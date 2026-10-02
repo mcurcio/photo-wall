@@ -266,7 +266,7 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
             re.compile(r"^Frame first: "))
         expect(badge).to_have_accessible_name("Frame first: Enrolled 0 s ago, no report yet")
-        for section in ("wall", "attention", "equipment", "schedule"):
+        for section in ("wall", "attention", "players", "schedule"):
             go(page, section)
             count = len(reads)
             drive_poll(page)
@@ -344,10 +344,10 @@ def test_hidden_show_pages_announce_no_status(page, registry):
         expect(page.locator("main > section:not([hidden])")).to_have_count(1)
 
 
-# --- R4 by routes (§6): every Show and neutral sample path, visited.
+# --- R4 by routes (§6): every Show, fleet and neutral sample path, visited.
 
 
-def test_no_show_or_neutral_route_holds_display_controls(page, registry):
+def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
     _bound_commissioned(registry, SAMPLE_FRAME)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -369,7 +369,7 @@ def test_no_show_or_neutral_route_holds_display_controls(page, registry):
             expect(landmark).to_have_count(1)
 
         visited = 0
-        for table in ("show", "neutral"):
+        for table in ("show", "fleet", "neutral"):
             for section, paths in SAMPLES[table].items():
                 for path in paths:
                     visit(page, path)
@@ -378,7 +378,7 @@ def test_no_show_or_neutral_route_holds_display_controls(page, registry):
                     for landmark in commissioning:
                         expect(landmark).to_have_count(0)
                     visited += 1
-        assert visited == sum(len(paths) for table in ("show", "neutral")
+        assert visited == sum(len(paths) for table in ("show", "fleet", "neutral")
                               for paths in SAMPLES[table].values())
 
 

@@ -104,6 +104,22 @@ def test_a_player_not_heard_past_the_threshold_reads_silent(page, registry):
         assert text["x"] + text["width"] <= tile["x"] + tile["width"], (text, tile)
 
 
+def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_read(page, registry):
+    player_id = _bound_frame(registry)
+    report_readiness(registry, player_id)
+    registry.clock.advance(40)
+    with operator_server(registry.db, registry.clock) as origin:
+        node_reads = []
+        page.on("request", lambda request: node_reads.append(request.url)
+                if "/v1/operator/node/" in request.url else None)
+        connect(page, origin, "wall")
+        inspector = open_frame(page, FRAME, "binding")
+        link = inspector.get_by_role("link", name="See its layers on the Player page", exact=True)
+        expect(link).to_have_attribute("href", re.compile(r"^#/players/device-"))
+        page.wait_for_timeout(200)
+        assert node_reads == [], "the Wall read node records"
+
+
 def test_an_enrolled_player_without_a_report_never_reads_ok(page, registry):
     _bound_frame(registry, "fresh", x_mm=100)
     registry.clock.advance(40)

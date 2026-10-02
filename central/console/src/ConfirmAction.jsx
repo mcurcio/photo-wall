@@ -376,8 +376,8 @@ function frameReferenceRefusal(result) {
     actions.push("Review the queued activations and retry after Central resolves them.");
   }
   const guidance = actions.length > 0
-    ? ` Refresh Equipment. ${actions.join(" ")}`
-    : " Refresh Equipment to see the current references before retrying.";
+    ? ` Press Refresh. ${actions.join(" ")}`
+    : " Press Refresh to see the current references before retrying.";
   return `This Frame is still referenced.${reported}${guidance}`;
 }
 
@@ -527,7 +527,7 @@ export function retireRequest(snapshot, bootFacts, playerId) {
 }
 
 /**
- * Unbind every Output of an in-service Player (the Equipment roster). Captures
+ * Unbind every Output of a bound Player (its Player page). Captures
  * each bound Frame with its generation and live Runs; the write is the
  * sequence in equipmentApi.js `unbindSequence`, and the dialog ends in a
  * terminal "K of N unbound" summary with each Frame's result.

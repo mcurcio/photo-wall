@@ -3,10 +3,10 @@ tables' sample paths, and the hash routes' round trip.
 
 R4: Display controls are reachable only from the Wall side. The shell mounts Show sections
 always (hidden when not current) and Wall sections only while current, so R4 holds as long as
-nothing the Show and neutral route tables import can reach a module only the Wall needs (the
-WALL-ONLY CLOSURE: everything `wallRoutes.jsx` reaches but the shell's own modules and the
-modules declared shared with the Show side, `SHARED_WITH_SHOW`), no Show or neutral module
-names the display's calibration route, and the shell's own modules reach the Wall's only
+nothing the Show, fleet and neutral route tables import can reach a module only the Wall needs
+(the WALL-ONLY CLOSURE: everything `wallRoutes.jsx` reaches but the shell's own modules and the
+modules declared shared with the other sides, `SHARED_WITH_SHOW`), no Show, fleet or neutral
+module names the display's calibration route, and the shell's own modules reach the Wall's only
 through `wallRoutes.jsx`. The browser half (tests/browser/test_console_shell_browser.py)
 visits every sample path.
 
@@ -43,11 +43,13 @@ CONSOLE = Path(__file__).parents[1] / "central/console"
 SRC = CONSOLE / "src"
 ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
-TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "neutral": "neutralRoutes.jsx"}
+TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
+          "neutral": "neutralRoutes.jsx"}
 DISPLAY_CONTROLS = {"Commissioning.jsx", "Inspector.jsx", "useCalibration.js"}
 # The display's calibration route (central/app.py): only the Wall side may name it.
 CALIBRATION_ROUTE = "/calibration"
-# Modules the Wall table reaches that the Show side uses too, besides the shell's own. The
+# Modules the Wall table reaches that the Show, fleet or neutral sides use too, besides the
+# shell's own. The
 # rest of the Wall's closure is Wall-only: sharing another module is a design decision, made
 # here, and none of these may be a display control or name the calibration route.
 SHARED_WITH_SHOW = {
@@ -55,6 +57,7 @@ SHARED_WITH_SHOW = {
     "NowShowingFacet.jsx",  # a frame's intent, also shown on Now showing
     "equipmentApi.js",  # UNKNOWN_MESSAGE and the equipment reads
     "framesApi.js",
+    "players.js",  # a Player page address (Wall links to the box's home); pure, no controls
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
@@ -415,8 +418,8 @@ def _wall_only(graph):
         TABLES["wall"]}
 
 
-@pytest.mark.parametrize("table", ["show", "neutral"])
-def test_show_and_neutral_routes_never_reach_the_wall_only_closure(graph, table):
+@pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
+def test_show_fleet_and_neutral_routes_never_reach_the_wall_only_closure(graph, table):
     modules = reachable(graph, TABLES[table])
     assert "health.js" in modules  # the walk reached past the table itself
     assert not modules & _wall_only(graph), sorted(modules & _wall_only(graph))
@@ -437,12 +440,13 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     # The declared sharing is exactly what the Show and neutral sides reach of the Wall's
     # closure (a module no longer shared is taken off), and none of it is a display control.
     wall = reachable(graph, TABLES["wall"]) - _shell_own(graph)
-    shown = reachable(graph, TABLES["show"]) | reachable(graph, TABLES["neutral"])
+    shown = (reachable(graph, TABLES["show"]) | reachable(graph, TABLES["fleet"])
+             | reachable(graph, TABLES["neutral"]))
     assert wall & shown == SHARED_WITH_SHOW
     assert not SHARED_WITH_SHOW & DISPLAY_CONTROLS
 
 
-@pytest.mark.parametrize("table", ["show", "neutral"])
+@pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
 def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, table):
     modules = reachable(graph, TABLES[table])
     assert {"ReadinessNotice.jsx", "readinessRecovery.js"} <= modules
@@ -469,7 +473,7 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "equipment", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "players", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -492,6 +496,7 @@ out.invalidRoutes = input.invalidRoutes.map((route) => {
 out.landing = [landingRoute(0), landingRoute(3)];
 out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
                                 initialTarget: "frame_one" });
+out.equipment = parseRoute("#/equipment");
 out.badTargetRoute = (() => { try {
   return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
 } catch { return "refused"; } })();
@@ -500,8 +505,10 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "equipment", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "players", "attention")
 ] + [
+    {"section": "players", "id": "device-" + "a" * 64},
+    {"section": "players", "id": "a/b ç?#%"},
     {"section": "now", "flow": "show", "step": "review"},
     {"section": "scenes", "flow": "new", "step": "kind"},
     {"section": "scenes", "flow": "new", "step": "kind", "initialTarget": "portrait-1"},
@@ -518,7 +525,8 @@ ROUTES = [
 ]
 INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
-    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x",
+    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
+    "#/equipment?target=x", "#/players/a/b", "#/players/x?target=y",
     "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
     "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
     "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
@@ -530,6 +538,7 @@ INVALID_ROUTES = [
     {"section": "now", "flow": "new", "step": "x"}, {"section": "scenes", "flow": "edit",
                                                     "step": "x"},
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
+    {"section": "equipment"}, {"section": "scenes", "id": "x"},
 ]
 
 
@@ -555,5 +564,7 @@ def test_routes_parse_format_and_round_trip():
     assert out["invalidHashes"] == [None] * len(INVALID_HASHES)
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
     assert out["landing"] == [{"section": "wall"}, {"section": "now"}]
+    # The retired Equipment page's bookmark lands on the Players list, and is never formatted.
+    assert out["equipment"] == {"section": "players"}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"

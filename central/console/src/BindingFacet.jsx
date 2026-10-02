@@ -9,6 +9,7 @@ import {
   outputLabel,
   playerLiveness,
 } from "./health.js";
+import { playerPageHref } from "./players.js";
 import { useMutate } from "./useMutate.js";
 
 /**
@@ -74,6 +75,9 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
   const frame = frames.find((candidate) => candidate.id === frameId);
   const bound = isBound(frame);
   const liveness = bound ? playerLiveness(snapshot, frame.player_id) : null;
+  // A silent Player app links to its box's Player page, which reads its node layers; the
+  // Wall itself makes no node read.
+  const silentHref = liveness?.state === "silent" ? playerPageHref(snapshot, frame.player_id) : null;
   const options = bound ? [] : bindableOutputs(snapshot);
 
   // A new snapshot that no longer offers the chosen Output clears the choice
@@ -128,7 +132,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
       bind(frameId, chosen.playerId, chosen.outputId, chosen.generation),
     );
     setBusy(false);
-    // One policy for the bind verb (as the Equipment roster): an attempt spends
+    // One policy for the bind verb (as the Player page): an attempt spends
     // the choice and its captured generation, whatever the outcome; the
     // operator chooses again against the fresh snapshot.
     setChoice(null);
@@ -166,7 +170,15 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
             </div>
             <div className="facet__field">
               <dt>Player reports</dt>
-              <dd>{liveness?.label ?? "Player not in the inventory"}</dd>
+              <dd>
+                {liveness?.label ?? "Player not in the inventory"}
+                {liveness?.state === "silent" && silentHref !== null && (
+                  <>
+                    {" · "}
+                    <a href={silentHref}>See its layers on the Player page</a>
+                  </>
+                )}
+              </dd>
             </div>
           </dl>
           {reviewRequired && (
@@ -209,7 +221,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
             {options.length === 0 ? (
               <p className="chooser__empty">
                 No free outputs with a detected display. Power on a Pi with its panel
-                attached; it appears under Pending.
+                attached; it appears under Players.
               </p>
             ) : (
               options.map((option, index) => {

@@ -12,6 +12,7 @@ the two hardware areas are default-closed by the derived capability gate (§7.6)
 """
 
 import os
+import re
 import time
 
 import pytest
@@ -80,9 +81,10 @@ def test_commissioning_shows_committed_gain_and_gates_hardware_off(page, registr
         expect(calibration).to_contain_text("SDR gain")
         expect(calibration).to_contain_text(str(GAIN))
 
-        # The bound Player/Output — the equipment path.
-        equipment = inspector.get_by_role("group", name="Display equipment")
-        expect(equipment).to_contain_text(player_id)
+        # The bound Output and its Player, which links to the Player's home.
+        equipment = inspector.get_by_role("group", name="Bound Output")
+        expect(equipment.get_by_role("link", name=player_id, exact=True)).to_have_attribute(
+            "href", re.compile(r"^#/players/device-"))
         expect(equipment).to_contain_text(OUTPUT)
 
         # A committed calibration on this binding hands directly into Scene

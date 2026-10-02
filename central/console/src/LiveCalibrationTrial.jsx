@@ -100,7 +100,7 @@ export function LiveCalibrationTrial({ frameId, trying, calibrated }) {
         <button type="button" className="calib__action" disabled={busy} onClick={() => run("end")}>End Trial</button>
       </>}
     </div>
-    <p role="status">{active ? (changed ? "Draft edit pending." : presented ? `Edit ${row.sequence} presented on the display.` : `Waiting for presentation of edit ${row.sequence}.`) : row ? `Trial ${row.state}. Your draft is retained.` : "Begin when the bound display is connected and admitted."}</p>
+    <p role="status">{active ? (changed ? "Draft edit pending." : presented ? `Edit ${row.sequence} presented to the compositor by Display Host.` : `Waiting for presentation of edit ${row.sequence}.`) : row ? `Trial ${row.state}. Your draft is retained.` : "Begin when the bound display is connected and admitted."}</p>
     {error && <p role="alert">{error} <button type="button" disabled={busy} onClick={() => { setError(null); if (active) run("status"); }}>Retry status</button></p>}
   </section>;
 }

@@ -14,7 +14,10 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/schedule/new/<step>          {section: "schedule", flow: "new", step}
  *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
+ *   #/players/<device-id>          {section: "players", id} one Player's page
  *   #/<section>                    {section} for every section
+ *   #/equipment                    {section: "players"}: the retired Equipment page's
+ *                                  bookmark (console DDD §9); never formatted
  *
  * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Facets are
  * the Inspector's keys. Ids and steps are URI-encoded, so an id may hold any text.
@@ -24,7 +27,7 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"equipment"|"attention"} Section
+ * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"attention"} Section
  * @typedef {"new"|"edit"|"show"} Flow
  * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
@@ -63,9 +66,12 @@ export const SECTIONS = Object.freeze([
   "schedule",
   "sources",
   "wall",
-  "equipment",
+  "players",
   "attention",
 ]);
+
+// Old section names that parse to a current one, so their bookmarks keep working.
+const ALIASES = Object.freeze({ equipment: "players" });
 
 /** The Inspector's facet keys (Inspector.jsx FACETS). */
 export const FACETS = Object.freeze(["commissioning", "binding", "nowshowing"]);
@@ -103,7 +109,11 @@ export function parseRoute(hash) {
   if (parts.some((part) => part === "")) {
     return null;
   }
-  const [section, ...rest] = parts;
+  const [named, ...rest] = parts;
+  if (Object.hasOwn(ALIASES, named)) {
+    return rest.length === 0 && query === "" ? { section: ALIASES[named] } : null;
+  }
+  const section = named;
   if (!SECTIONS.includes(section)) {
     return null;
   }
@@ -116,6 +126,9 @@ export function parseRoute(hash) {
   }
   if (section === "wall" && rest.length === 3 && rest[0] === "frames" && FACETS.includes(rest[2])) {
     return { section, id: rest[1], facet: rest[2] };
+  }
+  if (section === "players" && rest.length === 1) {
+    return { section, id: rest[0] };
   }
   if (section === "now" && rest.length === 2 && rest[0] === "show") {
     return { section, flow: "show", step: rest[1] };
@@ -155,6 +168,8 @@ export function formatRoute(route) {
     parts = [section, id, "edit", step];
   } else if (flow !== undefined) {
     parts = [section, flow, step];
+  } else if (id !== undefined) {
+    parts = [section, id];
   } else {
     parts = [section];
   }

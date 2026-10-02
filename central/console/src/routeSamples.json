@@ -25,8 +25,13 @@
       "#/wall/frames/sample-frame/commissioning",
       "#/wall/frames/sample-frame/binding",
       "#/wall/frames/sample-frame/nowshowing"
-    ],
-    "equipment": ["#/equipment"]
+    ]
+  },
+  "fleet": {
+    "players": [
+      "#/players",
+      "#/players/device-0000000000000000000000000000000000000000000000000000000000000000"
+    ]
   },
   "neutral": {
     "attention": ["#/attention"]

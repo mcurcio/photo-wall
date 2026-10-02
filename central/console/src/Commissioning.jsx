@@ -9,6 +9,7 @@ import { useCalibration } from "./useCalibration.js";
 import { useDraft } from "./useDraft.js";
 import { cornerHandles, cropHandles, toNormalized } from "./projection.js";
 import { frameProfileProblem, updateFrameProfile } from "./framesApi.js";
+import { playerPageHref } from "./players.js";
 import { useMutate } from "./useMutate.js";
 import { formatRoute, sceneCreationRoute } from "./routes.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
@@ -142,6 +143,8 @@ export function Commissioning({ snapshot, frameId }) {
   const output = boundOutput(snapshot, frameId);
   const observation = output?.observation ?? null;
   const bound = isBound(frame);
+  // The bound Output's Player links to its home, the Player page (console DDD rule 1).
+  const playerHref = bound ? playerPageHref(snapshot, frame.player_id) : null;
   const rotation = calibration.rotation ?? 0;
   const hasUsableResolutions = (dimensions) =>
     Number.isFinite(dimensions?.width_px) && dimensions.width_px > 0 &&
@@ -642,13 +645,15 @@ export function Commissioning({ snapshot, frameId }) {
         )}
       </section>
 
-      <section className="facet__section" role="group" aria-label="Display equipment">
-        <h4 className="facet__subtitle">Display equipment</h4>
+      <section className="facet__section" role="group" aria-label="Bound Output">
+        <h4 className="facet__subtitle">Bound Output</h4>
         {bound ? (
           <dl className="facet__fields">
             <div className="facet__field">
               <dt>Player</dt>
-              <dd>{frame.player_id}</dd>
+              <dd>
+                {playerHref === null ? frame.player_id : <a href={playerHref}>{frame.player_id}</a>}
+              </dd>
             </div>
             <div className="facet__field">
               <dt>Output</dt>

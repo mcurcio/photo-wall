@@ -3,8 +3,8 @@ import { apiWrite } from "./apiWrite.js";
 /**
  * The one equipment write module (slice 2 §6): bind, unbind, retire and identify, each
  * with its message table. Every write goes through {@link apiWrite} (the write
- * fence) and answers ONE result shape, so the Binding facet, the Equipment
- * roster and the confirmation dialogs read the same outcomes:
+ * fence) and answers ONE result shape, so the Binding facet, the Player page
+ * and the confirmation dialogs read the same outcomes:
  *
  *  - "done":    2xx.
  *  - "already": the effect is already in place (unbind: 404 not_bound or
@@ -141,7 +141,7 @@ export function retirePlayer(playerId) {
 /**
  * Ask a pending Player to briefly identify one connected, unbound Output.
  * Acceptance means Central queued the request, not that anything was observed
- * on the display. The roster owns the success wording and never claims output.
+ * on the Panel. The Player page owns the success wording and never claims output.
  *
  * @param {string} playerId
  * @param {string} outputId
@@ -170,8 +170,8 @@ export async function identifyOutput(playerId, outputId) {
     code: result.error ?? String(result.status),
     message:
       result.status === 404 || result.status === 409
-        ? "This Output changed or the Player is no longer eligible. Refresh Equipment before trying again."
-        : "Identify was refused. Refresh Equipment and try again.",
+        ? "This Output changed or the Player is no longer eligible. Press Refresh before trying again."
+        : "Identify was refused. Press Refresh and try again.",
   };
 }
 

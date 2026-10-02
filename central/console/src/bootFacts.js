@@ -4,7 +4,7 @@ import { apiWrite } from "./apiWrite.js";
 
 /**
  * Boot facts (slice 2 §5): the netboot record of each device, read ONCE at App
- * level and passed to the Equipment roster and the output chooser, so both show
+ * level and passed to the Players pages and the output chooser, so both show
  * the same serials and boot outcomes.
  *
  * An OPTIONAL side read of `GET /v1/operator/netboot`, never part of the atomic

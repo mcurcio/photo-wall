@@ -3,7 +3,7 @@
 import os
 
 import pytest
-from console_tasks import connect, go
+from console_tasks import connect, go, open_player, player_name
 from operator_harness import operator_server, report_readiness
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import INVALID_FRAME, VALID_FRAME, _seed
@@ -102,9 +102,10 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         expect(reports).to_contain_text(DECODE_RECOVERY)
         expect(reports.get_by_text(f"Frame {INVALID_FRAME}", exact=True)).to_have_count(0)
 
-        # Equipment places the same diagnosis with the bound Output and Player.
-        go(page, "equipment")
-        outputs = page.get_by_role("list", name=f"Outputs of {players[0]}", exact=True)
+        # The Player page places the same diagnosis with the bound Output.
+        name = player_name(registry, players[0])
+        open_player(page, name)
+        outputs = page.get_by_role("list", name=f"Outputs of {name}", exact=True)
         expect(outputs.get_by_role("note", name=f"Player readiness for {VALID_FRAME}")).to_contain_text(
             DECODE_RECOVERY)
 

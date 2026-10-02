@@ -31,8 +31,8 @@ CHECKS = {
     "test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login": (
         "authentication_rejection", "authentication_success", "authentication_recovery",
     ),
-    "test_pending_player_appears_in_the_pending_rail": ("two_players_three_outputs",),
-    "test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output": (
+    "test_an_enrolled_player_appears_on_the_players_list": ("two_players_three_outputs",),
+    "test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output": (
         "equipment_replacement_retirement",
     ),
     "test_drag_create_posts_frame_with_scaled_placement": ("frame_creation_binding",),

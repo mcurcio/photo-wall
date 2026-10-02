@@ -75,7 +75,7 @@ def test_operator_node_browser(registry):
             if server.started:
                 break
             time.sleep(0.01)
-        print(f"NODE_BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/equipment", flush=True)
+        print(f"NODE_BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/players/{DEVICE_ID}", flush=True)
         print(f"NODE_BROWSER_CURRENT_BOOT {second.kernel_boot_id}", flush=True)
         assert done.wait(330), "operator browser fixture timed out"
         with registry.db.transaction() as conn:

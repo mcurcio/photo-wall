@@ -13,7 +13,17 @@ import re
 import sys
 
 import pytest
-from console_tasks import LABELS, author_scene, connect, current_hash, go, show_now, visit
+from console_tasks import (
+    LABELS,
+    author_scene,
+    connect,
+    current_hash,
+    go,
+    open_player,
+    player_name,
+    show_now,
+    visit,
+)
 from operator_harness import SNAPSHOT, RequestGate, operator_server, sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import SCENE_ID, SOURCE, VALID_FRAME, _seed, _seed_source
@@ -102,9 +112,9 @@ def test_a_poll_401_under_an_open_confirmation_signs_in_by_mouse_and_keeps_it(pa
     player_id = identity["player_id"]
     handle = player_id[-6:]
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "equipment", paused_at=registry.clock.utc())
-        page.get_by_role("group", name="Pending players", exact=True).get_by_role(
-            "button", name=f"Retire player {player_id}", exact=True).click()
+        connect(page, origin, paused_at=registry.clock.utc())
+        player = open_player(page, player_name(registry, player_id))
+        player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Retire player {handle}?", exact=True)
         typed = dialog.get_by_label(f"Type {handle} to confirm", exact=True)
         typed.press_sequentially(handle[:3])
@@ -126,8 +136,7 @@ def test_a_poll_401_under_an_open_confirmation_signs_in_by_mouse_and_keeps_it(pa
         expect(typed).to_be_focused()
         page.keyboard.type(handle[3:])
         dialog.get_by_role("button", name="Confirm retire", exact=True).click()
-        retired = page.get_by_role("group", name="Retired players", exact=True)
-        expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        expect(player).to_contain_text("Standing: Retired")
 
 
 def test_a_write_401_from_a_confirmation_signs_in_by_keyboard_and_keeps_it(page, registry):
@@ -254,10 +263,10 @@ def test_a_route_typed_before_the_first_snapshot_is_never_replaced(page, registr
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         # A fresh load at a known route: the landing route never applies.
-        page.goto(origin + "/console#/equipment")
-        expect(_heading(page, "equipment")).to_be_visible()
+        page.goto(origin + "/console#/players")
+        expect(_heading(page, "players")).to_be_visible()
         page.wait_for_timeout(300)
-        assert current_hash(page) == "#/equipment"
+        assert current_hash(page) == "#/players"
         visit(page, "#/nope")
         expect(_heading(page, "now")).to_be_visible()
         assert current_hash(page) == "#/now"
@@ -275,7 +284,7 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         # Plain selection on Surface A remembers A.
         page.get_by_role("button", name="Frame a1", exact=True).click()
         expect(surface).to_have_value("A")
-        go(page, "equipment")
+        go(page, "players")
 
         visit(page, "#/wall/frames/b1/binding")
         expect(page.get_by_role("region", name="Frame b1 inspector", exact=True)).to_be_visible()
@@ -283,7 +292,7 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         expect(page.get_by_role("button", name="Frame b1", exact=True)).to_be_visible()
         # Back to a1's route: its Surface again.
         page.go_back()
-        expect(_heading(page, "equipment")).to_be_visible()
+        expect(_heading(page, "players")).to_be_visible()
         page.go_back()
         expect(page.get_by_role("region", name="Frame a1 inspector", exact=True)).to_be_visible()
         expect(surface).to_have_value("A")

@@ -7,11 +7,12 @@ export { isBound };
  * Wall health: the ONE classifier (console pass 2, slice 1 — design
  * docs/operator-console-ux-pass2.md §4). Every surface that says whether a frame
  * or Player is alright — the plan tile, the Inspector header, Commissioning,
- * Binding, the Equipment roster, the Unplaced tray, the Showrunner frame list and
+ * Binding, the Players pages, the Unplaced tray, the Showrunner frame list and
  * the attention strip — reads it through here, so the states, their precedence
  * and their wording live in exactly one place. Equipment standing (slice 2,
- * docs/operator-console-ux-pass2-onboarding.md §4) lives here too: a Player's
- * standing, each Output's state, the bindable set, and the one Output wording.
+ * docs/operator-console-ux-pass2-onboarding.md §4; standing words per
+ * docs/operator-console-ddd.md §3) lives here too: a Player's standing, each
+ * Output's state, the bindable set, and the one Output wording.
  *
  * LIVENESS is Central's record of the last readiness report it ACCEPTED from a
  * Player on that Player's current authority epoch (`last_report_at`). Enrollment
@@ -239,7 +240,7 @@ export function wallAttention(snapshot) {
 // --- Equipment standing (slice 2 §4).
 
 /**
- * @typedef {"retired"|"pending"|"in-service"} PlayerState
+ * @typedef {"retired"|"unbound"|"bound"} PlayerState
  * @typedef {"retired"|"bound"|"no-display"|"free"} OutputState
  * @typedef {{state: PlayerState, label: string}} PlayerStanding
  * @typedef {{playerId: string, outputId: string, state: OutputState,
@@ -291,7 +292,7 @@ export function outputStates(snapshot, playerId) {
     }
     const frame = frameForOutput(snapshot, playerId, output.output_id);
     if (frame !== null) {
-      return { ...standing, state: "bound", frameId: frame.id, label: `Shows frame ${frame.id}` };
+      return { ...standing, state: "bound", frameId: frame.id, label: `Bound to Frame ${frame.id}` };
     }
     if (!displayDetected(output)) {
       return {
@@ -305,10 +306,11 @@ export function outputStates(snapshot, playerId) {
 }
 
 /**
- * A Player's standing (first match): retired (`retired_at` set), pending (no
- * Output bound — the store's pending queue), in service (at least one Output
- * bound). The label states the fact; liveness is read separately
- * ({@link playerLiveness}).
+ * A Player's standing (first match): retired (`retired_at` set), unbound (no
+ * Output bound — the store's pending queue), bound (at least one Output bound).
+ * The label states the fact; liveness is read separately ({@link playerLiveness}).
+ * A box seen only at boot has no Player and so no standing here; the Players
+ * list calls it "Not enrolled" (players.js).
  *
  * @param {object|null} snapshot
  * @param {string} playerId
@@ -331,14 +333,14 @@ export function playerStanding(snapshot, playerId) {
   if (!outputs.some((output) => output.state === "bound")) {
     const age = ageAt(readAt, player.registered_at);
     return {
-      state: "pending",
-      label: Number.isNaN(age) ? "New" : `New · enrolled ${formatAge(age)} ago`,
+      state: "unbound",
+      label: Number.isNaN(age) ? "Unbound" : `Unbound · enrolled ${formatAge(age)} ago`,
     };
   }
   const free = outputs.filter((output) => output.state === "free").length;
   return {
-    state: "in-service",
-    label: `In service · ${free} of ${outputs.length} outputs free`,
+    state: "bound",
+    label: `Bound · ${free} of ${outputs.length} outputs free`,
   };
 }
 
@@ -422,7 +424,7 @@ export function bootOutcomeLabel(bootFacts, deviceId) {
 }
 
 /**
- * The one Output wording (chooser, roster and dialogs): handle · output id ·
+ * The one Output wording (chooser, Player page and dialogs): handle · output id ·
  * state label.
  *
  * @param {object|null} snapshot

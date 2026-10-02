@@ -830,9 +830,8 @@ label {
   color: var(--fg);
 }
 
-/* Equipment roster (slice 2 §5): groups by standing, one card per Player. On a
-   narrow screen it sits below the plan and tray; ids wrap and actions wrap
-   under the facts. */
+/* Players list and Player page (console DDD §9): one card per box, and on a box's
+   page its Outputs; ids wrap and actions wrap under the facts. */
 .roster {
   margin: 24px 0 0;
   display: flex;
@@ -2042,7 +2041,7 @@ label {
 /* A region whose title repeats its page's heading keeps it for assistive
    technology only. */
 .page--scenes .showrunner__region-title,
-.page--equipment .roster__title {
+.page--players .roster__title {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -2052,7 +2051,7 @@ label {
   white-space: nowrap;
 }
 
-.page--equipment .roster {
+.page--players .roster {
   margin-top: 0;
 }
 
@@ -2316,3 +2315,102 @@ label {
 .fleet__device p { margin-block: .35rem; overflow-wrap: anywhere; }
 .fleet__controls select { max-width: 100%; margin-inline: .4rem; }
 .fleet__notice { margin-block: .75rem; }
+
+/* The Player page (console DDD §9): one section per aggregate part, each with its own
+   read time; facts carry their truth kind (FactLine.jsx). */
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.player__name {
+  margin: 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.player__header p,
+.player__frames {
+  margin: 4px 0 0;
+}
+.player__section {
+  min-width: 0;
+  padding: 12px 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.player__section-title {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.player__section-failed {
+  margin: 0;
+  color: var(--alarm);
+  font-weight: 600;
+}
+.player__read-time {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.player__layers {
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.player__layer-title {
+  margin: 0;
+  font-size: 14px;
+}
+.player__details {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+.player__reboot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+.player__reason {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.player__commands {
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.player__command {
+  min-width: 0;
+}
+.player__state {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.fact {
+  margin: 2px 0 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fact__label {
+  color: var(--fg-muted);
+}
+.fact--unknown {
+  color: var(--fg-subtle);
+}

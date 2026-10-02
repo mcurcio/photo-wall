@@ -34,7 +34,7 @@ function findFrame(snapshot, frameId) {
  * the route (`#/wall/frames/<id>/<facet>`).
  *
  * Visiting a frame from outside the plan (the attention strip, the Needs attention
- * page, the Equipment roster) shows its Surface, opens the facet that shows its cause
+ * page, a Player page) shows its Surface, opens the facet that shows its cause
  * (health.js `facetFor`; an ok frame keeps the facet last open) and asks the Inspector
  * to take focus ONCE: `focusRequest` is a fresh number each time, and the Inspector
  * clears it when spent, so a later remount does not refocus. Plain selection on the

@@ -26,10 +26,16 @@ _SEQUENCE = itertools.count(1)
 
 
 @contextmanager
-def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN):
-    """Run the production app on an ephemeral loopback listener with real lifespan."""
+def operator_server(db, clock, *, media_root=None, media_queue=None, admin_token=ADMIN,
+                    node_control=None, node_serving_verifier=None):
+    """Run the production app on an ephemeral loopback listener with real lifespan.
+
+    `node_control` (a NodeControlConfig) mounts node management as a Central configured for
+    it does; without it node management is off, as on a Central without node control.
+    `node_serving_verifier` lets the effect gate admit node commands (reboots)."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     media_root=media_root, media_queue=media_queue)
+                     media_root=media_root, media_queue=media_queue, node_control=node_control,
+                     node_serving_verifier=node_serving_verifier)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()

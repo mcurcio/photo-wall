@@ -625,7 +625,7 @@ def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, r
         expect(alert).to_contain_text("saved Scenes: new-scene")
         expect(alert).to_contain_text("Programs: new-program")
         expect(alert).to_contain_text("queued activations: queued-show")
-        expect(alert).to_contain_text("Refresh Equipment. Edit or remove the saved Scenes")
+        expect(alert).to_contain_text("Press Refresh. Edit or remove the saved Scenes")
         expect(alert).to_contain_text("Edit or remove the Programs")
         expect(alert).to_contain_text("retry after Central resolves them")
         assert any(frame.id == CLEAR for frame in registry.inventory().frames)

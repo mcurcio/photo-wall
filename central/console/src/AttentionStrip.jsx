@@ -27,7 +27,7 @@ const LIST_CAP = 8;
  * `onShowAll()`, with which the shell focuses that page's heading (the link itself
  * leaves with the closing list).
  *
- * On the Wall side (Wall, Equipment) and the Needs attention page each entry is
+ * On the Wall side, the Players pages and the Needs attention page each entry is
  * a button calling `onNavigate(frameId)`; on a Show page `onNavigate` is null
  * and entries are plain text, so the show layer is never abandoned (R4). With
  * no frames the strip renders nothing and defers to the Guidance banner.
@@ -47,7 +47,7 @@ export function AttentionStrip({ snapshot, central, onNavigate, onShowAll }) {
 
   const summary =
     alarms.length === 0 && todos.length === 0
-      ? `All ${frames(frameCount)} heard from`
+      ? `All ${frameCount} ${frameCount === 1 ? "Frame's Player app" : "Frames' Player apps"} reporting`
       : [
           alarms.length > 0 &&
             `${frames(alarms.length)} ${alarms.length === 1 ? "needs" : "need"} attention`,

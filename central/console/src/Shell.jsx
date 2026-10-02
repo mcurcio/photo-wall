@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState }
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
 import { useBootFacts } from "./bootFacts.js";
+import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
@@ -42,8 +43,8 @@ const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 // The drawer serves narrow screens only (index.css repeats this breakpoint).
 const WIDE = "(min-width: 850px)";
 
-// Sidebar groups, in order: Show, Wall, neutral.
-const TABLES = [showRoutes, wallRoutes, neutralRoutes];
+// Sidebar groups, in order: Show, Wall, fleet, neutral.
+const TABLES = [showRoutes, wallRoutes, fleetRoutes, neutralRoutes];
 const ENTRIES = TABLES.flat();
 const SHOW = new Set(showRoutes.map((entry) => entry.section));
 
@@ -156,8 +157,9 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  *
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
- * status and alert regions leave the accessibility tree). Wall and neutral sections
- * mount only while current, so no hidden page ever holds Commissioning DOM (R4).
+ * status and alert regions leave the accessibility tree). Wall, fleet and neutral
+ * sections mount only while current, so no hidden page ever holds Commissioning DOM
+ * (R4) and a Player page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the snapshot says
  * whether any frame exists.
@@ -180,7 +182,7 @@ export function Shell({ hidden = false }) {
   const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
   // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
-  // the Equipment roster and the output chooser.
+  // the Players pages and the output chooser.
   const bootFacts = useBootFacts(snapshot);
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();

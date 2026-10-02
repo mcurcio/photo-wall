@@ -11,8 +11,9 @@ Tests that are *about* a form (its validation, focus, descriptions or chooser co
 their direct locators; these helpers are for tests that only need the task done.
 
 As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #/schedule,
-#/sources, #/wall, #/equipment, #/attention), reached from the sidebar (a drawer under
-850 px). Signing in lands on #/wall while no frame exists and on #/now once one does, so a
+#/sources, #/wall, #/players, #/attention), reached from the sidebar (a drawer under
+850 px). As of the console DDD pass 1 (B1) the boxes live on Players: a list with one row
+per box, and one Player page per box (#/players/<device-id>), opened with `open_player`. Signing in lands on #/wall while no frame exists and on #/now once one does, so a
 test that needs a page goes to it.
 
 As of bead 2 a Scene is made in the Scene flow (#/scenes/new/<step>): "New Scene" on the
@@ -38,11 +39,12 @@ from playwright.sync_api import expect
 # The sections of §6, grouped as its route tables group them, and their sidebar labels
 # (each page's <h1> reads the same).
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
-WALL_SECTIONS = frozenset({"wall", "equipment"})
-SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | {"attention"}
+WALL_SECTIONS = frozenset({"wall"})
+FLEET_SECTIONS = frozenset({"players"})
+SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now showing", "scenes": "Scenes", "schedule": "Schedule", "sources": "Photo sources",
-    "wall": "Wall", "equipment": "Equipment", "attention": "Needs attention",
+    "wall": "Wall", "players": "Players", "attention": "Needs attention",
 }
 
 # The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
@@ -50,7 +52,7 @@ FACETS = {"commissioning": "Commissioning", "binding": "Binding", "nowshowing": 
 
 
 def go(page, section):
-    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "equipment"
+    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "players"
     or "attention". Name the section the test is about (a Run test goes to "now", a
     Program test to "schedule").
 
@@ -90,6 +92,25 @@ def visible_page(page):
     negative text check is scoped through this: `main`'s one page without `hidden`.
     """
     return page.locator("main > section:not([hidden])")
+
+
+def player_name(registry, player_id, serial=None):
+    """A Player's name on the Players pages (players.js `playerName`): "Player …<last six of
+    its serial>" when its box netbooted with `serial`, else "Player <device id>"."""
+    if serial:
+        return f"Player …{serial[-6:]}"
+    device_id = next(p.device_id for p in registry.inventory().players if p.id == player_id)
+    return f"Player {device_id}"
+
+
+def open_player(page, name):
+    """Go to Players and follow the list's link to the Player page named `name`
+    (`player_name`); waits for the page's heading and returns the page on screen."""
+    go(page, "players")
+    page.get_by_role("list", name="Players", exact=True).get_by_role(
+        "link", name=name, exact=True).click()
+    expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
+    return visible_page(page)
 
 
 def connect(page, origin, section=None, *, paused_at=None):
