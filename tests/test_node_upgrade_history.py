@@ -56,7 +56,7 @@ def ledger(db):
 
 
 def seed_historical_committed_stop(registry, player, request):
-    """Fixture bytes for a pre-052 stop, without invoking newer domain readers."""
+    """Fixture bytes for a historical committed stop, without newer domain readers."""
     snapshot = {"admission_scope": "unbound_canary", "outputs": []}
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,"
@@ -65,13 +65,12 @@ def seed_historical_committed_stop(registry, player, request):
                      (player["player_id"], request.boot_id, Jsonb(snapshot)))
 
 
-def test_052_to_current_preserves_committed_legacy_stop_and_identity(history):
-    # Such a stop legitimately predates 052's same-transaction permit trigger.
-    with history(51) as (registry, through):
+def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
+    # A committed drain row written before the node migrations still fences its Player.
+    with history(49) as (registry, _through):
         _seed(registry)
         player, _, request = enroll(registry, device_id=DEVICE_ID)
         seed_historical_committed_stop(registry, player, request)
-        through(registry.db, 52)
         before = ledger(registry.db)
         with registry.db.transaction() as conn:
             drain = conn.execute("SELECT * FROM equipment_drains").fetchone()

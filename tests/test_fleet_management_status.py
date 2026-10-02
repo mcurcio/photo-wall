@@ -3,31 +3,101 @@
 import json
 from uuid import UUID
 
-from test_fleet_attempt_reports import (
-    ATTEMPT,
-    AUDIENCE,
-    BOOT,
-    COMMAND,
-    DEVICE,
-    DRAIN,
-    FALLBACK,
-    OFFER,
-    SESSION,
-    TARGET,
-    _principal,
-    _report,
-    _seed,
-)
-from test_fleet_attempts import DEVICE_ID
-from test_fleet_attempts import _principal as command_principal
-from test_fleet_command_lifecycle import _ready, _setup
-
-from central.fleet.attempt_reports import AttemptReportStore
-from central.fleet.management_status import _command_doc
+from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.service import FleetService
-from contracts.os_recovery_report import OsRecoveryReport
+from contracts.os_attempt_report import OsAttemptReport
 
-LEASE = UUID(int=801)
+SERIAL = "abcdef1234567890"
+DEVICE = device_id_for_serial(SERIAL)
+assert DEVICE is not None
+BOOT = UUID(int=701)
+OFFER = UUID(int=702)
+SESSION = UUID(int=703)
+ATTEMPT = UUID(int=704)
+COMMAND = UUID(int=705)
+DRAIN = UUID(int=706)
+AUDIENCE = "installation-one"
+TARGET = "d" * 64
+FALLBACK = "e" * 64
+
+
+def _report(sequence: int = 1, **changes) -> OsAttemptReport:
+    values = dict(
+        device_id=DEVICE, device_generation=1, installation_audience=AUDIENCE,
+        kernel_boot_id=BOOT, offer_id=OFFER, command_session_id=SESSION,
+        attempt_id=ATTEMPT, command_id=COMMAND, drain_id=DRAIN,
+        report_sequence=sequence, sampled_boottime_ms=1234,
+        executor_state="committed", active_sha256=TARGET,
+    )
+    values.update(changes)
+    return OsAttemptReport(**values)
+
+
+def _seed(registry, *, phase: str = "stop_committed", schema: int = 1,
+          revoked_at: float | None = None,
+          attempt_session_id: UUID | None = SESSION) -> None:
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
+                     "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,900,900)")
+        conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
+                     "VALUES(%s,%s,900,900)", (DEVICE, SERIAL))
+        conn.execute("INSERT INTO fleet_boot_offers(offer_id,installation_audience,device_id,"
+                     "serial,kernel_boot_id,boot_nonce,base_policy_source,base_policy_revision,"
+                     "app_policy_source,app_policy_revision,base_tag,base_content_key,"
+                     "base_sha256,base_size,app_status,compatibility_basis,offer_schema,"
+                     "created_at,expires_at) "
+                     "VALUES(%s,%s,%s,%s,%s,%s,'operator_baseline',1,'explicit',1,"
+                     "'v1.0.0',%s,%s,1024,'unconfigured','none',2,900,2000)",
+                     (OFFER, AUDIENCE, DEVICE, SERIAL, BOOT, "1" * 32,
+                      "a" * 64, "b" * 64))
+        conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
+                     "device_generation,kernel_boot_id,offer_id,installation_audience,"
+                     "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at) "
+                     "VALUES(%s,%s,1,%s,%s,%s,'t1',%s,'test-gateway',900,1100)",
+                     (SESSION, DEVICE, BOOT, OFFER, AUDIENCE, "f" * 64))
+        if attempt_session_id is not None and attempt_session_id != SESSION:
+            conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
+                         "device_generation,kernel_boot_id,offer_id,installation_audience,"
+                         "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at,"
+                         "revoked_at) VALUES(%s,%s,1,%s,%s,%s,'t1',%s,"
+                         "'former-gateway',800,900,900)",
+                         (attempt_session_id, DEVICE, BOOT, OFFER, AUDIENCE, "e" * 64))
+        if schema == 1:
+            conn.execute(
+                "INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
+                "desired_revision,target_sha256,fallback_sha256,phase,command_id,drain_id,"
+                "created_at,updated_at,device_generation,command_session_id,"
+                "revoked_at,attempt_schema,"
+                "installation_audience,kernel_boot_id,policy_source,base_sha256,base_abi,"
+                "base_abi_source_manifest,target_tag,target_size,target_format,"
+                "target_base_abi,target_source_manifest,fallback_size,fallback_base_abi,"
+                "fallback_trust_mode,fallback_evidence_ref) "
+                "VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,900,900,1,%s,%s,1,%s,%s,'explicit',%s,%s,"
+                "'manifest.v2.json','v1.0.1',123,'pw-player-data-v1',%s,"
+                "'manifest.v2.json',80,%s,'t1','test-qualified-output')",
+                (ATTEMPT, DEVICE, OFFER, TARGET, FALLBACK, phase, COMMAND, DRAIN,
+                 attempt_session_id, revoked_at, AUDIENCE, BOOT, "b" * 64,
+                 "sha256:" + "c" * 64,
+                 "sha256:" + "c" * 64, "sha256:" + "c" * 64),
+            )
+        else:
+            conn.execute("INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
+                         "desired_revision,target_sha256,fallback_sha256,phase,command_id,"
+                         "drain_id,created_at,updated_at,device_generation) "
+                         "VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,900,900,1)",
+                         (ATTEMPT, DEVICE, OFFER, TARGET, FALLBACK, phase, COMMAND, DRAIN))
+
+
+def _store_report(registry, report: OsAttemptReport) -> None:
+    """Fixture bytes as the retired T1/T2 carrier route stored them."""
+    with registry.db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO fleet_os_attempt_reports(attempt_id,report_sequence,"
+            "command_session_id,carrier_trust_mode,report_json,received_at) "
+            "VALUES(%s,%s,%s,'t1',%s,%s)",
+            (report.attempt_id, report.report_sequence, SESSION,
+             report.model_dump_json(by_alias=True), registry.clock.utc()),
+        )
 
 
 def _management(registry):
@@ -48,7 +118,6 @@ def test_t0_device_has_no_invented_command_or_os_session(registry):
     assert device["management"]["os_session"]["state"] == "none"
     assert device["management"]["attempt"]["state"] == "none"
     assert device["management"]["latest_attempt_report"]["state"] == "none"
-    assert device["management"]["recovery"]["state"] == "none"
     assert device["update_now"]["available"] is False
 
 
@@ -63,10 +132,8 @@ def test_status_separates_attempt_session_and_carrier_report(registry):
     assert before["os_session"]["state"] == "recorded_unexpired"
     assert before["os_session"]["physical_connectivity"] == "unknown"
     assert before["latest_attempt_report"]["state"] == "none"
-    assert before["recovery"]["state"] == "none"
 
-    AttemptReportStore(registry.db, registry.clock).record(
-        _principal(), _report(active_sha256=TARGET, fault_code="renderer_fault"))
+    _store_report(registry, _report(active_sha256=TARGET, fault_code="renderer_fault"))
     after = _management(registry)
     claim = after["latest_attempt_report"]
     assert claim["state"] == "reported"
@@ -94,104 +161,3 @@ def test_status_separates_attempt_session_and_carrier_report(registry):
     assert stale["os_session"]["state"] == "expired"
     assert stale["latest_attempt_report"]["carrier_session_relation"] == \
         "historical_or_unavailable"
-
-
-def test_recovery_lease_and_observation_are_repair_status_only(registry):
-    _seed(registry)
-    report = OsRecoveryReport(
-        device_id=DEVICE, device_generation=1,
-        installation_audience=AUDIENCE, kernel_boot_id=BOOT, offer_id=OFFER,
-        command_session_id=SESSION, attempt_id=ATTEMPT, command_id=COMMAND,
-        drain_id=DRAIN, lease_id=LEASE, report_sequence=1,
-        sampled_boottime_ms=2500, executor_state="rolled_back",
-        active_sha256=FALLBACK)
-    with registry.db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO fleet_recovery_leases(lease_id,attempt_id,lease_sequence,"
-            "device_id,device_generation,issuing_session_id,carrier_session_id,"
-            "carrier_boot_id,carrier_offer_id,carrier_audience,carrier_trust_mode,"
-            "issued_at,expires_at) VALUES(%s,%s,1,%s,1,%s,%s,%s,%s,%s,'t1',900,1100)",
-            (LEASE, ATTEMPT, DEVICE, SESSION, SESSION, BOOT, OFFER, AUDIENCE),
-        )
-        conn.execute(
-            "INSERT INTO fleet_recovery_observations(attempt_id,carrier_session_id,"
-            "report_sequence,lease_id,report_json,received_at) "
-            "VALUES(%s,%s,1,%s,%s,1000)",
-            (ATTEMPT, SESSION, LEASE, report.model_dump_json(by_alias=True)),
-        )
-    status = _management(registry)
-    assert status["recovery"]["state"] == "recorded_unexpired"
-    assert status["recovery"]["assurance"] == "repair_authority_record_only"
-    claim = status["recovery"]["latest_claim"]
-    assert claim["state"] == "reported"
-    assert claim["executor_state"] == "rolled_back"
-    assert claim["active_digest"] == FALLBACK
-    assert status["command"]["state"] == "attempt_correlation_only"
-
-    registry.clock.advance(101)
-    expired = _management(registry)
-    assert expired["recovery"]["state"] == "expired"
-    assert expired["recovery"]["latest_claim"]["state"] == "reported"
-
-
-def test_command_and_permit_status_never_claim_delivery_or_stop():
-    attempt = {"command_id": COMMAND, "drain_id": DRAIN}
-    command = {"attempt_id": ATTEMPT, "command_id": COMMAND,
-               "request_id": UUID(int=802), "drain_id": DRAIN,
-               "command_issued_at": 900.0, "command_expires_at": 1100.0,
-               "permit_id": None, "permit_issued_at": None,
-               "permit_expires_at": None, "command_bytes": b"must-not-leak"}
-    issued = _command_doc(command, attempt, 1000.0)
-    assert issued["state"] == "issued_delivery_unknown"
-    assert issued["os_delivery"] == "unknown"
-    assert issued["stop_execution"] == "unknown"
-    assert "command_bytes" not in issued
-    assert _command_doc(command, attempt, 1101.0)["state"] == \
-        "expired_delivery_unknown"
-
-    permitted = command | {"permit_id": UUID(int=803),
-                           "permit_issued_at": 950.0,
-                           "permit_expires_at": 970.0,
-                           "permit_bytes": b"must-not-leak"}
-    assert _command_doc(permitted, attempt, 960.0)["state"] == \
-        "permit_issued_stop_unknown"
-    expired = _command_doc(permitted, attempt, 1000.0)
-    assert expired["state"] == "permit_expired_stop_unknown"
-    assert expired["stop_execution"] == "unknown"
-    assert "permit_bytes" not in expired
-
-
-def test_status_reads_issued_command_and_permit_without_claiming_execution(registry):
-    lifecycle, request_id, player, generation = _setup(registry)
-    principal = command_principal()
-    issued = lifecycle.dispatch_unbound(
-        principal, request_id=request_id, player_id=player["player_id"],
-        expected_gate_generation=generation)
-
-    def status():
-        device = next(item for item in FleetService(
-            registry.db, registry.clock).status()["devices"]
-            if item["device_id"] == DEVICE_ID)
-        return device["management"]["command"]
-
-    command = status()
-    assert command["state"] == "issued_delivery_unknown"
-    assert command["command_id"] == str(issued.command_id)
-    assert command["request_id"] == str(request_id)
-    assert command["os_delivery"] == "unknown"
-    assert command["stop_execution"] == "unknown"
-
-    permit = lifecycle.authorize_stop_unbound(
-        principal, _ready(issued), expected_gate_generation=generation)
-    after = status()
-    assert after["state"] == "permit_issued_stop_unknown"
-    assert after["permit_id"] == str(permit.permit_id)
-    assert after["stop_execution"] == "unknown"
-    assert "command_bytes" not in json.dumps(after)
-    assert "permit_bytes" not in json.dumps(after)
-    assert "ready_nonce" not in json.dumps(after)
-
-    registry.clock.advance(31)
-    expired = status()
-    assert expired["state"] == "permit_expired_stop_unknown"
-    assert expired["stop_execution"] == "unknown"

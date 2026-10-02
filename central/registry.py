@@ -668,7 +668,6 @@ class Registry:
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
         with self._equipment_write() as conn:
             from central.equipment_drain import require_unfenced_player_in
-            from central.fleet.attempts import release_queued_for_device_in
             from central.fleet.fallback import retire_device_fallback_references
 
             require_unfenced_player_in(conn, player_id)
@@ -704,7 +703,6 @@ class Registry:
                          "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
             conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s "
                          "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
-            release_queued_for_device_in(conn, device_id, now=now)
             retire_device_fallback_references(conn, device_id)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (now, player_id))

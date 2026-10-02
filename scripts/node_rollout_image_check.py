@@ -30,8 +30,8 @@ SUITES = {
         "test_player_control_protocol.py::test_first_state_seals_hello_and_new_epoch_can_negotiate",
         "test_player_control_protocol.py::test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_result",
         "test_player_control_protocol.py::test_older_central_writer_cannot_leave_a_replayable_receipt",
-        "test_published_player_wire.py", "test_fleet_os_routes.py", "test_node_protocol.py", "test_node_boot.py"),
-    "fence_contract": ("test_equipment_drain.py", "test_equipment_drain_in.py", "test_node_lifecycle.py", "test_node_runtime_reconciliation.py"),
+        "test_published_player_wire.py", "test_node_protocol.py", "test_node_boot.py"),
+    "fence_contract": ("test_node_lifecycle.py", "test_node_runtime_reconciliation.py"),
     "readiness_contract": ("test_readiness_diagnostics.py", "test_coordination.py", "test_node_central.py"),
 }
 PRODUCTION_MODULES = ("central.app", "central.coordination", "central.fleet.node_lifecycle", "contracts.node_protocol")

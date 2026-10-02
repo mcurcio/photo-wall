@@ -1,7 +1,6 @@
 """Device lifecycle revokes OS command state without promoting T0 claims."""
 
 import base64
-from dataclasses import replace
 from uuid import UUID
 
 import pytest
@@ -11,11 +10,6 @@ from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.models import CheckIn
-from central.fleet.principal import (
-    PrincipalError,
-    VerifiedOsPrincipal,
-    require_current_principal_in,
-)
 from central.fleet.service import FleetService
 from central.registry import (
     Enrollment,
@@ -48,15 +42,6 @@ def _seed_player(registry, *, canonical_device: bool) -> None:
                      (PLAYER_ID, "test-public-key", "test-token-hash", DEVICE_ID))
 
 
-def _principal() -> VerifiedOsPrincipal:
-    return VerifiedOsPrincipal(
-        device_id=DEVICE_ID, device_generation=1, kernel_boot_id=BOOT_ID,
-        offer_id=OFFER_ID, installation_audience=AUDIENCE, trust_mode="t1",
-        command_session_id=SESSION_ID, agent_key_sha256=KEY_SHA,
-        expires_at=1100,
-    )
-
-
 def _seed_offer(conn, *, audience: str = AUDIENCE) -> None:
     conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
                  "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,900,900)")
@@ -76,19 +61,6 @@ def _seed_session(conn, session_id: UUID) -> None:
                  "agent_key_sha256,verifier_ref,issued_at,expires_at) "
                  "VALUES(%s,%s,1,%s,%s,%s,'t1',%s,'test-gateway-session',900,1100)",
                  (session_id, DEVICE_ID, BOOT_ID, OFFER_ID, AUDIENCE, KEY_SHA))
-
-
-def test_principal_is_strict_data_and_t0_label_cannot_be_an_audience() -> None:
-    assert _principal().trust_mode == "t1"
-    with pytest.raises(PrincipalError, match="trust_mode_invalid"):
-        replace(_principal(), trust_mode="t0")
-    with pytest.raises(PrincipalError, match="installation_audience_invalid"):
-        VerifiedOsPrincipal(
-            device_id=DEVICE_ID, device_generation=1, kernel_boot_id=BOOT_ID,
-            offer_id=OFFER_ID, installation_audience="photo-wall-central-t0", trust_mode="t1",
-            command_session_id=SESSION_ID, agent_key_sha256=KEY_SHA,
-            expires_at=1100,
-        )
 
 
 def test_ticketless_player_retirement_creates_canonical_tombstone_once(registry) -> None:
@@ -119,14 +91,10 @@ def test_retirement_revokes_same_generation_session_and_queued_attempt(registry)
                      "desired_revision,target_sha256,phase,created_at,updated_at,"
                      "device_generation) VALUES(%s,%s,%s,1,%s,'queued',900,900,1)",
                      (ATTEMPT_ID, DEVICE_ID, OFFER_ID, "d" * 64))
-        assert require_current_principal_in(
-            conn, _principal(), clock=registry.clock).admitted_at == 1000
         assert conn.execute("SELECT count(*) AS n FROM "
                             "fleet_generation_current_app_attempts").fetchone()["n"] == 1
     registry.retire(PLAYER_ID)
     with registry.db.transaction() as conn:
-        with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
-            require_current_principal_in(conn, _principal(), clock=registry.clock)
         assert conn.execute("SELECT count(*) AS n FROM "
                             "fleet_generation_current_os_command_sessions").fetchone()["n"] == 0
         assert conn.execute("SELECT count(*) AS n FROM "
@@ -151,20 +119,6 @@ def test_new_os_session_requires_explicit_revocation_of_previous_one(registry) -
         conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=1000 "
                      "WHERE command_session_id=%s", (SESSION_ID,))
         _seed_session(conn, UUID(int=45))
-        with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
-            require_current_principal_in(conn, _principal(), clock=registry.clock)
-        require_current_principal_in(
-            conn, replace(_principal(), command_session_id=UUID(int=45)),
-            clock=registry.clock)
-
-
-def test_t0_offer_label_cannot_back_authenticated_os_session(registry) -> None:
-    _seed_player(registry, canonical_device=True)
-    with registry.db.transaction() as conn:
-        _seed_offer(conn, audience="photo-wall-central-t0")
-        _seed_session(conn, SESSION_ID)
-        with pytest.raises(PrincipalError, match="os_command_session_unavailable"):
-            require_current_principal_in(conn, _principal(), clock=registry.clock)
 
 
 def test_retired_device_still_accepts_bounded_t0_observation_only(registry) -> None:

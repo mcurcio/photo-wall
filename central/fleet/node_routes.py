@@ -25,7 +25,6 @@ from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
-from central.fleet.os_route_support import bounded_os_body
 from central.fleet.principal import PrincipalError
 from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError, ServingImageVerifier
 from central.kernel.handling import OriginRejected, OriginUnavailable
@@ -105,8 +104,17 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             raise NodeControlError(str(exc), 422) from exc
 
     async def body(request: Request, limit: int) -> bytes:
+        """Bound streamed content even when Content-Length is absent or dishonest."""
         sessions.require_enabled()
-        return await bounded_os_body(request, limit=limit, error_code="node_body_too_large")
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > limit:
+            raise NodeControlError("node_body_too_large", 413)
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > limit:
+                raise NodeControlError("node_body_too_large", 413)
+            data.extend(chunk)
+        return bytes(data)
 
     @app.get("/v1/operator/node/status", dependencies=[Depends(admin)])
     async def node_status():

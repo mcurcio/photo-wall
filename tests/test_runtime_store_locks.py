@@ -6,11 +6,11 @@ from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
 from central.coordination import COORDINATION_LOCK, Coordinator
-from central.equipment_drain import EquipmentDrain
 from central.runtime import Contribution, Program, RuntimeConflict, Scene
 from central.runtime_store import RUNTIME_LOCK, RuntimeStore
 from central.transaction_locks import acquire_runtime_locks
@@ -135,10 +135,13 @@ def test_operator_activation_uses_post_lock_time_after_drain_cut(registry, monke
             with pytest.raises(TimeoutError):
                 pending.result(timeout=.1)
             registry.clock.advance(5)
-            EquipmentDrain(Coordinator(registry.db, registry.clock))._prepare_idle_in(
-                blocker, player["player_id"], "attempt-after-cut", request.boot_id,
-                player["authority_epoch"], authorization_expires_at=1010,
-                require_unbound=False,
+            # No Central owner writes drains now; a row is the fence the readers honour.
+            blocker.execute(
+                "INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,"
+                "phase,prepared_at,authorization_expires_at,snapshot) "
+                "VALUES(%s,'attempt-after-cut',%s,%s,'prepared',1005,1010,%s)",
+                (player["player_id"], request.boot_id, player["authority_epoch"],
+                 Jsonb({"outputs": [{"output_id": "HDMI-A-1", "frame_id": "drained"}]})),
             )
         response = pending.result(timeout=4)
 
