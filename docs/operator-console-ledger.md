@@ -1,7 +1,7 @@
 # Operator Console Redesign — Bead Ledger
 
 One row per bead. Status: open | in_progress | blocked | closed.
-Design of record: `operator-console-ux-design.md`. Plan: `operator-console-delivery-plan.md`.
+Design of record: `operator-console-ux-design.md`. Plan: `operator-console-delivery-plan.md`. Bead names below that say Commissioning are historical; the facet is the Calibration facet since [console DDD pass 3](operator-console-ddd.md#19-screens).
 Pass 2, slice 1 (wall health at a glance; design built on its gate defaults, owner approval pending): [operator-console-ux-pass2.md](operator-console-ux-pass2.md).
 Pass 2, slice 2 (safe onboarding; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-onboarding.md](operator-console-ux-pass2-onboarding.md).
 Pass 2, slice 3 (Showrunner readability; design-gate artifact, awaiting owner approval): [operator-console-ux-pass2-showrunner.md](operator-console-ux-pass2-showrunner.md).

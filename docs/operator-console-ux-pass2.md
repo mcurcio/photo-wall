@@ -1,6 +1,6 @@
 # Operator Console Pass 2, Slice 1: Wall Health at a Glance
 
-**Date:** 2026-09-27 · **Status:** design-gate artifact, awaiting owner approval.
+**Date:** 2026-09-27 · **Status:** design-gate artifact, awaiting owner approval. Later renames ([console DDD pass 3](operator-console-ddd.md#19-screens)): `needs-commissioning` is `needs-calibration` ("Needs calibration", Calibration facet), and `display-not-detected` is `no-panel-at-enrollment` ("No Panel listed as connected at the Player app's last enrollment (may be stale)", Binding facet). The [console DDD pass 2](operator-console-ddd.md#15-screens) adds an `output-interrupted` alarm after Player silent.
 **Builds on:** [the approved console design](operator-console-ux-design.md) (rules R1–R4).
 **Layer:** one console increment, plus a small read-only backend addition and one shared constant module. No migration.
 **Size:** 6 beads (5 code, 1 docs), about 450 production lines and 520 test lines. Reported failures move to slice 1b (§12).
@@ -122,7 +122,7 @@ States are checked in order and the first match wins. "Age" is always taken from
 A new `AttentionStrip.jsx`, directly under the status bar.
 
 - **Fixed height.** It is a single line that never reflows the page. Its detail list is a disclosure that **overlays** the content below rather than pushing it down.
-- **Summary.** The live region (`role="status"`) carries **state only**, for example "2 frames need attention · 3 to set up" or "All 6 frames heard from" (renamed "All 6 Frames' Player apps reporting" by [console DDD pass 1](operator-console-ddd.md#7-gaps-ranked), because it counts Player app reports, not node health). Ages appear as plain text outside the live region, so screen readers are not re-announced every 5 s.
+- **Summary.** The live region (`role="status"`) carries **state only**, for example "2 frames need attention · 3 to set up" or "All 6 frames heard from" (renamed "All 6 Frames' Player apps reporting" by [console DDD pass 1](operator-console-ddd.md#7-gaps-ranked), because it counts Player app reports, not node health, and then "No Frame needs attention", plus "· K awaiting a first report", by its bead R0, because a settling Frame has no report yet). Ages appear as plain text outside the live region, so screen readers are not re-announced every 5 s.
 - **List.** Alarms come first, then to-dos, capped at 8 entries followed by "and M more". Each entry reads like "lobby-left — Player silent · last heard 4 min ago".
 - **Just-enrolled grace.** An `awaiting-report` frame whose enrolled age is under a short grace (2 × `REPORT_INTERVAL`) is left out of the strip's counts and list, so a Player enrolling between reads does not flash a to-do. It is never shown `ok`: its tile and Inspector still read "Enrolled N s ago, no report yet".
 - **When the scheduler is not ok.** If `/healthz` reports a scheduler status other than `ok` or `disabled`, the strip replaces the **liveness** alarm rows (`cause: "liveness"`: `player-silent` and overdue `awaiting-report`) with **one** causal line plus a count: "5 frames silent — Central's scheduler is stale; Players may be unable to report until it recovers." Alarms with another cause, such as `display-not-detected`, are not caused by the scheduler and stay listed.

@@ -46,6 +46,17 @@ T0 changes **no shape**: it adds a layer to the existing Wall-First + Showrunner
 design. T1/T2 are real multi-layer engineering programs, stated as costs, not
 sold.
 
+> **Superseded in part (2026-10-02).** The [domain-driven console design](operator-console-ddd.md)
+> now owns the Frame's facets and the Panel words. The **Commissioning** facet is
+> the **Calibration** facet (committed calibration, the draft editor, Live
+> calibration and the Frame profile); its equipment block moved to **Binding**
+> ([pass 3](operator-console-ddd.md#19-screens)). The capability-gated colour and
+> power areas, the capability gate and the **T0/T1/T2 scope tiers** are retired
+> from the console: panel colour and display power are feature proposals, each
+> arriving with its own served read. The console says **Panel** for the display
+> hardware ("Display" survives only in Display Host). The tier and Commissioning
+> text below is kept as the record of the 2026-09-13 gate, not as current design.
+
 ---
 
 ## 1. The problem in plain words
@@ -142,15 +153,13 @@ graph TD
     SURF["Surface filter<br/>(text label -> filters plan)"]
     PLAN["Per-Surface 2D plan (SVG)<br/>rects from x_mm/y_mm/w_mm/h_mm<br/>drag-to-move -> PATCH; drag-to-create -> POST"]
     TRAY["Unplaced tray (ENTRY state)<br/>legacy/geometry-less frames;<br/>drag onto plan -> PATCH; delete -> DELETE"]
-    RAIL["Equipment rail<br/>Pending / Retired players"]
-    INSP["Frame Inspector<br/>Commissioning | Binding | Now-showing"]
+    RAIL["Players section (#/players)<br/>one row per box; one Player page each"]
+    INSP["Frame Inspector<br/>Calibration | Binding | Now-showing"]
   end
 
-  subgraph COMM["COMMISSIONING facet (Wall-only; hidden in Showrunner)"]
-    GEO["Geometry + SDR gain calibration<br/>(T0 - real today)"]
-    DFACTS["Read-only facts<br/>OutputReport connected (live Display readback)<br/>+ FrameProfile (Frame facts)"]
-    COLOR["Panel color / white-balance<br/>gated 'not yet available' until T1"]
-    POWER["Display power / CEC params<br/>gated 'not yet available' until T2"]
+  subgraph COMM["CALIBRATION facet (Wall-only; hidden in Showrunner)"]
+    GEO["Geometry + SDR gain calibration<br/>draft editor + Live calibration"]
+    DFACTS["Frame profile (Frame facts)<br/>+ mismatch note vs the Panel record<br/>at the Player app's last enrollment"]
   end
 
   subgraph SHOW["SHOWRUNNER MODE"]
@@ -160,8 +169,6 @@ graph TD
     RUN["Runs (activate / finish / cancel)"]
     BADGE["calibration_valid badge<br/>(Frame health - STATUS, not a control)"]
   end
-
-  CAP{"Capability gate<br/>(derived from a wired path,<br/>default closed)"}
 
   MODE -->|Installation| WALL
   MODE -->|Showrunner| SHOW
@@ -175,8 +182,6 @@ graph TD
   PLAN -->|select Frame| INSP
   INSP --> COMM
   SURF -.filters.-> PLAN
-  CAP -.enables.-> COLOR
-  CAP -.enables.-> POWER
 ```
 
 **The four rules the whole console obeys:**
@@ -225,6 +230,12 @@ layer, so honesty is enforced by *where a control may render*, not only by
 wording). It is orthogonal to R3: Commissioning writes (calibration) already use
 Plane B and the preview lease unchanged.
 
+*Wording note (2026-10-02):* R4's hardware facet is now the **Calibration** facet
+and holds calibration and the Frame profile only; the gated colour and power areas
+are removed, and the Panel record at enrollment is shown on Binding
+([pass 3](operator-console-ddd.md#19-screens)). The rule itself is unchanged: no
+Show or neutral page reaches the Calibration facet (`tests/test_console_routes_r4.py`).
+
 ---
 
 ## 3. Glossary
@@ -251,8 +262,8 @@ entries below that it changed say so; where the two differ, that glossary wins.
   Frame-vs-Player (decision 0006). *Counter-example:* swapping the panel does not
   change the Frame; the Frame's mm aperture, location, identity, normalized
   calibration corners, and schedule all persist. The Display is reached only
-  through the selected Frame's Commissioning facet — never a competing unit of
-  selection. Distinct from Surface / Frame / Player / Output / Binding / Panel.
+  through the selected Frame (its Calibration and Binding facets since 2026-10-02)
+  — never a competing unit of selection. Distinct from Surface / Frame / Player / Output / Binding / Panel.
   *Renamed (2026-10-02):* the console now calls this hardware the **Panel**, as the
   requirements do, and no longer says "Display" for it. "Display" survives only in
   **Display Host** (the node layer, L1.5, that owns final scanout and reports
@@ -289,25 +300,52 @@ entries below that it changed say so; where the two differ, that glossary wins.
   persisting across a panel swap. The only **live Display readback** is
   `OutputReport {width_px, height_px, connected}` from enrollment. Distinct from
   the Frame's mm aperture; a 1080×1920 panel behind a 300×500 mm aperture is
-  normal. The Player page shows these Panel facts as reported at the last Player
-  start and labels them stale.
+  normal. *Reworded (2026-10-02):* `OutputReport.connected` is not live readback but
+  an enrollment record, and `connected=false` is Central's own write (enrollment first
+  marks every Output not connected). Everywhere, fleet and Wall, it reads "No Panel
+  listed as connected at the Player app's last enrollment (may be stale)" or "Panel
+  connected at the Player app's last enrollment (may be stale)"; the Binding facet and
+  the Player page show it, and the Frame-health alarm uses the same wording. Display
+  Host's **current** per-Output connector, admitted surface and compositor receipt are
+  shown only on the Player page, as Display Host reports, never as Panel pixels.
 - **Calibration** — output-pixel correction bound to the Frame: `revision` (bumps
   on commit), `rotation`, four projective `corners`, a `crop` rectangle, and SDR
   `gain`. **Preview** pushes proposed values to the panel under a 30-second lease;
   **commit** saves a new revision against an `expected_revision`; **generation** is
   a separate optimistic token bumped by binding changes. A future **photometric**
   (color/white-balance) field would ride this same model (T1, [§7.3](#73-panel-color--white-balance-t1)).
-- **Commissioning** — the layer (and the Frame-Inspector facet) where the
-  Display↔Frame hardware relationship is set up: geometry + SDR gain today; panel
-  color (T1) and display power/params (T2) as capability-gated areas. Hidden in
-  Showrunner (R4).
-- **Capability gate** — a rendered branch that shows a hardware control **only
+  *Renamed (2026-10-02):* both calibration paths are called **Live calibration**.
+  The legacy lease path reads "Show on the Panel", "Show again", "Save without
+  acknowledgment" and "Stop live calibration" (it has no acknowledgment, so its
+  commit is never called Save calibration); the native Display Host path reads
+  "Start live calibration" and "Stop live calibration", and its **Save calibration**
+  is enabled only once Display Host acknowledges the latest edit
+  ([pass 3 §20](operator-console-ddd.md#20-one-live-calibration-noun-two-honest-verbs)).
+  The "Preview"/"Commit"/"Trial" wording below is the 2026-09-13 design's.
+- **Calibration facet** (was **Commissioning**) — the Frame-Inspector facet,
+  Wall-only and hidden from the Show sections (R4), that holds the committed
+  calibration, the draft editor, Live calibration and the Frame profile. The facets
+  are **Calibration | Binding | Now-showing**; `#/wall/frames/<id>/commissioning`
+  still opens Calibration, and the console never writes that address. The Panel
+  record at enrollment and the bound Output are on **Binding**. *Retired
+  (2026-10-02):* the Commissioning name and its capability-gated colour and power
+  areas.
+- **Output interrupted** — a Frame-health alarm (after Player silent): Central's
+  inference, from its linked Output-loss record for the Frame's current Binding,
+  that the Output was lost, from what a node layer actually reported (the App
+  Effect Broker an app process exit, Display Host an invalidated or withdrawn
+  surface); "the Run continues" is added only when a live Run targets the Frame.
+  Absence of one is never worded as health.
+- **Capability gate** *(retired 2026-10-02 with the gated areas; kept as the
+  2026-09-13 definition)* — a rendered branch that shows a hardware control **only
   when the capability is derived from a real wired path** (a player session that
   negotiated the command protocol; a build whose model carries the field),
   defaulting closed to an explicit "not yet available." A stored boolean that
   merely *claims* the capability is a bug caught by a mutation probe
   ([§7.6](#76-capability-gating--derived-not-declared)).
-- **Scope tier (T0 / T1 / T2)** — the staged scope of the Display dimension: T0
+- **Scope tier (T0 / T1 / T2)** *(retired 2026-10-02: no longer console
+  vocabulary; colour and power are feature proposals)* — the staged scope of the
+  Display dimension as gated on 2026-09-13: T0
   UX-only (this pass), T1 a photometric backend program, T2 a CEC/actuator
   cross-layer epic. The owner picks how far to go ([§10](#10-decisions-that-are-yours)).
 - **Source** — a saved Immich *query* with a plain operator name (e.g.
@@ -354,7 +392,7 @@ Plane B.** When a refresh reveals that committed state moved underneath an open
 draft (e.g. `revision` or `generation` advanced on the Frame being calibrated),
 the console does **not** discard the draft; it raises a "committed changed
 underneath you" banner and lets the operator decide. This is the documented
-exception to "pure render from snapshot": the Commissioning facet reads Plane B for
+exception to "pure render from snapshot": the Calibration facet reads Plane B for
 its calibration handles and Plane A only for the committed baseline and conflict
 detection.
 
@@ -415,6 +453,19 @@ The console uses the aggregate endpoint for Plane A, because independent legacy
 requests cannot promise a shared database view. The older routes are not removed
 or repurposed.
 
+### Output interruptions
+
+*Added 2026-10-02 ([console DDD §16](operator-console-ddd.md#16-backend-reads-the-pass-2-gate-q3-and-q4)).*
+The snapshot also carries `output_interruptions`, read in the same repeatable-read
+transaction: each unresolved Output-loss record that fences a Frame's **current**
+Binding (the Player's current authority epoch, and the same Frame, Player, Output
+and binding generation), shaped `{frame_id, player_id, output_id,
+binding_generation, cause_layer, interrupted_at}`. `cause_layer` is the owner of
+the producer that reported the loss. A loss from an earlier Binding or epoch is
+not served, so the console matches rows by Frame id alone. Its Frame reads
+**Output interrupted** (Central's inference, with Central's record age), and "the
+Run continues" when a live Run targets it; a Frame with no row shows nothing, never "not interrupted".
+
 ### Scene-card summaries
 
 Scene cards summarize the complete stored Scene tree. A recursive projection
@@ -428,7 +479,7 @@ candidate is currently ready or that a Player has displayed it.
 ### 4b. Calibration commit / conflict decision table
 
 Every calibration write sends `expected_revision` and `expected_generation`. On
-entering the Commissioning facet the console fetches a **fresh inventory** so it
+entering the Calibration facet the console fetches a **fresh inventory** so it
 starts from truth (the single preview slot is not otherwise polled elsewhere).
 
 | Who is asking | Result | Why |
@@ -460,8 +511,14 @@ claims a freshness or a playback it cannot prove.*
 ## 5. Walkthroughs
 
 Each step names the exact endpoint it calls. The Frame Inspector's facets are
-**Commissioning | Binding | Now-showing**; calibration (geometry + gain) lives
-under **Commissioning** (R4), and is reached only in Wall mode.
+**Calibration | Binding | Now-showing** (named Commissioning until 2026-10-02);
+calibration (geometry + gain) lives under **Calibration** (R4), and is reached
+only from the Wall. The walkthroughs keep the 2026-09-13 strings ("Commission the
+display", "Preview", "Recovered" banner); the current wording is in
+[pass 3 §19–§20](operator-console-ddd.md#19-screens): the CTA is "Calibrate this
+Frame", the legacy path's verbs are "Show on the Panel" and "Save without
+acknowledgment", the gated areas are removed, and the Recovered banner is replaced
+by the enrolled fact on the Player page.
 
 ### J1 — Onboarding: pending → bind → commission → showing (with auto-recovery)
 
@@ -683,7 +740,7 @@ for the Display layer — is treated in [§7.6](#76-capability-gating--derived-n
   claim the refresh model never reconciled.
 - **The fix:** two explicit planes ([§4a](#4a-the-two-plane-state-model)); a
   refresh replaces Plane A only; no auto-renew (visible countdown + explicit
-  expiry + Re-preview); poll `/inventory` while the Commissioning facet is open so
+  expiry + Re-preview); poll `/inventory` while the Calibration facet is open so
   overtaken previews and committed-elsewhere changes surface as their own states.
 - **Stated plainly:** preview is a shared single slot with no lock; the console
   shows the *server's* `expires_at`, and a second operator can overtake the wall.
@@ -711,6 +768,12 @@ stateDiagram-v2
 ---
 
 ## 7. The commissioning layer
+
+> **Superseded (2026-10-02).** This section is the 2026-09-13 record. The console
+> no longer has a Commissioning facet, capability gates or scope tiers: the facet is
+> the Calibration facet, the equipment block is on Binding, and colour and power
+> are feature proposals without a console seam
+> ([pass 3](operator-console-ddd.md#19-screens)).
 
 This layer folds the owner's Display/hardware dimension into the existing shape.
 It adds R4, a Commissioning facet, and the Display as a first-class console
@@ -938,6 +1001,10 @@ for inherently non-spatial content.
 
 ### 8b. Where Commissioning lives — Facet vs third Mode (chosen: Shape 1)
 
+*Renamed (2026-10-02):* the chosen facet is now the **Calibration** facet
+([pass 3](operator-console-ddd.md#19-screens)); the facet-versus-mode reasoning below
+still holds.
+
 **Shape 1 — Commissioning FACET in the Frame Inspector (chosen):** the facets
 become `Commissioning | Binding | Now-showing`; you commission the Display where
 it physically sits on the Wall plan (select the Frame → Commissioning), and it is
@@ -1071,6 +1138,11 @@ The calibration lifecycle state machine is in
 | Q9 | Vanilla zero-build, or a framework with a build? | **RESOLVED — React with a SMALL self-hosted build (owner decision; reverses the prior vanilla recommendation).** A bundler (Vite recommended, esbuild acceptable) compiles real JSX + hooks into **one bundled JS/CSS served same-origin** under `script-src 'self'` — no CDN. The two hard surfaces (per-Surface SVG plan; 4-corner + crop pointer-drag calibration on a live preview) are React components with hand-coded SVG + Pointer Events *inside* React; the two-plane model (R3/§4a) becomes framework-enforced state instead of hand-rolled render discipline. | Adds a **Node build toolchain + a CI build step** to a Python repo that has neither today, and a built `dist` artifact to serve same-origin. | **Rejected:** (1) **vanilla zero-build** — keeps a zero-build stack but loses reactive ergonomics for a 9-domain console (the two-plane tax stays hand-rolled); (2) **React-no-build via `htm`** — keeps zero-build and same-origin but loses real JSX. Both declined in favour of JSX + hooks; the "vendor one same-origin ES module" escape valve is now moot. |
 
 ### The scope-tier gate — how far into the Display dimension to go now
+
+> **Retired (2026-10-02).** T0 was delivered; the tiers are no longer console
+> vocabulary, and T1/T2 are feature proposals, not open tiers. Q7's facet is now the
+> Calibration facet and Q8's CTA reads "Calibrate this Frame"
+> ([pass 3](operator-console-ddd.md#19-screens)). The table is the 2026-09-13 record.
 
 This is the new owner decision. The tiers are cumulative; T0 is recommended in
 this pass, T1 and T2 as separately-greenlit programs.
@@ -1259,6 +1331,9 @@ full, ordered slice/bead plan is a separate delivery artifact,
    Run control, "why" panel — with the `calibration_valid` Frame-health badge and
    **no** Commissioning surface (R4).
 8. Guidance banner + snapshot clock + refresh model.
+
+*(2026-10-02: the Commissioning facet is now the Calibration facet and the gated
+areas are removed; see [pass 3](operator-console-ddd.md#19-screens).)*
 
 **T1 and T2 are separate programs, not slices of this pass.** T1 (photometric
 field + render stage + capability signal) is a medium central/renderer/contract

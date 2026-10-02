@@ -2134,3 +2134,183 @@ stated in §10 "What the console cannot close"; R0 closes the single-page class 
 `rebootPermit`, judged on the newest read; `sendReboot` takes only a permit), and the cross-page race is
 owner question Q4 (a `node_reboot_outstanding` fence in `NodeCommands.request_reboot`). Source: pass-1
 residual review (major: open dialog sends a new command id while a different request is Requested).
+
+## 2026-10-02 — console DDD R0 (built): spec gaps found while implementing
+Bead R0 built to Q4 = yes. Findings for the doc (E1 or the batch review to fold in):
+1. §21 sketch `panelAtEnrollment(observation, readAt)` cannot build its `reported` fact: `fact()` needs a receipt
+   time, and the observation carries none (the receipt is the Player's `last_seen`, Central's enrollment record).
+   Built as `panelAtEnrollment(observation, readAt, enrolledAt)` in players.js. D1 calls it the same way.
+2. §10 retry row says a held request may be re-sent when "the read lists it as outstanding OR Central's read time
+   is before its retryUntil"; the paragraph above it says the held request "counts as outstanding until a read lists
+   it, or until Central's read time passes its frozen retryUntil". These disagree when a read lists the held request
+   as NOT outstanding (rejected, or expired) inside its window. Built to the paragraph: once listed, Central's served
+   `outstanding` decides; unlisted, `readAt < retryUntil` decides. Consequence: a retry after the window is refused
+   in the console once a read past the window has arrived; the 410 "Outcome unknown" answer is reached only when the
+   retry is sent before that read (the B2 browser test now holds the device read to show it).
+3. §11 sketch has no name for the dialog's disabled-state check. Built as one exported `rebootRefusal(request,
+   nodeDevice)` in fleetCommands.js (= `rebootOffer` with the request as `held`, "retry" meaning sendable), used by
+   both the dialog (read on screen) and `sendReboot` (on `node.latest()`), so there is still one rule.
+4. Browser acceptance "a direct sendReboot call refuses": a click on a disabled button runs nothing, so the browser
+   test calls the dialog's React `onClick` from the button's `__reactProps$` key (React 18 internals). That is the
+   only way a built bundle exposes the send path; the mutation probe (remove the call-time check) fails it, with
+   the fence answering 409 to the leaked POST.
+5. Pass-1 residual "fleet strings say display": the `outputStates` no-display label is now "No Panel listed at the
+   last enrollment" (not the residual's "No Panel detected at last Player start", which §19 shows is Central's
+   enrollment record, not a Player start report). The Wall's Frame-health alarm wording stays for D1.
+6. docs/runbook.md still quotes the old all-clear "All 6 Frames' Player apps reporting"; E1 should change it to
+   "No Frame needs attention" (· K awaiting a first report).
+Source: R0 implementation.
+
+## 2026-10-02 — console DDD C1 (built): spec gaps found while implementing
+Bead C1 built to Q3 = A (the interruption read). Findings for the doc (E1 or the batch review to fold in):
+1. §15 wording "Output interrupted (Central's inference: <Layer> reported the Output lost · recorded <age> ago) · the
+   Run continues" does not fit one `fact()`: the `derived` pattern ends at the closing parenthesis. Built as a
+   `derived` fact (basis "<Layer> reported the Output lost · recorded <age> ago") plus the fixed suffix
+   `RUN_CONTINUES`. §18's `interruptionFor(...) -> {fact}` therefore returns `{fact, label}` (label = the full
+   wording, used by Frame health), and `FactLine` gained an optional `suffix` prop so the Player page's Output row
+   still renders through the one fact renderer ("Interruption: <fact> · the Run continues").
+2. §23 C1 acceptance wants "· the Run continues" on the Run chip, which renders `tileLabel` (no age). The tile label
+   is therefore "Output interrupted · the Run continues" (the plan tile shows the same); the full label with the
+   age is the tile's accessible name, Attention's row and the Inspector header.
+3. §18 names `snapshot.output_interruptions`; the console's snapshot object is camelCased by useSnapshot.js
+   (`readinessDiagnostics`), so the client key is `outputInterruptions`, required to be an array like
+   `readiness_diagnostics` (a malformed snapshot is refused whole).
+4. Unnamed in the doc, chosen by convention: FrameHealth cause "output" (a new cause group; readinessRecovery.js
+   still shows readiness guidance beside it, as for every non-liveness cause), facet "binding". The served
+   `cause_layer` is Central's producer owner code (`display_host`, …, including `player_runtime`), worded in the
+   console through a new `LAYER_NAMES` in facts.js ("Player app" for `player_runtime`, which §15 does not list).
+   nodeRead.js still spells its five layer names inline (DRY residual; not touched to keep C1 in scope).
+5. health.js now imports facts.js, which imports `formatAge` from health.js: an ES-module cycle, safe because
+   both sides only call hoisted function declarations at call time. It also makes facts.js one of the shell's own
+   modules, so R0's `facts.js` entry in tests/test_console_routes_r4.py SHARED_WITH_SHOW is removed (the test
+   requires the declared set to equal the reached set).
+6. The read's `bindings.frame_id = loss.frame_id` predicate is an equivalent mutant under today's Registry (every
+   bind or unbind bumps `frames.generation`, so the generation join already excludes a rebound Output); kept to
+   mirror Runtime's exact fence key. The generation and epoch predicates are each mutation-probed by the DB tests.
+Source: C1 implementation.
+
+## 2026-10-02 — console DDD C2 (built): spec gaps found while implementing
+
+1. §15's three per-Output phrases are `reported`, latest, so they render through the one `reported` wording
+   ("Display Host last reported <age> ago · <phrase>"). The null-surface line therefore reads "Display Host last
+   reported N s ago · Display Host reported no app surface admitted" (the source is named twice), and each Output's
+   receipt age repeats on its three lines. All three lines carry the label "Output <id>", so PlayerPage keys layer
+   facts by label and index instead of label alone. The acceptance phrase is present verbatim.
+2. §23's "no display string says 'visible'" is built as scoped to the Display Host row (its facts and details).
+   The pass-1 Host Management and broker details still say "Host samples do not show visible pixels" and "A running
+   process is not visible output" (negations, outside C2); D1/E1 may reword them if the rule is meant console-wide.
+3. §16 does not define `receipt.matches_surface`. Built as: the exchange has an admitted surface and the receipt's
+   whole Surface (Output key, process, app epoch, binding generation, configuration revision, Frame) equals it,
+   the same comparison qualification uses (`node_acceptance.py`, `exchange.receipt.surface != exchange.admitted`).
+   A receipt for another surface reads "No compositor receipt for that surface in this report".
+4. Unnamed in the doc, chosen by convention: an empty `display_outputs` reads "Last reported: Unknown: Display Host
+   has reported no Output on this boot"; an absent field (an older Central) reads "Unknown: display_outputs not
+   served"; the row details list each admitted surface's configuration revision. The read's `p.owner =
+   'display_host'` predicate is an equivalent mutant (the `DisplayExchange` contract already requires a
+   display_host producer); kept to state §16's scope. Read is capped at LIMIT 64 like the device read's other lists.
+5. §15 calls the authenticated OS attempt claim `claimed`; only its `reported` state is a claim. Its other states
+   (`none`, `invalid_stored_report`, `context_mismatch`) are Central's own record and render `set`. The claim's
+   local "received <time>" became the fact's latest-receipt age (fleet `read_at` minus the report's `received_at`).
+   Labels are "V1 loader OS session", "V1 app attempt", "V1 authenticated OS attempt claim"; a Central that serves
+   no management block reads Unknown. The loader session's `expires_at` stays a local clock time (display only).
+6. The browser test stores its Display Host exchange by direct insert (the display owner's decision path needs a
+   linked app process and Runtime authority; tests/test_node_display.py proves that path).
+Source: C2 implementation.
+
+## 2026-10-02 — console DDD D1 (built): spec gaps found while implementing
+
+1. §20's gap-17 wording for Unbind each Output ("if one fails, the rest stay as they are") contradicts
+   `equipmentApi.js` `unbindSequence`: a refused ("changed") or already-done Frame is skipped and the sequence
+   continues; only an unknown outcome stops it, leaving the rest not attempted. Built to the behaviour: "Central
+   unbinds them one at a time. One that changed since you opened this is skipped; if an outcome is unknown, the
+   rest are not attempted." The dialog title is §20's "Unbind each Output of Player X?"; the Player page's danger
+   button still reads "Unbind all outputs" (§20 names only the dialog).
+2. §19 does not name the Panel alarm's facet, state key or short label. Built: state `no-panel-at-enrollment`,
+   cause `panel`, facet `binding` (the Panel at enrollment moved there, so the alarm opens where its record is),
+   tile label "No Panel listed at the last enrollment". The wording lives once in health.js
+   (`NO_PANEL_AT_ENROLLMENT`), which players.js `panelAtEnrollment` imports, so health.js does not import players.js
+   (players.js already imports health.js; this avoids a second ESM cycle). The alarm label is the bare wording,
+   without the fact's "· recorded <age> ago".
+3. §19's enrolled wording "Player app enrolled <age> ago (authority epoch N)" is not the `set` pattern's
+   "<value> · recorded <age> ago". Built to §19 verbatim: a `set` fact whose value carries Central's age
+   (`read_at - last_seen`), Unknown when either time is missing. Label "Enrollment" in the Player page header.
+4. tests/test_console_routes_r4.py's calibration-route scan matched "/calibration", which the Calibration facet's
+   own route sample (`#/wall/frames/<id>/calibration` in routeSamples.json) now contains. Narrowed to
+   "}/calibration" (the API path after an interpolated Frame id); the Wall-side positive control still finds it.
+   FactLine.jsx joins SHARED_WITH_SHOW: the Binding facet renders the Panel at enrollment through it (rule 2).
+5. Central answers `identify_unsupported` with 409, like the other refusals, so `identifyOutput` maps it by error
+   code. Whether a Player app offered Identify is not served on the snapshot, so `identifyOffer` cannot disable on
+   it; §19's table already makes it an outcome.
+6. The moved block keeps its resolution line: "Output resolution at that enrollment: W × H" under the Binding
+   facet's Panel record (connected only). Not in §19's table; carried from the moved block.
+7. The "display for the Panel" sweep also reached files §19 does not list: Plan.jsx's new-Frame form labels read
+   "Pixel width (px)"/"Pixel height (px)" (as the Calibration facet's profile), framesApi.js and the facet say
+   "Frame profile must match the frame's orientation", Guidance says "calibrate the Frame", ConfirmAction says
+   "calibrated again"/"uncalibrated", and ManagementFacts' "No commissioned session recorded" reads "No loader OS
+   session recorded" (the retired word, in the V1 block). Native refusal codes are reworded from their conditions in
+   `node_display.py` (no current Display Host session; no exchange for the Output in 10 s; admitted surface or its
+   receipt does not match).
+8. The native-path browser test stubs Central's capability and trial answers at the network (`page.route`); a real
+   `native_trial` needs a Display Host session, a linked app process and a matching receipt (tests/
+   test_node_calibration.py proves Central's side). The health honesty test now allows the one "connected" that §19
+   mandates (the Panel record at enrollment).
+9. Renaming Commissioning.jsx broke a link in docs/production-readiness-v0.13.md; its target is retargeted to
+   CalibrationFacet.jsx so check_docs stays green. Its prose ("Preview") and docs/operator-console-delivery-plan.md's
+   history are left for E1. Browser test files keep their names; test functions are renamed, and conftest's evidence
+   key follows the provenance test.
+Source: D1 implementation.
+
+## 2026-10-02 — console DDD E1 (built): batch-2 errata folded into the design doc; items left open
+The R0, C1, C2 and D1 entries above that change doc statements are now reflected in docs/operator-console-ddd.md
+(§10 retry row and `rebootRefusal`; §15 interruption wording, `player_runtime` → "Player app", Display Host row
+Unknown cases, V1 claim states; §16 `matches_surface`, Q3/Q4 answers; §18 `interruptionFor` → {fact, label};
+§19 Panel alarm state/cause/facet, `identify_unsupported`; §20 Unbind each Output wording; §21
+`panelAtEnrollment(observation, readAt, enrolledAt)`). Left open:
+1. §13 "Deferred", §17 and §22 still describe the node release workflows as deferred; the owner chose Q5 = design
+   next. Left untouched by instruction (a separate design run replaces §17); the status line and history record Q5.
+2. The pass-1 Host Management and broker detail strings still say "visible" in negations (C2 item 2); recorded in
+   §15 as scoped to the Display Host row, not reworded.
+3. docs/runbook.md has two in-page anchors that match no heading under a GitHub-style slug
+   (`#operator-api-reposition-and-remove-frames`, `#photo-sources-add-a-source`); both predate this batch, and
+   check_docs.py checks file links only. Not fixed (outside E1).
+Source: E1 implementation.
+
+## 2026-10-02 — console DDD batch 2, fix cycle 1: spec defects found in review (folded into the doc)
+1. §16 "Lock cost" claimed the display read was "bounded by one boot's producers times its Outputs". The built SQL
+   (`SELECT DISTINCT ON(output_id) ... LIMIT 64`) read and sorted every exchange of the boot (exchanges are immutable
+   and never pruned; ~1 per 3 s per Output) inside the fleet-lock hold. Code fixed: `DISPLAY_OUTPUTS_SQL` in
+   `central/fleet/node_display.py` is a recursive skip-scan plus one LIMIT 1 probe per (producer, Output) through
+   `node_display_output_latest`; the DB test seeds 20,000 exchanges and asserts the plan reads < 50 exchange rows
+   (mutation-probed: the old SQL reads 20,008). §16 paragraph restated to the real bound.
+2. §15 worded the interruption basis "<Layer> reported the Output lost". No layer reports that: the owner of each
+   fact kind is fixed (contracts/node_protocol.py `owners`), and Central records a loss only from an App Effect
+   Broker app-process exit (applied to every linked Output) or a Display Host invalidated/withdrawn surface
+   (node_runtime_reconciliation.py:117-139). §15 now words the basis per cause layer (`LOSS_REPORTS` in health.js);
+   other layers read "<Layer> sent the evidence Central linked to this Output".
+3. §15 mandated "· the Run continues" on every interruption, but a loss is recorded for any bound Frame linked to
+   the app process, Run or not. The suffix is now added only when `liveRunsFor` lists a live Run on the Frame
+   (tile, Attention, Inspector and the Player page's Output row alike).
+4. §19 worded `identify_unsupported` as "did not offer Identify when it enrolled"; Central raises it when no
+   current-epoch control session is negotiated at schema 2 with `identify_output` (registry.py:434-441), which also
+   covers open and legacy sessions. Now "Central has not negotiated Identify with this Player app's current
+   enrollment" (equipmentApi.js, §19, runbook).
+5. D1's `trial_current_output_required` wording named only the stale-exchange trigger; node_display.py raises it also
+   when there is no current app-process link or Binding. Reworded to the union (LiveCalibrationTrial.jsx).
+6. §16 said the console never re-derives `outstanding`, but the device read served `outstanding` and the responses
+   from separate READ COMMITTED statements, so a mid-read rejection could tear them. Both now come from one statement
+   (node_observations.py); §16 states it.
+7. Two wordings for the one "another request is outstanding" outcome: `REBOOT_OUTSTANDING` now is §16's 409 wording
+   and both paths use it (§10 table updated).
+Source: batch-2 review, fix cycle 1.
+
+## 2026-10-02 — console DDD batch 2, fix cycle 2: spec defects found in review (folded into the doc)
+1. §15's failure row "An exchange payload drifts → 'This section could not be shown' in Layers only · Per-section
+   boundary" was false: Display Host exchanges are decoded server-side in `display_outputs_in`, inside
+   `NodeObservations.status` (node_observations.py:125), and `invoke` (node_routes.py) maps the ValueError to a 422
+   for the whole device read, taking Reboot with it. Code fixed: decoding is contained per Output; an undecodable
+   stored exchange is served as `{output_id, received_at, undecodable: true}` and the console shows one Unknown fact
+   for that Output ("Central could not decode Display Host's last exchange for this Output"). §15 row split into the
+   server-side (decode) and client-side (shape) cases; §22 "Wire coupling" restated.
+2. §18 sketched `interruptionFor -> {fact, label}`; since fix cycle 1 item 3 the code returns a conditional `suffix`
+   too (consumed by PlayerPage.jsx and frameHealth). §18 now `{fact, suffix: string|null, label: string}`.
+Source: batch-2 review, fix cycle 2.
