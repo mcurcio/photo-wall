@@ -2314,3 +2314,290 @@ Source: batch-2 review, fix cycle 1.
 2. §18 sketched `interruptionFor -> {fact, label}`; since fix cycle 1 item 3 the code returns a conditional `suffix`
    too (consumed by PlayerPage.jsx and frameHealth). §18 now `{fact, suffix: string|null, label: string}`.
 Source: batch-2 review, fix cycle 2.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NV1: where the frozen page met reality
+1. Order. §32 orders NR1 before NV1 and has NR1 create `polledRead.js`; this run built NV1 first (no earlier bead).
+   NV1 needed a second polled read (`useNodeControl`) and DRY forbids a copy, so NV1 created `polledRead.js`
+   (`usePolledRead(load, {cadenceMs, skip, initial}) -> {value, refresh, latest}`) and moved `useNodeDevice` onto it.
+   NR1 reuses it and must not recreate it. The sketch's `error` output is omitted: `load` folds failures into its
+   value (both callers do), so the hook has none to report.
+2. NV1 acceptance "one 'not shown' line ... on Releases" and the Reboot gate-reason "+ link" to Releases › Effect gate
+   cannot be met before NR1 creates `#/releases`. `NodeRecords` (nodeControl.js) is ready for ReleasesPage; the link
+   lands with NR1/NR2 (a link now would hit an unknown route and fall back to the landing page).
+3. §28 sketches `useNodeControl() -> {state, gate, readAt, ...}`. Node status serves no read time (§26 says so
+   itself), so there is no `readAt`. Added `failed: boolean` instead: `unread` covers both "no answer yet" and "read
+   failed", and the two must differ — node reads are skipped before the first answer (so a Central without node
+   control receives zero node reads, the browser acceptance) but sent after a failed status read (§30: "pages show
+   their own read failures"). Rule: `nodeReadsAllowed(control)`.
+4. §28 says `NodeDevice` "gains deprecatedBoot (G5) as served". Not added: the field is already on the served read
+   (`node.read.deprecated_boot`); a copied field is a second source. `deprecatedBootFact(deprecatedBoot, readAt)`
+   takes Central's read time too, for the age (§26 "recorded <age>").
+5. §25 and §26 word the deprecated-path line differently. Rendered as §26's fact (label "Booted by the deprecated
+   path", value "Central's newest boot record for this box is a deprecated boot offer | a base image served without
+   an offer", Central's age) with §25's tail as the FactLine suffix: "its kernel command line lacks
+   photowall.node=v2; Select and Stage do not reach it". ND1 should keep one wording.
+6. G5 "the device's latest node boot offer": implemented over every device generation (`node_boot_offers` by
+   `device_id`), so a node offer from an earlier generation still counts as the box's newest node boot. Ties go to
+   the node offer (strictly newer only), and between the two deprecated records to `offer`.
+7. The Reboot gate reason is `effectGateFact`'s whole wording, so on a real Central it reads "Reboot unavailable:
+   Effect gate closed · Central's reason: no deployment certification has opened it · recorded <Central's time>."
+Source: NV1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NR1: where the frozen page met reality
+1. G1 field list. The Publish dialog must say how much Central downloads (§26 "Publish in flight": "1.2 GB"), but
+   G1 serves no size. Release rows also serve `download_bytes` (sum of every artifact's `size_bytes`; a publish
+   downloads all of them with or without the app). Additive, read from the stored manifest through its parser.
+2. §28 sketch `publishOffer -> ... | {offer: "in_flight" | "unknown"}`. Added held state `recorded` (Central answered
+   published/duplicate, no read lists the id yet): calling it in flight would be untrue, and offering Publish again
+   would break the one-POST hold. Row words: "Published; the next read lists its deployment".
+3. §28 says Publish sends only when the derived id is not listed; §30 says a release whose derived id was
+   hand-published with another document "reads Central's identity-conflict words". Reconciled: `publishOffer` returns
+   `blocked` with those words (no POST), so both hold. "Published from" is absent there, as §26 requires.
+4. "The next read decides" (§27 Select, unknown answer). `usePolledRead.refresh()` returns at once when a read is in
+   flight (it queues), so awaiting it does not mean "a read after the answer". `useReleaseRead` numbers reads by START
+   (`seq`) and exposes `startedReads()`; the first read with `seq` > the count taken at the answer settles it. A read
+   showing the revision unchanged reads "changed" per the §27 diagram, although nothing changed in that case; NR2/ND1
+   may want distinct words ("Central did not record it; review it").
+5. Scope bleed taken from NR2, each because NR1 cannot render without it: the empty-state lines (an empty list must
+   say something; §25 wording used verbatim), the Select no-app sentence (§28 has NR1's `selectionRequest` freeze
+   `noApp`), and the Select codes `node_deployment_unknown`/`invalid_node_boot_selection` plus
+   `node_deployment_identity_conflict` in `releaseResult`. Every other Publish code takes the fail-closed default
+   until NR2 (so an origin 503 reads "Central refused: <code>", refused, not unknown).
+6. Deferred to NR2 as planned: Publish without its app, Send again after an unknown Publish (until then a lost
+   Publish answer holds the row until a read lists the id or the page reloads), Check GitHub releases now, the Effect
+   gate section, and therefore NV1's Reboot gate-reason link to Releases › Effect gate (NV1 errata item 2; the
+   other half, Releases' one "not shown" line with zero release reads, is now built and browser-tested).
+7. `ConfirmAction` gained an optional `progress` (replaces "Sending…" in flight) for the Publish in-flight sentence;
+   `gigabytes` moved from mediaHealth.js to health.js (one byte formatter, now shared with Releases).
+Source: NR1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NR2: where the frozen page met reality
+1. §26 "origin unavailable (any `OriginUnavailable` reason)" / "origin rejected (any `OriginRejected` reason)" is
+   worded by exception class, but the console keys on the code (§26's own rule), and Central serves the reason
+   string as the code (`node_routes.py` `publish_release`). Listed explicitly from `central/origins/github.py`:
+   unavailable = origin_unreachable, origin_error, rate_limited, manifest_unavailable, download_truncated,
+   download_corrupt (unknown, "send again"); rejected = download_not_found, download_encoding, download_too_large,
+   download_rejected, list_invalid, node_release_invalid (refused). A new origin reason takes the default (refused),
+   so the list must follow github.py.
+2. §28 sketches one `releaseResult(result) -> outcome`. A single table across verbs would word a Publish code served
+   to Select (e.g. an origin reason would read "unknown"). §26 tables are per verb, so `releaseResult(result, done,
+   codes)` takes the verb's own table (SELECT_CODES, PUBLISH_CODES, CHECK_CODES = {}).
+3. `HeldPublishes` gained `frozen(id)`: Send again must send the identical body (§27, NR2 acceptance), and the body
+   carries `operator_audit_ref` dated from the read the dialog opened on, so it cannot be rebuilt later. `sendPublish`
+   takes `{again}` and re-sends only `held.frozen(id)` (by identity), only while held `unknown`, and only while the
+   newest read still lists the release.
+4. `deploymentId` on catalog rows (NR1's `releaseHome`) is kept but no longer rendered: with Publish without its app a
+   release has two derived ids, and each publish choice now shows its own "Published as deployment X" line. NU1 may
+   use the field, or remove it.
+5. §25 says the reboot dialog change adds "no new module edge". The link uses `formatRoute` (the one route
+   formatter), so PlayerCommands.jsx now imports routes.js, a pure module PlayerPage.jsx already imports. The R4
+   graph is unchanged in reach. A hard-coded "#/releases" would avoid the edge but bypass the route formatter.
+6. The Reboot gate link comes from a structural flag, not a string match: `rebootTarget` marks gate refusals
+   (`gate: true`: closed, unreadable, generation not served) and `rebootOffer` passes it through. NS1's
+   `stageBlocker` should set the same flag for its gate blocker.
+7. Routes have no in-page anchors (hash routing), so "Releases › Effect gate" links to `#/releases`; the Effect gate
+   section is the last section on that page.
+8. The NV1 "not shown" line on Releases was already built and browser-tested by NR1 (NR1 errata 6); NR2 added nothing.
+9. Disconnect probe: a client disconnect does not cancel the publish handler (uvicorn 0.34.2, Starlette 0.46.2,
+   BaseHTTPMiddleware stack). Recorded in docs/player-fleet-implementation-map.md. It is a scratch probe, not a CI
+   test. The §31 assumption holds for these versions only.
+Source: NR2 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NS1: where the frozen page met reality
+1. G6 proof, how "rejoins the Run at its current point" happens in code: the old app's observed exit interrupts each
+   bound Output (`node_output_losses` keyed on the old authority epoch). The new app process then re-enrolls in the
+   Registry, which bumps the authority epoch (the PID1 fixture already asserts `authority_epoch` advances across a
+   switch), so the old-epoch losses no longer fence and the planner commits the Run's current layers for the new epoch.
+   That is the same path as a reboot. The DB test (`test_a_bound_players_switch_follows_the_operator_reboot_rule`)
+   drives exactly that: Stage while bound → exit → both Outputs interrupted, bindings and frames rows (calibration,
+   `calibration_valid`, generation) byte-equal → re-enroll → commits on both Outputs at epoch 2, Runtime
+   `export_state()` equal except `now`. Order kept: the rule half was run green with the refusal still in place, then
+   the refusal was deleted and the test extended through `stage()`. Docs still saying Central refuses a bound stage
+   (`player-node-domain-model.md` "D16 app-upgrade scope", design-decisions D16) are ND1's.
+2. §28 sketches `appOperationState` under stage.js. It stays in fleetCommands.js (its §10 home, the Player page and the
+   fleet-commands model test already import it there); `ended_by_later_boot` was added there, with the broker's earlier
+   report kept as `prior`, as Interrupted does.
+3. §28 `stageBlocker -> {reason: Fact}`: returns `{reason: string, gate?: true}` instead, the `rebootTarget` shape, so
+   the gate reason is the one `effectGateFact` wording and the Releases link keys on the structural flag (NR2 errata 6).
+   Beyond §25's four served blockers it also blocks when the device generation, the gate generation or the app-attempts
+   read is not served: without them `stageRequest` cannot bind a fence or judge "switching".
+4. A lost Stage answer (§27 "resend byte-identical"): the resend is offered only while the held request is NOT listed
+   by the app-attempts read. If Central did record it, the next read lists it and the console refuses any resend
+   ("Central already recorded this stage"): the read is the authority, and a resend would only return `duplicate`.
+   `HeldStages` holds `in_flight | recorded | unknown` like Publish's hold; it ends once a read lists the operation.
+5. `rollout_gate_closed` (§26 "Effect gate closed: <reason words>") carries no reason in Central's answer
+   (`invoke` maps `RolloutGateError` to its message as the code). The words come from the shell's gate via the new
+   `nodeControl.js` `effectGateReason` (extracted from `effectGateFact`, one wording). If the shell still reads the
+   gate open, the answer reads "Effect gate closed: its reason is not readable here (see Releases › Effect gate)".
+6. Unworded by §26 and so on the default ("Central refused: <code>"): `node_app_stage_invalid` (the route's 422 for a
+   body it cannot parse), `node_control_disabled`, and the deleted `bound_switch_policy_unselected`.
+7. §25 "Any later boot … runs the boot selection (deployment X)" with no selection: worded "(none: Central refuses
+   every boot)", the Releases empty-selection fact.
+8. DRY: RebootDialog's guarded-modal lifecycle moved to `useSendDialog.js`; RebootDialog and StageDialog both use it.
+   Reboot browser tests unchanged and green.
+9. Test fixture: `tests/test_node_lifecycle.py` `Rig` gained `gate_seconds` (the gate certificate expires on wall
+   time; browser tests use 300 s like `_open_gate`).
+Source: NS1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NS2: where the frozen page met reality
+
+1. §29 G4 serves `acceptances[] {environment_sha256, base_tag, accepted_at}`, but an acceptance row stores only
+   `base_content_key` (migration 056); no tag is recorded anywhere keyed by content key except inside boot offers and
+   deployment documents. Built: each acceptance serves `base_content_key` and `base_tag`, the tag named only when the
+   key equals the base of the boot this generation currently runs (one offer parse per read), else `null`, worded
+   "on a base other than the one this boot runs". Resolving older bases would parse every offer of the generation on
+   every 5 s read (a reboot-looping Pi has hundreds); not done.
+2. §29 "G4 adds two indexed queries": `node_environment_acceptances` has no `(device_id, device_generation)` index
+   (only the PK and `qualification_id`); the G4 query and Stage's `_qualified_fallback_in` both scan. Rows are few
+   (one per accepted qualification); no migration added. Raise if acceptances grow.
+3. §27 "no progress for 2 min": the page's monotonic clock starts at the first sample, which is sent at once, so 60
+   waiting answers 2 s apart cover 118 s and the 61st (at 120 s) stops it. A hidden tab samples nothing; its pause
+   counts at most 5 s towards the limit (Central's own window restarts after a 5 s gap anyway), so returning to the
+   tab never stops sampling on time spent away.
+4. §28 `sendBegin(deviceId, request, node)`: "Player bound" is a snapshot fact, not in the node read, so `sendBegin`
+   takes `{node, snapshot, playerId}`; it judges `beginOffer` on `node.latest()` and the snapshot at call time, and
+   also refuses when the linked environment changed since the request was built.
+5. §28 `useQualificationSampler -> {answer, stop}`: returns the sampler state (`phase`, `answer`, `stopped`); the
+   operator's Stop is the caller passing `active: false` ("Stop sampling" button). The load itself returns its state
+   unchanged once accepted or stopped, so a tick firing before React re-renders cannot POST (mutation-probed).
+6. Not done: §32 NS2's "first step" (the still-photo and witness-cadence probe on a real Player). It needs Display
+   Host buffers from real hardware; nothing here can produce them. The 2-minute stop shows the failure either way.
+7. NS1 test defect fixed: `test_a_lost_stage_answer_resends_the_identical_body…` chose "the first radio"; the release
+   read lists deployments published at one instant in no fixed order, so the first was sometimes the running app's own
+   deployment and Central refused `node_app_qualified_fallback_required` (about 1 run in 3). It now names
+   `fixture.deployments[0]`.
+Source: NS2 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NU1: where the frozen page met reality
+
+1. §29 G7 not built. It is §31's open owner choice, and the NU1 brief said "composed only from the existing send
+   functions and reads; no new Central feature". Built §31's "No" column, tightened: a Player is on the selection
+   when THIS PAGE rebooted it after Select and its Host Management session is on a later kernel boot id than the
+   frozen request's (`kernelBootId`, two ids, no clocks); for a Player this page did not reboot, when its linked app
+   (G4) is the target's. A no-app release cannot be recognised that way, so its rows read "Waiting · unknown whether
+   it booted the selection" and are rebooted to make sure. Stated cost: after a reload, a base-only release whose app
+   equals the old one reads every Player Rejoined without a reboot (Done), and a Player running the target as a
+   Stage reads Rejoined. G7 (+10/+30) removes both; it stays the owner's call.
+2. §25a assumes "the tried Player's latest stage is the target's" is readable, but the app-attempts read serves no
+   deployment per operation (`node_lifecycle.py` `status()`, the `results.append` fields). Built: a stage is the
+   target's when this page holds it (operation id), or when it reads `target_running` while the linked app is the
+   target's. After a reload, a target stage that is staged, switching, `fallback_running` or `effect_unknown` shows as
+   Staging (Stage offered, with "Sends a newer stage. It replaces…") instead of Looking. Serving `deployment_id` per
+   operation (one field) would close it; not done for the same "no new Central feature" reason.
+3. §25a interface sketch: `keepRow` takes one object `{node, snapshot, playerId, target, gate, sent, waitedMs,
+   skipped}` (the gate decides Cannot reboot; `sent` carries the frozen reboot and the page's monotonic send time);
+   `keepPlan(snapshot, bootFacts, tried)` (names need boot facts); `journeyStep` also returns `paused` and
+   `done:{kept|backed_out}`; added `journeyTarget`, `tryWithdrawn`, `keepPause`, `keepCount`.
+4. §25a "Not rejoined: Rebooting or Rejoining for 10 min": also applied to a row this page did not reboot that runs
+   the target's app but never reports ready (waited since rolling began), else it would hold the rollout silently.
+5. §25a reads "app-attempts for the active row only": `useNodeDevice` always reads both; every planned row reads
+   both every 15 s (5 s active). Not split, to keep one node-read hook.
+6. Pause actions: Retry forgets this page's sent record and resumes (the row re-derives; Central's served
+   `outstanding` still blocks a duplicate), rather than re-sending the frozen body: a Not-rejoined retry needs a new
+   command id. Skip resumes when it skips the paused row. A hidden tab pauses rolling (Resume needed).
+7. Staging: only a Central refusal returns to Choose (base mismatch also withdraws Try for this target; a missing
+   qualified fallback goes to Qualifying once). A send-rule refusal before any request (stale fences, held stage)
+   stays on Staging with its words. Stage is inline on the journey with the target fixed (the Player page's dialog
+   lists deployments for choice); Back out sends at once ("Back out: reboot <name>"), Keep and Publish confirm.
+8. Browser evidence (`tests/browser/test_update_wall_browser.py`): Central is real for catalog, Publish, Select,
+   Registry, bindings and readiness; the node layer (device reads, app-attempts, reboot/stage/qualification writes,
+   samples, node status) is a test stand-in, so a box "reboots onto the selection" between reads. The send rules
+   against Central's real owners stay in `test_player_page_browser.py`. Mutation probes run: dropping the Rejoined
+   wait sends 3 reboots at once (fails); starting rolling on open fails the reload test; a 100 min wait fails the
+   10 min stall test.
+Source: NU1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead ND1: docs folded; items left open
+1. Part E folded into docs/operator-console-ddd.md as §24–§32 with every batch-3 errata item that changes a statement
+   (NV1–NU1 above) applied in place; its per-Part history became one History line. §17 now records Q5 and points to
+   Part E; its constraint table is gone (restated as R13–R18). G7 is recorded as not built and the one open owner
+   choice; NS2's real-Player probe as not run.
+2. Scope beyond §32's ND1 list, each because a doc still presented the V1 lane as current: README's console paragraph
+   (Player page "V1 boot offers", fleet side now "Players and Releases") and the status line of
+   operator-console-ux-pass2-onboarding.md (bootOutcomeLabel deleted).
+3. Left open: the runbook's V1 provisioning sections (0009 `.deb` promote with curl, 0010, 0012) are kept, each with a
+   "Deprecated lane" note, because the V1 backend still runs until the follow-up; the 0010 worker settings are shared
+   with the node catalog fill. README's provisioning overview (lines 7–26, 105–117) still describes the `.deb`
+   promotion path as the provisioning model; it belongs to the V1 follow-up (item 1b and 5), not rewritten here.
+   Neither tells an operator boot selection needs curl.
+4. ND1 delta is about +690 docs lines net, against §32's +280/−120: the folded Part E alone is about 610 lines.
+Source: ND1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E): architect course-correction pass (after 5 implementers)
+1. NU1 drift, high: `updateWall.js` `keepRow` line 224 (`onSelection = sent != null ? booted : target.app !== null && linked === target.app`)
+   reads a Player this page did not reboot as on the selection whenever its linked app equals the target's. For a base-only
+   release (same app environment, new base) every row reads Rejoined at once and `journeyStep` returns Done with zero reboots,
+   in the same session, not only after a reload as NU1 errata 1 and §31 said. That is Central intent shown as device truth.
+   Design changed (§25a Keep table, §28 choices, §31): the linked app counts only when it identifies the target, i.e. no other
+   listed deployment or catalog release pairs that app environment with a different base (`appIdentifiesTarget(read, target)`,
+   pure, on the release read). Otherwise the row is Waiting · unknown, and the page reboots it to make sure (as for no-app).
+2. NU1 drift, medium: `UpdateWallPage.jsx` lines 357 and 361 branch on `outcome.message === \`${FALLBACK_REQUIRED}.\`` /
+   `BASE_MISMATCH`, so changing the wording changes the behaviour. Design changed (§25a failures, §26, §28): `releaseResult`
+   returns `{outcome, message, code}` and the journey keys on `node_app_qualified_fallback_required` / `node_app_target_base_mismatch`.
+Both are owed by an NU1 correction bead; the doc states the target.
+Source: architect course-correction pass.
+
+## 2026-10-02 — console DDD batch 3 (Part E): NU1 correction bead (fix cycle 1)
+1. Course-correction items 1 and 2 applied: `updateWall.js` `appIdentifiesTarget(read, target)` (carried on the target as
+   `appIdentifies`); `releaseResult` returns `code`; the journey's Stage branches go through a pure
+   `stageFollowUp(outcome, refusals)` keyed on `STAGE_REFUSAL` codes (`stage.js`); the refusal words are no longer exported.
+2. Wider than the review asked: a Player this page did not reboot is never on the selection while its latest app operation
+   is not ended by a later boot (ANY stage on the current boot, including a rejected or pending one), not only "the target's
+   stage". Conservative by design: such a Player is rebooted, which is the guaranteed path. The tried Player therefore reads
+   "Waiting · it runs a Stage, which applies to this boot only" and is rebooted first, as §25a intended.
+3. Spec change (review major): Select lands in Paused, not Keeping; no reboot is sent until "Start rebooting". Choose shows
+   the named plan with Skip/Include, the Keep confirmation names the Players in order and the skipped ones. §25a diagram and
+   Keep paragraph edited in place.
+4. Keep table kind: Rejoined (and Rejoining, Not rejoined) is the page's `derived` inference over a claimed boot and reported
+   readiness, shown as an Evidence fact naming its basis; the table said `claimed` + `reported`. Edited in place.
+5. Deferred, open choice: G4 `linked_app` still names an app after Central accepted its observed exit (review minor). Not
+   trivial (a Central read change under the fleet lock). Exposure now: a staged Player is covered by item 2; any other Player
+   with a dead app has a bound Output not ready, so its row reads Rejoining and pauses at 10 min, never Rejoined. Options stay:
+   (A) serve null/`exited` from the projection's accepted AppProcessFact, or (B) reword as "last linked app".
+6. Update the wall's "Send again" title now reads "... with its app again?" (the Releases wording), because both pages render
+   `releases.js` `publishConfirmation`. Deep freeze and audit reference moved to `frozenRequest.js` (fleetCommands, releases,
+   stage, qualification).
+7. G6 node half: `docs/player-node-domain-model.md` reworded (the DB test proves Central's half; the node half is
+   unqualified because the PID1 switch scenario refuses bound Players). A bound PID1 leg was not added.
+Source: NU1 correction bead.
+
+## 2026-10-02 — console DDD batch 3 (Part E): NU1 fix cycle 2 (review blockers)
+1. Spec gap (review blocker 1), fixed: the Keep plan was re-derived live and skips were page memory, so a Player enrolled
+   after the Keep confirmation was rebooted unnamed, and a skip was lost on reload (one Resume rebooted it). Now:
+   (a) skips are operator choices and live in the URL: `#/releases/update/<tag>[/try/<player>]/skip/<id>[/<id>…]`
+   (routes.js `skipped`, routeSamples.json, R4 round trip); (b) the rollout a confirmation names is frozen in page memory
+   (`freezeRollout`) and rolling reboots only its Players (`rolloutMembers`); any other Player reads "Not in this rollout"
+   and is never rebooted; (c) a Resume with no frozen rollout (a reload, or a target already selected) opens a confirmation
+   naming the Players it will reboot, in order. §25a's placement line ("hash holds target release, tried Player") and the
+   Keep paragraph need these three statements; the doc bead owes them.
+2. Spec wrong (review blocker 2): §25a's Rejoined source "every bound Output reports ready in the snapshot (`outputStates`)"
+   names no readiness at all: `outputStates` is binding standing and `frameHealth` is liveness. Corrected source: a row is
+   Rejoined only when (i) the snapshot lists the Player app's enrollment on the new boot (its `authority_epoch` is greater
+   than the epoch in the snapshot the reboot was sent on: Central's counter, never a clock; `playerEpoch`), (ii) every
+   bound Output's Frame is live, and (iii) Central serves no current `readinessDiagnostics` row for any bound Frame. A
+   current readiness failure is Not rejoined and pauses rolling with that failure's recovery words. The Evidence basis now
+   names exactly that and says it is not proof the Output shows its assignment. Without (i) the readiness check is
+   ineffective: the browser probe sent a second reboot from a snapshot read before the new boot enrolled (old liveness, no
+   diagnostics). Stated cost: Central serves no per-Output playback commitment to the console, so a failure reported after
+   the first good report on the new epoch is not seen before the next Player is rebooted. A served per-Output commit fact
+   would close it; that is a read gate (§29), not raised as built.
+3. G6 residual (review major), not built here: no CI leg drives a real broker and Display Host through a bound switch
+   (tests/node_pid1_central_fixture.py `fixture_requires_unbound_player`). Owed: a residual bead for one bound PID1 leg
+   (broker emits `exited`, each bound Output gets a `node_output_losses` row, Display Host diagnoses then admits the new
+   process, epoch-2 commits). Until it is green, the journey's Try step says "A switch on a Frame-bound Player is proven on
+   Central only; the Player's side of it is not yet qualified."
+4. G6 ordering (review minor), test added: when the new app enrolls before the reconciler reads the old app's exit, no
+   interruption fact is recorded (`node_output_losses` stays empty), epoch 1 is refused as `stale_authority`, bindings and
+   calibration are kept, and epoch 2 rejoins at the Run's current point. The G6 row should state that the interruption fact
+   may be absent in that order.
+5. G4 generation fence (review minor), test added: an acceptance under another device generation is not listed.
+6. Lock cost (review minor), doc correction owed: G4's status read takes `players` and `player_control_sessions` FOR SHARE
+   (acceptance_query.py `load_current_app_control_in`) inside the fleet-lock hold, and the journey's per-Player poll is two
+   fleet-lock holds (device read and app-attempts, nodeRead.js), so twelve Players at 15 s are about 1.6 holds a second,
+   not "about one". Not changed in code: dropping FOR SHARE in a shared query is outside this bead.
+7. Wording (review minor): the Back-out outcome is a `derived` fact; the Keep confirm button reads "Select for every boot"
+   in both gate states; the counts carry a `derived` "On the selection" fact. The "n of m Players on the selection" words
+   stay as §25a states them.
+8. Still open, owner choices (not applied): errata NU1-correction item 5 (G4 `linked_app` after an accepted exit, A or B),
+   G7 and a per-operation deployment id (one gate decision), NS2's real-Player still-photo probe, ND1 item 3.
+Source: NU1 fix cycle 2.

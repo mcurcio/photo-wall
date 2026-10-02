@@ -57,6 +57,22 @@ sold.
 > hardware ("Display" survives only in Display Host). The tier and Commissioning
 > text below is kept as the record of the 2026-09-13 gate, not as current design.
 
+> **Fleet releases and the V2-only console (2026-10-02).** [Part E of the
+> domain-driven console design](operator-console-ddd.md#24-what-part-e-covers-and-why)
+> owns these screens. The console assumes node control: when Central runs without
+> it, one **banner** sits above every page and node pages show one "not shown" line,
+> and a Pi whose newest boot was by the deprecated path gets one warning line on its
+> Player page. There is **no V1 section** anywhere (no V1 boot offers, V1 fleet
+> policy, maintenance requests or V1 records). The fleet group is **Players,
+> Releases**: **Fleet › Releases** (`#/releases`) holds the boot selection,
+> deployments (Select), the release catalog (Publish, Check GitHub releases now) and
+> the effect gate; the Player page's App section gains **Stage app** (on bound or
+> unbound Players; a bound switch follows the reboot rule) and **Qualified
+> fallback**. The guided **Update the wall** journey
+> (`#/releases/update/<tag>[/try/<player>]`) walks Publish, an optional try on one
+> Frame, then Keep (Select, then one-at-a-time reboots) or Back out, through the same
+> send functions as the homes.
+
 ---
 
 ## 1. The problem in plain words
@@ -285,9 +301,20 @@ entries below that it changed say so; where the two differ, that glossary wins.
   **Players** section, `#/players`): the list has one row per box with its standing
   and bound Frames and makes no node read; the Player page
   (`#/players/<device-id>`) is the one home for a box, with its node layers,
-  Outputs, boot records, reboot, app operations and V1 boot offers, each section
-  with its own read time. They replace the Equipment rail and roster; the old
+  Outputs, boot records, reboot, app operations, Stage app and Qualified fallback,
+  each section with its own read time (no V1 section since 2026-10-02). They replace the Equipment rail and roster; the old
   `#/equipment` address opens the Players list.
+- **Releases / boot selection** — **Fleet › Releases** (`#/releases`) is the home of
+  the fleet-wide release aggregates: the **boot selection** (the one deployment Central
+  offers every node-path boot from now on, with its revision), the deployments
+  (Publish creates them, permanently) and the release catalog GitHub releases reported,
+  plus the effect gate's state and reason. Owned by
+  [DDD Part E](operator-console-ddd.md#25-screens).
+- **Update the wall** — the guided journey over Releases and the Player page:
+  Publish, optionally try on one Frame (qualify, then Stage), look, then Keep (Select,
+  then reboot Players one at a time, each after the previous rejoined) or Back out.
+  Central stores no rollout; progress is re-derived from Central's reads
+  ([DDD §25a](operator-console-ddd.md#25a-update-the-wall-guided-journey-nu1)).
 - **Output** — one HDMI port on a Player (≤2). The thing a Binding attaches to a
   Frame. An unbound Output shows nothing.
 - **Binding** — the one current Output→Frame association, worded "Bound to Frame X",
