@@ -6,9 +6,10 @@ downloaded assets and sets it, making this matrix a required Postgres gate.
 
 import json
 import os
-import selectors
+import queue
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -22,9 +23,7 @@ from scripts.published_player_wire import PLAYERS, _verified_package, package_ro
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/published_player_wire.py"
 STATE_FIELDS = {"configuration", "plan", "commits", "revocations"}
-# Each wait spans a cold published-Player interpreter start; under -n 4 on a 4-vCPU
-# runner that exceeded 15 s. The assertion is that the request arrives, not its speed.
-HANDSHAKE_SECONDS = 45
+HANDSHAKE_SECONDS = 15
 
 
 @pytest.fixture(scope="module")
@@ -59,42 +58,57 @@ def enroll_from_published_package(client: TestClient, root: Path, *, cold: bool)
     )
     registrations = []
     expected_paths = ("/v1/enrollment/challenge", "/v1/enrollment/register")
+    assert process.stdin is not None and process.stdout is not None
+    # A reader thread owns the buffered text stream: select() on the raw pipe cannot
+    # see lines already pulled into Python's buffer by a previous readline().
+    lines: queue.Queue[str] = queue.Queue()
+
+    def pump(stream=process.stdout):
+        for received in stream:
+            lines.put(received)
+        lines.put("")
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+
+    def next_line(message: str) -> str:
+        try:
+            return lines.get(timeout=HANDSHAKE_SECONDS)
+        except queue.Empty:
+            raise AssertionError(message) from None
+
     try:
-        assert process.stdin is not None and process.stdout is not None
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            for _ in range(rounds):
-                for path in expected_paths:
-                    assert selector.select(timeout=HANDSHAKE_SECONDS), "published Player enrollment timed out"
-                    line = process.stdout.readline()
-                    assert line, "published Player enrollment exited before HTTP request"
-                    request = json.loads(line)
-                    assert request["event"] == "request"
-                    assert request["source"] == str(root / "player/service.py")
-                    assert (request["method"], request["path"], request["authenticated"]) == (
-                        "POST", path, False)
-                    response = client.post(path, json=request["body"])
-                    assert response.status_code == 200, response.text
-                    process.stdin.write(json.dumps({"status": response.status_code,
-                                                    "body": response.json()}) + "\n")
-                    process.stdin.flush()
-                    if path.endswith("/register"):
-                        registrations.append(response.json())
-                assert selector.select(timeout=HANDSHAKE_SECONDS), "published Player registration timed out"
-                line = process.stdout.readline()
-                assert line, "published Player omitted parsed registration"
-                registered = json.loads(line)
-                assert registered == {"event": "registered",
-                                      "source": str(root / "player/service.py"),
-                                      "player_id": registrations[-1]["player_id"],
-                                      "authority_epoch": registrations[-1]["authority_epoch"],
-                                      "has_token": True}
+        for _ in range(rounds):
+            for path in expected_paths:
+                line = next_line("published Player enrollment timed out")
+                assert line, "published Player enrollment exited before HTTP request"
+                request = json.loads(line)
+                assert request["event"] == "request"
+                assert request["source"] == str(root / "player/service.py")
+                assert (request["method"], request["path"], request["authenticated"]) == (
+                    "POST", path, False)
+                response = client.post(path, json=request["body"])
+                assert response.status_code == 200, response.text
+                process.stdin.write(json.dumps({"status": response.status_code,
+                                                "body": response.json()}) + "\n")
+                process.stdin.flush()
+                if path.endswith("/register"):
+                    registrations.append(response.json())
+            line = next_line("published Player registration timed out")
+            assert line, "published Player omitted parsed registration"
+            registered = json.loads(line)
+            assert registered == {"event": "registered",
+                                  "source": str(root / "player/service.py"),
+                                  "player_id": registrations[-1]["player_id"],
+                                  "authority_epoch": registrations[-1]["authority_epoch"],
+                                  "has_token": True}
         process.stdin.close()
         assert process.wait(timeout=15) == 0, process.stderr.read()
     finally:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+        reader.join(timeout=5)  # the pipe is at EOF once the child is gone
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
@@ -105,8 +119,6 @@ def enroll_from_published_package(client: TestClient, root: Path, *, cold: bool)
     return registrations[-1]
 
 
-# One worker runs the whole matrix so its cells do not contend for CPU with each other.
-@pytest.mark.xdist_group("published_player_wire_matrix")
 @pytest.mark.parametrize("player", PLAYERS, ids=lambda value: value.tag)
 @pytest.mark.parametrize("cold", (False, True), ids=("warm", "cold-reenrollment"))
 @pytest.mark.parametrize("bound", (False, True), ids=("unbound", "bound-active-plan"))
