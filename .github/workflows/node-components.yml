@@ -1,0 +1,129 @@
+name: V2 node components
+
+# Builds the exact V2 node component set ONCE per pipeline run, for every job that needs it:
+# base-image.yml bakes node-base.deb and node-display.deb into the squashfs and the seal ships
+# the set (the photo-wall-node-components-<revision> artifact), and each node-pid1.yml leg boots
+# it under real systemd from the PID1 fixture derived here (the -node-pid1-fixture- artifact:
+# the stage targets, fixture.json and the fixture image as a `docker save` archive). Called by
+# pipeline.yml (its `node-components` job) when the plan lists either consumer, and by
+# base-image.yml and node-pid1.yml themselves only when dispatched by hand. Native arm64
+# (ubuntu-24.04-arm): the components and the fixture image are arm64.
+#
+# The component builds run on a docker-container builder with a GHA BuildKit cache per role
+# (the buildkit-cache action; scripts/node_build_inputs.py): the display build, and each sealed
+# environment's dependency layer, are reused across commits; only what changed rebuilds. A hit
+# reuses exactly the layer a cold build recorded, so the cache changes no byte: node-display.deb
+# is reproducible (SOURCE_DATE_EPOCH) and a sealed environment's digest names its image ID,
+# which BuildKit derives from the layers and the pin's SOURCE_DATE_EPOCH.
+on:
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact 40-character commit the components are built from
+        required: true
+        type: string
+      pid1-fixture:
+        description: Also derive the real-PID1 scenarios' fixture from the components
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    # Cold about 9 min (components 6, fixture 3); with the caches warm, a few minutes.
+    timeout-minutes: 40
+    env:
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/python-uv
+
+      - name: Install the locked environment
+        run: uv sync --frozen
+
+      # Not made current (use: false): the fixture image builds FROM a local image, on Docker's
+      # daemon-backed default builder (scripts/container_build.py), which this must not replace.
+      - name: Set up the container build cache
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          use: false
+
+      # The builders run `docker buildx build` themselves, which reads the GHA cache service's
+      # URL and token from the ACTIONS_* environment that only actions see: this exports it.
+      - name: Expose the GHA cache service to the builders
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
+      - name: Resolve the node build cache scopes
+        id: cache
+        uses: ./.github/actions/buildkit-cache
+        with:
+          name: node-{role}
+          architecture: arm64
+
+      - name: Build the immutable V2 node components
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.cache.outputs.to }}
+        run: |
+          set -eu
+          SOURCE_DATE_EPOCH=$(python3 scripts/debian_packages.py epoch)
+          export SOURCE_DATE_EPOCH
+          .venv/bin/python -m scripts.build_node_components \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --output "$RUNNER_TEMP/node-components"
+
+      # The targets are the app repacked: their environments read the app's cache (the same
+      # dependency layer) and write none, so the app's scope keeps the app's own index.
+      - name: Build the stage targets and the PID1 fixture image
+        if: inputs.pid1-fixture
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
+        run: |
+          set -eu
+          fixture="$RUNNER_TEMP/node-pid1-fixture"
+          .venv/bin/python -m scripts.build_node_pid1_fixture \
+            --components "$RUNNER_TEMP/node-components" --output "$fixture"
+          image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' \
+            "$fixture/fixture.json")
+          docker save "$image" -o "$fixture/image.tar"
+          # One archive, zstd on every core: the targets' environments and the image are about
+          # 3 GB raw, a third of that compressed.
+          tar -C "$RUNNER_TEMP" -cf - node-pid1-fixture \
+            | zstd -T0 -3 -q -o "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
+
+      # The seal ships these bytes on a release; a pull request's consumers need them for a day.
+      # About 1 GB, mostly the environments: the fastest zip level.
+      - name: Upload exact V2 node components
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-components-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-components/
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
+
+      # Already compressed: stored, not zipped again.
+      - name: Upload the PID1 fixture
+        if: inputs.pid1-fixture
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-pid1-fixture-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-pid1-fixture.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1

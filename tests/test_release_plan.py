@@ -15,9 +15,10 @@ import pytest
 
 from contracts.release import IMAGES
 from scripts import release_plan
-from scripts.module_closure import POLICIES, closure_for
+from scripts.module_closure import POLICIES, closure_for, first_party_packages
 from scripts.release_plan import (
     ALWAYS_JOBS,
+    BUILD_JOBS,
     DOCKERFILE,
     NOT_SHIPPED,
     PACKAGES,
@@ -35,6 +36,7 @@ from scripts.release_plan import (
     check_commits,
     claimed_by,
     dockerfile_stages,
+    due_suites,
     gate,
     image_inputs,
     matches,
@@ -710,9 +712,44 @@ def _scripts_named(text: str) -> set[str]:
     return found
 
 
+# The first-party top-level packages an import can reach: the repository's packages and the
+# scripts namespace. A bare name that is a tests/ module is a test helper (tests/ is on the path).
+FIRST_PARTY = (*first_party_packages(REPO), "scripts")
+
+
+def _module_files(name: str) -> list[str]:
+    """The repository files importing `name` runs: each package __init__ on its way and the
+    module itself; none for an attribute (`from a import f`) or a module outside the repository."""
+    parts, files = name.split("."), []
+    for depth in range(1, len(parts) + 1):
+        base = REPO.joinpath(*parts[:depth])
+        for candidate in (base / "__init__.py", base.with_suffix(".py")):
+            if candidate.is_file():
+                files.append(candidate.relative_to(REPO).as_posix())
+                break
+    return files
+
+
+def _imported(path: str, tree: ast.AST) -> list[str]:
+    """The module names `path`'s code imports, at module level or in a function, relative
+    imports resolved; for `from m import n`, both m and m.n (n may be a submodule)."""
+    package = path[:-3].split("/")[:-1]
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = ".".join([*package[:len(package) - node.level + 1], *filter(None, [module])])
+            names += [module, *(f"{module}.{alias.name}" for alias in node.names)]
+    return names
+
+
 def _with_imports(scripts: set[str]) -> set[str]:
-    """`scripts` and every first-party script they import (transitively); a shell script's
-    siblings are those it names."""
+    """`scripts` (any repository .py or .sh files) and every first-party file they import,
+    transitively: a module's package __init__s, and a bare-name tests/ helper; a shell script's
+    sibling scripts are those it names."""
     seen, todo = set(), list(scripts)
     while todo:
         path = todo.pop()
@@ -724,14 +761,11 @@ def _with_imports(scripts: set[str]) -> set[str]:
             todo += [f"scripts/{name}" for name in re.findall(r"\b([a-z_]+\.py)\b", text)
                      if (REPO / "scripts" / name).is_file()]
             continue
-        for node in ast.walk(ast.parse(text)):
-            if isinstance(node, ast.ImportFrom) and node.module == "scripts":
-                todo += [f"scripts/{alias.name}.py" for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("scripts."):
-                todo.append(f"scripts/{node.module.split('.', 1)[1]}.py")
-            elif isinstance(node, ast.Import):
-                todo += [f"scripts/{alias.name.split('.', 1)[1]}.py" for alias in node.names
-                         if alias.name.startswith("scripts.")]
+        for name in _imported(path, ast.parse(text)):
+            if name.partition(".")[0] in FIRST_PARTY:
+                todo += _module_files(name)
+            elif "." not in name and (REPO / "tests" / f"{name}.py").is_file():
+                todo.append(f"tests/{name}.py")
     return seen
 
 
@@ -759,12 +793,36 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
                                          or _package("player-payload").claims(path))] == []
     # The seal and the plan it imports decide whether and how a release is written; they shape
     # no artefact byte. The packager does, and ships as release-assets.
-    seal = _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
+    seal = {path for path in _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
+            if path.startswith("scripts/")}
     assert seal == {"scripts/release_seal.py", "scripts/package_release_artifacts.py",
                     "scripts/node_release_artifacts.py", "scripts/release_plan.py"}
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
+    # The node components base-image.yml bakes and the seal ships are node-components.yml's.
+    components = _job("node-components.yml", "build")
+    assert ".venv/bin/python -m scripts.build_node_components" in components
+    assert [path for path in _with_imports({"scripts/build_node_components.py"})
+            if not _package("base-bundle").claims(path)] == []
+
+
+def _harness(suite: Suite) -> list[str]:
+    """A suite's harness: the Python tests and scripts its own paths name."""
+    return [path for path in _tracked() if path.endswith(".py")
+            and path.startswith(("tests/", "scripts/"))
+            and any(matches(pattern, path) for pattern in suite.paths)]
+
+
+@pytest.mark.parametrize("suite", [suite for suite in SUITES if _harness(suite)],
+                         ids=lambda suite: suite.job)
+def test_a_suite_is_due_for_every_file_its_harness_imports(suite):
+    """A suite runs the first-party code its harness imports (central.app, a test helper, a
+    builder), so a change to any file of that closure makes it due -- decided by due_suites, the
+    rule itself. A harness that grows an import fails here until the suite's paths cover it."""
+    closure = _with_imports(set(_harness(suite)))
+    assert [path for path in sorted(closure)
+            if suite.job not in due_suites(release_plan.changed_packages([path]), [path])] == []
 
 
 def test_base_cache_and_content_check_include_base_owned_player_contract():
@@ -797,9 +855,22 @@ def _needs_of(body: str) -> list[str]:
 def test_every_conditional_job_is_one_the_plan_lists_and_reads_the_plan():
     jobs = _pipeline_jobs()
     plannable = {suite.job for suite in SUITES} | set(RELEASE_JOBS)
-    assert set(jobs) == plannable | {"plan", "tested", "gate"}
+    assert set(jobs) == plannable | set(BUILD_JOBS) | {"plan", "tested", "gate"}
     for name in plannable:
         assert f"contains(fromJSON(needs.plan.outputs.jobs), '{name}')" in jobs[name], name
+
+
+def test_a_build_runs_when_a_consumer_is_listed_and_every_consumer_needs_it():
+    """A build job is never listed: it runs exactly when the plan lists one of its consumers,
+    each of which needs it, so a failed build fails every listed consumer and the gate."""
+    jobs = _pipeline_jobs()
+    for build, consumers in BUILD_JOBS.items():
+        assert build not in {suite.job for suite in SUITES} | set(RELEASE_JOBS)
+        condition = _condition(jobs[build])
+        assert set(re.findall(r"contains\(fromJSON\(needs\.plan\.outputs\.jobs\), '([\w-]+)'\)",
+                              condition)) == set(consumers), build
+        for consumer in consumers:
+            assert build in _needs_of(jobs[consumer]), consumer
 
 
 def test_the_barrier_needs_every_test_and_every_release_job_needs_the_barrier():

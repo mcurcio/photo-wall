@@ -12,6 +12,10 @@ name: Pipeline
 #   netboot-e2e     netboot-e2e.yml, when a .deb or the tracer's own paths changed.
 #   node-pid1       node-pid1.yml, the Player node lifecycle under real systemd, when a node
 #                   package, Central's fleet owners or the scenarios' own paths changed.
+#   node-components node-components.yml: the V2 node components (and the PID1 fixture when
+#                   node-pid1 runs), built ONCE for base-image and node-pid1 when the plan lists
+#                   either. A build, not a test: scripts/release_plan.py's BUILD_JOBS names its
+#                   consumers, and the gate fails a run where it failed.
 #   tested          the barrier every release job needs: each test job the plan listed passed.
 #   service-base, images, seal
 #                   the release, in that order: a push to main that changed a shipped package.
@@ -136,11 +140,24 @@ jobs:
       packages: write
     uses: ./.github/workflows/software-e2e.yml
 
+  # The V2 node components for the plan's exact revision, once, for every job that needs them.
+  node-components:
+    needs: plan
+    if: >-
+      contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
+      || contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')
+    permissions:
+      contents: read
+    uses: ./.github/workflows/node-components.yml
+    with:
+      revision: ${{ needs.plan.outputs.revision }}
+      pid1-fixture: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1') }}
+
   # The base OS, the netboot bundle and both .debs, built for the plan's exact revision (a pull
   # request's merge commit or main's commit). Every artifact is
   # named by that revision, so the seal packages the bytes built here.
   base-image:
-    needs: plan
+    needs: [plan, node-components]
     if: contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
     permissions:
       contents: read
@@ -157,7 +174,7 @@ jobs:
     uses: ./.github/workflows/netboot-e2e.yml
 
   node-pid1:
-    needs: plan
+    needs: [plan, node-components]
     if: contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')
     permissions:
       contents: read
@@ -383,7 +400,7 @@ jobs:
   # job the plan listed did not succeed, or when any job failed or was cancelled.
   gate:
     name: gate
-    needs: [plan, checks, e2e, base-image, netboot-e2e, node-pid1, tested, service-base, images, seal]
+    needs: [plan, checks, e2e, node-components, base-image, netboot-e2e, node-pid1, tested, service-base, images, seal]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -217,11 +217,13 @@ def image_inputs(target: str, text: str | None = None) -> tuple[str, ...]:
 
 # The locked Python project every build syncs. pyproject.toml counts only through DIGESTED below.
 _PROJECT: Final = ("pyproject.toml", "uv.lock")
-# How base-image.yml builds both .debs: each builder `git archive`s its computed closure and the
-# Debian declaration at the revision, stamps the pyproject version, and runs in the pinned uv
-# environment. build_bootstrapper_deb imports build_player_deb and build_player.
+# How base-image.yml builds both .debs, and node-components.yml the node set: each builder
+# `git archive`s its computed closure and the Debian declaration at the revision, stamps the
+# pyproject version, and runs in the pinned uv environment. build_bootstrapper_deb imports
+# build_player_deb and build_player.
 _DEB_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
-                     ".github/workflows/base-image.yml", "scripts/build_player.py",
+                     ".github/workflows/base-image.yml", ".github/workflows/node-components.yml",
+                     "scripts/build_player.py",
                      "scripts/build_player_deb.py", "scripts/module_closure.py",
                      "scripts/debian_packages.py", "scripts/device_root_checks.py")
 _PLAYER_DEB: Final = (*_DEB_BUILD, "player/**", "contracts/**", "uplink/**",
@@ -302,8 +304,9 @@ NOT_SHIPPED: Final = (
     ".github/workflows/netboot-e2e.yml",
     ".github/workflows/pipeline.yml",           # owner ruling: see the manifest's head
     # The service images' shared build and BuildKit cache wiring, which pipeline.yml runs: under
-    # the same owner ruling, how an image is built is not a release input.
-    ".github/actions/service-image/action.yml",
+    # the same owner ruling, how an image is built is not a release input. The cache scope policy
+    # also serves the node component builds, where a hit reuses a recorded layer: no byte changes.
+    ".github/actions/service-image/action.yml", ".github/actions/buildkit-cache/action.yml",
     # The test jobs' console build; the images build their own bundle (the Dockerfile).
     ".github/actions/console-bundle/action.yml",
     # The software e2e jobs' shared setup; it builds test images only.
@@ -382,26 +385,46 @@ SUITES: Final = (
     Suite("e2e", always=True),
     Suite("base-image", packages=("base-bundle", "bootstrapper-deb", "player-deb",
                                   "player-payload")),
-    # The tracer serves the Player .deb from a real Central: its content-serving layers.
+    # The tracer serves the Player .deb from a real Central: its content-serving layers, and the
+    # rest of what its harness imports (tests/test_release_plan.py computes that closure).
     Suite("netboot-e2e", packages=("bootstrapper-deb", "player-deb"),
           paths=("scripts/test_netboot_e2e.py", "scripts/packaged_os_agent_probe.py",
-                 "scripts/uplink_device_harness.py",
+                 "scripts/uplink_device_harness.py", "scripts/demo_wall.py",
+                 "scripts/container_build.py", "scripts/docker_diagnostics.py",
+                 "scripts/harness_bundle.py", "scripts/harness_failure.py",
+                 "scripts/immich_actions.py", "scripts/immich_fixture.py",
+                 "scripts/provenance_models.py", "scripts/runtime_provenance.py",
                  "tests/tls_fixture.py", ".github/workflows/netboot-e2e.yml",
-                 "central/app.py", "central/db.py", "central/fleet/**",
+                 "central/__init__.py", "central/app.py", "central/db.py", "central/fleet/**",
+                 "central/catalog.py", "central/execution_outcomes.py", "central/media_ports.py",
+                 "central/planner.py", "central/runtime.py", "media/__init__.py",
+                 "media/models.py",
                  "central/migrations/041_fleet_app_observations.sql",
                  "central/content_routes.py", "central/content_catalog/**",
                  "central/assets/**", "central/infra/**", "Dockerfile", "uv.lock")),
     # The node lifecycle under real systemd (node-pid1.yml): the node packages it boots, the
-    # Central owners it runs against, and its own builder, harness and workflow.
+    # Central it runs against (its fixture imports central.app, so all of Central's Python), and
+    # its own builder, harness, the test modules the harness borrows from, and workflow.
     Suite("node-pid1", packages=("node-base-deb", "node-manager-deb", "node-display-deb",
                                  "player-environment"),
           paths=("tests/test_node_pid1.py", "tests/node_pid1_*",
+                 "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",
+                 "tests/test_fleet_attempts.py", "tests/test_fleet_rollout_gate.py",
+                 "tests/test_node_boot.py", "tests/test_registry.py",
                  "scripts/build_node_pid1_fixture.py", "scripts/build_node_components.py",
-                 "scripts/player_start_probe.py", ".github/workflows/node-pid1.yml",
-                 "central/app.py", "central/node_app.py", "central/fleet/**",
-                 "central/migrations/*_node_*.sql", "uv.lock")),
+                 "scripts/container_build.py", "scripts/player_start_probe.py",
+                 "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",
+                 "scripts/build_boot_data.py", ".github/workflows/node-pid1.yml",
+                 "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
+                 "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),
 )
 SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
+# The jobs that build for others, and the jobs they build for: each runs when the plan lists one
+# of its consumers, each of which needs it. A build is never listed itself, so the gate judges it
+# through its consumers (each listed one must succeed, and cannot without it) and by its rule
+# that no job fails. tests/test_release_plan.py holds pipeline.yml's wiring to this.
+BUILD_JOBS: Final[Mapping[str, tuple[str, ...]]] = {
+    "node-components": ("base-image", "node-pid1")}
 # A release runs these; base-image doubles as the release build (its artifacts are what the
 # seal packages), so a release always runs it.
 RELEASE_JOBS: Final = ("base-image", *PUBLISH_JOBS)

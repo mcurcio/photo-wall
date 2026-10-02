@@ -59,6 +59,8 @@ def test_daemon_image_build_explicitly_selects_and_loads_default_builder(tmp_pat
         "docker", "buildx", "build", "--builder", "default", "--load",
         "--tag", "boot:local", "--network", "none", "--label", "fixture=one", str(tmp_path),
     ]
+    assert daemon_image_build("pid1:local", tmp_path, platform="linux/arm64")[6:10] == [
+        "--tag", "pid1:local", "--platform", "linux/arm64"]
 
 
 @pytest.mark.parametrize("scenario,count",

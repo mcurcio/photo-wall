@@ -7,10 +7,13 @@ from pathlib import Path
 
 def daemon_image_build(tag: str, context: Path, *, dockerfile: Path | None = None,
                        network: str | None = None,
-                       labels: tuple[tuple[str, str], ...] = ()) -> list[str]:
+                       labels: tuple[tuple[str, str], ...] = (),
+                       platform: str | None = None) -> list[str]:
     """Build with Docker's daemon-backed default builder and load the result."""
 
     command = ["docker", "buildx", "build", "--builder", "default", "--load", "--tag", tag]
+    if platform is not None:
+        command.extend(("--platform", platform))
     if dockerfile is not None:
         command.extend(("--file", str(dockerfile)))
     if network is not None:

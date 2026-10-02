@@ -65,6 +65,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
+      - uses: ./.github/actions/console-bundle
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
       - name: Prepare digest-pinned published Player wire fixtures
@@ -218,6 +219,8 @@ jobs:
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      # Reads its cache on every run and writes it only on main: a pull request's write would
+      # land in a scope only that pull request can read (docs/module-appliance-ci.md, "Limits").
       - name: Build the pinned Linux media test image
         uses: ./.github/actions/service-image
         with:
@@ -226,5 +229,7 @@ jobs:
           build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
           load: true
           tags: photo-wall-media-test:ci
+          cache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # The image's own command, across every runner CPU: each test works in its own tmp_path.
       - name: Qualify conversion in the pinned Linux worker
-        run: docker run --rm --network none photo-wall-media-test:ci
+        run: docker run --rm --network none --env 'PYTEST_ADDOPTS=-n auto' photo-wall-media-test:ci

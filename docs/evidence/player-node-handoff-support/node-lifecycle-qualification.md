@@ -6,7 +6,9 @@ owners and a disposable test database. Each scenario boots a fresh privileged ar
 with systemd as PID 1, masks host and reboot actions, and removes only its own containers,
 database and archive copies. The [node-pid1 workflow](../../../.github/workflows/node-pid1.yml)
 runs the four scenarios as a parallel matrix whenever the release plan finds a node package,
-Central's fleet owners or the scenarios' own paths changed; the pipeline gate requires it.
+a file the harness imports (Central's Python included) or the scenarios' own paths changed; the
+pipeline gate requires it. Every leg boots the one component set and fixture the run's
+[node-components workflow](../../../.github/workflows/node-components.yml) built.
 
 The hardware seam is explicit: read-only synthetic CPU serial and DRM inventory,
 a separately compiled headless Weston Virtual-1 module, and fixture cohort and

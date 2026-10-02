@@ -30,7 +30,7 @@ from appliance.node.environment import (
 )
 from contracts.app_environment import AppEnvironmentRefV2
 from scripts.debian_packages import PIN
-from scripts.node_build_inputs import BUILDER_IMAGE, validate_builder
+from scripts.node_build_inputs import BUILDER_IMAGE, docker_build, validate_builder
 
 EXCLUDED = {"dev", "proc", "sys", "run", "tmp"}
 
@@ -104,7 +104,10 @@ def materialize(export: Path, root: Path) -> None:
 
 
 def build(deb: Path, output: Path, *, builder_image: str, architecture: str,
-          base_abi: str, graphics_abi: str, plugin_abi: str) -> AppEnvironmentRefV2:
+          base_abi: str, graphics_abi: str, plugin_abi: str,
+          role: str = "app") -> AppEnvironmentRefV2:
+    """Seal `deb`'s environment. `role` names its build cache scope (node_build_inputs): one
+    per package whose dependencies differ, so one role's build never replaces another's index."""
     validate_builder(builder_image, architecture, purpose="closure")
     input_files = {name: file_sha256(Path(__file__).resolve().parents[1] / name) for name in (
         "scripts/build_app_environment.py", "scripts/debian_packages.py",
@@ -116,17 +119,26 @@ def build(deb: Path, output: Path, *, builder_image: str, architecture: str,
         (work / "snapshot.list").write_text("\n".join(source.line() for source in PIN.sources()) + "\n")
         # No mounts, host namespaces, privileged containers, install on host, or daemon
         # socket in the build. COPY input is the sole application-controlled build input.
-        dockerfile = f'''FROM {builder_image}
+        # The package's own relations are satisfied in a layer of their own, before the package
+        # is copied: `fields` reads them out of the .deb, and BuildKit keys COPY --from on the
+        # copied bytes, so a new package with unchanged relations (every commit: the version
+        # names it) reuses the installed dependencies and only installs itself. A relation-less
+        # package skips the satisfy; the final install resolves anything satisfy left.
+        dockerfile = f'''FROM {builder_image} AS fields
+COPY player.deb /tmp/player.deb
+RUN dpkg-deb --show --showformat='${{Pre-Depends}},${{Depends}}' /tmp/player.deb | tr '\\n' ' ' | sed -e 's/^ *, *//' -e 's/ *, *$//' > /relations
+
+FROM {builder_image}
 COPY snapshot.list /etc/apt/sources.list
 RUN rm -f /etc/apt/sources.list.d/* && printf 'Package: *\\nPin: origin snapshot.debian.org\\nPin-Priority: 1001\\n' > /etc/apt/preferences.d/snapshot && apt-get update && apt-get -y --allow-downgrades dist-upgrade
+COPY --from=fields /relations /tmp/relations
+RUN printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d && if [ -s /tmp/relations ]; then apt-get satisfy -y --no-install-recommends "$(cat /tmp/relations)"; fi && rm /tmp/relations
 COPY player.deb /tmp/player.deb
-RUN printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d && apt-get install -y --no-install-recommends /tmp/player.deb && dpkg --audit && dpkg-query -W -f='${{binary:Package}}\\t${{Version}}\\t${{Architecture}}\\n' > /dependency-lock.tsv && dpkg-deb --show --showformat='${{Package}}\\n${{Version}}\\n${{Architecture}}\\n' /tmp/player.deb > /player-fields && rm /tmp/player.deb
+RUN apt-get install -y --no-install-recommends /tmp/player.deb && dpkg --audit && dpkg-query -W -f='${{binary:Package}}\\t${{Version}}\\t${{Architecture}}\\n' > /dependency-lock.tsv && dpkg-deb --show --showformat='${{Package}}\\n${{Version}}\\n${{Architecture}}\\n' /tmp/player.deb > /player-fields && rm /tmp/player.deb
 RUN mkdir -p /usr/lib/photo-wall-environment && printf '#!/bin/sh\\nexec /usr/bin/python3 -I -B /usr/lib/photo-wall-player --config /etc/photo-wall/public.json\\n' > /usr/lib/photo-wall-environment/entry && chmod 755 /usr/lib/photo-wall-environment/entry
 '''
         (work / "Dockerfile").write_text(dockerfile)
-        subprocess.run(["docker", "build", "--platform", "linux/" + architecture,
-                        "--iidfile", str(work / "image-id"), str(work)], check=True)
-        image = (work / "image-id").read_text().strip()
+        image = docker_build(work, architecture=architecture, role="environment-" + role)
         container = subprocess.check_output(["docker", "create", "--platform", "linux/" + architecture, image, "/bin/true"], text=True).strip()
         try:
             subprocess.run(["docker", "export", "--output", str(work / "root.tar"), container], check=True)

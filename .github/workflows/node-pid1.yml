@@ -12,16 +12,17 @@ name: Player node real-PID1 lifecycle scenarios
 #   reboot    a second kernel boot of the same device re-enrolls, supersedes the first (its
 #             sessions are refused) and accepts a stage with no operator action
 #
-# Each leg builds the components with the same builder base-image.yml runs
-# (scripts/build_node_components.py), derives the stage targets and the PID1 image from them
-# (scripts/build_node_pid1_fixture.py), and requires the scenario to run:
-# PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 turns a missing fixture into a failure, never a skip.
+# Each leg boots the components node-components.yml built ONCE for the run (the builder
+# base-image.yml's squashfs bakes, scripts/build_node_components.py) and the PID1 fixture it
+# derived from them (scripts/build_node_pid1_fixture.py): it downloads both and loads the fixture
+# image. PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 turns a missing fixture into a failure, never a skip.
 # Native arm64 (ubuntu-24.04-arm): the node components and the fixture image are arm64, and the
 # container is --privileged with systemd as PID 1, as base-image.yml's start probes run.
 # Hardware stays synthetic (sysfs Virtual-1, headless Weston): no DRM, HDMI or PXE claim.
 #
-# Called by pipeline.yml (its `node-pid1` job) when scripts/release_plan.py finds a node package
-# or one of this suite's own paths changed.
+# Called by pipeline.yml (its `node-pid1` job, after its `node-components` job) when
+# scripts/release_plan.py finds a node package or one of this suite's own paths changed.
+# Dispatched by hand, it builds its own components first (the `components` job).
 on:
   workflow_call:
     inputs:
@@ -43,10 +44,20 @@ env:
   PHOTO_WALL_TEST_REQUIRE_NODE_PID1: '1'
 
 jobs:
+  # By hand only: a pipeline run's components come from its own node-components job.
+  components:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/node-components.yml
+    with:
+      revision: ${{ github.sha }}
+      pid1-fixture: true
+
   scenario:
+    needs: components
+    if: ${{ !cancelled() && needs.components.result != 'failure' }}
     runs-on: ubuntu-24.04-arm
-    # Components about 6 min (base-image.yml's step), fixture about 3 min, one scenario 2-5 min.
-    timeout-minutes: 30
+    # Setup and the fixture download about 2 min, one scenario 2-5 min.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -67,18 +78,28 @@ jobs:
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
 
-      - name: Build the immutable V2 node components
+      # The fixture names its components by the absolute path they were built at, so both land
+      # at the builder's paths.
+      - name: Download the V2 node components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-components-${{ env.REVISION }}
+          path: ${{ runner.temp }}/node-components
+
+      - name: Download the PID1 fixture
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-pid1-fixture-${{ env.REVISION }}
+          path: ${{ runner.temp }}
+
+      # Loaded by its immutable ID, which the scenario requires the loaded image to have.
+      - name: Unpack the PID1 fixture and load its image
         run: |
           set -eu
-          export SOURCE_DATE_EPOCH="$(python3 scripts/debian_packages.py epoch)"
-          .venv/bin/python -m scripts.build_node_components \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --output "$RUNNER_TEMP/node-components"
-
-      - name: Build the stage targets and the PID1 fixture image
-        run: |
-          .venv/bin/python -m scripts.build_node_pid1_fixture \
-            --components "$RUNNER_TEMP/node-components" --output "$RUNNER_TEMP/node-pid1-fixture"
+          zstd -dc "$RUNNER_TEMP/node-pid1-fixture.tar.zst" | tar -C "$RUNNER_TEMP" -xf -
+          rm "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
+          docker load -i "$RUNNER_TEMP/node-pid1-fixture/image.tar"
+          rm "$RUNNER_TEMP/node-pid1-fixture/image.tar"
 
       - name: Run the ${{ matrix.scenario }} scenario under real systemd
         env:

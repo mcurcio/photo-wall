@@ -28,6 +28,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from scripts.build_app_environment import build as build_environment
+from scripts.container_build import daemon_image_build
 from scripts.debian_packages import PIN
 from scripts.node_build_inputs import BUILDER_IMAGE
 
@@ -80,6 +81,8 @@ def derive_target(base_image: str, app_deb: Path, work: Path, role: str) -> Path
 
 
 def build_image(base_image: str, components: Path, work: Path) -> str:
+    """The fixture image, FROM a local image: so Docker's daemon-backed default builder, never
+    the current one (a docker-container builder cannot see the daemon's images)."""
     alias = "photo-wall-node-pid1-base:" + secrets.token_hex(6)
     subprocess.run(["docker", "tag", base_image, alias], check=True)
     try:
@@ -89,9 +92,9 @@ def build_image(base_image: str, components: Path, work: Path) -> str:
             shutil.copyfile(components / name, work / name)
         shutil.copyfile(FIXTURE_HEAD, work / "fixture-head.c")
         (work / "Dockerfile").write_text(DOCKERFILE.format(alias=alias))
-        subprocess.run(["docker", "build", "--platform", "linux/arm64",
-                        "--iidfile", str(work / "image-id"), str(work)], check=True)
-        return (work / "image-id").read_text().strip()
+        tag = "photo-wall-node-pid1:" + secrets.token_hex(6)
+        subprocess.run(daemon_image_build(tag, work, platform="linux/arm64"), check=True)
+        return inspect(tag)["Id"]
     finally:
         subprocess.run(["docker", "rmi", alias], check=False, capture_output=True)
 

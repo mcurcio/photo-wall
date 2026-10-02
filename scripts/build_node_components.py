@@ -43,7 +43,8 @@ def build(repository: Path, revision: str, output: Path) -> None:
         refs = {}
         for role, deb in (("manager-primary", manager_deb), ("app", output / "app.deb")):
             sealed = work / (role + "-environment")
-            ref = build_environment(deb, sealed, builder_image=BUILDER_IMAGE, architecture="arm64", **abi)
+            ref = build_environment(deb, sealed, builder_image=BUILDER_IMAGE, architecture="arm64",
+                                    role=role, **abi)
             shutil.copyfile(sealed / (ref.environment_sha256 + ".tar"), output / (role + ".tar"))
             refs[role] = asdict(ref)
         provenance = {"schema": 2, "revision": revision, "architecture": "arm64", "abi": abi,

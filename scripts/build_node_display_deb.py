@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Compile the base Weston shell/diagnostic from a pinned Debian snapshot in Docker."""
+"""Compile the base Weston shell/diagnostic from a pinned Debian snapshot in Docker.
+
+The .deb is reproducible: dpkg-deb runs under the pin's SOURCE_DATE_EPOCH, which clamps every
+member's mtime and sets the ar timestamps, so the same inputs give the same bytes, cold or cached.
+`display-build-source.json` records those inputs and `inputs_sha256`, their digest, which keys
+base-image.yml's squashfs cache: the key follows from the inputs alone.
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,7 +19,7 @@ from pathlib import Path
 from scripts import node_build_inputs
 from scripts.build_player_deb import fetch_tree
 from scripts.debian_packages import PIN, packages
-from scripts.node_build_inputs import BUILDER_IMAGE, validate_builder
+from scripts.node_build_inputs import BUILDER_IMAGE, docker_build, validate_builder
 
 
 def build(tree: Path, output: Path, *, builder_image: str, architecture: str) -> Path:
@@ -54,13 +60,12 @@ COPY source /source
 COPY seal-display.py /seal-display.py
 RUN meson setup /build /source --prefix=/usr --libdir=lib && meson compile -C /build && DESTDIR=/package meson install -C /build
 RUN cp /package/usr/lib/photo-wall-client/libphoto-wall-frame-client.so /client.so && rm -rf /package/usr/lib/photo-wall-client && python3 /seal-display.py
-RUN mkdir /package/DEBIAN && dpkg-query -W -f='${{Package}} (= ${{Version}}), ' {runtime} > /depends && printf 'Package: photo-wall-node-display\\nVersion: {version}\\nArchitecture: {architecture}\\nMaintainer: Photo Wall <noreply@example.invalid>\\nDescription: Base-owned Weston display shell and private diagnostic\\nDepends: ' > /package/DEBIAN/control && cat /depends >> /package/DEBIAN/control && sed -i 's/, $//' /package/DEBIAN/control && printf '\\n' >> /package/DEBIAN/control && dpkg-deb --root-owner-group --build /package /node-display.deb
+ARG SOURCE_DATE_EPOCH
+RUN test "$SOURCE_DATE_EPOCH" = {PIN.epoch} && mkdir /package/DEBIAN && dpkg-query -W -f='${{Package}} (= ${{Version}}), ' {runtime} > /depends && printf 'Package: photo-wall-node-display\\nVersion: {version}\\nArchitecture: {architecture}\\nMaintainer: Photo Wall <noreply@example.invalid>\\nDescription: Base-owned Weston display shell and private diagnostic\\nDepends: ' > /package/DEBIAN/control && cat /depends >> /package/DEBIAN/control && sed -i 's/, $//' /package/DEBIAN/control && printf '\\n' >> /package/DEBIAN/control && dpkg-deb --root-owner-group --build /package /node-display.deb
 RUN dpkg-query -W -f='${{binary:Package}}\\t${{Version}}\\t${{Architecture}}\\n' > /build-packages.tsv
 '''
         (work / "Dockerfile").write_text(dockerfile)
-        subprocess.run(["docker", "build", "--platform", "linux/" + architecture,
-                        "--iidfile", str(work / "image-id"), str(work)], check=True)
-        image = (work / "image-id").read_text().strip()
+        image = docker_build(work, architecture=architecture, role="display")
         container = subprocess.check_output(["docker", "create", "--platform", "linux/" + architecture, image, "/bin/true"], text=True).strip()
         artifact = output / f"photo-wall-node-display_{architecture}.deb"
         try:
@@ -70,12 +75,15 @@ RUN dpkg-query -W -f='${{binary:Package}}\\t${{Version}}\\t${{Architecture}}\\n'
             subprocess.run(["docker", "cp", container + ":/build-packages.tsv", str(output / "display-build-packages.tsv")], check=True)
         finally:
             subprocess.run(["docker", "rm", container], check=True, stdout=subprocess.DEVNULL)
-        (output / "display-build-source.json").write_text(json.dumps({"builder_image": builder_image,
-            "built_image": image, "architecture": architecture, "source_sha256": source_hash.hexdigest(),
-            "builder_script_sha256": builder_script_sha256,
-            "build_inputs_sha256": build_inputs_sha256,
-            "abi": json.loads((output / "display-abi.json").read_text()),
-            "snapshot": PIN.snapshot, "sources": [s.line() for s in PIN.sources()]}, sort_keys=True))
+        inputs = {"builder_image": builder_image, "architecture": architecture,
+                  "source_sha256": source_hash.hexdigest(),
+                  "builder_script_sha256": builder_script_sha256,
+                  "build_inputs_sha256": build_inputs_sha256,
+                  "snapshot": PIN.snapshot, "sources": [s.line() for s in PIN.sources()]}
+        (output / "display-build-source.json").write_text(json.dumps({**inputs,
+            "inputs_sha256": hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest(),
+            "built_image": image,
+            "abi": json.loads((output / "display-abi.json").read_text())}, sort_keys=True))
         return artifact
 
 

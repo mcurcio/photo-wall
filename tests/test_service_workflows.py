@@ -147,7 +147,8 @@ def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
 
 def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     """One matrix leg per scenario of tests/test_node_pid1.py, each required, never skipped,
-    on native arm64 from the components builder base-image.yml runs."""
+    on native arm64, every leg booting the one component set and fixture node-components.yml
+    built for the run -- the set base-image.yml bakes."""
     from test_node_pid1 import FIXTURE_VARIABLE, REQUIRE_VARIABLE, SCENARIOS
 
     workflow = (WORKFLOWS / 'node-pid1.yml').read_text()
@@ -160,10 +161,15 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert f"\n  {REQUIRE_VARIABLE}: '1'\n" in workflow
     assert "\n  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'\n" in workflow
     assert 'compose.test-database.yml up -d --wait' in scenario
+    builds = _job((WORKFLOWS / 'node-components.yml').read_text(), 'build')
+    assert 'runs-on: ubuntu-24.04-arm\n' in builds
     for builder in ('build_node_components', 'build_node_pid1_fixture'):
-        assert f'.venv/bin/python -m scripts.{builder}' in scenario, builder
-    assert '.venv/bin/python -m scripts.build_node_components' in (
-        WORKFLOWS / 'base-image.yml').read_text()
+        assert f'.venv/bin/python -m scripts.{builder}' in builds, builder
+        assert builder not in scenario, builder
+    components = 'name: photo-wall-node-components-${{ env.REVISION }}'
+    assert components in scenario and components in (WORKFLOWS / 'base-image.yml').read_text()
+    assert 'name: photo-wall-node-pid1-fixture-${{ env.REVISION }}' in scenario
+    assert 'docker load -i "$RUNNER_TEMP/node-pid1-fixture/image.tar"' in scenario
     assert f'{FIXTURE_VARIABLE}: ' in scenario
     assert '-m node_pid1 -k "$SCENARIO"' in scenario and 'SCENARIO: ${{ matrix.scenario }}' in scenario
     pipeline = (WORKFLOWS / 'pipeline.yml').read_text()
@@ -171,3 +177,44 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert "if: contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')" in job
     assert 'uses: ./.github/workflows/node-pid1.yml' in job
     assert 'revision: ${{ needs.plan.outputs.revision }}' in job
+    build = _job(pipeline, 'node-components')
+    assert 'uses: ./.github/workflows/node-components.yml' in build
+    assert 'revision: ${{ needs.plan.outputs.revision }}' in build
+    assert "pid1-fixture: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1') }}" in build
+
+
+def test_the_base_probes_run_at_once_and_every_failure_fails_the_step():
+    """The three systemd probes of the built base run concurrently, each in its own work
+    directory (their containers and images carry random names), and the step waits for every
+    one, shows every log and fails when any failed."""
+    workflow = (WORKFLOWS / 'base-image.yml').read_text()
+    step = workflow.split('      - name: Start the Player, the Player payload and the OS-agent')[1]
+    step = step.split('\n      - name: ')[0]
+    works = re.findall(r'--work "\$RUNNER_TEMP/([\w-]+)"', step)
+    assert len(works) == len(set(works)) == 3
+    assert step.count('    probe ') == 3 and '"$@" > "$logs/$name.log" 2>&1 &' in step
+    assert 'for name in player-deb player-payload os-agent; do' in step
+    assert 'wait "${probes[$name]}" || status=$?' in step
+    assert 'if [ "${#failed[@]}" -ne 0 ]; then' in step and 'exit 1' in step
+
+
+def test_a_pull_request_uploads_no_release_artifact_but_keeps_failure_diagnostics():
+    workflow = (WORKFLOWS / 'base-image.yml').read_text()
+    for step in re.split(r'^      - ', workflow, flags=re.MULTILINE):
+        if 'uses: actions/upload-artifact@' not in step:
+            continue
+        condition = re.search(r'^        if: (.+)$', step, flags=re.MULTILINE)
+        assert condition, step.splitlines()[0]
+        assert condition[1] in ("github.event_name != 'pull_request'", 'failure()',
+                                "failure() || github.event_name != 'pull_request'"), step
+    assert 'name: photo-wall-node-components-' not in workflow.split('upload-artifact@')[-1]
+
+
+def test_linux_media_runs_in_parallel_and_writes_its_cache_only_from_main():
+    linux_media = _job((WORKFLOWS / 'checks.yml').read_text(), 'linux-media')
+    assert "--env 'PYTEST_ADDOPTS=-n auto' photo-wall-media-test:ci" in linux_media
+    assert ("cache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
+            in linux_media)
+    action = (ACTIONS / 'service-image/action.yml').read_text()
+    assert 'uses: ./.github/actions/buildkit-cache' in action
+    assert 'write: ${{ inputs.cache-write }}' in action

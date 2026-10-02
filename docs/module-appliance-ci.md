@@ -289,7 +289,8 @@ editable path only when the packages exist, and making it source-independent
 would change `pyproject.toml`, an input of every released package and of the
 base squashfs cache key.
 
-**Cache scopes.** Each target reads and writes (`mode=max`) one GHA scope per
+**Cache scopes.** The [`buildkit-cache`](../.github/actions/buildkit-cache/action.yml)
+action is the one scope policy. Each target reads and writes (`mode=max`) one GHA scope per
 architecture, its own: `photo-wall-<target>-<architecture>-v<epoch>`. An export
 replaces its scope's index, so the former shared scopes
 (`photo-wall-checks-amd64-v1`, `photo-wall-software-e2e-arm64-v1`) kept only
@@ -299,7 +300,23 @@ shared `deps` parent in a sibling's index and then missed the target's own
 `COPY --link` layers, depending on import order. Builds in one job still share
 layers through the job's builder. Jobs of one run that build the same target
 write identical content. Raising the action's `CACHE_EPOCH` discards every
-service cache at once.
+service cache at once. `linux-media` reads its scope on every run and writes it
+only from `main`, whose scope every pull request can read.
+
+**Node components.** [`node-components.yml`](../.github/workflows/node-components.yml)
+builds the V2 node component set once per pipeline run, for `base-image` and every
+`node-pid1` leg, which download it (and the PID1 fixture image, `docker save`d).
+Its builders ([`node_build_inputs.py`](../scripts/node_build_inputs.py)) use the
+same policy with one scope per role (`photo-wall-node-<role>-arm64-v<epoch>`:
+`display`, `environment-app`, `environment-manager-primary`); the fixture's
+environments read the app's scope and write none. A sealed environment installs
+its package's relations in a layer before the package is copied, so a commit
+that changes only the package rebuilds only its last layers. The cache changes
+no byte: `node-display.deb` is reproducible (`SOURCE_DATE_EPOCH`), and an
+environment digest names an image ID that BuildKit derives from the layers and
+the pin's `SOURCE_DATE_EPOCH`. The base squashfs cache is keyed on the
+display build's recorded inputs and the staged `node-base.deb`, and the node ABI
+check refuses a hit whose installed ABI differs from the components'.
 
 **Limits.** A workflow run restores only caches of its own ref, its pull
 request's base branch and the default branch
