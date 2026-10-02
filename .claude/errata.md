@@ -2601,3 +2601,34 @@ Source: NU1 correction bead.
 8. Still open, owner choices (not applied): errata NU1-correction item 5 (G4 `linked_app` after an accepted exit, A or B),
    G7 and a per-operation deployment id (one gate decision), NS2's real-Player still-photo probe, ND1 item 3.
 Source: NU1 fix cycle 2.
+
+## 2026-10-02 — console DDD batch 3 (Part E): fix cycle 3 (final review residuals)
+1. R17 drift (major), fixed: Select's confirmation words have one home, releases.js `selectionConfirmation` (contents,
+   `SELECT_SCOPE`, `SELECT_NO_APP` when the deployment has no app). Releases' Select dialog and the journey's Keep dialog
+   both render it, so Keep now states the fleet-wide scope and the no-app offer; the page-local constants are deleted.
+2. Bound-rule caveat (major), fixed: `BOUND_PROVEN` moved to stage.js and `StageApp.jsx` `BoundRule` renders the rule
+   with its caveat; the Player page's Stage dialog and the journey's Try both use it. Remove the caveat when the bound PID1
+   switch leg (NU1 fix cycle 2 item 3) is green. §25/§29 G6 and the runbook say so.
+3. G4 fallback fence (major), tests added: `_qualified_fallback_in` refuses an acceptance on another base or under
+   another device generation, alone or when newest. Mutation-probed (base OR TRUE, generation OR TRUE): each fails.
+4. G2 arms (major), tests added: Staged and EffectUnknown read interrupted_by_reboot after a later boot. Mutation-probed
+   (drop staged; drop effect_unknown; effect_unknown sent to ended_by_later_boot): each fails.
+5. G6 ordering (major), NU1 fix cycle 2 item 4 applied as docs (option B): the G6 row and domain model :117 state that
+   when the new app enrolls before Central reconciles the old app's exit, no interruption fact is recorded and the exit's
+   work item stays `awaiting_output_link`, re-queued every 5 s for the boot. The ordering test pins both. Not fixed in
+   code: recording the loss under a superseded epoch or finishing the work item as superseded touches the reconciler's
+   epoch/fence semantics (effect authority) and is owed as its own residual bead. Secondary (not G6's): the exit work
+   item of every switch, bound or not, stays queued for the boot and takes the Coordination, Runtime and fleet locks on
+   each retry.
+6. Back out (major), fixed: a synchronous in-flight hold (ref set before the await, button disabled) makes a second click
+   send nothing; the browser test double-clicks and asserts one reboot.
+7. Wording (minor), fixed in code, tests and §25/§25a/§26/§31 and the runbook: the boot selection is Central's offer
+   ("is offered"), never what the Player runs; the ended_by_later_boot basis reads "a later boot was admitted; Central
+   offers each boot the boot selection". The rolling rule is scoped to "this page", and §31 states that two pages (or a
+   page plus a Player-page Reboot) can have two Players rebooting at once.
+8. Step strip (minor), fixed: Back out marks Look as current, not Done, until journeyStep returns done.
+9. Finding (minor), not in this batch's scope: `_admit_boot_in` (node_sessions.py:152-157) revives a superseded admission
+   when a late claim for its kernel boot arrives, so ended_by_later_boot can flip back to target_running and the live
+   later boot's sessions are revoked. Owed: refuse a claim for a superseded admission (node_boot_superseded) and a DB
+   test that the projection never moves backwards; raise in the fleet implementation map.
+Source: batch 3 fix cycle 3.

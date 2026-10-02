@@ -38,9 +38,11 @@ OPEN = {"effective_state": "open", "state": "open", "generation": 7, "reason": N
 CLOSED = {"effective_state": "closed", "state": "closed", "generation": 6, "reason": "never_certified",
           "changed_at": 1_759_363_000}
 JOURNEY = "#/releases/update/v9.0.0"
-KEEP_WORDS = "These are the Players this console knows. Select is fleet-wide: any other Pi takes deployment"
-GATE_CLOSED_KEEP = "Players take it at their next boot; this page cannot reboot them while the gate is closed."
+KEEP_WORDS = "These are the Players this console knows. Select is fleet-wide: any other Pi that boots by node path is offered deployment"
+GATE_CLOSED_KEEP = "Each Player is offered it at its next boot; this page cannot reboot them while the gate is closed."
 TRIED_RUNNING = "App Effect Broker reported the staged app running"
+SELECT_SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players "
+                "Central has not seen. Central cannot list which Players will boot.")
 
 
 class Fleet:
@@ -184,8 +186,9 @@ def _publish(page):
 
 def _keep(page, label="Select for every boot"):
     _section(page, "Choose").or_(_section(page, "Look")).get_by_role("button", name=re.compile("^Keep:")).click()
-    page.get_by_role("dialog", name="Keep release v9.0.0 on the wall?").get_by_role(
-        "button", name=label, exact=True).click()
+    dialog = page.get_by_role("dialog", name="Keep release v9.0.0 on the wall?")
+    expect(dialog).to_contain_text(SELECT_SCOPE)  # Select's own R17 words (releases.js `selectionConfirmation`)
+    dialog.get_by_role("button", name=label, exact=True).click()
 
 
 def _start_rebooting(page, fleet):
@@ -332,7 +335,8 @@ def test_try_samples_then_stages_then_looks_and_back_out_reboots_only_the_tried_
         _settle(page)
         look = _section(page, "Look")
         expect(look).to_contain_text(TRIED_RUNNING, timeout=10_000)
-        look.get_by_role("button", name=re.compile("^Back out: reboot")).click()
+        # A double click sends one reboot: Back out is held in flight from the first click.
+        look.get_by_role("button", name=re.compile("^Back out: reboot")).dblclick()
         expect(_section(page, "Back out")).to_be_visible(timeout=10_000)
         assert fleet.reboots == [tried_device]
         fleet.reboot(tried_device)

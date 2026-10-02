@@ -49,12 +49,16 @@ export const SWITCH_IN_PROGRESS = "A switch is in progress; wait for it to finis
 export const STAGE_STALE = "This request is out of date; close and reopen";
 /** Always in the dialog (§25): a stage is desired state for its own boot only. */
 export const stageScope = (selection) => "Applies to this boot only. Any later boot, including an unplanned one, "
-  + `runs the boot selection (${selection?.deployment_id == null
+  + `is offered the boot selection (${selection?.deployment_id == null
     ? "none: Central refuses every boot"
     : `deployment ${deploymentHandle(selection.deployment_id)}`}).`;
 /** The bound rule (§25, D16), in the dialog when the Player drives Frames. */
 export const BOUND_RULE = "Each Frame this Player drives shows the base page while the app switches, then rejoins "
   + "its Run at the current point (missed content is not replayed), as on Reboot.";
+/** Beside the bound rule wherever it is shown: G6's node half (the broker's exit evidence, Display
+ * Host across the switch) has no CI leg yet. Remove it when the bound PID1 switch leg is green. */
+export const BOUND_PROVEN = "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not "
+  + "yet qualified.";
 
 const isGeneration = (value) => Number.isInteger(value) && value >= 1;
 const tail = (id) => `${String(id).slice(0, 4)}…`;

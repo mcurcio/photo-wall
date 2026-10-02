@@ -4,6 +4,7 @@ import { useNodeControlValue } from "./nodeControl.js";
 import { useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import {
+  BOUND_PROVEN,
   BOUND_RULE,
   boundFrames,
   pendingStage,
@@ -20,6 +21,19 @@ import { useSendDialog } from "./useSendDialog.js";
 
 // The effect gate's and the deployments' home (Part E §25).
 const RELEASES = formatRoute({ section: "releases" });
+
+/**
+ * The bound rule (§25, D16) with its qualification caveat: the one rendering for every Stage
+ * surface, so no page can state the rule without the caveat.
+ */
+export function BoundRule() {
+  return (
+    <>
+      <p>{BOUND_RULE}</p>
+      <p className="roster__note">{BOUND_PROVEN}</p>
+    </>
+  );
+}
 
 /**
  * The Stage app dialog (Part E §25, §27): lists the deployments that carry an app (the release
@@ -61,7 +75,7 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
         {replaces !== null && <p>{replaces}</p>}
         {opened.frames.length > 0 && (
           <>
-            <p>{BOUND_RULE}</p>
+            <BoundRule />
             <p>{`Frames this Player drives: ${opened.frames.join(", ")}.`}</p>
           </>
         )}

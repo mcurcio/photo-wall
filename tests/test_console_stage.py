@@ -163,9 +163,9 @@ def test_stage_targets_are_the_deployments_carrying_an_app_and_the_scope_names_t
         {"id": "d-app-2", "contents": "Base v0.14.0 · app aaaaaa…", "selected": False}]
     assert out["noTargets"] == []
     assert out["scope"] == [
-        "Applies to this boot only. Any later boot, including an unplanned one, runs the boot selection "
+        "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection "
         "(deployment d-ap…).",
-        "Applies to this boot only. Any later boot, including an unplanned one, runs the boot selection "
+        "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection "
         "(none: Central refuses every boot)."]
 
 

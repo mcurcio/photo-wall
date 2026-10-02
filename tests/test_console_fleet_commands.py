@@ -388,7 +388,7 @@ def test_app_operations_read_the_brokers_response_not_only_staged():
     # G2 (§26): a derived fact, Central's inference from a later admitted boot.
     assert app[8]["state"] == "ended_by_later_boot"
     assert app[8]["fact"] == ("Ended by a later boot (Central's inference: a later boot was admitted; "
-                              "it runs the boot selection's app)")
+                              "Central offers each boot the boot selection)")
 
 
 def test_superseded_and_interrupted_operations_keep_the_brokers_earlier_answer():

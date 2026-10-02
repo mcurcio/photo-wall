@@ -396,7 +396,7 @@ function operationState(operation, readAt) {
       // G2: the stage had finished (target or fallback running); a later boot runs the selection.
       return { state: "ended_by_later_boot", label: "Ended by a later boot",
         fact: fact({ kind: "derived", value: "Ended by a later boot",
-          basis: "a later boot was admitted; it runs the boot selection's app" }),
+          basis: "a later boot was admitted; Central offers each boot the boot selection" }),
         prior: prior() };
     default:
       return { state: "unknown", label: "Unknown state",

@@ -748,7 +748,8 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
 STAGES = f"**/v1/operator/node/devices/{DEVICE_ID}/app-stages"
 BOUND_RULE = ("Each Frame this Player drives shows the base page while the app switches, then rejoins its Run "
               "at the current point (missed content is not replayed), as on Reboot.")
-THIS_BOOT = "Applies to this boot only. Any later boot, including an unplanned one, runs the boot selection"
+BOUND_PROVEN = "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet qualified."
+THIS_BOOT = "Applies to this boot only. Any later boot, including an unplanned one, is offered the boot selection"
 RECORDED = "Stage recorded; App Effect Broker has not responded yet."
 
 
@@ -785,6 +786,7 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
         dialog = _stage_dialog(page)
         expect(dialog).to_contain_text(THIS_BOOT)
         expect(dialog).to_contain_text(BOUND_RULE)
+        expect(dialog).to_contain_text(BOUND_PROVEN)  # the node half is unqualified, as on the journey
         expect(dialog).to_contain_text("Frames this Player drives: node-f0, node-f1.")
         for deployment in fixture.deployments:  # each published deployment carrying an app is offered
             expect(dialog.get_by_role("radio", name=re.compile(
@@ -816,7 +818,7 @@ def test_a_bound_player_stages_with_the_bound_rule_and_renders_every_served_stat
         offer = NodeBootService(fixture.sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
         fixture.sessions.enroll(claim_for(offer, owner="app_effect_broker"))
         expect(operations).to_contain_text("Ended by a later boot", timeout=10_000)
-        expect(operations).to_contain_text("a later boot was admitted; it runs the boot selection's app")
+        expect(operations).to_contain_text("a later boot was admitted; Central offers each boot the boot selection")
         assert len(sent) == 1
         assert sent[0]["deployment_id"] == str(fixture.deployments[0].deployment_id)
         assert sent[0]["rollout_generation"] == fixture.generation

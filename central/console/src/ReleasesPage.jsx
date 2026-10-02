@@ -11,6 +11,7 @@ import {
   publishConfirmation,
   publishRequest,
   releaseHome,
+  selectionConfirmation,
   selectionOffer,
   selectionRequest,
   selectionSettled,
@@ -22,11 +23,6 @@ import {
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 
-// Select's scope (§26, R17): fleet-wide, and wider than any list the console could show.
-const SELECT_SCOPE = "Every Player that boots by node path from now on is offered this deployment, including "
-  + "Players Central has not seen. Central cannot list which Players will boot. A Pi whose kernel command line "
-  + "lacks photowall.node=v2 is misconfigured and is not offered it.";
-const NO_APP = "This deployment has no app: every boot from now on is offered no app.";
 const SELECT_UNKNOWN = "Outcome unknown: Central did not answer. The next read of the boot selection decides.";
 
 // What the effect gate governs (§25), beside Central's state and reason.
@@ -197,9 +193,7 @@ function ReleaseRecords() {
       title: `Select deployment ${deploymentHandle(deploymentId)} for every boot?`,
       body: (
         <>
-          <p>{request.contents}</p>
-          <p>{SELECT_SCOPE}</p>
-          {request.noApp && <p>{NO_APP}</p>}
+          {selectionConfirmation(request).map((line) => <p key={line}>{line}</p>)}
           <details>
             <summary>Request</summary>
             <ul>

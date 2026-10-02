@@ -247,6 +247,65 @@ def test_renewed_broker_session_keeps_the_stage_current_and_reportable(registry)
     assert fixture.states() == ['switching']
 
 
+@pytest.mark.parametrize('phases, before', [((), 'staged'), (('intent_stop', 'effect_unknown'), 'effect_unknown')])
+def test_a_staged_or_effect_unknown_operation_of_a_rebooted_boot_is_interrupted(registry, phases, before):
+    """G2's other arms (Part E §27): Staged and EffectUnknown become interrupted_by_reboot, never
+    ended_by_later_boot, once a later boot is admitted; each is asserted first, so neither passes vacuously."""
+    fixture = Rig(registry)
+    command = fixture.stage()
+    for sequence, phase in enumerate(phases, start=1):
+        fixture.report(command, phase, sequence)
+    assert fixture.states() == [before]
+    _later_boot(fixture)
+    assert fixture.states() == ['interrupted_by_reboot']
+
+
+def _wrong_acceptance(fixture, kind, environment_sha256, accepted_at):
+    """An acceptance in the current cohort that differs from this boot only by its base content
+    key (`kind='base'`) or its device generation (`kind='generation'`)."""
+    registry = fixture.registry
+    with registry.db.transaction() as conn:
+        generation = fixture.sessions.lock_device_generation_in(conn, DEVICE_ID)
+        cohort = current_cohort_in(conn, DEVICE_ID, generation, registry.clock.utc())
+        base_key = parse_node_deployment(bytes(conn.execute(
+            'SELECT document FROM node_deployments ORDER BY published_at LIMIT 1').fetchone()['document'])).base.content_key
+        if kind == 'base':
+            base_key = ('0' if base_key[0] != '0' else '1') + base_key[1:]
+        else:
+            generation += 1
+        qualification = uuid4()
+        conn.execute('INSERT INTO node_app_qualifications VALUES(%s,%s,%s,%s,%s,%s)',
+                     (qualification, DEVICE_ID, generation, environment_sha256, f'test:other-{kind}', accepted_at))
+        conn.execute('INSERT INTO node_environment_acceptances VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)',
+            (uuid4(), qualification, DEVICE_ID, generation, base_key, environment_sha256, Jsonb(cohort),
+             Jsonb({'test_fixture': True}), accepted_at))
+
+
+@pytest.mark.parametrize('kind', ['base', 'generation'])
+def test_the_qualified_fallback_is_this_boots_base_and_this_device_generations_only(registry, kind):
+    """G4's one home of fallback admission (`_qualified_fallback_in`): an acceptance on another
+    base, or under another device generation, never becomes the fallback, alone or when newest.
+    With G6 this is the only guard that a failed target on a bound wall restores a runnable app."""
+    fixture = Rig(registry, qualified=False)
+    other = fixture.deployments[1].app_environment.environment_sha256  # known to Central, not the target
+    _wrong_acceptance(fixture, kind, other, 1001)
+    with pytest.raises(NodeControlError, match='qualified_fallback_required'):
+        fixture.stage(0)
+    # The right acceptance, older than the wrong one: the fallback is still the right one.
+    with registry.db.transaction() as conn:
+        generation = fixture.sessions.lock_device_generation_in(conn, DEVICE_ID)
+        cohort = current_cohort_in(conn, DEVICE_ID, generation, registry.clock.utc())
+        base_key = parse_node_deployment(bytes(conn.execute(
+            'SELECT document FROM node_deployments ORDER BY published_at LIMIT 1').fetchone()['document'])).base.content_key
+        qualification = uuid4()
+        linked = fixture.proof.challenge.environment_sha256
+        conn.execute('INSERT INTO node_app_qualifications VALUES(%s,%s,%s,%s,%s,1000)',
+                     (qualification, DEVICE_ID, generation, linked, 'test:qualified-fixture'))
+        conn.execute('INSERT INTO node_environment_acceptances VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1000)',
+            (uuid4(), qualification, DEVICE_ID, generation, base_key, linked, Jsonb(cohort), Jsonb({'test_fixture': True})))
+    assert fixture.stage(0).fallback.environment_sha256 == linked
+
+
 def test_operation_of_a_rebooted_boot_is_interrupted_and_not_desired(registry):
     fixture = Rig(registry)
     command = fixture.stage()
@@ -343,9 +402,10 @@ def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
 
 def test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejoins_with_nothing_stale(registry):
     """D16 (G6), the other ordering: the new app enrolls (epoch 2) before the reconciler reads
-    the old app's exit. No interruption fact is recorded in this order (a stated cost), but
-    nothing of epoch 1 stays deliverable, bindings and calibration are kept, and epoch 2
-    rejoins the Run at its current point."""
+    the old app's exit. Stated costs, pinned here: no interruption fact is recorded in this order
+    (`node_output_losses` stays empty), and the exit's work item is never finished (it stays
+    `awaiting_output_link`, re-queued). Nothing of epoch 1 stays deliverable, bindings and
+    calibration are kept, and epoch 2 rejoins the Run at its current point."""
     fixture = Rig(registry, unbound=False)
     coordinator = fixture.coordinator
     player_id = fixture.proof.challenge.player_id
@@ -356,11 +416,20 @@ def test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejo
     command = fixture.stage()
     fixture.report(command, 'intent_stop', 1)
     exited = AppProcessFact(fixture.proof.challenge.process, 42, 'd' * 64, 'exited')
+    exit_evidence = uuid4()
     NodeIngest(fixture.sessions).ingest(fixture.claim.session_id, fixture.claim.credential, encode_node_message(
-        NodeEventV2(fixture.grants['app_effect_broker'].producer, uuid4(), 2, 1300, (exited,))))
+        NodeEventV2(fixture.grants['app_effect_broker'].producer, exit_evidence, 2, 1300, (exited,))))
     player, _, _ = enroll(registry, fixture.key, device_id=DEVICE_ID)  # before the reconciler runs
     assert player['authority_epoch'] == 2
-    NodeRuntimeReconciler(fixture.sessions, coordinator).advance()
+    reconciler = NodeRuntimeReconciler(fixture.sessions, coordinator)
+    for _ in range(3):  # each retry after its 5 s back-off
+        reconciler.advance()
+        registry.clock.advance(6)
+    with registry.db.transaction() as conn:
+        work = conn.execute('SELECT completed_at,result FROM node_reconciliation_work WHERE evidence_id=%s',
+                            (exit_evidence,)).fetchone()
+    assert dict(work) == {'completed_at': None, 'result': 'awaiting_output_link'}
+    assert _bound_state(registry)[2] == []  # no interruption fact in this order
     with pytest.raises(CoordinationError, match='stale_authority'):  # epoch 1 is no longer deliverable at all
         coordinator.delivery(player_id, 1)
     after_bindings, after_frames, _ = _bound_state(registry)

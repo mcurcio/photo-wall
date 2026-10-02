@@ -24,6 +24,7 @@ import {
   publishOffer,
   publishRequest,
   releaseHome,
+  selectionConfirmation,
   selectionRequest,
   sendSelection,
   useHeldPublishes,
@@ -31,8 +32,8 @@ import {
 } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
+import { BoundRule } from "./StageApp.jsx";
 import {
-  BOUND_RULE,
   pendingStage,
   sendStage,
   stageBlocker,
@@ -69,20 +70,18 @@ const STEP_LABELS = Object.freeze([
   ["get_it", "Get it"], ["choose", "Choose"], ["qualifying", "Qualify (if needed)"], ["staging", "Try on one Frame"],
   ["looking", "Look"], ["keeping", "Keep"], ["done", "Done"],
 ]);
-const STEP_OF = Object.freeze({ paused: "keeping", backing_out: "done" });
+// Back out branches from Look; only journeyStep's done (the boot ended or interrupted the stage) is Done.
+const STEP_OF = Object.freeze({ paused: "keeping", backing_out: "looking" });
 
 const pausedWords = (deploymentId) => "Paused means this page sends no more reboots. Select is fleet-wide: any "
-  + `Player that restarts for any reason, a power cut included, takes deployment ${deploymentHandle(deploymentId)} now.`;
+  + `Player that restarts for any reason, a power cut included, is offered deployment ${deploymentHandle(deploymentId)} at that boot.`;
 const keepScope = (deploymentId) => "These are the Players this console knows. Select is fleet-wide: any other Pi "
-  + `takes deployment ${deploymentHandle(deploymentId)} at its next boot.`;
-const GATE_CLOSED_KEEP = "Players take it at their next boot; this page cannot reboot them while the gate is closed.";
+  + `that boots by node path is offered deployment ${deploymentHandle(deploymentId)} at its next boot.`;
+const GATE_CLOSED_KEEP = "Each Player is offered it at its next boot; this page cannot reboot them while the gate is closed.";
 const HIDDEN = "the tab was hidden; this page sends no reboots while it is not shown";
 const KEEP_THEN = "Then, when you press Start rebooting, this page reboots these Players one at a time, each after the "
   + "previous one rejoins:";
 const FALLBACK_LOOK = "The new app did not start; the Player fell back on its own. Back out is recommended.";
-// G6's node half (the broker's exit evidence, Display Host across the switch) has no CI leg yet.
-const BOUND_PROVEN = "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet "
-  + "qualified.";
 const COUNT_FACT = fact({ kind: "derived", value: "each Rejoined row is this page's judgement",
   basis: "a later kernel boot than this page's reboot, or a linked app that identifies this release, and every bound "
     + "Output's Frame live with no current readiness failure; see each row's Evidence" });
@@ -205,6 +204,10 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const [stageWords, setStageWords] = useState(/** @type {string|null} */ (null));
   const stageIds = useRef(/** @type {{operationId: string, commandId: string}|null} */ (null));
   const [backOut, setBackOut] = useState(/** @type {object|null} */ (null));
+  // Back out's in-flight hold: set synchronously before the await, so a second click before the
+  // first answer lands sends nothing (as `sendStage`'s held "in_flight" and `rebootNext`'s sendingRef).
+  const backOutSending = useRef(false);
+  const [backOutInFlight, setBackOutInFlight] = useState(false);
 
   // Keep: rolling, the reboots this page sent, the operator's skips, each row's read.
   const [rolling, setRolling] = useState(false);
@@ -369,8 +372,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       title: `Keep release ${tag} on the wall?`,
       body: (
         <>
-          <p>{request.contents}</p>
-          <p>{`Selects deployment ${deploymentHandle(target.deploymentId)} for every boot from now on.`}</p>
+          {selectionConfirmation(request).map((line) => <p key={line}>{line}</p>)}
           <p>{keepScope(target.deploymentId)}</p>
           <p>{canReboot ? KEEP_THEN : GATE_CLOSED_KEEP}</p>
           {canReboot && <PlanNames plan={plan} skipped={skipped} />}
@@ -437,6 +439,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
 
   // Back out (§25a): reboot the tried Player through `sendReboot`; no selection is sent.
   const onBackOut = async () => {
+    if (backOutSending.current) return;
     const latest = triedNode.latest();
     const request = backOut ?? rebootRequest(rebootTarget(latest, control.latest().gate), latest.read?.reboot_commands ?? null,
       snapshot, latest.readAt, { playerId: tried, commandId: crypto.randomUUID(), reason: "update-wall-back-out" });
@@ -444,11 +447,18 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       say(`Back out unavailable: ${request.refused}.`);
       return;
     }
-    const result = await sendReboot(triedEntry.deviceId, request, triedNode, control);
-    void triedNode.refresh();
-    setBackOut(heldReboot(request, result));
-    if (result.outcome === "done" || result.outcome === "already") remember({ backingOut: true });
-    else say(result.message);
+    backOutSending.current = true;
+    setBackOutInFlight(true);
+    try {
+      const result = await sendReboot(triedEntry.deviceId, request, triedNode, control);
+      void triedNode.refresh();
+      setBackOut(heldReboot(request, result));
+      if (result.outcome === "done" || result.outcome === "already") remember({ backingOut: true });
+      else say(result.message);
+    } finally {
+      backOutSending.current = false;
+      setBackOutInFlight(false);
+    }
   };
 
   if (read === null) {
@@ -534,8 +544,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
             const replaces = stageReplaces(triedNode.operations);
             return replaces !== null && step.stage == null ? <p>{replaces}</p> : null;
           })()}
-          <p>{BOUND_RULE}</p>
-          <p className="roster__note">{BOUND_PROVEN}</p>
+          <BoundRule />
           <FramesNow snapshot={snapshot} frames={triedEntry.frames} />
           {step.stage != null ? (
             <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
@@ -569,8 +578,8 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
           {step.stage.state === "fallback_running" && <p className="roster__note" role="alert">{FALLBACK_LOOK}</p>}
           {keepButton}
-          <button type="button" onClick={onBackOut}>{backOut !== null ? "Send the same back-out reboot again" : `Back out: reboot ${triedName}`}</button>
-          <p className="roster__note">{`Back out reboots ${triedName}; its next boot runs the boot selection. Nothing is selected.`}</p>
+          <button type="button" onClick={onBackOut} disabled={backOutInFlight}>{backOut !== null ? "Send the same back-out reboot again" : `Back out: reboot ${triedName}`}</button>
+          <p className="roster__note">{`Back out reboots ${triedName}; its next boot is offered the boot selection. Nothing is selected.`}</p>
         </SectionBoundary>
       )}
       {step.step === "backing_out" && triedEntry !== null && (

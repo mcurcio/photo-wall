@@ -328,6 +328,25 @@ export function selectionRequest(read, deploymentId) {
   });
 }
 
+/** Select's scope (§26, R17): fleet-wide, and wider than any list the console could show. */
+export const SELECT_SCOPE = "Every Player that boots by node path from now on is offered this deployment, including "
+  + "Players Central has not seen. Central cannot list which Players will boot. A Pi whose kernel command line "
+  + "lacks photowall.node=v2 is misconfigured and is not offered it.";
+/** Central's offer when the selected deployment has no app (R17). */
+export const SELECT_NO_APP = "This deployment has no app: every boot from now on is offered no app.";
+
+/**
+ * Select's confirmation words (R17), shared by every page that sends a selection, so no page can
+ * drop the scope or the no-app consequence: the deployment's contents, the fleet-wide scope and,
+ * when it has no app, what every boot is then offered. A page may add its own lines below them.
+ *
+ * @param {{contents: string, noApp: boolean}} request `selectionRequest`'s frozen request
+ * @returns {string[]}
+ */
+export function selectionConfirmation(request) {
+  return [request.contents, SELECT_SCOPE, ...(request.noApp ? [SELECT_NO_APP] : [])];
+}
+
 /**
  * Why a frozen selection may not be sent on `read`, or null: the revision moved, the
  * deployment is no longer listed, or it is already selected.

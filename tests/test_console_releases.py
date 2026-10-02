@@ -68,6 +68,10 @@ out.selectOffers = [
 const frozenSelect = releases.selectionRequest(listed, derived);
 out.selectRequest = { request: frozenSelect, frozen: Object.isFrozen(frozenSelect) && Object.isFrozen(frozenSelect.body) };
 out.noApp = releases.selectionRequest(listed, "d-2").noApp;
+// Select's confirmation words (R17), one home for every page that sends a selection.
+out.selectWords = { withApp: releases.selectionConfirmation(frozenSelect),
+  noApp: releases.selectionConfirmation(releases.selectionRequest(listed, "d-2")),
+  scope: releases.SELECT_SCOPE, none: releases.SELECT_NO_APP };
 
 // --- sendSelection: judged on releases.latest() at call time; refuses without a PUT.
 const sent = [];
@@ -279,6 +283,15 @@ def test_select_offers_and_freezes_the_newest_revision_zero_with_no_selection():
     assert request["body"]["expected_revision"] == 0 and out["selectRequest"]["frozen"]
     assert request["contents"] == "Base v0.15.0 · app 9f8e7d…" and request["noApp"] is False
     assert out["noApp"] is True
+
+
+def test_select_confirmation_states_its_fleet_wide_scope_and_the_no_app_offer():
+    words = _run()["selectWords"]
+    assert words["scope"].startswith("Every Player that boots by node path from now on is offered this deployment")
+    assert "Central cannot list which Players will boot" in words["scope"]
+    assert words["none"] == "This deployment has no app: every boot from now on is offered no app."
+    assert words["withApp"] == ["Base v0.15.0 · app 9f8e7d…", words["scope"]]
+    assert words["noApp"] == ["Base v0.15.0 · no app", words["scope"], words["none"]]
 
 
 def test_send_selection_judges_the_newest_read_and_refuses_without_a_put():

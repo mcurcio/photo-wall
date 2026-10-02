@@ -69,7 +69,7 @@ sold.
 > the effect gate; the Player page's App section gains **Stage app** (on bound or
 > unbound Players; a bound switch follows the reboot rule) and **Qualified
 > fallback**. The guided **Update the wall** journey
-> (`#/releases/update/<tag>[/try/<player>]`) walks Publish, an optional try on one
+> (`#/releases/update/<tag>[/try/<player>][/skip/<player>…]`) walks Publish, an optional try on one
 > Frame, then Keep (Select, then one-at-a-time reboots) or Back out, through the same
 > send functions as the homes.
 
