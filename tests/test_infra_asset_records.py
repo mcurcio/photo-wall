@@ -6,14 +6,11 @@ The DB tests skip without `PHOTO_WALL_TEST_DATABASE_URL` (the `registry` fixture
 
 from __future__ import annotations
 
-import os
-import uuid
 from pathlib import Path
 
 import psycopg
 import pytest
 from fakes.transactions import FakeTransaction
-from psycopg.conninfo import make_conninfo
 
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
@@ -144,25 +141,13 @@ def test_touch_served_sets_last_served_at(repo):
 
 
 @pytest.fixture
-def pre_021():
-    """A fresh schema migrated up to (not including) 021; yields a DSN bound to it."""
-    dsn = os.environ.get("PHOTO_WALL_TEST_DATABASE_URL")
-    if not dsn:
-        pytest.skip("set PHOTO_WALL_TEST_DATABASE_URL for real PostgreSQL integration")
-    schema = "pw_test_" + uuid.uuid4().hex
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(schema)))
-    bound = make_conninfo(dsn, options=f"-c search_path={schema}")
-    try:
-        with psycopg.connect(bound) as conn:
-            for path in sorted(MIGRATIONS.glob("*.sql")):
-                if path.name < "021":
-                    conn.execute(path.read_text())
-        yield bound
-    finally:
-        with psycopg.connect(dsn, autocommit=True) as conn:
-            conn.execute(psycopg.sql.SQL("DROP SCHEMA {} CASCADE").format(
-                psycopg.sql.Identifier(schema)))
+def pre_021(empty_database):
+    """A fresh database migrated up to (not including) 021; yields its DSN."""
+    with psycopg.connect(empty_database) as conn:
+        for path in sorted(MIGRATIONS.glob("*.sql")):
+            if path.name < "021":
+                conn.execute(path.read_text())
+    return empty_database
 
 
 def _release(conn, tag, *, asset=None, base=None):

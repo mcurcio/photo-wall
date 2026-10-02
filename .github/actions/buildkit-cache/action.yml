@@ -1,0 +1,57 @@
+name: BuildKit cache scope
+description: >-
+  The repository's one BuildKit GHA cache policy (docs/module-appliance-ci.md, "Service image
+  builds"): one cache scope per build role and architecture, read by --cache-from and written
+  (mode=max) by --cache-to, so no build replaces another's cache index. The service images use it
+  through the service-image action; the node components workflow hands it to its builders.
+
+inputs:
+  name:
+    description: >-
+      The build role's scope stem: a Dockerfile target, or `node-{role}`, whose `{role}` the node
+      builders replace with each build's role (scripts/node_build_inputs.py)
+    required: true
+  architecture:
+    description: amd64 or arm64; part of the scope
+    required: true
+  write:
+    description: Write the cache too ('true'); anything else reads only (`to` is empty)
+    required: false
+    default: 'true'
+
+outputs:
+  from:
+    description: The --cache-from value
+    value: ${{ steps.cache.outputs.from }}
+  to:
+    description: The --cache-to value, empty when this build only reads
+    value: ${{ steps.cache.outputs.to }}
+
+runs:
+  using: composite
+  steps:
+    # Bump the epoch to discard every BuildKit cache at once (a suspected poisoned or corrupt
+    # entry); keys are content-addressed, so a layout change never needs it.
+    - name: Resolve the cache scope
+      id: cache
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        WRITE: ${{ inputs.write }}
+        CACHE_EPOCH: '1'
+      run: |
+        set -eu
+        case "$ARCHITECTURE" in
+          amd64|arm64) ;;
+          *) echo "::error::unsupported architecture '$ARCHITECTURE'"; exit 1 ;;
+        esac
+        # Only its own scope: importing a sibling's too made BuildKit match a shared parent in
+        # the sibling's index and miss this target's COPY --link layers (docs/module-appliance-ci.md).
+        scope="type=gha,scope=photo-wall-$NAME-$ARCHITECTURE-v$CACHE_EPOCH"
+        echo "from=$scope" >> "$GITHUB_OUTPUT"
+        if [ "$WRITE" = true ]; then
+          echo "to=$scope,mode=max,ignore-error=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "to=" >> "$GITHUB_OUTPUT"
+        fi

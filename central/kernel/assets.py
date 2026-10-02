@@ -16,6 +16,8 @@ _MAX_OWNER_LENGTH = 128
 class AssetKind(StrEnum):
     OS_IMAGE = "os-image"
     PLAYER_DEB = "player-deb"  # media-variant arrives with media (co-change bead)
+    PLAYER_PAYLOAD = "player-payload"
+    SEALED_ENVIRONMENT = "sealed-environment"
 
 
 def _positive_int(value: object, what: str) -> None:

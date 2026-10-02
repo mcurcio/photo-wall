@@ -10,14 +10,22 @@ on failure and never returns a partial list.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
 from central.kernel.assets import Asset, AssetKey, AssetReady, AssetReference, OriginLocator
-from central.kernel.job_types import AssetJob, FetchOsImage, FetchPackage
+from central.kernel.job_types import (
+    AssetJob,
+    FetchOsImage,
+    FetchPackage,
+    FetchPlayerPayload,
+    FetchSealedEnvironment,
+)
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version, require_reason, require_sha256
+from contracts.player_payload import FORMAT as PLAYER_PAYLOAD_FORMAT
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +52,8 @@ class Candidates:
     def __post_init__(self) -> None:
         jobs = self.jobs
         if (not isinstance(jobs, tuple) or not jobs
-                or not all(isinstance(job, (FetchOsImage, FetchPackage)) for job in jobs)):
+                or not all(isinstance(job, (FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment))
+                           for job in jobs)):
             raise ValueError("invalid_candidates")
         if len(set(jobs)) != len(jobs):
             raise ValueError("duplicate_candidate")
@@ -121,6 +130,42 @@ class UpstreamVersion:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayerPayload:
+    """A schema-2 Player archive and the base-owned launcher ABI it requires."""
+
+    locator: OriginLocator
+    format: str
+    base_abi: str
+
+    def __post_init__(self) -> None:
+        _complete_locator(self.locator)
+        if (self.format != PLAYER_PAYLOAD_FORMAT
+                or not isinstance(self.base_abi, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.base_abi) is None):
+            raise ValueError("invalid_player_payload")
+
+
+@dataclass(frozen=True, slots=True)
+class NodePublication:
+    manifest: bytes
+    assets: tuple[tuple[str, OriginLocator], ...]
+
+    def __post_init__(self):
+        from contracts.node_release import parse_node_release
+        release = parse_node_release(self.manifest)
+        if type(self.assets) is not tuple or len(self.assets) != len(release.artifacts):
+            raise ValueError("node_publication_assets_invalid")
+        values = dict(self.assets)
+        if len(values) != len(self.assets) or set(values) != {a.role for a in release.artifacts}:
+            raise ValueError("node_publication_assets_invalid")
+        for asset in release.artifacts:
+            locator = values[asset.role]
+            _complete_locator(locator)
+            if (locator.sha256, locator.size) != (asset.sha256, asset.size_bytes):
+                raise ValueError("node_publication_asset_mismatch")
+
+
+@dataclass(frozen=True, slots=True)
 class PublishedRelease:
     tag: str  # release_version-valid
     is_prerelease: bool
@@ -131,6 +176,10 @@ class PublishedRelease:
     # otherwise (absent, 404/410, invalid, or `.deb` not attached yet): an observation with no
     # version is refused over a stored one, so it can never wipe the tag.
     upstream_version: UpstreamVersion | None
+    payload: PlayerPayload | None = None
+    base_abi: str | None = None
+    base_abi_squashfs_sha256: str | None = None
+    node_publication: NodePublication | None = None
 
     def __post_init__(self) -> None:
         release_version(self.tag)
@@ -146,6 +195,17 @@ class PublishedRelease:
                 raise ValueError("unexpected_package_problem")
         if self.os_image is not None:
             _complete_locator(self.os_image)
+        if self.payload is not None and not isinstance(self.payload, PlayerPayload):
+            raise ValueError("invalid_player_payload")
+        if (self.base_abi is None) != (self.base_abi_squashfs_sha256 is None):
+            raise ValueError("incomplete_base_abi")
+        if self.base_abi is not None and (
+                self.os_image is None
+                or not isinstance(self.base_abi, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.base_abi) is None
+                or not isinstance(self.base_abi_squashfs_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", self.base_abi_squashfs_sha256) is None):
+            raise ValueError("invalid_base_abi")
 
 
 @dataclass(frozen=True, slots=True)

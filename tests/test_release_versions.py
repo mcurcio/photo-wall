@@ -19,6 +19,7 @@ import httpx
 import psycopg
 import pytest
 from content_db import schema_before
+from support.database import waiting_backends
 from support.github_release import (
     FIRST_UPLOAD,
     deb_name,
@@ -98,15 +99,13 @@ def references_match_the_row(w: World, tag: str = T1) -> None:
 
 def wait_until_blocked_or_done(w: World, thread: threading.Thread, *,
                                advisory: bool = False) -> bool:
-    """Whether `thread` is waiting on a lock (an advisory `AUTO_PROMOTION_LOCK` wait, or any
-    lock) before it finishes; False once it finished without waiting. Well inside the 5 s
-    `lock_timeout` of `Database.transaction`."""
-    sql = ("SELECT count(*) AS n FROM pg_locks WHERE NOT granted AND locktype='advisory' "
-           "AND objid=%s" if advisory else "SELECT count(*) AS n FROM pg_locks WHERE NOT granted")
+    """Whether `thread` is waiting on a lock in this test's database (an advisory
+    `AUTO_PROMOTION_LOCK` wait, or any lock) before it finishes; False once it finished without
+    waiting. Well inside the 5 s `lock_timeout` of `Database.transaction`."""
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and thread.is_alive():
         with w.db.transaction() as conn:
-            if conn.execute(sql, (AUTO_PROMOTION_LOCK,) if advisory else ()).fetchone()["n"]:
+            if waiting_backends(conn, advisory_lock=AUTO_PROMOTION_LOCK if advisory else None):
                 return True
         time.sleep(0.01)
     return False
@@ -246,8 +245,8 @@ def test_v5_the_last_automatic_promotion_read_every_row_committed_before_it(worl
 # -- V6: migration 029 ----------------------------------------------------------------------------
 
 
-def test_v6_029_adds_the_version_pair_and_the_etag_time_and_clears_the_etag():
-    with schema_before("029") as db:
+def test_v6_029_adds_the_version_pair_and_the_etag_time_and_clears_the_etag(empty_database):
+    with schema_before(empty_database, "029") as db:
         with db.transaction() as conn:
             conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
                          "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,1.0,1.0)")

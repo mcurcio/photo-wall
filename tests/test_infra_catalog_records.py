@@ -27,7 +27,7 @@ from central.content_catalog.ports import (
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import OriginLocator
-from central.kernel.ports import PublishedRelease, UpstreamVersion
+from central.kernel.ports import PlayerPayload, PublishedRelease, UpstreamVersion
 from central.netboot_base import record_base_health
 from contracts.models import BaseHealth
 
@@ -91,35 +91,52 @@ def _raw(registry, sql, params=()):
 # -- no database: a fake transaction handed to a real repository --------------------------------
 
 
-@pytest.mark.parametrize("call", [
-    lambda tx: PgReleaseRecords().get(tx, T1),
-    lambda tx: PgReleaseRecords().all(tx),
-    lambda tx: PgReleaseRecords().claim(tx, published(T1), now=1.0),
-    lambda tx: PgReleaseRecords().apply(tx, published(T1), divergent=False, now=1.0),
-    lambda tx: PgReleaseRecords().promoted_tag(tx),
-    lambda tx: PgReleaseRecords().set_promoted(tx, T1, by="operator"),
-    lambda tx: PgReleaseRecords().promotion(tx),
-    lambda tx: PgReleaseRecords().load_etag(tx),
-    lambda tx: PgReleaseRecords().store_etag(tx, "e", now=1.0),
-    lambda tx: PgReleaseRecords().lock_auto_promotion(tx),
-    lambda tx: PgReleaseRecords().bound_player_count(tx),
-    lambda tx: PgReleaseRecords().shipping(tx, sha("x")),
-    lambda tx: PgReleaseRecords().last_good_tag(tx),
-    lambda tx: PgReleaseRecords().set_last_good(tx, T1),
-    lambda tx: PgDeviceRecords().known_good_tags(tx),
-    lambda tx: PgDeviceRecords().named_tags(tx, served_since=1.0),
-    lambda tx: PgDeviceRecords().names_any(tx, {T1}, served_since=1.0),
-    lambda tx: PgDeviceRecords().lock(tx, "d", "s", now=1.0),
-    lambda tx: PgDeviceRecords().active(tx),
-    lambda tx: PgDeviceRecords().get(tx, "d"),
-    lambda tx: PgDeviceRecords().apply(tx, "d", DeviceUpdate(None, False)),
-    lambda tx: PgDeviceRecords().record_served(tx, "d", T1, now=1.0),
-    lambda tx: PgDeviceRecords().set_pin(tx, "d", T1),
-    lambda tx: PgDeviceRecords().sweep_failed_boots(tx, served_before=1.0),
-])
-def test_a_fake_transaction_is_a_type_error(call):
-    with pytest.raises(TypeError):
-        call(FakeTransaction())
+FAKE_TRANSACTION_CALLS = {
+    "PgReleaseRecords.get": lambda tx: PgReleaseRecords().get(tx, T1),
+    "PgReleaseRecords.all": lambda tx: PgReleaseRecords().all(tx),
+    "PgReleaseRecords.claim": lambda tx: PgReleaseRecords().claim(tx, published(T1), now=1.0),
+    "PgReleaseRecords.apply":
+        lambda tx: PgReleaseRecords().apply(tx, published(T1), divergent=False, now=1.0),
+    "PgReleaseRecords.promoted_tag": lambda tx: PgReleaseRecords().promoted_tag(tx),
+    "PgReleaseRecords.set_promoted":
+        lambda tx: PgReleaseRecords().set_promoted(tx, T1, by="operator"),
+    "PgReleaseRecords.promotion": lambda tx: PgReleaseRecords().promotion(tx),
+    "PgReleaseRecords.load_etag": lambda tx: PgReleaseRecords().load_etag(tx),
+    "PgReleaseRecords.store_etag": lambda tx: PgReleaseRecords().store_etag(tx, "e", now=1.0),
+    "PgReleaseRecords.lock_auto_promotion": lambda tx: PgReleaseRecords().lock_auto_promotion(tx),
+    "PgReleaseRecords.bound_player_count": lambda tx: PgReleaseRecords().bound_player_count(tx),
+    "PgReleaseRecords.shipping": lambda tx: PgReleaseRecords().shipping(tx, sha("x")),
+    "PgReleaseRecords.last_good_tag": lambda tx: PgReleaseRecords().last_good_tag(tx),
+    "PgReleaseRecords.set_last_good": lambda tx: PgReleaseRecords().set_last_good(tx, T1),
+    "PgDeviceRecords.known_good_tags": lambda tx: PgDeviceRecords().known_good_tags(tx),
+    "PgDeviceRecords.named_tags": lambda tx: PgDeviceRecords().named_tags(tx, served_since=1.0),
+    "PgDeviceRecords.names_any": lambda tx: PgDeviceRecords().names_any(tx, {T1}, served_since=1.0),
+    "PgDeviceRecords.lock": lambda tx: PgDeviceRecords().lock(tx, "d", "s", now=1.0),
+    "PgDeviceRecords.active": lambda tx: PgDeviceRecords().active(tx),
+    "PgDeviceRecords.get": lambda tx: PgDeviceRecords().get(tx, "d"),
+    "PgDeviceRecords.apply": lambda tx: PgDeviceRecords().apply(tx, "d", DeviceUpdate(None, False)),
+    "PgDeviceRecords.record_served":
+        lambda tx: PgDeviceRecords().record_served(tx, "d", T1, now=1.0),
+    "PgDeviceRecords.set_pin": lambda tx: PgDeviceRecords().set_pin(tx, "d", T1),
+    "PgDeviceRecords.sweep_failed_boots":
+        lambda tx: PgDeviceRecords().sweep_failed_boots(tx, served_before=1.0),
+}
+
+
+def test_a_fake_transaction_is_a_type_error():
+    # Every call is tried, so one run names every offender: one that accepts the fake, and one
+    # that refuses it with anything but a TypeError.
+    offenders = []
+    for name, call in FAKE_TRANSACTION_CALLS.items():
+        try:
+            call(FakeTransaction())
+        except TypeError:
+            continue
+        except Exception as error:
+            offenders.append(f"{name}: {type(error).__name__}")
+        else:
+            offenders.append(f"{name}: accepted")
+    assert offenders == []
 
 
 # -- releases -----------------------------------------------------------------------------------
@@ -146,6 +163,29 @@ def test_claim_inserts_then_returns_the_previous_row_and_apply_writes_over_it(re
     assert (stored["discovered_at"], stored["updated_at"]) == (1000.0, 2000.0)
     assert stored["base_tarball_url"] is None
     assert (stored["upstream_changed_at"], stored["upstream_asset_id"]) == (2.0, 1)
+
+
+def test_payload_origin_facts_round_trip_and_clear_on_newer_schema_one(registry, pg):
+    payload = PlayerPayload(OriginLocator("https://example.test/player.tar.gz", sha("payload"),
+                                          123), "pw-player-data-v1", "sha256:" + "a" * 64)
+    release = dataclasses.replace(published(T1), payload=payload)
+    records = PgReleaseRecords()
+    with pg.begin() as tx:
+        assert records.claim(tx, release, now=1000.0) is None
+        assert records.get(tx, T1).payload == payload
+    stored = _raw(registry, "SELECT payload_sha256,payload_size,payload_format,"
+                            "payload_base_abi,payload_source_manifest "
+                            "FROM app_releases WHERE tag=%s", (T1,))
+    assert dict(stored) == {
+        "payload_sha256": payload.locator.sha256, "payload_size": 123,
+        "payload_format": payload.format, "payload_base_abi": payload.base_abi,
+        "payload_source_manifest": "manifest.v2.json",
+    }
+    legacy = published(T1, at=2)
+    with pg.begin() as tx:
+        assert records.claim(tx, legacy, now=2000.0).payload == payload
+        assert records.apply(tx, legacy, divergent=False, now=2000.0)
+        assert records.get(tx, T1).payload is None
 
 
 def test_claim_of_a_prerelease_without_a_deb_is_undeployable_legacy_state(registry, pg):

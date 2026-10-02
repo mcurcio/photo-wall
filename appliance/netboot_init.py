@@ -53,6 +53,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -62,7 +63,10 @@ import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final
+from uuid import UUID
 
+from appliance.boot_offer import BootOffer, BootOfferError, boot_nonce, read_handoff
+from appliance.boot_offer import write_handoff as write_boot_handoff
 from appliance.bootstrap import (
     CHUNK,
     BootstrapError,
@@ -75,7 +79,15 @@ from appliance.bootstrap import (
     open_watchdog,
     read_pi_serial,
 )
+from appliance.central_post import UnsupportedRoute, post_json
+from appliance.node_boot_handoff import node_nonce, write_node_handoff
 from contracts.clock_record import ClockRecord
+from contracts.node_boot import (
+    MAX_NODE_BOOT_BYTES,
+    NodeBootRequestV2,
+    encode_node_boot_request,
+    parse_node_boot_offer,
+)
 from contracts.release import MAX_ROOTFS_BYTES
 from contracts.time import SystemClock
 from uplink.causes import Cause, UplinkError
@@ -110,6 +122,8 @@ RAM_IMAGE_NAME = "photo-wall-base.squashfs"
 # the command line: cmdline.txt carries only Central's root, so the base image stays fleet-wide
 # immortal as the served squashfs is revised. The `/v1` prefix is the future-proofing seam.
 NETBOOT_BASE_PATH = "/v1/netboot/base"
+BOOT_OFFER_PATH = "/v1/netboot/offers"
+KERNEL_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 SERIAL_HEADER = "X-PhotoWall-Serial"
 CONSOLE_PATH = "/dev/console"
 KMSG_PATH = "/dev/kmsg"
@@ -317,7 +331,8 @@ def parse_digest_header(value: str | None) -> str | None:
     return None
 
 
-def fetch_verified(chunks, destination: Path, expected_digest, *, log=None) -> None:
+def fetch_verified(chunks, destination: Path, expected_digest, *,
+                   expected_size: int | None = None, log=None) -> None:
     """Stream the base squashfs into `destination`, checking its sha256 against
     `expected_digest` as a corruption check only.
 
@@ -350,6 +365,8 @@ def fetch_verified(chunks, destination: Path, expected_digest, *, log=None) -> N
                     log.info(f"phase 6/{PHASES} base: {total // (1024 * 1024)} MiB")
             if not total:
                 raise NetbootError("netboot_empty")
+            if expected_size is not None and total != expected_size:
+                raise NetbootError("netboot_size_mismatch")
             expected = expected_digest() if callable(expected_digest) else expected_digest
             computed = digest.hexdigest()
             if log is not None:
@@ -541,10 +558,13 @@ class _PacedTransport:
         self._transport, self._keeper, self._monotonic = transport, keeper, monotonic
 
     def send(self, url: Url, *, headers: Mapping[str, str], deadline: float,
-             status_timeout: float = HOP_TIMEOUT) -> Reply:
-        reply = self._transport.send(
-            url, headers=headers, status_timeout=status_timeout,
-            deadline=min(deadline, self._monotonic() + STAGE1_SEND_SECONDS))
+             status_timeout: float = HOP_TIMEOUT, method: str = "GET",
+             body: bytes | None = None) -> Reply:
+        options = {"headers": headers, "status_timeout": status_timeout,
+                   "deadline": min(deadline, self._monotonic() + STAGE1_SEND_SECONDS)}
+        if method != "GET" or body is not None:
+            options.update(method=method, body=body)
+        reply = self._transport.send(url, **options)
         self._keeper.pet()
         return _PacedReply(reply, self._keeper)
 
@@ -552,7 +572,8 @@ class _PacedTransport:
 def netboot(cmdline: Mapping[str, str] | None, rootmnt: Path, *, ops: NetbootOps,
             transport: Transport, clock_gate: ClockSettler, keeper: Keeper,
             trust_provenance: str, serial_reader: Callable[[], str | None],
-            log: ConsoleLog) -> None:
+            log: ConsoleLog, offer_mode: bool = False,
+            boot_id_reader: Callable[[], str] | None = None) -> None:
     """Locate Central, fetch and RAM-overlay-mount the base, hand the watchdog over. Every
     collaborator is required, with no defaults: a test that forgets a fake fails with
     TypeError instead of reaching the real network or clock. Only main() builds the real ones.
@@ -564,14 +585,16 @@ def netboot(cmdline: Mapping[str, str] | None, rootmnt: Path, *, ops: NetbootOps
     try:
         _run_netboot(cmdline, rootmnt, console, ops=ops,
                      transport=_PacedTransport(transport, keeper),
-                     clock_gate=clock_gate, serial_reader=serial_reader)
+                     clock_gate=clock_gate, serial_reader=serial_reader,
+                     offer_mode=offer_mode, boot_id_reader=boot_id_reader)
     except BaseException as error:
         console.failed(error, debug=debug)
         raise
 
 
 def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: Transport,
-                 clock_gate: ClockSettler, serial_reader) -> None:
+                 clock_gate: ClockSettler, serial_reader, offer_mode: bool,
+                 boot_id_reader: Callable[[], str] | None) -> None:
     missing = missing_kernel_liveness()
     note = f" note: kernel liveness missing: {' '.join(missing)}" if missing else ""
     console.line(0, f"setup: {console.provenance} keeper={console.keeper.summary}{note}")
@@ -628,9 +651,48 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
         # unauthenticated first hop, so this note names the risk only.
         console.log.info("note: configured root is http: the first hop is unauthenticated")
 
-    # Phase 6: the base, one direct request to the located origin.
+    # Phase 6: freeze one exact selection before requesting its bytes. The legacy path is only
+    # for a Central that answered the offer POST with its canonical unknown-route response.
+    offer: BootOffer | None = None
+    node_offer = None
+    boot_id: str | None = None
+    nonce: str | None = None
+    node_mode = (cmdline or {}).get("photowall.node") == "v2"
+    if node_mode:
+        if serial is None:
+            raise NetbootError("node_boot_serial_unavailable")
+        boot_id = boot_id_reader() if boot_id_reader else KERNEL_BOOT_ID.read_text().strip()
+        nonce = node_nonce(ops.run_root, UUID(boot_id))
+        request = NodeBootRequestV2(serial, UUID(boot_id), nonce)
+        body = post_json(located, "/v2/node/boot-offers", json.loads(encode_node_boot_request(request)),
+                         transport=transport, max_reply=MAX_NODE_BOOT_BYTES)
+        node_offer = parse_node_boot_offer(body)
+        if node_offer.kernel_boot_id != UUID(boot_id) or node_offer.boot_nonce != nonce or node_offer.serial != serial:
+            raise NetbootError("node_boot_offer_binding")
+    elif offer_mode:
+        if serial is None:
+            raise NetbootError("boot_serial_unavailable")
+        boot_id = boot_id_reader() if boot_id_reader else KERNEL_BOOT_ID.read_text().strip()
+        try:
+            nonce = boot_nonce(ops.run_root, boot_id)
+            body = post_json(located, BOOT_OFFER_PATH,
+                             {"schema": 1, "kind": "pi", "serial": serial,
+                              "kernel_boot_id": boot_id, "boot_nonce": nonce},
+                             transport=transport)
+            offer = BootOffer.parse(body)
+        except UnsupportedRoute:
+            console.log.info("phase 6/7 offer: older Central route unsupported; legacy base")
+        except BootOfferError as error:
+            raise NetbootError(str(error)) from error
+    base_path = (NETBOOT_BASE_PATH if offer is None else
+                 f"{BOOT_OFFER_PATH}/{offer.offer_id}/base")
+    if node_offer is not None:
+        base_path = f"/v2/node/boot-offers/{node_offer.offer_id}/artifacts/base"
+    expected_digest = (node_offer.base.squashfs_sha256 if node_offer else
+                       offer.base.sha256 if offer else None)
+    expected_size = node_offer.base.size_bytes if node_offer else offer.base.size if offer else None
     headers = {SERIAL_HEADER: serial} if serial else {}
-    console.line(6, f"base: GET {located.origin.url(NETBOOT_BASE_PATH)} headers={headers}")
+    console.line(6, f"base: GET {located.origin.url(base_path)} headers={headers}")
     fetcher = DirectFetch(located, transport=transport, seconds=BASE_FETCH_SECONDS)
     image = ops.ram() / RAM_IMAGE_NAME
     captured: dict[str, str | None] = {}
@@ -645,15 +707,34 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
         if captured["digest"] is None:
             console.log.info(f"phase 6/{PHASES} base: NO usable sha-256 Digest header -- "
                              "the fetch will fail closed")
+        if expected_digest is not None and captured["digest"] != expected_digest:
+            raise NetbootError("netboot_offer_header_mismatch")
 
     try:
-        chunks = fetcher.chunks(NETBOOT_BASE_PATH, MAX_ROOTFS_BYTES, block=CHUNK,
+        chunks = fetcher.chunks(base_path, expected_size or MAX_ROOTFS_BYTES,
+                                block=CHUNK,
                                 headers=headers, on_response=on_response)
         # keeper.paced pets once per streamed block (S0-AC4).
-        fetch_verified(console.keeper.paced(chunks), image, lambda: captured.get("digest"),
-                       log=console.log)
+        fetch_verified(console.keeper.paced(chunks), image,
+                       expected_digest or (lambda: captured.get("digest")),
+                       expected_size=expected_size, log=console.log)
         console.line(7, "mount + handoff: mounting squashfs")
         ops.mount_root(image, rootmnt)
+        if node_offer is not None:
+            write_node_handoff(rootmnt, central=str(located.origin), offer=node_offer)
+        elif offer_mode:
+            assert boot_id is not None and nonce is not None
+            try:
+                handoff = write_boot_handoff(rootmnt, kernel_boot_id=boot_id, nonce=nonce,
+                                             base_digest=offer.base.sha256 if offer else
+                                             captured["digest"], offer=offer)
+                recovered = read_handoff(handoff)
+            except BootOfferError as error:
+                raise NetbootError(str(error)) from error
+            if (recovered is None or recovered["kernel_boot_id"] != boot_id
+                    or recovered["boot_nonce"] != nonce
+                    or recovered["offer_id"] != (offer.offer_id if offer else None)):
+                raise NetbootError("boot_handoff_invalid")
         differs = compare_trust_bundles(INITRD_CA_BUNDLE,
                                         rootmnt / DEBIAN_CA_BUNDLE.relative_to("/"))
         if differs is not None:
@@ -699,7 +780,7 @@ def main() -> None:
         netboot(cmdline, args.rootmnt, ops=ops, transport=HttpTransport(trust=trust),
                 clock_gate=clock_gate, keeper=keeper,
                 trust_provenance=trust_provenance(trust, floor), serial_reader=read_pi_serial,
-                log=log)
+                log=log, offer_mode=True)
     except (NetbootError, UplinkError, BootstrapError, BootstrapFatal, OSError):
         raise SystemExit("photo-wall: netboot_failed") from None
 

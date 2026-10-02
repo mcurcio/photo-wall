@@ -16,7 +16,8 @@ def closure():
 
 
 def test_stage_1_reaches_uplink_and_the_stdlib_only_contracts(closure):
-    assert {"appliance.netboot_init", "appliance.bootstrap", "uplink.locate", "uplink.fetch",
+    assert {"appliance.netboot_init", "appliance.boot_offer", "appliance.central_post",
+            "appliance.bootstrap", "uplink.locate", "uplink.fetch",
             "uplink.clock", "uplink.trust", "contracts.central_identity",
             "contracts.clock_record"} <= set(closure.modules)
 

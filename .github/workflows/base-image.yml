@@ -14,6 +14,12 @@ name: rpi-image-gen base OS build
 # Every artifact is named by that revision so the publish job consumes it by
 # name. Nothing here is signed (home LAN, no threat model), so this call takes
 # no signing secret. workflow_dispatch builds by hand (manual iteration).
+#
+# The V2 node components are built once per run by node-components.yml (the
+# pipeline's `node-components` job; this workflow's own `components` job when
+# dispatched) and downloaded here: the squashfs bakes their two .debs.
+# A pull request uploads no release artifact (only the seal, on main, reads
+# them); its failure diagnostics are still kept.
 on:
   workflow_dispatch:
   workflow_call:
@@ -51,9 +57,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # By hand only: a pipeline run's components come from its own node-components job.
+  components:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/node-components.yml
+    with:
+      revision: ${{ github.sha }}
+
   build-base-image:
+    needs: components
+    if: ${{ !cancelled() && needs.components.result != 'failure' }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 150
     env:
       # The exact commit these assets are built for: the caller's `revision`
       # when called by pipeline.yml, else the triggering commit. Threads through
@@ -153,6 +168,44 @@ jobs:
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
 
+      - name: Build the data-only Player payload
+        id: player-payload
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
+        run: |
+          set -eu
+          install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-payload"
+          payload_path=$(.venv/bin/python -m scripts.build_player_payload \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
+            --output-dir "$RUNNER_TEMP/photo-wall-player-payload")
+          echo "payload_path=$payload_path" >> "$GITHUB_OUTPUT"
+
+      # The exact set node-components.yml built for this revision, the one the seal ships.
+      - name: Download the immutable V2 node components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-components-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-node-components
+
+      # Cache A's node input: the two node .debs the squashfs bakes, named by what builds them
+      # rather than by bytes a build might not repeat. node-base.deb is pure staging under the
+      # pin's SOURCE_DATE_EPOCH, so its bytes are its inputs; node-display.deb is compiled, so
+      # it is named by the inputs its builder records (inputs_sha256 in build-provenance.json).
+      # A stale hit cannot pass silently: the node ABI check below requires the cached
+      # squashfs's installed ABI to equal these components'.
+      - name: Compute the node component input digest
+        id: node-components
+        run: |
+          set -eu
+          components="$RUNNER_TEMP/photo-wall-node-components"
+          base=$(sha256sum < "$components/node-base.deb" | cut -d' ' -f1)
+          display=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["native"]["inputs_sha256"])' \
+            "$components/build-provenance.json")
+          digest=$(printf 'node-base.deb %s\nnode-display inputs %s\n' "$base" "$display" \
+            | sha256sum | cut -d' ' -f1)
+          echo "inputs_digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The bootstrapper's computed closure digest (scripts/module_closure.py,
       # the code the .deb ships): Cache A's code input, instead of a hand-kept
       # file list that could fall behind the closure.
@@ -213,7 +266,8 @@ jobs:
       # (the pin and the device set the base installs), the bootstrapper .deb
       # (BAKED into the squashfs: its computed closure's digest, its unit and
       # its builders, which also generate its __main__.py and Depends), the
-      # pyproject version, and this workflow. Deliberately EXACT match only (no
+      # node component input digest (above), the pyproject version, and this
+      # workflow. Deliberately EXACT match only (no
       # restore-keys): a prefix-fallback could restore a stale base built from
       # different inputs -- exactly the poisoning risk. The Player's code is NOT
       # in this closure because it is NOT baked into the base (it ships as the
@@ -226,7 +280,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}-${{ steps.node-components.outputs.inputs_digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -241,6 +295,8 @@ jobs:
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB" \
+               "IGconf_app_node_base_deb=$RUNNER_TEMP/photo-wall-node-components/node-base.deb" \
+               "IGconf_app_node_display_deb=$RUNNER_TEMP/photo-wall-node-components/node-display.deb" \
                "IGconf_app_device_packages=$DEVICE_PACKAGES" \
                "IGconf_app_debian_sources=$DEBIAN_SOURCES"
 
@@ -361,6 +417,17 @@ jobs:
           bootstrapper_dir=usr/lib/photo-wall-bootstrapper
           require_path - "$bootstrapper_dir/__main__.py" 'the bootstrapper entry point'
           require_path - "$bootstrapper_dir/closure.json" 'the bootstrapper closure manifest'
+          require_path - "$bootstrapper_dir/os-agent.py" 'the base-owned OS agent launcher'
+          require_path - "$bootstrapper_dir/player-launch.py" 'the base-owned Player launcher'
+          require_path - "$bootstrapper_dir/base-abi.txt" 'the base ABI declaration'
+          require_path - "$bootstrapper_dir/weston.ini" 'the base-owned Weston configuration'
+          for unit in photo-wall-os-agent photo-wall-player photo-wall-weston; do
+            if grep -Eq -- "^- squashfs-root/(usr/)?lib/systemd/system/$unit.service$" "$typed"; then
+              echo "OK: found base-owned $unit.service vendor unit"
+            else
+              violation "missing base-owned $unit.service vendor unit"
+            fi
+          done
           # The unit ships at the vendor path (/lib/systemd/system, not
           # /etc/systemd/system -- this is a packaged unit now, not a raw
           # overlay file), AND is actually enabled (a `.wants` symlink the
@@ -382,6 +449,15 @@ jobs:
               violation "enablement symlink points at unexpected target: $target"
             fi
           fi
+          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service 'photo-wall-os-agent.service enablement symlink'
+          if grep -Fxq -- 'l squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service' "$typed"; then
+            agent_target=$(grep -F -- 'squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service ->' "$listing" | awk '{print $NF}')
+            if [ "$agent_target" = "/lib/systemd/system/photo-wall-os-agent.service" ] || [ "$agent_target" = "/usr/lib/systemd/system/photo-wall-os-agent.service" ]; then
+              echo "OK: OS-agent enablement symlink points at the vendor unit path"
+            else
+              violation "OS-agent enablement symlink points at unexpected target: $agent_target"
+            fi
+          fi
           # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
           # regular file on some distros), so accept either type here. The
           # unit runs it as `python3 -I -B /usr/lib/photo-wall-bootstrapper`.
@@ -399,13 +475,21 @@ jobs:
           rm -rf "$extract"
           unsquashfs -no-xattrs -d "$extract" "$squashfs" \
             etc/systemd usr/lib/systemd/system.conf.d lib/systemd/system.conf.d \
-            etc/apt var/lib/dpkg/status "$bootstrapper_dir/closure.json" >/dev/null
+            etc/apt etc/passwd var/lib/dpkg/status "$bootstrapper_dir/closure.json" \
+            "$bootstrapper_dir/base-abi.txt" >/dev/null
           manifest="$extract/$bootstrapper_dir/closure.json"
           if [ -f "$manifest" ]; then
             closure_files=$(python3 -c 'import sys; from pathlib import Path; from scripts.module_closure import read_manifest; print("\n".join(read_manifest(Path(sys.argv[1])).files))' "$manifest")
             for file in $closure_files; do
               require_path - "$bootstrapper_dir/$file" "closure file $file"
             done
+          fi
+          if ! grep -q '^wall:' "$extract/etc/passwd"; then
+            violation "missing wall user in base OS"
+          fi
+          expected_abi=$(.venv/bin/python -c 'from pathlib import Path; from contracts.player_payload import base_abi; from scripts.debian_packages import PIN, packages; from scripts.build_bootstrapper_deb import launcher_contract_digest; print(base_abi(PIN.snapshot, packages("player"), launcher_contract_digest(Path.cwd())))')
+          if [ "$(cat "$extract/$bootstrapper_dir/base-abi.txt")" != "$expected_abi" ]; then
+            violation "base ABI file does not match installed runtime declaration"
           fi
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
@@ -445,6 +529,7 @@ jobs:
           fi
           # No Player venv baked into the base.
           forbid_substring 'squashfs-root/opt/photo-wall/venv' 'the Player venv (/opt/photo-wall/venv)'
+          forbid_substring 'squashfs-root/usr/lib/photo-wall-player/' 'application code before payload activation'
           # No deployment config or app trust anchor baked into the base --
           # the bootstrapper resolves these at boot, not build time.
           forbid_substring 'squashfs-root/etc/photo-wall/public.json' 'a baked /etc/photo-wall/public.json'
@@ -773,9 +858,28 @@ jobs:
             --rpi-eeprom-digest "$KOUT/rpi-eeprom-digest" \
             $overlay_arg \
             --squashfs "$squashfs" \
+            --base-abi-file "$RUNNER_TEMP/photo-wall-base-extract/usr/lib/photo-wall-bootstrapper/base-abi.txt" \
             --output "$BUNDLE" \
             --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
             --python python3
+
+      - name: Verify installed node ABI and produce the explicit V2 cohort bundle
+        run: |
+          set -eu
+          .venv/bin/python - "$RUNNER_TEMP" <<'PYCODE'
+          import json, pathlib, subprocess, sys
+          work = pathlib.Path(sys.argv[1])
+          components = json.loads((work / "photo-wall-node-components/components.json").read_text())
+          squashfs = work / "photo-wall-base-bundle/photo-wall-base.squashfs"
+          installed = {}
+          for name in ("usr/lib/photo-wall-node-base/abi.json", "usr/lib/photo-wall-display/abi.json"):
+              installed.update(json.loads(subprocess.check_output(["unsquashfs", "-cat", str(squashfs), name])))
+          if installed != components["abi"]:
+              raise SystemExit("installed node ABI does not match exact component roots")
+          PYCODE
+          .venv/bin/python -m scripts.node_release_artifacts \
+            --source-bundle "$RUNNER_TEMP/photo-wall-base-bundle" \
+            --output "$RUNNER_TEMP/photo-wall-node-bundle"
 
       - name: Verify the assembled bundle (content, no hardware)
         env:
@@ -792,7 +896,7 @@ jobs:
           for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img \
                    boot/initrd.img boot/bcm2712-rpi-5-b.dtb \
                    boot/pieeprom.upd boot/pieeprom.sig \
-                   photo-wall-base.squashfs SHA256SUMS; do
+                   photo-wall-base.squashfs base-abi.json SHA256SUMS; do
             [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
           done
 
@@ -814,6 +918,18 @@ jobs:
             || violation "SHA256SUMS lists $listed files, bundle has $expected"
           ( cd "$BUNDLE" && sha256sum -c --quiet SHA256SUMS ) \
             || violation "SHA256SUMS re-verification failed"
+          python3 - "$BUNDLE" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+          from contracts.release import parse_base_abi_sidecar
+          bundle = pathlib.Path(sys.argv[1])
+          abi, digest = parse_base_abi_sidecar((bundle / "base-abi.json").read_bytes())
+          with (bundle / "photo-wall-base.squashfs").open("rb") as stream:
+              actual = hashlib.file_digest(stream, "sha256").hexdigest()
+          if digest != actual:
+              raise SystemExit("base ABI sidecar does not bind assembled squashfs")
+          PY
 
           # No signed / trust material anywhere in the bundle (this path is
           # unsigned by construction -- 0008 boot-chain). pieeprom.sig is the
@@ -907,27 +1023,93 @@ jobs:
 
       # The base must START the Player, not only carry its Depends. v0.9.1's base had no udev,
       # so no render group, and player.service failed at spawn (216/GROUP) on every Pi while
-      # every content check passed. This boots the built squashfs under real systemd (a
+      # every content check passed. Three probes boot the built squashfs under real systemd (a
       # --privileged container, systemd as PID 1, the units that would act on this runner's
-      # devices and kernel masked), requires udev and the render, video and input groups,
-      # installs the Player .deb built above with dpkg alone, and starts the unit as
-      # provisioning does: it passes only when the unit is active/running. It then hands the
-      # built initrd's modules over as stage 1 does and requires the base's own libkmod to find
-      # vc4 and v3d by their devices' aliases and read every file they need
-      # (scripts/player_start_probe.py). After the bundle, so it reads the initrd the release
-      # ships; not gated by a cache hit, so a Player-only change still has to start on the
-      # cached base.
-      - name: Start the Player unit on the built base under systemd
+      # devices and kernel masked), each in its own container, image and work directory (every
+      # name carries a random suffix), so they run at once; the step waits for all three,
+      # prints each one's output, and fails if any failed. Not gated by a cache hit, so a
+      # Player-only change still has to start on the cached base. After the bundle, so they read
+      # the initrd the release ships.
+      #
+      #   player-deb       requires udev and the render, video and input groups, installs the
+      #                    Player .deb built above with dpkg alone, and starts the unit as
+      #                    provisioning does: it passes only when the unit is active/running.
+      #                    It then hands the built initrd's modules over as stage 1 does and
+      #                    requires the base's own libkmod to find vc4 and v3d by their devices'
+      #                    aliases and read every file they need (scripts/player_start_probe.py).
+      #   player-payload   the data-only Player payload through the shipped base-owned launcher
+      #                    and exact archive (the .deb probe installs an overriding unit, so this
+      #                    one has its own container).
+      #   os-agent         the netboot tracer checks the exact packaged check-in wire against
+      #                    Central, but invokes two one-shot reports. This boots the final
+      #                    squashfs to multi-user.target with the provisioner masked and requires
+      #                    the OS-agent to start without an explicit start; a separate container
+      #                    then keeps the same installed agent process alive while the
+      #                    provisioner rejects a corrupt package. The HTTP peer is a local
+      #                    recorder on an ephemeral port.
+      - name: Start the Player, the Player payload and the OS-agent on the built base under systemd
         env:
-          WORKROOT: ${{ runner.temp }}/photo-wall-base-work
-          BUNDLE: ${{ runner.temp }}/photo-wall-base-bundle
+          SQUASHFS: ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base/photo-wall-base.squashfs
+          INITRD: ${{ runner.temp }}/photo-wall-base-bundle/boot/initrd.img
           PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+          PLAYER_PAYLOAD: ${{ steps.player-payload.outputs.payload_path }}
         run: |
           set -eu
-          sudo .venv/bin/python scripts/player_start_probe.py \
-            --squashfs "$WORKROOT/image-photo-wall-base/photo-wall-base.squashfs" \
-            --deb "$PLAYER_DEB" --initrd "$BUNDLE/boot/initrd.img" \
+          logs="$RUNNER_TEMP/base-probes"
+          mkdir -p "$logs"
+          declare -A probes
+          # A probe in the background, its output to its own log: `probe NAME COMMAND...`.
+          probe() {
+            local name=$1
+            shift
+            "$@" > "$logs/$name.log" 2>&1 &
+            probes[$name]=$!
+          }
+          probe player-deb sudo .venv/bin/python scripts/player_start_probe.py \
+            --squashfs "$SQUASHFS" --deb "$PLAYER_DEB" --initrd "$INITRD" \
             --work "$RUNNER_TEMP/player-start-probe"
+          probe player-payload sudo .venv/bin/python scripts/player_start_probe.py \
+            --squashfs "$SQUASHFS" --payload "$PLAYER_PAYLOAD" \
+            --work "$RUNNER_TEMP/player-payload-start-probe"
+          probe os-agent sudo .venv/bin/python scripts/os_agent_service_probe.py \
+            --squashfs "$SQUASHFS" --deb "$PLAYER_DEB" \
+            --work "$RUNNER_TEMP/os-agent-service-probe"
+          failed=()
+          for name in player-deb player-payload os-agent; do
+            status=0
+            wait "${probes[$name]}" || status=$?
+            echo "::group::$name probe (exit $status)"
+            cat "$logs/$name.log"
+            echo "::endgroup::"
+            if [ "$status" -ne 0 ]; then failed+=("$name"); fi
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::base systemd probes failed: ${failed[*]}"
+            exit 1
+          fi
+
+      - name: Make OS-agent probe diagnostics readable to the runner
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/os-agent-service-probe" ]; then
+            sudo chmod -R a+rX "$RUNNER_TEMP/os-agent-service-probe"
+          fi
+
+      # Diagnostics: kept on any failure, and on every run that is not a pull request.
+      - name: Upload OS-agent service probe diagnostics
+        if: failure() || github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-os-agent-service-${{ env.REVISION }}
+          path: |
+            ${{ runner.temp }}/os-agent-service-probe/evidence.json
+            ${{ runner.temp }}/os-agent-service-probe/requests.json
+            ${{ runner.temp }}/os-agent-service-probe/journal.log
+            ${{ runner.temp }}/os-agent-service-probe/autostart/evidence.json
+            ${{ runner.temp }}/os-agent-service-probe/autostart/requests.json
+            ${{ runner.temp }}/os-agent-service-probe/autostart/journal.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Show what was produced
         if: always()
@@ -937,7 +1119,10 @@ jobs:
           set -x
           find "$WORKROOT" -maxdepth 3 -printf '%y %10s %p\n' 2>/dev/null || true
 
+      # The release artifacts: only the seal reads them, on a push to main, so a pull request
+      # uploads none (each is still built and verified above).
       - name: Upload the base rootfs squashfs and manifest
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: photo-wall-base-image-${{ env.REVISION }}
@@ -952,6 +1137,7 @@ jobs:
       # initrd + Pi 5 DTBs + squashfs + SHA256SUMS). pipeline.yml publishes this
       # by name (photo-wall-base-bundle-<revision>).
       - name: Upload the netboot base bundle
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: photo-wall-base-bundle-${{ env.REVISION }}
@@ -959,10 +1145,20 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload the explicit V2 cohort bundle
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-bundle-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-node-bundle/
+          if-no-files-found: error
+          retention-days: 7
+
       # The two .debs built above, each as its own revision-named artifact so
       # pipeline.yml can publish them as standalone release assets alongside the
       # base bundle.
       - name: Upload the Player .deb
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: photo-wall-player-deb-${{ env.REVISION }}
@@ -970,7 +1166,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Upload the data-only Player payload
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-player-payload-${{ env.REVISION }}
+          path: ${{ steps.player-payload.outputs.payload_path }}
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload the bootstrapper .deb
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: photo-wall-bootstrapper-deb-${{ env.REVISION }}

@@ -1,9 +1,10 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { isBound } from "./health.js";
 import { boundOutput } from "./join.js";
 import { derive } from "./capability.js";
 import { GatedArea } from "./GatedArea.jsx";
+import { LiveCalibrationTrial, useCalibrationCapability } from "./LiveCalibrationTrial.jsx";
 import { useCalibration } from "./useCalibration.js";
 import { useDraft } from "./useDraft.js";
 import { cornerHandles, cropHandles, toNormalized } from "./projection.js";
@@ -96,6 +97,7 @@ export function Commissioning({ snapshot, frameId }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
   const calibration = frame?.calibration ?? {};
+  const [calibrationCapability, retryCapability] = useCalibrationCapability(frameId, frame?.generation);
 
   // Plane B draft, seeded from the committed calibration and refresh-proof. This
   // hook is called unconditionally (before the early return) to keep hook order
@@ -118,6 +120,14 @@ export function Commissioning({ snapshot, frameId }) {
   const profileEditButtonRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const svgRef = useRef(/** @type {SVGSVGElement|null} */ (null));
   const dragRef = useRef(/** @type {{kind: string, index?: number}|null} */ (null));
+
+  // Restore focus after React has committed the editor's removal. A queued
+  // animation frame may be throttled while the operator tab is in the background.
+  useEffect(() => {
+    if (profileDraft == null && profileStatus != null) {
+      profileEditButtonRef.current?.focus();
+    }
+  }, [profileDraft, profileStatus]);
 
   if (!frame) {
     return (
@@ -178,7 +188,6 @@ export function Commissioning({ snapshot, frameId }) {
         setProfileStatus(result.changed
           ? "Display profile saved. Recalibrate this Frame before showing content."
           : "Display profile already matches; calibration was not changed.");
-        requestAnimationFrame(() => profileEditButtonRef.current?.focus());
       } else if (result.code === "binding_generation_conflict") {
         setProfileError("This Frame's equipment changed while you were editing. Reload its facts before retrying.");
       } else if (result.code === "frame_bound") {
@@ -472,6 +481,9 @@ export function Commissioning({ snapshot, frameId }) {
         </div>
       </section>
 
+      {calibrationCapability?.mode === "native_trial" ? (
+        <LiveCalibrationTrial key={frameId + ":" + frame?.generation} frameId={frameId} trying={trying} calibrated={frame.calibration_valid === true} />
+      ) : calibrationCapability?.mode === "legacy_preview" ? (
       <section
         className="facet__section facet__section--lease"
         role="group"
@@ -536,6 +548,11 @@ export function Commissioning({ snapshot, frameId }) {
           </p>
         ) : null}
       </section>
+      ) : <section className="facet__section" aria-label="Calibration capability">
+        <p role="status">{calibrationCapability ? "Calibration capability is unavailable. Writes are paused." : "Checking calibration capability…"}</p>
+        {calibrationCapability && <button type="button" onClick={retryCapability}>Retry capability</button>}
+      </section>}
+
 
       <section className="facet__section" role="group" aria-label="Frame facts">
         <h4 className="facet__subtitle">Frame facts</h4>

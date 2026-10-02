@@ -639,7 +639,8 @@ def test_the_devices_serial_shows_in_the_chooser_and_the_roster(page, registry):
         expect(_serial_option(inspector)).to_be_visible()
         go(page, "equipment")
         pending = page.get_by_role("group", name="Pending players", exact=True)
-        expect(pending).to_contain_text(f"Reported serial {SERIAL} · Netboot seen, no image served yet")
+        expect(pending).to_contain_text(
+            f"Reported serial {SERIAL} · Legacy netboot seen, no image served yet")
 
 
 def test_collapsed_pending_cards_show_distinct_reported_serial_handles(page, registry):
@@ -708,20 +709,24 @@ OLD, NEW = "v1.4.2", "v1.5.0"
 
 
 @pytest.mark.parametrize(("outcome", "served", "good", "failed", "label"), [
-    # healthy: netboot_base writes known_good = last_served with it.
-    ("healthy", OLD, OLD, None, f"Last netboot healthy on {OLD}"),
-    ("healthy", OLD, OLD, NEW, f"Rolled back from {NEW} · last netboot healthy on {OLD}"),
-    # pending: record_served moved last_served and left known_good behind.
-    ("pending", NEW, OLD, None, f"Netboot served {NEW}, base health not reported · last healthy on {OLD}"),
-    ("pending", NEW, None, None, f"Netboot served {NEW}, base health not reported"),
-    ("pending", OLD, OLD, NEW, f"Rolled back from {NEW} · netboot served {OLD}, base health not reported"),
-    # fenced with no known-good: the failed tag is served again (boot_policy.py).
+    ("healthy", OLD, OLD, None,
+     f"Legacy health report for {OLD} · exact base acceptance unverified"),
+    ("healthy", OLD, OLD, NEW,
+     f"Legacy health report for {OLD} after {NEW} · exact base acceptance unverified"),
+    ("pending", NEW, OLD, None,
+     f"Legacy netboot served {NEW} · base acceptance unknown · legacy known-good tag {OLD}, bytes unverified"),
+    ("pending", NEW, None, None,
+     f"Legacy netboot served {NEW} · base acceptance unknown · no verified fallback"),
+    ("pending", OLD, OLD, NEW,
+     f"Legacy netboot served {OLD} · base acceptance unknown · legacy known-good tag {OLD}, bytes unverified"),
     ("pending", NEW, None, NEW,
-     f"Retrying {NEW} after a failed netboot · no healthy version to roll back to"),
-    ("failed", NEW, OLD, NEW, f"Last netboot of {NEW} failed · last healthy on {OLD}"),
-    ("failed", NEW, None, NEW, f"Last netboot of {NEW} failed · no healthy version to roll back to"),
+     f"Legacy netboot served {NEW} · base acceptance unknown · no verified fallback"),
+    ("failed", NEW, OLD, NEW,
+     f"Legacy netboot marked {NEW} failed · physical failure unconfirmed · legacy known-good tag {OLD}, bytes unverified"),
+    ("failed", NEW, None, NEW,
+     f"Legacy netboot marked {NEW} failed · physical failure unconfirmed · no verified fallback"),
 ])
-def test_the_boot_outcome_names_each_tag_by_what_central_recorded(
+def test_the_legacy_boot_outcome_discloses_uncertainty(
         page, registry, outcome, served, good, failed, label):
     player_id = _netbooted_player(registry)
     row = {"device_id": device_id_for_serial(SERIAL), "serial": SERIAL, "attached_tag": None,

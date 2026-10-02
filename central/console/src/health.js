@@ -391,24 +391,9 @@ export function playerSerial(snapshot, bootFacts, playerId) {
 export const BOOT_FACTS_UNAVAILABLE = "Boot records unavailable";
 
 /**
- * A device's netboot outcome in plain words, from the boot facts (bootFacts.js),
- * branched on `boot_outcome` first, as Central writes it:
- *
- *  - none:    the row exists (created empty at the netboot seam) but no image was
- *             ever served (`record_served` is the only writer of a first outcome).
- *  - healthy: a healthy report for the tag last served (netboot_base.py writes
- *             `known_good_tag = last_served_tag` with it). A fence still standing
- *             (`failed_tag`) means this healthy boot was the rollback.
- *  - pending: `last_served_tag` was served and no health report has confirmed it
- *             yet (`record_served`); the known-good is an older tag, not this one.
- *             With a fence on another tag it is the rollback boot; with a fence on
- *             the served tag itself there was no known-good to fall back to and
- *             the failed tag is being served again (boot_policy.py: it boot-loops
- *             until an operator pins).
- *  - failed:  the last served boot never reported healthy (DETECT or the sweep).
- *
- * Null while the first read is pending; "Boot records unavailable" when no read
- * has succeeded.
+ * Historical tag-based netboot status. These records may come from app-owned
+ * health or timeout policy; neither proves exact base bytes, physical boot, or
+ * an accepted fallback. The fleet projector carries stronger evidence separately.
  *
  * @param {{devices: Map<string, object>, loaded: boolean, unavailable: boolean}|null} bootFacts
  * @param {string} deviceId the Player's `device_id`
@@ -419,30 +404,20 @@ export function bootOutcomeLabel(bootFacts, deviceId) {
     return bootFacts?.unavailable ? BOOT_FACTS_UNAVAILABLE : null;
   }
   const row = bootFacts.devices.get(deviceId);
-  if (row === undefined) {
-    return "No netboot record";
-  }
+  if (row === undefined) return "No netboot record";
   const { last_served_tag: served, known_good_tag: good, failed_tag: failed } = row;
-  const fallback = good ? `last healthy on ${good}` : "no healthy version to roll back to";
+  const fallback = good ? `legacy known-good tag ${good}, bytes unverified` : "no verified fallback";
   switch (row.boot_outcome) {
     case "healthy":
       return failed
-        ? `Rolled back from ${failed} · last netboot healthy on ${served}`
-        : `Last netboot healthy on ${served}`;
+        ? `Legacy health report for ${served} after ${failed} · exact base acceptance unverified`
+        : `Legacy health report for ${served} · exact base acceptance unverified`;
     case "pending":
-      if (failed && failed !== served) {
-        return `Rolled back from ${failed} · netboot served ${served}, base health not reported`;
-      }
-      if (failed) {
-        return `Retrying ${served} after a failed netboot · ${fallback}`;
-      }
-      return good && good !== served
-        ? `Netboot served ${served}, base health not reported · ${fallback}`
-        : `Netboot served ${served}, base health not reported`;
+      return `Legacy netboot served ${served} · base acceptance unknown · ${fallback}`;
     case "failed":
-      return `Last netboot of ${served} failed · ${fallback}`;
+      return `Legacy netboot marked ${served} failed · physical failure unconfirmed · ${fallback}`;
     default:
-      return "Netboot seen, no image served yet";
+      return "Legacy netboot seen, no image served yet";
   }
 }
 

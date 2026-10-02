@@ -196,8 +196,7 @@ class ProcrastinateHarness:
 
 
 @pytest.fixture(params=["recording", "procrastinate"])
-def h(request):
-    registry = request.getfixturevalue("registry")  # skips without a DB
+def h(request, registry):
     if request.param == "recording":
         return RecordingHarness(registry)
     return ProcrastinateHarness(registry)

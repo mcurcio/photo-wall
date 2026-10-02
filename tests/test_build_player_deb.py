@@ -376,7 +376,9 @@ def test_build_takes_no_root_argument():
     """The re-architected builder drops the arm64-chroot `--root`: `build()`
     is (repository, revision, output_dir) only, like the bootstrapper's."""
     params = list(inspect.signature(deb.build).parameters)
-    assert params == ["repository", "revision", "output_dir"]
+    assert params == ["repository", "revision", "output_dir", "native_client", "architecture"]
+    assert inspect.signature(deb.build).parameters["native_client"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert inspect.signature(deb.build).parameters["architecture"].kind is inspect.Parameter.KEYWORD_ONLY
     assert "root" not in params
 
 

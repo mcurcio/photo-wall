@@ -691,14 +691,17 @@ def test_the_running_kernels_tree_is_the_default(tmp_path):
         f"modules={os.uname().release} ")
 
 
-def test_a_kernel_without_its_modules_in_this_initrd_is_named(tmp_path):
+def test_a_kernel_without_its_modules_in_this_initrd_is_named(tmp_path, monkeypatch):
     """A kernel staged with another build's initrd: the display would never come up."""
+    # A relative source keeps the path short like the real /usr/lib/modules: a long tmp_path
+    # (an xdist worker's) would overflow the detail's STDERR_TAIL bound and lose its head.
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(BootstrapError) as raised:
         netboot_module.hand_over_modules(tmp_path / "root", pet=lambda: None,
                                          release="6.99.0-other",
-                                         source=initrd_modules(tmp_path / "initrd"))
+                                         source=initrd_modules(Path("initrd")))
     assert str(raised.value) == "boot_modules"
-    assert raised.value.detail == (f"no {tmp_path / 'initrd' / '6.99.0-other'} in this initrd "
+    assert raised.value.detail == ("no initrd/6.99.0-other in this initrd "
                                    "(kernel and initrd from different builds)")
 
 

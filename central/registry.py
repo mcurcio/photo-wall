@@ -7,6 +7,7 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -15,12 +16,14 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
+from central.fleet.locks import lock_fleet_assets_in
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
     OutputInventory,
     PlayerInventory,
 )
+from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
@@ -31,6 +34,15 @@ from contracts.models import (
     Model,
     OutputBinding,
     TargetIdentifier,
+)
+from contracts.player_control import (
+    ControlAck,
+    ControlAckResponse,
+    ControlAppliedReceipt,
+    ControlDelivery,
+    ControlHello,
+    ControlSelection,
+    select_control,
 )
 from contracts.time import Clock
 
@@ -89,6 +101,13 @@ class Registry:
     def __init__(self, db: Database, clock: Clock):
         self.db, self.clock = db, clock
 
+    @contextmanager
+    def _equipment_write(self):
+        """Serialize equipment mutation after Coordination then Runtime locks."""
+        with self.db.transaction() as conn:
+            acquire_runtime_locks(conn)
+            yield conn
+
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
                      (self.clock.utc(), kind, subject, Jsonb(detail or {})))
@@ -133,12 +152,23 @@ class Registry:
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         player_id = "p-" + hashlib.sha256(request.device_id.encode()).hexdigest()[:32]
         with self.db.transaction() as conn:
+            from central.coordination import COORDINATION_LOCK
+
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
             conn.execute("SELECT pg_advisory_xact_lock(734118322)")
             challenge = conn.execute("DELETE FROM enrollment_nonces WHERE nonce=%s "
                                      "AND public_key=%s AND expires_at>%s RETURNING nonce",
                                      (request.nonce, request.public_key, now)).fetchone()
             if not challenge:
                 raise RegistryError("expired_or_used_challenge", 403)
+            # Serial enrollment has no OS command authority. It must still
+            # respect permanent device retirement while an offer or retirement
+            # transaction may be creating/updating the canonical row.
+            lock_fleet_assets_in(conn)
+            device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
+                                  (request.device_id,)).fetchone()
+            if device is not None and device["retired_at"] is not None:
+                raise RegistryError("retired_device", 403)
             old = conn.execute("SELECT * FROM players WHERE device_id=%s FOR UPDATE",
                                (request.device_id,)).fetchone()
             if old and old["retired_at"] is not None:
@@ -160,6 +190,8 @@ class Registry:
                              (player_id, output.output_id, Jsonb(output.model_dump())))
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
+            # Negotiation belongs to this enrollment epoch, never to the serial or package tag.
+            self._reset_control(conn, player_id, epoch, "open")
             # Ticketless enroll (0009): the signed-rootfs boot-ticket path has
             # been retired, so no boot server ever issues a ticket and there is
             # no release session to bind. Every player enrolls unbound (pending)
@@ -182,18 +214,231 @@ class Registry:
                 raise RegistryError("unauthorized", 401)
             return row
 
+    @staticmethod
+    def _control_player(conn, player_id: str, epoch: int) -> None:
+        row = conn.execute(
+            "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
+            (player_id,),
+        ).fetchone()
+        if not row or row["retired_at"] is not None or row["authority_epoch"] != epoch:
+            raise RegistryError("stale_authority", 403)
+
+    @staticmethod
+    def _reset_control(conn, player_id: str, epoch: int, status: str) -> None:
+        conn.execute(
+            "INSERT INTO player_control_sessions(player_id,authority_epoch,status) "
+            "VALUES(%s,%s,%s) ON CONFLICT(player_id) DO UPDATE SET "
+            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,schema_version=1,"
+            "capabilities='[]',offered_schemas=NULL,offered_capabilities=NULL,"
+            "issued_sequence=0,pending_id=NULL,pending_digest=NULL,pending_expires=NULL,"
+            "applied_sequence=0,applied_at=NULL,applied_delivery_id=NULL,"
+            "applied_digest=NULL,applied_ack_nonce=NULL,last_delivery_id=NULL,last_result_sequence=NULL,"
+            "last_result_digest=NULL,last_result=NULL,last_result_at=NULL",
+            (player_id, epoch, status),
+        )
+
+    @classmethod
+    def _seal_legacy_control(cls, conn, player_id: str, epoch: int) -> ControlSelection:
+        """An epoch enrolled by an older Central is already legacy on the wire."""
+        cls._reset_control(conn, player_id, epoch, "legacy")
+        return ControlSelection(authority_epoch=epoch, schema=1)
+
+    def control_hello(self, player_id: str, request: ControlHello) -> ControlSelection:
+        with self.db.transaction() as conn:
+            self._control_player(conn, player_id, request.authority_epoch)
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if not row or row["authority_epoch"] != request.authority_epoch:
+                # A mixed-version pod may have enrolled this current epoch without a
+                # control row. Seal it as legacy so a new Player can still proceed.
+                if 1 not in request.schemas:
+                    raise RegistryError("control_schema_unsupported")
+                return self._seal_legacy_control(conn, player_id, request.authority_epoch)
+            if row["status"] == "negotiated":
+                if (row["offered_schemas"] != list(request.schemas)
+                        or row["offered_capabilities"] != list(request.capabilities)):
+                    raise RegistryError("control_negotiation_conflict")
+                return ControlSelection(authority_epoch=request.authority_epoch,
+                                        schema=row["schema_version"],
+                                        capabilities=tuple(row["capabilities"]))
+            if row["status"] != "open":
+                raise RegistryError("control_negotiation_closed")
+            selection = select_control(request)
+            if selection is None:
+                raise RegistryError("control_schema_unsupported")
+            conn.execute(
+                "UPDATE player_control_sessions SET status='negotiated',schema_version=%s,"
+                "capabilities=%s,offered_schemas=%s,offered_capabilities=%s "
+                "WHERE player_id=%s",
+                (selection.schema_version, Jsonb(list(selection.capabilities)),
+                 Jsonb(list(request.schemas)),
+                 Jsonb(list(request.capabilities)), player_id),
+            )
+            return selection
+
+    def control_selection(self, player_id: str, epoch: int) -> ControlSelection:
+        with self.db.transaction() as conn:
+            return self.control_selection_in(conn, player_id, epoch)
+
+    def control_selection_in(self, conn, player_id: str, epoch: int) -> ControlSelection:
+        """Seal/select under a caller-owned Coordination transaction when issuing state."""
+        self._control_player(conn, player_id, epoch)
+        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                           (player_id,)).fetchone()
+        if not row or row["authority_epoch"] != epoch:
+            return self._seal_legacy_control(conn, player_id, epoch)
+        if row["status"] == "open":
+            conn.execute("UPDATE player_control_sessions SET status='legacy' "
+                         "WHERE player_id=%s", (player_id,))
+            return ControlSelection(authority_epoch=epoch, schema=1)
+        return ControlSelection(authority_epoch=epoch, schema=row["schema_version"],
+                                capabilities=tuple(row["capabilities"]))
+
+    def issue_control_delivery_record(self, player_id: str, epoch: int,
+                                      digest: str) -> dict:
+        """Persist a v2 challenge and sequence before sending either state transport."""
+        with self.db.transaction() as conn:
+            return self.issue_control_delivery_record_in(conn, player_id, epoch, digest)
+
+    def issue_control_delivery_record_in(self, conn, player_id: str, epoch: int,
+                                         digest: str) -> dict:
+        """Issue under the caller's Coordinator lock, atomic with its projected state."""
+        self._control_player(conn, player_id, epoch)
+        now = self.clock.utc()
+        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                           (player_id,)).fetchone()
+        if not row or row["authority_epoch"] != epoch or row["schema_version"] != 2:
+            raise RegistryError("control_protocol_mismatch")
+        if (row["pending_id"] and row["pending_digest"] == digest
+                and row["pending_expires"] > now):
+            return ControlDelivery(delivery_id=row["pending_id"],
+                                   delivery_sequence=row["issued_sequence"]).model_dump()
+        delivery_id = secrets.token_hex(16)
+        issued = conn.execute(
+            "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
+            "pending_id=%s,pending_digest=%s,pending_expires=%s,"
+            "applied_ack_nonce=NULL WHERE player_id=%s "
+            "RETURNING issued_sequence",
+            (delivery_id, digest, now + 60, player_id),
+        ).fetchone()
+        return ControlDelivery(delivery_id=delivery_id,
+                               delivery_sequence=issued["issued_sequence"]).model_dump()
+
+    def issue_control_delivery(self, player_id: str, epoch: int, digest: str) -> str:
+        """Compatibility wrapper while HTTP and WebSocket adopt the sequence field."""
+        return self.issue_control_delivery_record(player_id, epoch, digest)["delivery_id"]
+
+    def control_ack(self, player_id: str, report: ControlAck) -> bool:
+        """Compatibility wrapper for callers that only need ACK acceptance."""
+        return self.control_ack_response(player_id, report).accepted
+
+    @staticmethod
+    def _current_applied_receipt(row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
+        """Replay only a receipt for the exact still-current applied delivery."""
+        if (report.result != "applied" or row["status"] != "negotiated"
+                or row["schema_version"] != 2
+                or row["pending_id"] is not None or row["pending_digest"] is not None
+                or row["pending_expires"] is not None
+                or row["issued_sequence"] != row["applied_sequence"]
+                or row["last_result_sequence"] != row["applied_sequence"]
+                or row["last_result"] != "applied"
+                or row["applied_at"] is None or row["last_result_at"] is None
+                or row["applied_delivery_id"] != report.delivery_id
+                or row["last_delivery_id"] != report.delivery_id
+                or row["last_result_digest"] != row["applied_digest"]
+                or row["applied_ack_nonce"] is None):
+            return None
+        return ControlAppliedReceipt(
+            authority_epoch=row["authority_epoch"],
+            delivery_id=row["applied_delivery_id"],
+            delivery_sequence=row["applied_sequence"],
+            state_digest=row["applied_digest"],
+            ack_nonce=row["applied_ack_nonce"],
+        )
+
+    def control_ack_response(self, player_id: str, report: ControlAck) -> ControlAckResponse:
+        with self.db.transaction() as conn:
+            self._control_player(conn, player_id, report.authority_epoch)
+            now = self.clock.utc()
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if (not row or row["authority_epoch"] != report.authority_epoch
+                    or row["schema_version"] != 2):
+                return ControlAckResponse(accepted=False)
+            if row["pending_id"] != report.delivery_id:
+                receipt = self._current_applied_receipt(row, report)
+                return ControlAckResponse(accepted=receipt is not None, receipt=receipt)
+            if row["pending_expires"] is None or row["pending_expires"] <= now:
+                return ControlAckResponse(accepted=False)
+            # The nonce is generated only after the ACK passes the current-epoch,
+            # pending-delivery and expiry checks. It is committed with the result.
+            nonce = secrets.token_hex(32) if report.result == "applied" else None
+            conn.execute(
+                "UPDATE player_control_sessions SET pending_id=NULL,pending_digest=NULL,"
+                "pending_expires=NULL,last_delivery_id=%s,last_result_sequence=issued_sequence,"
+                "last_result_digest=pending_digest,last_result=%s,last_result_at=%s,"
+                "applied_ack_nonce=%s,"
+                "applied_sequence=CASE WHEN %s='applied' THEN issued_sequence "
+                "ELSE applied_sequence END,"
+                "applied_at=CASE WHEN %s='applied' THEN %s ELSE applied_at END,"
+                "applied_delivery_id=CASE WHEN %s='applied' THEN pending_id "
+                "ELSE applied_delivery_id END,"
+                "applied_digest=CASE WHEN %s='applied' THEN pending_digest "
+                "ELSE applied_digest END "
+                "WHERE player_id=%s",
+                (report.delivery_id, report.result, now, nonce,
+                 report.result, report.result, now,
+                 report.result, report.result, player_id),
+            )
+            receipt = None
+            if nonce is not None:
+                receipt = ControlAppliedReceipt(
+                    authority_epoch=report.authority_epoch,
+                    delivery_id=report.delivery_id,
+                    delivery_sequence=row["issued_sequence"],
+                    state_digest=row["pending_digest"],
+                    ack_nonce=nonce,
+                )
+            return ControlAckResponse(accepted=True, receipt=receipt)
+
+    def control_fact(self, player_id: str) -> dict | None:
+        """Read provenance-labelled app-control history without readiness inference."""
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT c.authority_epoch,c.schema_version,c.status,c.issued_sequence,"
+                "c.pending_id,c.pending_digest,c.applied_sequence,c.applied_at,"
+                "c.applied_delivery_id,c.applied_digest,c.last_delivery_id,"
+                "c.last_result_sequence,c.last_result_digest,c.last_result,c.last_result_at "
+                "FROM player_control_sessions c JOIN players p ON p.id=c.player_id "
+                "AND p.authority_epoch=c.authority_epoch WHERE c.player_id=%s "
+                "AND p.retired_at IS NULL",
+                (player_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def identify_output(self, player_id: str, output_id: str) -> dict:
         """Ask one active, connected, unbound Output to identify itself briefly."""
         now = self.clock.utc()
         request_id = uuid.uuid4()
         expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_player_in
+
+            require_unfenced_player_in(conn, player_id)
             player = conn.execute(
                 "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL FOR UPDATE",
                 (player_id,),
             ).fetchone()
             if not player:
                 raise RegistryError("unknown_or_retired_player", 404)
+            negotiated = conn.execute(
+                "SELECT 1 FROM player_control_sessions WHERE player_id=%s "
+                "AND authority_epoch=%s AND status='negotiated' AND schema_version=2 "
+                "AND capabilities ? 'identify_output'",
+                (player_id, player["authority_epoch"]),
+            ).fetchone()
+            if not negotiated:
+                raise RegistryError("identify_unsupported")
             output = conn.execute(
                 "SELECT observation FROM outputs WHERE player_id=%s AND output_id=%s FOR UPDATE",
                 (player_id, output_id),
@@ -250,7 +495,14 @@ class Registry:
 
     def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
         try:
-            with self.db.transaction() as conn:
+            with self._equipment_write() as conn:
+                from central.equipment_drain import (
+                    require_unfenced_frame_in,
+                    require_unfenced_player_in,
+                )
+
+                require_unfenced_player_in(conn, player_id)
+                require_unfenced_frame_in(conn, frame_id)
                 # Common lock ordering for bind and retire avoids transferring retired equipment.
                 player = conn.execute("SELECT retired_at FROM players WHERE id=%s FOR UPDATE",
                                       (player_id,)).fetchone()
@@ -283,7 +535,10 @@ class Registry:
     def unbind(self, frame_id: str, *, expected_generation: int) -> dict:
         """Release a Frame's active binding, reversibly: unlike retire, the player record
         (and its ability to be re-bound, to this or another Frame) is untouched."""
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_frame_in
+
+            require_unfenced_frame_in(conn, frame_id)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:
                 raise RegistryError("unknown_frame", 404)
@@ -305,7 +560,10 @@ class Registry:
         """Reposition: last-write-wins, no token (the one deliberate exception to R3,
         design §9a). FOR UPDATE makes the read-merge-write atomic; the row is still LWW.
         Bumps NO generation, NO configuration_revision; never touches calibration."""
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_frame_in
+
+            require_unfenced_frame_in(conn, frame_id)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
                                  (frame_id,)).fetchone()
             if not frame:
@@ -330,17 +588,11 @@ class Registry:
         The persistent Frame and its placement remain the same. A changed display
         profile invalidates committed calibration and any outstanding preview.
         """
-        from central.coordination import COORDINATION_LOCK
-        from central.runtime_store import RUNTIME_LOCK
-
-        held = conn.execute(
-            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
-            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
-            "AND objid=ANY(%s::oid[])",
-            ([COORDINATION_LOCK, RUNTIME_LOCK],),
-        ).fetchone()["n"]
-        if held != 2:
+        if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_runtime_snapshot_required", 500)
+        from central.equipment_drain import require_unfenced_frame_in
+
+        require_unfenced_frame_in(conn, frame_id)
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
@@ -384,20 +636,13 @@ class Registry:
             raise RegistryError("frame_reference_snapshot_required", 500)
         if any(not isinstance(references[key], tuple) for key in reference_keys):
             raise RegistryError("frame_reference_snapshot_required", 500)
-        # The caller's reference snapshot is authoritative only while both writers
-        # are excluded on this same transaction connection. Import constants here
-        # to avoid a module cycle: Coordination depends on RegistryError.
-        from central.coordination import COORDINATION_LOCK
-        from central.runtime_store import RUNTIME_LOCK
-
-        held = conn.execute(
-            "SELECT count(*) AS n FROM pg_locks WHERE locktype='advisory' "
-            "AND pid=pg_backend_pid() AND granted AND classid=0 AND objsubid=1 "
-            "AND objid=ANY(%s::oid[])",
-            ([COORDINATION_LOCK, RUNTIME_LOCK],),
-        ).fetchone()["n"]
-        if held != 2:
+        # The caller's reference snapshot is authoritative only while both
+        # writers are excluded on this same transaction connection.
+        if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_reference_snapshot_required", 500)
+        from central.equipment_drain import require_unfenced_frame_in
+
+        require_unfenced_frame_in(conn, frame_id)
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
@@ -421,23 +666,81 @@ class Registry:
         too, so a bind and a retire serialize. Under READ COMMITTED (the default;
         central/db.py sets no isolation) the check is a new statement after any lock
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
-        with self.db.transaction() as conn:
-            player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
-            if not player:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_player_in
+            from central.fleet.fallback import retire_device_fallback_references
+
+            require_unfenced_player_in(conn, player_id)
+            identity = conn.execute("SELECT device_id FROM players WHERE id=%s",
+                                    (player_id,)).fetchone()
+            if identity is None:
                 raise RegistryError("unknown_player", 404)
+            device_id = identity["device_id"]
+            # Fleet offer, fallback reservation and eviction take this lock
+            # before the device row. Use the same order for retirement so a
+            # fallback cannot be pinned between revocation and GC release.
+            lock_fleet_assets_in(conn)
+            now = self.clock.utc()
+            # Ticketless legacy Players may predate any PXE `devices` row.
+            # Operator retirement is allowed to create their canonical tombstone.
+            conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) "
+                         "VALUES(%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
+                         (device_id, now, now))
+            conn.execute("SELECT retired_at FROM devices WHERE device_id=%s FOR UPDATE",
+                         (device_id,)).fetchone()
+            player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
             if player["retired_at"] is not None:
                 return
             if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s LIMIT 1",
                             (player_id,)).fetchone():
                 raise RegistryError("player_bound")
+            conn.execute("UPDATE devices SET retired_at=COALESCE(retired_at,%s) "
+                         "WHERE device_id=%s", (now, device_id))
+            conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
+                         "revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL",
+                         (now, device_id))
+            conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=%s "
+                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
+            conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s "
+                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
+            retire_device_fallback_references(conn, device_id)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
-                         "WHERE id=%s", (self.clock.utc(), player_id))
+                         "WHERE id=%s", (now, player_id))
             self._audit(conn, "player_retired", player_id)
+
+    @staticmethod
+    def calibration_mode_in(conn, frame_id: str) -> str:
+        """Established V2 capability survives admission/generation revocation.
+
+        Missing current authority cannot downgrade a known V2 device to the
+        legacy write protocol. An explicit capability downgrade is not inferred.
+        """
+        row = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM bindings b JOIN players p ON p.id=b.player_id "
+            "JOIN node_boot_admissions a ON a.device_id=p.device_id "
+            "JOIN node_offer_contexts o ON o.offer_id=a.offer_id "
+            "WHERE b.frame_id=%s AND "
+            "(o.basis='node_v2' OR EXISTS(SELECT 1 FROM node_producers n "
+            "WHERE n.admission_id=a.admission_id AND n.owner='display_host'))) AS native",
+            (frame_id,),
+        ).fetchone()
+        return "native_trial" if row["native"] else "legacy_preview"
+
+    def calibration_capability(self, frame_id: str) -> dict:
+        with self.db.transaction() as conn:
+            if not conn.execute("SELECT 1 FROM frames WHERE id=%s", (frame_id,)).fetchone():
+                raise RegistryError("unknown_frame", 404)
+            return {"mode": self.calibration_mode_in(conn, frame_id)}
 
     def calibrate(self, frame_id: str, operation: str, expected_revision: int,
                   calibration: Calibration | None = None, *, expected_generation: int) -> dict:
         now = self.clock.utc()
-        with self.db.transaction() as conn:
+        with self._equipment_write() as conn:
+            from central.equipment_drain import require_unfenced_frame_in
+
+            require_unfenced_frame_in(conn, frame_id)
+            if self.calibration_mode_in(conn, frame_id) == "native_trial":
+                raise RegistryError("calibration_trial_required", 409)
             self._expire_previews(conn)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:
@@ -471,6 +774,40 @@ class Registry:
                          (frame_id,))
             self._audit(conn, f"calibration_{operation}", frame_id)
             return result
+
+    def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
+            authority_epoch: int, output_id: str, binding_generation: int,
+            config_revision: int, calibration_revision: int,
+            calibration: Calibration) -> Calibration:
+        """Registry-owned Save CAS inside the Trial owner's existing transaction.
+
+        Caller holds Coordination→Runtime then Fleet/session locks. This method
+        owns persistent Frame calibration only; it never interprets trial evidence.
+        """
+        from central.equipment_drain import require_unfenced_frame_in
+
+        if not holds_runtime_locks_in(conn):
+            raise RegistryError("calibration_runtime_locks_required")
+        require_unfenced_frame_in(conn, frame_id)
+        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id "
+                           "FROM frames f JOIN bindings b ON b.frame_id=f.id "
+                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s FOR UPDATE OF f",
+                           (frame_id,)).fetchone()
+        if row is None or row["retired_at"] is not None or (
+            row["player_id"], row["authority_epoch"], row["output_id"], row["generation"],
+            row["configuration_revision"]
+        ) != (player_id, authority_epoch, output_id, binding_generation, config_revision):
+            raise RegistryError("calibration_trial_baseline_changed")
+        current = Calibration.model_validate(row["calibration"])
+        if current.revision != calibration_revision:
+            raise RegistryError("calibration_revision_conflict")
+        committed = Calibration.model_validate(calibration.model_dump()).model_copy(
+            update={"revision": current.revision + 1})
+        conn.execute("UPDATE frames SET calibration=%s,calibration_valid=true,preview=NULL,"
+                     "preview_expires=NULL,configuration_revision=configuration_revision+1 "
+                     "WHERE id=%s", (Jsonb(committed.model_dump(mode="json")), frame_id))
+        self._audit(conn, "calibration_trial_commit", frame_id)
+        return committed
 
     def bindings_for(self, player_id: str, epoch: int, *, include_unvalidated=False) -> list[OutputBinding]:
         config = self.configuration_for(player_id, epoch)

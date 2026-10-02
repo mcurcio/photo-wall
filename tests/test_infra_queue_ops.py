@@ -11,13 +11,7 @@ import pytest
 from fakes.transactions import FakeTransactions
 from procrastinate.jobs import Job as ProcrastinateJob
 from procrastinate.jobs import Status
-from runtime_fakes import (
-    FetchOsImageStub,
-    FetchPackageStub,
-    PrefetchStub,
-    SyncReleasesStub,
-    apply_procrastinate_schema,
-)
+from runtime_fakes import apply_procrastinate_schema, catalog_stubs
 
 from central.infra import queue_ops
 from central.infra.asset_records import PgAssetRecords
@@ -97,8 +91,9 @@ def test_the_handlers_dispatch_by_their_hints_and_fill_the_catalog():
                                      outcomes=JobOutcomes(), clock=ManualClock(0.0))
     assert handler_job_type(rescue) is RescueStalledJobs
     assert handler_job_type(purge) is PurgeFinishedJobs
-    JobExecutor([FetchOsImageStub(), FetchPackageStub(), SyncReleasesStub(), PrefetchStub(),
-                 rescue, purge], transactions=FakeTransactions(), outcomes=JobOutcomes(),
+    others = [handler for handler in catalog_stubs()
+              if handler_job_type(handler) not in (RescueStalledJobs, PurgeFinishedJobs)]
+    JobExecutor([*others, rescue, purge], transactions=FakeTransactions(), outcomes=JobOutcomes(),
                 assets=PgAssetRecords(ManualClock(0.0)), clock=ManualClock(0.0), redeliver=None)
 
 

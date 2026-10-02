@@ -12,8 +12,16 @@ from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from contracts.app_process_proof import (
+    AppProofChallenge,
+    AppProofChallengeV2,
+    AppProofResponse,
+    app_proof_message,
+    app_proof_message_v2,
+)
 from contracts.enrollment import BootTicketId, Enrollment, OutputReport, enrollment_message
 from contracts.models import Identifier
+from contracts.node_app_link import NodeAppLinkChallengeV2, NodeAppLinkV2, node_app_link_message
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,28 @@ class Identity:
             boot_id=boot_id,
             ticket_id=ticket_id,
         )
+
+    def sign_app_proof(self, challenge: AppProofChallenge) -> AppProofResponse:
+        """Prove this process's enrollment key to the local base OS verifier."""
+        return AppProofResponse(
+            nonce=challenge.nonce,
+            public_key=self.public_key,
+            signature=base64.b64encode(self._key.sign(app_proof_message(challenge))).decode(),
+        )
+
+    def sign_applied_control_proof(self, challenge: AppProofChallengeV2) -> AppProofResponse:
+        """Sign the separate post-ACK domain with this enrollment's key."""
+        return AppProofResponse(
+            nonce=challenge.nonce,
+            public_key=self.public_key,
+            signature=base64.b64encode(self._key.sign(app_proof_message_v2(challenge))).decode(),
+        )
+
+
+    def sign_node_app_link(self, challenge: NodeAppLinkChallengeV2) -> NodeAppLinkV2:
+        """Sign LAN node linkage in its own domain; existing proof versions remain unchanged."""
+        return NodeAppLinkV2(challenge, self.public_key,
+                             self._key.sign(node_app_link_message(challenge)).hex())
 
 
 def load_identity() -> Identity:

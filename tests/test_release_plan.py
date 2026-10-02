@@ -15,9 +15,10 @@ import pytest
 
 from contracts.release import IMAGES
 from scripts import release_plan
-from scripts.module_closure import POLICIES, closure_for
+from scripts.module_closure import POLICIES, closure_for, first_party_packages
 from scripts.release_plan import (
     ALWAYS_JOBS,
+    BUILD_JOBS,
     DOCKERFILE,
     NOT_SHIPPED,
     PACKAGES,
@@ -35,6 +36,7 @@ from scripts.release_plan import (
     check_commits,
     claimed_by,
     dockerfile_stages,
+    due_suites,
     gate,
     image_inputs,
     matches,
@@ -131,11 +133,28 @@ def test_feat_releases_a_minor(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
     assert plan.packages == ("central-image", "media-worker-image")
-    # A central-only change needs no base build or tracer on a pull request; the release
-    # itself always builds the base (it is the release's asset build).
-    assert plan.suites == ("checks", "e2e")
-    assert PullRequestRun(plan).jobs == ("checks", "e2e")
+    # The composition root mounts the packaged OS-agent's v2 route and the node routes, so it
+    # runs the netboot tracer and the node scenarios; a pull request still needs no base-image
+    # rebuild.
+    assert plan.suites == ("checks", "e2e", "netboot-e2e", "node-pid1")
+    assert PullRequestRun(plan).jobs == ("checks", "e2e", "netboot-e2e", "node-pid1")
     assert "base-image" in ReleaseRun(plan).jobs
+
+
+@needs_uvx
+@pytest.mark.parametrize("path", ("central/db.py", "Dockerfile", "uv.lock"))
+def test_packaged_os_agent_gate_runs_for_central_database_and_image_inputs(scratch, path):
+    scratch.commit("fix(central): preserve check-in startup", {path: "changed\n"})
+    assert "netboot-e2e" in scratch.plan().suites
+
+
+@needs_uvx
+def test_resident_agent_probe_change_runs_the_built_base_gate(scratch):
+    scratch.commit("fix(base): keep OS reports through package failure",
+                   {"scripts/os_agent_service_probe.py": "PROBE = 1\n"})
+    plan = scratch.plan()
+    assert "base-bundle" in plan.packages
+    assert "base-image" in plan.suites
 
 
 @needs_uvx
@@ -247,15 +266,17 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     # The report: what merging releases.
     assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, player-deb, "
-            "bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
+            "player-environment, player-payload, bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
             "since v0.8.0)") in summary.read_text()
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
     assert values["revision"] == scratch.git("rev-parse", "HEAD")
     assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
         "false", "", "", "")
-    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e"]
-    assert "Jobs: base-image, checks, e2e, netboot-e2e\n" in summary.read_text()
+    # The Player is the sealed environment the node scenarios boot.
+    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e",
+                                          "node-pid1"]
+    assert "Jobs: base-image, checks, e2e, netboot-e2e, node-pid1\n" in summary.read_text()
 
 
 @needs_uvx
@@ -441,7 +462,10 @@ def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_a
                  "scripts/release_plan.py"):
         assert claimed_by(path) == () and any(matches(pattern, path) for pattern in NOT_SHIPPED)
     assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
-                                                "contracts/release.py")
+                                                "contracts/release.py",
+                                                "contracts/player_payload.py",
+                                                "contracts/node_release.py",
+                                                "scripts/node_release_artifacts.py")
     assert "release-assets" in claimed_by("contracts/release.py")
 
 
@@ -688,9 +712,44 @@ def _scripts_named(text: str) -> set[str]:
     return found
 
 
+# The first-party top-level packages an import can reach: the repository's packages and the
+# scripts namespace. A bare name that is a tests/ module is a test helper (tests/ is on the path).
+FIRST_PARTY = (*first_party_packages(REPO), "scripts")
+
+
+def _module_files(name: str) -> list[str]:
+    """The repository files importing `name` runs: each package __init__ on its way and the
+    module itself; none for an attribute (`from a import f`) or a module outside the repository."""
+    parts, files = name.split("."), []
+    for depth in range(1, len(parts) + 1):
+        base = REPO.joinpath(*parts[:depth])
+        for candidate in (base / "__init__.py", base.with_suffix(".py")):
+            if candidate.is_file():
+                files.append(candidate.relative_to(REPO).as_posix())
+                break
+    return files
+
+
+def _imported(path: str, tree: ast.AST) -> list[str]:
+    """The module names `path`'s code imports, at module level or in a function, relative
+    imports resolved; for `from m import n`, both m and m.n (n may be a submodule)."""
+    package = path[:-3].split("/")[:-1]
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                module = ".".join([*package[:len(package) - node.level + 1], *filter(None, [module])])
+            names += [module, *(f"{module}.{alias.name}" for alias in node.names)]
+    return names
+
+
 def _with_imports(scripts: set[str]) -> set[str]:
-    """`scripts` and every first-party script they import (transitively); a shell script's
-    siblings are those it names."""
+    """`scripts` (any repository .py or .sh files) and every first-party file they import,
+    transitively: a module's package __init__s, and a bare-name tests/ helper; a shell script's
+    sibling scripts are those it names."""
     seen, todo = set(), list(scripts)
     while todo:
         path = todo.pop()
@@ -702,14 +761,11 @@ def _with_imports(scripts: set[str]) -> set[str]:
             todo += [f"scripts/{name}" for name in re.findall(r"\b([a-z_]+\.py)\b", text)
                      if (REPO / "scripts" / name).is_file()]
             continue
-        for node in ast.walk(ast.parse(text)):
-            if isinstance(node, ast.ImportFrom) and node.module == "scripts":
-                todo += [f"scripts/{alias.name}.py" for alias in node.names]
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("scripts."):
-                todo.append(f"scripts/{node.module.split('.', 1)[1]}.py")
-            elif isinstance(node, ast.Import):
-                todo += [f"scripts/{alias.name.split('.', 1)[1]}.py" for alias in node.names
-                         if alias.name.startswith("scripts.")]
+        for name in _imported(path, ast.parse(text)):
+            if name.partition(".")[0] in FIRST_PARTY:
+                todo += _module_files(name)
+            elif "." not in name and (REPO / "tests" / f"{name}.py").is_file():
+                todo.append(f"tests/{name}.py")
     return seen
 
 
@@ -733,15 +789,54 @@ def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, pac
 def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
-    assert [path for path in base if not _package("base-bundle").claims(path)] == []
+    assert [path for path in base if not (_package("base-bundle").claims(path)
+                                         or _package("player-payload").claims(path))] == []
     # The seal and the plan it imports decide whether and how a release is written; they shape
     # no artefact byte. The packager does, and ships as release-assets.
-    seal = _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
+    seal = {path for path in _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
+            if path.startswith("scripts/")}
     assert seal == {"scripts/release_seal.py", "scripts/package_release_artifacts.py",
-                    "scripts/release_plan.py"}
+                    "scripts/node_release_artifacts.py", "scripts/release_plan.py"}
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
+    # The node components base-image.yml bakes and the seal ships are node-components.yml's.
+    components = _job("node-components.yml", "build")
+    assert ".venv/bin/python -m scripts.build_node_components" in components
+    assert [path for path in _with_imports({"scripts/build_node_components.py"})
+            if not _package("base-bundle").claims(path)] == []
+
+
+def _harness(suite: Suite) -> list[str]:
+    """A suite's harness: the Python tests and scripts its own paths name."""
+    return [path for path in _tracked() if path.endswith(".py")
+            and path.startswith(("tests/", "scripts/"))
+            and any(matches(pattern, path) for pattern in suite.paths)]
+
+
+@pytest.mark.parametrize("suite", [suite for suite in SUITES if _harness(suite)],
+                         ids=lambda suite: suite.job)
+def test_a_suite_is_due_for_every_file_its_harness_imports(suite):
+    """A suite runs the first-party code its harness imports (central.app, a test helper, a
+    builder), so a change to any file of that closure makes it due -- decided by due_suites, the
+    rule itself. A harness that grows an import fails here until the suite's paths cover it."""
+    closure = _with_imports(set(_harness(suite)))
+    assert [path for path in sorted(closure)
+            if suite.job not in due_suites(release_plan.changed_packages([path]), [path])] == []
+
+
+def test_base_cache_and_content_check_include_base_owned_player_contract():
+    workflow = (WORKFLOWS / "base-image.yml").read_text()
+    key = next(line for line in workflow.splitlines() if "key: squashfs-" in line)
+    for path in ("appliance/systemd/photo-wall-os-agent.service",
+                 "appliance/systemd/player.service",
+                 "appliance/systemd/weston.service",
+                 "appliance/systemd/weston.ini", "player/output_discovery.py"):
+        assert path in key
+    for path in ("$bootstrapper_dir/os-agent.py", "$bootstrapper_dir/player-launch.py",
+                 "$bootstrapper_dir/base-abi.txt", "$bootstrapper_dir/weston.ini"):
+        assert path in workflow
+    assert "forbid_substring 'squashfs-root/usr/lib/photo-wall-player/'" in workflow
 
 
 # --- pipeline.yml wires the rule ---------------------------------------------------------------
@@ -760,9 +855,22 @@ def _needs_of(body: str) -> list[str]:
 def test_every_conditional_job_is_one_the_plan_lists_and_reads_the_plan():
     jobs = _pipeline_jobs()
     plannable = {suite.job for suite in SUITES} | set(RELEASE_JOBS)
-    assert set(jobs) == plannable | {"plan", "tested", "gate"}
+    assert set(jobs) == plannable | set(BUILD_JOBS) | {"plan", "tested", "gate"}
     for name in plannable:
         assert f"contains(fromJSON(needs.plan.outputs.jobs), '{name}')" in jobs[name], name
+
+
+def test_a_build_runs_when_a_consumer_is_listed_and_every_consumer_needs_it():
+    """A build job is never listed: it runs exactly when the plan lists one of its consumers,
+    each of which needs it, so a failed build fails every listed consumer and the gate."""
+    jobs = _pipeline_jobs()
+    for build, consumers in BUILD_JOBS.items():
+        assert build not in {suite.job for suite in SUITES} | set(RELEASE_JOBS)
+        condition = _condition(jobs[build])
+        assert set(re.findall(r"contains\(fromJSON\(needs\.plan\.outputs\.jobs\), '([\w-]+)'\)",
+                              condition)) == set(consumers), build
+        for consumer in consumers:
+            assert build in _needs_of(jobs[consumer]), consumer
 
 
 def test_the_barrier_needs_every_test_and_every_release_job_needs_the_barrier():

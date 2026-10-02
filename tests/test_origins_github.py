@@ -174,6 +174,39 @@ def test_normal_release_becomes_a_published_release_with_package():
     assert result.etag == ETAG and result.unchanged is False
 
 
+def test_schema_two_prefers_payload_and_checks_legacy_projection():
+    server = Server()
+    base_record = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
+    row, _, _ = server.deployable("v1.2.3", base=base_record)
+    legacy_url = next(asset["browser_download_url"] for asset in row["assets"]
+                      if asset["name"] == "manifest.json")
+    legacy = json.loads(server.blobs[legacy_url]["chunks"][0])
+    payload_name = f"photo-wall-player-payload-{'a' * 40}.tar.gz"
+    payload_url = f"https://github.com/{REPO}/releases/download/v1.2.3/{payload_name}"
+    v2_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.v2.json"
+    payload_record = {"filename": payload_name, "sha256": "c" * 64, "size": 100,
+                      "format": "pw-player-data-v1", "base_abi": "sha256:" + "d" * 64}
+    v2 = {**legacy, "schema": 2, "player_payload": payload_record,
+          "base_image": {**base_record, "base_abi": "sha256:" + "d" * 64,
+                         "base_abi_squashfs_sha256": "e" * 64}}
+    server.blob(v2_url, chunks=[json.dumps(v2).encode()])
+    row["assets"].extend((asset("manifest.v2.json", v2_url),
+                          asset(payload_name, payload_url)))
+    observed = only(discover(server).releases)
+    assert observed.payload is not None
+    assert observed.payload.locator == OriginLocator(payload_url, "c" * 64, 100)
+    assert observed.payload.base_abi == payload_record["base_abi"]
+    assert observed.base_abi == "sha256:" + "d" * 64
+    assert observed.base_abi_squashfs_sha256 == "e" * 64
+
+    # A v2 manifest which disagrees with the legacy view is never promoted into catalog facts.
+    v2["player_deb"]["sha256"] = "e" * 64
+    server.blob(v2_url, chunks=[json.dumps(v2).encode()])
+    invalid = only(discover(server).releases)
+    assert invalid.package is None and invalid.upstream_version is None
+    assert invalid.package_problem == "manifest_invalid"
+
+
 def test_base_image_becomes_the_os_image_locator():
     server = Server()
     base = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
@@ -235,7 +268,7 @@ def test_non_semver_tag_is_skipped_with_no_record():
 
 def test_schema_mismatch_has_no_package_and_does_not_crash():
     server = Server()
-    server.deployable("v1.2.3", schema=2)
+    server.deployable("v1.2.3", schema=3)
     record = only(discover(server).releases)
     assert record.package is None and record.package_problem == "schema_mismatch"
 
@@ -319,7 +352,7 @@ def test_an_offset_updated_at_is_read_as_the_same_instant():
 @pytest.mark.parametrize("manifest,problem", [
     (b"{not json", "manifest_invalid"),
     (b"[1]", "manifest_invalid"),  # not an object
-    (manifest_bytes(DEB_NAME, SHA, len(BODY), schema=2), "schema_mismatch"),
+    (manifest_bytes(DEB_NAME, SHA, len(BODY), schema=3), "schema_mismatch"),
     (manifest_bytes("not-a-deb.txt", SHA, 1), "manifest_invalid"),  # a malformed player_deb
     (VALID, "asset_missing"),  # valid, but its .deb is not attached: an incomplete upload
 ])

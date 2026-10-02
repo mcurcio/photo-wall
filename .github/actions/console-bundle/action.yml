@@ -1,0 +1,18 @@
+name: Operator console bundle
+description: >-
+  The pinned Node and the operator console's locked install and build, for the jobs whose tests
+  run the console: the unit tier runs its pure modules under Node and esbuild, the browser tier
+  serves the built bundle. The service images build their own bundle (the Dockerfile's
+  console-builder stage).
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: '20'
+    - name: Build the operator console bundle
+      shell: bash
+      run: |
+        npm --prefix central/console ci
+        npm --prefix central/console run build

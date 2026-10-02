@@ -1930,3 +1930,96 @@ doc softenings.
   `@@PHOTOWALL_CENTRAL@@` once; the explanation lives in the builder as shell comments; the
   seal's verify refuses any other shape, and the base-image check requires the whole file to be
   one line.
+
+## 2026-10-01 — PR test gate (design /Volumes/Dock/Temp/photo-wall-test-gate-design.md, at 2da99ee)
+- **Test database is its own compose file, not a `compose.yaml` profile.** compose.yaml requires
+  `PHOTO_WALL_DB_PASSWORD`/`PHOTO_WALL_ADMIN_TOKEN` (`:?`), and Compose interpolates every
+  service even when one profile is started, so a profile would need deployment secrets to start
+  a throwaway server. Prior art: tests/integration/compose.immich.yml. Now
+  tests/integration/compose.test-database.yml; tests/test_database_provisioning.py holds its
+  image pin equal to compose.yaml's and scripts/test_local.py's URL equal to its settings.
+- **The published-Player-wire prepare is needed by the unit job too, not only db.**
+  test_published_player_extra_field_negative_control uses `published_directory` and no
+  database fixture, so it is a unit test; without the directory it skipped (a CI failure under
+  the skip allowlist). Both unit and db jobs prepare it.
+- **Skip allowlist needs three entries the design did not list**, each skipped in run
+  36797558553 today: `set PHOTO_WALL_NATIVE_DISPLAY_IMAGE`, `interactive local fixture only`,
+  and the `real dpkg-deb build/inspection requires` pair. The dpkg-deb pair is dead in every
+  job: gated on `PHOTO_WALL_IMAGE_TOOL_TESTS=1`, which no workflow sets, and its body skips
+  unconditionally anyway (tests/test_build_player_deb.py:401, test_build_bootstrapper_deb.py:314).
+  Pre-existing hidden coverage loss, allowlisted rather than fixed here.
+- **xdist needs deterministic parameter ids.** tests/test_node_linux_adapters.py parametrized
+  with `str(uuid4())`, so each worker collected different ids and xdist refused the run. Fixed
+  with a constant replacement id.
+- **Classification root is `database_provisioner`, not a list of four fixture names.** Every
+  database fixture builds on it, so a new one classifies itself.
+- **e2e cannot reach < 4.5 min with the levers that keep what it proves.** Run 36797558553:
+  e2e job 401 s = 46 s setup + 106 s Immich fixture (start + adapter checks + Immich restart)
+  + 233 s wall scenario + 14 s. The scenario alone is 233 s: setup 28, baseline 24, live
+  membership/presentation 55, deletion 15, permission/upstream faults 20, central outage 45
+  (waits for every held plan lease to expire), central recovery 38, Player rejoin 5. Done here:
+  the adapter checks move to a parallel `immich-adapter` job (`--setup-only` fixture for the
+  scenario) and the Immich images are prefetched in the background (est. saving 0.7-1.1 min,
+  e2e ≈ 5.6-6.0 min, PR ≈ 6.5-6.9 min; unconfirmed until a CI run). Reaching < 5 min total
+  needs an owner decision: split the scenario into parallel upstream-fault and
+  Central/Player-fault jobs (each repeating setup + baseline, ≈ 52 s), and/or shorten the demo's
+  plan horizon/lease so the outage phase waits less.
+- **B7: the plan lease alone does not shorten the Central-outage span; the Player's session
+  backoff does.** Run 36797558553: central stopped at t=0, lease expired t=42, restarted t=45,
+  recovered t=83. The Player retries at t≈0, 1, 6, 21 (SESSION_BACKOFF 1, 5, 15, 60) and then
+  not before t≈81, so a shorter lease moves the restart earlier but recovery still waits for
+  t≈81. The demo runner now sets `player.service.BACKOFF = (1, 2, 3, 5)` (the documented test
+  hook; first step kept, Central's silence threshold derives from it). Local run: recovery
+  38 s -> 16 s.
+- **B7: the demo's lease lever is the 30 s renewal quantum, not the horizon.** A held lease ends
+  `horizon + up to one quantum` ahead; the demo horizon was already 15 s. The quantum was not
+  configurable: Central now reads `PHOTO_WALL_RENEWAL_SECONDS` (default 30, unchanged; bound
+  (0, 60] by CoordinationLimits) and the demo sets 10. Lease 15-45 s -> 15-25 s.
+- **B7: the e2e composite action cannot hold the media OS guard or the checkout.** A local action
+  needs the checkout first, and the guard reads `needs`, which a composite cannot see; both stay
+  in each job (guard first, held by test_existing_required_jobs_fail_if_shared_preparation_fails).
+- **B7: an uncommitted core change cannot be exercised by the wall demo locally.** The demo's
+  preflight refuses a dirty `central/`, so the local split runs used HEAD's Central (30 s quantum)
+  with the new harness; the 10 s quantum is first exercised by CI. Locally on Docker Desktop the
+  demo's `--builder default` also needs `DOCKER_CONTEXT=default` (environmental).
+
+## 2026-10-01 — Player-node right-sized fix (proposal /Volumes/Dock/Temp/node-fix-proposal.md Part 1, at 2645c01)
+
+- **B1: `require_command_boot_in` was not only the boot-claim fence.** It also refused commands to
+  sessions enrolled from weak legacy `fleet_boot_offers` adoption (`legacy_observation_adoption`).
+  The proposal's "a superseded session already fails `authenticate_in`" covers the CAS half only.
+  Kept as one `command_eligibility_in(conn, offer_id)` in `node_sessions.py`, enforced at reboot
+  issuance (and reported on the grant); poll for a legacy session now returns no commands.
+- **B1: a superseded boot can re-enroll.** "A claim for its matching offer always admits its boot"
+  includes the old boot's frozen offer: it re-activates its admission row and supersedes the newer
+  boot (the proposal's duplicate-serial flap). `node_boot_adoption_mismatch` still refuses a
+  different offer for an already-admitted boot.
+- **B1: `asset()` still refuses an offer older than its 3600 s TTL** (Central clock only). Not in
+  the spec; a node that re-offers after a >1 h outage gets its frozen offer but 410 on artifacts.
+  Same class as the removed re-offer/enroll expiry; left for the owner.
+- **B2: "stage-time refusal of bound Players is unchanged" — there was none at stage time.** The
+  bound check lived in `ready()` (`bound_drain_policy_unselected`). Moved to `stage()` as
+  `bound_switch_policy_unselected`, with the qualified-fallback requirement (now a non-optional
+  `StageCommandV2.fallback`) and the V1 equipment-drain conflict check.
+- **B2: no command expiry + a command bound to one broker session would strand on renewal.** The
+  broker's `_bound` and Central's `_command_current_in` compared `command_session_id` to the live
+  session; any renewal (hourly, or B3's re-enroll on 401/403) made the desired stage undeliverable
+  and unexecutable. Binding is now the broker producer (boot + owner + incarnation) and offer.
+- **B2: "latest wins" needs a total order.** `created_at` ties (same clock reading) made the
+  latest stage ambiguous; 056 gains `sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE`.
+- **B2: the fallback cohort is now checked at stage time only.** A display mode change after
+  staging no longer blocks the switch (the former `ready()` check); a new stage is refused instead.
+  This is the proposal's stated cost "Central cannot veto a switch at the moment of stop".
+- **B2: `OnlineEffectBroker.flush` stops at the first non-200 effect** (pre-existing). A Central
+  refusal of one event (e.g. 409) blocks every later report of that boot. Not changed.
+- **B4: PID1 harness ported, not run.** `tests/node_pid1_central_{fixture,probe}.py` now run
+  success / failure / outage (35 s node-exchange drop after the broker fetches its stage); the
+  reboot/re-enroll second-container scenario and a ≥9 s cold-start injection are not written.
+  `tests/node_pid1_stop_diagnostic.py` traces a pre-existing stale `stop(expected, *,
+  expires_boottime_ms)` signature, unrelated to this change.
+
+## 2026-10-01 — node component cache key ignores source file mode
+node_component_inputs.manifest hashes source-tree file bytes only, not mode/symlink target (the staged-output
+content_version does include mode). An executable-bit-only change to a component source file would not change the
+cache key. Not exploitable today (no declared builder executes source files directly). Fix if a builder ever does:
+include mode in the manifest entry. Source: review of the component-cache bead.

@@ -110,7 +110,7 @@ should be ignored, restarted, or queued. Queue requests require an expiry;
 **Force** is an explicit override. Queued and ignored requests report their
 actual outcome without claiming that a new Run started.
 
-`PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds. In the scheduler's PostgreSQL transaction, the media repository records each bounded preparation request and defers its exact job ID through Procrastinate. The separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. Procrastinate owns dispatch, retry timing, and queue-worker liveness. Photo Wall schedules only domain preparation, source refresh, and publication/storage maintenance tasks; it retains publication recovery, reservations, and stale-attempt fencing. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits.
+`PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds and `PHOTO_WALL_RENEWAL_SECONDS`, the plan renewal quantum (at most 60), to 30; the [wall demo](module-wall-demo.md) shortens both. In the scheduler's PostgreSQL transaction, the media repository records each bounded preparation request and defers its exact job ID through Procrastinate. The separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. Procrastinate owns dispatch, retry timing, and queue-worker liveness. Photo Wall schedules only domain preparation, source refresh, and publication/storage maintenance tasks; it retains publication recovery, reservations, and stale-attempt fencing. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits.
 
 Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player reads its RAM boot context, creates a new process key, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched from `/v1/netboot/base` (by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
 
@@ -831,15 +831,23 @@ uv sync --frozen
 python3 scripts/check_docs.py
 ```
 
-The portable command reports PostgreSQL integration tests as **skipped** unless `PHOTO_WALL_TEST_DATABASE_URL` is set. To run all tests against the local Compose database:
+The portable command reports PostgreSQL integration tests as **skipped** unless `PHOTO_WALL_TEST_DATABASE_URL` is set. To run all tests, start the disposable test database and run the suite through the wrapper:
 
 ```sh
-.venv/bin/python scripts/test_local.py -q
+docker compose -f tests/integration/compose.test-database.yml up -d --wait
+.venv/bin/python scripts/test_local.py -q -n auto
 ```
 
-That wrapper reads local `.env` as data, never sources it as shell code. Each PostgreSQL test creates a random `pw_test_*` schema and removes only that schema. It preserves registry data in the deployment's public schema. A custom integration server may be supplied through `PHOTO_WALL_TEST_DATABASE_URL` with permission to create/drop test schemas. Keep it pointed at a development server.
+The [test database](../tests/integration/compose.test-database.yml) runs the deployment's pinned PostgreSQL image on loopback port 54330 (`PHOTO_WALL_TEST_DB_PORT` overrides it), in tmpfs with every durability setting off; it holds only throwaway databases and a fixed test-only credential, and `docker compose -f tests/integration/compose.test-database.yml down` discards it. The wrapper points `PHOTO_WALL_TEST_DATABASE_URL` at it unless that variable is already set; any server where the user may `CREATE DATABASE` serves. Keep it away from deployment data. A [template database](../tests/support/database.py) holding every migration is built once per migration set, under a name derived from the migrations and their runner, and each database test runs in its own clone (`pw_t_*`), dropped after the test; a later run drops clones a crashed run left behind once they are an hour old. Nothing touches a deployment database.
 
-CI installs the locked dependencies, lints, checks local documentation links, builds/launches Compose, runs the PostgreSQL suite, and checks central HTTP health. It separately runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Passing CI does not establish physical Pi/PXE, real Immich, rendering or visible timing.
+**Test tiers.** `tests/conftest.py` gives every test exactly one tier: `browser` for `tests/browser/`, `db` for any test whose fixtures reach the database (all of them build on `database_provisioner`), and unit for the rest. Select a tier with `-m db`, `-m "not db and not browser"`, or the `tests/browser` path, and parallelize with `-n` ([pytest-xdist](https://pytest-xdist.readthedocs.io/)); `-m db` needs `--dist loadgroup`, which keeps a module sharing one `module_registry` on one worker. Two rules keep a tier from silently losing tests:
+
+- With `PHOTO_WALL_TEST_REQUIRE_DATABASE=1`, a test that reaches a database fixture without `PHOTO_WALL_TEST_DATABASE_URL` fails instead of skipping. Every CI job sets it, so a database test that escaped the `db` tier fails the unit job.
+- Under `CI`, a skip whose reason no entry of `CI_SKIP_ALLOWLIST` (tests/conftest.py) owns fails the run. Each entry names a capability that the CI job running the test deliberately lacks (FFmpeg, root, `dtc`, a locally built image, a fork's missing token, the opt-in dpkg-deb build). Add one only with that justification.
+
+A test that observes a lock wait counts only its own database's waiters through `support.database.waiting_backends`; `pg_locks` is cluster-wide, so an unscoped count also sees other workers' tests. `tests/test_lock_observation_scope.py` refuses unscoped queries of `pg_locks` or `pg_stat_activity`.
+
+CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health and the served console), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
 
 All CI worker builds reuse the architecture-matched native media base through
 the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
@@ -849,20 +857,23 @@ with its architecture and `prepare_base=true`. Fork runs require the definition 
 been published by a trusted run. Ordinary local Compose builds retain their
 explicit cold native target.
 
-The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own temporary PostgreSQL schemas. The shell, the look and each step flow have their own walkthroughs (`tests/browser/test_console_*_browser.py`, `test_scene_flow_browser.py`, `test_source_flow_browser.py`, `test_schedule_flow_browser.py`, `test_show_now_browser.py`), built on the task-level helpers in `tests/browser/console_tasks.py`. The console's pure modules run under Node in ordinary pytest (`tests/test_console_flow.py`, `test_console_schedule_flow.py`, `test_console_show_now.py`); without Node they skip on a developer machine but fail under `CI` or `PHOTO_WALL_BROWSER_TESTS` (the route round trip in `test_console_routes_r4.py` only skips). Install the locked development dependencies and their matching Chromium build, then run:
+The real-browser walkthroughs of the [binding/commissioning](../tests/browser/test_operator_binding_browser.py) and [showrunner content](../tests/browser/test_operator_showrunner_browser.py) surfaces drive the production React operator console (served at `/`, aliased at `/console`) and its HTTP API against their own disposable PostgreSQL databases. The shell, the look and each step flow have their own walkthroughs (`tests/browser/test_console_*_browser.py`, `test_scene_flow_browser.py`, `test_source_flow_browser.py`, `test_schedule_flow_browser.py`, `test_show_now_browser.py`), built on the task-level helpers in `tests/browser/console_tasks.py`. The console's pure modules run under Node in ordinary pytest (`tests/test_console_flow.py`, `test_console_schedule_flow.py`, `test_console_show_now.py`); without Node they skip on a developer machine but fail under `CI` or `PHOTO_WALL_BROWSER_TESTS` (the route round trip in `test_console_routes_r4.py` only skips). Install the locked development dependencies and their matching Chromium build, then run:
 
 ```sh
 uv sync --frozen
 .venv/bin/python -m playwright install chromium
-PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/browser \
+PHOTO_WALL_BROWSER_TESTS=1 .venv/bin/python scripts/test_local.py -q tests/browser -n 4 \
   --browser chromium --tracing retain-on-failure --output artifacts/operator-browser
 ```
+
+Pass `tests/browser` as the path even under `-n`: its conftest gathers the evidence report from every worker's test reports in the process that writes it, and that process loads the conftest only for a path argument.
 
 CI runs these checks in the official Playwright Python 1.62.0 Noble container,
 pinned by digest in `checks.yml`. That image already contains Chromium and its
 Linux dependencies, so CI does not run a browser APT installation. A separate
 container environment installs the repository's frozen Python dependencies and
-connects to the job's local PostgreSQL fixture. Reports and failure traces are
+connects to the job's disposable test database; CI requires the report to say
+`passed`. Reports and failure traces are
 written to the existing artifact directory. Ordinary test runs skip browser
 checks unless opted in. Playwright 1.62.0 and pytest-playwright 0.9.0 are pinned
 in the development dependency group and `uv.lock`; neither enters production
@@ -892,3 +903,96 @@ If an Output moves, bind the destination persistent Frame. Returning recognized 
 Preview carries a 30-second expiry and both proposed/committed settings in current process memory so the Executor can revert during a running-process outage. Commit and revert use optimistic revision and binding-generation checks. A stale browser must refresh before retrying. Partitioned equipment respects the bounded plan lease and rejects obsolete work when it obtains fresh session authority. Cold reboot requires central time/release/enrollment/control/media connectivity. A surviving cache file can avoid a media request only after the new process validates it against the current assignment; it cannot restore authority.
 
 The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [central release contract](module-appliance-release.md) provide commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md), [GitHub ARM image workflow](module-appliance-ci.md), and [headless image e2e gate](module-appliance-e2e.md) describe exact-artifact checks and their limits. Earlier signed image and hosted boot evidence remains useful for artifact identity and generic-VM behavior, but its durable-Player/local-update assumptions are superseded. Complete current-image native rendering, valid-cache reuse, corrupt-cache reacquisition, real automatic reboot/central rollback, and physical measurements remain pending until recorded against the final revision.
+
+
+## Opt-in V2 node integration
+
+The V2 node composition uses the same database, cache layout, dependency lock, and
+content worker as Central. Deploy Central and its worker from the same revision
+so both know migrations 053–054 and the sealed-environment job kind. Keep the
+ordinary `PHOTO_WALL_DATABASE_URL` and `PHOTO_WALL_ADMIN_TOKEN` configuration in
+its existing protected deployment settings. No token is placed in a command line.
+
+To select the implemented node transport composition, set an installation-specific
+`PHOTO_WALL_NODE_AUDIENCE` and override the Central process command with:
+
+```sh
+uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 1048576
+```
+
+The ordinary `central.app:create_app` factory keeps node transport disabled. The
+node factory enables observation, explicit session enrollment, immutable V2 boot
+offers and scoped command routes; it does **not** open the durable effect gate.
+`/healthz` remains process/service health. Authenticated
+`GET /v1/operator/node/status` reports transport selection and the persistent gate
+state separately. A running HTTP server, accepted serial claim, stored sample, or
+catalogued artifact is not command qualification, authenticated physical identity,
+verified downloaded bytes, or observed pixels.
+
+Publish a canonical `NodeDeployment` using authenticated
+`POST /v1/operator/node/deployments`, then select its immutable ID with the
+revision CAS at `PUT /v1/operator/node/boot-policy`. The base release must already
+have exact catalog provenance; manager primary and any accepted fallback are
+pinned to that base digest. Environment sources feed the existing content worker.
+A missing byte artifact is reported unavailable until the worker acquires and
+verifies it. An explicit no-app deployment still boots the independent base.
+Only the V2 cohort (`photowall.node=v2`) uses these frozen offers; it cannot silently
+fall back to a legacy manifest.
+
+For ambiguity, `GET /v1/operator/node/devices/{device_id}` separates current and
+historical scoped credentials, observation sample/receipt ages, reboot requests,
+responses and effect evidence. The latest boot to enroll is the current boot: it
+supersedes the prior boot and revokes that boot's sessions, so no operator boot
+selection exists. Two Pis claiming one serial flap visibly, each enrollment revoking
+the other. This does not prove which physical Pi exists or that an
+already-delivered effect stopped. Effect rollout still requires the
+existing D17 all-serving/rollback certification and a real injected serving-image
+verifier; there is no environment-variable bypass. The automated node scenarios and
+their limits are listed in [validation](validation.md).
+
+
+### Optional read-only Kubernetes node verifier
+
+The node factory accepts `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
+read-only deployment-owned JSON file. Its exact keys are `identity_directory`,
+`namespace`, `ci_record`, `guard_record`, `ci_public_key`, `guard_public_key`, and
+`audience`. Public keys are distinct raw Ed25519 keys encoded as hex. The identity
+directory provides `namespace`, `pod_name`, `pod_uid`, `container_name`,
+`deployment_name`, and `deployment_uid`; populate Pod identity through the
+[Kubernetes downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/).
+The reader checks the actual Pod owner chain and registry-qualified
+[`status.containerStatuses.imageID`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/).
+A mutable image tag or runtime config hash is insufficient.
+
+The service-account reader uses verified Kubernetes TLS and GET only. It needs
+complete Pod/ReplicaSet/Deployment, Service/EndpointSlice, Ingress/NetworkPolicy,
+API discovery and supported Gateway resource inventories, plus the two named
+public evidence ConfigMaps. It never reads Secrets. Unknown custom API groups,
+unsupported route resources, forbidden lists or incomplete pagination refuse
+certification. This conservative adapter needs extension and corresponding tests
+before using a cluster with other routing controllers.
+
+Each ConfigMap contains `data["evidence.json"]` with exact `payload` and hex
+`signature` fields. Sign canonical sorted compact JSON after the domain prefix
+`photo-wall-rollout-ci-v1` or `photo-wall-rollout-guard-v1`, each followed by a NUL
+byte. The source `SignedRolloutEvidence` defines the exact payload fields. Both
+records bind audience, record UID, increasing generation, active/revoked state,
+issue/expiry times (at most 300 seconds). CI binds all exact serving and rollback
+image digests plus immutable compatibility, fence and readiness evidence hashes.
+The guard binds Deployment UID/generation, complete endpoint/route hashes, CI
+payload hash, exact image sets, and an irrevocable `mutation_not_before` equal to
+its expiry. Revocation blocks new observation/admission but cannot shorten this
+promised no-mutation interval. The durable local watermark records revocation
+before returning refusal, and rejects earlier signed active records after restart.
+Key rotation or ConfigMap replacement fails closed and requires explicit operator
+reprovisioning; deleting replay floors is not a normal recovery action.
+
+**External implementation dependency:** the separate IaC owner must implement
+and deploy a controller that closes the durable effect gate before changing any
+certified direct Service/Pod/Gateway path, waits out outstanding signed holds,
+prevents uncertified rollback, and retains fenced images while any effect remains
+unreconciled even after certification expiry. It must produce truthful exact-image
+CI matrices and signed guard records from those enforcement results. The adapter
+and signatures do not implement that controller. No real such controller or
+qualification is established by the local tests. An unconfigured or uncertified
+node factory therefore continues to serve observations with effects closed.

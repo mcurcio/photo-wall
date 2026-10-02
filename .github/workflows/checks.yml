@@ -3,6 +3,12 @@ name: MVP checks
 # Called by pipeline.yml (its `checks` job) on every pull request and push to main; the
 # pipeline owns the triggers and the concurrency. To prepare a missing media OS dependency by
 # hand, dispatch service-base.yml.
+#
+# The suite runs as three tiers in parallel jobs, each test in exactly one: tests/conftest.py
+# derives `browser` from the path (tests/browser) and `db` from the fixtures, and everything
+# else is `unit` (the runbook's test section). Each tier job's timeout is about twice its budget, and prints
+# its 25 slowest phases. In every job a test that reaches a database where none is provided
+# fails, and a skip no allowlist owns fails the run (tests/conftest.py).
 on:
   workflow_call:
 
@@ -11,6 +17,7 @@ permissions:
 
 env:
   COMPOSE_PROJECT_NAME: photo-wall-ci
+  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'
 
 jobs:
   service-base:
@@ -21,14 +28,127 @@ jobs:
     with:
       architecture: amd64
 
-  portable-and-postgres:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
+      - run: .venv/bin/python -m ruff check .
+      - run: .venv/bin/lint-imports
+      - run: python scripts/check_docs.py
+
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
+      - uses: ./.github/actions/console-bundle
+      - name: Prepare digest-pinned published Player wire fixtures
+        run: |
+          .venv/bin/python scripts/published_player_wire.py prepare \
+            "$RUNNER_TEMP/published-player-wire"
+      - name: Run the unit tier, with no database
+        env:
+          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
+        run: |
+          .venv/bin/python -m pytest -q --tb=short --durations=25 \
+            -m "not db and not browser" -n 4 --dist worksteal
+
+  db:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
+      - uses: ./.github/actions/console-bundle
+      - name: Start the disposable test database
+        run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+      - name: Prepare digest-pinned published Player wire fixtures
+        run: |
+          .venv/bin/python scripts/published_player_wire.py prepare \
+            "$RUNNER_TEMP/published-player-wire"
+      - name: Run the database tier
+        env:
+          # The built-in, repo-scoped GHA token (no manually-managed secret): the
+          # workflow's `permissions: contents: read` lets it read THIS repo's own
+          # releases + release assets, which is all the fresh-install e2e gate (b)
+          # (test_fresh_install_arc_against_real_github) needs to exercise the real
+          # GitHub path. httpx strips this Authorization header on the cross-host CDN
+          # redirect, so it reaches api.github.com only. On a fork PR the token is
+          # empty/restricted, so gate (b) skips (its guard treats an empty token as
+          # unset) -- the correct safe behavior.
+          PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
+        run: |
+          .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
+            -m db -n 4 --dist loadgroup
+
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: python-uv
+        uses: ./.github/actions/python-uv
+      - uses: ./.github/actions/console-bundle
+      - name: Start the disposable test database
+        run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+      - name: Walk through the operator interface in the pinned browser image
+        env:
+          UV_VERSION: ${{ steps.python-uv.outputs.uv-version }}
+        run: |
+          install -d "$RUNNER_TEMP/operator-browser"
+          docker run --rm --init --network host --ipc=host --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --volume "$RUNNER_TEMP/operator-browser:/evidence" --workdir /work \
+            --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI \
+            --env GITHUB_SHA --env GITHUB_EVENT_NAME --env GITHUB_ACTIONS \
+            --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
+            --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
+            --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/work \
+            mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d \
+            sh -ec 'python -m pip install "uv==$UV_VERSION"
+              uv sync --frozen --no-install-project --python /usr/bin/python3.12
+              /tmp/photo-wall-browser-venv/bin/python scripts/test_local.py -q \
+                -p no:cacheprovider tests/browser -n 4 --browser chromium --durations=25 \
+                --tracing retain-on-failure --output /evidence --tb=short'
+      # The xdist controller writes it from every worker's reports (tests/browser/conftest.py).
+      - name: Require passed operator browser evidence
+        run: |
+          python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["status"] != "passed")' \
+            "$RUNNER_TEMP/operator-browser/operator-browser.json"
+      - name: Make browser evidence readable
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/operator-browser" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/operator-browser"
+          fi
+      - name: Retain operator browser evidence and failed traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: operator-browser-${{ github.sha }}
+          path: ${{ runner.temp }}/operator-browser
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The service images, built (or restored) and run as Compose runs them. No test needs them;
+  # this proves they boot and serve.
+  image-smoke:
     needs: service-base
     if: always()
     permissions:
       contents: read
       packages: read
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - name: Require media OS preparation
         env:
@@ -38,21 +158,7 @@ jobs:
           test "$PREPARATION" = success
           test -n "$MEDIA_BASE_IMAGE"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - id: python-uv
-        uses: ./.github/actions/python-uv
-      - run: uv sync --frozen
-      - run: .venv/bin/python -m ruff check .
-      - run: .venv/bin/lint-imports
-      - run: python scripts/check_docs.py
-      - run: python scripts/configure.py
-      - name: Set up Node for the operator console build
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '20'
-      - name: Build the operator console bundle
-        run: |
-          npm --prefix central/console ci
-          npm --prefix central/console run build
+      - run: python3 scripts/configure.py
       - name: Authenticate to the durable image registry
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -75,52 +181,6 @@ jobs:
           load: true
           tags: photo-wall-ci-central
       - run: docker compose up -d --no-build --wait
-      - name: Run the Postgres pytest suite
-        env:
-          # The built-in, repo-scoped GHA token (no manually-managed secret): the
-          # workflow's `permissions: contents: read` lets it read THIS repo's own
-          # releases + release assets, which is all the fresh-install e2e gate (b)
-          # (test_fresh_install_arc_against_real_github) needs to exercise the real
-          # GitHub path. httpx strips this Authorization header on the cross-host CDN
-          # redirect, so it reaches api.github.com only. On a fork PR the token is
-          # empty/restricted, so gate (b) skips (its guard treats an empty token as
-          # unset) -- the correct safe behavior.
-          PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: .venv/bin/python scripts/test_local.py -q --tb=short
-      - name: Walk through the operator interface in the pinned browser image
-        env:
-          UV_VERSION: ${{ steps.python-uv.outputs.uv-version }}
-        run: |
-          install -d "$RUNNER_TEMP/operator-browser"
-          docker run --rm --init --network host --ipc=host --platform linux/amd64 \
-            --volume "$GITHUB_WORKSPACE:/work:ro" \
-            --volume "$RUNNER_TEMP/operator-browser:/evidence" --workdir /work \
-            --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
-            --env GITHUB_SHA --env GITHUB_EVENT_NAME --env GITHUB_ACTIONS \
-            --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
-            --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
-            --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
-            --env GIT_CONFIG_VALUE_0=/work \
-            mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d \
-            sh -ec 'python -m pip install "uv==$UV_VERSION"
-              uv sync --frozen --no-install-project --python /usr/bin/python3.12
-              /tmp/photo-wall-browser-venv/bin/python scripts/test_local.py -q \
-                -p no:cacheprovider tests/browser --browser chromium \
-                --tracing retain-on-failure --output /evidence --tb=short'
-      - name: Make browser evidence readable
-        if: always()
-        run: |
-          if [ -d "$RUNNER_TEMP/operator-browser" ]; then
-            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/operator-browser"
-          fi
-      - name: Retain operator browser evidence and failed traces
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: operator-browser-${{ github.sha }}
-          path: ${{ runner.temp }}/operator-browser
-          if-no-files-found: ignore
-          retention-days: 7
       - run: curl --fail http://127.0.0.1:8000/healthz
         # GET / must serve the console shell (HTTP 200), not 500. Because
         # central/console/dist/ is .dockerignore'd, the compose central image
@@ -159,6 +219,8 @@ jobs:
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      # Reads its cache on every run and writes it only on main: a pull request's write would
+      # land in a scope only that pull request can read (docs/module-appliance-ci.md, "Limits").
       - name: Build the pinned Linux media test image
         uses: ./.github/actions/service-image
         with:
@@ -167,5 +229,7 @@ jobs:
           build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
           load: true
           tags: photo-wall-media-test:ci
+          cache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # The image's own command, across every runner CPU: each test works in its own tmp_path.
       - name: Qualify conversion in the pinned Linux worker
-        run: docker run --rm --network none photo-wall-media-test:ci
+        run: docker run --rm --network none --env 'PYTEST_ADDOPTS=-n auto' photo-wall-media-test:ci

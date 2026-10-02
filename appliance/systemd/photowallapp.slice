@@ -1,0 +1,8 @@
+[Unit]
+Description=Bounded Player application resources
+[Slice]
+CPUWeight=100
+IOWeight=100
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=128

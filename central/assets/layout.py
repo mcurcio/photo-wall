@@ -20,10 +20,14 @@ TEMP_PREFIX: Final = ".tmp-"
 _DIRECTORIES: Final[dict[AssetKind, str]] = {
     AssetKind.OS_IMAGE: OS_IMAGES_SUBDIR,
     AssetKind.PLAYER_DEB: APPS_SUBDIR,
+    AssetKind.PLAYER_PAYLOAD: APPS_SUBDIR,
+    AssetKind.SEALED_ENVIRONMENT: APPS_SUBDIR,
 }
 _FILE_NAMES: Final[dict[AssetKind, tuple[str, str]]] = {
     AssetKind.OS_IMAGE: ("base-", ".squashfs"),
     AssetKind.PLAYER_DEB: ("app-", ".deb"),
+    AssetKind.PLAYER_PAYLOAD: ("payload-", ".tar.gz"),
+    AssetKind.SEALED_ENVIRONMENT: ("environment-", ".tar"),
 }
 
 

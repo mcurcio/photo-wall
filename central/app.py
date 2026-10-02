@@ -25,7 +25,12 @@ from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database
+from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
+from central.fleet.node_routes import mount_node_routes
+from central.fleet.node_sessions import NodeControlConfig
+from central.fleet.rollout_gate import ServingImageVerifier
+from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
 from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
@@ -39,8 +44,10 @@ from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.netboot_base import record_base_health
+from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.player_control_protocol import project_state, state_digest
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -62,6 +69,7 @@ from contracts.models import (
     PlayerTime,
     Readiness,
 )
+from contracts.player_control import ControlAck, ControlHello
 from contracts.time import Clock, SystemClock
 from media.models import SourcePreviewQuery, SourceSpec
 
@@ -140,6 +148,9 @@ def create_app(
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
     mdns_advertiser: MdnsCentralAdvertiser | None = None,
+    node_control: NodeControlConfig | None = None,
+    node_serving_verifier: ServingImageVerifier | None = None,
+    node_serving_verifier_factory=None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     owns_db = db is None
@@ -148,6 +159,10 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
+    if node_serving_verifier_factory is not None:
+        if node_serving_verifier is not None:
+            raise ValueError("choose one node serving verifier composition")
+        node_serving_verifier = node_serving_verifier_factory(db)
     registry = Registry(db, clock)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
@@ -158,7 +173,8 @@ def create_app(
         db,
         clock,
         CoordinationLimits(
-            horizon_seconds=float(os.environ.get("PHOTO_WALL_HORIZON_SECONDS", "300"))
+            horizon_seconds=float(os.environ.get("PHOTO_WALL_HORIZON_SECONDS", "300")),
+            renewal_seconds=float(os.environ.get("PHOTO_WALL_RENEWAL_SECONDS", "30")),
         ),
         media=media_repository,
     )
@@ -228,6 +244,8 @@ def create_app(
         try:
             while True:
                 try:
+                    if hasattr(app.state, "node_reconciler"):
+                        await asyncio.to_thread(app.state.node_reconciler.advance)
                     projection = await asyncio.to_thread(coordinator.advance)
                     await asyncio.to_thread(
                         media_application.request_acquisitions, projection.acquisitions
@@ -315,6 +333,31 @@ def create_app(
         if not credentials:
             raise RegistryError("unauthorized", 401)
         return registry.authenticate(credentials.credentials)
+
+    def control_state(identity: dict) -> dict:
+        # Projection, drain generation and challenge issuance share one Coordination
+        # transaction. A prepared drain cannot slip between projection and sequence.
+        def finalize(conn, delivery: dict) -> dict:
+            selection = registry.control_selection_in(
+                conn, identity["id"], identity["authority_epoch"]
+            )
+            payload = project_state(delivery, selection)
+            if selection.schema_version == 2:
+                cue = payload["identify_output"]
+                payload["identify_expires_at"] = (
+                    clock.utc() + cue["remaining_seconds"] if cue else None
+                )
+                digest = state_digest(
+                    payload, control_fence=control_fence_in(conn, identity["id"])
+                )
+                payload.update(registry.issue_control_delivery_record_in(
+                    conn, identity["id"], identity["authority_epoch"], digest
+                ))
+            return payload
+
+        return coordinator.delivery(
+            identity["id"], identity["authority_epoch"], finalize=finalize
+        )
 
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
@@ -450,6 +493,12 @@ def create_app(
     def register(request: Enrollment):
         return registry.enroll(request)
 
+    @app.post("/v1/player/hello")
+    def player_hello(request: ControlHello, identity: dict = Depends(player)):
+        if request.authority_epoch != identity["authority_epoch"]:
+            raise RegistryError("stale_authority", 403)
+        return registry.control_hello(identity["id"], request)
+
     @app.get("/v1/player/config")
     def player_config(identity: dict = Depends(player)):
         config = coordinator.configuration(identity["id"], identity["authority_epoch"])
@@ -457,7 +506,14 @@ def create_app(
 
     @app.get("/v1/player/state")
     def player_state(identity: dict = Depends(player)):
-        return coordinator.delivery(identity["id"], identity["authority_epoch"])
+        return control_state(identity)
+
+    @app.post("/v1/player/control-acks")
+    def control_ack(request: ControlAck, identity: dict = Depends(player)):
+        if request.authority_epoch != identity["authority_epoch"]:
+            raise RegistryError("stale_authority", 403)
+        return registry.control_ack_response(identity["id"], request).model_dump(
+            mode="json", by_alias=True, exclude_none=True)
 
     @app.get("/v1/player/time", response_model=PlayerTime)
     def player_time(identity: dict = Depends(player)):
@@ -536,20 +592,11 @@ def create_app(
                 current = await asyncio.to_thread(registry.authenticate, token)
                 if current != identity:
                     raise RegistryError("stale_authority", 403)
-                state = await asyncio.to_thread(
-                    coordinator.delivery, identity["id"], identity["authority_epoch"]
-                )
-                await websocket.send_json(
-                    {
-                        "type": "state",
-                        "configuration": state["configuration"].model_dump(mode="json"),
-                        "plan": state["plan"].model_dump(mode="json") if state["plan"] else None,
-                        "commits": [c.model_dump(mode="json") for c in state["commits"]],
-                        "revocations": [r.model_dump(mode="json") for r in state["revocations"]],
-                        "identify_output": (state["identify_output"].model_dump(mode="json")
-                                           if state["identify_output"] else None),
-                    }
-                )
+                state = await asyncio.to_thread(control_state, identity)
+                # A re-enrollment during projection must not keep this old session alive.
+                if await asyncio.to_thread(registry.authenticate, token) != identity:
+                    raise RegistryError("stale_authority", 403)
+                await websocket.send_json({"type": "state", **state})
                 try:
                     raw = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
                 except asyncio.TimeoutError:
@@ -807,22 +854,19 @@ def create_app(
     def replace_program(program_id: Identifier, request: ProgramReplacementRequest):
         if request.expected.program_id != program_id or request.program.program_id != program_id:
             raise ValueError("Program identity mismatch")
-        coordinator.runtime.command(
-            "replace_program", request.expected, request.program, clock.utc()
-        )
+        coordinator.runtime.command_current("replace_program", request.expected, request.program)
         return {"status": "configured"}
 
     @app.delete("/v1/operator/programs/{program_id}", dependencies=[Depends(admin)])
     def remove_program(program_id: Identifier):
-        return coordinator.runtime.command("remove_program", program_id, clock.utc())
+        return coordinator.runtime.command_current("remove_program", program_id)
 
     @app.post("/v1/operator/activations", dependencies=[Depends(admin)])
     def activate(request: ActivationRequest):
-        return coordinator.runtime.command(
+        return coordinator.runtime.command_current(
             "activate",
             request.scene_id,
             request.activation_id,
-            clock.utc(),
             priority=request.priority,
             repeat=request.repeat,
             force=request.force,
@@ -831,8 +875,14 @@ def create_app(
 
     @app.post("/v1/operator/runs/{run_id}/{operation}", dependencies=[Depends(admin)])
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
-        return coordinator.runtime.command(operation, run_id, clock.utc())
+        return coordinator.runtime.command_current(operation, run_id)
 
     if content is not None:
         mount_content_routes(app, content)
+    mount_fleet_routes(app, db=db, clock=clock, admin=admin, content=content)
+    mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
+                      serving_verifier=node_serving_verifier, content=content)
+    app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
+    # Every route is bound: refuse one that `admin` guards outside the cookie's path.
+    operator_auth.require_scoped(app)
     return app

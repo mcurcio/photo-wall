@@ -16,6 +16,10 @@ class PostgresExecutionRepository:
         reference_owners: set[str],
         now: float,
     ) -> bool:
+        if conn.execute(
+            "SELECT 1 FROM active_equipment_drains WHERE player_id=%s", (player_id,),
+        ).fetchone():
+            return False
         offers = conn.execute(
             "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
             "AND valid_until>%s",

@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from contracts.release import CMDLINE
+from contracts.release import CMDLINE, base_abi_sidecar
 
 BUNDLE_BUILDER = Path(__file__).resolve().parents[2] / "scripts" / "build_netboot_bundle.sh"
 
@@ -64,6 +64,14 @@ def base_bundle(root: Path) -> Path:
     write(bundle / "boot" / "pieeprom.upd", b"fake-eeprom-bytes")
     write(bundle / "boot" / "pieeprom.sig", b"fake-eeprom-digest")
     write(bundle / "SHA256SUMS", b"deadbeef  photo-wall-base.squashfs\n")
+    return bundle
+
+
+def with_base_abi(bundle: Path, abi: str) -> Path:
+    """Attach the schema-2 fact for the synthetic squashfs bytes."""
+    squashfs = bundle / "photo-wall-base.squashfs"
+    digest = hashlib.sha256(squashfs.read_bytes()).hexdigest()
+    write(bundle / "base-abi.json", base_abi_sidecar(abi, digest))
     return bundle
 
 

@@ -39,7 +39,7 @@ class SourceInUse(RegistryError):
 
 
 class SourceNameService:
-    """Coordinate Runtime and media changes under Runtime then media locks."""
+    """Coordinate Source edits under Coordination, Runtime, then media locks."""
 
     def __init__(self, db: Database, repository: MediaRepository, runtime: RuntimeStore):
         self.db, self.repository, self.runtime = db, repository, runtime

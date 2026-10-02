@@ -1,8 +1,8 @@
 [Unit]
 Description=Photo Wall base bootstrapper (discover central, fetch and install the Player app)
 Documentation=file:///usr/share/doc/photo-wall/0009-minimal-base-and-app-package.md
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target photo-wall-os-agent.service
+After=network-online.target photo-wall-os-agent.service
 # A base with no central on the LAN, or a central with no app promoted yet,
 # must keep retrying (appliance.provision.Bootstrapper.run loops forever by
 # default), so a single crash must not park the unit. But a unit that cannot

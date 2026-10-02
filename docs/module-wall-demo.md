@@ -1,6 +1,6 @@
 # Full media path demo
 
-Status: the harness has been refactored for central release authority and stateless Players. Its focused tests pass. The `Controller and Player software e2e` workflow now runs the full two-Player/three-Output scenario for each pull-request revision; a passing workflow result is still required before final acceptance evidence is recorded.
+Status: the harness has been refactored for central release authority and stateless Players. Its focused tests pass. The `Controller and Player software e2e` workflow now runs the full two-Player/three-Output scenario for each pull-request revision, as two parallel fault-segment jobs, each against a fixture started with `--setup-only` while a parallel job runs the [fixture's](module-immich-fixture.md) adapter checks; a passing workflow result is still required before final acceptance evidence is recorded.
 
 The demo joins the real Immich fixture, central PostgreSQL application, Procrastinate media worker, media gateway, two Player processes, and three simulated Outputs. Media conversion, queueing, HTTP/WebSocket traffic, exact bytes, session epochs, cache validation, readiness, commitments, and observations are real. `RecordingRenderer` supplies simulated display actuation, so native GTK/GStreamer and physical HDMI remain separate gates.
 
@@ -34,6 +34,8 @@ Build a Player-only wheelhouse, central image, and media-worker image from the s
   --worker-image sha256:<exact-worker-image-id> \
   --scenario full --keep
 ```
+
+`--scenario full` runs every fault segment in order against one wall: `upstream-faults` (live membership, deletion after security, permission loss, upstream outage) then `central-player-faults` (Central outage past every held lease, Central restart, Player restart). Each segment is also a scenario of its own, after the same setup and baseline; the software e2e workflow runs the two as parallel jobs. To keep those waits short, the demo's Central plans a 15 s horizon renewed every 10 s (a deployment: 300 s and 30 s), so a held lease ends 15-25 s ahead, and the Player runner retries a lost Central within 5 s rather than backing off to 60 s.
 
 Preflight rejects a dirty source tree, revision mismatch, Player inventory mismatch, mutable image tag, missing paired image ID, reused state directory, or unverified fixture. This means an uncommitted workspace cannot produce final evidence. The selected revision, image IDs, source inventory, wheel inventory, media hashes, session epochs, observations, and phase results are retained in the private report.
 

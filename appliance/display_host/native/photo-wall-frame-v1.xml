@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="photo_wall_frame_v1">
+  <copyright>Copyright 2026 Photo Wall contributors. MIT license.</copyright>
+  <interface name="pw_frame_manager_v1" version="3">
+    <description summary="Correlate an app frame with a base-authorized grant">
+      This request grants no authority and produces no presentation evidence.
+      Tag and wp_presentation.feedback MUST precede the same wl_surface.commit
+      that submits the rendered buffer. The base shell consumes the tag once.
+      A grant is delivered separately by the base controller, never minted here.
+      A frame tag is an opaque bounded token mapped by the applying owner to its
+      exact configuration or trial/sequence/hash. The shell does not interpret
+      geometry or assert that the renderer implemented its claimed transform.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="tag">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="grant_id" type="string"/>
+      <arg name="frame_tag" type="string"/>
+    </request>
+    <event name="grant">
+      <description summary="Base-issued surface grant, never Runtime authority">
+        State 0 is candidate/synthetic-only, 1 is admitted, 2 is revoked,
+        3 is an explicitly authorized pending same-process revision. The active
+        admitted grant remains valid until the pending revision is presented.
+        Each new grant UUID fences prior process/Output/configuration state.
+      </description>
+      <arg name="output_id" type="string"/>
+      <arg name="grant_id" type="string"/>
+      <arg name="binding_generation" type="string"/>
+      <arg name="config_revision" type="string"/>
+      <arg name="state" type="uint"/>
+    </event>
+    <request name="overlay" since="2">
+      <description summary="Primitives for the same tagged buffer">
+        Exactly four normalized output corner points, bounded JSON. Consumed with
+        the next surface commit. Only matching authorized trial/hash presentation
+        can publish these primitives to the private diagnostic client.
+      </description>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="grant_id" type="string"/>
+      <arg name="frame_tag" type="string"/>
+      <arg name="primitives" type="string"/>
+    </request>
+    <event name="trial" since="2">
+      <arg name="output_id" type="string"/>
+      <arg name="grant_id" type="string"/>
+      <arg name="candidate_json" type="string"/>
+    </event>
+    <event name="grant_frame" since="3">
+      <description summary="Exact Frame identity, including equal-counter rebinds">
+        Replaces grant for version 3 clients. Frame identity is mandatory authority
+        scope; two Frames may legitimately have equal generation and revision.
+      </description>
+      <arg name="output_id" type="string"/>
+      <arg name="grant_id" type="string"/>
+      <arg name="frame_id" type="string"/>
+      <arg name="binding_generation" type="string"/>
+      <arg name="config_revision" type="string"/>
+      <arg name="state" type="uint"/>
+    </event>
+  </interface>
+  <interface name="pw_diagnostic_manager_v1" version="2">
+    <description summary="Base-private diagnostic surfaces">
+      Only the compositor-created private diagnostic client may bind this global.
+      Output events name physical Output pixels. Serial is acknowledged before
+      committing the corresponding page buffer. No application can obtain this role.
+    </description>
+    <request name="destroy" type="destructor"/>
+    <request name="surface">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output_id" type="string"/>
+    </request>
+    <request name="ack">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="serial" type="uint"/>
+    </request>
+    <event name="output">
+      <arg name="output_id" type="string"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="serial" type="uint"/>
+      <arg name="reason" type="string"/>
+      <arg name="testing" type="uint"/>
+    </event>
+    <event name="overlay" since="2">
+      <arg name="output_id" type="string"/>
+      <arg name="serial" type="uint"/>
+      <arg name="primitives" type="string"/>
+      <arg name="visible" type="uint"/>
+    </event>
+  </interface>
+</protocol>

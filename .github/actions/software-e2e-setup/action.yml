@@ -1,0 +1,70 @@
+name: Software e2e setup
+description: >-
+  The setup every software-e2e job shares, after its media OS guard and checkout: the Immich
+  fixture images prefetched in the background, the pinned CPython and uv, the locked harness
+  environment, registry access, the build cache and the media worker image, and on request the
+  central image. One definition, so the parallel e2e jobs cannot drift apart.
+
+inputs:
+  media-base-image:
+    description: The retained media OS image (service-base.yml's output) the worker builds from
+    required: true
+  central:
+    description: "'true' also builds the central image"
+    required: false
+    default: 'false'
+
+outputs:
+  worker-image:
+    description: The media worker image ID, as loaded into the runner's Docker
+    value: ${{ steps.worker.outputs.imageid }}
+  central-image:
+    description: The central image ID when `central` is 'true', else empty
+    value: ${{ steps.central.outputs.imageid }}
+
+runs:
+  using: composite
+  steps:
+    # Overlap the fixture's largest pulls with this setup and the image builds; the fixture's
+    # own (retried) pull joins any still in flight.
+    - name: Prefetch the Immich fixture images in the background
+      shell: bash
+      run: |
+        FIXTURE_DB_PASSWORD=unused FIXTURE_IMAGE=unused nohup docker compose \
+          -f tests/integration/compose.immich.yml pull --quiet immich database redis \
+          > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
+
+    - uses: ./.github/actions/python-uv
+
+    - name: Install the locked harness environment
+      shell: bash
+      run: uv sync --frozen
+
+    - name: Authenticate to the durable image registry
+      shell: bash
+      env:
+        REGISTRY_TOKEN: ${{ github.token }}
+      run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+    - name: Set up the container build cache
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+    - name: Build or restore the central image
+      id: central
+      if: inputs.central == 'true'
+      uses: ./.github/actions/service-image
+      with:
+        target: central
+        architecture: arm64
+        load: true
+        tags: photo-wall-software-e2e-central:ci
+
+    - name: Build or restore the media worker image
+      id: worker
+      uses: ./.github/actions/service-image
+      with:
+        target: media-worker
+        architecture: arm64
+        build-args: MEDIA_BASE_IMAGE=${{ inputs.media-base-image }}
+        load: true
+        tags: photo-wall-software-e2e-worker:ci

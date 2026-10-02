@@ -24,6 +24,9 @@ name: Netboot boot-chain e2e tracer (p4 s3)
 # with the real python3-gi etc.), runs scripts/device_root_checks.py on the
 # post-install root, and proves a flip-a-byte refusal. This job GATES
 # retirement of the old signed netboot/release-authority pipeline (s4/s5).
+# The installed bootstrapper closure also sends schema-2 OS observations to
+# Central/PostgreSQL before and after a packaged corrupt-package refusal. Those
+# observations remain T0 claims, without physical boot or acceptance proof.
 #
 # Part B (ticketless enroll -> pending -> operator bind -> render smoke) is
 # proven by the re-keyed scripts/demo_wall.py runner under the existing
@@ -168,7 +171,7 @@ jobs:
           deb_path=$(printf '%s\n' "$build_out" | tail -n1)
           echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
 
-      - name: Run the boot-time app-delivery tracer
+      - name: Run boot-time delivery and packaged OS check-in tracer
         env:
           CENTRAL_IMAGE: ${{ steps.central.outputs.imageid }}
           DEVICE_ROOT: ${{ steps.device-root.outputs.image }}
@@ -194,6 +197,9 @@ jobs:
             ${{ runner.temp }}/netboot-e2e/central.log
             ${{ runner.temp }}/netboot-e2e/compose-ps.txt
             ${{ runner.temp }}/netboot-e2e/provision.log
+            ${{ runner.temp }}/netboot-e2e/os-agent-before.log
+            ${{ runner.temp }}/netboot-e2e/packaged-refusal.log
+            ${{ runner.temp }}/netboot-e2e/os-agent-after.log
             ${{ runner.temp }}/device-root/mmdebstrap.log
           if-no-files-found: warn
           retention-days: 7

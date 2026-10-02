@@ -45,8 +45,10 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -512,6 +514,60 @@ def test_real_netboot_locates_through_a_301_to_central_over_verified_tls(registr
 
 
 # --- the compose tracer's helpers that need no docker ------------------------------------
+
+
+def test_packaged_os_gate_refuses_v1_or_promoted_t0_claims():
+    rows = [{"schema": 2, "sequence": sequence, "boot_id": tracer.PROBE_BOOT_ID,
+             "phase": "base_ready" if sequence == 1 else "retry_wait",
+             "fault": None if sequence == 1 else "app_integrity",
+             "installed": None, "running": None,
+             "installed_reason": "executor_not_initialized",
+             "running_reason": "executor_not_initialized"}
+            for sequence in (1, 2)]
+    claim = {"state": "unknown", "source": "serial_claim", "assurance": "t0_unverified",
+             "boot_id": tracer.PROBE_BOOT_ID, "digest": None}
+    status = {"commands_available": False,
+              "devices": [{"serial": tracer.PROBE_SERIAL,
+                           "base": {"source": "serial_claim", "assurance": "t0_unverified",
+                                    "boot_id": tracer.PROBE_BOOT_ID, "phase": "retry_wait",
+                                    "fault_code": "app_integrity"},
+                           "installed": claim, "running": claim,
+                           "accepted_fallback": None,
+                           "update_now": {"available": False}}]}
+    central = SimpleNamespace(os_rows=lambda: rows, accepted_count=lambda: 0,
+                              fleet=lambda: status)
+    assert tracer.os_claim_evidence(central, sequence=2, phase="retry_wait",
+                                    fault="app_integrity")["rows"] == rows
+    bad_rows = deepcopy(rows)
+    bad_rows[1]["schema"] = 1
+    with pytest.raises(tracer.TracerError, match="os_check_in_app_claim_invalid"):
+        tracer.os_claim_evidence(SimpleNamespace(os_rows=lambda: bad_rows,
+                                                 accepted_count=lambda: 0,
+                                                 fleet=lambda: status),
+                                 sequence=2, phase="retry_wait", fault="app_integrity")
+    with pytest.raises(tracer.TracerError, match="os_check_in_created_acceptance"):
+        tracer.os_claim_evidence(SimpleNamespace(os_rows=lambda: rows,
+                                                 accepted_count=lambda: 1,
+                                                 fleet=lambda: status),
+                                 sequence=2, phase="retry_wait", fault="app_integrity")
+
+
+@pytest.mark.parametrize("diagnostic", ["packaged probe failed\n", ""])
+def test_failed_packaged_probe_keeps_its_diagnostic_log(tmp_path, monkeypatch, diagnostic):
+    log = tmp_path / "os-agent-before.log"
+
+    def failed_command(argv, *, timeout, log):
+        assert argv[:3] == ["docker", "exec", "device"]
+        assert timeout == 60
+        if diagnostic:
+            log.write_text(diagnostic)
+        raise tracer.TracerError("command_failed:docker")
+
+    monkeypatch.setattr(tracer, "run", failed_command)
+    device = tracer.DeviceRoot("image", tmp_path, "device")
+    with pytest.raises(tracer.TracerError, match="command_failed:docker"):
+        device.packaged_probe("report", "http://127.0.0.1:8000", log=log)
+    assert log.read_text() == (diagnostic or "command_failed:docker\n")
 
 
 def test_the_tracer_gateway_301s_every_path_to_central_by_another_name():

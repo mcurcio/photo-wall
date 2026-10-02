@@ -36,6 +36,14 @@ CORE_IMAGES = {
 CORE_IMAGE_PATTERN = re.compile(r"sha256:[a-f0-9]{64}")
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "pyproject.toml", "uv.lock")
+# Demo-only plan timing; a deployment keeps Central's defaults (300 s horizon, 30 s renewal). A
+# held plan lease ends horizon + up to one renewal quantum ahead (15-25 s, against 15-45 s at the
+# default quantum), and the Central-outage step waits for exactly that expiry.
+DEMO_HORIZON_SECONDS = 15
+DEMO_RENEWAL_SECONDS = 10
+SCENE_CYCLE_SECONDS = 8
+# The deletion step needs a secured assignment that starts at least this far ahead.
+SECURED_LEAD_SECONDS = 3
 
 # This is the ONLY benchmark application code copied into the Player image.
 # It imports source-neutral Player/contracts/uplink and stdlib; no host harness follows.
@@ -55,6 +63,7 @@ import uuid
 from concurrent.futures import Future
 from pathlib import Path
 
+import player.service
 from contracts.enrollment import OutputReport
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
@@ -62,6 +71,12 @@ from player.service import BootContext, PlayerConfig, PlayerService, central_fin
 from uplink.resolver import read_kernel_command_line, resolve_central
 from uplink.transport import HttpTransport
 from uplink.trust import Trust
+
+# Demo configuration, not the Player's: retry a lost Central every few seconds instead of backing
+# off to contracts.liveness.SESSION_BACKOFF's 60 s, so the Central-restart step waits on
+# reconnection and readiness rather than on the schedule. The first step, which Central's silence
+# threshold is derived from, is unchanged.
+player.service.BACKOFF = (1, 2, 3, 5)
 
 class Recorder(RecordingRenderer):
     def __init__(self):
@@ -405,7 +420,8 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
                              interval="2s", timeout="3s", retries=30), restart="no", mem_limit="192m", cpus=1),
         "central": dict(app, environment=dict(PHOTO_WALL_DATABASE_URL=dsn,
             PHOTO_WALL_ADMIN_TOKEN="${DEMO_ADMIN_TOKEN}", PHOTO_WALL_CACHE_ROOT="/var/cache/photo-wall",
-            PHOTO_WALL_HORIZON_SECONDS="15"), volumes=["media:/var/cache/photo-wall/media:ro"], networks=["wall", "backend"],
+            PHOTO_WALL_HORIZON_SECONDS=str(DEMO_HORIZON_SECONDS),
+            PHOTO_WALL_RENEWAL_SECONDS=str(DEMO_RENEWAL_SECONDS)), volumes=["media:/var/cache/photo-wall/media:ro"], networks=["wall", "backend"],
             sysctls={"net.ipv4.ip_forward": "0"}, mem_limit="384m", depends_on={"database": {"condition": "service_healthy"}}),
         "worker": dict(common, image=project + "-worker:local", user="10001:10001",
             environment=dict(PHOTO_WALL_DATABASE_URL=dsn, PHOTO_WALL_CACHE_ROOT="/var/cache/photo-wall",
@@ -430,7 +446,7 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
             tmpfs=["/tmp", "/state:uid=10001,gid=10001,mode=0700"], networks=["wall"],
             mem_limit="192m", cpus=1, stop_grace_period="40s"),
     }
-    if scenario == "full":
+    if scenario != "baseline":
         services["player-two"] = dict(services["player-one"], command=["python", "/opt/player/runner.py", "1"],
             environment={"PHOTO_WALL_DEMO_DEVICE_ID": "device-" + hashlib.sha256(b"demo-player-two").hexdigest()},
             tmpfs=["/tmp", "/state:uid=10001,gid=10001,mode=0700"])
@@ -494,7 +510,7 @@ class DemoHost:
             data = (wheelhouse / "wheels" / wheel["filename"]).read_bytes()
             require(len(data) == wheel["size"] and hashlib.sha256(data).hexdigest() == wheel["sha256"],
                     "player_wheel_mismatch")
-        require(scenario in ("baseline", "full"), "invalid_scenario")
+        require(scenario in SCENARIOS, "invalid_scenario")
         state = state.resolve()
         require(not any(c in str(state) for c in "\n\r$#'\""), "unsupported_state_path")
         state.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -565,7 +581,7 @@ class DemoHost:
 
     @property
     def players(self):
-        return ["player-one"] + (["player-two"] if self.marker["scenario"] == "full" else [])
+        return ["player-one"] + (["player-two"] if self.marker["scenario"] != "baseline" else [])
 
     def player_report(self, player: str):
         return json.loads(self.compose("exec", "-T", player, "python", "-c",
@@ -822,7 +838,8 @@ def operator_action(action: str):
                 "operation": "commit", "expected_revision": 1, "expected_generation": 1,
                 "calibration": {}})
             frames.append(frame)
-        request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True, "cycle_seconds": 8,
+        request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True,
+            "cycle_seconds": SCENE_CYCLE_SECONDS,
             "contributions": [{"target": "frame:" + frame, "kind": "media", "source_refs": ["demo:1"]}
                               for frame in frames]})
         now = time.time()
@@ -976,7 +993,8 @@ def delete_secured_original(host, evidence, save, before, reports, portrait_sha)
               "start", "end", "valid_until")
     candidates = [dict((field, lock[field]) for field in fields)
                   for lock in before["locks"]
-                  if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
+                  if lock["sha256"] == portrait_sha
+                  and lock["start"] > before["utc"] + SECURED_LEAD_SECONDS]
     require(candidates, "portrait_not_secured")
     return journal_upstream_mutation(
         host, evidence, save, before, reports, "delete",
@@ -989,7 +1007,8 @@ def delete_secured_original(host, evidence, save, before, reports, portrait_sha)
 def selected_secured_presentation(before, reports, portrait_sha, deleted_at):
     """Find one exact selected lock presented after deletion before its lease ends."""
     selected = [lock for lock in before["locks"]
-                if lock["sha256"] == portrait_sha and lock["start"] > before["utc"] + 3]
+                if lock["sha256"] == portrait_sha
+                and lock["start"] > before["utc"] + SECURED_LEAD_SECONDS]
     for lock in selected:
         limit = min(lock["end"], lock["valid_until"])
         # DemoHost reports are keyed by stable role name, while the lock binds
@@ -1019,11 +1038,15 @@ def retryable_operator_error(error):
                           "operator_http_504", "operator_transport")
 
 
-def full_sequence(host, evidence, save):
-    """Bounded real-time faults, scoped to this demo's objects and interfaces."""
-    phases = evidence["phases"]
+class FaultRun:
+    """Sampling, bounded waits and phase records shared by the fault segments of one wall."""
 
-    def sample():
+    def __init__(self, host, evidence, save):
+        self.host, self.evidence, self.save = host, evidence, save
+        self.phases = evidence["phases"]
+
+    def sample(self):
+        host = self.host
         snapshot = host.role("operator", "snapshot")
         reports = {name: host.player_report(name) for name in host.players}
         write_json(host.state / "last-central.json", snapshot)
@@ -1031,11 +1054,11 @@ def full_sequence(host, evidence, save):
         require(not any(report["commit_failures"] for report in reports.values()), "readiness_commit_proof")
         return snapshot, reports
 
-    def await_state(check, code, seconds=65):
+    def await_state(self, check, code, seconds=65):
         deadline = time.monotonic() + seconds
         while True:
             try:
-                snapshot, reports = sample()
+                snapshot, reports = self.sample()
             except Exception as error:
                 if not retryable_operator_error(error):
                     raise
@@ -1047,12 +1070,20 @@ def full_sequence(host, evidence, save):
             require(time.monotonic() < deadline, code)
             time.sleep(2)
 
+    @staticmethod
     def refresh_status(receipt, status):
         return lambda snapshot, _: source_refresh_completed(snapshot, receipt, status=status)
 
-    def record(name, snapshot, reports, **checks):
-        phases[name] = dict(central=snapshot, players=reports, checks=checks)
-        save()
+    def record(self, name, snapshot, reports, **checks):
+        self.phases[name] = dict(central=snapshot, players=reports, checks=checks)
+        self.save()
+
+
+def upstream_faults(run):
+    """Live membership, deletion after security, permission loss and upstream outage."""
+    host, evidence, save = run.host, run.evidence, run.save
+    sample, await_state, refresh_status, record = (
+        run.sample, run.await_state, run.refresh_status, run.record)
 
     # One Run must survive membership edits; current locks freeze exact assignment bytes.
     before, reports = sample()
@@ -1085,7 +1116,8 @@ def full_sequence(host, evidence, save):
     portrait_sha = next(job["variant"]["sha256"] for job in snapshot["jobs"]
                         if job["original_sha1"] == portrait_sha1 and job["state"] == "ready")
     before, reports = await_state(lambda snapshot, _: any(item["sha256"] == portrait_sha and
-        item["start"] > snapshot["utc"] + 3 for item in snapshot["locks"]), "portrait_not_secured", 40)
+        item["start"] > snapshot["utc"] + SECURED_LEAD_SECONDS for item in snapshot["locks"]),
+        "portrait_not_secured", 40)
     deleted, deleted_at, deleted_refresh = delete_secured_original(
         host, evidence, save, before, reports, portrait_sha
     )
@@ -1134,6 +1166,14 @@ def full_sequence(host, evidence, save):
     )
     record("upstream_recovered", snapshot, reports)
 
+    return snapshot, reports
+
+
+def central_player_faults(run):
+    """Central outage past every held lease, Central restart and a Player restart."""
+    host, phases, save = run.host, run.phases, run.save
+    await_state, record = run.await_state, run.record
+
     # Central is unavailable past every held lease, so the Player must reach fallback.
     before, reports = await_state(lambda snapshot, reports: all(all(event["layers"] and not event["fallback"]
         for event in current_outputs(report)) for report in reports.values()), "active_before_outage_timeout", 60)
@@ -1150,8 +1190,9 @@ def full_sequence(host, evidence, save):
     finally:
         host.compose("start", "central", capture=False)
     resumed_at = time.time()
-    # Allow the documented 60s reconnect backoff, bounded HTTP reconciliation
-    # and readiness, then the next 8s cue. Keep the complete-output predicate.
+    # The demo runner retries Central within 5 s; the budget still covers the Player's own 60 s
+    # backoff, bounded HTTP reconciliation and readiness, then the next cue. Keep the
+    # complete-output predicate.
     recovery_seconds = 120
     recovery_started = time.monotonic()
     phases["central_restart"] = dict(resumed_at=resumed_at, recovery_budget_seconds=recovery_seconds)
@@ -1180,9 +1221,25 @@ def full_sequence(host, evidence, save):
     require(bool(cache_after), "cache_not_rebuilt")
     record("player_rejoined", snapshot, reports, cache_before=cache_before, cache_after=cache_after,
            cache_rebuilt_after_restart=True)
+    return snapshot, reports
+
+
+# The full scenario runs every fault segment, in this order, against one wall. Each segment is
+# also a scenario of its own (the same setup and baseline, then that segment alone), so CI runs
+# the segments as parallel jobs; tests/test_service_workflows.py holds those jobs to a partition.
+FAULT_SEGMENTS = {"upstream-faults": upstream_faults, "central-player-faults": central_player_faults}
+SCENARIOS = {"baseline": (), "full": tuple(FAULT_SEGMENTS),
+             **{segment: (segment,) for segment in FAULT_SEGMENTS}}
+
+
+def fault_sequence(host, evidence, save, segments):
+    """Bounded real-time faults, scoped to this demo's objects and interfaces."""
+    run = FaultRun(host, evidence, save)
+    for segment in segments:
+        snapshot, reports = FAULT_SEGMENTS[segment](run)
     require(time.time() < evidence["run"]["program"]["ends_at"], "run_ended_before_faults_completed")
-    phases["network_final"] = host.probe()
-    phases["final_checks"] = baseline_checks(snapshot, reports)
+    run.phases["network_final"] = host.probe()
+    run.phases["final_checks"] = baseline_checks(snapshot, reports)
     save()
 
 
@@ -1277,8 +1334,8 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
             central=snapshot, players=reports)
         evidence["phases"]["network_after"] = host.probe()
         save()
-        if scenario == "full":
-            full_sequence(host, evidence, save)
+        if SCENARIOS[scenario]:
+            fault_sequence(host, evidence, save, SCENARIOS[scenario])
         evidence["status"] = "passed"
         evidence["finished_utc"] = datetime.now(timezone.utc).isoformat()
         save()
@@ -1323,7 +1380,7 @@ def main():
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--immich-state", type=Path)
     parser.add_argument("--wheelhouse", type=Path)
-    parser.add_argument("--scenario", choices=("baseline", "full"), default="baseline")
+    parser.add_argument("--scenario", choices=tuple(SCENARIOS), default="baseline")
     parser.add_argument("--revision", default=PLAYER_REVISION)
     parser.add_argument("--central-image")
     parser.add_argument("--worker-image")
@@ -1339,7 +1396,7 @@ def main():
                                 lambda: operator_action(args.action))
     elif args.command == "plan":
         require(REVISION_PATTERN.fullmatch(args.revision) is not None, "exact_revision_required")
-        result = dict(schema=1, scenarios=["baseline", "full"], revision=args.revision,
+        result = dict(schema=1, scenarios=list(SCENARIOS), revision=args.revision,
             player_revision=args.revision, requires_core_images=args.revision != PLAYER_REVISION,
             topology="isolated wall and backend, worker-only retained upstream access", host_ports=False,
             actuation="simulated", required_inputs=["new state-dir", "retained immich-state", "exact wheelhouse"])

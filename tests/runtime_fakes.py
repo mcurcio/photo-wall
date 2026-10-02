@@ -13,13 +13,17 @@ import procrastinate
 
 from central.kernel.assets import AssetReady
 from central.kernel.job_types import (
+    CATALOG,
     FetchOsImage,
     FetchPackage,
+    FetchPlayerPayload,
+    FetchSealedEnvironment,
     Prefetch,
     PurgeFinishedJobs,
     RescueStalledJobs,
     SyncReleases,
 )
+from central.kernel.jobs import Job
 
 FACTS = AssetReady(size=7, sha256="ef" * 32)
 
@@ -31,6 +35,16 @@ class FetchOsImageStub:
 
 class FetchPackageStub:
     async def handle(self, job: FetchPackage) -> AssetReady:
+        return FACTS
+
+
+class FetchPlayerPayloadStub:
+    async def handle(self, job: FetchPlayerPayload) -> AssetReady:
+        return FACTS
+
+
+class FetchSealedEnvironmentStub:
+    async def handle(self, job: FetchSealedEnvironment) -> AssetReady:
         return FACTS
 
 
@@ -55,8 +69,17 @@ class PurgeStub:
 
 
 def catalog_stubs() -> list[Any]:
-    return [FetchOsImageStub(), FetchPackageStub(), SyncReleasesStub(), PrefetchStub(),
+    return [FetchOsImageStub(), FetchPackageStub(), FetchPlayerPayloadStub(),
+            FetchSealedEnvironmentStub(), SyncReleasesStub(), PrefetchStub(),
             RescueStub(), PurgeStub()]
+
+
+def catalog_instances() -> list[Job]:
+    samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32),
+               FetchPackage: FetchPackage(sha256="ab" * 32),
+               FetchPlayerPayload: FetchPlayerPayload(sha256="ef" * 32),
+               FetchSealedEnvironment: FetchSealedEnvironment(sha256="12" * 32)}
+    return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 
 def apply_procrastinate_schema(dsn: str) -> None:

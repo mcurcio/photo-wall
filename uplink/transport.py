@@ -1,4 +1,4 @@
-"""One GET at a time, over http.client: never follows a redirect, never uses a proxy, bounds
+"""One direct HTTP exchange at a time, over http.client: never follows a redirect or proxy, bounds
 every wait, and raises only UplinkError, classified where the error happens."""
 
 import http.client
@@ -36,8 +36,9 @@ class Reply(Protocol):
 
 class Transport(Protocol):
     def send(self, url: Url, *, headers: Mapping[str, str], deadline: float,
-             status_timeout: float = HOP_TIMEOUT) -> Reply:
-        """Exactly one GET. Never follows a redirect; never uses a proxy. `deadline` is absolute
+             status_timeout: float = HOP_TIMEOUT, method: str = "GET",
+             body: bytes | None = None) -> Reply:
+        """Exactly one GET or bounded POST. Never follows a redirect or proxy. `deadline` is absolute
         monotonic time. `status_timeout` bounds each address's exchange up to and including the
         status line; a caller whose server may hold the answer longer passes a longer one.
         Raises only UplinkError (DNS, CONNECT, TLS or TIME), classified at the source (classify
@@ -205,7 +206,12 @@ class HttpTransport:
         self._trust, self._lookup, self._monotonic = trust, lookup, monotonic
 
     def send(self, url: Url, *, headers: Mapping[str, str], deadline: float,
-             status_timeout: float = HOP_TIMEOUT) -> Reply:
+             status_timeout: float = HOP_TIMEOUT, method: str = "GET",
+             body: bytes | None = None) -> Reply:
+        if method not in ("GET", "POST") or (method == "GET" and body is not None):
+            raise ValueError("unsupported request")
+        if body is not None and len(body) > 8192:
+            raise ValueError("request body too large")
         host = url.origin.host
         try:
             addresses = self._lookup(host, url.origin.port,
@@ -225,7 +231,7 @@ class HttpTransport:
                 url, family=family, address=address, context=context, monotonic=self._monotonic,
                 connect_deadline=min(start + HOP_TIMEOUT, answer_by), deadline=answer_by)
             try:
-                connection.request("GET", url.target, headers=dict(headers))
+                connection.request(method, url.target, body=body, headers=dict(headers))
                 response = connection.getresponse()
                 if response.status < 200:
                     # A 1xx that is not 100 Continue (a 101 upgrade): no request/response HTTP.

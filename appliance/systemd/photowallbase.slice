@@ -1,0 +1,8 @@
+[Unit]
+Description=Reserved base management resources
+[Slice]
+CPUWeight=1000
+IOWeight=1000
+MemoryMin=128M
+MemoryMax=768M
+TasksMax=128

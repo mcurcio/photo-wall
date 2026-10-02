@@ -655,6 +655,42 @@ def test_saving_returns_to_the_cards_and_offers_show_now_and_schedule_it(page, r
             "Scene", exact=True)).to_have_value("saved-scene")
 
 
+
+# A loaded main thread (CI run 36954340001): the flow's `history.back()` returns and the
+# page stays busy, so the traversal moves the location before React renders the
+# finished flow, and that traversal's `hashchange` is queued behind the render.
+_BUSY_AFTER_HISTORY_BACK = """
+(() => {
+  const back = history.back.bind(history);
+  history.back = () => {
+    back();
+    const until = performance.now() + 300;
+    while (performance.now() < until) {}
+  };
+})();
+"""
+
+
+def test_a_save_whose_return_lands_before_its_render_still_offers_the_next_actions(
+        page, registry):
+    """§6 history under load: the rendered route follows the location's `popstate`, so when
+    Save's return to #/scenes lands before the finished flow renders, no render sees the
+    flow's route with its draft closed and opens a fresh draft (which would clear the
+    just-saved Scene and its next actions). Mutation probe: listen to `hashchange` only in
+    useRoute.js."""
+    page.add_init_script(_BUSY_AFTER_HISTORY_BACK)
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        author_scene(page, "saved-scene", SOURCE, (VALID_FRAME,))
+        scenes = _scenes(page)
+        expect(scenes.get_by_role("group", name="Next for Scene saved-scene").get_by_role(
+            "button")).to_have_text(["Show now", "Schedule it"])
+        assert current_hash(page) == "#/scenes"
+        expect(_scenes_link(page)).to_have_accessible_description("")
+
+
 # --- Review fixes (bead 2 review).
 
 

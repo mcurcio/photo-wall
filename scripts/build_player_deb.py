@@ -24,8 +24,13 @@ Pure Python, no venv, no wheelhouse, no arm64 chroot: it builds on any host with
 
 Version scheme matches scripts/build_player.py: `{pyproject project.version}+g{revision}`, read
 from the given Git revision (not the working tree) -- one reproducible identifier across every
-artefact built from that commit. (scripts/build_bootstrapper_deb.py DELIBERATELY uses a different,
-content-derived scheme; see that module's docstring.)
+artefact built from that commit. This is the PUBLISHED Player `.deb` (base-image.yml, the release's
+`photo-wall-player_*_all.deb`). The V2 node component set's `app.deb`
+(scripts/build_node_components.py, `build_tree(..., by_content=True)`) is instead versioned by
+what it ships (`content_version`), like the node base, display and manager packages, so equal
+inputs at different commits give equal bytes and the set can be cached whole.
+(scripts/build_bootstrapper_deb.py DELIBERATELY uses a content-derived scheme too; see that
+module's docstring.)
 
 `control_file` and `run_dpkg_deb` are generic (parameterized on package, version, architecture,
 Depends, maintainer and description); `fetch_tree` computes the git-archived tree both `.deb`
@@ -37,6 +42,7 @@ verbatim by scripts/build_bootstrapper_deb.py (which imports them); do not move 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import re
 import subprocess
@@ -100,6 +106,9 @@ UNIT_FILES = ("player.service", "weston.service")
 _PYPI_ROOTS = frozenset({"pydantic", "httpx", "websockets", "cryptography", "zeroconf"})
 
 DECLARATION: Final = "scripts/debian_packages.py"
+# The only files outside the first-party packages that fetch_tree archives; a builder may
+# read nothing else from the tree (tests/test_build_trees.py enforces it).
+ARCHIVED_FILES: Final = (DECLARATION, "pyproject.toml")
 
 # The first-party packages, the declaration and pyproject.toml (~1.4 MiB today); guards
 # against archiving an unexpectedly huge tree.
@@ -114,6 +123,37 @@ def package_version(project_version: str, revision: str) -> str:
     if base_version.local:
         raise BuildError("unsupported project version")
     return f"{base_version}+g{revision}"
+
+
+# The control file's version while the content version is computed over the staged tree.
+_UNVERSIONED: Final = "0"
+
+
+def content_version(project_version: str, deb_root: Path) -> str:
+    """`{pyproject version}+{12 hex}` over EVERYTHING staged under `deb_root` -- each entry's
+    path, type, mode and bytes or link target, the control file included as staged with the
+    `_UNVERSIONED` placeholder (so its Depends and Architecture count) -- and nothing else: no
+    revision, no time. Length-prefixed fields, so distinct trees cannot alias."""
+    base_version = Version(project_version)
+    if base_version.local:
+        raise BuildError("unsupported project version")
+    hasher = hashlib.sha256(str(base_version).encode())
+    for path in sorted(deb_root.rglob("*")):
+        mode = path.lstat().st_mode
+        if path.is_symlink():
+            content = str(path.readlink()).encode()
+        else:
+            content = path.read_bytes() if path.is_file() else b""
+        for field in (path.relative_to(deb_root).as_posix().encode(), oct(mode).encode(), content):
+            hasher.update(b"\x00" + str(len(field)).encode() + b"\x00" + field)
+    return f"{base_version}+{hasher.hexdigest()[:12]}"
+
+
+def write_control(deb_root: Path, version: str, *, architecture: str = ARCHITECTURE) -> None:
+    """DEBIAN/control for this package at `version`, mode 0644."""
+    control_path = deb_root / "DEBIAN/control"
+    control_path.write_bytes(control_file(version, packages("player"), architecture=architecture))
+    control_path.chmod(0o644)
 
 
 def control_file(version: str, depends: tuple[str, ...], *, package: str = PACKAGE,
@@ -189,7 +229,7 @@ def fetch_tree(repository: Path, revision: str, into: Path) -> None:
     ).stdout.decode().split("\0")
     first_party = sorted({name.partition("/")[0] for name in listing
                           if re.fullmatch(r"[^/]+/__init__\.py", name)})
-    wanted = (*first_party, DECLARATION, "pyproject.toml")
+    wanted = (*first_party, *ARCHIVED_FILES)
     archive = subprocess.run(
         ["git", "-C", str(repository), "archive", "--format=tar", revision, "--", *wanted],
         check=True, capture_output=True, timeout=60,
@@ -201,7 +241,7 @@ def fetch_tree(repository: Path, revision: str, into: Path) -> None:
         for member in members:
             path = PurePosixPath(member.name)
             inside = (path.parts[0] in first_party
-                      or member.name in (DECLARATION, "pyproject.toml", "scripts"))
+                      or member.name in (*ARCHIVED_FILES, "scripts"))
             if (path.is_absolute() or ".." in path.parts or not inside
                     or not (member.isfile() or member.isdir())):
                 raise BuildError("unexpected or nonregular source member")
@@ -218,7 +258,8 @@ def assert_declaration_matches(tree: Path) -> None:
 
 
 def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: Path,
-               weston_ini: bytes, version: str) -> None:
+               weston_ini: bytes, version: str, native_client: Path | None = None,
+               architecture: str = ARCHITECTURE) -> None:
     """Assemble the `.deb` staging tree.
 
     Refuses a closure that leaves a declared import unreached (the declaration would put an
@@ -240,15 +281,23 @@ def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: 
 
     debian = deb_root / "DEBIAN"
     debian.mkdir(mode=0o755)
-    control_path = debian / "control"
-    control_path.write_bytes(control_file(version, packages("player")))
-    control_path.chmod(0o644)
+    write_control(deb_root, version, architecture=architecture)
     postinst_path = debian / "postinst"
     postinst_path.write_bytes(postinst_script())
     postinst_path.chmod(0o755)
 
     stage_application(closure, PLAYER_POLICY, repo=tree,
                       into=deb_root / INSTALL_DIR.relative_to("/"))
+
+    if native_client is not None:
+        blob = native_client.read_bytes()
+        machine = {"arm64": 183, "amd64": 62}.get(architecture)
+        if machine is None or len(blob) < 64 or blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(blob[18:20], "little") != machine:
+            raise BuildError("native_client_elf_architecture")
+        client = deb_root / "usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+        client.parent.mkdir(parents=True)
+        client.write_bytes(blob)
+        client.chmod(0o644)
 
     units_dir = deb_root / "etc/systemd/system"
     units_dir.mkdir(parents=True)
@@ -313,9 +362,36 @@ def run_dpkg_deb(deb_root: Path, output: Path) -> Path:
     return output
 
 
-def build(repository: Path, revision: str, output_dir: Path) -> Path:
-    """End to end: `fetch_tree` the committed sources at `revision` -> refuse a stale declaration
-    (`assert_declaration_matches`) -> compute the closure -> stage -> `dpkg-deb`.
+def sources(tree: Path) -> set[str]:
+    """Every tree path `build_tree` reads: the Player closure, its units, and the declaration and
+    pyproject.toml. scripts/node_component_inputs.py builds the node set from exactly these."""
+    closure = closure_for(PLAYER_POLICY, repo=tree)
+    return {*(path.as_posix() for path in closure.files), *ARCHIVED_FILES,
+            *(f"appliance/systemd/{name}" for name in UNIT_FILES)}
+
+
+def build(repository: Path, revision: str, output_dir: Path, *,
+          native_client: Path | None = None, architecture: str = ARCHITECTURE) -> Path:
+    """End to end: `fetch_tree` the committed sources at `revision`, then `build_tree` with the
+    revision's version (`package_version`): the published Player `.deb`."""
+    output_dir = output_dir.resolve()
+    repository = repository.resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=".photo-wall-player-deb-src-", dir=output_dir) as tmp:
+        tree = Path(tmp) / "tree"
+        fetch_tree(repository, revision, tree)
+        return build_tree(tree, output_dir, revision=revision, native_client=native_client,
+                          architecture=architecture)
+
+
+def build_tree(tree: Path, output_dir: Path, *, revision: str | None = None,
+               by_content: bool = False, native_client: Path | None = None,
+               architecture: str = ARCHITECTURE) -> Path:
+    """Refuse a stale declaration (`assert_declaration_matches`) -> compute the closure -> stage
+    -> version -> `dpkg-deb`, over an already fetched `tree`.
+
+    Version: `package_version(pyproject, revision)` (plus `.client<12 hex>` with a native
+    client), or with `by_content=True` the staged tree's own digest (`content_version`),
+    which then also covers the native client's bytes. Exactly one of the two must be chosen.
 
     No arm64 chroot and no `--root`: the `.deb` carries only `.py` files, units and config, so it
     builds on any host with `dpkg-deb` (like the bootstrapper `.deb`). `weston.ini` is generated
@@ -324,21 +400,29 @@ def build(repository: Path, revision: str, output_dir: Path) -> Path:
     """
     from player.output_discovery import weston_ini as render_weston_ini
 
+    if (revision is None) is not by_content:
+        raise BuildError("player_deb_version_scheme")
     output_dir = output_dir.resolve()
-    repository = repository.resolve(strict=True)
+    assert_declaration_matches(tree)
+    closure = closure_for(PLAYER_POLICY, repo=tree)
+    project_version = tomllib.loads((tree / "pyproject.toml").read_text())["project"]["version"]
     with tempfile.TemporaryDirectory(prefix=".photo-wall-player-deb-", dir=output_dir) as tmp:
-        tree = Path(tmp) / "tree"
-        fetch_tree(repository, revision, tree)
-        assert_declaration_matches(tree)
-        closure = closure_for(PLAYER_POLICY, repo=tree)
-        project = tomllib.loads((tree / "pyproject.toml").read_text())
-        version = package_version(project["project"]["version"], revision)
         deb_root = Path(tmp) / "deb-root"
+        if by_content:
+            version = _UNVERSIONED
+        else:
+            version = package_version(project_version, revision)
+            if native_client is not None:
+                version += ".client" + hashlib.sha256(native_client.read_bytes()).hexdigest()[:12]
         stage_tree(deb_root, closure=closure, tree=tree,
                    systemd_source=tree / "appliance/systemd",
-                   weston_ini=render_weston_ini().encode(), version=version)
+                   weston_ini=render_weston_ini().encode(), version=version,
+                   native_client=native_client, architecture=architecture)
         assert_no_deployment_config(deb_root)
-        output = output_dir / f"{PACKAGE}_{version}_{ARCHITECTURE}.deb"
+        if by_content:
+            version = content_version(project_version, deb_root)
+            write_control(deb_root, version, architecture=architecture)
+        output = output_dir / f"{PACKAGE}_{version}_{architecture}.deb"
         return run_dpkg_deb(deb_root, output)
 
 
@@ -347,9 +431,11 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--revision", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--native-client", type=Path)
+    parser.add_argument("--architecture", choices=("all", "arm64", "amd64"), default=ARCHITECTURE)
     args = parser.parse_args()
     try:
-        output = build(args.repository, args.revision, args.output_dir)
+        output = build(args.repository, args.revision, args.output_dir, native_client=args.native_client, architecture=args.architecture)
     except (ValueError, OSError, subprocess.SubprocessError, ClosureError) as exc:
         parser.exit(1, f"Player .deb build failed: {exc}\n")
     print(str(output))

@@ -1,0 +1,35 @@
+[Unit]
+Description=Photo Wall exact-root cold app effect broker
+ConditionKernelCommandLine=photowall.node=v2
+ConditionPathExists=/run/photo-wall-node/cold.json
+After=photo-wall-display.service photo-wall-host-core.service
+
+After=photo-wall-node-handoff.service photo-wall-node-prepare.service
+
+[Service]
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-app-broker
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=photo-wall-app-broker
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+User=root
+UMask=0077
+Slice=photowallbase.slice
+MemoryMax=192M
+MemorySwapMax=0
+TasksMax=24
+CPUQuota=50%
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+ReadWritePaths=/run/photo-wall-app-broker /run/photo-wall-app-proof
+InaccessiblePaths=-/run/photo-wall-host-core

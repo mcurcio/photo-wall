@@ -219,8 +219,10 @@ publishes the GitHub Release only once every declared asset is attached to its
 draft and every image is tagged with the version. The
 [`service-base.yml`](../.github/workflows/service-base.yml) reusable workflow
 provides a separate retained FFmpeg environment for `checks.yml`,
-`software-e2e.yml` and the release's media worker image. Both checks jobs share
-the AMD64 result; software E2E shares the ARM64 definition.
+`software-e2e.yml` and the release's media worker image. Both image-building checks
+jobs (`image-smoke`, `linux-media`) share the AMD64 result; every software E2E job
+shares the ARM64 definition and builds its images through one shared setup action
+([`software-e2e-setup`](../.github/actions/software-e2e-setup/action.yml)).
 
 `scripts/service_base.py` reads the `media-os` recipe prefix ending at
 `# END MEDIA OS DEFINITION` in the root Dockerfile. The recipe and architecture
@@ -287,7 +289,8 @@ editable path only when the packages exist, and making it source-independent
 would change `pyproject.toml`, an input of every released package and of the
 base squashfs cache key.
 
-**Cache scopes.** Each target reads and writes (`mode=max`) one GHA scope per
+**Cache scopes.** The [`buildkit-cache`](../.github/actions/buildkit-cache/action.yml)
+action is the one scope policy. Each target reads and writes (`mode=max`) one GHA scope per
 architecture, its own: `photo-wall-<target>-<architecture>-v<epoch>`. An export
 replaces its scope's index, so the former shared scopes
 (`photo-wall-checks-amd64-v1`, `photo-wall-software-e2e-arm64-v1`) kept only
@@ -297,7 +300,45 @@ shared `deps` parent in a sibling's index and then missed the target's own
 `COPY --link` layers, depending on import order. Builds in one job still share
 layers through the job's builder. Jobs of one run that build the same target
 write identical content. Raising the action's `CACHE_EPOCH` discards every
-service cache at once.
+service cache at once. `linux-media` reads its scope on every run and writes it
+only from `main`, whose scope every pull request can read.
+
+**Node components.** [`node-components.yml`](../.github/workflows/node-components.yml)
+builds the V2 node component set once per pipeline run, for `base-image` and every
+`node-pid1` leg, which download it (and the PID1 fixture image, `docker save`d).
+Its builders ([`node_build_inputs.py`](../scripts/node_build_inputs.py)) use the
+same policy with one scope per role (`photo-wall-node-<role>-arm64-v<epoch>`:
+`display`, `environment-app`, `environment-manager-primary`); the fixture's
+environments read the app's scope and write none. A sealed environment installs
+its package's relations in a layer before the package is copied, so a commit
+that changes only the package rebuilds only its last layers. The cache changes
+no byte: `node-display.deb` is reproducible (`SOURCE_DATE_EPOCH`), and an
+environment digest names an image ID that BuildKit derives from the layers and
+the pin's `SOURCE_DATE_EPOCH`. The base squashfs cache is keyed on the
+display build's recorded inputs and the staged `node-base.deb`, and the node ABI
+check refuses a hit whose installed ABI differs from the components'.
+
+**Node component output cache.** The component set names no commit: its Player
+`app.deb` is versioned by what it ships, like the base, display and manager
+packages (the published Player `.deb` keeps `+g<revision>`), and
+`components.json` and `build-provenance.json` carry no revision. So the workflow
+caches the whole output (`actions/cache`, exact key only), and the PID1 fixture
+together with the set it was derived from. The key is the digest of the input
+manifest
+([`node_component_inputs.py`](../scripts/node_component_inputs.py)) that the
+build records in `build-provenance.json`: the fetched tree pruned to exactly the
+paths each builder declares it reads (so a builder that reads anything else
+fails), the first-party modules the build and fixture processes import, `uv.lock`,
+the workflow, the builder image, the Debian snapshot and its `SOURCE_DATE_EPOCH`.
+[`test_node_component_inputs.py`](../tests/test_node_component_inputs.py)
+fails when a builder reads a file the manifest omits. After a build or a hit,
+`node_component_inputs stamp` recomputes the digest, refuses a set that records
+another, and writes `revision.json`, the set's only record of the commit; the
+seal ([`node_release_artifacts.py`](../scripts/node_release_artifacts.py))
+refuses a set without that stamp for its revision. The cache is written only
+from `main`, like `linux-media`'s: every pull request reads it, and a pull
+request's own entries (about 1 GB a set, 2 with the fixture) would only crowd
+`main`'s out.
 
 **Limits.** A workflow run restores only caches of its own ref, its pull
 request's base branch and the default branch

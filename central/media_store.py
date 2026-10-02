@@ -789,9 +789,18 @@ class MediaStore:
             with self.db.transaction() as conn:
                 conn.execute("SET LOCAL lock_timeout='5s'")
                 conn.execute("SET LOCAL statement_timeout='10s'")
+                # A grant must serialize before or after drain admission, never
+                # slip between its snapshot and its durable fence.
+                from central.coordination import COORDINATION_LOCK
+
+                conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
                 identity = self.installation.authenticate_in(conn, token)
                 if identity is None:
                     raise MediaStoreError("unauthorized", 401)
+                if conn.execute(
+                    "SELECT 1 FROM active_equipment_drains WHERE player_id=%s", (identity["id"],),
+                ).fetchone():
+                    raise MediaStoreError("equipment_draining", 409)
                 observed = self.installation.configuration_in(
                     conn, identity["id"], identity["authority_epoch"]
                 )

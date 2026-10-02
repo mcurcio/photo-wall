@@ -1,0 +1,8 @@
+[Unit]
+Description=Independent reserved HostCore control resources
+[Slice]
+CPUWeight=1000
+IOWeight=1000
+MemoryMin=64M
+MemoryMax=96M
+TasksMax=32

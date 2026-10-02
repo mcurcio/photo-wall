@@ -40,7 +40,7 @@ PLAYER_DEB_DEPENDS_BEFORE = (
 DEVICE_INCLUDE = (
     "--include=ca-certificates,gir1.2-gst-plugins-base-1.0,gir1.2-gtk-3.0,gstreamer1.0-libav,"
     "gstreamer1.0-plugins-bad,gstreamer1.0-plugins-base,gstreamer1.0-plugins-good,libegl1,"
-    "libgl1-mesa-dri,passwd,python3,python3-cryptography,python3-gi,python3-gst-1.0,"
+    "libgl1-mesa-dri,libwayland-client0,passwd,python3,python3-cryptography,python3-gi,python3-gst-1.0,"
     "python3-httpx,python3-opengl,python3-pydantic,python3-websockets,python3-zeroconf,udev,"
     "weston")
 SNAPSHOT_LINES = (
@@ -147,9 +147,11 @@ def test_the_pin_names_its_two_sources_each_signed_by_the_debian_keyring():
 
 
 def test_each_consumer_gets_its_list():
-    assert packages("bootstrapper") == ("ca-certificates", "python3", "python3-zeroconf")
+    assert packages("bootstrapper") == (
+        "ca-certificates", "python3", "python3-cryptography", "python3-pydantic",
+        "python3-zeroconf")
     assert packages("player") == tuple(sorted(
-        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev")))
+        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev", "libwayland-client0")))
     assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
         {*packages("bootstrapper"), *packages("player")}))
     assert packages("initrd-build") == (
@@ -168,7 +170,9 @@ def test_an_unknown_consumer_is_refused_rather_than_rendering_nothing():
 
 
 def test_the_import_tables_are_read_only_and_cover_the_device_imports():
-    assert dict(import_table("bootstrapper")) == {"zeroconf": "python3-zeroconf"}
+    assert dict(import_table("bootstrapper")) == {
+        "cryptography": "python3-cryptography", "pydantic": "python3-pydantic",
+        "zeroconf": "python3-zeroconf"}
     assert sorted(import_table("player")) == [
         "OpenGL", "cryptography", "gi", "httpx", "pydantic", "websockets", "zeroconf"]
     assert import_table("initrd-build") == {}
@@ -191,7 +195,8 @@ def test_mmdebstrap_builds_the_device_root_at_the_pin():
 
 @pytest.mark.parametrize(("argv", "printed"), [
     (["epoch"], ["1788480000"]),
-    (["packages", "bootstrapper"], ["ca-certificates", "python3", "python3-zeroconf"]),
+    (["packages", "bootstrapper"], ["ca-certificates", "python3", "python3-cryptography",
+                                   "python3-pydantic", "python3-zeroconf"]),
     (["packages", "bootstrapper", "player"], list(packages(*DEVICE_CONSUMERS))),
     (["packages", "--archive", "raspberrypi", "initrd-build"],
      ["linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom"]),
@@ -325,6 +330,9 @@ def test_no_deb_builder_writes_a_depends_list():
     declared = {package.name for package in PACKAGES}
     builders = sorted((REPO / "scripts").glob("build_*_deb.py"))
     assert [path.name for path in builders] == ["build_bootstrapper_deb.py",
+                                                "build_node_base_deb.py",
+                                                "build_node_display_deb.py",
+                                                "build_node_manager_deb.py",
                                                 "build_player_deb.py"]
     for path in builders:
         tree = ast.parse(path.read_text())
@@ -335,3 +343,8 @@ def test_no_deb_builder_writes_a_depends_list():
                 literal = {element.value for element in node.elts
                            if isinstance(element, ast.Constant) and isinstance(element.value, str)}
                 assert not literal & declared, (path.name, sorted(literal & declared))
+
+
+def test_node_base_and_manager_explicit_host_dependencies():
+    assert {"udev", "mount", "systemd", "ca-certificates", "login", "libpam-systemd"} <= set(packages("node-base"))
+    assert "ca-certificates" in packages("node-manager")

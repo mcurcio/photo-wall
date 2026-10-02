@@ -14,7 +14,7 @@ from typing import Literal, Protocol, TypeAlias
 
 from central.kernel.assets import OriginLocator
 from central.kernel.job_types import AssetJob
-from central.kernel.ports import PublishedRelease
+from central.kernel.ports import PlayerPayload, PublishedRelease
 from central.kernel.transactions import Transaction
 
 BootOutcome: TypeAlias = Literal["pending", "healthy", "failed"]
@@ -30,6 +30,18 @@ class ReleaseRow:
     package: OriginLocator | None  # the .deb (asset_url/asset_sha256/asset_size)
     os_image: OriginLocator | None  # the base tarball (base_tarball_url/_sha256/_size)
     divergent: bool = False  # the .deb was re-cut upstream after it was produced: frozen
+    payload: PlayerPayload | None = None
+    base_abi: str | None = None
+    base_abi_squashfs_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FleetDesiredAssets:
+    """Exact content keys named by current fleet policy or unexpired offers."""
+
+    base_tarballs: frozenset[str] = frozenset()
+    player_debs: frozenset[str] = frozenset()
+    player_payloads: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +100,14 @@ class ReleaseRecords(Protocol):
     def get(self, tx: Transaction, tag: str) -> ReleaseRow | None: ...
 
     def all(self, tx: Transaction) -> tuple[ReleaseRow, ...]: ...
+
+    def fleet_desired_assets(self, tx: Transaction, *, now: float) -> FleetDesiredAssets:
+        """Digest roots from explicit fleet selection and active schema-2 offers."""
+        ...
+
+    def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:
+        """One unambiguous outer ABI claim for exact payload bytes, else None."""
+        ...
 
     def shipping(self, tx: Transaction, sha256: str) -> tuple[ReleaseRow, ...]:
         """The releases whose `.deb` sha is `sha256` (an indexed WHERE, never a scan)."""

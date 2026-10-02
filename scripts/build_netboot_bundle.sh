@@ -59,6 +59,7 @@ optional:
   --rpi-eeprom-digest FILE  the packaged rpi-eeprom-digest to run (default: PATH lookup)
   --build-boot-data SCRIPT  path to scripts/build_boot_data.py (default: alongside this script)
   --snapshot-epoch N  the Debian snapshot pin; build_boot_data.py warns past 90 days
+  --base-abi-file FILE  ABI extracted from this squashfs by the build; binds schema-2 releases
   --skip-verify       skip the lsinitramfs content-verify (local dev only;
                       lsinitramfs is unavailable off an initramfs-tools host)
 EOF
@@ -81,6 +82,7 @@ REPO=""
 PYTHON_LIBDIR=""
 BUILD_BOOT_DATA=""
 SNAPSHOT_EPOCH=""
+BASE_ABI_FILE=""
 SKIP_VERIFY=0
 
 while [ "$#" -gt 0 ]; do
@@ -101,6 +103,7 @@ while [ "$#" -gt 0 ]; do
         --python-libdir) PYTHON_LIBDIR="$2"; shift 2 ;;
         --build-boot-data) BUILD_BOOT_DATA="$2"; shift 2 ;;
         --snapshot-epoch) SNAPSHOT_EPOCH="$2"; shift 2 ;;
+        --base-abi-file) BASE_ABI_FILE="$2"; shift 2 ;;
         --skip-verify) SKIP_VERIFY=1; shift ;;
         -h|--help) usage ;;
         *) echo "build_netboot_bundle: unknown argument: $1" >&2; usage ;;
@@ -288,6 +291,17 @@ EOF
 
 # Corruption-only SHA256SUMS over every staged artifact (incl. the squashfs).
 # Paths are relative to the bundle root so the file is position-independent.
+if [ -n "$BASE_ABI_FILE" ]; then
+    [ -f "$BASE_ABI_FILE" ] || { echo "base ABI file missing" >&2; exit 1; }
+    ( cd "$REPO" && "$PYTHON" -c '
+import hashlib, pathlib, sys
+from contracts.release import base_abi_sidecar
+abi_file, squashfs, output = map(pathlib.Path, sys.argv[1:])
+abi = abi_file.read_text(encoding="ascii").strip()
+digest = hashlib.file_digest(squashfs.open("rb"), "sha256").hexdigest()
+output.write_bytes(base_abi_sidecar(abi, digest))
+' "$BASE_ABI_FILE" "$OUTPUT/photo-wall-base.squashfs" "$OUTPUT/base-abi.json" )
+fi
 (
     cd "$OUTPUT"
     find . -type f ! -name SHA256SUMS -print0 \

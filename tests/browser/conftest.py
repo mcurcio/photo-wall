@@ -60,9 +60,39 @@ CHECKS = {
     "test_cancel_removes_live_run": ("run_cancellation",),
     "test_finish_live_run_posts": ("controlled_program_admission_completion",),
 }
-RESULTS = pytest.StashKey[dict]()
-BROWSERS = pytest.StashKey[set]()
 ERRORS = pytest.StashKey[list]()
+BROWSER = pytest.StashKey[list]()
+# A test report's `user_properties` key for its evidence facts: the report is what xdist carries
+# from the worker that ran the test to the controller that writes the evidence.
+FACTS = "operator_browser_evidence"
+
+
+class EvidenceCollector:
+    """The evidence, gathered from test reports where they are logged: the xdist controller (or
+    the one process) that writes it in `pytest_sessionfinish`."""
+
+    def __init__(self):
+        self.results = {}
+        self.browsers = set()
+
+    def pytest_runtest_logreport(self, report):
+        facts = dict(report.user_properties).get(FACTS)
+        if facts is None:
+            return
+        if facts["browser"]:
+            self.browsers.add(tuple(facts["browser"]))
+        if facts["check"] in CHECKS:
+            result = self.results.setdefault(facts["check"], {"phases": {}})
+            result["phases"][report.when] = report.outcome
+            result["page_errors"] = facts["page_errors"]
+
+
+COLLECTOR = pytest.StashKey[EvidenceCollector]()
+
+
+def pytest_configure(config):
+    config.stash[COLLECTOR] = collector = EvidenceCollector()
+    config.pluginmanager.register(collector, "operator-browser-evidence")
 
 
 @pytest.fixture
@@ -86,9 +116,7 @@ def page_errors(context, request):
         watch(page)
     context.on("page", watch)
     browser = context.browser
-    request.config.stash.setdefault(BROWSERS, set()).add((
-        browser.browser_type.name, browser.version,
-    ))
+    request.node.stash[BROWSER] = [browser.browser_type.name, browser.version]
     yield
     assert not errors, f"unexpected JavaScript page errors: {len(errors)}"
 
@@ -96,13 +124,11 @@ def page_errors(context, request):
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
-    name = getattr(item, "originalname", item.name)
-    if name not in CHECKS:
-        return
-    phase = outcome.get_result()
-    result = item.config.stash.setdefault(RESULTS, {}).setdefault(name, {"phases": {}})
-    result["phases"][phase.when] = phase.outcome
-    result["page_errors"] = len(item.stash.get(ERRORS, []))
+    outcome.get_result().user_properties.append((FACTS, {
+        "check": getattr(item, "originalname", item.name),
+        "page_errors": len(item.stash.get(ERRORS, [])),
+        "browser": item.stash.get(BROWSER, None),
+    }))
 
 
 def source_identity(root):
@@ -127,9 +153,11 @@ def source_identity(root):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1":
+    if (os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1"
+            or hasattr(session.config, "workerinput")):  # the controller writes it
         return
-    results = session.config.stash.get(RESULTS, {})
+    collector = session.config.stash[COLLECTOR]
+    results = collector.results
     checks = []
     for name, assertions in CHECKS.items():
         result = results.get(name, {})
@@ -147,8 +175,8 @@ def pytest_sessionfinish(session, exitstatus):
         "source": source_identity(session.config.rootpath),
         "playwright": importlib.metadata.version("playwright"),
         "browsers": [{"name": name[:24], "version": version[:80]}
-                     for name, version in sorted(session.config.stash.get(BROWSERS, set()))],
-        "environment": {"database": "real_postgresql_disposable_schema", "transport": "loopback_http",
+                     for name, version in sorted(collector.browsers)],
+        "environment": {"database": "real_postgresql_disposable_database", "transport": "loopback_http",
                         "equipment": "simulated", "players": 2, "outputs": 3,
                         "scheduler": False, "worker": False, "preview_clock": "controlled",
                         "runtime_advance": "controlled_production_owner",

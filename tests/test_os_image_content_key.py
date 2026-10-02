@@ -286,9 +286,9 @@ def test_t6_a_substitute_serve_records_the_known_good_tag(world):
 
 
 @pytest.fixture
-def at_027():
-    """A schema migrated through 027 with procrastinate installed, and its `Database`."""
-    with schema_before("028") as db:
+def at_027(empty_database):
+    """A database migrated through 027 with procrastinate installed, and its `Database`."""
+    with schema_before(empty_database, "028") as db:
         yield db
 
 

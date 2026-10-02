@@ -1,0 +1,124 @@
+name: Player node real-PID1 lifecycle scenarios
+
+# The node lifecycle under real systemd (tests/test_node_pid1.py, marker `node_pid1`): the sealed
+# node components booted as PID 1 in a privileged arm64 container against a real HTTP Central on
+# the disposable test database. One matrix leg per scenario, so the job takes about one scenario
+# plus setup:
+#
+#   success   ordered stop-before-start effects and natural completion
+#   failure   a target whose entrypoint exits falls back to the previous environment
+#   outage    Central unreachable for at least 35 s once the target is served: the node
+#             converges locally and reports every effect on reconnect, nothing held
+#   reboot    a second kernel boot of the same device re-enrolls, supersedes the first (its
+#             sessions are refused) and accepts a stage with no operator action
+#
+# Each leg boots the components node-components.yml built ONCE for the run (the builder
+# base-image.yml's squashfs bakes, scripts/build_node_components.py) and the PID1 fixture it
+# derived from them (scripts/build_node_pid1_fixture.py): it downloads both and loads the fixture
+# image. PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 turns a missing fixture into a failure, never a skip.
+# Native arm64 (ubuntu-24.04-arm): the node components and the fixture image are arm64, and the
+# container is --privileged with systemd as PID 1, as base-image.yml's start probes run.
+# Hardware stays synthetic (sysfs Virtual-1, headless Weston): no DRM, HDMI or PXE claim.
+#
+# Called by pipeline.yml (its `node-pid1` job, after its `node-components` job) when
+# scripts/release_plan.py finds a node package or one of this suite's own paths changed.
+# Dispatched by hand, it builds its own components first (the `components` job).
+on:
+  workflow_call:
+    inputs:
+      revision:
+        description: Exact 40-character commit the components are built from
+        required: true
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'
+  PHOTO_WALL_TEST_REQUIRE_NODE_PID1: '1'
+
+jobs:
+  # By hand only: a pipeline run's components come from its own node-components job.
+  components:
+    if: github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/node-components.yml
+    with:
+      revision: ${{ github.sha }}
+      pid1-fixture: true
+
+  scenario:
+    needs: components
+    if: ${{ !cancelled() && needs.components.result != 'failure' }}
+    runs-on: ubuntu-24.04-arm
+    # Setup and the fixture download about 2 min, one scenario 2-5 min.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [success, failure, outage, reboot]
+    env:
+      REVISION: ${{ inputs.revision || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/python-uv
+
+      - name: Install the locked environment
+        run: uv sync --frozen
+
+      - name: Start the disposable test database
+        run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+
+      # The fixture names its components by the absolute path they were built at, so both land
+      # at the builder's paths.
+      - name: Download the V2 node components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-components-${{ env.REVISION }}
+          path: ${{ runner.temp }}/node-components
+
+      - name: Download the PID1 fixture
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-pid1-fixture-${{ env.REVISION }}
+          path: ${{ runner.temp }}
+
+      # Loaded by its immutable ID, which the scenario requires the loaded image to have.
+      - name: Unpack the PID1 fixture and load its image
+        run: |
+          set -eu
+          zstd -dc "$RUNNER_TEMP/node-pid1-fixture.tar.zst" | tar -C "$RUNNER_TEMP" -xf -
+          rm "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
+          docker load -i "$RUNNER_TEMP/node-pid1-fixture/image.tar"
+          rm "$RUNNER_TEMP/node-pid1-fixture/image.tar"
+
+      - name: Run the ${{ matrix.scenario }} scenario under real systemd
+        env:
+          PHOTO_WALL_NODE_PID1_FIXTURE: ${{ runner.temp }}/node-pid1-fixture
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          .venv/bin/python scripts/test_local.py -q --tb=short -p no:cacheprovider \
+            -m node_pid1 -k "$SCENARIO" --basetemp "$RUNNER_TEMP/node-pid1" \
+            tests/test_node_pid1.py
+
+      # The scenario's evidence: journal, owner state, Central status and cleanup proof. Never
+      # the fixture token file or an archive (the test removes its archive copies).
+      - name: Upload scenario evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-pid1-${{ matrix.scenario }}-${{ env.REVISION }}
+          path: |
+            ${{ runner.temp }}/node-pid1
+            !${{ runner.temp }}/node-pid1/**/config.json
+          if-no-files-found: warn
+          retention-days: 7

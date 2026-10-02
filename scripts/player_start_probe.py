@@ -8,11 +8,11 @@ because none ran systemd. This does, with no fake of the base or the package:
   1. import the built base squashfs as a container image (unsquashfs, tar, docker import);
   2. boot it with systemd as PID 1, the provisioner masked (this probe plays its part);
   3. require udev installed and the render, video and input groups;
-  4. install the real Player .deb with `dpkg --install` alone, as provisioning does, and require
-     `wall` in each of those groups;
-  5. write provisioning's own handoff (appliance.provision.write_handoff) naming a Central that
-     never resolves, and run `systemctl start photo-wall-player.service`;
-  6. pass only if that start returns 0 and the unit is active/running;
+  4. with --deb, install the real legacy Player .deb using `dpkg --install` alone; with
+     --payload, stage and activate the real data-only archive through the base's AppExecutor;
+  5. require `wall` in the device groups, and write provisioning's own handoff
+     (appliance.provision.write_handoff) naming a Central that never resolves;
+  6. pass only if the service is active/running after the requested path commits;
   7. with --initrd: stage 1's module hand-over (appliance.netboot_init.hand_over_modules) from
      the BUILT initrd into the container, then the BASE's own libkmod -- the library its udev
      loads drivers through -- must find each display driver by its device's alias, list its
@@ -50,6 +50,7 @@ Needs root (unsquashfs keeps ownership) and docker on a host that runs the base'
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import secrets
 import shutil
@@ -76,6 +77,7 @@ from appliance.provision import (  # noqa: E402
     unit_ending,
     write_handoff,
 )
+from contracts.player_payload import verify_archive  # noqa: E402
 from scripts.initrd_mount_probe import INITRD_MODULES, kernel_release, unpack  # noqa: E402
 from scripts.verify_netboot_initrd import DISPLAY_MODULES  # noqa: E402
 from uplink.origin import Origin  # noqa: E402
@@ -143,8 +145,11 @@ PROBE_CENTRAL: Final = "http://central.invalid"
 PROBE_SERIAL: Final = "10000000c0ffee00"
 # Not /tmp: systemd mounts a tmpfs over it at boot, hiding anything docker cp put there.
 DEB_IN_CONTAINER: Final = "/var/tmp/photo-wall-player.deb"
+PAYLOAD_IN_CONTAINER: Final = "/var/tmp/photo-wall-player-payload.tar.gz"
 HANDOFF_IN_CONTAINER: Final = "/etc/photo-wall/public.json"
 SYSTEMD: Final = "/usr/lib/systemd/systemd"
+PROBE_CMDLINE: Final = "/var/tmp/photo-wall-probe-cmdline"
+PROBE_FIRMWARE: Final = "/var/tmp/photo-wall-probe-firmware"
 BOOT_SECONDS: Final = 180.0
 # A booted system: `degraded` too, since some units (systemd-modules-load: no modules for the
 # host's kernel) cannot work in a container, and none of them is the Player's concern.
@@ -152,6 +157,18 @@ BOOTED: Final = frozenset({"running", "degraded"})
 EXEC_SECONDS: Final = 120.0
 START_SECONDS: Final = START_UNIT_SECONDS + 30.0
 JOURNAL_LINES: Final = 40
+PAYLOAD_ACTIVATION: Final = """\
+import sys
+from pathlib import Path
+sys.path.insert(0, '/usr/lib/photo-wall-bootstrapper')
+from appliance.app_executor import AppExecutor, expected_abi
+body = Path(sys.argv[1]).read_bytes()
+outcome = AppExecutor().activate(
+    body, sha256=sys.argv[2], size=int(sys.argv[3]), base_abi=sys.argv[4],
+    attempt_id='00000000-0000-4000-8000-000000000001',
+    expected_base_abi=expected_abi())
+print(outcome)
+"""
 
 Run = Callable[..., subprocess.CompletedProcess]
 
@@ -161,15 +178,42 @@ def cpuinfo_text(serial: str = PROBE_SERIAL) -> str:
     return f"processor\t: 0\nSerial\t\t: {serial}\n"
 
 
-def docker_run_argv(image: str, name: str, cpuinfo: Path) -> list[str]:
+def docker_run_argv(image: str, name: str, cpuinfo: Path, *, cmdline: Path | None = None,
+                    firmware: Path | None = None,
+                    host_network: bool = False, target: str | None = None,
+                    mask_provisioner: bool = True) -> list[str]:
     """PURE. Boot `image` with systemd as PID 1. Arguments after SYSTEMD are its command line in
     a container: systemd.mask= keeps the provisioner (this probe plays its part) and the units
     that act on the runner's devices and kernel (HOST_ACTING_UNITS) from running."""
-    return ["docker", "run", "--detach", "--name", name, "--privileged",
+    argv = ["docker", "run", "--detach", "--name", name, "--privileged",
             "--env", "container=docker", "--tmpfs", "/run", "--tmpfs", "/run/lock",
-            "--volume", f"{cpuinfo}:/proc/cpuinfo:ro",
-            image, SYSTEMD, *(f"systemd.mask={unit}"
-                              for unit in (PROVISION_UNIT, *HOST_ACTING_UNITS))]
+            "--volume", f"{cpuinfo}:/proc/cpuinfo:ro"]
+    if cmdline is not None:
+        # runc refuses a direct OCI bind over /proc/cmdline. The privileged entrypoint
+        # binds it inside the container, then execs systemd as PID 1. Unit files remain exact.
+        argv.extend(("--volume", f"{cmdline}:{PROBE_CMDLINE}:ro"))
+    if firmware is not None:
+        # The base OS-agent reads the Pi devicetree serial, never cpuinfo. Bind a fixture
+        # directory over existing /sys/firmware in this container's mount namespace.
+        argv.extend(("--volume", f"{firmware}:{PROBE_FIRMWARE}:ro"))
+    if host_network:
+        argv.extend(("--network", "host"))
+    if cmdline is None and firmware is None:
+        argv.extend((image, SYSTEMD))
+    else:
+        mounts = []
+        if cmdline is not None:
+            mounts.append(f"mount --bind {PROBE_CMDLINE} /proc/cmdline")
+        if firmware is not None:
+            mounts.append(f"mount --bind {PROBE_FIRMWARE} /sys/firmware")
+        argv.extend((image, "sh", "-ec",
+                     "; ".join((*mounts, f'exec {SYSTEMD} "$@"')),
+                     "sh"))
+    if target is not None:
+        argv.append(f"systemd.unit={target}")
+    argv.extend(f"systemd.mask={unit}" for unit in
+                ((*((PROVISION_UNIT,) if mask_provisioner else ()), *HOST_ACTING_UNITS)))
+    return argv
 
 
 def kmod_violations(output: str, modules: Sequence[str] = DISPLAY_MODULES) -> list[str]:
@@ -303,20 +347,51 @@ def install_player(container: Container, deb: Path) -> tuple[bool, list[str]]:
 
 def start_player(container: Container, work: Path) -> list[str]:
     """Steps 5-6: provisioning's handoff, then provisioning's `systemctl start`."""
-    handoff = work / "public.json"
-    write_handoff(Handoff(Origin.parse_root(PROBE_CENTRAL), None), path=handoff)
-    container.exec("mkdir", "-p", str(Path(HANDOFF_IN_CONTAINER).parent))
-    container.copy_in(handoff, HANDOFF_IN_CONTAINER)
+    write_probe_handoff(container, work)
     try:
         started: int | None = container.exec("systemctl", "start", DEFAULT_UNIT,
                                              timeout=START_SECONDS).returncode
     except subprocess.TimeoutExpired:
         started = None
+    return player_unit_violations(container, started)
+
+
+def write_probe_handoff(container: Container, work: Path) -> None:
+    """Give either app format the same inert Central address and hardware identity."""
+    handoff = work / "public.json"
+    write_handoff(Handoff(Origin.parse_root(PROBE_CENTRAL), None), path=handoff)
+    container.exec("mkdir", "-p", str(Path(HANDOFF_IN_CONTAINER).parent))
+    container.copy_in(handoff, HANDOFF_IN_CONTAINER)
+
+
+def player_unit_violations(container: Container, started: int | None) -> list[str]:
     shown = container.exec("systemctl", "show",
                            *(f"--property={name}" for name in UNIT_PROPERTIES), DEFAULT_UNIT)
     properties = parse_unit_properties(shown.stdout)
     print("unit: " + " ".join(f"{name}={properties.get(name, '')}" for name in UNIT_PROPERTIES))
     return start_violations(started, properties)
+
+
+def start_payload(container: Container, payload: Path, work: Path) -> list[str]:
+    """Activate the built archive through the base's own executor and real systemd unit."""
+    manifest = verify_archive(payload)
+    body = payload.read_bytes()
+    digest = hashlib.sha256(body).hexdigest()
+    write_probe_handoff(container, work)
+    container.copy_in(payload, PAYLOAD_IN_CONTAINER)
+    try:
+        activated = container.exec("python3", "-I", "-c", PAYLOAD_ACTIVATION,
+                                   PAYLOAD_IN_CONTAINER, digest, str(len(body)),
+                                   manifest["base_abi"], timeout=START_SECONDS)
+    except subprocess.TimeoutExpired:
+        return ["data-only Player activation timed out"]
+    print(activated.stdout, end="")
+    print(activated.stderr, end="", file=sys.stderr)
+    if activated.returncode != 0 or activated.stdout.strip() != "committed":
+        detail = activated.stderr.strip()[-2000:] or activated.stdout.strip()[-2000:]
+        return [f"data-only Player activation failed (exit {activated.returncode}): "
+                f"{detail or 'no outcome'}"]
+    return player_unit_violations(container, 0)
 
 
 def check_modules(container: Container, initrd: Path, work: Path, *,
@@ -341,10 +416,13 @@ def check_modules(container: Container, initrd: Path, work: Path, *,
     return kmod_violations(shown.stdout)
 
 
-def probe(image: str, deb: Path, work: Path, *, initrd: Path | None = None,
+def probe(image: str, deb: Path | None, work: Path, *, payload: Path | None = None,
+          initrd: Path | None = None,
           run: Run = subprocess.run) -> list[str]:
-    """Boot, check the base, install, start, check the modules; the container is always removed,
-    even when `docker run` itself fails. The violations (empty = pass)."""
+    """Boot, check the base, start one exact app format, and check modules if requested.
+
+    The container is always removed, even when `docker run` itself fails.
+    """
     cpuinfo = work / "cpuinfo"
     cpuinfo.write_text(cpuinfo_text())
     container = Container(f"photo-wall-player-start-probe-{secrets.token_hex(4)}", run=run)
@@ -359,10 +437,15 @@ def probe(image: str, deb: Path, work: Path, *, initrd: Path | None = None,
         for line in failed.splitlines():
             print(f"note: failed in the container: {line.strip()}")
         violations += check_base(container)
-        installed, found = install_player(container, deb)
-        violations += found
-        if installed:
-            violations += start_player(container, work)
+        if payload is not None:
+            violations += membership_violations(container.exec("id", "-nG", PLAYER_USER).stdout)
+            violations += start_payload(container, payload, work)
+        else:
+            assert deb is not None
+            installed, found = install_player(container, deb)
+            violations += found
+            if installed:
+                violations += start_player(container, work)
         if initrd is not None:
             violations += check_modules(container, initrd, work, run=run)
         if violations:
@@ -379,7 +462,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     base = parser.add_mutually_exclusive_group(required=True)
     base.add_argument("--squashfs", type=Path, help="the built base squashfs (needs root)")
     base.add_argument("--image", help="an already imported base image")
-    parser.add_argument("--deb", type=Path, required=True, help="the built Player .deb")
+    player = parser.add_mutually_exclusive_group(required=True)
+    player.add_argument("--deb", type=Path, help="the built legacy Player .deb")
+    player.add_argument("--payload", type=Path, help="the built data-only Player archive")
     parser.add_argument("--initrd", type=Path,
                         help="the built initrd.img: its modules must load on the base (needs "
                              "root, cpio and the initrd's decompressor)")
@@ -394,7 +479,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.squashfs:
             import_squashfs(args.squashfs, image, work)
-        violations = probe(image, args.deb.resolve(), work.resolve(),
+        violations = probe(image, args.deb.resolve() if args.deb else None, work.resolve(),
+                           payload=args.payload.resolve() if args.payload else None,
                            initrd=args.initrd.resolve() if args.initrd else None)
     except subprocess.CalledProcessError as error:
         stderr = error.stderr or b""

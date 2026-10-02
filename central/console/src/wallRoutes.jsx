@@ -1,6 +1,7 @@
 import React from "react";
 
 import { EquipmentRoster } from "./EquipmentRoster.jsx";
+import { PlayerVersions } from "./PlayerVersions.jsx";
 import SAMPLES from "./routeSamples.json";
 import { WallPage } from "./WallPage.jsx";
 
@@ -33,7 +34,10 @@ export const wallRoutes = Object.freeze(
       section: "equipment",
       label: "Equipment",
       render: ({ snapshot, bootFacts, wall }) => (
-        <EquipmentRoster snapshot={snapshot} bootFacts={bootFacts} onNavigate={wall.visitFrame} />
+        <>
+          <PlayerVersions snapshot={snapshot} />
+          <EquipmentRoster snapshot={snapshot} bootFacts={bootFacts} onNavigate={wall.visitFrame} />
+        </>
       ),
       samplePaths: SAMPLES.wall.equipment,
     },

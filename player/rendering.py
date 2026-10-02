@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from contracts.models import Calibration, Layer, OutputBinding
+from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,8 @@ class PresentationResult:
     # completion time. None denotes immediate candidate presentation (simulators).
     composition: OutputComposition | None = None
     presented_at: float | None = None
+    # Logical composition stays independently authorized; this is the actual output transform.
+    applied_calibration: AppliedCalibration | None = None
 
 
 class Renderer(Protocol):

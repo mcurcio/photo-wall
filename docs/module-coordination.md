@@ -15,11 +15,25 @@ activation or Actuator effects. Commands validate before committing; a failure
 rolls back the whole change. Schema migration and runtime locks use distinct keys.
 
 `Coordinator` serializes plan/readiness/commit changes under a second transaction
-lock. Lock order is coordinator, runtime (when needed), all current Player rows in
-ID order, Frame rows, then media quota/reference lock. Registry operations never
-take a coordinator lock. No database transaction spans downloads, decoder work or
-WebSocket sends. Configuration reads and offers validate current Player epoch and
-Frame generation while holding the same transaction's row locks.
+lock. Lock order is coordinator, runtime (when needed), current Player rows,
+Output and Frame rows, then media quota/reference lock. Registry's enrollment,
+binding, placement, calibration, Identify, profile, deletion and retirement
+writes serialize through the coordinator lock; equipment writes also take Runtime's
+lock before their row locks. Media grants take the coordinator lock before
+authorization and refuse a drained Player. No database transaction spans downloads,
+decoder work or WebSocket sends. Configuration reads and offers validate current
+Player epoch and Frame generation while holding the same transaction's row locks.
+
+An idle-only equipment drain persists an affected-Output snapshot and cancels
+outstanding atomic groups in the same transaction. New offers omit that Player's
+Outputs; old plan delivery carries cancellation. A prepared drain may abort only
+after authorization expiry plus margin, a fresh current-epoch applied control
+receipt, offer/configuration revalidation and a repeated idle check. The aborted
+record remains as a tombstone until a new attempt replaces it. `stop_committed`
+persists across restart and deadline expiry and cannot use the prepared abort.
+This foundation exposes no remote command or stop permit, does not interrupt an
+active Run, and has no committed-stop reconciliation or per-Output handoff. Those
+require the accepted fleet trust and Runtime policies.
 
 The complete configuration has its own persisted monotonic revision per Player
 epoch. Comparing the normalized full snapshot detects removal and changes to

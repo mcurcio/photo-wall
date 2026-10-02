@@ -174,13 +174,27 @@ def test_the_policy_table():
     assert INITRD_POLICY.roots == ("appliance.netboot_init",)
     assert INITRD_POLICY.forbidden == ("player", "central", "media", "zeroconf", "ifaddr", "gi")
     assert INITRD_POLICY.third_party == {}
-    assert BOOTSTRAPPER_POLICY.roots == ("appliance.provision",)
+    assert BOOTSTRAPPER_POLICY.roots == ("appliance.provision", "appliance.os_agent",
+                                         "appliance.app_launcher", "appliance.app_proof_service")
     assert PLAYER_POLICY.roots == ("player.service",)
     # The .deb tables are the declaration's, never hand-written.
     assert BOOTSTRAPPER_POLICY.third_party == debian_packages.import_table("bootstrapper")
     assert PLAYER_POLICY.third_party == debian_packages.import_table("player")
     with pytest.raises(TypeError):
         PLAYER_POLICY.third_party["requests"] = "python3-requests"
+
+
+def test_proof_service_and_player_client_are_packaged_on_opposite_sides():
+    bootstrapper = closure_for(BOOTSTRAPPER_POLICY)
+    player = closure_for(PLAYER_POLICY)
+    assert {"appliance.app_proof_service", "appliance.app_process_proof",
+            "appliance.linux_app_proof", "contracts.app_process_proof"} <= set(
+                bootstrapper.modules)
+    assert "player.local_app_proof" in player.modules
+    assert "appliance.app_proof_service" not in player.modules
+    assert "player.local_app_proof" not in bootstrapper.modules
+    assert bootstrapper.third_party == ("cryptography", "pydantic", "zeroconf")
+    assert unreached_imports(bootstrapper, BOOTSTRAPPER_POLICY) == ()
 
 
 DECLARED = MappingProxyType({"pydantic": "python3-pydantic", "gi": "python3-gi"})
