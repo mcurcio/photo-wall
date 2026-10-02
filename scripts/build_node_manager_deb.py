@@ -16,6 +16,11 @@ POLICY = ClosurePolicy("node-manager", ("appliance.node.manager_runner",),
                         "appliance.node.broker", "appliance.node.process_linux"), MappingProxyType({}))
 
 
+def sources(tree: Path) -> set[str]:
+    """Every tree path `stage_tree` reads: the manager's closure."""
+    return {path.as_posix() for path in closure_for(POLICY, repo=tree).files}
+
+
 def stage_tree(tree: Path, destination: Path) -> str:
     destination.mkdir(parents=True)
     closure = closure_for(POLICY, repo=tree)

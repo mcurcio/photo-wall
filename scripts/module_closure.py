@@ -111,11 +111,26 @@ class _Finder(modulefinder.ModuleFinder):
     outside `first_party` is still found and loaded (so it is judged as an import of the
     first-party code that reached it), but its own imports are not followed."""
 
-    def __init__(self, path: list[str], first_party: frozenset[str]) -> None:
+    def __init__(self, path: list[str], first_party: frozenset[str],
+                 namespaces: Mapping[str, str] = MappingProxyType({})) -> None:
         super().__init__(path=path)
-        self.first_party = first_party
+        self.first_party = first_party | frozenset(namespaces)
+        self.namespaces = namespaces          # top-level PEP 420 package -> its one directory
         self.importer: dict[str, str] = {}
         self._scanning: list[str] = []
+
+    def find_module(self, name, path, parent=None):
+        # modulefinder cannot find a PEP 420 package (no __init__.py): name its directory.
+        if parent is None and name in self.namespaces:
+            return None, self.namespaces[name], ("", "", modulefinder._PKG_DIRECTORY)
+        return super().find_module(name, path, parent)
+
+    def load_package(self, fqname, pathname):
+        if fqname in self.namespaces:     # no __init__ to load; no file of its own
+            module = self.add_module(fqname)
+            module.__path__ = [pathname]
+            return module
+        return super().load_package(fqname, pathname)
 
     def load_module(self, fqname, fp, pathname, file_info):
         self.importer.setdefault(fqname, self._scanning[-1] if self._scanning else "a root")
@@ -195,6 +210,32 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
         digest.update(f"{path.as_posix()}\0{len(content)}\0".encode() + content)
     return Closure(tuple(modules), tuple(files), tuple(sorted(reached_third_party)),
                    digest.hexdigest())
+
+
+def first_party_files(roots: Sequence[str], *, repo: Path,
+                      namespaces: Sequence[str] = ()) -> tuple[Path, ...]:
+    """The repo-relative files of every first-party module `roots` import, directly or not, at
+    module level or inside a function -- `compute_closure`'s scan without its judgement of
+    third-party imports, for build tooling whose third-party environment is locked elsewhere
+    (uv.lock). `namespaces` names top-level directories without an __init__.py (`scripts`) that
+    count as first-party packages. Raises ClosureError for a root or a first-party module that
+    does not exist."""
+    first_party = frozenset(first_party_packages(repo)) | frozenset(namespaces)
+    finder = _Finder([str(repo), *search_path()], first_party,
+                     MappingProxyType({name: str(repo / name) for name in namespaces}))
+    for root in roots:
+        try:
+            finder.import_hook(root)
+        except ImportError as error:
+            raise ClosureError(f"root {root} not found under {repo}: {error}") from None
+    missing, _ = finder.any_missing_maybe()
+    for name in missing:
+        if name.partition(".")[0] in first_party and any(
+                caller.partition(".")[0] in first_party for caller in finder.badmodules[name]):
+            raise ClosureError(f"{finder.importers(name)} imports {name}, which does not exist")
+    return tuple(sorted(Path(module.__file__).resolve().relative_to(repo.resolve())
+                        for name, module in finder.modules.items()
+                        if name.partition(".")[0] in first_party and module.__file__))
 
 
 def stage(closure: Closure, *, repo: Path, into: Path) -> None:

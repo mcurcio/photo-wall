@@ -15,6 +15,12 @@ name: V2 node components
 # reuses exactly the layer a cold build recorded, so the cache changes no byte: node-display.deb
 # is reproducible (SOURCE_DATE_EPOCH) and a sealed environment's digest names its image ID,
 # which BuildKit derives from the layers and the pin's SOURCE_DATE_EPOCH.
+#
+# Above that, the whole output is cached: the set is a function of its inputs alone and names
+# no commit (scripts/node_component_inputs.py), so the key is the digest of the very input
+# manifest the build records, computed by the same code before building. A hit restores the set
+# (and, when asked, its PID1 fixture) instead of building; either way the set is then stamped
+# with this revision, which refuses a set whose recorded inputs are not this revision's.
 on:
   workflow_call:
     inputs:
@@ -38,7 +44,8 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-24.04-arm
-    # Cold about 9 min (components 6, fixture 3); with the caches warm, a few minutes.
+    # Cold about 9 min (components 6, fixture 3); with the BuildKit caches warm, a few minutes;
+    # on a whole-output hit, the restore and the stamp.
     timeout-minutes: 40
     env:
       REVISION: ${{ inputs.revision }}
@@ -53,9 +60,50 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
+      - name: Compute the component input digest
+        id: inputs
+        run: |
+          set -eu
+          digest=$(.venv/bin/python -m scripts.node_component_inputs key \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Exact keys only, never a prefix fallback: a set built from other inputs is not this one.
+      # The fixture is derived from the set it was built with, so it is cached WITH that set.
+      - name: Restore the component set
+        id: restore-components
+        if: ${{ !inputs.pid1-fixture }}
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/node-components
+          key: node-components-v1-${{ steps.inputs.outputs.digest }}
+
+      - name: Restore the component set and its PID1 fixture
+        id: restore-pid1
+        if: inputs.pid1-fixture
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ${{ runner.temp }}/node-components
+            ${{ runner.temp }}/node-pid1-fixture.tar.zst
+          key: node-pid1-v1-${{ steps.inputs.outputs.digest }}
+
+      - name: Resolve the cache outcome
+        id: cached
+        env:
+          HIT: ${{ steps.restore-components.outputs.cache-hit == 'true' || steps.restore-pid1.outputs.cache-hit == 'true' }}
+        run: |
+          set -eu
+          echo "hit=$HIT" >> "$GITHUB_OUTPUT"
+          # A failed restore can leave part of an output behind; the build refuses an existing one.
+          if [ "$HIT" != true ]; then
+            rm -rf "$RUNNER_TEMP/node-components" "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
+          fi
+
       # Not made current (use: false): the fixture image builds FROM a local image, on Docker's
       # daemon-backed default builder (scripts/container_build.py), which this must not replace.
       - name: Set up the container build cache
+        if: steps.cached.outputs.hit != 'true'
         id: buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
         with:
@@ -64,9 +112,11 @@ jobs:
       # The builders run `docker buildx build` themselves, which reads the GHA cache service's
       # URL and token from the ACTIONS_* environment that only actions see: this exports it.
       - name: Expose the GHA cache service to the builders
+        if: steps.cached.outputs.hit != 'true'
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
 
       - name: Resolve the node build cache scopes
+        if: steps.cached.outputs.hit != 'true'
         id: cache
         uses: ./.github/actions/buildkit-cache
         with:
@@ -74,6 +124,7 @@ jobs:
           architecture: arm64
 
       - name: Build the immutable V2 node components
+        if: steps.cached.outputs.hit != 'true'
         env:
           PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
           PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
@@ -89,7 +140,7 @@ jobs:
       # The targets are the app repacked: their environments read the app's cache (the same
       # dependency layer) and write none, so the app's scope keeps the app's own index.
       - name: Build the stage targets and the PID1 fixture image
-        if: inputs.pid1-fixture
+        if: steps.cached.outputs.hit != 'true' && inputs.pid1-fixture
         env:
           PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
           PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
@@ -105,6 +156,33 @@ jobs:
           # 3 GB raw, a third of that compressed.
           tar -C "$RUNNER_TEMP" -cf - node-pid1-fixture \
             | zstd -T0 -3 -q -o "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
+
+      # Written only from main, before the stamp (the cached set names no commit): every pull
+      # request reads main's entries (docs/module-appliance-ci.md, "Limits"), and its own, about
+      # 1 GB a set and 2 with the fixture, would only crowd them out.
+      - name: Save the component set
+        if: steps.cached.outputs.hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ runner.temp }}/node-components
+          key: node-components-v1-${{ steps.inputs.outputs.digest }}
+
+      - name: Save the component set and its PID1 fixture
+        if: steps.cached.outputs.hit != 'true' && inputs.pid1-fixture && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ${{ runner.temp }}/node-components
+            ${{ runner.temp }}/node-pid1-fixture.tar.zst
+          key: node-pid1-v1-${{ steps.inputs.outputs.digest }}
+
+      # The only record of the commit: written after the build or the restore, and refused when
+      # the set's recorded inputs are not this revision's (the release seal checks it).
+      - name: Stamp the component set with this revision
+        run: |
+          .venv/bin/python -m scripts.node_component_inputs stamp \
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --components "$RUNNER_TEMP/node-components"
 
       # The seal ships these bytes on a release; a pull request's consumers need them for a day.
       # About 1 GB, mostly the environments: the fastest zip level.

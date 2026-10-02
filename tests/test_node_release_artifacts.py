@@ -16,8 +16,10 @@ from support.release_build import (
 
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_release import NODE_RELEASE_MANIFEST, encode_node_release, parse_node_release
-from scripts.node_release_artifacts import cohort_bundle
+from scripts.node_release_artifacts import COMPONENTS_SCHEMA, STAMP, cohort_bundle, write_stamp
 from scripts.package_release_artifacts import PackagingError, package, verify
+
+INPUTS = "c" * 64
 
 
 def inputs(tmp_path):
@@ -38,9 +40,11 @@ def inputs(tmp_path):
             "/usr/bin/entry", **abi))
     for role in ("node-base", "node-display"):
         (components / (role + ".deb")).write_bytes(role.encode())
-    (components / "components.json").write_text(json.dumps({"schema": 2, "revision": REVISION, "abi": abi,
+    (components / "components.json").write_text(json.dumps({"schema": COMPONENTS_SCHEMA, "abi": abi,
         "app_environment": refs["app"], "manager_primary": refs["manager-primary"], "manager_fallback": None}))
-    (components / "build-provenance.json").write_text(json.dumps({"revision": REVISION, "abi": abi}))
+    (components / "build-provenance.json").write_text(json.dumps(
+        {"schema": COMPONENTS_SCHEMA, "abi": abi, "inputs_sha256": INPUTS}))
+    write_stamp(components, revision=REVISION, inputs_sha256=INPUTS)
     output = tmp_path / "release"
     package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), output,
             revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
@@ -81,3 +85,32 @@ def test_cohort_bundle_refuses_symlink_input(tmp_path):
     (legacy / "boot/unsafe").symlink_to("/etc/passwd")
     with pytest.raises(ValueError, match="node_bundle_link"):
         cohort_bundle(legacy, tmp_path / "node")
+
+
+def _restamp(tmp_path, **stamp):
+    """The components of `inputs`, packaged again under another stamp."""
+    legacy, node, _ = inputs(tmp_path)
+    components = tmp_path / "components"
+    (components / STAMP).write_text(json.dumps({"schema": 1, "revision": REVISION,
+                                                "inputs_sha256": INPUTS, **stamp}))
+    return legacy, node, components
+
+
+@pytest.mark.parametrize("stamp", [{"revision": "f" * 40}, {"inputs_sha256": "d" * 64}])
+def test_components_stamped_for_another_revision_or_inputs_are_refused(tmp_path, stamp):
+    """A restored component set is released only under the stamp its own revision wrote."""
+    legacy, node, components = _restamp(tmp_path, **stamp)
+    with pytest.raises((PackagingError, ValueError), match="node_component_revision_mismatch"):
+        package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), tmp_path / "again",
+                revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
+                node_components=components, node_bundle=node, release_tag="v2.0.0")
+
+
+def test_unstamped_components_are_refused(tmp_path):
+    legacy, node, _ = inputs(tmp_path)
+    components = tmp_path / "components"
+    (components / STAMP).unlink()
+    with pytest.raises((PackagingError, ValueError), match="node_component_revision_mismatch"):
+        package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), tmp_path / "again",
+                revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
+                node_components=components, node_bundle=node, release_tag="v2.0.0")

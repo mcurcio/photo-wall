@@ -20,6 +20,31 @@ from contracts.node_release import (
 )
 from contracts.release import BASE_ROOT, BASE_SQUASHFS, BOOT_ROOT
 
+# components.json and build-provenance.json (scripts/build_node_components.py): revision-free,
+# so a set built for equal inputs at another commit is the same set (node-components.yml's cache).
+COMPONENTS_SCHEMA = 3
+# The one record of which commit a component set was built or restored for, written beside it
+# after the build or the restore (scripts/node_component_inputs.py `stamp`), never cached.
+STAMP = "revision.json"
+
+
+def write_stamp(components: Path, *, revision: str, inputs_sha256: str) -> None:
+    """Record `revision` for `components`, whose recorded inputs the caller checked against
+    that revision's. Once: a set already stamped is refused, never relabelled."""
+    if (components / STAMP).exists():
+        raise ValueError("node_component_stamp_exists")
+    (components / STAMP).write_text(json.dumps(
+        {"schema": 1, "revision": revision, "inputs_sha256": inputs_sha256}, sort_keys=True))
+
+
+def _check_components(metadata: dict, provenance: dict, stamp: dict, revision: str) -> None:
+    if (metadata.get("schema") != COMPONENTS_SCHEMA or provenance.get("schema") != COMPONENTS_SCHEMA
+            or stamp.get("schema") != 1 or stamp.get("revision") != revision
+            or not provenance.get("inputs_sha256")
+            or stamp.get("inputs_sha256") != provenance.get("inputs_sha256")
+            or provenance.get("abi") != metadata.get("abi")):
+        raise ValueError("node_component_revision_mismatch")
+
 
 def cohort_bundle(source: Path, output: Path) -> None:
     """Produce an explicitly selected, separately deployed V2 TFTP tree."""
@@ -43,9 +68,8 @@ def append(components: Path, bundle: Path, destination: Path, *, revision: str,
     from scripts.package_release_artifacts import _tarball, checked_file
     metadata = json.loads((components / "components.json").read_bytes())
     provenance = json.loads((components / "build-provenance.json").read_bytes())
-    if (metadata.get("schema") != 2 or metadata.get("revision") != revision
-            or provenance.get("revision") != revision or provenance.get("abi") != metadata.get("abi")):
-        raise ValueError("node_component_revision_mismatch")
+    stamp = json.loads((components / STAMP).read_bytes()) if (components / STAMP).is_file() else {}
+    _check_components(metadata, provenance, stamp, revision)
     if (bundle / "boot/cmdline.txt").read_text().split().count("photowall.node=v2") != 1:
         raise ValueError("node_bundle_flag_missing")
     records = []

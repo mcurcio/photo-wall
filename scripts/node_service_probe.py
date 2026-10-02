@@ -13,6 +13,7 @@ import secrets
 import subprocess
 from pathlib import Path
 
+from scripts.node_release_artifacts import COMPONENTS_SCHEMA
 from scripts.player_start_probe import (
     BOOTED,
     HOST_ACTING_UNITS,
@@ -27,7 +28,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 def probe(image: str, components: Path, work: Path) -> None:
     metadata = json.loads((components / "components.json").read_text())
-    if metadata.get("schema") != 2 or metadata.get("app_environment") is None:
+    if metadata.get("schema") != COMPONENTS_SCHEMA or metadata.get("app_environment") is None:
         raise ValueError("node_probe_requires_app_and_manager")
     work.mkdir(parents=True, exist_ok=True)
     cpuinfo = work / "cpuinfo"

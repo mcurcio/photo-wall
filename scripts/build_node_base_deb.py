@@ -38,6 +38,13 @@ UNITS = ("photo-wall-node.target", "photo-wall-host-core.service", "photo-wall-a
          "photowallpreparation.slice", "photo-wall-node-handoff.service", "photo-wall-node-prepare.service", "photo-wall-node-storage.service", "photo-wall-display.service", "photo-wall-display-controller.service")
 
 
+def sources(tree: Path) -> set[str]:
+    """Every tree path `stage_tree` reads: each launcher's closure and the units."""
+    return {*(path.as_posix() for policy in POLICIES.values()
+              for path in closure_for(policy, repo=tree).files),
+            *(f"appliance/systemd/{name}" for name in UNITS)}
+
+
 def stage_tree(tree: Path, destination: Path) -> str:
     destination.mkdir(parents=True)
     dependencies = packages("node-base")

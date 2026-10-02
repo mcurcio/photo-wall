@@ -21,6 +21,15 @@ from scripts.build_player_deb import fetch_tree
 from scripts.debian_packages import PIN, packages
 from scripts.node_build_inputs import BUILDER_IMAGE, docker_build, validate_builder
 
+# The one tree directory the display build reads, whole: the native sources and their Meson files.
+SOURCE_DIR = "appliance/display_host"
+
+
+def sources(tree: Path) -> set[str]:
+    """Every tree path `build` reads: SOURCE_DIR's files."""
+    return {path.relative_to(tree).as_posix() for path in (tree / SOURCE_DIR).rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts}
+
 
 def build(tree: Path, output: Path, *, builder_image: str, architecture: str) -> Path:
     validate_builder(builder_image, architecture, purpose="display")
@@ -31,14 +40,14 @@ def build(tree: Path, output: Path, *, builder_image: str, architecture: str) ->
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="photo-wall-display-build-") as temporary:
         work = Path(temporary)
-        shutil.copytree(tree / "appliance/display_host", work / "source")
+        shutil.copytree(tree / SOURCE_DIR, work / "source")
         (work / "snapshot.list").write_text("\n".join(source.line() for source in PIN.sources()) + "\n")
         dependencies = " ".join(packages("node-display", "node-display-build"))
         runtime = " ".join(packages("node-display"))
         source_hash = hashlib.sha256((builder_image + architecture + PIN.snapshot + dependencies).encode())
         for source in sorted((work / "source").rglob("*")):
             if source.is_file() and "__pycache__" not in source.parts:
-                source_hash.update(("appliance/display_host/" + source.relative_to(work / "source").as_posix()).encode() + b"\x00" + source.read_bytes())
+                source_hash.update((SOURCE_DIR + "/" + source.relative_to(work / "source").as_posix()).encode() + b"\x00" + source.read_bytes())
         version = "2.0+" + source_hash.hexdigest()[:12]
         # The protocol ABI identity binds compiled bytes and resolved runtime
         # versions, not only a source label. This script runs inside the build root.
