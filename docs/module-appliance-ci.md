@@ -318,6 +318,28 @@ the pin's `SOURCE_DATE_EPOCH`. The base squashfs cache is keyed on the
 display build's recorded inputs and the staged `node-base.deb`, and the node ABI
 check refuses a hit whose installed ABI differs from the components'.
 
+**Node component output cache.** The component set names no commit: its Player
+`app.deb` is versioned by what it ships, like the base, display and manager
+packages (the published Player `.deb` keeps `+g<revision>`), and
+`components.json` and `build-provenance.json` carry no revision. So the workflow
+caches the whole output (`actions/cache`, exact key only), and the PID1 fixture
+together with the set it was derived from. The key is the digest of the input
+manifest
+([`node_component_inputs.py`](../scripts/node_component_inputs.py)) that the
+build records in `build-provenance.json`: the fetched tree pruned to exactly the
+paths each builder declares it reads (so a builder that reads anything else
+fails), the first-party modules the build and fixture processes import, `uv.lock`,
+the workflow, the builder image, the Debian snapshot and its `SOURCE_DATE_EPOCH`.
+[`test_node_component_inputs.py`](../tests/test_node_component_inputs.py)
+fails when a builder reads a file the manifest omits. After a build or a hit,
+`node_component_inputs stamp` recomputes the digest, refuses a set that records
+another, and writes `revision.json`, the set's only record of the commit; the
+seal ([`node_release_artifacts.py`](../scripts/node_release_artifacts.py))
+refuses a set without that stamp for its revision. The cache is written only
+from `main`, like `linux-media`'s: every pull request reads it, and a pull
+request's own entries (about 1 GB a set, 2 with the fixture) would only crowd
+`main`'s out.
+
 **Limits.** A workflow run restores only caches of its own ref, its pull
 request's base branch and the default branch
 ([GitHub cache access](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)).

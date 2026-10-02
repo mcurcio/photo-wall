@@ -2017,3 +2017,9 @@ doc softenings.
   reboot/re-enroll second-container scenario and a ≥9 s cold-start injection are not written.
   `tests/node_pid1_stop_diagnostic.py` traces a pre-existing stale `stop(expected, *,
   expires_boottime_ms)` signature, unrelated to this change.
+
+## 2026-10-01 — node component cache key ignores source file mode
+node_component_inputs.manifest hashes source-tree file bytes only, not mode/symlink target (the staged-output
+content_version does include mode). An executable-bit-only change to a component source file would not change the
+cache key. Not exploitable today (no declared builder executes source files directly). Fix if a builder ever does:
+include mode in the manifest entry. Source: review of the component-cache bead.
