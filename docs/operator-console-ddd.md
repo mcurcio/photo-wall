@@ -1,9 +1,9 @@
 # Operator console: one home per aggregate (domain-driven console)
 
-**Status:** pass 1 approved 2026-10-01 under the owner's autonomous-gate instruction (Q1 = A, one home per box; Q2 = keep the V1 boot-offer controls, labelled), built and reviewed 2026-10-02 (beads B1–B4); its implementation errata are folded in below, and its residual review findings became bead R0 (§23). Passes 2 and 3 are designed at feature level in Parts C and D, revised once after adversarial review, and cut into one batch (§23). The owner answered the pass-2/3 gate on 2026-10-02: Q3 = A (both read-only backend reads), Q4 = yes (the reboot fence), and Q5 = design the node release workflows next. Batch 2 (R0, C1, C2, D1, E1) is built to those answers and its implementation errata are folded in below. **Part E** (§24–§32) designs the node release workflows and, on the owner's steer of 2026-10-02, a **V2-only console**: node control is the one configuration posture and the console shows no V1-lane surface. It replaces §17 and supersedes Q2's answer. The owner then answered D16/Q1 = yes (a Stage on a Frame-bound Player follows the operator-reboot rule) and chose the guided **Update the wall** journey. Part E is built as batch 3 (§32), its implementation errata folded in; batches 2 and 3 await their full verify and review. Passes 4–5 are planned, not designed.
-**Layers:** Part A is the **module layer**: the domain-to-console map, the design rules and the roadmap of passes. The owner steers this part. Parts B, C and D design **passes 1, 2 and 3 at the feature layer** for delivery: screens, read models, signatures, wordings and beads. Part E designs the V2-only console and the node release workflows at the same layer.
+**Status:** pass 1 approved 2026-10-01 under the owner's autonomous-gate instruction (Q1 = A, one home per box; Q2 = keep the V1 boot-offer controls, labelled), built and reviewed 2026-10-02 (beads B1–B4); its implementation errata are folded in below, and its residual review findings became bead R0 (§23). Passes 2 and 3 are designed at feature level in Parts C and D, revised once after adversarial review, and cut into one batch (§23). The owner answered the pass-2/3 gate on 2026-10-02: Q3 = A (both read-only backend reads), Q4 = yes (the reboot fence), and Q5 = design the node release workflows next. Batch 2 (R0, C1, C2, D1, E1) is built to those answers and its implementation errata are folded in below. **Part E** (§24–§32) designs the node release workflows and, on the owner's steer of 2026-10-02, a **V2-only console**: node control is the one configuration posture and the console shows no V1-lane surface. It replaces §17 and supersedes Q2's answer. The owner then answered D16/Q1 = yes (a Stage on a Frame-bound Player follows the operator-reboot rule) and chose the guided **Update the wall** journey. Part E is built as batch 3 (§32), its implementation errata folded in; batches 2 and 3 await their full verify and review. **Part F** (§33–§45) designs pass 4 (Show) and pass 5 (Sources, PR 37's library design re-based on current code) at the feature layer, and cuts them with bead R1 (batch 3's residuals) into batch 4 (§45); it awaits the owner's gate. **Part G** (§46–§59), on the owner's steer of 2026-10-02, re-cuts the console's information architecture by domain and lifecycle at the module layer: bring-up gets its own worklist home, daily faces lose their one-time writes, and host health (batch A) and node metrics (batch B) get their homes; it awaits the owner's approval.
+**Layers:** Part A is the **module layer**: the domain-to-console map, the design rules and the roadmap of passes. The owner steers this part. Parts B, C and D design **passes 1, 2 and 3 at the feature layer** for delivery: screens, read models, signatures, wordings and beads. Part E designs the V2-only console and the node release workflows at the same layer. Part G returns to the **module layer** for the information architecture.
 **Branch:** every pass lands on one running PR from `claude/console-ddd`.
-**Owner is asked:** Q1 and Q2 (answered 2026-10-01; Q2 superseded 2026-10-02 by the V2-only steer, §24). Q3 (which of two read-only backend reads to add, §16), Q4 (a backend fence for one outstanding reboot, §16) and Q5 (the node release workflows, §17), answered 2026-10-02: Q3 = A, Q4 = yes, Q5 = design next. D16/Q1 (bound Stage, §29 G6) answered yes and Q7 (who samples qualification) answered "the page", 2026-10-02. **Open:** G7 (§31), a read-only boot-claim field the Update the wall journey would use; built without it. Everything else is a current design choice that the owner can revise. Each batch is built to the answers, so no declined branch and no dormant code ships.
+**Owner is asked:** Q1 and Q2 (answered 2026-10-01; Q2 superseded 2026-10-02 by the V2-only steer, §24). Q3 (which of two read-only backend reads to add, §16), Q4 (a backend fence for one outstanding reboot, §16) and Q5 (the node release workflows, §17), answered 2026-10-02: Q3 = A, Q4 = yes, Q5 = design next. D16/Q1 (bound Stage, §29 G6) answered yes and Q7 (who samples qualification) answered "the page", 2026-10-02. **Open:** G7 (§31), a read-only boot-claim field the Update the wall journey would use; built without it. **Part F asks four questions:** Q8 (two requirements the code does not meet: Program recurrence and Source size, §33), Q9 (pass 5's backend shape, §38), Q10 (media times on one clock, §42 G11) and Q11 (batch 4 as one batch, §45). **Part G asks two:** Q12 (the bring-up home, §48) and Q13 (batch B's text values, §52). Everything else is a current design choice that the owner can revise. Each batch is built to the answers, so no declined branch and no dormant code ships.
 **Builds on:** [requirements](requirements.md), [Player node domain model](player-node-domain-model.md), [fleet implementation map](player-fleet-implementation-map.md), [console UX design](operator-console-ux-design.md) and its pass-2 history, and the open [library design](operator-console-ux-pass2-library.md) (PR 37), which becomes pass 5 here.
 
 # Part A: the map and the roadmap (module layer)
@@ -70,6 +70,7 @@ flowchart LR
 | **Boot path** | One supported path: the **node offer** (`/v2/node/boot-offers`), taken when the Pi's kernel command line carries `photowall.node=v2`. Each Pi's command line decides at every boot; it is not stored per Player. A box whose newest boot record on Central is a deprecated boot offer or a base image served without an offer is **misconfigured**, shown as one line on its Player page (§25, G5), never as a mode. | A Player attribute: there is none |
 | **Boot selection** | The fleet-wide boot policy: the one deployment Central offers every node-path boot from now on, with its revision (§25). | A per-Player choice: there is none (R17) |
 | **Update the wall** | The guided journey (§25a): Publish, optionally try on one Frame, then Keep (Select and reboot Players one at a time) or Back out. It adds no Central state or verb. | A stored rollout or canary: Central records neither |
+| **Source** | The requirements' **AssetSource** (`requirements.md:131`): a saved query against the operator's photo library that selects media, never a copy of it. The requirements keep their name; the console says Source. | A Scene (which uses Sources); a library connection (where a Source's query runs) |
 | **Last reported** | The latest receipt time of a layer that reports periodically (heartbeat). | **First received**: when Central first received one particular fact, which says nothing about the layer since |
 
 ## 4. The proposed shape
@@ -130,7 +131,7 @@ flowchart TB
 | `derived` | Central's own conclusion from named records | "<Conclusion> (Central's inference: <basis>)" | "Interrupted (Central's inference: a later boot was admitted)" |
 | `unknown` | Not observable, not served, or not read | "Unknown: <why>" | "Panel pixels: Unknown: no layer observes them" |
 
-A `reported` fact must say which receipt it carries; without that, it becomes `unknown`. A `set` fact may carry the time Central recorded it (" · recorded <age> ago"). A fifth kind, `planned` (Central's projection of intent, for now-showing), arrives with pass 4, its first user.
+A `reported` fact must say which receipt it carries; without that, it becomes `unknown`. A `set` fact may carry the time Central recorded it (" · recorded <age> ago"). A sixth kind, `planned` (Central's Runtime projection of which Run is on top on a Frame, made before media is checked), is designed in §35 with pass 4, its first user.
 
 ## 6. Domain-to-console map (every aggregate, one home)
 
@@ -154,9 +155,9 @@ A `reported` fact must say which receipt it carries; without that, it becomes `u
 | Output (Registry) | Player › Outputs | Output | Panel facts at last app start `reported`, first (labelled stale) | 1 |
 | Frame + Binding + Calibration (Registry) | `#/wall/frames/<id>/<facet>`: Calibration (with the Frame profile), Binding, Now-showing | Frame; Binding; Calibration; Frame profile | `set` | 3 (§19) |
 | CalibrationTrial and legacy preview (Registry + Display Host) | Frame › Calibration | Live calibration (one noun for both paths) | candidate `set`; Display Host acknowledgment `reported`; the legacy path has no acknowledgment, says so, and its commit is "Save without acknowledgment" | 1 wording; 3 (§20) |
-| Scene, Program, Activation, Run (Runtime) | `#/scenes`, `#/schedule`, `#/now` | Scene, Program, Show now, Run | `set`; "now" is `planned` | 4 |
-| Coordination: readiness, secured assignment (Runtime) | Frame › Plan; Attention | Readiness report | `reported` | 4 |
-| Source (Media) | `#/sources` | Source | spec `set`; refresh `reported` (via worker) | 5 |
+| Scene, Program, Activation, Run (Runtime) | `#/scenes`, `#/schedule`, `#/now` (nav "Now"); the top Run on the Wall tile and the Frame's **Planned** facet | Scene, Program, Show now, Run | Run and Program records `set`; which Run is on top on a Frame `planned` (§35) | 4 (§34–§36) |
+| Coordination: readiness, secured assignment (Runtime) | Frame health on the tile and the Planned facet; Attention | Readiness report | `reported` (unchanged by pass 4) | 4 |
+| Source (Media; the requirements' AssetSource) | `#/sources` (nav "Sources"); the Scene's "Which Source?" step links to it | Source | spec `set`; what it selects, tag list and refresh `reported` (your photo library, via the media worker) | 5 (§37–§40) |
 | Surface, Installation, Actuator, Sensor, Target group, Panel entity | none: no stored entity exists | — | — | not planned (§13) |
 
 ## 7. Gaps, ranked
@@ -206,22 +207,16 @@ flowchart LR
 | 2 | Part C (§14–§18): Output interruption on Frame health and Player › Outputs; Display Host's current presentation and last report; the broker's true reason; `ManagementFacts` through `fact()` (deleted by E's NV1) | Two read-only additions to existing admin reads (Q3), and optionally one reboot fence (Q4, in R0). Built to the answers | Batch 2 (§23) | Designed (feature layer), revised after review; awaiting the pass-2/3 gate |
 | 3 | Part D (§19–§22): Commissioning renamed Calibration, its equipment block moved to Binding; one live-calibration noun with two honest verbs; Identify on any unbound Output; no tier language; the enrolled fact on the Player page; the startup Panel alarm worded as possibly stale | none | Batch 2 (§23) | Designed (feature layer), revised after review; awaiting the pass-2/3 gate |
 | E | Part E (§24–§32): V2-only console (one banner when node control is off, the deprecated-path line, no V1 surface); Fleet › Releases with Publish, boot selection and the effect gate; Stage app (bound or unbound, D16 = yes); qualification sampled by the page; the Update the wall journey | G1, G2, G4, G5 read additions and G6 (one refusal removed); G7 open | Batch 3 (§32), about +6,650 added at pass 1's overrun | Built 2026-10-02; awaiting its verify and review |
-| 4 | `planned` truth kind for now-showing. Plan chip shows Run or Program origin. Program times state their zone. Program noun versus the recurrence requirement (doc fix). | none | about 2 beads | Planned |
-| 5 | PR 37 library design folded in (below) | as PR 37 already designs | as PR 37 | Planned |
+| 4 | Part F §34–§36: `planned` truth kind for which Run is on top on a Frame (media not checked); the chip names its Run's origin; every clock time states its zone; Program noun versus the recurrence requirement (Q8) | none | Batch 4 bead S1 (§45) | Designed (feature layer); awaiting the batch-4 gate |
+| 5 | Part F §37–§40: PR 37's library design re-based on current code (§38): one Source noun, a progressive Source flow, a tag picker, previews as `reported` facts, no Library section | G9, G10 (PR 37's backend, re-based) and G11 (media times on one clock, Q10) | Batch 4 beads L1–L3 (§45) | Designed (feature layer); awaiting the batch-4 gate |
+| R1 | Batch 3's residuals (§45) | none (G8 withdrawn in review, §42) | Batch 4 bead R1 | Designed; awaiting the batch-4 gate |
+| G | Part G (§46–§59): information architecture by domain and lifecycle: a Set up worklist, read-only daily faces, host health (batch A) on Fleet, node metrics (batch B), the debug overlay's reserved home | G12 (fleet host summary, implied by batch A) and G13 (host facts record, Q13) | About seven slices (§59) | Designed (module layer); awaiting owner approval (Q12, Q13) |
 
 **The pass-2 backend reads** are designed in §16 and asked as Q3: what each adds, its smallest read-only shape on an existing admin read, and what the console shows without it.
 
 **Feature proposals, outside this programme** (they add workflows or records, not alignment): Replace equipment as one Frame-side flow; an Installation timezone record; a Central health page; a host-silence alarm (needs a served threshold); a fleet-summary read route; Identify on bound Outputs (it overlays a showing Frame); a Registry nullable placement (gap 20); Display Host's current connector state in Frame health; a broker heartbeat.
 
-**PR 37 re-checked against the domain model** (pass 5). Its backend shape (lookup jobs answered as data) is its own approved scope. This programme changes only how it is presented.
-
-| PR 37 element | Fits the domain? | Change when folded in |
-|---|---|---|
-| "A Source is one library query" | Yes: Source = named, revisioned query | Make "Source" the one noun, all strings at once: nav "Sources", Scene step "Which Source?", not "Photo sources" or "selection". |
-| Preview "as of 12:03", Updating, failure is never empty | Yes (R6 there = R2 here) | Render through `fact()`: the preview is `reported` (the library, via the worker), with Central's receipt time. |
-| Dates in the browser's zone (its Q5 deferred) | Acceptable while labelled | Keep its "browser's time zone" label. An Installation timezone is a separate feature proposal. |
-| Tags, connection and preview inside the Source step | Yes: the library is an origin, not an aggregate | No "Library" nav section. Everything lives on the Source home. |
-| Line citations to PR #34's branch | Stale once that branch merged | Re-cite to `main` before its build. |
+**PR 37 folded in** (pass 5). Part F §38 re-checks PR 37 against the domain model and against current code, which gained a count-only Source preview, a shared `SourceQuery` base and a worker-reported connection list after PR 37 was written, and states every change made when folding it in.
 
 # Part B: pass 1 (feature layer, for delivery)
 
@@ -736,7 +731,7 @@ There are five beads, built back to back, each green on its own package tests so
 
 **Status:** designed 2026-10-02 after the owner's Q5 answer, revised after two adversarial review rounds (domain-fidelity/security and simplicity/scope lenses each time) and for the owner's steer of 2026-10-02: *"if node-path is the new/correct way to run the system, then lets stop acting like there is any other option. The v1 code can be fully deprecated and the designs and implementations should all assume a v2 configuration posture."* Built as batch 3 (NR1, NV1, NR2, NS1, NS2, NU1, ND1, §32); its implementation errata are folded in below, and it awaits its one full verify and review. This Part replaces §17, supersedes Q2's answer, and is the home of the §6 rows for BootOffer, NodeRelease/Deployment/BootPolicy, Qualification/EnvironmentAcceptance and the effect gate; the V1-lane row is deleted.
 **Layer:** feature. Screens, wordings, lifecycles, send rules, signatures, backend reads, failures and beads. The domain-to-console map, design rules 1–3 (§5) and the `fact()` vocabulary are inherited.
-**Owner decisions (2026-10-02, binding):** V2 node control is the only configuration posture: the console has no V1 surface (R20). D16/Q1 = **yes**: a Stage on a Frame-bound Player follows the operator-reboot rule (bound Outputs interrupted from the observed app exit, rejoining the Run at its current point, calibration and bindings kept); G6 is built. The guided journey (the Stage UX briefing's Shape B) is built as **Update the wall** (NU1, §25a). Q7: the page drives qualification samples. **One choice stays open** (§31): G7, a read-only field that would let the journey tell which Players booted on the selection. The owner asked for no new Central feature, so NU1 was built without it (§31's "No" column).
+**Owner decisions (2026-10-02, binding):** V2 node control is the only configuration posture: the console has no V1 surface (R20). D16/Q1 = **yes**: a Stage on a Frame-bound Player follows the operator-reboot rule (bound Outputs interrupted from the observed app exit when Central reconciles that exit before the new app enrolls, see §29 G6; rejoining the Run at its current point, calibration and bindings kept); G6 is built. The guided journey (the Stage UX briefing's Shape B) is built as **Update the wall** (NU1, §25a). Q7: the page drives qualification samples. **One choice stays open** (§31): G7, a read-only field that would let the journey tell which Players booted on the selection. The owner asked for no new Central feature, so NU1 was built without it (§31's "No" column).
 **Builds on:** §10's one-send-rule primitive (R0, batch 2), `fact()` (§5, §11), the former §17 constraints (restated as R13–R18, two amended), `useNodeDevice` (pass 1, moved onto the shared polled-read hook) and batch 2 (NV1 deletes batch 2's C2 `ManagementFacts` work).
 
 ## 24. What Part E covers, and why
@@ -1225,7 +1220,7 @@ Each addition sits behind the existing `admin` dependency and `require_enabled`,
 | ~~G3 · Stage admission read~~ | — | **Withdrawn** (§28 choices). Stage is judged by Central at send. | — | — | 0 |
 | **G4 · Qualification read** | NS2 | The linked app's environment (what to qualify) and the stored acceptances | `node_app_links` and `node_environment_acceptances` are written but never served | The app-attempts read (`node_lifecycle.py:291-322`) gains `qualification {linked_app {environment_sha256, admitted_at} \| null, acceptances[] {environment_sha256, base_content_key, base_tag \| null, accepted_at}}` for the current device generation, newest 5. An acceptance row stores only `base_content_key` (migration 056), so `base_tag` is named only when the key equals the base of the boot this generation runs (one offer parse per read), else null; resolving older bases would parse every offer of the generation on every read. No usability verdict: Stage's `_qualified_fallback_in` (`node_lifecycle.py:170-182`) stays its one home. | +30 / +45 |
 | **G5 · Deprecated boot evidence** | NV1 | That this box's newest boot on Central was by the deprecated path | The node device read serves node boot claims only (`node_observations.py:118-123`); V1 offers live in `fleet_boot_offers` (`036_fleet_foundation.sql:48`) and netboot-base serves in `devices.last_served_at` (`infra/catalog_records.py:519-521`, written by `content_routes.py:135`) | The node device read gains `deprecated_boot {path: "offer" \| "base_without_offer", recorded_at} \| null` (lane-neutral values, so the console needs no scanned string): the newer of the device's latest V1 offer and its `last_served_at`, served only when newer than the device's latest node boot offer `created_at` (or no node offer exists). "Latest node boot offer" is taken over every device generation (`node_boot_offers` by `device_id`); ties go to the node offer (strictly newer only), and between the two deprecated records to `offer`. All three are Central's own clock readings, compared inside Central (R10). | +25 / +40 |
-| **G6 · Bound switches follow the reboot rule** | NS1 (owner: yes, 2026-10-02) | — (a policy change, not a read) | `node_lifecycle.py:132-137` refuses bound Players "pending Q1"; the domain model says a Frame bound after staging already follows the reboot rule (`docs/player-node-domain-model.md:117`, `:203`) | **Built, in this order.** **First, before any deletion:** a DB test that a bound Player's switch marks each bound Output interrupted from the reported app exit, leaves `calibration_valid` true and the bindings untouched, and rejoins the Run at its current point. **Only after it passes:** delete the refusal and its comment, and update `tests/test_node_lifecycle.py:101` to assert admission. If the test cannot pass, the refusal stays, an errata entry records why, and NS1 and NU1's Try ship refusing bound Players in Central's words (default wording). Risk tier high (effect-authority admission). **How the rule holds in code:** the old app's observed exit interrupts each bound Output (`node_output_losses` keyed on the old authority epoch); the new app process re-enrolls in the Registry, which bumps the authority epoch, so the old-epoch losses no longer fence and the planner commits the Run's current layers for the new epoch, the same path as a reboot. `test_a_bound_players_switch_follows_the_operator_reboot_rule` drives it: Stage while bound, exit, both Outputs interrupted, bindings and frame rows (calibration, `calibration_valid`, generation) byte-equal, re-enroll, commits on both Outputs at the new epoch, Runtime `export_state()` equal except `now`. It ran green with the refusal in place; then the refusal was deleted and the test extended through `stage()`. **Stated cost (ordering):** the interruption is recorded only when Central reconciles the old app's exit before the new app enrolls. If the new app enrolls first (the broker reports `exited` only once its session is up, so a session blip can delay it), no interruption fact is recorded, so the Frames show no interruption while they show the base page, and the exit's reconciliation work item stays `awaiting_output_link`, re-queued every 5 s for the rest of the boot. Epoch 1 is still refused (`stale_authority`) and epoch 2 rejoins at the Run's current point. `test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejoins_with_nothing_stale` pins both costs. **Node half unqualified:** no PID1 leg drives a bound switch yet (`fixture_requires_unbound_player`), so every Stage surface shows "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet qualified." beside the bound rule (`StageApp.jsx` `BoundRule`). | −4 / +40 |
+| **G6 · Bound switches follow the reboot rule** | NS1 (owner: yes, 2026-10-02) | — (a policy change, not a read) | `node_lifecycle.py:132-137` refuses bound Players "pending Q1"; the domain model says a Frame bound after staging already follows the reboot rule (`docs/player-node-domain-model.md:117`, `:203`) | **Built, in this order.** **First, before any deletion:** a DB test that a bound Player's switch marks each bound Output interrupted from the reported app exit, leaves `calibration_valid` true and the bindings untouched, and rejoins the Run at its current point. **Only after it passes:** delete the refusal and its comment, and update `tests/test_node_lifecycle.py:101` to assert admission. If the test cannot pass, the refusal stays, an errata entry records why, and NS1 and NU1's Try ship refusing bound Players in Central's words (default wording). Risk tier high (effect-authority admission). **How the rule holds in code:** the old app's observed exit interrupts each bound Output (`node_output_losses` keyed on the old authority epoch); the new app process re-enrolls in the Registry, which bumps the authority epoch, so the old-epoch losses no longer fence and the planner commits the Run's current layers for the new epoch, the same path as a reboot. `test_a_bound_players_switch_follows_the_operator_reboot_rule` drives it: Stage while bound, exit, both Outputs interrupted, bindings and frame rows (calibration, `calibration_valid`, generation) byte-equal, re-enroll, commits on both Outputs at the new epoch, Runtime `export_state()` equal except `now`. It ran green with the refusal in place; then the refusal was deleted and the test extended through `stage()`. **Stated cost (ordering):** the interruption is recorded only when Central reconciles the old app's exit before the new app enrolls. If the new app enrolls first (the broker reports `exited` only once its session is up, so a session blip can delay it), no interruption fact is recorded, so the Frames show no interruption while they show the base page. The exit's reconciliation work item stays `awaiting_output_link` only until the new app links; it then finishes as `before_process_link` (`node_runtime_reconciliation.py:99-100`: the exit's sample precedes the new link's), so the interruption is **never** recorded, not merely late. It stays queued for the rest of the boot only if no app links again. Epoch 1 is still refused (`stale_authority`) and epoch 2 rejoins at the Run's current point. `test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejoins_with_nothing_stale` pins the window before the link; bead R1 (§45) extends it through the new link to pin the final state. *Corrected 2026-10-02 from "re-queued every 5 s for the rest of the boot", which a probe and the reconciler's code refute.* **Node half unqualified:** no PID1 leg drives a bound switch yet (`fixture_requires_unbound_player`), so every Stage surface shows "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet qualified." beside the bound rule (`StageApp.jsx` `BoundRule`). | −4 / +40 |
 | **G7 · Boot claim's selection revision** | NU1 | Which Players' current boot was offered the current selection | `boot_claims` serve no deployment or revision (`node_observations.py:166-171`); the stored offer carries `policy_revision` (`contracts/node_boot.py:59`) | Each `boot_claims` entry gains `policy_revision \| null`, parsed from the stored `offer_payload` (null on a refused offer). No new query. **Not built** (owner's open choice, §31; NU1 built the "without" column of §28's choices) | +10 / +30 |
 
 The node-control banner and the effect gate section need no gate: `GET /v1/operator/node/status` already serves `transport_enabled` and the gate row with its generation (`node_routes.py:119-125`, `rollout_gate.py:291-306`).
@@ -1262,7 +1257,7 @@ The node-control banner and the effect gate section need no gate: `GET /v1/opera
 | Stage refused at send (base mismatch, no qualified fallback, stale cohort, session changed) | Central's words in the dialog; nothing recorded; the next reads refresh | Every refusal rolls back (`node_lifecycle.py:115-158`); browser test per code class |
 | Stage attempted while the latest operation is switching | Button disabled: "A switch is in progress; wait for it to finish"; no request | `stageBlocker` re-judged in `sendStage`; model test; browser test counts zero POSTs; mutation probe (drop the rule, the test fails) |
 | Stage on a bound Player | Admitted; the dialog states that each Frame shows the base page during the switch and rejoins its Run at the current point, calibration kept, and that only Central's half is proven | G6 DB test (interrupted from the exit, `calibration_valid` kept, rejoin at the current point) before the refusal is removed; `BoundRule` renders rule and caveat together (browser test on both surfaces). The node half has no CI leg (residual, §31) |
-| A bound switch whose new app enrolls before Central reconciles the old app's exit | No interruption is shown while the Frames show the base page; they rejoin at the current point; the exit's work item is retried every 5 s for the boot | Stated cost (G6 row); DB ordering test pins it; the fix is a reconciler residual (§31) |
+| A bound switch whose new app enrolls before Central reconciles the old app's exit | No interruption is shown while the Frames show the base page, and none is ever recorded: the exit's work item finishes as `before_process_link` once the new app links; they rejoin at the current point | Stated cost (G6 row); DB ordering test, extended by R1 through the new link (§45) |
 | A Player enrolls after the Keep confirmation | Its row reads "Not in this rollout"; it is never rebooted | `rolloutMembers` over the frozen rollout; browser test |
 | Back out double-clicked | One reboot | Synchronous in-flight hold; browser test double-clicks and counts one POST (mutation-probed) |
 | The journey's page is closed or hidden mid-rollout | No more reboots are sent; on reopen every row is re-derived and the page waits for Resume; the fleet-wide sentence says a paused rollout is not fully paused | No Central state to diverge; browser test counts **zero** reboot POSTs after reload until Resume |
@@ -1307,7 +1302,7 @@ The node-control banner and the effect gate section need no gate: `GET /v1/opera
 
 **Deferred:** a Central-run rollout (the briefing's Shape C: a rollout record, waves, a server-side sampler and halt rules; overlaps D17), wanted only if walls grow or the operator must walk away mid-rollout; acceptance counts per deployment ("qualified on N Players"); a Central-driven sampler; a selection history (the policy is a singleton); a "cannot be fetched: gate generation changed" diagnostic on stranded stages (needs the operation's generation served); a served Stage admission read (G3) once the gate opens in production; a deprecated-path flag on the Players list.
 
-**Residuals owed by batch 3** (each its own bead; none blocks the batch): one bound PID1 switch leg (broker emits `exited`, each bound Output gets a loss row, Display Host diagnoses then admits the new process, epoch-2 commits), after which `BOUND_PROVEN` is removed; the reconciler's unfinished exit work item and unrecorded bound interruption (findings below); `_admit_boot_in` reviving a superseded admission (findings below); G4's `linked_app` still naming an app after Central accepted its observed exit (serve null from the accepted exit, or reword as "last linked app"; today a dead app leaves a bound Frame not live, so its row pauses at Rejoining, never Rejoined); a served per-Output playback commitment, so a readiness failure after the first good report on the new epoch is seen before the next reboot (a read gate, not raised); a per-operation `deployment_id` on the app-attempts read (one field; with G7, one gate decision).
+**Residuals owed by batch 3** (each its own bead; none blocks the batch): one bound PID1 switch leg (broker emits `exited`, each bound Output gets a loss row, Display Host diagnoses then admits the new process, epoch-2 commits), after which `BOUND_PROVEN` is removed; the unrecorded bound interruption (finding below; re-scoped by Part F to a stated cost, §44); `_admit_boot_in` reviving a superseded admission (findings below); G4's `linked_app` still naming an app after Central accepted its observed exit (serve null from the accepted exit, or reword as "last linked app"; today a dead app leaves a bound Frame not live, so its row pauses at Rejoining, never Rejoined); a served per-Output playback commitment, so a readiness failure after the first good report on the new epoch is seen before the next reboot (a read gate, not raised); a per-operation `deployment_id` on the app-attempts read (one field; with G7, one gate decision).
 
 **Not planned:** raw deployment documents in the console; a stored "canary" (the journey's tried Player lives in its URL only); a list of Players a selection will reach; any V1 surface.
 
@@ -1343,7 +1338,7 @@ Forward-only migrations: V1 tables are dropped by new numbered migrations, never
 | `node_qualification_process_changed` is raised both for a different environment and for no current link (`node_acceptance.py:115-117`), so a restart of the same app looks like a change | [Implementation map](player-fleet-implementation-map.md) |
 | A Stage on a bound Player follows the operator-reboot rule (D16 answered yes, G6); the domain model and D16 record it (done in ND1) | [Domain model](player-node-domain-model.md), [design decisions](design-decisions.md) |
 | Fleet-wide Select runs no per-device hardware or ABI check (`node_boot.py:47-53`); in a mixed Pi-model fleet one selection could stop some models booting | [Domain model](player-node-domain-model.md) |
-| An observed app exit with no current bound surface to interrupt is never finished: `node_runtime_reconciliation.py:160-161` re-queues it as `awaiting_output_link` every 5 s for the rest of the boot, taking the Coordination, Runtime and fleet locks on each retry. Every switch, bound or not, leaves one; a bound switch whose new app enrolled first leaves its interruption unrecorded. Owed: record the loss under the superseded epoch or finish the item as superseded (effect-authority semantics, its own bead) | [Implementation map](player-fleet-implementation-map.md) |
+| An observed app exit with no current bound surface to interrupt is re-queued as `awaiting_output_link` every 5 s (`node_runtime_reconciliation.py:160-161`) until an app links again, then finishes as `before_process_link` (`:99-100`); only an exit after which no app ever links stays queued for the boot, taking the Coordination, Runtime and fleet locks on each retry. A bound switch whose new app enrolled first leaves its interruption unrecorded for good. *Corrected 2026-10-02*: an earlier line said every switch leaves one queued for the boot. Part F re-scopes the residual: no reconciler change in batch 4 (recording an old-epoch loss after epoch 2 already rejoined would show a stale interruption); the cost is stated (§44) | [Implementation map](player-fleet-implementation-map.md) |
 | `_admit_boot_in` (`node_sessions.py:152-157`) revives a superseded admission when a late claim for its kernel boot arrives, so `ended_by_later_boot` can flip back to `target_running` and the live later boot's sessions are revoked. Owed: refuse a claim for a superseded admission and a DB test that the projection never moves backwards | [Implementation map](player-fleet-implementation-map.md) |
 
 ## 32. Beads
@@ -1364,6 +1359,731 @@ Forward-only migrations: V1 tables are dropped by new numbered migrations, never
 
 **Order.** Planned NR1 first (tracer), then NV1. **As built:** NV1 first, because it needed a second polled read (`useNodeControl`) and DRY forbade a copy, so NV1 created `polledRead.js` and moved `useNodeDevice` onto it, and NR1 reused it. NV1's Releases "not shown" line and the Reboot gate link landed with NR1 and NR2 once `#/releases` existed. Then NR2, NS1 (G6 its second commit), NS2, NU1 (it composes every verb, so it comes last before docs), ND1. Browser evidence for NU1 (`tests/browser/test_update_wall_browser.py`) runs Central for real for catalog, Publish, Select, Registry, bindings and readiness, and stands in for the node layer (device reads, app-attempts, reboot, stage and qualification writes, samples, node status) so a box can "reboot onto the selection" between reads; the send rules against Central's real owners stay in `test_player_page_browser.py`.
 
+# Part F: pass 4 Show and pass 5 Sources (feature layer)
+
+**Status:** designed 2026-10-02 and revised once after adversarial review (domain-fidelity and simplicity lenses); awaiting the owner's batch-4 gate (Q8–Q11).
+**Layer:** feature. Screens, wordings with truth kinds, lifecycles, signatures, backend gates, failures and beads. The domain-to-console map (§6), design rules 1–3 (§5), `fact()` (§11) and the V2-only posture (R20) are inherited.
+**Builds on:** [requirements](requirements.md) (Program, Scene, AssetSource, the [central media boundary](requirements.md#central-media-boundary)), [execution contract](execution-contract.md), the [library design](operator-console-ux-pass2-library.md) (PR 37, revision 6 on `origin/claude/pass-b-library-design`), the Source flow of [pass C+D](operator-console-ux-pass2-flow.md) (J5, merged), the [central cache](module-central-cache.md) asset layer, and §31's batch-3 residuals.
+
+## 33. What Part F covers, and why
+
+| Pass | Gap (§7) | What the console says today | What it breaks |
+|---|---|---|---|
+| 4 | 21 | The Wall tile reads "Scheduled: xmas · Phase: body" for any winning Intent, Show now included (`Plan.jsx:447`); the Frame facet reads "Intended scene: xmas (phase body)" (`NowShowingFacet.jsx:33`); the nav says "Now showing" (`showRoutes.jsx:30`) | R2: Central's Runs worded as if scheduled, or as if shown; a Program and a Show now look the same |
+| 4 | 22 | Program cards, Run cards and media lines print clock times with no zone (`showState.js:34-53`, `mediaHealth.js:411-424`); only the Schedule flow's steps name the zone (`ScheduleSteps.jsx:73`) | Two operators in different zones read different times as if they were one |
+| 4 | — | Requirements give a Program "recurrence" (`requirements.md:134`); Central stores one window per Program (`central/runtime.py:118-133`) and the console's Repeat helper writes N separate Programs (`ProgramsRegion.jsx:46-53`) | Spec and code disagree (Q8) |
+| 5 | 23 | One concept, four names: "Photo sources" (nav, `showRoutes.jsx:82`), "photo source" (`SourceFlow.jsx:36-37`, `SceneSteps.jsx:35-41`), "Source", "Photo match preview" (`SourceSteps.jsx:147`) | Glossary drift |
+| 5 | — | A Source filters by favourites, dates and media type only; the preview is a count with no media and no time (`SourceSteps.jsx:150-161`) | Owner request: a tag picker with autocomplete and a preview of the media a tag selects |
+| 5 | — | Requirements give an AssetSource no membership ceiling and a paged view of its matches (`requirements.md:177`); the worker refuses more than 1,000 matches as `source_limit` (`media/immich.py:342-353`, `media/models.py:124`) because the library's search pages unstably (`media/immich.py:355-357`), and no paged view exists | Spec and code disagree (Q8) |
+| 5 | — | Media ages subtract the media worker's clock from Central's: `workerState` (`mediaHealth.js:88`, `worker_seen`), `sourceState` (`:185`, `:192`, `:207`, `last_success` and `next_refresh`), and the worker compares Central's `source_previews.expires_at` with its own clock (`media_repository.py:300-308`) | R10: two clocks compared; a skew raises false "quiet" or "overdue" alarms (G11, Q10) |
+
+**Requirements added by this Part** (binding, alongside R1–R20):
+
+| # | Rule | Source |
+|---|---|---|
+| R21 | Neutral library vocabulary, no vendor words. Say plainly that media lives in the operator's photo library and Photo Wall only selects it. | Owner (earlier console passes); PR 37 R2 |
+| R22 | Players stay unaware of the library. Previews and thumbnails proxy through Central and never become Player media; Players have no route or job kind for them. The browser never sees the library's URL, hostname, key, owner id or any photo's library id or checksum (tag ids allowed: PR 37 Q4). | [Requirements](requirements.md#central-media-boundary); AGENTS.md; PR 37 R3, R4 |
+| R23 | Tags are picked with type-ahead from the library's own list, and the picker shows a preview of the media the chosen tags select. | Owner; PR 37 R1 |
+| R24 | Configuration is progressive: one question per step, defaults filled, never a wall of fields. | Owner |
+| R25 | PR 37's R5–R8 hold: the cache is only a cache; a failure is never shown as "nothing matches"; no credentials or private media in source, fixtures or evidence; idempotency belongs to each data type. | PR 37 §2 |
+
+> **Q8 (requirements the code does not meet: Program recurrence, Source size).** Two spec-code disagreements, one decision each.
+> **(a) Recurrence.** `requirements.md:134` defines a Program "including recurrence". Recommended: **amend it**: "A Program schedules one Scene for one time window at a priority. A repeating schedule is several Programs (the console's Repeat helper writes them); stored recurrence is a feature proposal." Cost: the requirement narrows to what is built; a stored rule (edit once, every window follows) stays unbuilt. Alternative: **keep it** and record the gap as an open feature; the helper is worded "makes N separate Programs" until a recurrence record is designed (a backend feature, R9).
+> **(b) Source size and the paged view.** `requirements.md:177` says an AssetSource has no fixed ceiling and its matches can be inspected through a paged view before and after saving. Recommended: **amend it**: "A Source selects at most 1,000 items while the library's search cannot page stably (`media/immich.py:355-357`); more is reported as over the limit, never as nothing. The operator sees the newest 24 of what a draft selects; a paged view is a feature proposal." Cost: large libraries must be narrowed by tags or dates, and the operator cannot browse past the newest 24. Alternative: **keep it** and record both as open gaps: until then the console states the limit as the worker's current refusal ("Photo Wall currently stops at 1,000"), not as a product rule, and §44 lists the paged view as an unmet requirement.
+
+## 34. Pass 4 Show: screens
+
+Pass 4 needs no backend change, because its one fact is worded as what Central serves, not as more. The snapshot serves the Runtime projection only (`central/operator_snapshot.py:38-46`): the visible Intents per Frame (`visible[]`), each with its `run_id` and `root_id`, and the root `RunView` with its `program_id` (`central/runtime.py:146-191`; a child Run's `program_id` is null, `:754-772`, so origin is read from the root). It does **not** serve what the Planner made of those Intents: an unbound Frame gets no layers (`central/planner.py:283-286`), and an Intent with no eligible, prepared or compatible media is skipped so the next layer down is planned (`:322-342`). So the fact names the top Run, says media was not checked, and says when the Frame is unbound. A read of the Planner's per-Frame layers and diagnostics is a feature proposal (§44).
+
+| Screen | Before | After |
+|---|---|---|
+| Navigation | "Now showing" | **"Now"** (the Runs page). It names Central's live Runs, never what Panels show |
+| Wall › Plan tile | "Scheduled: xmas" + "Phase: body"; "Not scheduled" | One `planned` fact, clipped to the tile, full text as its accessible name: "On top: xmas · Program dec-evenings …"; a second line "Ending (outro)" only in the outro phase |
+| Frame › facet "Now-showing" | "Intended scene: xmas (phase body)"; "Nothing scheduled." | Facet label **Planned** (the route segment stays `now-showing`: no alias). First line the `planned` fact; then the Frame's health line (`reported`, unchanged); then the precedence "Why", whose heading becomes "Central's Runs on <frame>: <scene> (<tag>) on top" (`join.js:138`, today "Central's plan for …"), and whose limit sentence (`join.js:143-147`, the next layer down and the unbound Frame) is kept |
+| Now › Run cards | origin "activated directly" / "Program p" / "part of x" (`showState.js:205-211`) | Same three origins from one `runOrigin` (§41), worded "started directly (Show now or the API)", "Program p" ("Program p, since removed" when the Program is no longer listed: `remove_program` drops it after reconciling, `central/runtime.py:537-555`), "part of x's Run". Clock times carry their zone |
+| Schedule › Program cards | "Tue 2 Mar 18:00–20:00"; "Running since 18:00" | "Tue 2 Mar 18:00–20:00 BST"; "Running since 18:00 BST"; one region line "Times in Europe/London (this browser's time zone)" |
+| Show now confirmation | unchanged (already states what Central will do) | — |
+
+**Design-it-twice for the plan's truth kind.**
+
+| | **A. A sixth kind, `planned` (recommended)** | **B. Reuse `derived`** |
+|---|---|---|
+| How | `fact({kind: "planned", value, origin, basis})`: which Run is on top on a Frame in Central's Runtime now, with who started it and what was not checked | "xmas (Central's inference: highest-precedence Intent)" |
+| Gives | Intent, record, inference and observation stay four distinct words; origin and basis are required labels, so "who started this" and "media not checked" can never be dropped | No new kind |
+| Costs | One more kind in `facts.js` and its tests; the tile text is longer | `derived` means "concluded from named records"; a Runtime projection is not a conclusion about the world, so R2's line between intent and truth blurs, and the origin and caveat become optional prose |
+
+## 35. The `planned` truth kind and Show wording
+
+**Rule (extends design rule 2).** Which Run is on top on a Frame is rendered only through a `planned` fact. The kind's name is the owner's; it means **Central's Runtime projection**, made before any media is chosen, and its words say exactly that. Its required labels are the value (the Scene, or "nothing"), the **origin** (the Run's starter) and the **basis**: "media not checked" when the Frame is bound, or "this Frame is unbound, so Central sends it no layers" when it is not. A `planned` fact missing its origin becomes `unknown`, naming what is missing. It never carries an age: it is Central's projection at the read's `runtime.current.now`, and the snapshot is already labelled by its read time. Its wording always ends "(Central's Runs; …; the Panel is not observed)". It never says "plan" alone, because the Planner may plan a lower layer (§34).
+
+| Fact | Kind | Wording |
+|---|---|---|
+| A Program's Run is on top on a bound Frame | `planned` | "On top: xmas · Program dec-evenings (Central's Runs; media not checked; the Panel is not observed)" |
+| A Show now Run is on top | `planned` | "On top: xmas · started directly, by Show now or the API (Central's Runs; media not checked; …)" |
+| A child Run is on top | `planned` | "On top: intro · part of xmas's Run, Program dec-evenings (Central's Runs; media not checked; …)" |
+| A Run is on top on an **unbound** Frame | `planned` | "On top: xmas · Program dec-evenings (Central's Runs; this Frame is unbound, so Central sends it no layers)" |
+| The origin's Program is no longer listed | `planned` | "… · Program dec-evenings, since removed (…)"; no link |
+| No visible Intent on the Frame (no Run, a gap between cycles, or a child Scene before its delay: a Run can target a Frame with nothing visible on it, `central/runtime.py:100-104`, `:914-921`) | `planned` | "On top: nothing · no Run puts a layer on this Frame now (Central's Runs; the Panel is not observed)" |
+| The top Intent's root Run is not in the read (payload drift) | `unknown` | "Unknown: who started xmas is not served" |
+| The outro phase | plain line | "Ending (outro)" |
+| A Run | `set` | "Running since 18:00 BST · started 3 min ago" (Central's record; the age is Central's `now` minus Central's `started_at`) |
+| A Program's window | `set` | "Tue 2 Mar 18:00–20:00 BST" |
+| A Program's display state | `set` | as `programState` today (`showState.js:80-143`), with zoned times; its "Ran" hint already says "Central's plan" and becomes "Central's Runs" |
+| A Frame's readiness | `reported` | unchanged (`health.js` `frameHealth`) |
+| Zone line | plain statement | "Times in Europe/London (this browser's time zone)" on Schedule and Now |
+
+**Clock times have one home.** `timeWords.js` (§41) is the only module that turns an instant into display words, and every clock time it returns carries the browser's zone abbreviation. A source-scan test fails when any other console module calls a **display formatter**: `toLocaleTimeString`, `toLocaleString`, `toLocaleDateString` or `Intl.DateTimeFormat`. Field arithmetic (`getHours` and friends) is not scanned: it builds `datetime-local` input values (`scheduleFlowModel.js:108`, `authoring.js:478`) and the capture-date heuristic (`mediaHealth.js:117`), none of which is display. S1 moves every current display call into `timeWords.js`, so the scan is green by construction: `facts.js:51` (`clock`), `showState.js:36` and `:43`, `ScheduleSteps.jsx:58` and `:332-333` (the zone fallback), `mediaHealth.js:107`, `SourceFlow.jsx:458`, and `authoring.js:404` (`timeZoneName`). That moves "a clock time without its zone" from review to a test.
+
+## 36. Pass 4 lifecycles shown
+
+A Frame's `planned` fact is a projection, re-read every snapshot; it has no stored state. It moves only as Runtime moves. Natural completion and cancellation differ (AGENTS.md): cancellation is downward-only (a Run's children end with it, never its parent), and either way a covered Run underneath is **revealed** at its current logical state, never restarted.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Nothing: no visible Intent on the Frame
+  Nothing --> OnTop: a Run is admitted (Program window opens, or Show now), or a child Scene's delay passes
+  OnTop --> OnTop: a higher-precedence Run is admitted (origin changes)
+  OnTop --> OnTop: the top Run completes or is cancelled and a covered Run is revealed (origin changes)
+  OnTop --> Ending: the top Run enters its outro
+  Ending --> OnTop: the outro ends and a covered Run is revealed
+  Ending --> Nothing: the outro ends and nothing is underneath
+  OnTop --> Nothing: the top Run completes with no outro, or is cancelled, and nothing is underneath
+  OnTop --> Nothing: the Run still targets the Frame but shows nothing now (between cycles, before a child's delay)
+```
+
+The Program display state (upcoming, due, running, ran, cancelled, refused, missed, old: `showState.js:80-143`) is unchanged; pass 4 only zones its times.
+
+## 37. Pass 5 Sources: screens and the progressive Source flow
+
+**One noun.** "Source" is the console's word everywhere (capitalised like Scene and Program): nav **Sources**, "New Source", "Name this Source", "Check your Source", the Scene step "Which Source?" and "Live from a Source". It is the requirements' **AssetSource** (`requirements.md:131`), which keeps its name there (§3). "Your photo library" names only the origin, which is not an aggregate and has no section. A source-scan test (extending `test_sources_have_no_immich_or_album_language`) fails on "photo source", "Photo sources", "match preview", "album" and vendor words in console strings.
+
+**The Source home** is `#/sources` (cards) with its flow at `#/sources/new/<step>` and edit at the card. A card shows the selection summary, the last refresh as a `reported` fact, and Edit, Refresh, Delete. It shows **no thumbnails** in this batch (deferred, §44): the owner asked for a preview of what the chosen tags select, which lives in the flow.
+
+**The flow, one question per step (R24).** The flow kit's steps (`sourceFlowModel.js`) become:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Library: more than one connection announced, or a typed new name
+  [*] --> Tags: exactly one connection (prefilled by the flow's connection rule)
+  Library --> Tags: connection chosen
+  Tags --> Narrow: Continue (zero tags is allowed: everything in the library)
+  Narrow --> Name: Continue (defaults: photos and videos, any favourite, no dates)
+  Name --> Review
+  Review --> [*]: Save Source (one write; refresh queued in the same transaction)
+  Tags --> Library: Back
+  Narrow --> Tags: Back
+```
+
+| Step | Asks | Beside it |
+|---|---|---|
+| **Which library connection?** | the connection, under PR 34's `connectionRule` (`sourceFlowModel.js:59-130`), unchanged | An unannounced typed name disables tags and preview with "This connection isn't set up yet, so tags and previews aren't available. You can still save; the Source starts selecting once the connection is set up." |
+| **Choose tags** | `TagCombobox` (PR 37 §8: ARIA combobox, ≤ 4 chips, all-of, a nested tag replaces its ancestor, an ancestor of a chosen tag is refused with its reason) | The **preview panel**: what the chosen tags select, re-queried on each change (R23) |
+| **Narrow it down (optional)** | media type, favourites, dated from and until, each prefilled with its default | The same preview panel, following the criteria |
+| **Name this Source** | the name (rename words unchanged, `SourceSteps.jsx:293`) | — |
+| **Check your Source** | the summary, with "Change" per step | The selection summary and the preview panel |
+
+**The preview panel** (one component, mounted on Tags, Narrow and Review): a `reported` count fact, the newest 24 tiles with alt text ("Photo dated 12 Dec 2024"), and the PR 37 states (Looking, Updating, nothing matches, over the limit, unreachable, key not allowed), worded in §39. Dates are the library's own dates (`fileCreatedAt`, `media/immich.py:287`), so the words say "dated", not "taken"; they are labelled "Dates in this browser's time zone" (PR 37 Q5 stays deferred).
+
+**The Scene's authored-media chooser** is unchanged in this batch ("Photo 108×192"). Its tiles are deferred with the card's (§44), because an authored item is **not** a current Source member: authored references are kept from membership independently (`media_repository.py:529`), the Planner plays them without consulting membership (`central/planner.py:233-234`), and the chooser already handles an authored asset no longer among the Source's candidates (`SceneSteps.jsx:376-379`).
+
+## 38. PR 37 folded in: what changes
+
+PR 37 (revision 6, 2026-09-28) was written before three things landed on `main`: a count-only unsaved-Source preview (2026-09-29, `POST /v1/operator/source-previews` and `GET …/{request_id}`, `central/app.py:808-815`, table `source_previews` in migration 033, worker `preview()` at `media/immich.py:478-499`), a shared `SourceQuery` base for `SourceSpec` and `SourcePreviewQuery` (`media/models.py:32-70`), and the worker's reported connection list (`media_settings.connection_ids`, `media_repository.py:621-638`, read by the flow's `connectionRule`). The repo also already has one cache-then-fallback **asset layer** for files (`central/assets/reader.py:114-168` `AssetReader`, kernel job types in `central/kernel/job_types.py`, a directory per `AssetKind` in `central/assets/layout.py`), run by every media worker process (`media/worker.py:452-455`). PR 37 would add a second preview mechanism and a second file-fetch lane. Folding it in keeps one of each: **data answers** (a preview, a tag list) stay on the media worker's existing paths; **files** (thumbnails) go through the asset layer.
+
+**Design-it-twice (Q9).**
+
+| | **A. PR 37 re-based on what exists (recommended)** | **B. PR 37 as written** |
+|---|---|---|
+| Preview | The existing request resource grows: the query gains `tags`; the answer gains the newest 24 members, a limit flag and its observation time. One row per POST, as today; the pending cap (`media_repository.py:251-260`, 429) bounds it | A new `GET …/library/preview` keyed by `query_key`, an observation store (`library_queries`, members), a waiter that awaits ≤ 8 s, a new `Publisher.follow` (PB10), a global cap under an advisory lock; the existing count preview deleted or left beside it |
+| Search | The per-kind walks stay (`media/immich.py:340-349`) and each gains `tagIds`; a both-kinds draft merges each kind's newest 24 and sums the counts | One search for both media types, rewriting the live refresh path, with a parity test |
+| Request gate | Preview stays a POST, so pass A's write checks already apply; only the thumbnail route (an `<img>` GET that publishes on a miss) needs PR 37's gate (servability, `Sec-Fetch-Site` when sent, CORP) | GETs that publish need the marker: pass A's GET rule is amended for preview and tags |
+| Tag list | The worker re-lists each connection's tags on its existing tick when the stored list is older than 5 min (database clock, G11), and replaces it at boot; `GET …/library/tags` reads stored data only | The GET publishes a refresh itself (stale-while-revalidate), with 2 waiter slots per pod |
+| Thumbnails | `AssetKind.LIBRARY_THUMBNAIL` plus one `FetchLibraryThumbnail` job on the kernel's FETCH queue, read through `AssetReader`; the worker prefetches a completed preview's 24 | Two new kernel queues (`LIBRARY`, `THUMBNAIL`), a periodic sweep job, a route that never awaits, and a console retry ladder |
+| Connections | Unchanged: the worker's reported list; no fingerprints (the worker holds one configuration per connection and must restart to change it, `media/immich.py:415`) | A new `library_connections` table, boot announcement and fingerprints |
+| Refresh lease | Unchanged (per Source). Kept from PR 37: canonical compare, `spec_unsupported`, the empty-`tags` omission | One lease per `query_key` (PR 37 L2), with a boot backfill |
+| Size (raw) | about +395 backend / +670 tests (G9, G10, G11) | PR 37's 34.5 h over 8 beads; about +1,100 backend / +1,300 tests |
+| Costs | A both-kinds Source is two library searches; two Sources with one query search twice per tick; preview-then-save searches again; a repeated draft is searched again; a failed preview cannot show "the last members" across requests, so the panel keeps the previous answer in page memory; thumbnail fetches share the FETCH queue with OS-image and package fetches (a burst of small fetches can delay a large fetch's start) | Two preview mechanisms until one is removed; a kernel Publisher addition; a pass A amendment; the one-search and per-key lease changes touch the live refresh path (high risk) |
+
+**PR 37 element by element.**
+
+| PR 37 element | Fits the domain and current code? | Change when folded in |
+|---|---|---|
+| A Source is one library query; `LibraryQuery` with canonical form (§4–§5) | Yes | `SourceQuery` *is* that base: it gains `tags` and `canonical()`; no new class. Empty `tags` omitted from stored Sources (PR 37's rollback rule, kept verbatim; `contracts/models.py:25` `extra='forbid'` makes it real) |
+| `query_key` and reuse by key (§5, §7) | An optimisation for an already bounded resource; a criteria change makes a new key anyway | Dropped |
+| One search for both media types (§5) | Changes nothing an operator sees and rewrites the live refresh path (`media/immich.py:417-424`) | Dropped: the per-kind walks gain `tagIds` |
+| Canonical compare in `configure_source`; `spec_unsupported` tolerance (§5, §6) | Yes; `configure_source` still compares raw JSON (`media_repository.py:97-99`) | Kept |
+| "Saving a Source queues nothing" (§1) | Stale: `configure_named_in` already queues the refresh in its transaction (`media_repository.py:163-165`) | Dropped |
+| Lookup jobs answered as data; the worker alone holds the key (§3) | Yes (R22) | Kept: preview and tag list on the media worker's paths |
+| Preview route, PB10, waiter slots, global cap (§7) | Duplicates the count preview | Replaced by shape A |
+| Per-key refresh lease and boot backfill (§6, L2) | Optimisation only ("correctness never depends on it", PR 37 §14) | Deferred (§44) |
+| Thumbnails: servability = current data, worker re-check, re-encode without metadata, a cache subdirectory, never awaited (§6, §7, §9) | Servability, re-check and re-encode: yes (R22, R25). A separate lane: no, the asset layer exists | Kept on the asset layer. **Servable = a member of a live preview row**, with the row's stored metadata. The kind's directory is `previews/` in the one layout (ADR 0013's fourth subdirectory, Dockerfile and entrypoint lines). "Never awaited" becomes a **short bounded wait in its own slots** (§40), which keeps PR 37's reason (24 tiles must not starve the console's own reads) |
+| Tag list with filtering, caps, bidi stripping (§7, §9) | Yes | Kept; refreshed by the worker's tick; read-only GET |
+| Preview "as of 12:03", Updating, failure never empty (§8) | Yes (R2 here) | Rendered through `fact()` as `reported` (§39); its time follows G11 |
+| "Tags" and preview slots in the J5 step (§8) | The step exists (`LibrarySlot`, `SourceSteps.jsx:96-171`) | The step splits into Tags and Narrow (§37); the slots are removed |
+| Fingerprints on connections (§6, §11) | Guards a repointed connection; the worker must restart to repoint, and a repointed library yields different asset ids (`media/models.py:141-143`) | Dropped; the worker replaces its connections' tag lists at boot |
+| No "Library" section | Yes | Kept: the library is an origin |
+| Migrations 030–032 | Stale (061 is the last on this branch) | Next free numbers at build time; `source_previews` is extended by a new migration, never edited |
+| Line citations to PR #34's branch | Stale: PR #34 merged | Re-cited above to this branch |
+| Q3 (key permissions `tag.read`, `asset.view`) | Answered by the owner; an action, not a design question | Assumption (§44): until the key has them, tags and thumbnails degrade as PR 37 §8 says and tagged Sources report `permission` |
+
+**The boundary (R22), frozen.** What the browser may receive is a closed shape, not a convention:
+
+| Shape | Fields | Where |
+|---|---|---|
+| **Served** `PreviewMember` | `asset_id` (Central's one-way hash of connection, library id and checksum, `media/models.py:141-143`), `kind`, `captured_at`, `width`, `height`, `duration_seconds` | `GET …/source-previews/{request_id}` → `shown[]` |
+| **Stored** member metadata | the served fields plus `upstream_id` and `checksum` | its own column on the preview row, which no route serializes; the thumbnail job reads it by `asset_id` |
+| **Served** tag | tag id, path, name (PR 37 §7 filtering and caps) | `GET …/library/tags` |
+
+Route and DB tests assert that the preview GET, the tag GET and the media read contain no library photo id, checksum, owner id, URL or key.
+
+## 39. Pass 5 wording and truth kinds
+
+Every line is a `fact()` rendered through `FactLine`, except plain statements. "Your photo library" is the reporting origin; the media worker is the channel ("via the media worker"). When more than one connection is announced, the origin names the connection: "Your photo library (connection home) …". Ages follow G11: with G11 (recommended), each age is the database's read time minus the database's write time, one clock.
+
+| Fact | Kind | Wording |
+|---|---|---|
+| Intro | plain statement | "Photo Wall selects media that lives in your photo library. It never uploads, edits or deletes anything there." |
+| Tag field | plain statement | Label "Tags in your library"; hint "Each tag includes everything nested under it. For media with *any* of several tags, give those photos one shared tag in your library." |
+| Tag list age | `reported`, latest | "Your photo library last reported its tags 7 min ago" (shown only when older than 5 min) |
+| What a draft selects | `reported`, first | "Your photo library reported 128 photos and 4 videos · first received 12 s ago" |
+| Updating | `reported`, first + plain | the same fact, then "Updating…" |
+| Nothing matches (ok, 0) | `reported`, first | "Your photo library reported nothing matching yet · first received 4 s ago" + "New matches appear automatically once saved." |
+| Over the limit | `reported`, first | "Your photo library reported more than 1,000 matches · first received …" + per Q8(b): amended, "A Source can select at most 1,000; narrow it with tags or dates."; kept, "Photo Wall currently stops at 1,000; narrow it with tags or dates." Then "Showing the newest 24." |
+| Unreachable, no earlier answer | `unknown` | "Unknown: Photo Wall can't reach your photo library right now; retrying" (never "nothing matches") |
+| Unreachable, earlier answer on screen | the earlier fact + plain | the earlier fact, then "Photo Wall can't reach your photo library right now." |
+| Key not allowed | plain statement | "Your library connection's key isn't allowed to list tags or show previews. Add the permissions in the setup guide's library key step." |
+| Tile | plain alt text | "Photo dated 12 Dec 2024" / "Video, 0:32, dated 12 Dec 2024"; not served yet: "Preview not ready yet" |
+| Selection summary | `set` (the Source's spec) | "Selects media tagged Family/Christmas (and nested tags) · favourites only · photos and videos"; a missing tag path: "a tag that no longer exists in your library" |
+| Source refresh | `reported`, latest | "Your photo library last reported 2 min ago · 132 valid in the last refresh" |
+| Refresh failing | `reported`, latest | "Your photo library refused access · last good refresh 3 h ago" (the existing `SOURCE_FAILURES` words, with "Library …" reworded to "Your photo library …") |
+| Media worker | `reported`, latest | "Media worker last reported 20 s ago · …" |
+| Tag deleted after save | `set` | "A tag this Source uses no longer exists in your library." |
+
+**Without G11** (if Q10 = no), every library and worker time is the worker's clock reading and cannot be aged by Central: the facts read "… · at 12:03 BST by the media worker's clock" (a `reported` receipt stamped by a named clock, a second `fact()` form), and the "quiet" and "overdue" alarms are removed, because no single clock can judge them.
+
+## 40. Pass 5 lifecycles
+
+**A preview request** (one row per POST, as today):
+
+```mermaid
+stateDiagram-v2
+  [*] --> Pending: POST (row + job in one transaction; 429 at the pending cap)
+  Pending --> Complete: worker writes counts, the newest 24 and their stored metadata, then publishes their thumbnail fetches
+  Pending --> Failed: worker writes a code (unavailable, permission, tag_missing, source_limit …)
+  Pending --> Expired: 600 s with no answer (one clock, G11)
+  Complete --> [*]: kept until expiry; its members stay servable while it lives
+```
+
+The panel polls the request's GET at 2 s, backing off to 30 s, and after 2 min reads "Still looking. Photo Wall will keep trying." A criteria change supersedes the request on screen (the old answer is dropped by sequence).
+
+**A thumbnail tile** reads through the asset layer. The route checks servability (a member of a live preview row), `Sec-Fetch-Site` when sent, and sets CORP; then it calls a dedicated `AssetReader` built with a short wait (2 s) and its own `WaiterSlots` (4), so cold tiles can hold at most four connections for two seconds and the console's polled reads are never starved. Because a completed preview prefetches its 24, most tiles are hits.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Shown: file in the cache (prefetched, or fetched within the wait)
+  [*] --> NotReady: Unavailable (busy, timeout, or a failed fetch) or 404 thumbnail_unknown
+  NotReady --> Shown: one retry after 5 s, or when the preview answer changes
+  NotReady --> NotReady: the retry also misses ("Preview not ready yet")
+```
+
+A 404 queues nothing. The console cannot tell a 404 from a 503 on an `<img>`, so it has one state, "Preview not ready yet", never "no longer selected".
+
+**The tag list** per connection: none → listed (with its age) → stale (older than 5 min: the worker's next tick re-lists it; the console keeps showing the list) → listed; a failed re-list keeps the last list with its own age.
+
+## 41. Interface sketch (passes 4 and 5; signatures only)
+
+```text
+facts.js                                                              (S1; L3 if Q10 = no)
+  fact({kind: "planned", value, origin, basis}) -> Fact   // origin and basis required; missing origin -> unknown "who started <value> is not served"
+  factText(planned) -> "On top: <value> · <origin> (Central's Runs; <basis>; the Panel is not observed)"
+  [Q10 = no only] fact({kind: "reported", …, stampedAt, stampedBy}) -> " · at <clockTime> by <stampedBy>'s clock"
+
+timeWords.js  (new, shared with Show, Sources and fleet, pure)        (S1)
+  zoneName() -> "Europe/London"            // moved from authoring.js timeZoneName
+  zoneNote() -> "Times in Europe/London (this browser's time zone)"
+  clockTime(epochSeconds) -> "18:00 BST"   // the one clock-time formatter; facts.js clock() and showState delegate
+  dateTime(epochSeconds) -> "Tue 2 Mar 18:00 BST"   // ScheduleSteps.jsx:58, SourceFlow.jsx:458
+  dayLabel(epochSeconds) -> "Tue 2 Mar";  captureDay(epochSeconds) -> "12 Dec 2024"   // mediaHealth.js:107
+  windowLabel({starts_at, ends_at}) -> "Tue 2 Mar 18:00–20:00 BST"
+  zoneLabel(date) -> "BST" | "UTC+01:00"   // ScheduleSteps.jsx:332-333 fallback
+
+showState.js                                                          (S1)
+  runOrigin(runtime, run) -> {kind: "program" | "direct" | "child", words, programListed: bool}   // the one home; runRows uses it
+
+join.js                                                               (S1)
+  plannedIntent(runtime, frameId) -> Intent | null   // renamed from nowShowing
+  plannedFor(runtime, frameId, bound: bool) -> {fact: Fact, sceneId | null, phase | null}
+
+media/models.py                                                       (L1)
+  SourceQuery.tags: tuple[TagRef, ...]               // 0–4 canonical UUIDs, unique, sorted; SourceSpec omits it when empty
+  SourceQuery.canonical() -> dict
+  PreviewMember {asset_id, kind, captured_at, width, height, duration_seconds}   // served
+  SourcePreviewResult {count, image_count, video_count, shown: ≤24 PreviewMember, limited: bool}
+media/immich.py                                                       (L1; L2)
+  _walk(query, kind, …)                              // gains tagIds when tags is non-empty
+  preview(query) -> SourcePreviewResult + stored member metadata;  list_tags() -> LibraryTag[]
+  thumbnail(upstream_id) -> bytes                    // re-check, then fetch and re-encode without metadata
+central/kernel                                                        (L2)
+  AssetKind.LIBRARY_THUMBNAIL;  FetchLibraryThumbnail(asset_id) on QueueName.FETCH   // CATALOG and Candidates gain it
+  handler injected by media/worker.py into build_job_runtime          // central imports no media package
+central/media_repository.py                                           (L1; L2)
+  request_source_preview(query) -> {request_id}
+  source_preview(request_id) -> {status, counts?, shown?, limited?, code?, observed_at?, read_at}
+  library_tags(connection_ref, q, limit) -> {status, tags[], observed_at, read_at}
+  servable_thumbnail(asset_id) -> StoredMember | None
+  DatabaseClock(db) -> Clock                          // G11: composed into MediaRepository in Central and the worker
+routes                                                                (L1; L2)
+  POST /v1/operator/source-previews                   // body gains tags
+  GET  /v1/operator/source-previews/{request_id}      // gains shown, limited, observed_at, read_at
+  GET  /v1/operator/library/tags?connection=&q=&limit=   // reads stored data only
+  GET  /v1/operator/library/thumbnails/{asset_id}     // img; servability, Sec-Fetch-Site when sent, CORP; AssetReader(wait 2 s, slots 4)
+
+fleetCommands.js                                                      (R1)
+  sendReboot(deviceId, request, node, control)        // a per-device in-flight guard inside: a second call while one is in flight -> {outcome: "changed"}, no POST
+
+console                                                               (L3)
+  sourceFlowModel.js  SOURCE_STEPS = library | tags | narrow | name | review   // library skipped by connectionRule
+  TagCombobox.jsx     <TagCombobox connection value onChange />
+  sourcePreview.js    usePreview(query) -> {phase, answer, previous};  previewFacts(answer, readAt, connections) -> Fact[]
+  PreviewPanel.jsx    <PreviewPanel query />          // Tags, Narrow, Review
+  selectionWords(query, tagPaths) -> string
+  mediaHealth.js      sourceState(source, readAt), workerState(health, readAt)   // readAt = the media read's database time (G11)
+```
+
+## 42. Backend gates
+
+Each lands as the first commit of the bead that shows it, behind the existing `admin` dependency. What the console shows without each is stated, so the owner can decline any one.
+
+| Gate | Bead | What the console cannot show honestly without it | Smallest addition | Without it the console shows | Lines raw (code / tests) |
+|---|---|---|---|---|---|
+| **G9 · A tagged Source query and a preview sample** | L1 | Tags (R23) and what a draft selects (R23) | §38 shape A: `tags` and canonical form; `tagIds` in each per-kind walk; newest-24 served members with stored metadata in a non-served column; `limited`; empty `tags` omitted from stored Sources; canonical compare; `spec_unsupported` | Count-only preview, no tags | +165 / +270 |
+| **G10 · Tag list and thumbnails** | L2 | Autocomplete from the library's tags (R23); any media in the preview | Tag-list table, the worker's tick re-list and boot replace, one read route; `LIBRARY_THUMBNAIL` on the asset layer with its job, handler, `previews/` directory and route (PR 37 §6–§9 security kept whole) | Tags typed as ids (unusable), tiles as text | +170 / +320 |
+| **G11 · Media times on one clock** (Q10) | L2 | Any media age or alarm: today the console subtracts the worker's clock from Central's (§33) | `DatabaseClock`: `MediaRepository` reads time from the database (`clock_timestamp()`) in both processes, so every media write and the media read's `read_at` share one clock; tests keep `ManualClock` | Worker-clock times labelled "by the media worker's clock", no ages, and no "quiet" or "overdue" alarms | +60 / +80 |
+
+**G8 withdrawn in review.** The first draft refused a claim for a superseded admission. That reverses designed behaviour: the owning document says "a claim for its matching offer always admits its boot … duplicate-serial Pis therefore flap visibly … rather than being fenced" (`player-node-domain-model.md:107`; `central/fleet/node_sessions.py:123-127`), the revival was recorded as accepted on 2026-10-01 (`.claude/errata.md:1993-1996`), and the owner's trust-identity decision says a new enrollment as X supersedes earlier boots. A superseded kernel boot can claim again only while it is still running (`appliance/node/session.py:63-69` re-enrolls with a new session and the same kernel boot id), so when "Ended by a later boot" returns to the earlier state, Central's record is right: that boot is current again and its operation is its own. The console is honest as built. A refusal would also have been an unhandled status on the node (`REFUSED = (401, 403)`, `session.py:27`; any other code is retried with the same claim forever). The reviewer's alternative, a monotonic admission epoch that keeps "ended" after re-admission, would state that a still-running boot's operation ended, which is false. R1 records the behaviour where it is owned and pins it with a test (§45).
+
+> **Q10 (G11, media times on one clock).** Recommended: **yes**. It is the only way to keep the worker-silent and refresh-overdue alarms honest (R10). Cost: every media clock read is one database round trip on its own statement (milliseconds; a few per refresh), so a write's time is the database's time at that read, not its transaction's; the refresh lease's schedule moves to the database's clock. Alternative: **no**: the console words worker times with their clock and drops the two alarms, so a stopped worker is seen only by its last time.
+
+## 43. Failure modes
+
+| What breaks | What the operator sees | Guarantee |
+|---|---|---|
+| The top Intent has no usable media for its Frame (none eligible, preparing, no compatible variant) | The `planned` fact still names the top Run and says "media not checked"; the facet's limit sentence says Central plans the next layer down | Required `basis` label (`fact()` construction); model test |
+| The Frame is unbound | "… this Frame is unbound, so Central sends it no layers" | `plannedFor(…, bound)`; model test |
+| A Run targets the Frame but shows nothing now | "On top: nothing · no Run puts a layer on this Frame now" | Model test (participant with no visible Intent) |
+| The top Intent's root Run is missing from the read | "Unknown: who started xmas is not served" on the tile and facet | `fact()` construction; model test |
+| The origin's Program was removed | "Program p, since removed", no link | `runOrigin`; model test |
+| A console module formats a clock time itself | Build fails | `timeWords.js` source-scan test (mutation probe: add a `toLocaleTimeString` call) |
+| A "photo source" or vendor string returns | Build fails | Source-noun scan (mutation probe) |
+| Library down or slow | The previous answer with its age, then "can't reach"; never "nothing matches" | `previewFacts`; browser test |
+| Worker not running | "Looking…", then "Still looking"; the media worker fact ages (G11) and its alarm fires | Browser test; G11 DB test |
+| 24 cold thumbnails | Most are prefetched; the rest show "Preview not ready yet" and retry once; the console's own reads are never starved | Dedicated reader (2 s wait, 4 slots); browser test with a slow fake |
+| A thumbnail requested for an id that is not servable | 404, nothing queued | Servability check; DB test |
+| A library photo id or checksum reaching the browser | — | Served shapes frozen (§38); route and DB tests |
+| Cache purged, or `previews/` missing on an existing volume | Tiles retry, then show | Worker boot creates it; asset layer refetches; probe |
+| A tag deleted after save | "A tag this Source uses no longer exists in your library."; the planner gives that Source no new selections | Tag check; test |
+| An older worker meets a tagged Source | That Source reads `spec_unsupported`; the others refresh | Lease tolerance; rollback rule (PR 37 §5) |
+| Clock skew between Central and the worker | Nothing (G11: one clock) | DB test with skewed process clocks |
+| A superseded boot that is still running re-enrolls (or two Pis claim one serial) | The Player page follows Central's current admission and flaps visibly, as designed (`player-node-domain-model.md:107`) | DB test pins the re-admission (R1) |
+
+## 44. Costs, deferrals and findings
+
+**Costs.**
+- **Size.** Raw about **+1,230 / −380 code** (backend +395, console +835), **+1,505 / −230 tests**, **+340 / −130 docs**: about +3,075 added. At pass 1's overrun (1.8× code, 2× tests) plan on about **+5,560 added** (net about +4,800), below batch 3. Escalation triggers: >4 beads (6); security-touching (G10's thumbnail route), so L2 reviews at the high tier.
+- **Pass 5 backend.** A both-kinds Source is two library searches; two Sources with one query search twice per tick; preview-then-save searches again; a repeated draft searches again (no reuse) until a per-key lease exists.
+- **Thumbnails** share the kernel FETCH queue with OS-image and package fetches; a separate queue is one `QueueName` if the delay proves real. On plain http they are bounded by servability, not prevented (PR 37 §9, unchanged).
+- **The `planned` fact does not say what the Player was sent.** It names the top Run; whether that Run's media exists for the Frame stays the facet's limit sentence until a Planner read exists.
+- **The plan tile is denser**: origin and basis are part of the fact, so a narrow tile clips them; the full text is the accessible name.
+- **Zones are the browser's**: two operators in two zones still see two clocks, now labelled. An Installation timezone stays a feature proposal.
+- **The unrecorded bound interruption** (G6, corrected): when the new app enrolls before Central reconciles the old app's exit, no interruption is ever recorded; the Frames show the base page for the switch with no interruption shown. Not fixed: recording an old-epoch loss after epoch 2 rejoined would show a stale interruption. An exit after which no app links again stays queued for the boot, taking three locks every 5 s.
+
+**Deferred (feature proposals):** a read of the Planner's per-Frame layers and diagnostics (it would let the `planned` fact say what Central sends, not only which Run is on top); thumbnails on the Source card and in the Scene's authored-media chooser (when built, servability must include `authored_candidates` rows, and a missing tile reads "Preview not available", never "no longer selected"); a paged view of a Source's matches (if Q8(b) = amend; an unmet requirement if kept); PR 37's per-key refresh lease and projection from a preview; the Scene "any of" over several Sources; PR 37 Q5 (capture days in an Installation timezone); a stored Program recurrence (if Q8(a) = amend); a CI job for a real-library run (its own bead and gate, outside batch 4).
+
+**Still open from batch 3** (not re-asked here): G7; G4's `linked_app` after an accepted exit (A or B); a per-operation `deployment_id`; NS2's real-Player still-photo probe; the bound PID1 switch leg, after which `BOUND_PROVEN` goes (an arm64 privileged CI scenario, its own bead outside batch 4).
+
+**Findings for other owners:**
+
+| Finding | Owner document |
+|---|---|
+| The worker compares Central-written `source_previews.expires_at` with its own clock (`media_repository.py:300-308`); `workerState` and `sourceState` subtract worker-written times from Central's read time (`mediaHealth.js:88`, `:185`, `:192`, `:207`) | [Media module](module-media.md) (closed by G11) |
+| `requirements.md:134` gives Program a recurrence the code does not store; `requirements.md:177` gives an AssetSource no ceiling and a paged view the code does not have | [Requirements](requirements.md) (Q8) |
+| Suspected, confirmed or dropped by R1: the rollout gate compares a certificate's `verified_at`, stamped by the verifier's clock, with PostgreSQL's `clock_timestamp()` (`central/fleet/rollout_gate.py:131-134`, `:190-191`), two clocks (R10); the tests stamp it with the host's `time.time()` (`tests/test_fleet_rollout_gate.py:27-37`) | [Fleet implementation map](player-fleet-implementation-map.md) |
+
+**Assumptions.** The owner has added `tag.read` and `asset.view` to the library key (PR 37 Q3); until then tags and thumbnails degrade and tagged Sources report `permission`. The browser's `Intl` short zone names exist for the operator's zone (otherwise `timeWords` falls back to the UTC offset, as `ScheduleSteps.jsx:332-334` does). Central runs one console operator at a time per pod for the thumbnail slots' sizing (4 slots are per pod, not per browser).
+
+## 45. Batch 4 beads
+
+**Built back to back, one full verify and one review for the batch** (owner preference), each bead green on its own package tests so the batch can stop after any bead. R1 first (it fixes shipped defects and pins stated costs); docs last. Risk tiers: L2 high (thumbnail route, G11 touches the refresh lease's clock), the rest standard.
+
+| Bead | Contents | Acceptance (observable) | Lines raw (code / tests) |
+|---|---|---|---|
+| **R1 · Batch-3 residuals** | The eight items of `batch3-final-residuals.json`: (1) `updateWall.js:404-405` reads "this page reboots it; its next boot is offered the selection", and the `fleetCommands.js:396` comment follows; (2) the two D16 summaries carry the ordering condition (`player-node-domain-model.md:203`; this document's Part E header, done in Part F); (3) `stage.js` exports one `boundRuleLines()` (rule plus caveat) and stops exporting `BOUND_RULE` and `BOUND_PROVEN`, mirroring `selectionConfirmation`; (4) a per-device in-flight guard **inside `sendReboot`** (`fleetCommands.js:422-433`, the single send path): a second call while one is in flight answers `changed` ("A reboot for this Player is already being sent.") with no POST; the callers' own holds are left as they are; (5) the Keep dialog shows only "These are the Players this console knows." beside `selectionConfirmation`; (6) the enroll-before-exit cost: errata entry, `player-node-domain-model.md:117` and errata item 5 corrected (G6, §30, §31 already corrected here), and the ordering test extended through the new link; (7) `ended_by_later_boot` added to `player-node-domain-model.md:149`; (8) test helpers `_accept(…)` and `_first_base_key(conn)` replace the five copied inserts and derivations. Then errata item 9 (`_admit_boot_in` revives a superseded admission): disposition **by design** (§42, G8 withdrawn): an errata entry superseding item 9's "owed a fix", one sentence in the [fleet implementation map](player-fleet-implementation-map.md) and beside `ended_by_later_boot` in the domain model, and a DB test that pins it. Then the flaky DB test (below) | **Re-admission DB:** a superseded boot that claims again is admitted, the later boot's sessions are revoked, and the earlier boot's operation reads its own state (the visible flap, `player-node-domain-model.md:107`). **Ordering DB:** after the epoch-2 link and a reconciler advance, the exit item reads `completed_at` set, `result = before_process_link`, and `node_output_losses` stays empty; the docstring says so. **Reboot guard:** a double-click on each of the three reboot callers sends one POST (browser; mutation probe: drop the guard inside `sendReboot`, the count fails). **Static:** a scan fails when any module but `stage.js` names the bound rule's text. **Wording:** no console string says "reboots it onto the selection". **Flaky test** (`test_the_qualified_fallback_is_this_boots_base_and_this_device_generations_only[generation]`, 1 failure in 3 full db-tier runs and none in 46 isolated reruns, so load or interleaving, not its logic; no traceback kept): R1 claims it only with **(a)** a named root cause, **(b)** a deterministic reproduction (force the hypothesised condition and watch this test fail the same way) and **(c)** a fix to the class, mutation-probed. Candidates to rule out first: the Rig opens its rollout gate with a certificate stamped by the host's `time.time()` but checked against PostgreSQL's `clock_timestamp()` (5 s future tolerance, 60 s expiry, re-checked at stage time: `tests/test_fleet_rollout_gate.py:27-37`, `central/fleet/rollout_gate.py:127`, `:131-134`, `:190-191`), so host-VM clock drift or a slow worker under `-n 4` fails any Rig test; and the 10 s cohort freshness (`central/fleet/node_acceptance.py:51`) if any clock on that path is not the test's manual clock. The cheap search is a targeted repeat of `tests/test_node_lifecycle.py` under `-n 4`. If no cause is reproduced, R1 does **not** claim the item: it lands a named residual bead with instrumentation that keeps the exception and both clocks' readings on the next failure | +45 / −30 · +125 / −60 |
+| **S1 · Show: planned, origins, zones** (pass 4) | `facts.js` `planned` with origin and basis; `timeWords.js` with every display call moved into it (§35) and the source-scan test; `runOrigin`, `plannedIntent`, `plannedFor`; the Plan tile, the **Planned** facet label (route segment unchanged), the Why heading "Central's Runs on …", nav "Now", Run and Program cards zoned; fleet tests that pin clock strings follow `facts.js` `clock()` | **Model:** each §35 row from stubbed runtimes (Program, direct, child, unbound, removed Program, nothing, participant with no visible Intent, missing root → Unknown). **Browser:** a Program's Run reads "On top: <scene> · Program <id> (Central's Runs; media not checked; the Panel is not observed)" on the tile and facet, a Show now reads "started directly", an unbound Frame's fact says Central sends it no layers; Program cards end in a zone abbreviation and Schedule shows the zone line. **Static:** the clock scan fails on an added `toLocaleTimeString` (mutation probe); no console string says "Scheduled:", "Intended scene", "Now showing" or "Central's plan for" | +220 / −70 · +250 / −50 |
+| **L1 · Tagged Source query and preview sample** (G9; tracer first) | Tracer (below), then the rest of G9: canonical compare, `spec_unsupported`, `tagIds` in the refresh's per-kind walks, empty `tags` omitted (frozen pre-L1 model test), `limited` with the sample, the served `PreviewMember` and the non-served stored metadata | **DB:** a tagged preview's job carries only the request id and each per-kind walk sends `tagIds`; a both-kinds draft's `shown` is the newest 24 across kinds and its counts are the sums; a stored untagged Source is byte-identical to the pre-L1 dump; one unreadable spec does not block the tick. **Route:** the preview GET contains no library photo id, checksum, owner id, URL or key | +165 / −40 · +270 |
+| **L2 · Tag list, thumbnails, one media clock** (G10, G11) | First commit: G11 (`DatabaseClock` composed in Central and the worker; the media read serves `read_at`). Then the tag-list table, the worker tick's re-list and boot replace, and the read route; `LIBRARY_THUMBNAIL`, `FetchLibraryThumbnail`, its handler injected from the media worker, the `previews/` directory (layout, Dockerfile, entrypoint), the worker's prefetch of a completed preview's 24, and the route on a dedicated `AssetReader`, with PR 37's security tests landing with each route | **DB:** with process clocks skewed by an hour, worker and refresh ages stay correct; a tag list older than 5 min is re-listed on the next tick and a failed re-list keeps the last list; a completed preview queues its 24 thumbnail fetches once. **Route:** a cold thumbnail answers within about 2 s (file or 503 with `Retry-After`); a fifth concurrent cold request answers busy at once; an id that is not servable gets 404 and queues nothing; with no `Sec-Fetch-Site`, an unknown id queues nothing; CORP present; signed out and Player credentials get 401; no query string logged; the tag GET contains no URL or key; an existing volume without `previews/` serves a thumbnail after worker boot. **Static:** `lint-imports` passes (central imports no media package) | +230 / −20 · +400 |
+| **L3 · Sources console** (pass 5) | One Source noun and its scan; the progressive flow (§37); `TagCombobox`; `PreviewPanel` and `previewFacts` (naming the connection when more than one is announced); selection summary; the Source card's refresh fact; `mediaHealth` on the media read's `read_at`; remove the `LibrarySlot` placeholders | **Browser:** with one connection the flow opens on Tags; picking a tag shows its count fact and tiles; a nested tag replaces its ancestor's chip and an ancestor is refused with its reason; a failure after a good answer keeps that answer with "can't reach"; a failure with none reads Unknown, never "nothing matches"; a tile that fails twice reads "Preview not ready yet"; Save sends one write. **Static:** the noun scan fails on an added "photo source" (mutation probe). No console string names the library's vendor | +570 / −220 · +460 / −120 |
+| **D1 · Docs** (last) | This document's status, §8 and history; the [library design](operator-console-ux-pass2-library.md) marked folded in, pointing to §38; [console UX design](operator-console-ux-design.md) (Now, Planned facet, Sources, the flow); [media module](module-media.md) and [media worker](module-media-worker.md) (tags, previews, thumbnails on the asset layer, one clock); ADR 0013 and [central cache](module-central-cache.md) (the fourth subdirectory, the new asset kind); the runbook's library-key step; requirements per Q8 | `check_docs.py` passes; no doc calls the Source "photo source", describes two preview mechanisms or a second asset lane; evidence holds synthetic media only | +340 / −130 (docs) |
+
+**Tracer bullet** (L1's first commit). From the Source flow's existing preview slot, a photos-only draft with one tag (chosen from a fake library's one tag by id in the test) is posted to `POST /v1/operator/source-previews`; the worker's photo walk sends `tagIds`; `GET …/{request_id}` answers `counts.images = 1`, one served member (`asset_id`, `kind`, `captured_at`, sizes; no library id) and `observed_at`/`read_at`; the slot renders "Your photo library reported 1 photo · first received …" as a `reported` fact. It proves the canonical query with tags, the preview resource's growth instead of a second mechanism, criteria as data behind a key-only job, the served-member boundary and the `reported` wording. **Non-goals:** the tag picker and tag list, thumbnails, G11, the noun, the progressive flow.
+
+**Order.** R1, S1 (independent of pass 5, so it can ship if the batch stops), L1, L2, L3, D1.
+
+> **Q11 (scope).** Recommended: **one batch of six beads**, as cut, with one verify and one review. Cost: about +5,560 lines at the overrun rate, and the pass-5 beads wait on the library key permissions for any manual look at a real library. Alternative: **two batches**: R1 and S1 now (about +1,230 adjusted), pass 5 after the key permissions are in place; one extra verify and review, and Sources stay unchanged meanwhile.
+
+# Part G: information architecture by domain and lifecycle (module layer)
+
+**Status:** designed 2026-10-02 from three drafted shapes and two adversarial reviews; **awaiting the owner's approval** (Q12, Q13). Nothing in Part G is built. Part F's batch 4 is unaffected except where §57 says so.
+**Layer:** module. It covers navigation, homes, what lives where, lifecycle modes and cross-links. Screen layout, wording tables, signatures and beads belong to the feature layer that follows approval.
+**Responds to:** the owner's steer of 2026-10-02: rethink the console from a hardware bring-up perspective, because it "conflates the one-time hardware operations with the steady-state show widgets", and "the various aspects of the total domain design deserve their own consideration and UI home". It also places the next batch's chosen scope: (A) a real host-health UI and (B) new node metrics. A Central-driven debug overlay is not in the batch, but Part G reserves its home.
+
+## 46. What is conflated today
+
+```mermaid
+flowchart LR
+  subgraph WALLP["Wall page (daily)"]
+    PLAN["Plan: draw, move, delete<br/>always on"]
+    INSP["Frame Inspector<br/>opens on Calibration"]
+    GUID["Guidance banner<br/>(0 Frames only)"]
+  end
+  subgraph STRIP["Attention strip (every page)"]
+    MIX["'2 Frames need attention · 1 to set up'"]
+  end
+  subgraph PLAYER["Player page"]
+    RAW["host samples as raw<br/>'name: value unit' lines"]
+  end
+  PLAN -->|"X a morning glance can move a Frame"| R26["one-time vs daily"]
+  INSP -->|"X a daily click lands in a bring-up editor"| R26
+  MIX -->|"X a finished install and a dead Pi share one line"| R26
+  RAW -->|"X no units policy, no thresholds,<br/>no fleet view, no silence alarm"| HH["host health"]
+```
+
+| Conflation | Where | What breaks |
+|---|---|---|
+| One-time writes on the daily face | The Plan draws, moves and deletes Frames on every visit (`Plan.jsx` imports `createFrame`, `moveFrame` and `deleteFrameRequest`) | A glance can change the layout (R26) |
+| The Frame opens on its bring-up editor | The Inspector's default facet is Calibration (`Inspector.jsx:59`) | Every daily click on a tile lands in a one-time editor |
+| Set-up gaps and incidents share one line | "Frames need attention · N to set up" (`AttentionStrip.jsx:48-55`) | Structural work and lost evidence compete for one sentence |
+| No home for bring-up | What is left on an install is split across Guidance (0 Frames only), the strip's count and each Frame's facets | No place answers "what is not finished?" |
+| Host health is unreadable | Samples render as raw lines on an open Player page only (`nodeRead.js:183-194`); no fleet view; no host-silence alarm (§7 gap 2) | Batch A cannot be shown |
+| A contract gap for batch B | Kernel, base version, link and IP are text; `HostMetricV2.value` must be a finite number (`contracts/node_observation.py:16-27`) | Batch B cannot ship as "a generic metric list" alone |
+
+**Requirements added by this Part** (binding, alongside R1–R25):
+
+| # | Rule | Source |
+|---|---|---|
+| R26 | One-time hardware operations (drawing Frames, binding, calibrating, enrolling equipment) and steady-state views have separate homes. Each part of the domain gets its own home. | Owner steer, 2026-10-02 |
+| R27 | A Central-driven debug overlay has a reserved home in the information architecture. It is not built in this batch. | Owner, 2026-10-02 |
+
+Batches A and B are scope choices, not requirements. Inherited unchanged: design rules 1–3 and the truth kinds (§5), R20 (V2-only), R24 (progressive configuration), the Immich look and feel, and staying signed in.
+
+## 47. Three shapes, one chosen
+
+Three shapes were drafted in parallel and walked through five operator journeys by two adversarial reviewers. Both ranked the domain-homes shape first, both failed every shape as drafted, and both listed what the winner must absorb. The recommended shape below is the domain-homes shape with those changes applied.
+
+| | **Domain homes with a Set up worklist (recommended)** | Lifecycle modes (Run / Show / Set up) | Task workspaces (Overview + Commissioning) |
+|---|---|---|---|
+| How | Keeps today's sections and route tables. Each hardware home opens on its daily face; its one-time writes sit behind a named mode or facet in the same home. One new worklist section, Set up, lists what is structurally unfinished and links into the homes | The sidebar groups by activity; every route moves under `/run`, `/show` or `/setup`; Calibration and Binding become Set up journeys | An Overview landing of summary cards; a Commissioning workspace hosts every one-time editor and shows in the sidebar while items are open |
+| Gives | Replacing a Pi and handling a 9 pm failure stay inside one home. Calibration and Binding stay behind the existing wall-only closure (R4). Show routes are unchanged. Least churn | The purest separation; a one-page morning check | The best morning check; the sharpest bring-up model |
+| Costs | No dashboard: live Runs are one click away on Now. A second worklist beside Needs attention. One-time writes are still reached through daily homes | Every route moves (the Show hashes alone appear about 146 times in tests); R4 re-rooted; about 940 lines of facets rewritten as journeys; experts pay clicks for a corner nudge | Overview breaks rule 1; the `wall` and `attention` sections go; R4 re-rooted |
+| Fatal as drafted | (fixed below) an unbind step before replacing; console-held thresholds; "reached then lost" not derivable | "Keep calibration" after a replacement leaves the Frame dark: every bind invalidates calibration (`registry.py:525`); the sidebar reorders on a reported fact mid-incident | "Qualified" as a bring-up step can never complete on day one and blocks during a live slideshow (qualification is a Stage fallback prerequisite, not a showing one); a Review step claims unqualified Frames "will not present", against the planner |
+
+**Grafted into the recommended shape:**
+
+| Idea | From | Lands in |
+|---|---|---|
+| Structural facts make set-up items; liveness makes only alarms | Workspaces | Rule G2 |
+| One pure set-up model feeds the page, the count and the landing rule | Workspaces | §54 |
+| A pipeline position is a "step", never a "stage" (Stage app is a verb) | Workspaces | Glossary, §48 |
+| [Frame] and [Player] links on every attention row | Workspaces | §52 |
+| Host facts as a separate text record | Workspaces | §52, G13 |
+| The Player-side bind lists Frames whose Player is silent first | Workspaces | §50 |
+| Spares are listed, never counted | Lifecycle | Rule G2 |
+| Install prerequisites from existing `set` records | Lifecycle | §54 |
+| A newly powered box fills in as its layers report | Lifecycle | §52, Set up › Players |
+| Thresholds served by Central | Lifecycle, Workspaces | G12 |
+| "Unknown: not read" for a box the fleet read did not cover | Lifecycle | §52 |
+| Land on Set up when there are no Frames | Lifecycle | §48 |
+
+**Cut from the domain-homes draft:** a System › Health page (a feature proposal outside the programme, §8); a bell replacing the strip (a working, tested strip; a count hides the cause); a Library group (Part F keeps no Library section); renaming `players` to `fleet`; five Player tabs (sections behind their own error boundaries stay); Setup tabs on Show, Sources and Releases (the steer is about hardware); thresholds held in the console (a console band is not Central's inference); kernel, base, link and IP in the metric list (the contract); an unbind step before a replacement (`bind` already replaces atomically under the Frame-generation fence, `registry.py:518-525`); "reached then lost is an incident" (an unbound Frame record cannot tell never-bound from was-bound); and a guided Replace-a-Player journey (bind-by-replace covers it; a wrapper stays a feature proposal).
+
+## 48. The proposed shape
+
+```mermaid
+flowchart TB
+  subgraph WORK["Worklists: link only"]
+    ATT["Needs attention<br/>incidents; strip on every page"]
+    SU["Set up (n)<br/>what is structurally unfinished"]
+  end
+  subgraph WALLG["Wall"]
+    WALL["Wall: plan, read-only<br/>Frame: Status (default) · Binding · Calibration"]
+    LAY["Edit layout mode<br/>draw, move, delete; Unplaced tray"]
+  end
+  subgraph SHOWG["Show (unchanged, Part F)"]
+    SHOW["Now · Scenes · Schedule · Sources"]
+  end
+  subgraph FLEETG["Fleet"]
+    PL["Players: fleet host health"]
+    PP["Player: Health first · Layers · Outputs · Boot · App<br/>Diagnostics (reserved) · Danger zone; Reboot in the header"]
+    REL["Releases · Update the wall"]
+  end
+  ATT -->|"link"| WALL
+  ATT -->|"link"| PP
+  SU -->|"link"| LAY
+  SU -->|"link"| WALL
+  SU -->|"link"| PP
+  SU -->|"link"| REL
+  WALL <-->|"chip"| PP
+  PL --> PP
+  SHOW -->|"link: Frame"| WALL
+```
+
+**Navigation tree.**
+
+```
+Header   Photo Wall · Central pill · updated <age> · account (stays signed in)
+Strip    Needs attention: incidents only, on every page               (changed: no "to set up")
+
+WALL
+  Wall              #/wall                          plan read-only; tile = health + Planned      (changed)
+    Frame           #/wall/frames/<id>/status       default facet; Part F's Planned facet        (new default)
+                    #/wall/frames/<id>/binding      bind; bind a different Output; Identify; unbind
+                    #/wall/frames/<id>/calibration  Frame profile, live calibration, Save
+    Edit layout     #/wall/layout                   draw, move, delete Frames; Unplaced tray     (new mode)
+SHOW
+  Now               #/now                           Runs, Show now, Why, media pipeline          (unchanged)
+  Scenes            #/scenes…                                                                    (unchanged)
+  Schedule          #/schedule…                                                                  (unchanged)
+  Sources           #/sources…                      Part F §37                                    (unchanged)
+FLEET
+  Players           #/players                       fleet host health, worst first               (changed)
+    Player          #/players/<device>              Health first; Diagnostics reserved; Reboot in header
+  Releases          #/releases                      unchanged; Update the wall #/releases/update/…
+WORKLISTS
+  Needs attention   #/attention                     every incident, Frame- or Player-keyed      (changed)
+  Set up (n)        #/setup                         prerequisites · Frames to finish ·          (new)
+                                                    Players not yet driving a Frame
+```
+
+- **Aliases:** the facet segments `nowshowing`, `now-showing` and `planned` parse to `status`. No section is renamed.
+- **Landing:** no Frames → `#/setup`; otherwise `#/wall`. Today it is Wall with the Guidance banner, otherwise Now.
+- **Sidebar order is fixed:** Wall, Show, Fleet, Worklists. Only the Set up count changes; nothing reorders on state.
+- **The Immich parallel:** Immich keeps the daily library apart from Administration and its first-run onboarding. Here the daily faces play the library, Set up plays onboarding (it empties itself), and the Players list's host columns play Server stats. Grouped icon-and-label sidebar, cards in Show, status tables in Fleet.
+
+**Words added** (glossary, §3):
+
+| Word | Meaning | Not to be confused with |
+|---|---|---|
+| **Set up** | The bring-up worklist: missing `set` records, with links to the homes that fix them | Needs attention (evidence of a problem) |
+| **Step** | One position in a target's bring-up (placed, bound, calibrated) | **Stage app**, the fleet verb (§25) |
+| **Spare** | An Unbound Player, or a box seen at boot and not enrolled: listed on Set up, never counted, never alarmed | A Player in trouble |
+| **Edit layout** | The Wall's mode for drawing, moving and deleting Frames | Calibration (per-Frame geometry on a Panel) |
+| **Status** (facet) | The Frame's default facet: its Planned fact, health, readiness report, precedence Why and the bound Player's chip | The Player's Health section |
+| **Host facts** | Text the host reports on change: kernel, base version, interface, link state, IP | Host samples (numbers, sampled) |
+
+> **Q12 (the bring-up home).** Recommended: **a Set up worklist**: one new section that lists what is structurally unfinished and links into the homes, while one-time writes stay in their homes behind Edit layout, Binding and Calibration. Cost: one more sidebar entry and a second worklist beside Needs attention; the one-time editors are still reached through daily homes. Alternative A: **no Set up section**: each home shows its own unfinished items on its daily face. Cost: no one place answers "what is left on this install", which reads "its own UI home" narrowly. Alternative B: **a Set up workspace that hosts the editors** (the lifecycle and workspace shapes). Cost: every Wall route and the R4 closure re-rooted, about 940 lines of facets rewritten as journeys, the Frame shown in two places, and a corner nudge becomes a journey.
+
+## 49. Design rules G1–G3 (design choices, not requirements)
+
+| Rule | What it makes impossible | Guarantee |
+|---|---|---|
+| **G1. Homes own state and writes; worklists only link.** Needs attention and Set up show a target, one fact (the cause or the missing step) and links to the home that fixes it. They host no editor, no write and no second copy of an aggregate. This extends rule 1. | A second place to calibrate or bind; two summaries of one Frame drifting apart | Import-graph test: worklist modules import models, never page or write modules (extends the R4 test) |
+| **G2. Set up is structural; Attention is evidence.** A set-up item is a missing `set` record: a Frame not placed, not bound, or with calibration not valid; node management off; no boot selection. `reported` and `derived` facts appear beside an item as hints and never add or remove one. Liveness, thresholds and interruptions are Attention incidents, never set-up items. Spares are listed on Set up, never counted and never alarmed. | Bring-up reopening on a flaky night; a count or landing that flips on a reported fact; a spare on the shelf counted forever | Construction: one pure model whose inputs are `set` records; model tests in which a silent Player must not add an item and an unbound Frame must not add an incident |
+| **G3. Daily faces carry no one-time write, and nothing reorders on state.** Every home opens on its steady state: the Wall read-only with the Status facet; the Player page with Health first. One-time and destructive writes sit in the same home behind a named mode or facet (Edit layout, Binding, Calibration, Danger zone). The sidebar order and the landing rule depend only on the Frame count. | A glance that drags a Frame; a Frame opening on its calibration editor; navigation moving under the operator mid-incident | Route tests for the default facet and the read-only Plan; a source-scan test that the Plan's write imports are reached only behind Edit layout |
+
+## 50. Homes and worklists: contracts
+
+| Home | Owns | Daily face | One-time or rare (same home) | Reads | Never |
+|---|---|---|---|---|---|
+| **Wall** | Frame, Binding, Calibration (Registry) | Read-only plan; tile = health + Planned; Frame › Status | Edit layout; Binding (bind, bind a different Output, Identify, unbind); Calibration | Snapshot | Host detail beyond one chip; Show authoring |
+| **Now, Scenes, Schedule, Sources** | Run, Scene, Program, Source | Part F, unchanged | The Source flow's connection step (Part F) | Snapshot, media read | Any hardware write (R4 closure unchanged) |
+| **Players** | The fleet of boxes | Host-health table, worst first, with a counts line | — | Fleet host summary (G12) | A spare counted as a problem |
+| **Player page** | One box (Device + Registry Player) | Health, then Layers, Outputs, Boot, App | Reboot (header); Outputs bind, listing unbound Frames and Frames whose Player is silent first; Stage app; Qualified fallback; Danger zone; Diagnostics (reserved) | Per-device node read (existing) + G12 thresholds | — |
+| **Releases** | Release, Deployment, Boot selection, Effect gate | Part E, unchanged | Publish, Select, Update the wall | Releases read | — |
+| **Needs attention** (worklist) | Nothing | Incidents keyed by Frame or Player, each with [Frame] and [Player] links | — | Snapshot + G12 | A set-up item; an editor |
+| **Set up** (worklist) | Nothing | Prerequisites; Frames to finish; Players not yet driving a Frame | — | Snapshot, boot facts; G12 for hints only | A write; a count from a reported fact |
+
+Binding stays the one two-sided relationship (rule 1): the Frame's Binding facet and the Player page's Outputs both call the one `bind` write with the Frame generation. On a bound Frame that write is the replacement, so a Frame is never left unbound while a new box is chosen.
+
+## 51. Lifecycle modes
+
+| Mode | The operator's question | Where it lives |
+|---|---|---|
+| **Bring-up** | What is not finished? | Set up → Wall › Edit layout, Binding, Calibration; the Player page |
+| **Steady state** | Is it healthy, and is the plan right? | Wall (landing), Players, Now |
+| **Change** | Tonight's show; a new release | Scenes, Schedule, Now › Show now; Releases › Update the wall |
+| **Incident** | What lost something it had? | Strip and Needs attention → Frame › Status or Player › Health; Reboot in the Player header |
+| **Maintenance** | Recalibrate, replace a Pi, retire a box | The owning home's facet or section; a set-up item appears only when a `set` record goes missing |
+| **Diagnose** (future) | What exactly is the box doing? | Player › Diagnostics (reserved, §53) |
+
+## 52. Host health (batch A) and node metrics (batch B)
+
+**Home: Fleet.** The host is part of the box, and Fleet owns the box. Everything else links to it.
+
+| Where | What | Truth kind |
+|---|---|---|
+| **Players list** | One row per box: standing, bound Frames (chips), Host Management last reported, temperature °C, throttling (now / since boot), CPU %, storage free vs App Manager required, link and IP, kernel and base. Worst first. A counts line: "12 Players · 11 reporting · 1 silent · 1 throttled". A box the read did not cover reads "Unknown: not read" | Values `reported`, latest, with Host Management's receipt age (R10); bands `derived`: "(Central's inference: above 80 °C, Central's threshold)" |
+| **Player › Health** (first section) | The same values with units and bands, grouped Thermal, Compute, Storage, Network, Software; "Host samples do not show visible pixels"; every metric, known or not, in a raw disclosure (moved from Layers) | As above; host facts `reported`, first |
+| **Needs attention** | **Host silence** on a Bound Player: Host Management's last report is older than Central's served limit; named cause, distinct from Player-app silence (R4). Threshold incidents: throttled now, temperature alarm, storage short of required. A Frame row appends up to two host facts of its Player. Every row has [Frame] and [Player] links | `derived`, basis named |
+| **Wall › Frame › Status** | One chip: the bound Player's worst host fact, linking to Player › Health | Link chip (rule 1) |
+| **Set up › Players** | A hint per box, filling in as layers report: "seen at boot" → "Host Management last reported 2 s ago" → "Player app enrolled · 2 Outputs" | Hints; never gate (G2) |
+
+An Unbound Player's host silence shows on its row (R4: named cause, bound or not) but raises no incident: an Unbound box is a spare or awaiting retirement (G2).
+
+**What the console holds and what Central serves.** The console holds one metric catalog: known names map to a label, a group and display units. Unknown names render generically in the raw disclosure, so a new node metric is visible without a console release and labelled with one. Central serves the thresholds (bands per metric and the host-silence limit) beside the read, as `silent_after_seconds` already is (`health.js:100`). One classifier (`health.js`) judges with them, so the list, Attention and the Player page agree. With no threshold served, a value shows without a band and raises nothing: no console default.
+
+**Gate G12 · fleet host summary** (backend, read-only; implied by the batch-A choice, R9). One admin read: each device's latest host observation with its receipt time, App Manager preparation bytes (available and required), its latest host facts, and the threshold table. Without it the Players list keeps today's columns, the Player page shows only its own box, and host silence and threshold incidents cannot exist. Incidents appear only while a console tab is open: there is no push.
+
+**Batch B split** (contract). `HostMetricV2.value` is a finite number, so:
+
+| Value | Carried as |
+|---|---|
+| Temperature °C, throttling (now and since boot, as bits), CPU %, memory available, link speed | Rows of the generic metric list (`HostMetricV2`), sampled |
+| Kernel version, base version, interface name, link state, IP address | A new **host facts** record of short text, reported on change (`reported`, first) and served in G12: gate **G13** (contracts, node and Central) |
+
+An IP address is reported by the host and is never identity, as a serial is never identity (R12).
+
+> **Q13 (batch B text values).** Recommended: **numbers in the metric list, text in a host facts record** (G13), reported on change. Cost: one more node record, with its ingest, storage and a field in G12. Alternative: **widen `HostMetricV2.value` to text**, one list as the batch wording says. Cost: a V2 wire-contract change that every consumer must handle; a text value cannot carry a threshold; versions re-sent on every sample. Alternative: **numbers only**: drop versions and IP. Cost: no view can say which base or address a box runs.
+
+## 53. The debug overlay's reserved home
+
+- **Home:** the Player page's **Diagnostics** section, per Output. The overlay is an effect on a box's Outputs, so the box owns it. The section stays hidden until the overlay is built.
+- **Truth kinds** follow live calibration: the desired state is `set`; Display Host's acknowledgment is `reported`, worded "presented to the compositor", never "visible" (R7).
+- **Entry links, never copies:** Frame › Status ("Show diagnostics on this Frame's Panel"), the Binding facet's Identify (the overlay is the richer Identify), and an attention row for a Player.
+- **An overlay left on is surfaced:** a chip on the Wall tile and an attention row, so no Panel stays labelled by accident.
+- **Never on Show pages:** it changes what a Panel shows, so it is a hardware write under the R4 closure.
+
+## 54. Bring-up tracking: one model
+
+One pure model computes every set-up item from records Central already serves. The Set up page, its sidebar count and the landing rule all read it, so they cannot disagree. It is tested like `health.js`. It reads `set` records directly, not Frame health, because health ranks liveness above calibration (`health.js:150-210`).
+
+| Item | Done when (`set`) | Link |
+|---|---|---|
+| Node management on | Central's node status is on | Runbook |
+| A boot selection exists | The Releases read has a selection | Releases |
+| At least one Frame | The inventory has a Frame | Wall › Edit layout |
+| Frame placed | The Frame is not in the Unplaced tray | Wall › Edit layout |
+| Frame bound | A Binding exists | Frame › Binding |
+| Frame calibration valid | `calibration_valid` | Frame › Calibration |
+
+```mermaid
+stateDiagram-v2
+  [*] --> NotPlaced: drawn, not on the plan
+  [*] --> NotBound: drawn on the plan
+  NotPlaced --> NotBound: placed
+  NotBound --> Calibrate: bound (a bind always invalidates calibration)
+  Calibrate --> Done: calibration saved
+  Done --> Calibrate: bound to a different Output (replacement)
+  Done --> NotBound: unbound
+  Done --> Done: Player silent, hot or interrupted (an incident, not a step)
+```
+
+**Players not yet driving a Frame** (listed, never counted): boxes seen at boot and not enrolled (claimed serial, first boot received) and Unbound Players ("spare or awaiting retirement"), newest first, each linking to its Player page with its hint (§52).
+
+**Leaving the view.** When the count reaches 0, the sidebar entry stays as a quiet "Set up" and the page reads "Everything is set up". There is no flag, no dismissal and no timer. A new Frame or a rebind brings an item back by itself.
+
+## 55. Journeys
+
+**J1. A Pi died behind Frame lobby-left; install a new one** (about 7 clicks, one home plus a glance at Set up).
+
+| # | Where | What happens |
+|---|---|---|
+| 1 | Strip | "Frame lobby-left: Player pi-07 silent 2 h · Host Management silent 2 h" [Frame] [Player] |
+| 2 | At the wall | Cable and power the new Pi. It netboots and enrolls. Set up › Players lists "pi-12 · Unbound · Host Management last reported 3 s ago · Player app enrolled · 2 Outputs" (not counted) |
+| 3 | Frame › Binding | "Bound to pi-07 HDMI-1 · Player app silent 2 h". **Bind a different Output** lists the Outputs of Unbound Players, newest enrolled first, each with its host chip; Identify Panel on any of them |
+| 4 | Confirm | "Bind pi-12 HDMI-1 to lobby-left? It replaces pi-07 HDMI-1; calibration will need review." One `bind` write with the Frame generation. The Frame is never left unbound |
+| 5 | Set up (1) | "lobby-left: calibrate". The Binding facet offers "Calibrate this Frame" (today's review notice) |
+| 6 | Frame › Calibration | Live calibration on the committed values; Save on Display Host's acknowledgment (R7) |
+| 7 | Done | Set up shows no count. The strip clears when pi-12's readiness report arrives. pi-07 is now Unbound and silent: listed, never alarmed; Retire it from its Danger zone when convenient |
+
+**J2. Morning check** (0 clicks on a healthy morning).
+
+| # | Where | What happens |
+|---|---|---|
+| 1 | Open | Still signed in; lands on Wall |
+| 2 | Strip and sidebar | "No Frame needs attention"; Set up shows no count |
+| 3 | Tiles | A health dot and "On top: autumn · Program weekday-mornings" per Frame. Healthy and planned right: done |
+| 4 | Optional | Players, worst first; Now for live Runs and the media pipeline (one click each) |
+
+**J3. Change tonight's show** (unchanged by Part G; Part F's flows). Scenes → New Scene → Frames → Which Source? → presentation → Review → Save → Schedule it → When (tonight 18:00–23:00 BST) → Review → Schedule Program. No hardware surface is on the path (R4).
+
+Also walked: a Pi failing at 9 pm is strip [Player] → Reboot (header) → confirm, 3 clicks; a rollout is Releases → Update the wall, 2 clicks.
+
+## 56. Migration of existing surfaces
+
+| Surface today (file) | Today | After Part G | Lifecycle |
+|---|---|---|---|
+| Sidebar (`Shell.jsx` `SectionNav`) | 8 links; groups Show, Wall, fleet, neutral | Groups Wall, Show, Fleet, Worklists; adds Set up (n) | — |
+| Landing (`routes.js` `landingRoute`) | Wall with 0 Frames, else Now | Set up with 0 Frames, else Wall | — |
+| Guidance banner (`Guidance.jsx`) | Wall, 0 Frames | Retired; Set up is the first-run landing | Bring-up |
+| Attention strip (`AttentionStrip.jsx`) | Alarms + "N to set up" | Incidents only; host causes; [Frame] [Player] links | Incident |
+| Needs attention page (`neutralRoutes.jsx`) | Frame rows + readiness reports | Adds Player-keyed rows (host silence, thresholds) | Incident |
+| Plan, read (`Plan.jsx`) | Wall, always editable | Wall, read-only | Steady state |
+| Plan draw, move, delete; Unplaced tray (`Plan.jsx`, `UnplacedTray.jsx`) | Wall, always on | Wall › Edit layout (`#/wall/layout`) | Bring-up, rare |
+| Inspector default facet (`Inspector.jsx`) | Calibration | Status | Steady state |
+| Now-showing facet (`NowShowingFacet.jsx`; Part F's Planned) | A facet | **Status** facet: Planned, health, readiness notice, Why, Player chip (§57) | Steady state |
+| Readiness notice (`ReadinessNotice.jsx`) | Binding facet, Attention, Player Outputs | Status facet, Attention, Player Outputs | Incident |
+| Binding facet (`BindingFacet.jsx`) | Bind when unbound; Unbind | Adds bind a different Output when bound (one write); host chips on choices | Bring-up, maintenance |
+| Calibration facet, live calibration | Default facet | Same home; not the default | Bring-up |
+| Now: Runs, Show now, Why, media pipeline, frame-health badges | Now | Unchanged | Steady state, change |
+| Scenes, Schedule, Sources | — | Unchanged (Part F) | Change |
+| Players list (`PlayersPage.jsx`) | No node read | Host-health table (G12) | Steady state |
+| Player page (`PlayerPage.jsx`) | Layers first; raw host lines; Reboot section | Health first; raw lines in Health's disclosure; Reboot in the header; Diagnostics reserved | Steady state, incident |
+| Releases, Update the wall | — | Unchanged | Change |
+| Node-control and effect-gate banners | Shell | Unchanged; node management off is also a Set up prerequisite | — |
+| Sign-in (`SignInScreen.jsx`) | — | Unchanged | — |
+| **New** Set up page | — | `#/setup` | Bring-up |
+| **New** host silence and threshold incidents | — | Needs attention (G12) | Incident |
+| **Reserved** debug overlay | — | Player › Diagnostics | Diagnose |
+
+## 57. How Part G re-homes Part F
+
+| Part F item | Under Part G |
+|---|---|
+| The Show group (Now, Scenes, Schedule, Sources), its routes and route tables | Unchanged. Show stays free of hardware writes (R4 closure) |
+| §34: the Frame facet labelled **Planned** (label only; the route segment stays `now-showing`) | Becomes the **Status** facet (`status`; `planned`, `now-showing` and `nowshowing` parse to it) and the Frame's default: the same content plus the readiness notice and the bound Player's chip. If Part G is approved before S1 is built, S1 builds Status; otherwise Part G's Wall slice renames it with one alias |
+| §34: the Plan tile's planned line | Unchanged, on the read-only Plan |
+| §37: the Source home, flow and preview; no Library section | Unchanged. Library connections stay inside the Source flow; they are not a Set up item (Set up is hardware bring-up, R26) |
+| The media pipeline on Now; the media-worker alarm after G11 | Stays on Now. A media-worker attention row is deferred (§58) |
+| Nav "Now" | Unchanged; second in the sidebar, after Wall |
+
+## 58. Costs, deferrals and what is not planned
+
+**Costs.**
+- **No dashboard.** Live Runs and the media worker are one click away on Now; the Wall answers health and plan per Frame. A summary card would break rule 1.
+- **Two worklists.** Needs attention and Set up sit side by side; the operator learns that structural gaps and evidence live apart.
+- **One-time writes stay inside daily homes**, behind a mode or facet. An operator who wants nothing editable on the Wall gets a read-only default, not absence.
+- **Scope moves.** Batches A and B alone were about five slices. Part G adds two console slices (the tracer and the Wall) and makes G13 explicit: about seven slices across contracts, node, Central and console, with two backend gates (R9). That fires the >4-beads and cross-package triggers; the owner may re-open the batch scope here.
+- **Host incidents need an open tab** (no push), and each open console adds one admin poll (G12).
+
+**Deferred:** a newer-release prompt outside Releases; a media-worker attention row (after G11); a guided Replace-a-Player wrapper (a feature proposal, §8); push or notifications; search; a per-viewer collapsed Set up.
+
+**Not planned:** a Central health page (§8); a Library section; renaming sections; a stored bring-up flag or "confirmed working" record.
+
+**Failure modes at this layer.**
+
+| What breaks | What the operator sees | Guarantee |
+|---|---|---|
+| G12 not served or failing | Players list without host columns ("Unknown: not read"); no host incidents; the Player page's Health from its own node read | `fact()` degrades; per-section error boundaries |
+| No threshold served for a metric | The value without a band; no incident | Model test (no console default) |
+| A rebind invalidates calibration | One Set up item, no alarm | G2 model test |
+| A Player goes silent during bring-up | An incident; the Set up count unchanged | G2 model test |
+| An unknown metric name | A raw line, unbanded | Catalog test |
+
+## 59. What happens next
+
+**Tracer bullet** (the first slice after approval; console only, no backend). The Set up section and its one model, built from existing `set` records; the strip drops "to set up"; with no Frames the console lands on Set up; Guidance retires. It proves G1 and G2 end to end on the real snapshot: an unbound Frame is a set-up item and not an incident, and a silent bound Player is an incident and not a set-up item. **Non-goals:** host health, G12, G13, Edit layout, the Status facet and the replacement chooser.
+
+**Rough slices** (cut at the feature layer per the implementation-workflow skill):
+
+| Slice | Contents | Package | After |
+|---|---|---|---|
+| G-T | The tracer | Console | — |
+| G-W | Wall daily face: read-only Plan and Edit layout; Status facet as default (with Part F's S1); bind a different Output; the Plan-writes source scan | Console | G-T |
+| G-N | Node metrics: numeric metrics in the host sampler; the host facts record (G13): contract, ingest, storage | Contracts, node, Central | Q13 |
+| G-R | G12: the fleet host summary with thresholds and App Manager bytes | Central | numeric part first; host facts after G-N |
+| G-H | Host-health UI: Players table, Player › Health, metric catalog, Reboot in the header, Diagnostics reserved | Console | G-R |
+| G-A | Host incidents: host silence and threshold rows, [Frame] [Player] links, host facts on Frame rows, Set up hints | Console | G-R, G-T |
+| G-D | Docs: this document, the console UX design, the fleet implementation map, the node domain model (host facts) | Docs | last |
+
 # History
 
-2026-10-01: first draft from the domain analysis and console audit, with the load-bearing audit claims re-checked against code. 2026-10-01: revised after adversarial review (domain-fidelity and simplicity lenses): Display Host presentation and broker/Display Host last-heard became Unknown after a probe showed the projection keeps the first reported state; `reported` split into latest and first receipt; `planned` deferred to pass 4 and `derived` added; Rule 1 names Binding as a two-sided relationship with one write; reboot gained Outcome unknown, the 410 path, late responses and a frozen request body; app operations read the broker response; "boot lane" replaced by three per-boot paths; `fact()` degrades instead of throwing, with per-section error boundaries; the Players list does no node reads and the lock cost is stated; beads re-cut to four with the tracer first and `ManagementFacts` kept; the Releases page, nav relabels and the backend-read question moved to pass 2; Replace equipment, the timezone record and the Central health page moved out as feature proposals; owner questions cut to two. 2026-10-02: pass 1 built (B1–B4). Implementation findings folded in: a `claimed` fact needs its source, and its receipt only when served; "Not read: Player retired" is a plain statement, not a fact; §10 wordings are state labels with an evidence fact beside them, and a staged operation with a received response has its own row; a Requested reboot is retried only from the page that holds its frozen body; §11 signatures match the code; `players.js` is shared with the Wall in the R4 test; a `claimed` receipt says whether it is the first or the latest; the sending page's own reboot request blocks a new command id until a read settles it; the runbook, README and the pass-2 documents now describe the Players pages in place of the Equipment roster. 2026-10-02 (fix cycle 2): a layer with no current session shows its last session's receipt instead of Unknown; a retired Player's app row no longer claims it has no report; a frozen reboot request is refused once a read reaches its window unlisted; a Requested label says when Central is not offering it now; `ManagementFacts` is recorded as rule 2's one pass-1 exception. 2026-10-02 (passes 2 and 3): Parts C and D designed at the feature layer and cut with R0 into batch 2. Pass-1 errata folded in: §10 states one send rule judged on the newest read and the cross-page race the console cannot close; superseded and interrupted operations keep the broker's earlier answer; a reboot rejection names its served reason. Grounding against the backend found that Display Host's display exchanges carry current per-Output presentation untouched by the evidence defect, and that the App Effect Broker has no heartbeat, so its last report stays Unknown for a stated reason. 2026-10-02 (passes 2 and 3, revised after adversarial review, domain-fidelity/security and simplicity lenses): the node release workflows (Releases home, Publish, boot selection, Stage, qualification) and their three reads are deferred as Q5, because node control is opt-in on the default image and they add workflows, and the review's constraints on them are kept in §17; the interruption read serves only losses that fence the current Binding, so a rebound Frame cannot inherit another Binding's alarm; the display read words a null surface as no admitted surface and serves the receipt's age on one producer clock; the legacy commit reads "Save without acknowledgment", and its U9 gap goes to the requirements owner; R0 drops the branded permit for one `sendReboot` that judges the newest read at call time, its guarantee restated as test-level; "outstanding" is defined once in Central and served per command, and the Q4 fence moves into R0. The review asked that accepted and initiated commands stop counting; they still count, because Host Management dedupes only by command id (`host.py:108-116`); batch 2 is built to the gate answers, with no `useAdminRead`, `servedField` or dormant branches; the V1 fleet policy stays on the Players list; pass 3 becomes one facet rename plus the equipment block moved to Binding, and drops `placement()`, `liveCalibration.js` and the Profile facet; `panelAtEnrollment` gives the Panel record one wording in R0 and D1; the enrolled fact moves to the Player page header; the startup Panel alarm stays an alarm, because it is the only Wall signal for an unplugged Panel; Identify on bound Outputs becomes a feature proposal, not a question; estimates are restated at pass 1's overrun rate. 2026-10-02 (owner gate): Q3 = A (both reads), Q4 = yes (the fence, as R0's first commit), Q5 = design the node release workflows next, in their own design run that replaces §17. 2026-10-02 (batch 2 built: R0, C1, C2, D1, E1): implementation findings folded in. §10 states that a listed held request is judged by Central's served `outstanding` (its retry row had contradicted its paragraph), names `rebootRefusal`, and records that the cross-page race is now refused by Central; `panelAtEnrollment` takes the enrollment time as its receipt; the interruption fact ends at its basis and "· the Run continues" is a suffix, `interruptionFor` returns its label too, and the Run chip carries the suffix; a `player_runtime` cause reads "Player app"; `matches_surface` is defined as whole-Surface equality; the V1 attempt claim is `claimed` only when reported; the Panel alarm's state, cause and facet are named; the Unbind each Output wording follows `unbindSequence`; `identify_unsupported` is an outcome only, because the capability is not served. The console UX design, runbook, README, architecture page, pass-2 documents and fleet implementation map now name the Calibration facet and the new reads, and no longer present the Commissioning facet or the T0/T1/T2 tiers as current. 2026-10-02 (batch 2, review fix cycle 2): an exchange Central can no longer decode fails only its own Output (served `undecodable`, shown Unknown), not the device read and Reboot, so §15 and §22 state Central's per-Output containment; §18 `interruptionFor` returns its conditional `suffix` too; `cause_layer` is typed by the node contract's `Owner`, and the console names every layer from `LAYER_NAMES`. 2026-10-02 (Part E: V2-only console and node release workflows): designed after the owner's Q5 answer and revised after two adversarial rounds (domain-fidelity/security and simplicity/scope lenses each time): the Stage fence withdrawn and a console rule against stranding a stage mid-switch kept; Rejected removed and "Ended by a later boot" added by a read-only `status()` change (G2); Publish joined the tracer, holds its request and states its re-download cost and permanence; refusal tables completed with a fail-closed default; per-Player boot lists dropped (R17 amended); one shared `usePolledRead`. On the owner's V2 posture steer: no V1 surface and node control off as one banner (R20; R19 withdrawn; Q2 superseded); a deprecated-path boot shown as one served Player line (G5); Stage judged by Central at send (G3 withdrawn, R14 amended); qualification sampled by the page, with Resume and a usability verdict withdrawn (R16 amended); the effect gate a fleet aggregate on Releases with one source; the V1 backend inventoried for a follow-up. On the owner's decisions: D16/Q1 = yes, so G6 removed the bound-Player refusal after its DB proof passed; the guided journey added as Update the wall (§25a), reversing "Not planned: rollout wizard"; G7 raised as the one open choice. 2026-10-02 (batch 3 built: NV1, NR1, NR2, NS1, NS2, NU1, ND1): implementation findings folded in. NV1 created `polledRead.js` and was built before NR1; `useNodeControl` serves `failed` instead of a read time; the deprecated-path line has one wording; Release rows serve `download_bytes`; Publish holds a `recorded` state and Send again re-sends only its frozen body; refusal tables are per verb and the GitHub origin reasons are listed by name; a client disconnect was probed not to cancel Publish; G6's proof shows the rejoin path is the Registry re-enrollment's new epoch; `stageBlocker` returns the `rebootTarget` shape with a structural gate flag; a lost Stage answer is resent only while unlisted; acceptances serve their base content key and name a tag only for the current boot's base; NU1 was built without G7 and judges Keep by kernel boot id after its own reboot, or by the linked app; NS2's real-Player probe was not run. The console UX design, runbook, design decisions (D16), domain model and fleet implementation map now describe the V2-only console, the Releases page, Stage on bound Players and the V1 follow-up. 2026-10-02 (architect course-correction after batch 3): a Player the journey did not reboot counts as on the selection by its linked app only when that app identifies the target (no other listed deployment or release carries it on a different base), because as built a base-only release read every Player Rejoined and finished with no reboot; `releaseResult` returns the served code and the journey's Stage refusal branches key on it, not on words. Both await an NU1 correction bead. 2026-10-02: NU1 correction bead after the course-correction pass: `appIdentifiesTarget` and `releaseResult`'s `code` built; a Player running a Stage on its current boot is never on the selection (the tried Player is rebooted first); Select lands in Paused with the named plan and Start rebooting; on-the-selection rows carry a derived Evidence fact; Done needs a read snapshot. 2026-10-02 (batch 3, review fix cycles 2 and 3, and the architect's second course-correction): skips live in the URL and the rollout a confirmation names is frozen, so a later Player reads Not in this rollout and Resume after a reload confirms again; Rejoined needs the snapshot to list the new boot's enrollment (a later authority epoch), every bound Frame live and no current readiness failure (`outputStates` is binding standing, not readiness), and a readiness failure is Not rejoined; Select's R17 words have one home (`selectionConfirmation`) rendered by Keep too; the bound rule always carries its node-half caveat (`BoundRule`); G6 states that an exit reconciled after the new app enrolls records no interruption; the boot selection is worded as Central's offer; one reboot at a time is per page; Back out holds itself in flight; the journey's lock cost is two fleet-lock holds per poll; the reconciler's unfinished exit work item and `_admit_boot_in`'s revived admission are findings, and the batch's residuals are listed in §31.
+2026-10-01: first draft from the domain analysis and console audit, with the load-bearing audit claims re-checked against code. 2026-10-01: revised after adversarial review (domain-fidelity and simplicity lenses): Display Host presentation and broker/Display Host last-heard became Unknown after a probe showed the projection keeps the first reported state; `reported` split into latest and first receipt; `planned` deferred to pass 4 and `derived` added; Rule 1 names Binding as a two-sided relationship with one write; reboot gained Outcome unknown, the 410 path, late responses and a frozen request body; app operations read the broker response; "boot lane" replaced by three per-boot paths; `fact()` degrades instead of throwing, with per-section error boundaries; the Players list does no node reads and the lock cost is stated; beads re-cut to four with the tracer first and `ManagementFacts` kept; the Releases page, nav relabels and the backend-read question moved to pass 2; Replace equipment, the timezone record and the Central health page moved out as feature proposals; owner questions cut to two. 2026-10-02: pass 1 built (B1–B4). Implementation findings folded in: a `claimed` fact needs its source, and its receipt only when served; "Not read: Player retired" is a plain statement, not a fact; §10 wordings are state labels with an evidence fact beside them, and a staged operation with a received response has its own row; a Requested reboot is retried only from the page that holds its frozen body; §11 signatures match the code; `players.js` is shared with the Wall in the R4 test; a `claimed` receipt says whether it is the first or the latest; the sending page's own reboot request blocks a new command id until a read settles it; the runbook, README and the pass-2 documents now describe the Players pages in place of the Equipment roster. 2026-10-02 (fix cycle 2): a layer with no current session shows its last session's receipt instead of Unknown; a retired Player's app row no longer claims it has no report; a frozen reboot request is refused once a read reaches its window unlisted; a Requested label says when Central is not offering it now; `ManagementFacts` is recorded as rule 2's one pass-1 exception. 2026-10-02 (passes 2 and 3): Parts C and D designed at the feature layer and cut with R0 into batch 2. Pass-1 errata folded in: §10 states one send rule judged on the newest read and the cross-page race the console cannot close; superseded and interrupted operations keep the broker's earlier answer; a reboot rejection names its served reason. Grounding against the backend found that Display Host's display exchanges carry current per-Output presentation untouched by the evidence defect, and that the App Effect Broker has no heartbeat, so its last report stays Unknown for a stated reason. 2026-10-02 (passes 2 and 3, revised after adversarial review, domain-fidelity/security and simplicity lenses): the node release workflows (Releases home, Publish, boot selection, Stage, qualification) and their three reads are deferred as Q5, because node control is opt-in on the default image and they add workflows, and the review's constraints on them are kept in §17; the interruption read serves only losses that fence the current Binding, so a rebound Frame cannot inherit another Binding's alarm; the display read words a null surface as no admitted surface and serves the receipt's age on one producer clock; the legacy commit reads "Save without acknowledgment", and its U9 gap goes to the requirements owner; R0 drops the branded permit for one `sendReboot` that judges the newest read at call time, its guarantee restated as test-level; "outstanding" is defined once in Central and served per command, and the Q4 fence moves into R0. The review asked that accepted and initiated commands stop counting; they still count, because Host Management dedupes only by command id (`host.py:108-116`); batch 2 is built to the gate answers, with no `useAdminRead`, `servedField` or dormant branches; the V1 fleet policy stays on the Players list; pass 3 becomes one facet rename plus the equipment block moved to Binding, and drops `placement()`, `liveCalibration.js` and the Profile facet; `panelAtEnrollment` gives the Panel record one wording in R0 and D1; the enrolled fact moves to the Player page header; the startup Panel alarm stays an alarm, because it is the only Wall signal for an unplugged Panel; Identify on bound Outputs becomes a feature proposal, not a question; estimates are restated at pass 1's overrun rate. 2026-10-02 (owner gate): Q3 = A (both reads), Q4 = yes (the fence, as R0's first commit), Q5 = design the node release workflows next, in their own design run that replaces §17. 2026-10-02 (batch 2 built: R0, C1, C2, D1, E1): implementation findings folded in. §10 states that a listed held request is judged by Central's served `outstanding` (its retry row had contradicted its paragraph), names `rebootRefusal`, and records that the cross-page race is now refused by Central; `panelAtEnrollment` takes the enrollment time as its receipt; the interruption fact ends at its basis and "· the Run continues" is a suffix, `interruptionFor` returns its label too, and the Run chip carries the suffix; a `player_runtime` cause reads "Player app"; `matches_surface` is defined as whole-Surface equality; the V1 attempt claim is `claimed` only when reported; the Panel alarm's state, cause and facet are named; the Unbind each Output wording follows `unbindSequence`; `identify_unsupported` is an outcome only, because the capability is not served. The console UX design, runbook, README, architecture page, pass-2 documents and fleet implementation map now name the Calibration facet and the new reads, and no longer present the Commissioning facet or the T0/T1/T2 tiers as current. 2026-10-02 (batch 2, review fix cycle 2): an exchange Central can no longer decode fails only its own Output (served `undecodable`, shown Unknown), not the device read and Reboot, so §15 and §22 state Central's per-Output containment; §18 `interruptionFor` returns its conditional `suffix` too; `cause_layer` is typed by the node contract's `Owner`, and the console names every layer from `LAYER_NAMES`. 2026-10-02 (Part E: V2-only console and node release workflows): designed after the owner's Q5 answer and revised after two adversarial rounds (domain-fidelity/security and simplicity/scope lenses each time): the Stage fence withdrawn and a console rule against stranding a stage mid-switch kept; Rejected removed and "Ended by a later boot" added by a read-only `status()` change (G2); Publish joined the tracer, holds its request and states its re-download cost and permanence; refusal tables completed with a fail-closed default; per-Player boot lists dropped (R17 amended); one shared `usePolledRead`. On the owner's V2 posture steer: no V1 surface and node control off as one banner (R20; R19 withdrawn; Q2 superseded); a deprecated-path boot shown as one served Player line (G5); Stage judged by Central at send (G3 withdrawn, R14 amended); qualification sampled by the page, with Resume and a usability verdict withdrawn (R16 amended); the effect gate a fleet aggregate on Releases with one source; the V1 backend inventoried for a follow-up. On the owner's decisions: D16/Q1 = yes, so G6 removed the bound-Player refusal after its DB proof passed; the guided journey added as Update the wall (§25a), reversing "Not planned: rollout wizard"; G7 raised as the one open choice. 2026-10-02 (batch 3 built: NV1, NR1, NR2, NS1, NS2, NU1, ND1): implementation findings folded in. NV1 created `polledRead.js` and was built before NR1; `useNodeControl` serves `failed` instead of a read time; the deprecated-path line has one wording; Release rows serve `download_bytes`; Publish holds a `recorded` state and Send again re-sends only its frozen body; refusal tables are per verb and the GitHub origin reasons are listed by name; a client disconnect was probed not to cancel Publish; G6's proof shows the rejoin path is the Registry re-enrollment's new epoch; `stageBlocker` returns the `rebootTarget` shape with a structural gate flag; a lost Stage answer is resent only while unlisted; acceptances serve their base content key and name a tag only for the current boot's base; NU1 was built without G7 and judges Keep by kernel boot id after its own reboot, or by the linked app; NS2's real-Player probe was not run. The console UX design, runbook, design decisions (D16), domain model and fleet implementation map now describe the V2-only console, the Releases page, Stage on bound Players and the V1 follow-up. 2026-10-02 (architect course-correction after batch 3): a Player the journey did not reboot counts as on the selection by its linked app only when that app identifies the target (no other listed deployment or release carries it on a different base), because as built a base-only release read every Player Rejoined and finished with no reboot; `releaseResult` returns the served code and the journey's Stage refusal branches key on it, not on words. Both await an NU1 correction bead. 2026-10-02: NU1 correction bead after the course-correction pass: `appIdentifiesTarget` and `releaseResult`'s `code` built; a Player running a Stage on its current boot is never on the selection (the tried Player is rebooted first); Select lands in Paused with the named plan and Start rebooting; on-the-selection rows carry a derived Evidence fact; Done needs a read snapshot. 2026-10-02 (batch 3, review fix cycles 2 and 3, and the architect's second course-correction): skips live in the URL and the rollout a confirmation names is frozen, so a later Player reads Not in this rollout and Resume after a reload confirms again; Rejoined needs the snapshot to list the new boot's enrollment (a later authority epoch), every bound Frame live and no current readiness failure (`outputStates` is binding standing, not readiness), and a readiness failure is Not rejoined; Select's R17 words have one home (`selectionConfirmation`) rendered by Keep too; the bound rule always carries its node-half caveat (`BoundRule`); G6 states that an exit reconciled after the new app enrolls records no interruption; the boot selection is worded as Central's offer; one reboot at a time is per page; Back out holds itself in flight; the journey's lock cost is two fleet-lock holds per poll; the reconciler's unfinished exit work item and `_admit_boot_in`'s revived admission are findings, and the batch's residuals are listed in §31. 2026-10-02 (Part F: passes 4 and 5, batch 4): designed at the feature layer. Pass 4 adds the `planned` truth kind for what a Frame should show now, with its Run's origin as a required label, renames the nav to Now and the Frame facet to Planned, and gives clock times one zoned home (`timeWords.js`); Program recurrence goes to the owner as a requirement question (Q8). Pass 5 folds PR 37 in, re-based on current code: the count-only preview, the `SourceQuery` base and the reported connection list already exist, so the preview resource grows instead of a second mechanism, PB10 and the GET-gate amendment for previews drop, jobs stay on the media queue, and the per-key refresh lease is deferred (Q9); one Source noun, a progressive flow and previews as `reported` facts. Grounding found the media console subtracting the worker's clock from Central's, raised as G11 (Q10). Batch 3's residuals became bead R1 with G8 (a superseded boot stays superseded); the enroll-before-exit stated cost was corrected in G6, §30 and §31 (the exit's work item finishes as `before_process_link` once the new app links, so the interruption is never recorded), and the D16 summary in Part E's header now carries its ordering condition. Batch 4 is six beads (Q11). 2026-10-02 (Part G: information architecture, module layer): on the owner's steer that the console conflates one-time hardware work with the steady-state show, three shapes (lifecycle modes, domain homes, task workspaces) were drafted in parallel and walked through five operator journeys by two adversarial reviewers, who ranked domain homes first and failed all three as drafted. The domain-homes shape was trimmed (no System › Health, bell, Library group, section rename or Player tabs) and given the losers' best ideas (structural facts make set-up items and liveness only alarms; one set-up model; spares never counted; Central-served thresholds; host facts as a text record). Review corrections folded in: a replacement is one atomic `bind`, never unbind then bind; every bind invalidates calibration, so replacement always ends in calibration; qualification is not a bring-up step; `HostMetricV2` cannot carry text. Two questions (Q12, Q13). 2026-10-02 (Part F, revised after adversarial review, domain-fidelity and simplicity lenses): G8 withdrawn, because refusing a superseded boot's claim reverses the owning rule that duplicate serials flap visibly (`player-node-domain-model.md:107`) and the re-admitted boot is genuinely current, so R1 records errata item 9 as by design and pins it with a test; the `planned` fact now names the top Run in Central's Runs with a required basis ("media not checked", or the unbound Frame), because the Planner skips an Intent with no usable media and that is not served, and its empty case, reveal, completion without outro and removed-Program origin are worded; thumbnails move onto the existing asset layer (`AssetReader`, a new `AssetKind`, the FETCH queue, a short bounded wait in its own slots, prefetched by the completed preview) instead of a second lane and retry ladder; `query_key`, preview reuse, the one-search rewrite, fingerprints and the tag-list POST drop; card and authored-chooser tiles are deferred, with the authored servability rule recorded for when they are built; the served `PreviewMember` and its non-served stored metadata are frozen; Q8 gains the Source ceiling and paged view the code does not meet; Source maps to the requirements' AssetSource in §3; the reboot hold becomes a guard inside `sendReboot`; the facet keeps its `now-showing` segment; the clock scan covers display formatters only, with every current call listed to move; the flaky-test acceptance needs a root cause, a deterministic reproduction and a class fix, or it stays a residual; the manual real-library run leaves D1; estimates restated (about +5,560 at the overrun rate).
