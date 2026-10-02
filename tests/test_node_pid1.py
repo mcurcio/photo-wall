@@ -76,6 +76,28 @@ def node_pid1_inputs():
     return Path(fixture["components"]).resolve(strict=True), root / "targets", image
 
 
+@pytest.fixture
+def node_host(node_pid1_inputs):
+    """This host's numeric IPv4 address as a node container routes to it.
+
+    The daemon writes host-gateway (the bridge gateway on Linux, the host on Docker Desktop) into
+    a throwaway container's /etc/hosts. The sandboxed Player app sees neither that file nor
+    Docker Desktop's resolver, so the scenarios hand the node only this number.
+    """
+    image = node_pid1_inputs[2]
+    hosts = subprocess.run(
+        [
+            "docker", "run", "--rm", "--add-host", "photo-wall-central:host-gateway",
+            "--entrypoint", "getent", image, "-s", "files", "ahostsv4", "photo-wall-central",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    ).stdout
+    return hosts.split()[0]
+
+
 def file_sha(path):
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
@@ -109,7 +131,9 @@ class Node:
         self.name = "photo-wall-node-pid1-" + phase + "-" + secrets.token_hex(4)
         self.container = Container(self.name, run=subprocess.run)
         argv = docker_run_argv(image, self.name, cpuinfo, target="basic.target")
-        argv[2:2] = ["--cgroupns=private", "--add-host", "host.docker.internal:host-gateway"]
+        # A resolver that never answers (RFC 5737 TEST-NET-1) keeps every runner, Docker Desktop
+        # included, from resolving a name the node must not depend on; no internet is needed.
+        argv[2:2] = ["--cgroupns=private", "--dns", "192.0.2.1"]
         mounts = "mount --make-rshared /run; "
         if boot_id is not None:
             # A reboot is a new kernel boot_id; runc refuses an OCI bind under /proc,
@@ -469,7 +493,7 @@ def stage_and_complete(fixture, node, phase, reference):
 
 
 @pytest.mark.parametrize("phase", [name for name in SCENARIOS if name != "reboot"])
-def test_node_pid1_lifecycle(node_pid1_inputs, registry, tmp_path, phase):
+def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
     # outage: a successful switch while Central drops every node exchange after accept.
     role = "success" if phase == "outage" else phase
@@ -480,6 +504,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, registry, tmp_path, phase):
         components_dir,
         {phase: (reference, fixture_targets / (role + ".tar"))},
         work / "central",
+        node_host,
     ) as fixture:
         node = Node(image, work, phase)
         try:
@@ -491,7 +516,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, registry, tmp_path, phase):
             node.capture_and_remove(fixture, sys.exc_info()[1])
 
 
-def test_node_pid1_reboot(node_pid1_inputs, registry, tmp_path):
+def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
     """Boot A links, powers off; boot B of the same device enrolls without operator action.
 
     B must supersede A (A's real broker session is refused) and accept a stage at once.
@@ -506,6 +531,7 @@ def test_node_pid1_reboot(node_pid1_inputs, registry, tmp_path):
         components_dir,
         {phase: (reference, fixture_targets / "success.tar")},
         work / "central",
+        node_host,
         max_boots=2,
     ) as fixture:
         first = Node(image, work / "boot-a", phase, boot_a)

@@ -6,6 +6,7 @@ process/display witness injection, operator reboot, or bound withdrawal.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import shutil
@@ -55,20 +56,34 @@ OUTAGE_CAP_SECONDS = 300
 
 
 @contextmanager
-def central_fixture(registry, components_dir, extra_refs_and_archives, workdir, max_boots=1):
+def central_fixture(
+    registry, components_dir, extra_refs_and_archives, workdir, node_host, max_boots=1
+):
+    """node_host: the numeric IPv4 address at which a node container reaches this host.
+
+    Every URL handed to the node is built from it. A sandboxed app sees neither the container's
+    /etc/hosts nor a Docker Desktop resolver, so a name here would resolve only by accident.
+    """
+    node_host = str(ipaddress.IPv4Address(node_host))
     # Own the listening socket before any fallible publication/cache setup.
     with socket.socket() as listener:
         listener.bind(("0.0.0.0", 0))
         listener.listen(16)
         with _central_fixture(
-            registry, components_dir, extra_refs_and_archives, workdir, listener, max_boots
+            registry,
+            components_dir,
+            extra_refs_and_archives,
+            workdir,
+            listener,
+            node_host,
+            max_boots,
         ) as fixture:
             yield fixture
 
 
 @contextmanager
 def _central_fixture(
-    registry, components_dir, extra_refs_and_archives, workdir, listener, max_boots
+    registry, components_dir, extra_refs_and_archives, workdir, listener, node_host, max_boots
 ):
     """Yield real HTTP origins plus fixture token; caller owns random-schema registry.
 
@@ -106,7 +121,7 @@ def _central_fixture(
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
     port = listener.getsockname()[1]
-    origin, host_origin = f"http://host.docker.internal:{port}", f"http://127.0.0.1:{port}"
+    origin, host_origin = f"http://{node_host}:{port}", f"http://127.0.0.1:{port}"
     token = secrets.token_hex(32)
     content = build_content_services(registry.db, clock, cache_root=workdir / "cache")
     app = create_app(
