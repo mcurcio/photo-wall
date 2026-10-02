@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
+from central.fleet.node_commands import OUTSTANDING_REBOOT_SQL
+from central.fleet.node_display import display_outputs_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from contracts.node_commands import parse_session_grant, producer_document
 from contracts.node_observation import encode_host_observation, parse_host_observation
@@ -81,15 +83,20 @@ class NodeObservations:
                         "sample": json.loads(bytes(sample["payload"])),
                         "received_at": sample["received_at"], "receipt_age_seconds": max(
                             0, now - sample["received_at"])}})
+            # `outstanding` and the responses come from ONE statement, so one snapshot: a
+            # response committed mid-read cannot be served beside an `outstanding` that
+            # predates it (response ingest does not take the fleet lock).
             commands = conn.execute("SELECT c.command_id,c.operator_audit_ref,c.issued_at,c.expires_at,"
+                                    f"{OUTSTANDING_REBOOT_SQL} AS outstanding,"
+                                    "(SELECT coalesce(json_agg(json_build_object("
+                                    "'message',convert_from(r.payload,'UTF8')::json,"
+                                    "'received_at',r.received_at) ORDER BY r.received_at),'[]'::json) "
+                                    "FROM node_command_responses r WHERE r.command_id=c.command_id) AS responses,"
                                     "c.payload FROM node_reboot_commands c JOIN node_sessions s "
                                     "ON s.session_id=c.session_id WHERE s.device_id=%s "
-                                    "ORDER BY c.issued_at DESC LIMIT 64", (device_id,)).fetchall()
+                                    "ORDER BY c.issued_at DESC LIMIT 64", (now, device_id)).fetchall()
             audit = []
             for command in commands:
-                responses = conn.execute("SELECT payload,received_at FROM node_command_responses "
-                                         "WHERE command_id=%s ORDER BY received_at",
-                                         (command["command_id"],)).fetchall()
                 effects = conn.execute("SELECT e.payload,e.received_at,e.disposition FROM node_evidence e "
                     "JOIN node_sessions s ON s.producer_id=e.producer_id "
                     "JOIN node_reboot_commands c ON c.session_id=s.session_id "
@@ -106,9 +113,7 @@ class NodeObservations:
                             "state": "reboot_initiated", "physical_completion": "unknown"})
                 audit.append({"effects": initiations,**{key: value for key, value in command.items() if key != "payload"},
                               "command_id": str(command["command_id"]),
-                              "command": json.loads(bytes(command["payload"])),
-                              "responses": [{"message": json.loads(bytes(item["payload"])),
-                                             "received_at": item["received_at"]} for item in responses]})
+                              "command": json.loads(bytes(command["payload"]))})
             claims = conn.execute("SELECT kernel_boot_id,offer_id,created_at,refusal FROM node_boot_offers "
                 "WHERE device_id=%s AND device_generation=%s ORDER BY created_at DESC,offer_id LIMIT 64",
                 (device_id, generation)).fetchall()
@@ -117,4 +122,5 @@ class NodeObservations:
                 "physical_identity": "unverified"} for item in claims]
             return {"boot_claims": boot_claims, "device_id": device_id, "device_generation": generation, "read_at": now,
                     "sessions": sessions, "reboot_commands": audit, "physical_output": "unknown",
+                    "display_outputs": display_outputs_in(conn, device_id, generation),
                     "runtime_reconciliation": "asynchronous_output_evidence"}

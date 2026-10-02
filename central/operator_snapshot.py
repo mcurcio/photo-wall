@@ -4,7 +4,7 @@ from typing import Any
 
 from central.coordination import Coordinator
 from central.db import Database
-from central.installation_models import InstallationInventory
+from central.installation_models import InstallationInventory, OutputInterruption
 from central.media_repository import MediaRepository
 from central.readiness_diagnostics import ReadinessDiagnostic, project_readiness_diagnostics
 from central.registry import Registry
@@ -29,6 +29,9 @@ class OperatorSnapshot(Model):
     runtime: dict[str, Any]
     media: dict[str, Any]
     readiness_diagnostics: tuple[ReadinessDiagnostic, ...] = ()
+    # Unresolved Output losses on current Bindings only (console DDD §16); read in the same
+    # snapshot as the inventory, so each row agrees with the Binding beside it.
+    output_interruptions: tuple[OutputInterruption, ...] = ()
 
 
 def runtime_document(runtime: Runtime, read_at: float) -> dict[str, Any]:
@@ -72,6 +75,7 @@ class OperatorSnapshotReader:
             runtime = self.runtime_store.read_in(conn)
             sources = self.media.sources_in(conn)
             health = self.media.health_in(conn)
+            interruptions = self.coordinator.output_interruptions_in(conn)
             return OperatorSnapshot(
                 read_at=read_at,
                 player_reports_read_at=reports.read_at,
@@ -79,4 +83,5 @@ class OperatorSnapshotReader:
                 runtime=runtime_document(runtime, read_at),
                 media={"sources": sources, "health": health},
                 readiness_diagnostics=readiness_diagnostics,
+                output_interruptions=interruptions,
             )

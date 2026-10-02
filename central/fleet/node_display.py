@@ -26,6 +26,86 @@ from contracts.node_display import (
     parse_display_exchange,
 )
 
+_MAX_OUTPUTS = 64
+# Index-bounded (node_display_output_latest): a recursive skip-scan walks each current
+# display_host producer's distinct Outputs, then one LIMIT 1 probe per (producer, Output).
+# Cost is producers x Outputs index probes, never the boot's exchange history, which is
+# immutable and grows every few seconds. Parameters: device_id, generation, Output bound.
+DISPLAY_OUTPUTS_SQL = (
+    "WITH RECURSIVE producers AS ("
+    " SELECT p.producer_id FROM node_producers p "
+    " JOIN node_boot_admissions b ON b.admission_id=p.admission_id "
+    " WHERE b.device_id=%s AND b.device_generation=%s AND b.superseded_at IS NULL "
+    " AND p.owner='display_host'), "
+    "outputs(producer_id,output_id,n) AS ("
+    " SELECT pr.producer_id,(SELECT e.output_id FROM node_display_exchanges e "
+    "  WHERE e.producer_id=pr.producer_id ORDER BY e.output_id LIMIT 1),1 FROM producers pr "
+    " UNION ALL "
+    " SELECT o.producer_id,(SELECT e.output_id FROM node_display_exchanges e "
+    "  WHERE e.producer_id=o.producer_id AND e.output_id>o.output_id "
+    "  ORDER BY e.output_id LIMIT 1),o.n+1 FROM outputs o "
+    " WHERE o.output_id IS NOT NULL AND o.n<%s) "
+    "SELECT o.output_id,x.sampled_boottime_ms,x.request,x.received_at FROM outputs o "
+    "CROSS JOIN LATERAL (SELECT e.sampled_boottime_ms,e.request,e.received_at "
+    " FROM node_display_exchanges e WHERE e.producer_id=o.producer_id "
+    " AND e.output_id=o.output_id ORDER BY e.sampled_boottime_ms DESC LIMIT 1) x "
+    "WHERE o.output_id IS NOT NULL"
+)
+
+
+def display_outputs_in(conn, device_id: str, generation: int) -> list[dict]:
+    """Display Host's newest exchange per Output for the device's current boot admission.
+
+    Read-only (console DDD §16, display read). Every ``display_host`` producer of the
+    current admission is considered, so after a Display Host restart within one kernel
+    boot the new producer's later sample wins. ``sampled_boottime_ms`` is that boot's one
+    clock, so it is compared only within the boot; an earlier boot's admission is
+    superseded and never served. ``receipt.age_ms`` is the exchange's own sample minus its
+    receipt's sample, both on one producer's clock. Nothing here is Panel pixels.
+
+    Decoding is contained per Output: a stored exchange this Central cannot decode (a
+    display contract changed across an upgrade while the node kept its boot) is served as
+    ``{output_id, received_at, undecodable: True}`` with no decoded fields, so one drifted
+    row never fails the device read that also carries sessions and Reboot (§15).
+    """
+    candidates = conn.execute(
+        DISPLAY_OUTPUTS_SQL,
+        (device_id, generation, _MAX_OUTPUTS),
+    ).fetchall()
+    newest: dict[str, dict] = {}
+    for row in candidates:
+        held = newest.get(row["output_id"])
+        if held is None or row["sampled_boottime_ms"] > held["sampled_boottime_ms"]:
+            newest[row["output_id"]] = row
+    rows = [newest[output_id] for output_id in sorted(newest)][:_MAX_OUTPUTS]
+    outputs = []
+    for row in rows:
+        try:
+            exchange = parse_display_exchange(bytes(row["request"]))
+        except ValueError:
+            outputs.append({
+                "output_id": row["output_id"],
+                "received_at": row["received_at"],
+                "undecodable": True,
+            })
+            continue
+        admitted, receipt = exchange.admitted, exchange.receipt
+        outputs.append({
+            "output_id": row["output_id"],
+            "received_at": row["received_at"],
+            "connected": exchange.connected,
+            "surface": None if admitted is None else {
+                "frame_id": admitted.frame_id,
+                "binding_generation": admitted.binding_generation,
+                "config_revision": admitted.config_revision,
+            },
+            "receipt": None if receipt is None else {
+                "matches_surface": admitted is not None and receipt.surface == admitted,
+                "age_ms": exchange.sampled_boottime_ms - receipt.sampled_boottime_ms,
+            },
+        })
+    return outputs
+
 
 class NodeDisplay:
     def __init__(

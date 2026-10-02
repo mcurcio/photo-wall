@@ -145,6 +145,192 @@ def test_reboot_audit_response_and_initiation_are_separate(registry):
     assert not any(item["producer"]["kernel_boot_id"] == str(second.kernel_boot_id) for item in status["sessions"])
 
 
+def test_reboot_fence_one_outstanding_per_session_and_served_outstanding(registry):
+    from test_node_boot import claim_for, cold_setup
+
+    from contracts.node_boot import NodeBootRequestV2
+    service, sessions, _ = cold_setup(registry)
+    claim = claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)))
+    grant = sessions.enroll(claim)
+    gate, _ = _gate(registry)
+    generation = gate.open(expected_revision=0).generation
+    commands, ingest, reads = NodeCommands(sessions, gate), NodeIngest(sessions), NodeObservations(sessions)
+
+    def reboot():
+        return OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture", generation)
+
+    def respond(request, issued, decision):
+        ingest.ingest(grant.session_id, claim.credential, encode_node_message(NodeCommandResponseV2(
+            grant.producer, request.command_id, issued["command"]["command_sha256"], grant.session_id,
+            "operator_reboot", decision, "reboot_scope_or_expiry")))
+
+    def served():
+        return {item["command_id"]: item["outstanding"] for item in reads.status(DEVICE_ID)["reboot_commands"]}
+
+    def stored():
+        with registry.db.transaction() as conn:
+            return conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"]
+
+    first = reboot()
+    first_issued = commands.request_reboot(DEVICE_ID, first)
+    assert served() == {str(first.command_id): True}
+    with pytest.raises(NodeControlError, match="node_reboot_outstanding") as refused:
+        commands.request_reboot(DEVICE_ID, reboot())
+    assert refused.value.status == 409 and stored() == 1
+    assert commands.request_reboot(DEVICE_ID, first)["duplicate"]  # the same id is unaffected
+    respond(first, first_issued, "rejected")
+    assert served() == {str(first.command_id): False}
+    second = reboot()
+    second_issued = commands.request_reboot(DEVICE_ID, second)  # accepted after a rejection
+    assert served() == {str(first.command_id): False, str(second.command_id): True}
+    respond(second, second_issued, "accepted")  # accepted, not initiated: still outstanding
+    assert served()[str(second.command_id)] is True
+    with pytest.raises(NodeControlError, match="node_reboot_outstanding"):
+        commands.request_reboot(DEVICE_ID, reboot())
+    registry.clock.advance(31)
+    assert served()[str(second.command_id)] is False
+    third = reboot()
+    commands.request_reboot(DEVICE_ID, third)  # accepted after expiry
+    assert served()[str(third.command_id)] is True and stored() == 3
+    later = sessions.enroll(claim_for(service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))))
+    commands.request_reboot(DEVICE_ID, OperatorReboot(uuid4(), later.session_id, 1, "operator:fixture",
+                                                      generation))  # an earlier session never blocks
+    assert stored() == 4
+
+
+def test_display_read_serves_the_newest_exchange_per_output_on_the_current_boot(registry):
+    # Console DDD C2 (§16 display read): newest per Output across the current admission's
+    # Display Host producers; an earlier boot is never served; receipt age on one clock.
+    from test_node_boot import claim_for, cold_setup
+
+    from contracts.node_boot import NodeBootRequestV2
+    from contracts.node_display import (
+        DisplayExchange,
+        DisplayReceipt,
+        Surface,
+        encode_display_exchange,
+    )
+    from contracts.node_protocol import OutputKey
+    service, sessions, _ = cold_setup(registry)
+    reads = NodeObservations(sessions)
+    process = NodeProcessIdentity(123, 10, uuid4())
+
+    def display_host(offer):
+        return sessions.enroll(claim_for(offer, owner="display_host"))
+
+    def record(grant, output_id, sampled, *, connected=True, admitted=False, receipt_at=None, receipt_revision=7):
+        output = OutputKey(grant.producer.kernel_boot_id, grant.producer.incarnation_id, output_id, 1, 1)
+        surface = Surface(output, process, 42, 3, 7, "lobby")
+        received = replace(surface, config_revision=receipt_revision)
+        receipt = None if receipt_at is None else DisplayReceipt(received, uuid4(), "buffer-1", "tag", receipt_at)
+        exchange = DisplayExchange(grant.producer, uuid4(), sampled, output, connected,
+                                   admitted=surface if admitted else None, receipt=receipt)
+        with registry.db.transaction() as conn:
+            producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
+                                    (grant.session_id,)).fetchone()["producer_id"]
+            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
+                         "sampled_boottime_ms,request,response,decision_id,received_at) "
+                         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                         (producer, exchange.request_id, grant.session_id, output_id, sampled,
+                          encode_display_exchange(exchange), b"{}", uuid4(), registry.clock.utc()))
+
+    def served():
+        return {item["output_id"]: item for item in reads.status(DEVICE_ID)["display_outputs"]}
+
+    first_boot = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
+    assert served() == {}
+    before = display_host(first_boot)
+    record(before, "HDMI-A-1", 1000, connected=False)
+    record(before, "HDMI-A-1", 1100, admitted=True, receipt_at=900)
+    record(before, "HDMI-A-2", 5000, admitted=True, receipt_at=4000, receipt_revision=6)
+    received = registry.clock.utc()
+    registry.clock.advance(5)
+    record(before, "HDMI-A-2", 4500)  # received later on Central's clock, sampled earlier: loses
+    restarted = display_host(first_boot)  # a new Display Host producer within the same boot
+    record(restarted, "HDMI-A-1", 2000, admitted=True, receipt_at=1600)
+    now = served()
+    assert set(now) == {"HDMI-A-1", "HDMI-A-2"}
+    assert now["HDMI-A-1"] == {"output_id": "HDMI-A-1", "received_at": received + 5, "connected": True,
+        "surface": {"frame_id": "lobby", "binding_generation": 3, "config_revision": 7},
+        "receipt": {"matches_surface": True, "age_ms": 400}}  # the restarted producer wins
+    assert now["HDMI-A-2"] == {"output_id": "HDMI-A-2", "received_at": received, "connected": True,
+        "surface": {"frame_id": "lobby", "binding_generation": 3, "config_revision": 7},
+        "receipt": {"matches_surface": False, "age_ms": 1000}}  # a receipt for another revision
+    # A later boot supersedes the first; its earlier samples (a new boot clock) still win,
+    # because the first boot's exchanges are never served.
+    later = display_host(service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64)))
+    assert served() == {}
+    record(later, "HDMI-A-1", 10, connected=False)
+    assert served() == {"HDMI-A-1": {"output_id": "HDMI-A-1", "received_at": registry.clock.utc(),
+                                     "connected": False, "surface": None, "receipt": None}}
+    # The read is bounded by the index, not the boot's history: thousands of exchanges per
+    # Output leave the served rows unchanged and the plan reads a handful of index entries.
+    from central.fleet.node_display import DISPLAY_OUTPUTS_SQL
+    with registry.db.transaction() as conn:
+        producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
+                                (later.session_id,)).fetchone()["producer_id"]
+        conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
+                     "sampled_boottime_ms,request,response,decision_id,received_at) "
+                     "SELECT %s,gen_random_uuid(),%s,'HDMI-A-' || (1 + i %% 2),i,'\\x00'::bytea,"
+                     "'\\x00'::bytea,gen_random_uuid(),0 FROM generate_series(100,20099) i",
+                     (producer, later.session_id))
+        conn.execute("ANALYZE node_display_exchanges")
+    record(later, "HDMI-A-1", 50000, connected=False)
+    record(later, "HDMI-A-2", 50001, admitted=True)
+    assert {key: item["connected"] for key, item in served().items()} == {"HDMI-A-1": False, "HDMI-A-2": True}
+    with registry.db.transaction() as conn:
+        plan = conn.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + DISPLAY_OUTPUTS_SQL,
+                            (DEVICE_ID, later.producer.device_generation, 64)).fetchone()
+    plan = next(iter(plan.values()))[0]["Plan"]
+
+    def exchange_rows(node):
+        own = (node["Actual Rows"] * node["Actual Loops"]
+               if node.get("Relation Name") == "node_display_exchanges" else 0)
+        return own + sum(exchange_rows(child) for child in node.get("Plans", []))
+
+    assert 0 < exchange_rows(plan) < 50  # never a scan of the 20,002 rows
+
+
+def test_an_undecodable_display_exchange_fails_only_its_own_output(registry):
+    # §15: a stored exchange this Central cannot decode (a display contract changed across an
+    # upgrade while the node kept its boot) is served as undecodable for that Output alone;
+    # the device read, the other Outputs and the reboot records survive.
+    from test_node_boot import claim_for, cold_setup
+
+    from contracts.node_boot import NodeBootRequestV2
+    from contracts.node_display import DisplayExchange, encode_display_exchange
+    from contracts.node_protocol import OutputKey
+    service, sessions, _ = cold_setup(registry)
+    reads = NodeObservations(sessions)
+    grant = sessions.enroll(claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)),
+                                      owner="display_host"))
+
+    def store(output_id, sampled, request):
+        with registry.db.transaction() as conn:
+            producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
+                                    (grant.session_id,)).fetchone()["producer_id"]
+            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
+                         "sampled_boottime_ms,request,response,decision_id,received_at) "
+                         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                         (producer, uuid4(), grant.session_id, output_id, sampled, request, b"{}",
+                          uuid4(), registry.clock.utc()))
+
+    output = OutputKey(grant.producer.kernel_boot_id, grant.producer.incarnation_id, "HDMI-A-1", 1, 1)
+    store("HDMI-A-1", 100, encode_display_exchange(DisplayExchange(grant.producer, uuid4(), 100, output, True)))
+    store("HDMI-A-2", 200, b'{"schema":99,"kind":"display_exchange"}')
+    store("HDMI-A-3", 300, b"\x00")
+    status = reads.status(DEVICE_ID)
+    served = {item["output_id"]: item for item in status["display_outputs"]}
+    received = registry.clock.utc()
+    assert served == {
+        "HDMI-A-1": {"output_id": "HDMI-A-1", "received_at": received, "connected": True,
+                     "surface": None, "receipt": None},
+        "HDMI-A-2": {"output_id": "HDMI-A-2", "received_at": received, "undecodable": True},
+        "HDMI-A-3": {"output_id": "HDMI-A-3", "received_at": received, "undecodable": True},
+    }
+    assert "reboot_commands" in status and any(item["current"] for item in status["sessions"])
+
+
 def test_default_gate_cannot_mint_reboot(registry):
     sessions, _, grant = setup(registry)
     service = NodeCommands(sessions, RolloutEffectGate(registry.db))
