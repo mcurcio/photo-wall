@@ -619,8 +619,8 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
             "Requested · delivery unknown · Central offers it to Host Management until")
         # While it is Requested, no new command id can be sent: only its retry is offered.
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_have_count(0)
-        _reboot(page).get_by_role("button", name="Retry reboot request", exact=True).click()
-        page.get_by_role("dialog").get_by_role("button", name="Retry the same request", exact=True).click()
+        _reboot(page).get_by_role("button", name="Send the reboot request again", exact=True).click()
+        page.get_by_role("dialog").get_by_role("button", name="Send the same request again", exact=True).click()
         expect(page.get_by_role("dialog").get_by_role("status")).to_have_text(
             "Already recorded. Requested · delivery unknown.")
         assert len(sent) == 2 and sent[0] == sent[1]
@@ -643,7 +643,7 @@ def test_a_lost_answer_is_retried_with_the_identical_body_inside_the_window(page
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Central did not answer. Check this after the next refresh.")
-        dialog.get_by_role("button", name="Retry the same request", exact=True).click()
+        dialog.get_by_role("button", name="Send the same request again", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text("Already recorded. Requested · delivery unknown.")
         assert len(sent) == 2 and sent[0] == sent[1]
 
@@ -679,15 +679,15 @@ def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_i
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
-        expect(dialog.get_by_role("button", name="Retry the same request", exact=True)).to_be_enabled()
+        expect(dialog.get_by_role("button", name="Send the same request again", exact=True)).to_be_enabled()
         # The window ends before the next read arrives: Central, not the page, answers the retry.
         held.freeze()
         registry.clock.advance(31)
-        dialog.get_by_role("button", name="Retry the same request", exact=True).click()
+        dialog.get_by_role("button", name="Send the same request again", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Outcome unknown: Central stopped offering this request before it was confirmed.")
         held.release()
-        expect(dialog.get_by_role("button", name="Retry the same request", exact=True)).to_have_count(0)
+        expect(dialog.get_by_role("button", name="Send the same request again", exact=True)).to_have_count(0)
         assert len(sent) == 2 and sent[0] == sent[1]
         dialog.get_by_role("button", name="Close", exact=True).click()
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)

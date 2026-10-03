@@ -27,16 +27,23 @@ from contracts.node_display import (
 )
 
 _MAX_OUTPUTS = 64
-# Index-bounded (node_display_output_latest): a recursive skip-scan walks each current
-# display_host producer's distinct Outputs, then one LIMIT 1 probe per (producer, Output).
-# Cost is producers x Outputs index probes, never the boot's exchange history, which is
-# immutable and grows every few seconds. Parameters: device_id, generation, Output bound.
+# A Display Host restart within one boot creates a new producer, and the node picks how many
+# (one per incarnation, up to the daily session cap), so the producer set is bounded here,
+# never by the node: only the newest few by admission are read.
+_MAX_PRODUCERS = 4
+# Index-bounded (node_display_output_latest), and bounded independently of what the node sends:
+# a recursive skip-scan walks the newest producers' distinct Outputs, one LIMIT 1 probe per
+# (producer, Output) picks each Output's newest sample on the boot clock, the winners are cut to
+# the Output bound in SQL, and only those winners' stored requests are fetched. Cost is at most
+# _MAX_PRODUCERS x _MAX_OUTPUTS index probes plus _MAX_OUTPUTS request rows, never the boot's
+# exchange history (immutable, growing every few seconds) nor the node's producer count.
 DISPLAY_OUTPUTS_SQL = (
     "WITH RECURSIVE producers AS ("
     " SELECT p.producer_id FROM node_producers p "
     " JOIN node_boot_admissions b ON b.admission_id=p.admission_id "
-    " WHERE b.device_id=%s AND b.device_generation=%s AND b.superseded_at IS NULL "
-    " AND p.owner='display_host'), "
+    " WHERE b.device_id=%(device_id)s AND b.device_generation=%(generation)s "
+    " AND b.superseded_at IS NULL AND p.owner='display_host' "
+    " ORDER BY p.admitted_at DESC,p.producer_id DESC LIMIT %(producers)s), "
     "outputs(producer_id,output_id,n) AS ("
     " SELECT pr.producer_id,(SELECT e.output_id FROM node_display_exchanges e "
     "  WHERE e.producer_id=pr.producer_id ORDER BY e.output_id LIMIT 1),1 FROM producers pr "
@@ -44,21 +51,35 @@ DISPLAY_OUTPUTS_SQL = (
     " SELECT o.producer_id,(SELECT e.output_id FROM node_display_exchanges e "
     "  WHERE e.producer_id=o.producer_id AND e.output_id>o.output_id "
     "  ORDER BY e.output_id LIMIT 1),o.n+1 FROM outputs o "
-    " WHERE o.output_id IS NOT NULL AND o.n<%s) "
-    "SELECT o.output_id,x.sampled_boottime_ms,x.request,x.received_at FROM outputs o "
-    "CROSS JOIN LATERAL (SELECT e.sampled_boottime_ms,e.request,e.received_at "
-    " FROM node_display_exchanges e WHERE e.producer_id=o.producer_id "
-    " AND e.output_id=o.output_id ORDER BY e.sampled_boottime_ms DESC LIMIT 1) x "
-    "WHERE o.output_id IS NOT NULL"
+    " WHERE o.output_id IS NOT NULL AND o.n<%(outputs)s), "
+    "candidates AS ("
+    " SELECT o.producer_id,o.output_id,x.sampled_boottime_ms FROM outputs o "
+    " CROSS JOIN LATERAL (SELECT e.sampled_boottime_ms FROM node_display_exchanges e "
+    "  WHERE e.producer_id=o.producer_id AND e.output_id=o.output_id "
+    "  ORDER BY e.sampled_boottime_ms DESC LIMIT 1) x WHERE o.output_id IS NOT NULL), "
+    "winners AS ("
+    " SELECT DISTINCT ON (output_id) producer_id,output_id,sampled_boottime_ms FROM candidates "
+    " ORDER BY output_id,sampled_boottime_ms DESC LIMIT %(outputs)s) "
+    "SELECT w.output_id,w.sampled_boottime_ms,x.request,x.received_at FROM winners w "
+    "CROSS JOIN LATERAL (SELECT e.request,e.received_at FROM node_display_exchanges e "
+    " WHERE e.producer_id=w.producer_id AND e.output_id=w.output_id "
+    " AND e.sampled_boottime_ms=w.sampled_boottime_ms LIMIT 1) x "
+    "ORDER BY w.output_id"
 )
+
+
+def display_outputs_params(device_id: str, generation: int) -> dict:
+    """The one parameter set for DISPLAY_OUTPUTS_SQL, so every caller carries both bounds."""
+    return {"device_id": device_id, "generation": generation,
+            "producers": _MAX_PRODUCERS, "outputs": _MAX_OUTPUTS}
 
 
 def display_outputs_in(conn, device_id: str, generation: int) -> list[dict]:
     """Display Host's newest exchange per Output for the device's current boot admission.
 
-    Read-only (console DDD §16, display read). Every ``display_host`` producer of the
-    current admission is considered, so after a Display Host restart within one kernel
-    boot the new producer's later sample wins. ``sampled_boottime_ms`` is that boot's one
+    Read-only (console DDD §16, display read). The newest ``display_host`` producers of the
+    current admission (at most ``_MAX_PRODUCERS``) are considered, so after a Display Host
+    restart within one kernel boot the new producer's later sample wins. ``sampled_boottime_ms`` is that boot's one
     clock, so it is compared only within the boot; an earlier boot's admission is
     superseded and never served. ``receipt.age_ms`` is the exchange's own sample minus its
     receipt's sample, both on one producer's clock. Nothing here is Panel pixels.
@@ -68,16 +89,7 @@ def display_outputs_in(conn, device_id: str, generation: int) -> list[dict]:
     ``{output_id, received_at, undecodable: True}`` with no decoded fields, so one drifted
     row never fails the device read that also carries sessions and Reboot (§15).
     """
-    candidates = conn.execute(
-        DISPLAY_OUTPUTS_SQL,
-        (device_id, generation, _MAX_OUTPUTS),
-    ).fetchall()
-    newest: dict[str, dict] = {}
-    for row in candidates:
-        held = newest.get(row["output_id"])
-        if held is None or row["sampled_boottime_ms"] > held["sampled_boottime_ms"]:
-            newest[row["output_id"]] = row
-    rows = [newest[output_id] for output_id in sorted(newest)][:_MAX_OUTPUTS]
+    rows = conn.execute(DISPLAY_OUTPUTS_SQL, display_outputs_params(device_id, generation)).fetchall()
     outputs = []
     for row in rows:
         try:

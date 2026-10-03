@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { fact, factText } from "./facts.js";
+import { factText } from "./facts.js";
 import { useProblems } from "./Field.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { inStepOrder } from "./flow/steps.js";
@@ -29,8 +29,7 @@ import {
   sourceSteps,
   unannouncedWords,
 } from "./sourceFlowModel.js";
-import { libraryName } from "./sourcePreview.js";
-import { refusalIssue, TAG_GONE } from "./sourceWords.js";
+import { refreshFact, refusalIssue, TAG_GONE } from "./sourceWords.js";
 import { LibraryStep, NameStep, NarrowStep, SourceReview, TagsStep } from "./SourceSteps.jsx";
 import { namedSource, sourceName } from "./sourceNames.js";
 import { sourceRefreshPath } from "./mediaApi.js";
@@ -362,27 +361,9 @@ function useSavedTagPaths(sources, connections, reported) {
 }
 
 /**
- * When a Source last refreshed, as the photo library's `reported` fact (§39), for a Source
- * whose last refresh succeeded: "Your photo library last reported 2 min ago · the media
- * worker accepted 132 in that refresh". The count is the worker's own acceptance, never the
- * library's report, so it names the worker. Its age is the database's read time minus the database's write time
- * (`media.read_at`, G11).
- */
-function refreshFact(source, now, connections) {
-  return fact({
-    kind: "reported",
-    source: libraryName(source.spec?.connection_ref, connections),
-    receipt: "latest",
-    value: `the media worker accepted ${Number(source.counts?.valid ?? 0)} in that refresh`,
-    receivedAt: source.last_success,
-    readAt: now,
-    field: "the time of the last refresh",
-  });
-}
-
-/**
- * The saved Sources as summary cards: each by its plain logical name, with its status, its
- * last refresh as the library's report (or that none has succeeded), what it selects, its
+ * The saved Sources as summary cards: each by its plain logical name, with its status (for a
+ * Source whose last refresh succeeded, that refresh as the library's report, sourceWords.js
+ * `refreshFact`, said once), or that no refresh has succeeded, what it selects, its
  * connection, whether a tag it uses is gone, and Refresh, Edit and Delete. No thumbnails:
  * those live in the flow's preview (§37; card tiles are deferred, §44).
  *
@@ -397,7 +378,7 @@ function SourceCards({ sources, now, connections, reported, onRefresh, refreshin
   return (
     <ul className="card-grid" role="list">
       {sources.map((source) => {
-        const state = sourceState(source, now, false);
+        const state = sourceState(source, now, false, connections);
         const refreshing = refreshingSources.has(source.source_ref);
         const feedback = Object.hasOwn(refreshFeedback, source.source_ref)
           ? refreshFeedback[source.source_ref] : null;
@@ -407,7 +388,8 @@ function SourceCards({ sources, now, connections, reported, onRefresh, refreshin
             title={sourceName(source)}
             lines={[
               { label: "Status", value: state.label },
-              ...(state.state === "never-refreshed" ? [] : [{
+              // An ok Source's Status already states its refresh (sourceState's one fact).
+              ...(state.state === "never-refreshed" || state.state === "ok" ? [] : [{
                 label: "Refreshed",
                 value: source.last_success == null ? "No successful refresh"
                   : source.status === "ok" ? factText(refreshFact(source, now, connections))
@@ -449,9 +431,10 @@ function SourceCards({ sources, now, connections, reported, onRefresh, refreshin
 
 function sourceIssue(source, now) {
   const diagnostics = source.diagnostics ?? [];
-  const details = [...new Set(diagnostics.map((entry) => entry.code))]
+  // One sentence per distinct code, then per distinct sentence (two codes may share a row).
+  const details = [...new Set([...new Set(diagnostics.map((entry) => entry.code))]
     .slice(0, 3)
-    .map(refusalIssue)
+    .map(refusalIssue))]
     .join(" · ");
   if (source.status !== "ok") return details;
   const state = sourceState(source, now, false);

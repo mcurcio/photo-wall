@@ -105,11 +105,11 @@ export function usePreview({ key, payload, active, connection }) {
         }
         if (poll.data?.status === "failed") {
           const phase = failurePhase(poll.data.error);
-          if (phase !== "unreachable") {
+          if (phase !== "retrying") {
             finish({ phase, code: poll.data.error ?? null });
             return;
           }
-          publish({ phase: "unreachable", code: poll.data.error });
+          publish({ phase: "retrying", code: poll.data.error });
           run.requestId = null; // asked again after the next wait
           await sleep(pollDelay(run.attempt++));
         }

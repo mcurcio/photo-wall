@@ -451,7 +451,7 @@ entries below that it changed say so; where the two differ, that glossary wins.
   record at enrollment and the bound Output are on **Binding**. *Retired
   (2026-10-02):* the Commissioning name and its capability-gated colour and power
   areas.
-- **Output interrupted** — a Frame-health alarm (after Player silent): Central's
+- **Output interrupted** — a Frame-health alarm (after Player app silent): Central's
   inference, from its linked Output-loss record for the Frame's current Binding,
   that the Output was lost, from what a node layer actually reported (the App
   Effect Broker an app process exit, Display Host an invalidated or withdrawn

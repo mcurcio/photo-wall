@@ -1,4 +1,5 @@
 import { apiWrite } from "./apiWrite.js";
+import { answerUnknown, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 
 /**
  * The one equipment write module (slice 2 §6): bind, unbind, retire and identify, each
@@ -23,11 +24,8 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {{outcome: Outcome, code: string|null, message: string|null}} EquipmentResult
  */
 
-export const UNKNOWN_MESSAGE = "Central did not answer. Check this after the next refresh.";
-
-// The one wording of the "changed" and "already" outcomes in the confirmation
-// dialogs (ConfirmAction.jsx); bind words its own conflict in BIND_MESSAGES.
-export const CHANGED_MESSAGE = "Changed since you opened this. Reopen to review.";
+// UNKNOWN_MESSAGE and CHANGED_MESSAGE live with the outcome pattern (sendOutcome.js); the
+// "already" wording of the confirmation dialogs (ConfirmAction.jsx) is the equipment writes'.
 export const ALREADY_MESSAGE = "Already done.";
 
 const GONE_PLAYER = "That Player is no longer available. Choose another.";
@@ -66,7 +64,7 @@ async function send(path, init, messages, already, fallback) {
   if (result.ok) {
     return { outcome: "done", code: null, message: null };
   }
-  if (result.status >= 500) {
+  if (answerUnknown(result)) { // any 5xx: no equipment refusal is served as one
     return { outcome: "unknown", code: null, message: UNKNOWN_MESSAGE };
   }
   const code = result.error ?? String(result.status);

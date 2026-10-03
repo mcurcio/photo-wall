@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { factText, LAYER_NAMES } from "./facts.js";
@@ -7,6 +7,7 @@ import { outputStates } from "./health.js";
 import { effectGateFact, effectGateReason, GATE_UNREADABLE } from "./nodeControl.js";
 import { nodeUnknown } from "./nodeRead.js";
 import { deploymentHandle, releaseHome, releaseResult } from "./releases.js";
+import { useHeldRequests } from "./sendOutcome.js";
 
 /**
  * Stage app (console DDD Part E §25, §27-§28, bead NS1): switch this Player's app, on this
@@ -299,21 +300,23 @@ export async function sendStage(deviceId, request, { node, control }, held) {
   return outcome;
 }
 
+// A page holds at most one stage: its one key in the page's held requests.
+const HELD_STAGE = "stage";
+
 /**
- * The stage one page holds (`HeldStages`): a ref, so a send marks its request held in the same
- * step as its check, and a render after each change. The Player page and Update the wall each
- * hold their own.
+ * The stage one page holds (`HeldStages`), on the one held-request store (sendOutcome.js
+ * `useHeldRequests`), so a send marks its request held in the same step as its check. The
+ * Player page and Update the wall each hold their own.
  *
  * @returns {HeldStages}
  */
 export function useHeldStage() {
-  const heldRef = useRef(/** @type {HeldStage|null} */ (null));
-  const [, setView] = useState(/** @type {HeldStage|null} */ (null));
+  const held = useHeldRequests();
   return useMemo(() => ({
-    get: () => heldRef.current,
-    set: (request, state) => {
-      heldRef.current = state === null ? null : { request, state };
-      setView(heldRef.current);
+    get: () => {
+      const state = held.get(HELD_STAGE);
+      return state === null ? null : { request: held.frozen(HELD_STAGE), state };
     },
-  }), []);
+    set: (request, state) => held.set(HELD_STAGE, state, request),
+  }), [held]);
 }

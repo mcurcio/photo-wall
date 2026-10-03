@@ -11,7 +11,7 @@ import {
   UNAUTHORABLE_REASON,
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { useProblems } from "./Field.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { editedId, editKey } from "./flow/instance.js";

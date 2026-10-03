@@ -2,7 +2,7 @@ import React, { useCallback, useId, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { ChevronIcon } from "./icons.jsx";
 import { explainPrecedence, LIVE_PHASES } from "./join.js";

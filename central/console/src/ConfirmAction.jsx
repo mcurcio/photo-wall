@@ -1,17 +1,11 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import {
-  ALREADY_MESSAGE,
-  CHANGED_MESSAGE,
-  retirePlayer,
-  unbind,
-  unbindSequence,
-  UNKNOWN_MESSAGE,
-} from "./equipmentApi.js";
+import { ALREADY_MESSAGE, retirePlayer, unbind, unbindSequence } from "./equipmentApi.js";
 import { deleteFrame } from "./framesApi.js";
 import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
 import { liveRunsFor } from "./join.js";
 import { usePageHidden } from "./pageVisibility.js";
+import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { frameStoredReferences } from "./sceneTargets.js";
 import { useMutate } from "./useMutate.js";
 

@@ -72,16 +72,16 @@ def test_a_reporting_player_reads_last_heard_with_centrals_age(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         label = _health(page)
-        expect(label).to_have_accessible_name("Last heard 2 s ago")
+        expect(label).to_have_accessible_name("Player app last reported 2 s ago")
         expect(label).to_have_text("Heard recently")
         expect(label).to_have_class(_severity("ok"))
 
         # The Inspector header and the Binding facet read the same fact.
         page.get_by_role("button", name=f"Frame {FRAME}", exact=True).click()
         inspector = page.get_by_role("region", name=f"Frame {FRAME} inspector", exact=True)
-        expect(inspector).to_contain_text("Last heard 2 s ago")
+        expect(inspector).to_contain_text("Player app last reported 2 s ago")
         inspector.get_by_role("tab", name="Binding", exact=True).click()
-        expect(inspector.get_by_role("tabpanel")).to_contain_text("Last heard 2 s ago")
+        expect(inspector.get_by_role("tabpanel")).to_contain_text("Player app last reported 2 s ago")
 
         # Honesty: ok states when Central last heard the Player, never playback. The one
         # "connected" allowed is the Binding facet's Panel record, worded as Central's record
@@ -100,8 +100,8 @@ def test_a_player_not_heard_past_the_threshold_reads_silent(page, registry):
         connect(page, origin, "wall")
         # The tile shows the fact without its age, so it fits; the age is in its name.
         label = _health(page)
-        expect(label).to_have_text("Player silent")
-        expect(label).to_have_accessible_name("Player silent · last heard 40 s ago")
+        expect(label).to_have_text("Player app silent")
+        expect(label).to_have_accessible_name("Player app silent · last reported 40 s ago")
         expect(label).to_have_class(_severity("alarm"))
         text = label.bounding_box()
         tile = page.get_by_role("button", name=f"Frame {FRAME}", exact=True).bounding_box()
@@ -165,7 +165,7 @@ def test_a_missing_read_time_fails_closed_and_never_prints_an_age(page, registry
             status.get_by_role("button", name="Refresh", exact=True).click()
         go(page, "wall")
         # With no Central read time there is no age: silence is assumed, never health.
-        expect(_health(page)).to_have_accessible_name("Player silent")
+        expect(_health(page)).to_have_accessible_name("Player app silent")
         expect(_health(page)).to_have_class(_severity("alarm"))
         expect(_health(page, "fresh")).to_have_accessible_name("Enrolled, no report yet")
         expect(_health(page, "fresh")).to_have_class(_severity("alarm"))
@@ -193,9 +193,9 @@ def test_the_threshold_is_centrals_not_a_constant_in_the_console(page, registry)
     registry.clock.advance(25)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        expect(_health(page, "newer")).to_have_accessible_name("Last heard 25 s ago")
+        expect(_health(page, "newer")).to_have_accessible_name("Player app last reported 25 s ago")
         expect(_health(page, "older")).to_have_accessible_name(
-            "Player silent · last heard 32 s ago")
+            "Player app silent · last reported 32 s ago")
 
 
 # --- Polling and the write fence (pass 2 §7). The page clock is paused, so the 5 s poll
@@ -221,7 +221,7 @@ def test_a_backend_change_shows_after_one_poll(page, registry):
         expect(_health(page)).to_have_accessible_name("Enrolled 0 s ago, no report yet")
         report_readiness(registry, player_id)
         page.clock.run_for(5000)
-        expect(_health(page)).to_have_accessible_name("Last heard 0 s ago")
+        expect(_health(page)).to_have_accessible_name("Player app last reported 0 s ago")
 
 
 def test_a_hidden_tab_does_not_poll_and_refreshes_on_return(page, registry):
@@ -256,12 +256,12 @@ def test_a_stale_poll_is_dropped_after_a_newer_refresh(page, registry):
 
         report_readiness(registry, player_id)
         page.get_by_role("button", name="Refresh", exact=True).click()
-        expect(_health(page)).to_have_accessible_name("Last heard 0 s ago")
+        expect(_health(page)).to_have_accessible_name("Player app last reported 0 s ago")
 
         # The poll started first but answers last, with what it read before the report.
         gate.release(status=200, content_type="application/json", body=stale)
         _settle(page)
-        expect(_health(page)).to_have_accessible_name("Last heard 0 s ago")
+        expect(_health(page)).to_have_accessible_name("Player app last reported 0 s ago")
 
 
 def test_a_stale_401_does_not_log_the_operator_out(page, registry):
@@ -286,7 +286,7 @@ def test_a_stale_401_does_not_log_the_operator_out(page, registry):
         # Still signed in: the next poll reads and applies.
         report_readiness(registry, player_id)
         page.clock.run_for(5000)
-        expect(_health(page)).to_have_accessible_name("Last heard 0 s ago")
+        expect(_health(page)).to_have_accessible_name("Player app last reported 0 s ago")
 
 
 def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues(
@@ -375,8 +375,8 @@ def test_the_strip_counts_incidents_and_leaves_to_dos_to_the_wall(page, registry
         # Each names the frame and states its fact and age; no structural to-do is a row.
         expect(entries).to_have_text([
             "never-reported — Enrolled 4 min ago, no report yet",
-            "silent-a — Player silent · last heard 4 min ago",
-            "silent-b — Player silent · last heard 4 min ago",
+            "silent-a — Player app silent · last reported 4 min ago",
+            "silent-b — Player app silent · last reported 4 min ago",
         ])
         # The unbound and needs-calibration Frames are the Wall's To finish items (G2).
         expect(page.get_by_role("list", name="To finish", exact=True).get_by_role("listitem")
@@ -397,7 +397,7 @@ def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_insp
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
-            "button", name="silent-a — Player silent · last heard 4 min ago").click()
+            "button", name="silent-a — Player app silent · last reported 4 min ago").click()
         inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
         expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
             "aria-selected", "true")
@@ -419,7 +419,7 @@ def test_a_needs_attention_visit_opens_the_cause_facet_and_an_ok_frame_opens_sta
         connect(page, origin, "attention")
         listing = page.get_by_role("main").get_by_role(
             "list", name="Frames and Players needing attention", exact=True)
-        listing.get_by_role("link", name="silent-a — Player silent · last heard 4 min ago").click()
+        listing.get_by_role("link", name="silent-a — Player app silent · last reported 4 min ago").click()
         inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
         expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
             "aria-selected", "true")
@@ -432,7 +432,7 @@ def test_a_strip_focus_request_is_spent_once_and_not_replayed_on_remount(page, r
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
-            "button", name="silent-b — Player silent · last heard 4 min ago").click()
+            "button", name="silent-b — Player app silent · last reported 4 min ago").click()
         heading = page.get_by_role("heading", name="Frame silent-b", exact=True)
         expect(heading).to_be_focused()
         # Away to a Show page (the Wall unmounts) and back through the sidebar, which
@@ -489,7 +489,7 @@ def test_showrunner_strip_entries_are_text_not_navigation(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         entries = _open_list(page)
-        expect(entries).to_contain_text("silent-a — Player silent · last heard 4 min ago")
+        expect(entries).to_contain_text("silent-a — Player app silent · last reported 4 min ago")
         expect(entries.get_by_role("button")).to_have_count(0)
 
 
@@ -550,7 +550,7 @@ def test_strip_navigation_leaves_the_inspector_in_view(page, registry, viewport)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
-            "button", name="silent-b — Player silent · last heard 4 min ago").click()
+            "button", name="silent-b — Player app silent · last reported 4 min ago").click()
         inspector = page.get_by_role("region", name="Frame silent-b inspector", exact=True)
         expect(inspector).to_be_in_viewport()
         expect(inspector.get_by_role("heading", name="Frame silent-b", exact=True)).to_be_focused()

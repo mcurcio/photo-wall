@@ -154,14 +154,24 @@ class _PrefixHeaders:
         await self.app(scope, receive, send_headers)
 
 
+async def _server_error(request: Request, exc: Exception) -> Response:
+    """The unhandled-500 answer, built from the prefix table (`add_prefix_headers`)."""
+    headers = _prefix_headers_for(request.app, request.url.path) or None
+    return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
+
+
 def add_prefix_headers(app: FastAPI, prefix: str, headers: Mapping[str, str]) -> None:
     """Put `headers` on every response under `prefix`: the user middleware for every answer a
     route or FastAPI builds, and the same table for the unhandled-500 handler, which Starlette's
-    outermost ServerErrorMiddleware runs outside every user middleware (`OperatorAuth.install`).
-    The one way a prefix gets fixed headers, so no answer under it can miss them."""
+    outermost ServerErrorMiddleware runs outside every user middleware. The table and that
+    handler are created together, on the first call for an app, so no answer under a prefix
+    can miss its headers whatever else the app mounts."""
     table = getattr(app.state, "prefix_headers", None)
     if table is None:
         table = app.state.prefix_headers = []
+        # An unhandled exception is answered by Starlette's outermost ServerErrorMiddleware,
+        # outside every user middleware; this handler is where that response is built.
+        app.add_exception_handler(Exception, _server_error)
     table.append((prefix, dict(headers)))
     app.add_middleware(_PrefixHeaders, prefix=prefix, headers=headers)
 
@@ -207,7 +217,8 @@ class OperatorAuth:
             _same_origin_fetch(request)
 
     def mount(self, app: FastAPI) -> None:
-        """Bind the two session routes, the no-store middleware and the unhandled-500 handler."""
+        """Bind the two session routes and the no-store headers (with their unhandled-500
+        handler, `add_prefix_headers`)."""
         codec = self.codec
 
         @app.post(SESSION_PATH, status_code=204)
@@ -234,15 +245,6 @@ class OperatorAuth:
             return response
 
         add_prefix_headers(app, OPERATOR_PREFIX, {"Cache-Control": NO_STORE})
-
-        # An unhandled exception is answered by Starlette's outermost ServerErrorMiddleware,
-        # outside every user middleware; this handler is where that response is built, from
-        # the same prefix table (`add_prefix_headers`).
-        async def server_error(request: Request, exc: Exception) -> Response:
-            headers = _prefix_headers_for(request.app, request.url.path) or None
-            return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
-
-        app.add_exception_handler(Exception, server_error)
 
     def require_scoped(self, app: FastAPI) -> None:
         """Refuse an app with a route that depends on `admin` outside `OPERATOR_PREFIX`, where the

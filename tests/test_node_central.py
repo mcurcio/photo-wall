@@ -291,7 +291,7 @@ def test_display_read_serves_the_newest_exchange_per_output_on_the_current_boot(
                                      "connected": False, "surface": None, "receipt": None}}
     # The read is bounded by the index, not the boot's history: thousands of exchanges per
     # Output leave the served rows unchanged and the plan reads a handful of index entries.
-    from central.fleet.node_display import DISPLAY_OUTPUTS_SQL
+    from central.fleet.node_display import DISPLAY_OUTPUTS_SQL, display_outputs_params
     with registry.db.transaction() as conn:
         producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
                                 (later.session_id,)).fetchone()["producer_id"]
@@ -306,15 +306,61 @@ def test_display_read_serves_the_newest_exchange_per_output_on_the_current_boot(
     assert {key: item["connected"] for key, item in served().items()} == {"HDMI-A-1": False, "HDMI-A-2": True}
     with registry.db.transaction() as conn:
         plan = conn.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + DISPLAY_OUTPUTS_SQL,
-                            (DEVICE_ID, later.producer.device_generation, 64)).fetchone()
+                            display_outputs_params(DEVICE_ID, later.producer.device_generation)).fetchone()
     plan = next(iter(plan.values()))[0]["Plan"]
+    assert 0 < _exchange_rows(plan) < 50  # never a scan of the 20,002 rows
 
-    def exchange_rows(node):
-        own = (node["Actual Rows"] * node["Actual Loops"]
-               if node.get("Relation Name") == "node_display_exchanges" else 0)
-        return own + sum(exchange_rows(child) for child in node.get("Plans", []))
 
-    assert 0 < exchange_rows(plan) < 50  # never a scan of the 20,002 rows
+def _exchange_rows(node):
+    """Rows the plan read from node_display_exchanges, across every loop."""
+    own = (node["Actual Rows"] * node["Actual Loops"]
+           if node.get("Relation Name") == "node_display_exchanges" else 0)
+    return own + sum(_exchange_rows(child) for child in node.get("Plans", []))
+
+
+def test_display_read_is_bounded_however_many_producers_the_node_creates(registry):
+    # A node picks its incarnation ids, so it picks how many display_host producers one boot
+    # has (up to the daily session cap), and any Output id. The read is bounded in SQL by
+    # the newest producers and the Output bound, never by that count: removing the producer
+    # LIMIT reads every producer's Outputs and fails the row bound below.
+    from test_node_boot import claim_for, cold_setup
+
+    from central.fleet.node_display import (
+        _MAX_OUTPUTS,
+        _MAX_PRODUCERS,
+        DISPLAY_OUTPUTS_SQL,
+        display_outputs_params,
+    )
+    from contracts.node_boot import NodeBootRequestV2
+    service, sessions, _ = cold_setup(registry)
+    offer = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
+    producers = 3 * _MAX_PRODUCERS
+    grants = []
+    for _ in range(producers):
+        grants.append(sessions.enroll(claim_for(offer, owner="display_host")))
+        registry.clock.advance(1)  # admission order is Central's own clock
+    with registry.db.transaction() as conn:
+        for index, grant in enumerate(grants):
+            producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
+                                    (grant.session_id,)).fetchone()["producer_id"]
+            # Each producer floods past the Output bound; the newest producer samples latest.
+            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
+                         "sampled_boottime_ms,request,response,decision_id,received_at) "
+                         "SELECT %s,gen_random_uuid(),%s,'OUT-' || lpad(i::text,3,'0'),%s,"
+                         "'\\x00'::bytea,'\\x00'::bytea,gen_random_uuid(),0 "
+                         "FROM generate_series(1,%s) i",
+                         (producer, grant.session_id, 1000 + index, _MAX_OUTPUTS + 6))
+        conn.execute("ANALYZE node_display_exchanges")
+        params = display_outputs_params(DEVICE_ID, grants[0].producer.device_generation)
+        rows = conn.execute(DISPLAY_OUTPUTS_SQL, params).fetchall()
+        plan = conn.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + DISPLAY_OUTPUTS_SQL, params).fetchone()
+    assert len(rows) == _MAX_OUTPUTS
+    assert {row["sampled_boottime_ms"] for row in rows} == {1000 + producers - 1}  # newest wins
+    assert [row["output_id"] for row in rows] == sorted(row["output_id"] for row in rows)
+    plan = next(iter(plan.values()))[0]["Plan"]
+    # Skip-scan plus newest probe per (producer, Output), then one request row per winner.
+    bound = _MAX_PRODUCERS * (2 * _MAX_OUTPUTS + 2) + _MAX_OUTPUTS
+    assert _exchange_rows(plan) <= bound
 
 
 def test_an_undecodable_display_exchange_fails_only_its_own_output(registry):

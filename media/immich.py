@@ -94,8 +94,8 @@ class _Budget:
         now = self.clock.monotonic()
         if not math.isfinite(now) or now < self.started:
             raise MediaError("clock_invalid")
-        if now >= self.deadline:
-            raise MediaError("upstream_timeout")
+        if now >= self.deadline:  # Photo Wall's own time limit, never the library's answer
+            raise MediaError("time_budget")
         return self.deadline - now
 
 
@@ -147,8 +147,11 @@ def _integer(value: object, *, code: str = "upstream_schema", minimum: int = 0) 
 
 def _dimension(value: object, limit: int) -> int:
     if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not 0 < value <= limit or not math.isfinite(value) or value != int(value)):
+            or (isinstance(value, float) and (not math.isfinite(value) or value != int(value)))
+            or not 0 < value):
         raise MediaError("metadata_invalid", "incompatible")
+    if value > limit:  # a well-formed item over Photo Wall's own limit
+        raise MediaError("item_over_limits", "incompatible")
     return int(value)
 
 
@@ -352,7 +355,7 @@ class ImmichClient:
         width = _dimension(exif.get("exifImageWidth"), self.limits.max_dimension)
         height = _dimension(exif.get("exifImageHeight"), self.limits.max_dimension)
         if width * height > self.limits.max_pixels:
-            raise MediaError("metadata_invalid", "incompatible")
+            raise MediaError("item_over_limits", "incompatible")
         orientation = exif.get("orientation")
         if orientation is not None and orientation not in tuple(str(i) for i in range(1, 9)):
             raise MediaError("metadata_invalid", "incompatible")
@@ -374,8 +377,10 @@ class ImmichClient:
                     raise MediaError("metadata_invalid", "incompatible")
                 hours, minutes, seconds = value.split(":")
                 duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-            if not 0 < duration <= self.limits.max_video_seconds:
+            if not 0 < duration:
                 raise MediaError("metadata_invalid", "incompatible")
+            if duration > self.limits.max_video_seconds:
+                raise MediaError("item_over_limits", "incompatible")
         return OriginalAsset(
             connection_id=self.config.connection_id, upstream_id=head.upstream_id,
             original_sha1=head.original_sha1, kind=head.kind, captured_at=head.captured_at,
@@ -531,8 +536,8 @@ class ImmichClient:
                                          examined=budget.examined, search_requests=budget.search_requests,
                                          json_bytes=budget.json_bytes),
                 )
-        except TimeoutError:
-            error = MediaError("upstream_timeout")
+        except TimeoutError:  # the whole refresh's limit (`refresh_seconds`) is Photo Wall's
+            error = MediaError("time_budget")
         except MediaError as caught:
             error = caught
         return RefreshResult(
@@ -590,8 +595,8 @@ class ImmichClient:
                     ),
                     members=stored,
                 )
-        except TimeoutError:
-            raise MediaError("upstream_timeout") from None
+        except TimeoutError:  # the whole preview's limit is Photo Wall's
+            raise MediaError("time_budget") from None
 
     async def list_tags(self) -> tuple[LibraryTag, ...]:
         """The library's tags as ids, paths and names; over the caps `tag_limit`, never a cut."""
@@ -600,8 +605,8 @@ class ImmichClient:
             async with asyncio.timeout(self.limits.refresh_seconds):
                 await self._check(budget)
                 rows = await self._json("GET", "tags", budget, array=True)
-        except TimeoutError:
-            raise MediaError("upstream_timeout") from None
+        except TimeoutError:  # the whole listing's limit is Photo Wall's
+            raise MediaError("time_budget") from None
         except MediaError as error:
             if error.code == "source_limit":  # over the 2 MiB JSON cap
                 raise MediaError("tag_limit", "incompatible") from None

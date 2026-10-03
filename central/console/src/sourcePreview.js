@@ -1,5 +1,12 @@
 import { fact, words as codeWords } from "./facts.js";
-import { OVER_LIMIT, OWNER_MISMATCH, TAG_GONE } from "./sourceWords.js";
+import {
+  libraryName,
+  LIBRARY,
+  OVER_LIMIT,
+  previewHandling,
+  refusalIssue,
+  SOURCE_REFUSALS,
+} from "./sourceWords.js";
 import { captureDay } from "./timeWords.js";
 
 /**
@@ -11,9 +18,11 @@ import { captureDay } from "./timeWords.js";
  *   idle         nothing asked (no announced connection, or the step shows no panel)
  *   looking      a request is in flight; `stillLooking` after {@link STILL_LOOKING_MS}
  *   complete     `answer` is the served `GET /v1/operator/source-previews/{id}` body
- *   unreachable  the library (or Central) could not be reached; the panel retries
+ *   retrying     a transient failure, `code` names it; the panel asks again. Its owner and
+ *                words are the code's row in sourceWords.js `SOURCE_REFUSALS`, so a stopped
+ *                worker never reads as the library being unreachable
  *   key          the library refused the connection's key
- *   failed       another failure, `code` names it
+ *   failed       another failure, `code` names it (its row's words when it has one)
  * and `previous` is the last complete answer of an earlier request (criteria change
  * supersede a request, but its answer stays on screen beside "Updating…" or a failure).
  * The age of an answer is the database's read time (`read_at`) minus the database's
@@ -22,7 +31,7 @@ import { captureDay } from "./timeWords.js";
  * @typedef {{count: number, image_count: number, video_count: number, limited?: boolean,
  *            shown?: Array<{asset_id: string, kind: string, captured_at: number,
  *            duration_seconds?: number|null}>, observed_at?: number, read_at?: number}} Answer
- * @typedef {{phase: "idle"|"looking"|"complete"|"unreachable"|"key"|"failed",
+ * @typedef {{phase: "idle"|"looking"|"complete"|"retrying"|"key"|"failed",
  *            answer: Answer|null, previous: Answer|null, stillLooking?: boolean,
  *            code?: string|null, connection?: string}} Preview
  */
@@ -47,35 +56,21 @@ export function pollDelay(attempt) {
   return Math.min(LONGEST_POLL_MS, FIRST_POLL_MS * 2 ** Math.max(0, attempt));
 }
 
-// Failure codes (media/worker.py `_code`, media/immich.py) that mean the library could not
-// be reached in time: a later request may succeed, so the panel retries.
-const UNREACHABLE = new Set(["upstream_unavailable", "upstream_timeout", "worker_timeout",
-  "worker_cancelled", "preview_expired"]);
-// Codes that mean the library refused the connection's key.
-// `owner_mismatch` is not one: more permissions cannot fix a key that is another user's, so
-// it fails with its own sentence (OWNER_MISMATCH, shared with the Source card).
-const KEY_REFUSED = new Set(["upstream_permission", "asset_permission"]);
-const FAILURE_NOTES = { owner_mismatch: OWNER_MISMATCH, tag_missing: TAG_GONE };
-
 /**
- * Which phase a served failure code puts the panel in.
+ * Which phase a served failure code puts the panel in, read from the code's one row
+ * (sourceWords.js `SOURCE_REFUSALS`): "retrying" for a transient code (the library's or
+ * Photo Wall's), "key" for the library refusing the key, otherwise "failed". `owner_mismatch`
+ * is not "key": more permissions cannot fix a key that is another user's.
  *
  * @param {string|null|undefined} code
- * @returns {"unreachable"|"key"|"failed"}
+ * @returns {"retrying"|"key"|"failed"}
  */
 export function failurePhase(code) {
-  if (UNREACHABLE.has(code)) return "unreachable";
-  if (KEY_REFUSED.has(code)) return "key";
-  return "failed";
+  const handling = previewHandling(code);
+  return handling === "retry" ? "retrying" : handling;
 }
 
-const LIBRARY = "Your photo library";
-
-/** "Your photo library", naming the connection when more than one is announced (§39). */
-export function libraryName(connection, connections) {
-  return (connections?.length ?? 0) > 1 && typeof connection === "string" && connection !== ""
-    ? `${LIBRARY} (connection ${connection})` : LIBRARY;
-}
+export { libraryName };
 
 export const CANT_REACH = "Photo Wall can't reach your photo library right now.";
 export const KEY_NOT_ALLOWED =
@@ -108,24 +103,34 @@ export function previewFacts(preview, connections = []) {
   }
   if (phase === "looking") {
     notes.push(preview.stillLooking ? STILL_LOOKING : shown ? UPDATING : LOOKING);
-  } else if (phase === "unreachable") {
-    if (shown) {
-      notes.push(CANT_REACH);
+  } else if (phase === "retrying") {
+    const row = owned(preview.code);
+    if (row === null || row.owner === LIBRARY) {
+      // The library's transient answer (or no code): only then "can't reach your photo library".
+      if (shown) notes.push(CANT_REACH);
+      else facts.push(fact({ kind: "unknown", why: "Photo Wall can't reach your photo library right now; retrying" }));
+    } else if (shown) {
+      notes.push(`${row.state} · retrying.`);
     } else {
-      facts.push(fact({ kind: "unknown", why: "Photo Wall can't reach your photo library right now; retrying" }));
+      facts.push(fact({ kind: "unknown", why: `${row.state} · retrying` }));
     }
   } else if (phase === "key") {
     notes.push(KEY_NOT_ALLOWED);
   } else if (phase === "failed") {
-    const words = `the preview failed (${codeWords(preview.code ?? "unknown_error")})`;
-    if (shown) {
-      notes.push(`The preview failed: ${codeWords(preview.code ?? "unknown_error")}.`);
-    } else {
-      facts.push(fact({ kind: "unknown", why: words }));
-    }
-    if (Object.hasOwn(FAILURE_NOTES, preview.code ?? "")) notes.push(FAILURE_NOTES[preview.code]);
+    const code = preview.code ?? "unknown_error";
+    const row = owned(code);
+    // A code with a row says that row's sentence (the Source card's); any other, the code.
+    const why = row === null ? `the preview failed (${codeWords(code)})` : "the preview failed";
+    if (shown) notes.push(row === null ? `The preview failed: ${codeWords(code)}.` : "The preview failed.");
+    else facts.push(fact({ kind: "unknown", why }));
+    if (row !== null) notes.push(refusalIssue(code));
   }
   return { facts, notes, answer: shown };
+}
+
+/** A served code's row in the one refusal table, or null. */
+function owned(code) {
+  return code && Object.hasOwn(SOURCE_REFUSALS, code) ? SOURCE_REFUSALS[code] : null;
 }
 
 /** "1,280 photos": digits grouped by three (not a locale formatter: timeWords.js owns those). */

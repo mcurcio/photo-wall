@@ -13,7 +13,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeAlias, get_args
+from typing import Final, Protocol, TypeAlias, get_args
 
 from central.kernel.assets import Asset, AssetKey, AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import (
@@ -223,6 +223,11 @@ class ReleaseOrigin(Protocol):
     async def list_releases(self, *, etag: str | None) -> ReleaseListing: ...
 
     async def download(self, locator: OriginLocator, into: Path, *, max_bytes: int) -> None: ...
+
+
+# The one refusal for a thumbnail no live preview selects: the route's, the origin's and the
+# production's (a retired record), so a later preview or GET asks again.
+THUMBNAIL_UNKNOWN: Final = "thumbnail_unknown"
 
 
 class ThumbnailOrigin(Protocol):

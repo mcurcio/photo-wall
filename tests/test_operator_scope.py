@@ -49,3 +49,25 @@ def test_require_scoped_refuses_a_direct_or_nested_admin_route_outside_the_prefi
         app.get("/v2/operator/outside", dependencies=[Depends(dependency)])(lambda: None)
         with pytest.raises(RuntimeError, match="/v2/operator/outside"):
             auth.require_scoped(app)
+
+
+def test_prefix_headers_cover_an_unhandled_500_without_the_operator_mount():
+    """`add_prefix_headers` creates its table and the unhandled-500 handler together, so an
+    app that never mounts OperatorAuth still answers a crash under the prefix with its
+    headers (Starlette's ServerErrorMiddleware runs outside every user middleware)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from central.operator_auth import add_prefix_headers
+
+    app = FastAPI()
+    add_prefix_headers(app, "/v1/fixed/", {"Cross-Origin-Resource-Policy": "same-origin"})
+
+    @app.get("/v1/fixed/boom")
+    def boom():
+        raise RuntimeError("synthetic")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/v1/fixed/boom")
+    assert response.status_code == 500
+    assert response.headers["cross-origin-resource-policy"] == "same-origin"

@@ -3388,3 +3388,121 @@ B5-FC3-A3 · NOTED (pre-existing, not fix-cycle drift): `media_repository.py:256
 `sourceState` now reads "Refresh failed (unavailable)" (before: "Your photo library is unreachable", which blamed the
 library for Central's own reset). Neutral, but "failed" overstates a reset awaiting its refresh; candidate for its own
 code or an "Awaiting refresh" branch.
+
+## PR41-FR · Final fix round for the whole PR (implementer)
+
+PR41-FR-A1 · APPLIED (B5-FC3-A1): `refusalIssue` returns the row's `issue ?? state`, the code in words only for a code
+outside `SOURCE_REFUSALS`; `codeText` deleted, one helper `facts.js` `words` (`mediaHealth.js` `codeWords` is it).
+Test: every row's issue equals `issue || state`, one per owner, unknown code in words; mutation (`issue ?? words(code)`)
+fails it.
+PR41-FR-A2 · APPLIED (B5-FC3-A2): central-system-architecture.md §three facts names the one `keyed_by_content=False`
+kind (`library-thumbnail`), whose facts a later production replaces.
+PR41-FR-1 · FIXED (major, owner class): codes are single-owner where raised. media/immich.py raises `item_over_limits`
+for `max_dimension`, `max_pixels`, `max_video_seconds` (malformed values stay `metadata_invalid`) and `time_budget` for
+`_Budget.remaining` and the `asyncio.timeout(refresh_seconds)` of refresh, preview and tag listing (one request's own
+deadline stays `upstream_timeout`). Both are Photo Wall rows; `metadata_pending_or_invalid` is Photo Wall's neutral
+"No item this Source found could be used · see each item's reason"; `unsupported_version` moved to Photo Wall ("This
+Photo Wall release doesn't support your photo library's version · check the supported versions"). The worker's
+`_PERMANENT` gained `item_over_limits`. New test `test_a_code_raised_for_photo_walls_own_limits_is_never_the_librarys`
+(AST harvest of media/immich.py: codes raised under a `limits`/`limit` comparison, in `_Budget.remaining`, or in a
+TimeoutError handler of `asyncio.timeout(self.limits.refresh_seconds)` must not be library-owned; `_text`'s schema
+length bound is excluded by name). Mutation (`metadata_invalid` for the video limit) fails it.
+PR41-FR-2 · FIXED (major, preview table): `sourcePreview.js` reads `SOURCE_REFUSALS` (rows carry `preview: "retry" |
+"key"`); UNREACHABLE, KEY_REFUSED and FAILURE_NOTES deleted. The phase "unreachable" is now "retrying": "can't reach
+your photo library" only for library-owned codes; `preview_expired` (new Photo Wall row), `worker_timeout`,
+`worker_cancelled` retry in their own words. Any other row fails with "the preview failed" + the row's card sentence.
+DDD §39 preview rows updated. Browser test: a stopped worker's preview never says "can't reach your photo library".
+PR41-FR-3 · FIXED (major): `AssetProduction.produce` raises TerminalFailure(`thumbnail_unknown`) for a missing record of
+a kind not `keyed_by_content` (one shared constant `kernel.ports.THUMBNAIL_UNKNOWN` for route, origin and production).
+DB test `test_a_fetch_for_a_retired_record_never_blocks_the_next_preview`; mutation (transient again) fails it.
+Decision flagged: the condition reuses `keyed_by_content` as the finding specified; the real property is "records
+retire with their selector", which today coincides with it. A future non-content-keyed kind whose record is not
+liveness-retired would need its own property.
+PR41-FR-4 · FIXED (major, R10): the calibration preview answer serves `lease_seconds` (registry
+`CALIBRATION_LEASE_SECONDS`) beside `expires_at`; `useCalibration.js` counts it down on `performance.now()` from the
+answer's arrival (can read up to one request's latency long; the end stays the poll's). Scan test
+`test_the_browser_clock_is_never_compared_with_a_served_time` bans Date.now() outside useSnapshot.js and authoring.js.
+Browser countdown pins 29/19 -> 30/20.
+PR41-FR-5 · FIXED (major): `sourceWords.js` `refreshFact` is the one home of a Source's refresh; `sourceState`'s ok label
+is that fact (+ qualifier, filters), and the card drops its separate Refreshed line for an ok Source (overdue/empty keep
+it). `workerState`'s ok line is a `reported` fact ("Media worker last reported 20 s ago · …"). Runbook rows updated.
+PR41-FR-6 · FIXED (major): `health.js` `livenessFact` (Player app layer, `reported`) is the one builder for the Wall's
+liveness and the Player page's Player app row: "Player app last reported 4 s ago", "Player app silent · last reported
+2 h ago", tile "Player app silent". "Player silent", "last heard", "Last heard" added to RETIRED_WORDS. DDD §55 J1,
+runbook liveness rows updated.
+PR41-FR-7 · PARTLY FIXED (major, held request): `sendOutcome.js` holds UNKNOWN_MESSAGE, CHANGED_MESSAGE, RESEND_LABEL
+("Send the same request again", now the reboot, stage and publish confirm label; the reboot opener reads "Send the
+reboot request again"), `answerUnknown(result, centralRefusal)` (the one 5xx rule, the verb passing which served codes
+are its own refusals; equipment, reboot and release classifiers use it) and `useHeldRequests` (publish holds use it
+directly, `useHeldStage` is built on it). RESIDUAL: Reboot's held request still lives in component state
+(PlayerCommands.jsx, UpdateWallPage.jsx) plus the module-level `rebootsInFlight` set; moving it onto `useHeldRequests`
+touches two pages' dialog flows and was not cheap in this round. Needs its own bead.
+PR41-FR-8 · FIXED (major, display read): `DISPLAY_OUTPUTS_SQL` reads only the newest 4 display_host producers of the
+current admission (`_MAX_PRODUCERS`, by admitted_at), picks each Output's winner in SQL (DISTINCT ON, LIMIT 64) and
+fetches `request` only for the winners. DB test with 12 flooding producers asserts the plan reads at most
+4×(2×64+2)+64 exchange rows; mutation (no producer LIMIT) reads 1600 and fails it. Semantics change: a Display Host
+restarted more than 4 times in one boot no longer contributes its oldest producers' Outputs (DDD §16 lock-cost text
+updated). Chosen over newest-producer-only to keep the existing test's "older producer's other Output still served".
+PR41-FR-9 · FIXED (minors): timeline qualifier said for every selection (`TIMELINE_ONLY`, last part); the regenerate
+test's "GETs publish nothing" now drops the queued job first and asserts 0 (mutation: publish on every read fails it);
+the "previous Digest" cost restated in module-central-cache.md and DDD §38 (the reader checks size only; the route sends
+no Digest); `add_prefix_headers` registers the unhandled-500 handler with its table (bare-app test), doc string fixed.
+PR41-FR-10 · DEFERRED (minor): Player page "enrolled" twice (`playerStanding` from `registered_at` beside
+`enrolledFact` from `last_seen`); the finding's fix text was truncated in the brief, so the wording choice is open.
+
+## HC · Worker healthcheck course-correction (architect, 2026-10-03)
+HC-1 · FIXED, failure class: FIRST-PARTY COMPOSITION HIDDEN IN YAML. compose.yaml's worker healthcheck was an inline
+`python -c` snippet that built `MediaRepository(Database(...), SystemClock())`. G11 made `times=` a required keyword, and
+nothing reached the snippet (not ruff, not lint-imports, not a test), so it failed only at `docker compose up --wait`
+(TypeError). It also compared the probe's `time.time()` with a database-clock `worker_seen`, an R10/G11 violation no
+clock scan could see. Fix: `python -m media.healthcheck`, composed by `media.worker.build_repository` (the same root as
+the worker entry), aged by `MediaRepository.worker_age()` on `times.now_in(conn)`; media/healthcheck.py joins the G11
+module scan. GUARD: tests/test_compose_healthchecks.py refuses a compose healthcheck whose inline snippet imports a
+first-party package. Guard limits (residual HC-3): it scans `test:` lines line-by-line, so a block-style list
+(`test:` then `- python` items) or a CMD-SHELL string using `python3 -c` passes unchecked; it covers compose.yaml and
+tests/integration/*.yml only. The same class exists in CI YAML: .github/workflows/base-image.yml:482, :490, :907
+import scripts.*/contracts.* inside `python3 -c` (caught only when that workflow runs). Stronger form: parse the YAML
+(PyYAML is not a dependency today), reject any `-c` payload naming a first-party package in compose AND workflow files,
+and require every `-m <module>` to resolve (importlib.util.find_spec).
+HC-2 · STOP (spec contradiction, needs an implementer cycle): media/task_queue.py sets WORKER_CHECK_IN_SECONDS=30 and
+WORKER_FRESH_SECONDS=35 claiming "the worker checks in at least once per refresh tick". False when idle:
+media/worker.py:247-250 `refresh_once` returns before any `worker_status` when no Source is due, and `list_tags` never
+checks in; the guaranteed cadence is boot plus maintenance every 5 min (MAINTENANCE_CRON), which
+central/console/src/mediaHealth.js:27 already states as WORKER_CHECK_IN_SECONDS=300, pinned by
+tests/test_media_queue.py:204. Same-name constants now disagree (30 vs 300). A busy worker also exceeds 35 s while one
+refresh runs (WorkerLimits.refresh_seconds=65; check-in after publish). Predicted effect: an idle stack's worker turns
+unhealthy about 65 s after boot (35 s + 3 retries x 10 s) until the next maintenance pass, so a second
+`docker compose up -d --wait` (runbook launch and Recovery) fails. Spec (runbook "remains healthy while idle"):
+derive the worker cadence from MAINTENANCE_CRON in one Python constant, set the healthcheck window to the console's
+worker-quiet window (2 x 300 + 60 = 660 s), leave REFRESH_CRON its own literal, and pin the console's
+WORKER_QUIET_AFTER formula to the Python window. Cost: a hung worker reads unhealthy up to 11 min late (compose only
+consumes health for `--wait`; nothing restarts on unhealthy). Alternative: a check-in on every refresh tick (idle path
+included), a worker behaviour change that adds one media-locked write per 30 s, with a window of at least
+65 + 30 + slack s.
+HC-3 · RESIDUAL: guard limits in HC-1. Import cost is NOT a residual: `import media.healthcheck` takes about 0.29 s
+warm vs 0.25 s for central.db + central.media_repository + media.task_queue alone (measured locally), because
+task_queue already pulls procrastinate.
+HC-2 · FIXED (implementer, 2026-10-03): media/task_queue.py now has one cadence, `WORKER_CHECK_IN_SECONDS =
+MAINTENANCE_MINUTES * 60` (MAINTENANCE_CRON is built from MAINTENANCE_MINUTES), and `WORKER_FRESH_SECONDS =
+2 * WORKER_CHECK_IN_SECONDS + 60` = 660 s; REFRESH_CRON is its own literal again. media.healthcheck compares with `<=`
+like the console's `since <= WORKER_QUIET_AFTER`. tests/test_media_queue.py
+`test_the_worker_healthcheck_window_is_the_console_worker_quiet_window` evaluates the console's
+`WORKER_QUIET_AFTER = a * WORKER_CHECK_IN_SECONDS + b` against WORKER_FRESH_SECONDS (mutation: +59 fails it). Cost stated
+in docs/runbook.md: a hung worker can read healthy for up to 11 minutes.
+HC-3 · PARTLY FIXED (implementer, 2026-10-03): tests/test_compose_healthchecks.py now scans healthchecks structurally
+(flow list, block list, string/CMD-SHELL, block scalar, `{test: ...}` flow mapping; no PyYAML), follows CMD-SHELL and
+`sh -c` into shell words, refuses `python*/-c` payloads importing first-party code, and requires every `python -m`
+module to resolve (importlib.util.find_spec); parametrised probes cover each form. RESIDUAL: not extended to
+.github/workflows/*.yml because existing CI steps violate it: base-image.yml:482 (`python3 -c` importing
+scripts.module_closure), :490 (`.venv/bin/python -c` importing contracts.player_payload and scripts.*), :907 (`python3 -c`
+importing contracts.release). Moving those to `python -m` entry points (or a scripts/ CLI) and then scanning workflow
+`run:` blocks is a separate bead.
+HC-2 · VERIFIED AGAINST SPEC (architect, 2026-10-03): diff matches the HC-2 spec point by point (one cadence from
+MAINTENANCE_MINUTES; window 2 x 300 + 60 = 660; REFRESH_CRON own literal; console formula pinned). `<=` in
+media.healthcheck is an implementer choice beyond spec, accepted (matches the console's `since <= WORKER_QUIET_AFTER`).
+Cadence re-checked in code: boot check-in is `set_recipe` (central/media_repository.py:815) via `_register_recipe`
+before the boot `maintain()` (media/worker.py:463-464); every preparation job (worker.py:347), preview (:409) and
+due refresh (:245) also checks in, so a preparation backlog delaying maintenance behind MEDIA_STORAGE_LOCK still checks in.
+docs/module-media-worker.md one-media-clock paragraph now states the window and cadence and links the runbook.
+HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` scan after moving base-image.yml
+:482/:490/:907 to entry points). Not blocking this PR.

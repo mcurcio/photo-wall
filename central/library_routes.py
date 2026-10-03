@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, Response
 from central.assets.reader import Unavailable
 from central.content_routes import ClientDisconnected, until_disconnect
 from central.content_wiring import ContentServices
+from central.kernel.ports import THUMBNAIL_UNKNOWN
 from central.media_ports import MediaApplication
 from central.operator_auth import OPERATOR_PREFIX, add_prefix_headers
 from contracts.models import Identifier
@@ -98,10 +99,10 @@ def mount_library_routes(app: FastAPI, *, admin: Any, media: MediaApplication,
         if site is not None and site != "same-origin":
             return _refusal("origin_mismatch", 403)
         if content is None or content.thumbnails is None or content.thumbnail_reader is None:
-            return _refusal("thumbnail_unknown", 404)
+            return _refusal(THUMBNAIL_UNKNOWN, 404)
         candidates = await content.thumbnails.resolve(asset_id)
         if candidates is None:
-            return _refusal("thumbnail_unknown", 404)
+            return _refusal(THUMBNAIL_UNKNOWN, 404)
         try:
             served = await until_disconnect(request, content.thumbnail_reader.read(candidates))
         except ClientDisconnected:

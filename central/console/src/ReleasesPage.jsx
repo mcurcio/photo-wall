@@ -17,9 +17,9 @@ import {
   selectionSettled,
   sendCatalogCheck,
   sendSelection,
-  useHeldPublishes,
   useReleaseRead,
 } from "./releases.js";
+import { useHeldRequests } from "./sendOutcome.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 
@@ -166,7 +166,7 @@ function ReleaseRecords() {
   const control = useNodeControlValue();
   const releases = useReleaseRead({ skip: !nodeReadsAllowed(control) });
   // The publishes this page holds (releases.js `HeldPublishes`).
-  const held = useHeldPublishes();
+  const held = useHeldRequests();
   // This page's unanswered "Check GitHub releases now" (releases.js `HeldCheck`): the same shape.
   const checkRef = useRef(false);
   const [checking, setChecking] = useState(false);
@@ -220,7 +220,7 @@ function ReleaseRecords() {
     });
   };
 
-  // The Publish dialog, first send or "Send again" (§27): one body, frozen once, shown and sent.
+  // The Publish dialog, first send or its re-send (RESEND_LABEL) (§27): one body, frozen once, shown and sent.
   const openPublish = (event, request, again) => {
     const { lines, ...dialog } = publishConfirmation(request, again, { releases, held });
     open(event, {

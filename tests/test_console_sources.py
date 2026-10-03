@@ -15,6 +15,7 @@ machine, but FAILS where the checks are meant to run in full (`CI` or
     "album" or the library's vendor, and none says a library date is "taken".
 """
 
+import ast
 import json
 import os
 import re
@@ -47,8 +48,12 @@ out.limited = said({ phase: "complete", previous: null, answer: answer({ count: 
   limited: true, shown: Array.from({ length: 24 }, (_, i) => ({ asset_id: `a${i}`, kind: "image", captured_at: 0 })) }) });
 out.many = said({ phase: "complete", previous: null, answer: answer({ count: 30, image_count: 30,
   shown: Array.from({ length: 24 }, (_, i) => ({ asset_id: `a${i}`, kind: "image", captured_at: 0 })) }) });
-out.unreachableNone = said({ phase: "unreachable", answer: null, previous: null });
-out.unreachableEarlier = said({ phase: "unreachable", answer: null, previous: good });
+out.unreachableNone = said({ phase: "retrying", answer: null, previous: null, code: "upstream_unavailable" });
+out.unreachableEarlier = said({ phase: "retrying", answer: null, previous: good, code: "upstream_timeout" });
+// A stopped worker retries in its own words, never as the library being unreachable.
+out.workerSilent = [said({ phase: "retrying", answer: null, previous: null, code: "preview_expired" }),
+                    said({ phase: "retrying", answer: null, previous: good, code: "worker_timeout" })];
+out.overTime = said({ phase: "failed", answer: null, previous: null, code: "time_budget" });
 out.looking = said({ phase: "looking", answer: null, previous: null });
 out.updating = said({ phase: "looking", answer: null, previous: good });
 out.stillLooking = said({ phase: "looking", answer: null, previous: null, stillLooking: true });
@@ -58,7 +63,8 @@ out.named = said({ phase: "complete", answer: good, previous: null, connection: 
 out.noTime = said({ phase: "complete", answer: { count: 2, image_count: 0, video_count: 2, read_at: 1 }, previous: null });
 out.kinds = [preview.failurePhase("upstream_unavailable"), preview.failurePhase("upstream_permission"),
              preview.failurePhase("source_limit"), preview.failurePhase("preview_expired"),
-             preview.failurePhase("owner_mismatch")];
+             preview.failurePhase("owner_mismatch"), preview.failurePhase("worker_cancelled"),
+             preview.failurePhase("time_budget"), preview.failurePhase("brand_new_code")];
 out.owner = said({ phase: "failed", answer: null, previous: null, code: "owner_mismatch" });
 out.delays = [0, 1, 2, 3, 4, 9].map(preview.pollDelay);
 const day = new Date(2024, 11, 12, 12).getTime() / 1000;
@@ -95,6 +101,10 @@ out.refusals = [failing([{ code: "spec_unsupported" }]), failing([{ code: "conne
                 failing([{ code: "upstream_unavailable" }]), failing([{ code: "brand_new_code" }]),
                 failing([])];
 out.tagMissingPreview = said({ phase: "failed", answer: null, previous: null, code: "tag_missing" });
+// Every item rejected (here by Photo Wall's 5-minute video limit): never "still settling".
+out.allRejected = media.sourceState({ status: "incompatible", next_refresh: 1000, last_success: null,
+  diagnostics: [{ code: "item_over_limits", asset_id: "a1" }, { code: "metadata_pending_or_invalid" }],
+  spec: {} }, 1000, false).label;
 out.state = media.sourceState({ status: "ok", next_refresh: 1000, last_success: 990, counts: { valid: 3 },
   spec: specs[0] }, 1000).label;
 // The unannounced sentence: "isn't set up yet" only once the worker reported a list without it.
@@ -157,6 +167,11 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
     # A failure is never "nothing matches".
     assert out["unreachableNone"] == ["Unknown: Photo Wall can't reach your photo library right now; retrying"]
     assert out["unreachableEarlier"] == [reported, "Photo Wall can't reach your photo library right now."]
+    assert out["workerSilent"] == [
+        ["Unknown: The media worker hasn't answered this preview · check that it is running · retrying"],
+        [reported, "The media worker's refresh ran out of time · retrying."]]
+    assert out["overTime"] == ["Unknown: the preview failed",
+                               "Over Photo Wall's current time limit for one refresh · narrow it with tags or dates"]
     for failure in ("unreachableNone", "unreachableEarlier", "key", "failed", "looking"):
         assert not any("nothing matching" in line or "reported 0" in line for line in out[failure]), failure
     assert out["looking"] == ["Looking…"]
@@ -165,26 +180,27 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
     assert out["key"] == [
         "Your library connection's key isn't allowed to list tags or show previews. Add the "
         "permissions in the setup guide's library key step."]
-    assert out["failed"] == ["Unknown: the preview failed (connection unknown)"]
+    assert out["failed"] == ["Unknown: the preview failed", "Connection is not configured in the media worker."]
     assert out["named"] == [reported.replace("Your photo library", "Your photo library (connection home)")]
     assert out["noTime"] == ["Unknown: the time of your photo library's answer not served"]
-    assert out["kinds"] == ["unreachable", "key", "failed", "unreachable", "failed"]
+    assert out["kinds"] == ["retrying", "key", "failed", "retrying", "failed", "retrying", "failed", "failed"]
     # A key that is another user's is not fixed by more permissions: the card's own sentence.
-    assert out["owner"] == ["Unknown: the preview failed (owner mismatch)",
-                            "The library key belongs to a different user."]
+    assert out["owner"] == ["Unknown: the preview failed", "The library key belongs to a different user."]
     assert out["delays"] == [2000, 4000, 8000, 16000, 30000, 30000]
     assert out["tiles"] == ["Photo dated 12 Dec 2024", "Video, 0:32, dated 12 Dec 2024",
                             "Video, 1:02:03, dated 12 Dec 2024", "Video dated 12 Dec 2024"]
     assert out["paths"] == ["/v1/operator/library/thumbnails/asset-1",
                             "/v1/operator/library/thumbnails/a%2Fb?attempt=1"]
 
+    # Every selection, tagged or not, says the worker's timeline-only search once, last.
+    timeline = " · on your library's timeline only (not archived, hidden or other users' media)"
     assert out["selection"] == [
-        "Selects media tagged Family/Christmas (and nested tags) · favourites only · photos and videos",
-        "Selects everything on your library's timeline (not archived, hidden or other users' media)"
-        " · no favourites · photos only · dated 3 Mar 2025 to 5 Mar 2025",
+        "Selects media tagged Family/Christmas (and nested tags) · favourites only · photos and videos" + timeline,
+        "Selects everything · no favourites · photos only · dated 3 Mar 2025 to 5 Mar 2025" + timeline,
         "Selects media tagged with all of Family, a tag that no longer exists in your library "
-        "(each with its nested tags) · videos only",
-        "Selects media tagged a tag Photo Wall has not looked up yet (and nested tags) · photos and videos",
+        "(each with its nested tags) · videos only" + timeline,
+        "Selects media tagged a tag Photo Wall has not looked up yet (and nested tags) · photos and videos"
+        + timeline,
     ]
 
     # One home for a Source's selection words: the state label's filters are pieces of the
@@ -219,8 +235,10 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
     # A tag deleted in the library: its own cause, never "unsupported" and never "nothing matches".
     assert out["tagMissing"] == ("Your photo library no longer has a tag this Source uses · edit its tags"
                                  " · last good refresh 1 min ago")
-    assert out["tagMissingPreview"] == ["Unknown: the preview failed (tag missing)",
+    assert out["tagMissingPreview"] == ["Unknown: the preview failed",
                                         "A tag this Source uses no longer exists in your library."]
+    assert out["allRejected"] == ("No item this Source found could be used · see each item's reason"
+                                  " · never refreshed successfully")
     assert out["state"].endswith(" · 1 tag · favourites only · photos only · dated 2024")
 
     assert out["unannounced"] == [
@@ -245,7 +263,7 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
     assert out["learnWhole"] == {"f": "Family", "p": "Pets"}
     assert out["learnUnnamed"] == {"u": ""}
     assert out["unnamedWords"] == [["1 tag"], "Selects media tagged a tag with no visible name in "
-                                   "your library (and nested tags) · photos and videos"]
+                                   "your library (and nested tags) · photos and videos" + timeline]
     # The picker never announces "No tags match" for an unlisted library or a failed read.
     assert out["said"] == [
         "2 tags", "No tags match", "2 of 40 tags; keep typing",
@@ -290,7 +308,9 @@ def test_every_served_refusal_code_has_one_owner():
     _require_node()
     script = r"""
 const words = await import(process.argv[1]);
-console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRARY, words.PHOTO_WALL] }));
+const issues = Object.fromEntries(Object.keys(words.SOURCE_REFUSALS).map((code) => [code, words.refusalIssue(code)]));
+console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRARY, words.PHOTO_WALL],
+  issues, unknownIssue: words.refusalIssue("brand_new_code") }));
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script, "--", (SRC / "sourceWords.js").as_uri()],
@@ -306,8 +326,90 @@ console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRAR
         if entry["owner"] == photo_wall:
             assert not entry["state"].startswith("Your photo library"), code
     for code in ("spec_unsupported", "connection_mismatch", "connection_unknown", "source_limit",
-                 "owner_mismatch", "worker_timeout"):
+                 "owner_mismatch", "worker_timeout", "unsupported_version", "item_over_limits",
+                 "time_budget", "metadata_pending_or_invalid", "preview_expired"):
         assert out["table"][code]["owner"] == photo_wall, code
+    # The card's Issue line never names another owner than its Status: a row's own sentence
+    # where it differs, else its state words; the code in words only outside the table
+    # (B5-FC3-A1). One case per owner, then every row.
+    assert out["issues"]["upstream_timeout"] == "Your photo library is unreachable"
+    assert out["issues"]["worker_exited"] == "The media worker failed during the refresh · check its logs"
+    assert out["unknownIssue"] == "brand new code"
+    for code, entry in out["table"].items():
+        assert out["issues"][code] == (entry.get("issue") or entry["state"]), code
+    # Only the library's own transient answers say "can't reach your photo library".
+    for code, entry in out["table"].items():
+        if entry.get("preview") == "key":
+            assert entry["owner"] == library, code
+
+
+def _limit_guarded_codes(tree) -> dict[str, list[int]]:
+    """MediaError codes the adapter raises because one of Photo Wall's own limits was hit: in
+    the body of an `if` whose test reads a limit (`self.limits.…` or a `limit` argument), in
+    `_Budget.remaining` (the whole operation's deadline), or in a `TimeoutError` handler of a
+    `try` whose body sets `asyncio.timeout(self.limits.refresh_seconds)`. A single request's
+    own deadline (`metadata_seconds`, `original_seconds`) is the library answering too slowly,
+    so it stays `upstream_timeout`. `_text`'s length bound is the answer's schema (ids, names),
+    not a limit on media, so it stays `upstream_schema`."""
+    def reads_limit(node):
+        return any((isinstance(n, ast.Attribute) and n.attr == "limits")
+                   or (isinstance(n, ast.Name) and n.id == "limit")
+                   for n in ast.walk(node))
+
+    def raised(statements):
+        for statement in statements:
+            for n in ast.walk(statement):
+                if (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+                        and getattr(n.exc.func, "id", None) == "MediaError" and n.exc.args
+                        and isinstance(n.exc.args[0], ast.Constant)):
+                    yield n.exc.args[0].value, n.lineno
+
+    schema = {n for f in ast.walk(tree) if isinstance(f, ast.FunctionDef) and f.name == "_text"
+              for n in ast.walk(f)}
+    found: dict[str, list[int]] = {}
+    for node in ast.walk(tree):
+        if node in schema:
+            continue
+        bodies = []
+        if isinstance(node, ast.If) and reads_limit(node.test):
+            bodies.append(node.body)
+        if isinstance(node, ast.FunctionDef) and node.name == "remaining":
+            bodies.append(node.body)
+        if isinstance(node, ast.Try) and any(
+                isinstance(item, ast.AsyncWith) and any(
+                    "timeout" in ast.unparse(w.context_expr)
+                    and "limits.refresh_seconds" in ast.unparse(w.context_expr)
+                    for w in item.items) for item in node.body):
+            bodies.extend(h.body for h in node.handlers
+                          if h.type is not None and "TimeoutError" in ast.unparse(h.type))
+        for body in bodies:
+            for code, line in raised(body):
+                found.setdefault(code, []).append(line)
+    return found
+
+
+def test_a_code_raised_for_photo_walls_own_limits_is_never_the_librarys():
+    """The reverse of the owner test: a library-owned row must come only from the library's
+    answers. A code raised because one of Photo Wall's own limits was hit (a dimension, pixel,
+    length, byte or time limit) must be Photo Wall's, or the card blames the library for
+    Photo Wall's limit (the `metadata_invalid` / `upstream_timeout` class). Mutation probe:
+    raise `metadata_invalid` for `max_video_seconds` again and this fails."""
+    _require_node()
+    script = r"""
+const words = await import(process.argv[1]);
+console.log(JSON.stringify(Object.fromEntries(
+  Object.entries(words.SOURCE_REFUSALS).map(([code, entry]) => [code, entry.owner]))));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "sourceWords.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    owners = json.loads(result.stdout)
+    tree = ast.parse((SRC.parents[2] / "media/immich.py").read_text())
+    guarded = _limit_guarded_codes(tree)
+    # The harvest sees the limits it must: the item limits and the whole-operation deadline.
+    assert {"item_over_limits", "time_budget", "source_limit"} <= set(guarded), guarded
+    offenders = {code: lines for code, lines in guarded.items() if owners.get(code) == "library"}
+    assert offenders == {}, f"library-owned codes raised for Photo Wall's own limits: {offenders}"
 
 
 def test_no_console_string_says_photo_source_album_or_the_librarys_vendor():

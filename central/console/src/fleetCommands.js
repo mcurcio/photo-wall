@@ -1,5 +1,5 @@
 import { apiWrite } from "./apiWrite.js";
-import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { answerUnknown, CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { clock as localClock, fact, factText, LAYER_NAMES, words } from "./facts.js";
 import { auditRef, frozen } from "./frozenRequest.js";
 import { outputStates } from "./health.js";
@@ -464,8 +464,7 @@ export function rebootResult(result) {
   }
   // Central's own refusals carry its node_/rollout_ codes; anything else at 5xx did not
   // come from the reboot owner (a gateway, a lost response) and its outcome is unknown.
-  const central = typeof code === "string" && /^(node|rollout)_/.test(code);
-  if (result.status >= 500 && !central) {
+  if (answerUnknown(result, (served) => typeof served === "string" && /^(node|rollout)_/.test(served))) {
     return { outcome: "unknown", message: UNKNOWN_MESSAGE, retryable: true };
   }
   if (code === "node_reboot_outstanding") {

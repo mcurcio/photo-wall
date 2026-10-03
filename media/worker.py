@@ -35,7 +35,7 @@ from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore, MediaStoreError
 from central.registry import RegistryError
 from contracts.models import Model, Positive
-from contracts.time import SystemClock
+from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import (
@@ -62,7 +62,7 @@ _FILE_LIMIT = 1024**2
 _RUNTIME_EXITS: Final = frozenset({WORKER_EXITED, COMPLETION_NOT_RECORDED})
 _PERMANENT = frozenset({
     "asset_integrity", "asset_oversize", "unsupported_media", "unsupported_color",
-    "metadata_invalid", "metadata_mismatch", "preparation_limit", "preparation_invalid",
+    "metadata_invalid", "item_over_limits", "metadata_mismatch", "preparation_limit", "preparation_invalid",
     "media_original_mismatch", "media_result_mismatch", "media_journal_invalid",
 })
 
@@ -498,6 +498,17 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime) -> None:
             loop.remove_signal_handler(number)
 
 
+def build_repository(dsn: str, clock: Clock | None = None, *,
+                     queue: ProcrastinateMediaQueue | None = None) -> MediaRepository:
+    """The worker's MediaRepository: the worker entry and `media.healthcheck` both compose here.
+
+    G11: media times on the database's clock in every worker process; `clock` stays for the
+    worker's monotonic budgets and process-local decisions.
+    """
+    return MediaRepository(Database(dsn), clock or SystemClock(),
+                           times=DatabaseTransactionClock(), queue=queue)
+
+
 async def _entry():
     try:
         dsn, connection_file = (os.environ[name] for name in
@@ -509,11 +520,8 @@ async def _entry():
     # env.
     root = cache_layout.media_root()
     clock = SystemClock()
-    db = Database(dsn)
-    queue = ProcrastinateMediaQueue(dsn)
-    # G11: media times on the database's clock in every worker process; `clock` stays
-    # for the worker's monotonic budgets and process-local decisions.
-    repository = MediaRepository(db, clock, times=DatabaseTransactionClock(), queue=queue)
+    repository = build_repository(dsn, clock, queue=ProcrastinateMediaQueue(dsn))
+    db = repository.db
     connections = load_connections(Path(connection_file))
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)

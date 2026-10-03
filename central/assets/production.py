@@ -31,7 +31,7 @@ from central.kernel.handling import (
 )
 from central.kernel.job_types import AssetJob
 from central.kernel.jobs import asset_key
-from central.kernel.ports import AssetRecords
+from central.kernel.ports import THUMBNAIL_UNKNOWN, AssetRecords
 from central.kernel.publishing import ASSET_NOT_RECORDED
 from central.kernel.transactions import Transactions
 
@@ -83,6 +83,12 @@ class AssetProduction:
         key = asset_key(job)
         asset = await asyncio.to_thread(self._get, key)
         if asset is None:
+            if not key.kind.keyed_by_content:
+                # A library thumbnail's record is retired when no live preview selects it, so a
+                # missing record means nobody wants it now. Terminal, never a retry window: every
+                # publisher of this kind sets `retry_terminal` (a new preview or GET is a new ask),
+                # which a transient window would block (PB2) for up to the last retry delay.
+                raise TerminalFailure(THUMBNAIL_UNKNOWN)
             # Transient, as a waiter sees the same condition (PB7): the record is catalog state
             # that a later reference re-creates; a terminal outcome would stick (PB3).
             raise TransientFailure(ASSET_NOT_RECORDED)

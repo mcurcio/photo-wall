@@ -345,7 +345,7 @@ def test_send_again_after_an_unknown_publish_sends_the_identical_body_and_states
         again = page.get_by_role("dialog", name="Send the publish of release v9.0.0 with its app again?")
         expect(again).to_contain_text("Sends the identical request again. Central downloads and verifies less than "
                                       "0.1 GB from GitHub releases again, even if its first download is still running.")
-        again.get_by_role("button", name="Send again", exact=True).click()
+        again.get_by_role("button", name="Send the same request again", exact=True).click()
         expect(again).to_be_hidden()
         assert len(posts) == 2 and posts[0].post_data_json == posts[1].post_data_json
         assert posts[1].url.endswith(f"/v1/operator/node/releases/{manifest}/deployments")

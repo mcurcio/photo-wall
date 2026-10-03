@@ -27,9 +27,9 @@ import {
   selectionConfirmation,
   selectionRequest,
   sendSelection,
-  useHeldPublishes,
   useReleaseRead,
 } from "./releases.js";
+import { useHeldRequests } from "./sendOutcome.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 import { BoundRule } from "./StageApp.jsx";
@@ -191,7 +191,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const control = useNodeControlValue();
   const allowed = nodeReadsAllowed(control);
   const releases = useReleaseRead({ skip: !allowed });
-  const heldPublishes = useHeldPublishes();
+  const heldPublishes = useHeldRequests();
   const heldStage = useHeldStage();
   const { open, confirmation } = useConfirm(null);
   const read = releases.read;

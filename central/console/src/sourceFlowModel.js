@@ -19,7 +19,14 @@
 import { localDayStart } from "./authoring.js";
 import { editedId, flowKeys } from "./flow/instance.js";
 import { namedSource, sourceDay, sourceName } from "./sourceNames.js";
-import { datedWords, favouritesWords, kindsWords, tagWords, UNTAGGED_SELECTION } from "./sourceWords.js";
+import {
+  datedWords,
+  favouritesWords,
+  kindsWords,
+  tagWords,
+  TIMELINE_ONLY,
+  UNTAGGED_SELECTION,
+} from "./sourceWords.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -303,12 +310,12 @@ export function sourceAnswers(draft, rule = null, tagPaths = {}) {
 }
 
 /** How Review says no tags: the Source takes everything the other criteria allow. */
-export const NO_TAGS = `No tags: ${UNTAGGED_SELECTION}`;
+export const NO_TAGS = `No tags: ${UNTAGGED_SELECTION} ${TIMELINE_ONLY}`;
 
 /**
  * What a Source selects, in words (§39 selection summary, a `set` fact: the Source's own
  * spec): "Selects media tagged Family/Christmas (and nested tags) · favourites only ·
- * photos and videos · dated 3 Mar 2025 to 5 Mar 2025". Its pieces live in sourceWords.js,
+ * photos and videos · dated 3 Mar 2025 to 5 Mar 2025 · on your library's timeline only (…)". Its pieces live in sourceWords.js,
  * the one home `sourceState` shares, so both say "dated", never "taken".
  *
  * @param {{tags?: string[], media_types?: string[], favorites?: boolean|null,
@@ -327,6 +334,7 @@ export function selectionWords(query, tagPaths = {}) {
     favouritesWords(query?.favorites),
     kindsWords(query?.media_types),
     datedWords(query?.captured_from, query?.captured_until),
+    TIMELINE_ONLY, // every Source, tagged or not
   ].filter((part) => part !== null).join(" · ");
 }
 

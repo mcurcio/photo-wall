@@ -421,7 +421,7 @@ def test_needs_attention_links_each_frame_to_the_facet_showing_its_cause(page, r
         _expect_on(page, "attention")
 
         entries = visible_page(page).get_by_role("list", name="Frames and Players needing attention")
-        entry = "silent — Player silent · last heard 4 min ago"
+        entry = "silent — Player app silent · last reported 4 min ago"
         expect(entries.get_by_role("link")).to_have_text([entry])
         expect(entries.get_by_role("link", name=entry)).to_have_attribute(
             "href", "#/wall/frames/silent/binding")

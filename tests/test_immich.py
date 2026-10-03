@@ -216,13 +216,30 @@ def test_qualified_video_duration_is_normalized_and_rechecked_on_download(tmp_pa
 @pytest.mark.parametrize("version,duration", [
     ((2, 5, 6), 10_250), ((3, 1, 0), "0:00:10.250"),
     ((3, 1, 0), None), ((3, 1, 0), True), ((3, 1, 0), 10.25),
-    ((3, 1, 0), 0), ((3, 1, 0), -1), ((3, 1, 0), 300_001),
+    ((3, 1, 0), 0), ((3, 1, 0), -1),
 ])
 def test_video_duration_rejects_wrong_version_shape_and_out_of_bounds(version, duration):
     upstream = Upstream([asset(kind="VIDEO", duration=duration)], version=version)
     result = refresh(upstream, source(media_types=("video",)))
     assert_failed(result, "incompatible", "metadata_pending_or_invalid")
     assert "metadata_invalid" in codes(result)
+
+
+@pytest.mark.parametrize("kind,changes", [
+    ("VIDEO", {"duration": "0:05:00.001"}),  # over max_video_seconds (300 s)
+    ("IMAGE", {"exifInfo": {"exifImageWidth": 16385, "exifImageHeight": 10, "orientation": "1",
+                            "fileSizeInByte": len(ORIGINAL)}}),  # over max_dimension
+    ("IMAGE", {"exifInfo": {"exifImageWidth": 16000, "exifImageHeight": 16000, "orientation": "1",
+                            "fileSizeInByte": len(ORIGINAL)}}),  # over max_pixels
+])
+def test_a_well_formed_item_over_photo_walls_limits_is_its_own_code(kind, changes):
+    """Photo Wall's limits are its own refusal (`item_over_limits`), never `metadata_invalid`,
+    which says the library's answer was malformed (console DDD §39 R21)."""
+    upstream = Upstream([asset(kind=kind, **changes)])
+    media_types = ("video",) if kind == "VIDEO" else ("image",)
+    result = refresh(upstream, source(media_types=media_types))
+    assert_failed(result, "incompatible", "metadata_pending_or_invalid")
+    assert "item_over_limits" in codes(result) and "metadata_invalid" not in codes(result)
 
 
 def test_empty_discovery_is_success_but_missing_exif_is_pending():
@@ -502,16 +519,18 @@ def test_pending_diagnostics_are_bounded_without_losing_counts_or_summary():
     assert len(result.diagnostics) <= 3
 
 
-@pytest.mark.parametrize("bounds,advance", [
-    ({"metadata_seconds": 2, "refresh_seconds": 60}, 3),
-    ({"metadata_seconds": 15, "refresh_seconds": 10}, 6),
+@pytest.mark.parametrize("bounds,advance,code", [
+    # One request over its own deadline: the library answered too slowly.
+    ({"metadata_seconds": 2, "refresh_seconds": 60}, 3, "upstream_timeout"),
+    # The whole refresh over Photo Wall's own time limit: never worded as the library's.
+    ({"metadata_seconds": 15, "refresh_seconds": 10}, 6, "time_budget"),
 ])
-def test_metadata_and_aggregate_deadlines_use_injected_monotonic_clock(bounds, advance):
+def test_metadata_and_aggregate_deadlines_use_injected_monotonic_clock(bounds, advance, code):
     upstream = Upstream([asset()])
     clock = ManualClock(NOW)
     upstream.on_request = lambda request: clock.advance(advance) if "/search/" in request.url.path else None
     result = refresh(upstream, limits=MediaLimits(**bounds), clock=clock)
-    assert_failed(result, "unavailable")
+    assert_failed(result, "unavailable", code)
 
 
 @pytest.mark.parametrize("fault", ["initial_monotonic", "backward_monotonic", "later_utc"])

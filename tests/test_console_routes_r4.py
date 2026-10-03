@@ -62,7 +62,8 @@ CALIBRATION_ROUTE = "}/calibration"
 SHARED_WITH_SHOW = {
     "ConfirmAction.jsx",  # every confirmation
     "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Status facet and the Now page's Why
-    "equipmentApi.js",  # UNKNOWN_MESSAGE and the equipment reads
+    "equipmentApi.js",  # the equipment reads and writes
+    "sendOutcome.js",  # the one outcome pattern: UNKNOWN_MESSAGE, CHANGED_MESSAGE, held requests
     "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
     "framesApi.js",
     "projection.js",

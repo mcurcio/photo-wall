@@ -247,9 +247,11 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
         expect(card).to_contain_text("No successful refresh")
-        expect(card).to_contain_text("Your photo library is unsupported · never refreshed successfully")
+        # The supported-version list is Photo Wall's, so its Status names Photo Wall's release.
         expect(card).to_contain_text(
-            "This Photo Wall release does not support your photo library's version.")
+            "This Photo Wall release doesn't support your photo library's version · check the supported "
+            "versions · never refreshed successfully")
+        expect(card).not_to_contain_text("Your photo library is unsupported")
         expect(card).not_to_contain_text("Awaiting refresh")
 
 
@@ -299,16 +301,19 @@ def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_det
         go(page, "sources")
         mixed = _sources(page).get_by_role("article", name="mixed")
         expect(mixed.get_by_text(
-            "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+            "Your photo library last reported 1 min ago · the media worker accepted 3 in that refresh"
+            " · 3 items pending or rejected"
         )).to_be_visible()
         expect(mixed.get_by_text(
-            "Refresh succeeded with 3 items pending or rejected: metadata invalid · "
-            "metadata pending or changed. Usable items remain available."
+            "Refresh succeeded with 3 items pending or rejected: Your photo library sent an item "
+            "Photo Wall can't read · Your photo library's item details are still settling. Usable "
+            "items remain available."
         )).to_be_visible()
         clean = _sources(page).get_by_role("article", name="clean")
+        # The ok card states its refresh once, as Status (sourceWords.js `refreshFact`).
         expect(clean.get_by_text(
-            "refreshed 1 min ago · 3 valid in the last refresh"
-        )).to_be_visible()
+            "Your photo library last reported 1 min ago · the media worker accepted 3 in that refresh",
+            exact=True)).to_have_count(1)
         expect(clean.get_by_text("Partial refresh")).to_have_count(0)
         expect(mixed).not_to_contain_text("asset-safe-id")
 
@@ -496,6 +501,21 @@ def test_a_failure_with_no_earlier_answer_reads_unknown_never_nothing_matches(pa
             "Unknown: Photo Wall can't reach your photo library right now; retrying", timeout=ANSWER_WAIT)
         expect(status.locator(".fact--unknown")).to_have_count(1)
         expect(status).not_to_contain_text(NOTHING_MATCHES)
+
+
+def test_a_stopped_worker_retries_in_its_own_words_never_as_the_library_unreachable(page, registry):
+    """`preview_expired` is written by Central when no worker answered: the preview retries,
+    naming the media worker, never "can't reach your photo library" (one table, one owner)."""
+    _enable_preview_connection(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "sources")
+        _Library(page, answers={"preview-1": _failed("preview-1", "preview_expired")})
+        start_source(page)
+        status = _panel(page).get_by_role("status")
+        expect(status).to_have_text(
+            "Unknown: The media worker hasn't answered this preview · check that it is running · retrying",
+            timeout=ANSWER_WAIT)
+        expect(status).not_to_contain_text("can't reach your photo library")
 
 
 def test_a_key_the_library_refuses_says_which_permissions_to_add(page, registry):

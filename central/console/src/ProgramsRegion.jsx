@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { apiWrite } from "./apiWrite.js";
 import { draftId, planWindows } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { useProblems } from "./Field.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { editKey, editedId } from "./flow/instance.js";

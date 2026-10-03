@@ -248,6 +248,12 @@ def _thumbnail_jobs(db):
                             "'%%library_thumbnail.fetch' AND status='todo'").fetchone()["n"]
 
 
+def _drop_thumbnail_jobs(db):
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM procrastinate_jobs WHERE task_name LIKE "
+                     "'%%library_thumbnail.fetch' AND status='todo'")
+
+
 def _thumbnail_records(db):
     with db.transaction() as conn:
         return {row["identity"] for row in conn.execute(
@@ -388,18 +394,48 @@ def test_a_purged_then_regenerated_thumbnail_serves_again_and_is_not_refetched(r
             for stale in previews.iterdir():  # the purge
                 stale.unlink()
             assert asyncio.run(runtime._executor.execute(job, 0)) == "ok"
-            jobs = _thumbnail_jobs(registry.db)
+            # The prefetch's queued job was run directly above; drop it so any publish by a
+            # GET below shows up as a new queued job (a merge into it would hide one).
+            _drop_thumbnail_jobs(registry.db)
             served = [client.get(_url(member.asset_id), headers=AUTH) for _ in range(3)]
             assert [response.status_code for response in served] == [200, 200, 200]
             with Image.open(io.BytesIO(served[0].content)) as image:
                 assert image.convert("RGB").getpixel((10, 10))[colour.index(200)] > 150
-            assert _thumbnail_jobs(registry.db) == jobs  # hits: nothing re-fetched
+            assert _thumbnail_jobs(registry.db) == 0  # hits: nothing published
             # A repeated preview keeps the record past the first one's expiry.
             registry.clock.advance(500)
             _complete(repo, member)
             registry.clock.advance(200)
             assert member.asset_id in repo.maintain_source_previews()
     assert origin.calls == 3
+
+
+def test_a_fetch_for_a_retired_record_never_blocks_the_next_preview(route, registry):
+    """A tile job that runs after its preview expired and maintenance retired the record is
+    terminal `thumbnail_unknown`, never a transient retry window: the next preview's prefetch
+    is a new ask (`retry_terminal`), which a window would silently drop (PB2), leaving the
+    GET refused `thumbnail_asset_not_recorded` for up to the last retry delay. Mutation probe:
+    make the missing record transient again in `AssetProduction.produce` and the prefetch
+    below queues nothing."""
+    app, root = route
+    repo, member = app.state.media_repository, stored_member(11)
+    runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
+                                thumbnails=FakeOrigin())
+    thumbnails = build_library_thumbnails(registry.db, registry.clock, cache_root=root)
+    job = FetchLibraryThumbnail(asset_id=member.asset_id)
+    _complete(repo, member)
+    asyncio.run(thumbnails.prefetch([member.asset_id]))
+    registry.clock.advance(700)  # the preview expires before its tile job runs
+    assert member.asset_id not in repo.maintain_source_previews()  # the record is retired
+    assert asyncio.run(runtime._executor.execute(job, 0)) == "terminal"
+    _drop_thumbnail_jobs(registry.db)
+    _complete(repo, member)  # a new preview selects the same item
+    asyncio.run(thumbnails.prefetch([member.asset_id]))
+    assert _thumbnail_jobs(registry.db) == 1  # the new ask is queued at once
+    assert asyncio.run(runtime._executor.execute(job, 0)) == "ok"
+    with TestClient(app) as client:
+        served = client.get(_url(member.asset_id), headers=AUTH)
+    assert served.status_code == 200 and served.headers["content-type"] == "image/jpeg"
 
 
 @pytest.mark.parametrize("asset_id", ["asset-" + "e" * 64, "not-an-asset", "asset-" + "E" * 64])

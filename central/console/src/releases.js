@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { answerUnknown, RESEND_LABEL, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { fact, words } from "./facts.js";
 import { auditRef, frozen } from "./frozenRequest.js";
 import { gigabytes } from "./health.js";
@@ -44,13 +44,12 @@ import { usePolledRead } from "./polledRead.js";
  * @typedef {{outcome: "done"|"already"|"changed"|"refused"|"unknown", message: string, code?: string|null}} Outcome
  *   `code`: Central's served error code (null on success, a lost answer or a refusal before any
  *   request), so a caller that branches on a refusal keys on it, never on the words (§26)
- * @typedef {"in_flight"|"recorded"|"unknown"} HeldState
+ * @typedef {import("./sendOutcome.js").HeldState} HeldState
  *   a publish this page holds: sent and unanswered; answered published, not listed yet; or
  *   its answer lost (Central may still be verifying)
- * @typedef {{get: (deploymentId: string) => HeldState|null,
- *            frozen: (deploymentId: string) => object|null,
- *            set: (deploymentId: string, state: HeldState|null, request?: object) => void}} HeldPublishes
- *   `frozen` is the request this page sent for the id, so "Send again" re-sends that body
+ * @typedef {import("./sendOutcome.js").HeldRequests} HeldPublishes
+ *   the publishes one page holds by deployment id (sendOutcome.js `useHeldRequests`); `frozen`
+ *   is the request this page sent for the id, so a re-send sends that body
  * @typedef {{get: () => boolean, set: (held: boolean) => void}} HeldCheck
  *   whether this page holds an unanswered "Check GitHub releases now"
  */
@@ -81,27 +80,6 @@ export function useReleaseRead({ skip = false } = {}) {
   const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, skip, initial: NOT_READ });
   const startedReads = useCallback(() => started.current, []);
   return useMemo(() => ({ ...value, busy, refresh, latest, startedReads }), [value, busy, refresh, latest, startedReads]);
-}
-
-/**
- * The publishes one page holds (`HeldPublishes`): a ref, so a send marks its request held in
- * the same step as its check, and a render after each change. Releases and Update the wall
- * each hold their own.
- *
- * @returns {HeldPublishes}
- */
-export function useHeldPublishes() {
-  const heldRef = useRef(/** @type {Map<string, {state: HeldState, request: object|null}>} */ (new Map()));
-  const [, setVersion] = useState(0);
-  return useMemo(() => ({
-    get: (id) => heldRef.current.get(id)?.state ?? null,
-    frozen: (id) => heldRef.current.get(id)?.request ?? null,
-    set: (id, state, request = null) => {
-      if (state === null) heldRef.current.delete(id);
-      else heldRef.current.set(id, { state, request });
-      setVersion((version) => version + 1);
-    },
-  }), []);
 }
 
 // --- Identity and contents.
@@ -273,7 +251,10 @@ const CHECK_CODES = Object.freeze({});
  * @returns {Outcome}
  */
 export function releaseResult(result, done, codes) {
-  if (result == null) return { outcome: "unknown", message: UNKNOWN_MESSAGE, code: null };
+  // Any served code at 5xx is Central's own refusal (§26 re-maps codes onto statuses).
+  if (answerUnknown(result, (code) => typeof code === "string" && code !== "")) {
+    return { outcome: "unknown", message: UNKNOWN_MESSAGE, code: null };
+  }
   if (result.ok) {
     return result.data?.duplicate === true
       ? { outcome: "already", message: `Already recorded. ${done(result.data)}`, code: null }
@@ -281,8 +262,7 @@ export function releaseResult(result, done, codes) {
   }
   const code = result.error;
   if (typeof code !== "string" || code === "") {
-    return result.status >= 500 ? { outcome: "unknown", message: UNKNOWN_MESSAGE, code: null }
-      : { outcome: "refused", message: `Central refused: ${result.status}.`, code: null };
+    return { outcome: "refused", message: `Central refused: ${result.status}.`, code: null };
   }
   const known = Object.hasOwn(codes, code) ? codes[code] : undefined;
   return known === undefined ? { outcome: "refused", message: `Central refused: ${code}.`, code }
@@ -460,7 +440,7 @@ export const PUBLISH_HELD_WORDS = Object.freeze({
 });
 
 /**
- * What "Send again" says before it re-sends a publish whose answer was lost (§27): the same
+ * What the re-send (RESEND_LABEL) says before it re-sends a publish whose answer was lost (§27): the same
  * body, and the whole download again.
  *
  * @param {object} request the frozen publish this page holds
@@ -470,7 +450,7 @@ export const sendAgainWords = (request) => "Sends the identical request again. C
   + `${request.size} from GitHub releases again, even if its first download is still running.`;
 
 /**
- * The Publish confirmation (§26, §27), first send or "Send again": its words and its run, the
+ * The Publish confirmation (§26, §27), first send or its re-send (RESEND_LABEL): its words and its run, the
  * one home both Releases and Update the wall render, so the verb's words cannot drift between
  * its pages. `lines` are the body's paragraphs; a page may add its own detail below them.
  *
@@ -490,7 +470,7 @@ export function publishConfirmation(request, again, { releases, held }) {
       again ? sendAgainWords(request) : `Central downloads and verifies ${request.size} from GitHub releases before it answers.`,
       request.permanence,
     ],
-    confirmLabel: again ? "Send again" : "Publish",
+    confirmLabel: again ? RESEND_LABEL : "Publish",
     progress: `Central is downloading and verifying ${request.size} from GitHub releases. Keep this page open.`,
     run: async () => {
       const outcome = await sendPublish(request, releases, held, { again });
@@ -505,7 +485,7 @@ export function publishConfirmation(request, again, { releases, held }) {
  * page's held requests, mark it held in the same step (so nothing on this page can send it
  * again while it is held), then POST with the long budget. The held state follows the answer:
  * recorded until a read lists the deployment, unknown when the answer was lost, released when
- * Central refused. `again` is the explicit "Send again" of a publish held unknown: it sends
+ * Central refused. `again` is the explicit re-send (RESEND_LABEL) of a publish held unknown: it sends
  * only the very request this page holds for the id (`held.frozen`), never a new body.
  *
  * @param {object} request `publishRequest`'s frozen request, or, with `again`, `held.frozen(id)`

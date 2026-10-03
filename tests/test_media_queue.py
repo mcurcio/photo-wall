@@ -20,6 +20,8 @@ from central.media_repository import StoreLimits
 from media.task_queue import (
     MAINTENANCE_CRON,
     REFRESH_CRON,
+    WORKER_CHECK_IN_SECONDS,
+    WORKER_FRESH_SECONDS,
     MediaRetryStrategy,
     RetryableMediaTask,
     create_worker_app,
@@ -205,3 +207,16 @@ def test_the_console_media_thresholds_follow_the_worker_schedule():
     assert int(pinned["SOURCE_REFRESH_SECONDS"]) == _every_seconds(REFRESH_CRON)
     assert int(pinned["SOURCE_REFRESH_SECONDS"]) == StoreLimits().refresh_seconds
     assert int(pinned["REFRESH_RUN_SECONDS"]) == WorkerLimits().refresh_seconds
+
+
+def test_the_worker_healthcheck_window_is_the_console_worker_quiet_window():
+    # HC-2: one cadence (boot + maintenance), one window; Python and the console cannot disagree.
+    source = (Path(__file__).parents[1] / "central/console/src/mediaHealth.js").read_text()
+    pinned = dict(re.findall(r"^export const ([A-Z_]+_SECONDS) = (\d+);$", source, re.MULTILINE))
+    assert WORKER_CHECK_IN_SECONDS == _every_seconds(MAINTENANCE_CRON)
+    assert int(pinned["WORKER_CHECK_IN_SECONDS"]) == WORKER_CHECK_IN_SECONDS
+    quiet = re.search(r"^export const WORKER_QUIET_AFTER = (\d+) \* WORKER_CHECK_IN_SECONDS \+ (\d+);$",
+                      source, re.MULTILINE)
+    assert quiet, "WORKER_QUIET_AFTER is no longer `a * WORKER_CHECK_IN_SECONDS + b`"
+    assert int(quiet[1]) * int(pinned["WORKER_CHECK_IN_SECONDS"]) + int(quiet[2]) == WORKER_FRESH_SECONDS
+    assert WORKER_FRESH_SECONDS == 660

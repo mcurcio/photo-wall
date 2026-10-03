@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 from central.kernel.handling import OriginUnavailable, TerminalFailure
+from central.kernel.ports import THUMBNAIL_UNKNOWN
 from central.media_repository import ServableThumbnail
 from media.models import ConnectionConfig, MediaError
 
@@ -50,7 +51,7 @@ class LibraryThumbnailOrigin:
     async def thumbnail(self, asset_id: str, into: Path) -> None:
         servable = await asyncio.to_thread(self._servable, asset_id)
         if servable is None:  # no live preview selects it any more: a request may ask again
-            raise TerminalFailure("thumbnail_unknown")
+            raise TerminalFailure(THUMBNAIL_UNKNOWN)
         config = self._connections.get(servable.connection_ref)
         if config is None:
             raise TerminalFailure("connection_unknown")

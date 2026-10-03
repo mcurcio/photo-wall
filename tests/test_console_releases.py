@@ -457,3 +457,42 @@ def test_check_github_releases_now_sends_one_post_while_unanswered_and_never_cla
 
 def test_send_catalog_check_is_the_only_caller_of_the_release_refresh_route():
     _only_caller(r"/app/releases/refresh[`'\"]", "sendCatalogCheck", "if (held.get())")
+
+
+def test_one_rule_says_when_an_answer_leaves_the_outcome_unknown():
+    """sendOutcome.js `answerUnknown` is the one 5xx rule; each verb names only which served
+    codes are its owner's own refusals: none for the equipment writes, `node_`/`rollout_` for
+    Reboot, any code for Publish. Mutation probe: make `answerUnknown` ignore `centralRefusal`
+    and the Reboot and Publish rows fail."""
+    _require_node()
+    script = r"""
+const outcome = await import(process.argv[1]);
+const equipment = await import(process.argv[2]);
+const fleet = await import(process.argv[3]);
+const releases = await import(process.argv[4]);
+const gateway = { ok: false, status: 502, error: null, data: null };
+const coded = (error) => ({ ok: false, status: 503, error, data: null });
+console.log(JSON.stringify({
+  none: outcome.answerUnknown(null),
+  gateway: outcome.answerUnknown(gateway),
+  ok: outcome.answerUnknown({ ok: true, status: 200 }),
+  refused: outcome.answerUnknown({ ok: false, status: 409, error: "x" }),
+  reboot: [fleet.rebootResult(coded("node_reboot_outstanding")).outcome, fleet.rebootResult(coded("other")).outcome,
+           fleet.rebootResult(gateway).outcome],
+  publish: [releases.releaseResult(coded("release_unavailable"), () => "", {}).outcome,
+            releases.releaseResult(gateway, () => "", {}).outcome, releases.releaseResult(null, () => "", {}).outcome],
+  shared: [fleet.rebootResult(gateway).message === outcome.UNKNOWN_MESSAGE,
+           releases.releaseResult(gateway, () => "", {}).message === outcome.UNKNOWN_MESSAGE,
+           !("UNKNOWN_MESSAGE" in equipment)],
+}));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--",
+         *[(SRC / name).as_uri() for name in ("sendOutcome.js", "equipmentApi.js", "fleetCommands.js",
+                                              "releases.js")]],
+        capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+    assert (out["none"], out["gateway"], out["ok"], out["refused"]) == (True, True, False, False)
+    assert out["reboot"] == ["changed", "unknown", "unknown"]
+    assert out["publish"] == ["refused", "unknown", "unknown"]
+    assert out["shared"] == [True, True, True]  # one home for the words, not the equipment module

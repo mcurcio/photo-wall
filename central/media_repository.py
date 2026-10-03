@@ -958,6 +958,23 @@ class MediaRepository:
         with self.transaction() as conn:
             return self.health_in(conn)
 
+    def worker_age(self) -> float | None:
+        """Seconds since the last worker check-in, or None before the first (the healthcheck).
+
+        A plain read: no settings-row insert and no media lock, so a probe never queues
+        behind the writer.
+        """
+        with self.db.transaction() as conn:
+            return self.worker_age_in(conn)
+
+    def worker_age_in(self, conn) -> float | None:
+        """The check-in's age on `times` (G11): `worker_seen` and the read time come from
+        one clock in one transaction, never from the probing process's clock."""
+        row = conn.execute("SELECT worker_seen FROM media_settings WHERE singleton").fetchone()
+        if row is None or row["worker_seen"] is None:
+            return None
+        return self.times.now_in(conn) - row["worker_seen"]
+
     def media_read(self) -> dict:
         """`GET /v1/operator/media`: Sources, health and their `read_at` in one transaction."""
         with self.transaction() as conn:

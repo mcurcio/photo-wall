@@ -208,7 +208,10 @@ def test_the_planned_fact_origins_and_zoned_times():
 DISPLAY_FORMATTERS = re.compile(r"toLocaleTimeString|toLocaleString|toLocaleDateString|Intl\.DateTimeFormat")
 RETIRED_WORDS = ("Scheduled:", "Intended scene", "Now showing", "Central's plan",
                  "Why each frame shows what it does", "meant to show", "No Scene is intended",
-                 "No contributions target")
+                 "No contributions target",
+                 # Liveness names its layer, the Player app, in its one `reported` wording
+                 # (health.js `livenessFact`): never "Player silent" or "last heard".
+                 "Player silent", "last heard", "Last heard")
 
 
 def _console_modules():
@@ -223,6 +226,22 @@ def test_only_time_words_formats_an_instant_for_display():
                        if path.name != "timeWords.js" and DISPLAY_FORMATTERS.search(path.read_text()))
     assert offenders == [], f"{offenders} format clock times themselves; use timeWords.js"
     assert DISPLAY_FORMATTERS.search((SRC / "timeWords.js").read_text())
+
+
+# Modules whose Date.now() compares only with another Date.now() of the same browser.
+_OWN_CLOCK_ONLY = {"useSnapshot.js",  # the snapshot's arrival age: both ends are this browser's
+                   "authoring.js"}    # a request id's entropy, never compared with anything
+
+
+def test_the_browser_clock_is_never_compared_with_a_served_time():
+    """R10: clocks compare only to themselves. A served absolute time (Central's, a node's)
+    is aged only against a served read time on the same clock; a browser counts a served
+    duration on its own monotonic clock (useCalibration.js `lease_seconds`). Date.now() is
+    allowed only where both ends are the browser's own. Mutation probe: restore
+    `expiresAt - Date.now() / 1000` in useCalibration.js and this fails."""
+    offenders = sorted(str(path.relative_to(SRC)) for path in _console_modules()
+                       if path.name not in _OWN_CLOCK_ONLY and "Date.now()" in path.read_text())
+    assert offenders == [], f"{offenders} read the browser's clock; see R10"
 
 
 def test_no_console_string_uses_the_retired_show_words():

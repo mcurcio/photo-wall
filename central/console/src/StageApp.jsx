@@ -3,6 +3,7 @@ import React, { useId, useRef, useState } from "react";
 import { useNodeControlValue } from "./nodeControl.js";
 import { useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
+import { RESEND_LABEL } from "./sendOutcome.js";
 import {
   boundFrames,
   boundRuleLines,
@@ -119,7 +120,7 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
         {(phase === "idle" || result?.outcome === "unknown") && (
           <button type="button" className="confirm__confirm" onClick={send}
             disabled={phase === "in-flight" || request === null || refusal !== null}>
-            {again ? "Send the same request again" : "Stage app"}
+            {again ? RESEND_LABEL : "Stage app"}
           </button>
         )}
         <button ref={cancelRef} type="button" onClick={close} disabled={phase === "in-flight"}>

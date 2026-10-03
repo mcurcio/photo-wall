@@ -7,6 +7,7 @@ The DB tests skew each process's clock by an hour and compose `DatabaseTransacti
 
 import ast
 import inspect
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from central.app import create_app
 from central.db import DatabaseTransactionClock, ProcessTransactionClock
 from central.media_repository import MediaRepository
 from contracts.time import ManualClock
+from media import healthcheck
 from media.models import SourcePreview, SourcePreviewQuery, SourcePreviewResult, SourceSpec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +28,7 @@ HOUR = 3600
 # The modules that write or compare media times (G11 inventory).
 MEDIA_MODULES = ("central/media_repository.py", "central/media_store.py", "central/app.py",
                  "central/coordination.py", "central/operator_snapshot.py", "media/worker.py",
-                 "media/immich.py")
+                 "media/immich.py", "media/healthcheck.py")
 
 
 def _db_now(registry) -> float:
@@ -176,3 +178,31 @@ def test_operator_reads_serve_media_read_at_on_the_database_clock(registry):
     assert before <= snapshot["media"]["read_at"] <= after
     assert before <= media["read_at"] <= after
     assert snapshot["read_at"] == registry.clock.utc()  # fleet reads stay on Central's clock (R-clock)
+
+
+# The worker container's healthcheck (`python -m media.healthcheck`, compose.yaml).
+
+def test_the_worker_healthcheck_ages_the_check_in_on_the_database_clock(registry, monkeypatch):
+    monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", registry.db.dsn)
+    assert healthcheck.main() == 1  # no check-in yet
+    _central, worker = _processes(registry)
+    worker.worker_status(None, ("fixture",))
+    assert healthcheck.main() == 0
+    # The probing process's clock is never read: an hour (or decades) of skew changes nothing.
+    for skew in (-HOUR, HOUR, -10**9):
+        monkeypatch.setattr(time, "time", lambda skew=skew: _db_now(registry) + skew)
+        assert healthcheck.main() == 0, skew
+    monkeypatch.undo()
+    monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", registry.db.dsn)
+    # A check-in older than WORKER_FRESH_SECONDS by the database's clock is unhealthy.
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE media_settings SET worker_seen=worker_seen-%s WHERE singleton",
+                     (healthcheck.WORKER_FRESH_SECONDS + 1,))
+    assert healthcheck.main() == 1
+
+
+def test_the_worker_healthcheck_fails_closed_without_a_reachable_database(monkeypatch):
+    monkeypatch.delenv("PHOTO_WALL_DATABASE_URL", raising=False)
+    assert healthcheck.main() == 1
+    monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", "postgresql://nobody:x@127.0.0.1:1/none")
+    assert healthcheck.main() == 1

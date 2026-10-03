@@ -15,6 +15,7 @@ import {
 import { useNodeControlValue } from "./nodeControl.js";
 import { nodeUnknown } from "./nodeRead.js";
 import { formatRoute } from "./routes.js";
+import { RESEND_LABEL } from "./sendOutcome.js";
 import { useSendDialog } from "./useSendDialog.js";
 
 const tail = (id) => `…${String(id).slice(-6)}`;
@@ -37,7 +38,7 @@ function StateEntry({ state, children }) {
 /**
  * The reboot dialog (§10, §11 "Reboot dialog home"): the fleet module's own, so the
  * shared ConfirmAction is not widened. It shows and sends ONE frozen request
- * (fleetCommands.js `rebootRequest`); "Retry the same request" re-sends that body
+ * (fleetCommands.js `rebootRequest`); RESEND_LABEL (sendOutcome.js) re-sends that body
  * unchanged. Esc and Cancel are blocked while a send is in flight (useSendDialog.js). Send is disabled by
  * `rebootRefusal` on the read on screen; the send itself is judged again by `sendReboot` on
  * the hooks' newest reads (§10), so the dialog never decides which read counts. The effect
@@ -101,7 +102,7 @@ function RebootDialog({ deviceId, name, request, retry, node, control, onSent, o
         {(phase !== "terminal" || result?.retryable) && (
           <button type="button" className="confirm__confirm" onClick={send}
             disabled={phase === "in-flight" || stale !== null}>
-            {retry || phase === "terminal" ? "Retry the same request" : "Reboot Player"}
+            {retry || phase === "terminal" ? RESEND_LABEL : "Reboot Player"}
           </button>
         )}
         <button ref={cancelRef} type="button" onClick={close} disabled={phase === "in-flight"}>
@@ -180,7 +181,7 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
         )}
         <button ref={openerRef} type="button" disabled={blocked !== null} onClick={open}
           aria-describedby={blocked !== null ? reasonId : undefined}>
-          {retryHeld ? "Retry reboot request" : "Reboot Player"}
+          {retryHeld ? "Send the reboot request again" : "Reboot Player"}
         </button>
         {blocked !== null && (
           <p id={reasonId} className="roster__note">

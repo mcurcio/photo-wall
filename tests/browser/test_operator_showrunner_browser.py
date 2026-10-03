@@ -207,7 +207,7 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         # The wall's labels, read first so the show layer can be held to them.
-        valid_label = "Last heard 3 s ago"
+        valid_label = "Player app last reported 3 s ago"
         invalid_label = "Needs calibration"
         expect(tile_health(page, VALID_FRAME)).to_have_accessible_name(valid_label)
         expect(tile_health(page, INVALID_FRAME)).to_have_accessible_name(invalid_label)
@@ -2090,8 +2090,8 @@ def test_the_media_pipeline_states_each_source(page, registry):
             return pipeline.get_by_label(f"Refresh of {ref.rsplit(':', 1)[0]}", exact=True)
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
         expect(state("fresh:1")).to_contain_text(
-            "refreshed 1 min ago · 790 valid in the last refresh · 10 items pending or rejected"
-            " · favourites only · photos only · dated 2024")
+            "Your photo library last reported 1 min ago · the media worker accepted 790 in that refresh"
+            " · 10 items pending or rejected · favourites only · photos only · dated 2024")
         expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
         expect(state("failing:1")).to_contain_text("Your photo library is unreachable · last good refresh 2 h ago")
         expect(state("failing:1")).to_contain_text("upstream unavailable")
@@ -2126,7 +2126,7 @@ def test_the_media_pipeline_states_each_worker_state(page, registry):
         registry.clock.advance(20)
         page.clock.run_for(5000)
         expect(worker).to_have_text(re.compile(
-            r"^checked in 20 s ago · preparing 0 · waiting 0 · failed 0 · cache 0 of 4\.3 GB$"))
+            r"^Media worker last reported 20 s ago · preparing 0 · waiting 0 · failed 0 · cache 0 of 4\.3 GB$"))
         expect(worker).to_have_class(re.compile(r"\bhealth--ok\b"))
 
         registry.clock.advance(2 * 300 + 60 - 20 + 1)
@@ -2155,7 +2155,7 @@ def test_media_ages_are_taken_against_the_media_read_time_not_the_inventory_read
         page.route("**/v1/operator/snapshot", skewed)
         page.clock.run_for(5000)
         worker = _pipeline(page).get_by_label("Media worker", exact=True)
-        expect(worker).to_have_text(re.compile(r"^checked in 30 s ago · "))
+        expect(worker).to_have_text(re.compile(r"^Media worker last reported 30 s ago · "))
         expect(worker).to_have_class(re.compile(r"\bhealth--ok\b"))
 
 
@@ -2237,7 +2237,8 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
         connect(page, origin, "now", paused_at=now)
         chain = _why_chain(page)
         expect(chain).to_contain_text(
-            "The Source holiday: refreshed 0 s ago · 3 valid in the last refresh.")
+            "The Source holiday: Your photo library last reported 0 s ago · the media worker accepted 3 "
+            "in that refresh.")
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
             "Check this frame Nothing usable yet: 2 still preparing.")

@@ -371,8 +371,9 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
 # to committed once preview_expires <= clock.utc()), never by a wall-clock wait.
 #
 # HIGH-RISK concurrency invariants proven here: both tokens ride every op (a stale
-# commit 409s, never silently succeeds); the countdown is the server's expires_at
-# (advancing the server clock past it does NOT tick the client countdown to zero —
+# commit 409s, never silently succeeds); the countdown is the server's lease duration,
+# counted on the browser's own clock (advancing the server clock past it does NOT tick the
+# client countdown to zero —
 # only the poll flips the panel to expired); a refresh never clobbers Plane B
 # (Re-preview reuses the retained trying values).
 
@@ -380,11 +381,10 @@ def test_calibration_draft_survives_snapshot_refresh(page, registry):
 def _sync_clock(registry):
     """Advance the fixture's ManualClock (starts at 1000) to real wall time.
 
-    The lease countdown displays `expires_at - Date.now()` (design §6b): with the
-    server clock parked at 1000 the browser's real-time clock would read the lease
-    as long expired. Syncing to time.time() (the same wall clock the browser reads)
-    makes the countdown honest (~30s) while leaving the deterministic
-    `clock.advance(31)` expiry mechanism intact.
+    The lease countdown counts the served `lease_seconds` on the browser's own clock
+    (R10), so it no longer depends on this; the sync keeps the server's times near real
+    time for the rest of the page while leaving the deterministic `clock.advance(31)`
+    expiry mechanism intact.
     """
     delta = time.time() - registry.clock.utc()
     if delta > 0:
@@ -399,7 +399,7 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
     """Preview holds the lease and shows a visible, server-driven countdown.
 
     Status is "previewing" (the countdown timer is present) and the countdown is
-    derived from the server's expires_at (= now + 30), not a hardcoded per-tab
+    derived from the server's lease (`lease_seconds` = 30), not a hardcoded per-tab
     timer.
     """
     _seed(registry)
@@ -421,7 +421,8 @@ def test_calibration_preview_shows_server_lease_countdown(page, registry):
 def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, registry):
     """Pass 2 §7: the console's one 5 s poll replaces Plane A while a preview is held; the
     draft (Plane B) and the server-driven countdown survive, and the panel stays previewing.
-    The page clock is paused at the server's clock, so the countdown is exact."""
+    The page clock is paused, so the countdown (the served 30 s lease, counted on the
+    browser's own clock from the answer's arrival) is exact."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
@@ -431,11 +432,11 @@ def test_calibration_preview_keeps_its_draft_and_countdown_across_polls(page, re
         gain.fill("1.9")
         _lease(inspector).get_by_role("button", name="Show on the Panel", exact=True).click()
         timer = inspector.get_by_role("timer", name="Live calibration countdown")
-        expect(timer).to_contain_text("live calibration ends in 29 s")
+        expect(timer).to_contain_text("live calibration ends in 30 s")
 
         for _ in range(2):
             drive_poll(page)
-        expect(timer).to_contain_text("live calibration ends in 19 s")
+        expect(timer).to_contain_text("live calibration ends in 20 s")
         expect(gain).to_have_value("1.9")
         expect(inspector.get_by_role("alert")).to_have_count(0)
         assert inventory(page, origin).frames[0].preview is not None

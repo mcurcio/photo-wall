@@ -1,4 +1,4 @@
-import { fact, factText, LAYER_NAMES } from "./facts.js";
+import { fact, factText, LAYER_NAMES, receiptText } from "./facts.js";
 import { boundOutput, frameForOutput, isBound, liveRunsFor } from "./join.js";
 
 // The one definition lives with the bound-output join; consumers read it through here.
@@ -80,7 +80,9 @@ export function gigabytes(bytes) {
 }
 
 /**
- * What Central last heard from a Player, aged against the snapshot's `read_at`.
+ * The Player app's liveness, aged against the snapshot's `read_at`. Its label is the one
+ * `reported` fact of the Player app layer (`livenessFact`), so the Wall, the Inspector,
+ * Needs attention, Binding and the Player page name the same layer in the same words.
  *
  *  - "awaiting-report": enrolled, but no report accepted on its current epoch;
  *    `age` is the time since enrollment and `overdue` is set past the threshold.
@@ -111,15 +113,15 @@ export function playerLiveness(snapshot, playerId) {
     };
   }
   const age = ageAt(inventory.read_at, player.last_report_at);
+  const reported = livenessFact(player, inventory.read_at);
   if (!(age <= limit)) {
+    const receipt = receiptText(reported);
     return {
       state: "silent",
       age,
       overdue: true,
       settling: false,
-      label: Number.isNaN(age)
-        ? "Player silent"
-        : `Player silent · last heard ${formatAge(age)} ago`,
+      label: receipt === null ? playerAppSilent() : `${playerAppSilent()} · ${receipt}`,
     };
   }
   return {
@@ -127,8 +129,31 @@ export function playerLiveness(snapshot, playerId) {
     age,
     overdue: false,
     settling: false,
-    label: `Last heard ${formatAge(age)} ago`,
+    label: factText(reported),
   };
+}
+
+/**
+ * The tile's word for a silent Player app (the box may still be up: R4, glossary §3). A
+ * function, not a constant: facts.js and this module import each other, so LAYER_NAMES is
+ * read at call time.
+ */
+function playerAppSilent() {
+  return `${LAYER_NAMES.player_runtime} silent`;
+}
+
+/**
+ * The Player app's last accepted readiness report as its layer's `reported` fact ("Player app
+ * last reported 4 s ago"): the one builder the Wall's liveness and the Player page's Player
+ * app row both read. Received and read on Central's one clock (`last_report_at`, `read_at`).
+ *
+ * @param {object} player an inventory Player
+ * @param {number|null|undefined} readAt `inventory.read_at`
+ * @returns {import("./facts.js").Fact}
+ */
+export function livenessFact(player, readAt) {
+  return fact({ kind: "reported", source: LAYER_NAMES.player_runtime, receipt: "latest",
+    receivedAt: player?.last_report_at, readAt, field: "last_report_at" });
 }
 
 /**
@@ -175,7 +200,7 @@ export function frameHealth(snapshot, frameId) {
   }
   if (liveness.state === "silent") {
     const { label } = liveness;
-    return healthOf("player-silent", "alarm", "liveness", label, "Player silent", "binding");
+    return healthOf("player-silent", "alarm", "liveness", label, playerAppSilent(), "binding");
   }
   const interruption = interruptionFor(snapshot, frameId);
   if (interruption !== null) {

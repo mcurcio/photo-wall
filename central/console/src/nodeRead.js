@@ -2,7 +2,7 @@ import { useCallback } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { fact, LAYER_NAMES, words } from "./facts.js";
-import { formatAge } from "./health.js";
+import { formatAge, livenessFact } from "./health.js";
 import { usePolledRead } from "./polledRead.js";
 
 /**
@@ -317,8 +317,7 @@ function playerAppRow(snapshot, playerId) {
     : player.last_report_at == null
     ? fact({ kind: "unknown",
       why: `no readiness report on the current enrollment (epoch ${player.authority_epoch})` })
-    : fact({ kind: "reported", source: row.layer, receipt: "latest",
-      receivedAt: player.last_report_at, readAt: inventory.read_at, field: "last_report_at" });
+    : livenessFact(player, inventory.read_at);
   const enrolled = typeof inventory?.read_at === "number" && typeof player.last_seen === "number"
     ? `Enrolled ${formatAge(Math.max(0, inventory.read_at - player.last_seen))} ago (enrollment is not a report)`
     : "Enrollment time not served";

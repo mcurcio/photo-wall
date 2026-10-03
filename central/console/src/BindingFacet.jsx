@@ -21,7 +21,7 @@ import { useMutate } from "./useMutate.js";
  * Read state comes straight from the Frame's FrameInventory row
  * (`player_id`/`output_id`); the console never invents a Player or Output that
  * the inventory does not carry (design R1). A bound Frame also shows when Central
- * last heard from its Player (health.js `playerLiveness`), links the Player to its home
+ * last accepted a report from its Player app (health.js `playerLiveness`), links the Player to its home
  * (the Player page) and shows the Panel at the Player app's last enrollment (players.js
  * `panelAtEnrollment`, the one wording fleet and Wall share; console DDD §19). Writes go through the
  * one equipment write module (equipmentApi.js) inside `useMutate()`, so the

@@ -415,7 +415,7 @@ def test_hand_offs_and_source_flow_shape():
         "revision": 3}
     assert out["answers"] == [
         {"label": "Connection name", "field": "connection", "value": None},
-        {"label": "Tags in your library", "field": "tags", "value": "No tags: everything on your library's timeline (not archived, hidden or other users' media)"},
+        {"label": "Tags in your library", "field": "tags", "value": "No tags: everything on your library's timeline only (not archived, hidden or other users' media)"},
         {"label": "Media type", "field": "type", "value": "Photos and videos"},
         {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
         {"label": "Dated from", "field": "from", "value": "2024-01-01"},
@@ -472,9 +472,10 @@ console.log(JSON.stringify([
     partial, healthy = json.loads(result.stdout)
     assert partial["state"] == "ok"
     assert partial["severity"] == "ok"
-    assert partial["label"] == "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+    assert partial["label"] == ("Your photo library last reported 1 min ago · the media worker accepted 3 "
+                                "in that refresh · 3 items pending or rejected")
     assert healthy["state"] == "ok"
-    assert healthy["label"] == "refreshed 1 min ago · 3 valid in the last refresh"
+    assert healthy["label"] == "Your photo library last reported 1 min ago · the media worker accepted 3 in that refresh"
 
 
 def test_program_edit_retains_later_repeated_hour_occurrence():

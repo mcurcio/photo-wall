@@ -1,10 +1,10 @@
 import { ageAt, formatAge, frameHealth, gigabytes } from "./health.js";
-import { factText, plannedNothing } from "./facts.js";
+import { fact, factText, plannedNothing, words } from "./facts.js";
 import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
 import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import {
-  datedWords, favouritesWords, kindsWords, refusalState, tagCountWords,
+  datedWords, favouritesWords, kindsWords, refreshFact, refusalState, tagCountWords,
 } from "./sourceWords.js";
 import { captureDay, clockTime } from "./timeWords.js";
 
@@ -31,7 +31,8 @@ export const SOURCE_REFRESH_SECONDS = 30;
 // One refresh may run this long (media/worker.py WorkerLimits.refresh_seconds).
 export const REFRESH_RUN_SECONDS = 65;
 // Past these, a missed beat is not jitter: two intervals plus slack. A pytest
-// pins the three constants above to the worker's schedule.
+// pins the three constants above to the worker's schedule, and WORKER_QUIET_AFTER
+// to the worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
 export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
 export const REFRESH_OVERDUE_AFTER = 2 * SOURCE_REFRESH_SECONDS + REFRESH_RUN_SECONDS;
 
@@ -49,10 +50,8 @@ function age(seconds) {
   return Number.isFinite(seconds) ? formatAge(Math.max(0, seconds)) : "an unknown time";
 }
 
-/** A code as words: "storage_pressure" → "storage pressure". */
-export function codeWords(code) {
-  return String(code).replaceAll("_", " ");
-}
+/** A code as words: "storage_pressure" → "storage pressure" (the one helper, facts.js `words`). */
+export const codeWords = words;
 
 const WORKER_ERRORS = { storage_pressure: "storage is full" };
 
@@ -103,7 +102,16 @@ export function workerState(health, now) {
   return {
     state: "ok",
     severity: "ok",
-    label: `checked in ${age(since)} ago · ${workerLoad(health)}`,
+    // The worker's own check-in, received and read on the database's clock (G11, §39).
+    label: factText(fact({
+      kind: "reported",
+      source: "Media worker",
+      receipt: "latest",
+      value: workerLoad(health),
+      receivedAt: health.worker_seen,
+      readAt: now,
+      field: "the media worker's check-in time",
+    })),
   };
 }
 
@@ -141,7 +149,7 @@ export function sourceFilters(spec, tagPaths = null) {
  * @param {number} now `media.read_at`, the database's clock (G11)
  * @returns {Classified}
  */
-export function sourceState(source, now, includeFilters = true) {
+export function sourceState(source, now, includeFilters = true, connections = []) {
   const filters = sourceFilters(source.spec);
   const said = (state, severity, label) => ({
     state,
@@ -185,8 +193,9 @@ export function sourceState(source, now, includeFilters = true) {
   const qualifier = partialCount > 0
     ? ` · ${partialCount} item${partialCount === 1 ? "" : "s"} pending or rejected`
     : "";
-  return said("ok", "ok",
-    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh${qualifier}`);
+  // The refresh's one home (sourceWords.js `refreshFact`), so a Source card that shows this
+  // label states its refresh once, as the library's `reported` fact.
+  return said("ok", "ok", `${factText(refreshFact(source, now, connections))}${qualifier}`);
 }
 
 // --- One candidate's standing for a frame, as Central serves it.
