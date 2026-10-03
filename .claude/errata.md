@@ -3032,3 +3032,318 @@ minus itself, holds no page or write; the classifier-mutation test covers it). G
 `stored_fact_values` (contracts/node_host_facts.py), tolerant per field (missing/refused fact -> None), so one
 older-shape row cannot fail the fleet read or the same-values comparison; ingest stays strict. Unit-tested; no DB test
 of an old row through G12 itself.
+
+## 2026-10-02 — console DDD batch 5 (Part F): architect reconcile before implementation
+
+## B5-0 · G11's DatabaseClock(db) -> Clock was wrong — DOC CORRECTED (spec wrong, found at reconcile)
+Part F §41/§42 composed a process-wide `DatabaseClock(db) -> Clock` into `MediaRepository`. Against the code:
+(1) `repository.clock` flows into `MediaStore`, `MediaWorker`, `Preparer`, `ImmichClient` and the installation
+repository (`media/worker.py:156-170`, `central/media_store.py:141-142`), so the swap re-means about thirty call
+sites, most of them monotonic budgets; (2) clock reads happen inside held transactions
+(`central/media_repository.py:307`, `:316`), so a clock taking its own pooled connection can exhaust the
+ten-connection pool (`central/db.py:15-27`). Correction (§41, §42, bead M1): a connection-bound
+`TransactionClock.now_in(conn)` used only where a media time another process compares is written or compared;
+the process `Clock` stays for budgets. Same port as Part H's deferred R-clock (§69). G11 cut out of L2 as bead M1.
+
+## B5-1 · Part F reconciled with Parts G/H as built — DOCS ONLY
+Planned facet → Status facet (W1 built it; S1 adds the `planned` fact; `NowShowingFacet.jsx` → `StatusFacet.jsx`,
+`PrecedenceExplanation` split so the Show side imports no Wall-facet module); `ShowNowFlow.jsx:233` also says
+"Now showing" and S1 renames it; Q8 kept (requirements.md unchanged, gaps in §44), Q9 = A, Q10 = yes, Q11 moot.
+
+## B5-S1-1 · "import HostChip into StatusFacet -> R4 fails" is void after the split — SPEC WRONG (found at S1)
+S1's mutation probe assumes the Status facet is shared with the Show side. Splitting `PrecedenceExplanation.jsx`
+out (§34) makes `StatusFacet.jsx` Wall-only, so importing `HostChip.jsx` there is not an R4 violation and
+`tests/test_console_routes_r4.py` stays green (probed: 35 passed). The property R4 protects still holds by
+construction: the same import into the now-shared `PrecedenceExplanation.jsx` fails R4 (`['HostChip.jsx']` in the
+Show and shell closures; probed). S1 keeps `hostChip` handed in by `Inspector.jsx` as specified, but no test binds
+"the facet does not import HostChip" and none is owed. §45's S1 probe list should name the shared module instead.
+
+## B5-S1-2 · §35's unbound row omits "; the Panel is not observed" — WORDING RULE WINS (found at S1)
+§35's rule says a `planned` fact's wording ALWAYS ends "(Central's Runs; …; the Panel is not observed)"; its table
+row for an unbound Frame ends "…so Central sends it no layers)". S1 follows the rule: "On top: xmas · Program p
+(Central's Runs; this Frame is unbound, so Central sends it no layers; the Panel is not observed)". The table row
+should be corrected in D1.
+
+## B5-S1-3 · Two direct-origin wordings, one home — NOTED (S1)
+§34 words a direct Run card "started directly (Show now or the API)"; §35 words the planned fact "started directly,
+by Show now or the API" (a parenthesis inside the fact's own parenthesis). S1 keeps both: `runOrigin` (showState.js)
+owns the card words, and join.js `originPhrase` maps only the `direct` kind to the comma form for the planned fact and
+the Why heading/rows. `sceneTargets.js` left `SHARED_WITH_SHOW` in the R4 test because join.js now imports
+showState.js (which re-exports it), making it one of the shell's own modules.
+
+## B5-L1-1 · The preview answer grows flat; "counts.images" / "code" in §41 and the tracer are not the served names — SPEC WRONG (found at L1)
+§41 sketches `source_preview(request_id) -> {status, counts?, shown?, limited?, code?, observed_at?, read_at}` and the
+tracer says `counts.images = 1`. The existing resource serves flat `count`, `image_count`, `video_count` and `error`
+(`central/media_repository.py` `source_preview`), and §38 says the resource GROWS. L1 keeps the flat fields and adds
+`shown`, `limited`, `observed_at` (complete only) and `read_at` (every status). L3 and D1 should cite `image_count`,
+`video_count` and `error`, not `counts.*` / `code`.
+
+## B5-L1-2 · Served sizes need the preview walk to ask for metadata; sizes are nullable — SPEC GAP (found at L1)
+The count-only preview walked with `withExif=false`, which carries no usable sizes or video duration (the fixture's
+top-level `width`/`height` are decoys the adapter never trusts). L1's preview walks each kind once WITH metadata and
+takes sizes and duration from `_original` (orientation-corrected). A member whose library metadata is unusable is still
+counted and shown, with `width`, `height` and `duration_seconds` null (`PreviewMember`). L3's tile alt text must allow
+a missing duration.
+
+## B5-L1-3 · L1's ages cross two process clocks until M1 — NOTED (L1; G11 was a non-goal)
+`observed_at` is stamped by the writer's process clock in `finish_source_preview` (the media worker's) and `read_at`
+by Central's in `source_preview`, so "first received N s ago" subtracts one process clock from another until M1. M1's
+list must include both: `finish_source_preview`'s `observed_at` and `source_preview`'s `read_at` (and the expiry
+comparisons beside them) go through `TransactionClock.now_in(conn)`.
+
+## B5-L1-4 · Things L1 had to touch that the bead row does not name — NOTED (L1)
+(1) `central/source_names.py` `NamedSourceWrite` re-declares the query fields; without `tags` there a tagged Source
+cannot be saved, and its `_same` compared raw JSON, so it now uses `MediaRepository.same_spec` (one canonical compare
+for both write paths). (2) The console draft carries a saved Source's `tags` through `seedSource` and
+`buildSourceSpec` (no picker), or editing a tagged Source would silently save it untagged; the tracer's browser test
+uses that path. (3) Migration 063 replaces the unnamed state CHECK, which PostgreSQL named `source_previews_check1`
+(`source_previews_check` is `expires_at > created_at`); a completed row written before 063 has no sample and is retired
+as `failed`/`preview_expired`, never back-filled with an empty one. (4) `tests/test_node_upgrade_history.py` asserted
+062 is the last migration; it now asserts 062 is applied. (5) An unreadable stored spec records `status=incompatible`,
+diagnostic `spec_unsupported`, pushes `next_refresh` by `refresh_seconds` and completes the requested revision, so
+neither the scheduled tick nor a requested refresh loops on it.
+
+## B5-L1-5 · "Showing the newest 24." is not rendered in L1 — DEFERRED to L3 (L1)
+§39's over-the-limit row ends "Showing the newest 24."; with no tiles until L2/L3 that sentence would describe nothing
+on screen, so L1 renders the fact and "Photo Wall currently stops at 1,000 matches; narrow it with tags or dates."
+only. `sourcePreview.js` `previewFacts(answer) -> {fact, notes}` is L3's starting point (§41 sketches
+`previewFacts(answer, readAt, connections) -> Fact[]`; `read_at` now travels in the answer).
+
+## B5-M1-1 · `media_references.expires_at` is cross-process but stays on process clocks — SPEC GAP, DEFERRED to R-clock (M1)
+M1's inventory missed one column. `media_references` rows are written by Central (Runtime pins from plan validity,
+`coordination.py` `pin_variants_in`; transfer grants `now + _TRANSFER_SECONDS` in `MediaStore.open_read`, whose `now`
+also feeds `media_authorized_in`) and compared by the worker's `MediaStore.collect` against the worker's process clock
+(`media_store.py` collect, "expires_at>%s"). A worker clock ahead of Central's evicts a pinned blob early. Not moved:
+the pins are Runtime plan times on Central's process clock and `open_read`'s `now` is Runtime authorization time, so
+moving only the media side would compare a database time with a Runtime time. It belongs to R-clock (§69), which
+puts Runtime receipts on the same `TransactionClock`; a comment marks the comparison in `collect`.
+
+## B5-M1-2 · The catalog's retry cooldown crossed clocks; `catalog_in` loses its `now` — NOTED (M1)
+`_hydrate_candidates` compares worker-written `media_jobs.retry_at` ("state='retry' AND retry_at>now") and
+`catalog_in(conn, now, …)` took `now` from the Coordinator's process clock. M1 makes `catalog_in(conn, source_refs)`
+read `now_in(conn)` itself, and changes the `CoordinationMedia` port to match (§41 does not list it).
+`media_jobs.earliest_start` stays: it is a Planner time on Central's clock, used only for ordering.
+
+## B5-M1-3 · Composition defaults — DECISION, flagged (M1)
+`MediaRepository(…, *, times)` is required (a missing `times` is a TypeError, pinned by a test). `create_app` gains
+`media_times`; when omitted it is `DatabaseTransactionClock()` unless the caller injected its own `clock`, in which case
+it is `ProcessTransactionClock(clock)` — the same "an injected clock means a test" convention `run_scheduler` already
+uses at `app.py`, so the 31 test files that build the app with `ManualClock` stay deterministic. Production builds the
+app with no clock. The `coordination.py` fallback (`media or …`) composes `DatabaseTransactionClock()`.
+
+## B5-L2-1 · Thumbnails break two asset-layer invariants the design did not account for — SPEC WRONG (found at L2)
+§38 keeps thumbnails "on the asset layer" and §43 says "the asset layer refetches", but the layer assumes a key fixes
+the bytes: (a) migration 028's `asset_references_locator_names_the_key` CHECK requires every reference's locator
+digest to equal the key, and Central holds no library address (R22); (b) produced facts are write-once
+(`record_produced`, `AssetProduction` "not_reproducible"), while a thumbnail is keyed by its ORIGINAL (asset id) and
+its bytes change when the library regenerates it or Pillow changes — a purge then a refetch would fail forever (PR 37
+§7 "Why thumbnails are not Asset records" foresaw this). L2 keeps the asset layer and closes both: 064 narrows the
+CHECK so a `library-thumbnail` admits exactly one reserved reference (`owner=library-preview`,
+`locator_url=http://library.invalid/`, no digests; `central/assets/library.py THUMBNAIL_REFERENCE`, which no handler
+reads), and `MediaRepository.maintain_source_previews` deletes the records of thumbnails no live preview selects
+(the worker then sweeps their files from `previews/`), so facts live only as long as a live preview. Residual: a file
+re-written between the purge and the sweep of one maintenance pass can be swept; the next request refetches it.
+
+## B5-L2-2 · The thumbnail handler is Central's; only its library half is in media/ — DECISION, flagged (L2)
+The bead says "its handler lives in media/". The handler needs the asset layer's cache store, record check and
+install (`AssetProduction`), which are built inside `build_job_runtime`. Following the existing `ReleaseOrigin` /
+`FetchPackageHandler` split, `FetchLibraryThumbnailHandler` is in `central/assets/handlers.py` and calls a
+`ThumbnailOrigin` port (`central/kernel/ports.py`); `media/library_thumbnails.py LibraryThumbnailOrigin` implements
+it (servability re-read, `ImmichClient.thumbnail`, private O_EXCL write) and is injected via
+`build_job_runtime(..., thumbnails=)` (required keyword). A new import-linter contract, "Central imports no library
+client", forbids `central` from importing `media.immich`, `media.library_thumbnails` and `media.worker`.
+
+## B5-L2-3 · Tag list choices L3 and D1 should cite — DECISION, flagged (L2)
+(1) The re-list gate is the last ATTEMPT (`library_tags.checked_at`) older than 300 s by the database clock, so a
+failing library is asked every 5 min, not every 30 s tick; `observed_at` stays the served list's own age. (2) Boot
+lists every connection regardless of age and drops rows of connections the worker no longer holds; a failed boot
+list keeps the last list (no fingerprint, §38). (3) The served tag is `{tag_ref, path, name, parent_ref}` — PR 37
+§7's shape; §38's boundary table says "tag id, path, name" but L3's nested-tag replacement needs the parent.
+(4) `GET /v1/operator/library/tags?connection=&q=&limit=` answers `{connection_ref, status, error?, observed_at,
+read_at, total_matches, tags}`; `status` is `pending` before the first listing (200, empty), `ok`, or the failure
+status with the last list; 404 `connection_unknown` when the worker's reported list excludes the connection; 422 for
+`q` > 128 chars or `limit` outside 1–20. Names and paths are stripped of C0/C1 controls, LRM/RLM and the bidi
+embeddings/isolates at construction (`media.models.LibraryTag`). No per-pod parsed cache: each GET parses the stored
+list (≤ 5,000 tags).
+
+## B5-L2-4 · Thumbnail route as built — NOTED (L2)
+Errors: 404 `thumbnail_unknown` (also for a malformed id, not PR 37's 422), 403 `origin_mismatch` for a sent
+`Sec-Fetch-Site` other than `same-origin`, 503 `thumbnail_<reason>` with `Retry-After` (`thumbnail_busy`,
+`thumbnail_timeout`, or the fetch's failure reason); CORP on every answer; a served tile adds `nosniff` and
+`default-src 'none'; sandbox`. The route lives in the new top-layer `central/library_routes.py`, which also installs
+the access-log filter (query strings dropped under `/v1/operator/library/`). `build_content_services` gains
+`servable_thumbnail` (default: nothing servable). Each fetch checks the library version and owner again (three
+library requests per tile; PR 37's once-a-minute check is not built). Proven where: the "fifth concurrent cold
+request is busy at once" acceptance is tested on the composed thumbnail reader (`tests/test_content_wiring.py`),
+not over HTTP (TestClient serializes requests); the access-log filter is tested on the `uvicorn.access` logger,
+not through a running uvicorn.
+
+## B5-L2-5 · For D1 — NOTED (L2)
+ADR 0013 and the central-cache module gain `previews/` (Dockerfile both stages, entrypoint loop, worker boot
+`ensure_previews_directory`) and the `library-thumbnail` kind with its record lifecycle (B5-L2-1); migration 064
+(tag table, kind CHECK, narrowed locator CHECK); the media worker doc gains the tag tick/boot and the prefetch.
+
+## B5-L3-1 · The tag GET cannot name a saved tag in a library with more than 20 tags — SPEC GAP (found at L3)
+§39 asks the Source card and Review to name a saved Source's tags ("tagged Family/Christmas") and to say "A tag this
+Source uses no longer exists in your library." The served route (B5-L2-3) answers at most 20 tags matching `q` against
+path or name; it has no lookup by tag id. L3 therefore names a saved tag only once some read has served it, and says
+"gone" only when a no-search read served the library's WHOLE list (`status=ok`, `total_matches <= tags served`)
+without it (`libraryTags.js learnPaths`). Otherwise it reads "a tag Photo Wall has not looked up yet", never "gone".
+Cost: in a library with more than 20 tags, an edited Source's chips and the card summary read that phrase until the
+operator types the tag, and a deleted tag is never reported on the card. Fix (not built, a backend residual): an
+`ids=` parameter (at most 4 UUIDs) on `GET /v1/operator/library/tags` answering those tags and naming the absent
+ones; the console then passes `whole` for those ids.
+
+## B5-L3-2 · Preview signatures as built — DECISION, flagged (L3)
+§41 sketches `sourcePreview.js usePreview(query)` and `previewFacts(answer, readAt, connections) -> Fact[]`. Built:
+the hook is `usePreview.js` (React), so `sourcePreview.js` stays pure and Node-testable; `previewFacts(preview,
+connections) -> {facts, notes, answer}` takes the whole panel state (`{phase, answer, previous, stillLooking, code,
+connection}`), because a failure's words depend on whether an earlier answer is on screen and §39 orders plain
+statements after the fact; `read_at` travels in the answer (B5-L1-5). Supersession: every run of the request loop
+takes a sequence number and the hook's cleanup moves it on; only the current run writes state (probed). A criteria
+change waits 400 ms (PR 37 §8) before it POSTs. Failure codes `upstream_unavailable`, `upstream_timeout`,
+`worker_timeout`, `worker_cancelled`, `preview_expired` (and a lost/5xx/429 POST or poll, or a 404 GET) are retried
+on the same 2→30 s schedule; `upstream_permission`, `asset_permission`, `owner_mismatch` read as "key not allowed";
+any other code is final and reads "Unknown: the preview failed (<code>)". "Showing the newest N." shows whenever the
+count exceeds the tiles, not only over the limit (it is the §44 paged-view gap's wording).
+
+## B5-L3-3 · The connection step's skip rule, and steps that follow live data — DECISION, flagged (L3)
+The Library step is skipped when `connectionRule` says `advanced` (exactly one known connection, including the
+pre-report guidance from saved Sources); that connection keeps its place under the Name step's Advanced, as before.
+An edit whose saved connection is no longer reported keeps its seed-time shape (`SourceFlow.jsx` `layout`), so
+choosing the one reported connection does not remove the step the operator is answering. The flow kit now normalises
+a route whose step the flow no longer has to its first step (`useFlowInstance.js`), so a worker report arriving
+mid-flow cannot loop the route. §37's unannounced sentence ("This connection isn't set up yet …") is shown for every
+unannounced connection, including a name from saved Sources while the worker has not reported its list, where "isn't
+set up yet" may be untrue; a separate sentence for that case is a wording question for D1.
+
+## B5-L3-4 · Wording choices beyond §39 — DECISION, flagged (L3)
+Labels "Dated from"/"Dated until" (and the window problem "'Dated until' must be after 'Dated from'."), media-type
+choices "Photos and videos"/"Photos only"/"Videos only", Scene Photos-step heading "Which Source?" (§37), New Source /
+Save Source / "This Source is for your Scene." (the kit's noun). `mediaHealth.js SOURCE_FAILURES` now read "Your
+photo library is unreachable / refused access / is unsupported" and "last good refresh <age> ago" (§39) everywhere
+they show (Now's pipeline, the Scene flow, cards). `sourceFilters` (Now, the Scene flow's Source status) still says
+"taken 2024"; only the new `selectionWords` says "dated" — D1 or a follow-up should make them one. The card's
+"Refreshed" line is the `reported` fact only for a Source whose status is ok; a failing Source points to Status (its
+"last good refresh" age), so no line says "last reported" for a library that last refused.
+
+## B5-A5 · After-5 course-correction — DOC UPDATED; correction bead C5 owed before verify (architect)
+Folded into Part F (§35, §37–§45, history): B5-S1-1/2/3, B5-L1-1..5, B5-M1-1..3, B5-L2-1..5, B5-L3-1..4. L2's thumbnail
+closure (064 reserved reference + per-live-preview record lifecycle; Central handler + injected ThumbnailOrigin) is
+CONFIRMED with costs stated in §38. Drift found by the architect, owed by C5 (§45): (1) `mediaHealth.js:342`
+"Central's plan puts <scene> (priority N) here." states the top Run outside the `planned` wording and escapes the
+S1 scan, which bans only "Central's plan for" (`tests/test_console_planned.py:188`) — reword and widen the scan to
+the class "Central's plan"; (2) two homes for a Source's selection words: `mediaHealth.js:131-157` `sourceFilters`
+("taken", "only favourites", omits tags) vs `sourceFlowModel.js:326` `selectionWords` ("dated", "favourites only",
+tags) — one home; (3) B5-L3-1's `ids=` tag lookup is built in batch 5, not deferred; (4) B5-L3-3's pre-report
+sentence decided in §37. Residuals (not batch 5): `media_references.expires_at` with R-clock; `create_app`'s
+injected-clock inference replaced by tests passing `media_times`.
+
+## B5-BV · Before-verify course-correction — DOC UPDATED; C5 and new docs bead D2 owed before verify (architect)
+No new spec error since B5-A5; every B5-S1/L1/M1/L2/L3 item is already folded into Part F and D1 corrected §35's
+unbound row (B5-S1-2). C5 is NOT built at 07965d6: `mediaHealth.js:342` still says "Central's plan puts …" and
+`tests/test_console_planned.py:188` still bans only "Central's plan for"; `sourceFilters` (`mediaHealth.js:131-157`)
+and the chooser string (`mediaHealth.js:235`, not `:223`, which is its comment) still say "taken";
+`central/library_routes.py` has no `ids=`; `SourceFlow.jsx:141` shows `UNANNOUNCED_CONNECTION` before the worker
+reports. §45 C5 item 4 pinned: branch at `SourceFlow.jsx:141` on `rule.reported`, the sentence beside
+`UNANNOUNCED_CONNECTION` (`sourceFlowModel.js:259`); the Name step hints (`SourceSteps.jsx:233`, `:292`) stay.
+D1 ran before C5 (its spec_wrong "order conflict"), so D2 (C5's docs follow-up) is added after C5; the verify waits
+for both. Static gates at this point: ruff clean, lint-imports 7/7 kept, check_docs passes, uv.lock unchanged.
+
+## B5-FX1 · Batch 5 fix cycle 1 — C5 and D2 BUILT, review findings folded in (implementer)
+C5 as §45 specifies, with these decisions: (1) `join.js` gains `plannedFact(runtime, intent, bound)` and
+`intentOrigin(runtime, intent)`, the one home of the `planned` fact and its origin; `whyNothingNew`'s Intended? step
+reads "<planned fact>; priority N." and `explainPrecedence` now names a child's root Run ("part of xmas's Run, Program
+…"), fixing the review's minor (the Why heading misattributed a child to the Program). RETIRED_WORDS bans "Central's
+plan" and the old Now heading "Why each frame shows what it does" (renamed "Central's Runs per frame, and why nothing
+new"). (2) One home is a NEW pure module `sourceWords.js` (imports only `timeWords.js`, so `mediaHealth.js`'s Show-side
+closure gains nothing of the Source flow): `tagWords`, `tagCountWords`, `favouritesWords`, `kindsWords`, `datedWords`.
+`sourceFilters(spec, tagPaths=null)` now orders tags · favourites · single kind · dated (selectionWords' order, was
+kinds first) and a whole local year reads "dated 2024" in BOTH homes. Tags read "N tag(s)" unless every path is given.
+(3) `ids` is a repeated query parameter (`?connection=&ids=a&ids=b`), typed `TagRef` (normalised, so an uppercase
+UUID is accepted and canonicalised; malformed → 422), 1–4, `q` with `ids` → 422 `ids_with_query`; answer is the
+`library_tags` envelope plus `absent`. `MediaApplication.library_tags_by_id` added. (4) `unannouncedWords(rule)` and
+`UNREPORTED_CONNECTIONS` beside `UNANNOUNCED_CONNECTION`.
+Review findings fixed: (a) SPEC-WRONG §38/L1: L1 dropped PR 37's `GET tags/{id}` existence check, so a deleted tag
+read ok-empty (R6). Restored in `ImmichClient._confirm_tags` for refresh and preview (400/404 → incompatible/
+tag_missing); console maps tag_missing to TAG_GONE (card, preview) and "Your photo library no longer has a tag this
+Source uses · edit its tags" (state). (b) Over-limit: OVER_LIMIT now says the worker refuses the Source and that a
+saved one selects nothing; a `source_limit` Source's state reads "Over Photo Wall's current 1,000-match limit · …",
+never "unsupported"; SOURCE_ISSUES gains source_limit and tag_missing. (c) `FetchLibraryThumbnail` priority −50 and
+the thumbnail client's budget is `metadata_seconds` (15 s), not `refresh_seconds`; the content_wiring comment and §40
+now say the slots bound HTTP waiters, not queue occupancy, and four library requests per tile (B5-L2-4 said three).
+(d) CORP on every LIBRARY_PREFIX answer via a middleware (the 401 and 422 had none). (e) owner_mismatch is no longer
+"key not allowed" in the preview; it shares OWNER_MISMATCH with the card.
+DEFERRED (minor, not trivial): TAG_GONE rendered as a `reported` fact with the tag list's observed_at; zone label on
+dated windows in the card/Review and the Narrow hints; servable check and reference write in one transaction
+(`LibraryThumbnails._reference_if_servable`); boot tag listing moved off the path before `run_queue()`.
+Docs (D2): DDD header, §8 rows 4–5, Part F status, §35, §38, §39, §40, §43, §44, §45 C5 "As built", order and
+history; runbook (pre-report sentence, over-limit, tag lookup, Failing row, Now heading, "dated" chooser); console UX
+design; module-media (`GET /tags/{id}`, over-limit wording); module-central-cache (priority); the two folded-in pass-2
+docs' "taken" examples. `requirements.md` unchanged.
+
+## B5-FC1 · Fix-cycle course-correction — DOC UPDATED; no blocker; residuals named (architect)
+Checked C5 + D2 (working tree over ddffa1d) against Part F and the owner answers (Q8a/b, Q9 = A, Q10 = yes):
+requirements.md and uv.lock untouched; ruff clean; lint-imports 7/7 kept; check_docs passes. Doc drift fixed in
+Part F (one history line): §33 Q8(b) still quoted "Photo Wall currently stops at 1,000 matches" (now the built
+refusal sentence); §40 and §44 still said three library requests per tile, and `module-media.md:105` too (four:
+version, owner, asset, thumbnail); §38 and §44 still stated the pre-priority FETCH cost (now: a queued Player fetch is
+picked first; one can wait behind a running tile's attempt, ≤ 15 s metadata budget, when both FETCH slots hold
+tiles); §39 had no preview row for `owner_mismatch` or `tag_missing`; §41 lacked `_confirm_tags`, `plannedFact`/
+`intentOrigin`, `sourceWords.js`, `readTagsById`, `unannouncedWords`, and said `sourceState` uses `selectionWords`
+(it shares the pieces). New findings, residual (not batch 5): (1) FALSE "GONE": `media/immich.py` `list_tags` skips
+a tag whose name strips to nothing (`except ValidationError: continue`), yet `library_tags_by_id` treats an `ok`
+list as every id the library holds, so such a tag reads "no longer exists" while the refresh (`_confirm_tags`)
+succeeds — §43 "None yet"; fix: the stored list keeps every listed id and only the search hides unnamed ones.
+(2) OVERCLAIM: `central/kernel/job_types.py:18` and `tests/test_library_thumbnails.py:59` say tiles "never delay" a
+Player; priority guarantees pick order only — reword to "picked after every queued fetch".
+
+## B5-FC2 · Fix cycle 2 (implementer) — B5-M1-1 SPEC WRONG, now fixed; B5-FC1 (1)(2) fixed; residuals named
+B5-FC2-1 · B5-M1-1's deferral reasoning was wrong (review finding, verified): the worker need not read
+`media_references.expires_at` at all. Central already deletes expired pins on its own clock every coordination
+pass (`coordination.py` → `media_repository.py` `expire_pins_in`) and a read lease's close deletes its transfer
+grant. FIXED: `MediaStore.collect` now treats any pin row as protecting its blob (`WHERE digest=%s`, no time).
+Rule: a `media_references` row is expired only by the process whose clock wrote it. Cost: a Central that stops
+running coordination passes leaves pins, so their blobs are never evicted (fails safe for playback, costs disk).
+G11 now has no cross-process media-time exception; DDD §42 "as built", §43 row and §44 updated. Test:
+`test_worker_clock_ahead_never_evicts_a_pinned_blob_only_central_expires_pins` (mutation: restoring the
+`expires_at>%s` comparison fails it). Central's own `open_read` comparison is a Central-replica time (R-clock).
+B5-FC2-2 · B5-FC1 (1) FIXED: `LibraryTag` path/name may be empty once stripped (`TagText` max length only);
+`list_tags` keeps every listed id; `matching_tags` hides tags with an empty path or name; the console's
+`learnPaths` no longer infers "gone" from an unfiltered search (it would now be wrong, since search hides unnamed
+tags) — only a by-id `absent` says gone; `tagWords` renders `""` as "a tag with no visible name in your library".
+The sanitizer also strips U+061C ALM, U+200B–U+200D and U+FEFF. B5-FC1 (2) FIXED: the comment and test docstring
+say pick order only; the test now asserts the DEFERRED job's priority via `_deferrer` (wiring, not declaration).
+B5-FC2-3 · RESIDUAL (R-clock): the asset layer's `job_outcomes.retry_not_before`/`updated_at` are stamped on the
+worker's clock (`central/infra/execution.py`) and compared on Central's (`central/infra/publisher.py`); thumbnails
+inherit this from the OS-image path. Named in DDD G11's limits and the R-clock scope.
+B5-FC2-4 · RESIDUAL (code): an identity-keyed `library-thumbnail` record that outlives a lost file can reach a
+terminal `not_reproducible` (`central/assets/production.py`) if the library's thumbnail bytes changed (e.g.
+regenerated after rotation, same checksum), and stays so while previews keep the record live. Fix direction: for
+kinds whose references state no expected digest, let re-production replace `produced`, with a test (record,
+delete file, change origin bytes, assert the next fetch serves). Not done in this cycle: it touches the asset
+layer's write-once invariant and needs its own design check.
+B5-FC2-5 · Minors done this cycle: Now's Runs note no longer claims per-Frame intent (and "meant to show" joins
+RETIRED_WORDS); the runbook calls the planned fact Central's Runtime projection; the tag picker announces the
+on-screen sentence (pending, unread, failed) instead of "No tags match" (`libraryTags.js` `pickerAnnouncement`);
+the Narrow step's From hint names the browser's zone; the Source card's refresh fact credits the count to the
+media worker; DDD §39's tag-gone row is `reported` (the console still renders it as a plain line — B5-FX1
+residual stands); the console UX diagram's "Scheduled:" chip line is annotated. Still deferred under B5-FX1:
+DATES_NOTE beside the dated window on the card and in Review.
+
+## B5-FC2C · Fix-cycle-2 course-correction — DOC UPDATED; no blocker; residuals listed (architect)
+Checked fix cycle 2 (working tree over 9fcc051) against Part F and the owner answers (Q8a/b, Q9 = A, Q10 = yes):
+requirements.md and uv.lock untouched; ruff clean; lint-imports 7/7 kept; check_docs passes; the touched console and
+library tests pass under Node 20 (23 passed). B5-FC2-1 confirmed: `expire_pins_in` (`central/media_repository.py:803-806`)
+deletes every expired `media_references` row, grants included, on Central's pass (`central/coordination.py:488`), and no
+worker path reads `expires_at` (`central/media_store.py:742`). Doc drift fixed (DDD one history line): §44's findings row
+still carved out `media_references.expires_at`; `module-media-worker.md` "One media clock" still stated the exception as
+live (the fix cycle's "fixed in docs" missed it); `module-media.md` tag lists and `module-media-store.md` `collect()`
+did not describe unnamed tags or pin-row protection; §43's purged-cache row said a regenerated tile recovers "when the
+preview expires" (B5-FC2-4: terminal `not_reproducible` while any live preview keeps the record); R-clock (§69) did not
+name `media_references.expires_at` across Central replicas; §45's order still listed the fixed fix-c1 findings as
+residuals. New finding, residual: `central/console/src/timeWords.js:27-31` `zonePart` does not catch the RangeError an
+engine without `timeZoneName: "longOffset"` throws (reproduced under Node 16: `occurrenceTime` throws "Value longOffset
+out of range"), so `offsetLabel`'s "local time" fallback is unreachable; fix: catch RangeError -> null, with a test.
+Minor, noted not fixed: the Source card says "the media worker accepted N in that refresh" while `sourceState`
+(`mediaHealth.js:198`) still says "N valid in the last refresh" for the same count — two wordings, two surfaces.

@@ -117,7 +117,8 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
     "$PHOTO_WALL_CACHE_ROOT" \
     "$PHOTO_WALL_CACHE_ROOT/media" \
     "$PHOTO_WALL_CACHE_ROOT/apps" \
-    "$PHOTO_WALL_CACHE_ROOT/os-images"
+    "$PHOTO_WALL_CACHE_ROOT/os-images" \
+    "$PHOTO_WALL_CACHE_ROOT/previews"
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 ENV PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
@@ -148,7 +149,8 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
     "$PHOTO_WALL_CACHE_ROOT" \
     "$PHOTO_WALL_CACHE_ROOT/media" \
     "$PHOTO_WALL_CACHE_ROOT/apps" \
-    "$PHOTO_WALL_CACHE_ROOT/os-images"
+    "$PHOTO_WALL_CACHE_ROOT/os-images" \
+    "$PHOTO_WALL_CACHE_ROOT/previews"
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 EXPOSE 8000

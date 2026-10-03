@@ -77,12 +77,12 @@ sold.
 > the domain-driven console design](operator-console-ddd.md#61-screens) own these screens;
 > the shape below describes them for this document's reader.
 > - **Sidebar.** Four groups in a fixed order, each with an accessible name and no visible
->   heading: **Wall**; **Show** (Now showing, Scenes, Schedule, Photo sources); **Fleet**
+>   heading: **Wall**; **Show** (Now, Scenes, Schedule, Sources); **Fleet**
 >   (Players, Releases); **Needs attention**. Nothing reorders or counts on state, and the
 >   landing route is always `#/wall`. There is no Set up section: each home shows its own
 >   unfinished items on its own face.
 > - **The Wall's daily face** (`#/wall`) holds no write. The **Plan** is read-only: a
->   health dot and the now-showing line per tile, and selecting a tile opens the Frame's
+>   health dot and the `planned` fact per tile (see the Show and Sources note below), and selecting a tile opens the Frame's
 >   Status. The **Unplaced tray** stays beside it as a select-only list (an entry opens its
 >   Inspector). **Edit layout** (`#/wall/layout`) holds every layout write: draw (with the
 >   Frame profile form), drag to move, Delete, and the tray's drag-out and Delete. Its header
@@ -99,8 +99,8 @@ sold.
 >   Dismiss: it leaves by itself when the first Frame exists, and **Add first frame** opens
 >   Edit layout.
 > - **The Frame Inspector's facets are Status · Binding · Calibration, and Status is the
->   default.** Status is the former Now-showing facet (its file keeps the name
->   `NowShowingFacet.jsx` until batch 5) and carries the bound Player's host chip. The route
+>   default.** Status is the former Now-showing facet (`StatusFacet.jsx` since batch 5) and
+>   carries the bound Player's host chip, then the Frame's `planned` fact. The route
 >   segment is `status`; the shipped `nowshowing` and `commissioning` segments still open
 >   Status and Calibration, and a Frame route with no facet opens Status. Which facet opens
 >   is `facetFor(health, "status")`: a visit from Needs attention or a Player page opens the
@@ -123,6 +123,45 @@ sold.
 >   read, and is worded by one classifier; the [runbook](runbook.md#host-health-on-the-players-pages)
 >   says what each state means.
 > - **Diagnostics** is a reserved home for a future debug overlay; nothing is built for it.
+
+> **Show and Sources (2026-10-02, batch 5).** [Part F of the domain-driven console
+> design](operator-console-ddd.md#33-what-part-f-covers-and-why) owns these screens and their
+> wordings; this note describes them for this document's reader.
+> - **Now** (`#/now`) is the Show group's Runs page, and the Show now flow's section label.
+>   It names Central's live Runs, never what Panels show (the earlier label is retired).
+> - **The `planned` fact.** Which Run is on top on a Frame is Central's Runtime projection,
+>   made before any media is chosen, so it is a labelled fact, never device truth. The Plan
+>   tile and Frame › Status show it as one line: "On top: xmas · Program dec-evenings
+>   (Central's Runs; media not checked; the Panel is not observed)". It always names who
+>   started the Run (a Program, "started directly, by Show now or the API", or "part of
+>   <root>'s Run"), and on an unbound Frame its basis reads "this Frame is unbound, so
+>   Central sends it no layers". It is a fact on the **Status** facet, not a facet of its
+>   own: there is no Planned or Now-showing facet. The Why heading reads "Central's Runs on
+>   <frame>: …". Every clock time states its zone ("18:00 BST"; one module, `timeWords.js`).
+> - **Sources** (`#/sources`) is the one noun for a saved library query (the requirements'
+>   AssetSource). Media lives in the operator's photo library; Photo Wall only selects it,
+>   and the console says so. A card shows the selection summary, the last refresh as a
+>   reported fact, and Edit, Refresh and Delete; it shows no thumbnails. A Source's dates
+>   are the library's own dates and read "dated" everywhere (the summary, the state label
+>   on Now and the Scene flow, the media chooser), one home for those words.
+> - **The Source flow asks one question per step:** Which library connection? → Choose tags
+>   → Narrow it down (optional) → Name this Source → Check your Source. The connection step
+>   is skipped when exactly one connection is known. Every step has its default filled.
+> - **The tag picker** ("Tags in your library") is a type-ahead combobox over the library's
+>   own tag list, which the media worker reads and Central stores: at most four tags, all of
+>   which a photo must carry; each tag includes everything nested under it, so a nested tag
+>   replaces its ancestor and an ancestor of a chosen tag is refused with its reason. A
+>   saved tag is named by a lookup by id in that stored list, so it reads by its path
+>   however many tags the library has, and as gone only when the current list lacks it.
+> - **The preview panel** sits beside Choose tags, Narrow and Check, and follows every
+>   change: a reported count ("Your photo library reported 128 photos and 4 videos · first
+>   received 12 s ago") and the newest 24 tiles, dated by the library's own dates. A failure
+>   is never worded as "nothing matches": the earlier answer stays with "Photo Wall can't
+>   reach your photo library right now." More than 1,000 matches reads "Photo Wall currently
+>   refuses a Source with more than 1,000 matches; saved like this it selects nothing.
+>   Narrow it with tags or dates." (the worker's current behaviour, not a product rule;
+>   see the [media module](module-media.md#open-gaps)). Tiles come
+>   through Central; the browser never receives the library's address, key or photo ids.
 
 ---
 
@@ -430,16 +469,21 @@ entries below that it changed say so; where the two differ, that glossary wins.
   Display dimension as gated on 2026-09-13: T0
   UX-only (this pass), T1 a photometric backend program, T2 a CEC/actuator
   cross-layer epic. The owner picks how far to go ([§10](#10-decisions-that-are-yours)).
-- **Source** — a saved Immich *query* with a plain operator name (e.g.
-  `holiday`) and internal immutable revisions: live eligibility, not a downloaded album. Players never see it.
+- **Source** — a saved *query* on the operator's photo library with a plain operator
+  name (e.g. `holiday`) and internal immutable revisions: live eligibility, not a
+  downloaded album. It selects by tags, media type, favourites and dates; the media stays
+  in the library. Players never see it. The console's one word for it (the requirements'
+  AssetSource), used everywhere.
 - **Scene / Program / Run** — a **Scene** is a per-target composition of
   contributions (media/black/actuator); a **Program** binds a Scene to a *single*
   time window with a priority; a **Run** is a live execution instance with phases
   body/outro/completed/cancelled.
-- **Intended now-showing** — for a Frame, the winning `Intent` from
-  `current.visible` (central's authored projection), joined in the browser by the
-  string `"frame:<id>"`. It is what central *intends*, not proof the pixels are
-  lit.
+- **`planned` fact** (was *intended now-showing*) — for a Frame, the winning `Intent`
+  from `current.visible` (central's authored projection), joined in the browser by the
+  string `"frame:<id>"`, worded with its Run's origin and basis: "On top: xmas · Program
+  p (Central's Runs; media not checked; the Panel is not observed)". It is what central
+  *intends*, before any media is chosen, not proof the pixels are lit. Shown on the Plan
+  tile and Frame › Status ([Part F §35](operator-console-ddd.md#35-the-planned-truth-kind-and-show-wording)).
 - **Edit layout** — the Wall's mode for layout writes (`#/wall/layout`): draw, move
   and delete Frames, and the tray's drag-out and delete. The daily face (`#/wall`)
   holds none of them ([DDD §61](operator-console-ddd.md#61-screens)).
@@ -722,7 +766,7 @@ sequenceDiagram
   UI->>UI: frames with no distinct geometry -> Unplaced tray (list)
   loop each frame tile
     UI->>UI: join runtime - visible.filter(e => e.target === "frame:"+id)
-    UI->>UI: chip = "Scheduled: <scene_id>" + phase; NOT "LIVE"
+    UI->>UI: chip = planned fact "On top: …" (Central's Runs; batch 5, was "Scheduled:"); NOT "LIVE"
     UI->>UI: connectivity dot from observation.connected (superseded by pass 2: enrollment-time only; now last-heard liveness)
     UI->>UI: calibration_valid badge (Frame health - status, not a control)
   end
@@ -818,6 +862,9 @@ for the Display layer — is treated in [§7.6](#76-capability-gating--derived-n
   that value is enrollment-time only; the console now shows last-heard liveness and
   display detection at Player start, per the reworded R2; see [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal).)* The "why" from
   precedence is real and rendered.
+- *Superseded (2026-10-02, batch 5):* the chip is now the `planned` fact ("On top: …
+  (Central's Runs; media not checked; the Panel is not observed)"), which names who started
+  the Run; see [Part F §35](operator-console-ddd.md#35-the-planned-truth-kind-and-show-wording).
 - **Stated plainly:** the console shows what central *intends* per Frame, joined
   with connectivity. It cannot confirm the pixels are lit — there is no
   execution/render readback in `/inventory`+`/runtime`.

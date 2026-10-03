@@ -1,13 +1,12 @@
 # Operator console pass B: a Source is one library query; choose it by tag and see what it selects
 
-**Status:** design-gate artifact, awaiting owner approval. **Layer:** module (contracts, data flow, ownership), not functions.
+**Status:** **folded in; superseded as a plan (2026-10-02).** The owner chose shape A of [console design §38](operator-console-ddd.md#38-pr-37-folded-in-what-changes) (Q9): this design lands **re-based on what already exists**, and was built in console batch 5. §38 lists, element by element, what was kept, changed or dropped: the existing count-only preview grows (tags, the newest 24 members, a limit flag) instead of a second preview mechanism; thumbnails ride the one asset layer (`AssetKind.LIBRARY_THUMBNAIL`, the `previews/` cache subdirectory) instead of a separate lane; `query_key`, the one-search rewrite, connection fingerprints and the GET-gate amendment are dropped; the per-key refresh lease is deferred. The design of record is Part F of the [console design](operator-console-ddd.md#33-what-part-f-covers-and-why); the current behaviour is in the [media module](module-media.md#tags-previews-and-thumbnails), the [media worker](module-media-worker.md) and the [runbook](runbook.md#sources-add-and-manage-a-source). This page is kept as the record of revision 6 and its research (the library's API facts in §5 remain useful); do not build from it. **Layer:** module (contracts, data flow, ownership), not functions.
 **Builds on:** [pass C+D](operator-console-ux-pass2-flow.md) §7 J5 (the Source step's reserved "Tags" and preview slot), [slice 3](operator-console-ux-pass2-showrunner.md) (candidates, served `standing`), [pass A](operator-console-ux-pass2-session.md) (cookie sign-in: GETs need no marker), [central system architecture](central-system-architecture.md) (read-through, typed jobs, one worker kind).
-**Owner is asked:** approve this revision. Q1 (tags are all-of), Q2 (shape A) and Q3 (widen the key) are answered.
+**Owner was asked** (answered): Q1 (tags are all-of), Q2 (this page's own shape A) and Q3 (widen the key). The revision itself was not approved as written; it was folded into the console design (Q9 there).
 
-**Current implementation note (2026-09-29):** a separate, count-only unsaved
-Source preview now uses bounded worker queries; see the [evidence](evidence/2026-09-29-unsaved-source-preview.md).
-The tag picker, media thumbnails, shared query observations, and other designs
-below remain proposals awaiting approval.
+**Implementation note (2026-09-29, kept as history):** a separate, count-only unsaved
+Source preview landed first; see the [evidence](evidence/2026-09-29-unsaved-source-preview.md).
+Batch 5 grew that preview rather than adding this page's preview route.
 
 ## 1. Today
 
@@ -185,7 +184,7 @@ sequenceDiagram
 | --- | --- |
 | Connection | Moves to the top of step 1 when a choice is needed: a chooser fed by `library/connections` (flow doc's one-value rule kept). |
 | `TagCombobox` | WAI-ARIA combobox: `input role=combobox`, `aria-autocomplete=list`, `aria-expanded`, `aria-controls`, `aria-activedescendant`; a `listbox` of ≤ 20 `option`s. Up/Down, Enter, Escape, Home/End. Debounced 150 ms, stale responses dropped by sequence. Each chosen tag becomes a chip with a "Remove tag *path*" button (at most 4). With two or more, the group is labelled "Media with **all** of these tags". There is no any-of switch. A polite live region: "20 of 143 tags; keep typing". |
-| `PreviewGrid` | Re-queried on each criteria change (debounced 400 ms). A `role=list` of 24 fixed-size tiles, `loading=lazy`, alt text "Photo taken 12 Dec 2024" or "Video, 0:32, taken …". On error a tile retries after 2 s, up to 3 times, then shows "Preview not available". |
+| `PreviewGrid` | Re-queried on each criteria change (debounced 400 ms). A `role=list` of 24 fixed-size tiles, `loading=lazy`, alt text "Photo dated 12 Dec 2024" or "Video, 0:32, dated …". On error a tile retries after 2 s, up to 3 times, then shows "Preview not available". |
 | `SelectionSummary` | Shown in step 1, on Review and on the saved Source card: "Selects media tagged **Family/Christmas** (and nested tags) · favourites only · photos and videos: **128 photos and 4 videos** in your library now; showing the newest 24." |
 
 | Situation | Wording (neutral) |
@@ -273,3 +272,4 @@ Fake library with one tag and one synthetic image. `GET …/library/preview?conn
 ## 15. History
 
 - 2026-09-28: draft, then 3 revisions. The draft verified the Immich 2.5.6 endpoints, chose shape A and kept thumbnails out of Asset records. Revision 1: Q2 and Q3 answered; the one-query rule set, and the per-media-type refresh found to break it. Revision 2: the search surface enumerated: all-of only, any-of only through nested tags. Revision 3: Q1 answered (all-of; the Scene "any of" deferred). A Source is a name plus one canonical `LibraryQuery` keyed by `query_key`, and the worker searches and caches per key (`library_queries` replaces `library_previews`); L2 added.
+- 2026-10-02: folded into the [console design](operator-console-ddd.md#38-pr-37-folded-in-what-changes) Part F (owner Q9 = shape A there: re-based on what exists) and built in console batch 5. Thumbnails became asset records after all, made safe by a reserved reference and a per-live-preview record lifecycle (§38 there). This page is no longer a plan.
