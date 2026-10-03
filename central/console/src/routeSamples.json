@@ -22,9 +22,10 @@
   "wall": {
     "wall": [
       "#/wall",
-      "#/wall/frames/sample-frame/calibration",
+      "#/wall/layout",
+      "#/wall/frames/sample-frame/status",
       "#/wall/frames/sample-frame/binding",
-      "#/wall/frames/sample-frame/nowshowing"
+      "#/wall/frames/sample-frame/calibration"
     ]
   },
   "fleet": {

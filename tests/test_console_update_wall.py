@@ -372,7 +372,7 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
         "base, so it cannot be recognised by its app); this page reboots it to make sure")
     assert rows["sharedAppNotRebooted"]["label"] == rows["baseOnlyNotRebooted"]["label"]
     assert rows["triedStageRunning"]["label"] == (
-        "Waiting · it runs a Stage, which applies to this boot only; this page reboots it onto the selection")
+        "Waiting · it runs a Stage, which applies to this boot only; this page reboots it; its next boot is offered the selection")
     assert rows["waitingNoApp"]["label"].startswith("Waiting · unknown whether it booted the selection")
     assert rows["rebootingHeldUnlisted"]["label"] == "Reboot sent by this page; Central has not listed it yet"
     assert rows["rebootingListed"]["label"].startswith("Requested · delivery unknown")

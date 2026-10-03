@@ -16,10 +16,11 @@ export const wallRoutes = Object.freeze(
     {
       section: "wall",
       label: "Wall",
-      render: ({ snapshot, bootFacts, route, navigate, wall }) => (
+      render: ({ snapshot, bootFacts, route, navigate, wall, hosts }) => (
         <WallPage
           snapshot={snapshot}
           bootFacts={bootFacts}
+          hosts={hosts}
           route={route}
           navigate={navigate}
           memory={wall}

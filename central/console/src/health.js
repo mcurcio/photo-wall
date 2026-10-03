@@ -34,7 +34,7 @@ export { isBound };
  * @typedef {"ok"|"todo"|"alarm"} Severity
  * @typedef {"unbound"|"awaiting-report"|"player-silent"|"output-interrupted"|
  *           "no-panel-at-enrollment"|"needs-calibration"|"ok"} FrameState
- * @typedef {"calibration"|"binding"|"nowshowing"} Facet
+ * @typedef {import("./routes.js").Facet} Facet
  * @typedef {"liveness"|"binding"|"output"|"panel"|"calibration"} Cause
  * @typedef {{state: FrameState, severity: Severity, cause: Cause|null,
  *            label: string, tileLabel: string, settling: boolean,
@@ -278,8 +278,8 @@ function healthOf(state, severity, cause, label, tileLabel, facet) {
 }
 
 /**
- * The Inspector facet that shows the cause of a frame's health; `ok` keeps the
- * operator's current facet (no reset).
+ * The Inspector facet that shows the cause of a frame's health; `ok` opens the caller's
+ * fallback (the Wall passes "status": console DDD §61).
  *
  * @param {FrameHealth|null} health
  * @param {Facet} currentFacet
@@ -290,34 +290,31 @@ export function facetFor(health, currentFacet) {
 }
 
 /**
- * Every frame that needs attention, alarms first then to-dos, each group in
- * frame-id order. A settling frame (enrolled within the grace, no report yet)
- * needs no attention yet and is left out, but counted in `awaiting` so the
- * all-clear never claims a report that has not arrived.
+ * Every frame that needs attention (its alarms), in frame-id order: evidence only (console
+ * DDD G2). A structural to-do (unbound, needs calibration) is never an attention row; it is
+ * the Wall's To finish item (unfinished.js `wallUnfinished`). A frame awaiting its Player's
+ * first report within the silence limit (settling or not) is no alarm yet and is counted in
+ * `awaiting`, so the all-clear never claims a report that has not arrived.
  *
  * @param {object|null} snapshot
  * @returns {{frameCount: number, awaiting: number,
- *            alarms: Array<{frame: object, health: FrameHealth}>,
- *            todos: Array<{frame: object, health: FrameHealth}>}}
+ *            alarms: Array<{frame: object, health: FrameHealth}>}}
  */
 export function wallAttention(snapshot) {
   const frames = [...(snapshot?.inventory?.frames ?? [])].sort((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
   const alarms = [];
-  const todos = [];
   let awaiting = 0;
   for (const frame of frames) {
     const health = frameHealth(snapshot, frame.id);
     if (health.severity === "alarm") {
       alarms.push({ frame, health });
-    } else if (health.severity === "todo" && health.settling) {
+    } else if (health.state === "awaiting-report") {
       awaiting += 1;
-    } else if (health.severity === "todo") {
-      todos.push({ frame, health });
     }
   }
-  return { frameCount: frames.length, awaiting, alarms, todos };
+  return { frameCount: frames.length, awaiting, alarms };
 }
 
 // --- Equipment standing (slice 2 §4).

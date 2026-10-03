@@ -180,21 +180,15 @@ function nodeRow(key, level, owner, nodeDevice, hasEvidence, build) {
  * @returns {LayerRow[]}
  */
 export function layerEvidence({ nodeDevice, snapshot, playerId }) {
+  // Host Management's sample values live in Player › Health (HostHealthSection.jsx, §61);
+  // its layer row keeps when it last reported and its session.
   const host = nodeRow("host", "L0", "host_core", nodeDevice,
-    (session) => session.host_observation != null, (session, readAt) => {
-    const sample = session.host_observation?.sample;
-    return {
+    (session) => session.host_observation != null, (session, readAt) => ({
       facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: LAYER_NAMES.host_core,
         receipt: "latest", receivedAt: session.host_observation?.received_at, readAt,
         field: "host_observation.received_at" }) }],
-      details: [
-        ...(sample?.metrics ?? []).map((metric) =>
-          `${words(metric.name)}: ${metric.value} ${metric.unit} (${words(metric.source)})`),
-        ...(sample?.fault_code ? [`Reported fault: ${words(sample.fault_code)}`] : []),
-        "Source: host samples (node device read). Host samples do not show visible pixels.",
-      ],
-    };
-  });
+      details: [],
+    }));
   const manager = nodeRow("manager", "L1", "app_manager", nodeDevice,
     (session) => session.manager_preparation != null, (session, readAt) => {
     const preparation = session.manager_preparation;

@@ -5,7 +5,7 @@ the token: every operator fetch carries the console marker and the browser's Htt
 no request carries a bearer. Cookies ignore the port, so two servers on 127.0.0.1 share one
 cookie jar: that is how a rotated token and "another address" are exercised for real.
 
-Signed in, the console lands on Now showing (a frame exists), whose frame-health badge is the
+Signed in, the console lands on the Wall (console DDD §48), whose plan tile for the frame is the
 proof that the inventory rendered. A session that ends while signed in shows the sign-in screen
 as an overlay over the kept, hidden console (flow design §6 (a)).
 """
@@ -39,9 +39,8 @@ def _seed(registry):
 
 
 def _frame(page):
-    """The frame's health badge on Now showing: visible only while signed in and shown."""
-    return page.get_by_role("group", name="Frame health", exact=True).get_by_label(
-        re.compile(rf"^Frame {FRAME}: "))
+    """The frame's plan tile status on the Wall: visible only while signed in and shown."""
+    return page.get_by_role("group", name=f"Frame {FRAME} status", exact=True)
 
 
 def _sign_in_button(page):

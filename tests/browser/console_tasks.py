@@ -13,8 +13,10 @@ their direct locators; these helpers are for tests that only need the task done.
 As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #/schedule,
 #/sources, #/wall, #/players, #/attention), reached from the sidebar (a drawer under
 850 px). As of the console DDD pass 1 (B1) the boxes live on Players: a list with one row
-per box, and one Player page per box (#/players/<device-id>), opened with `open_player`. Signing in lands on #/wall while no frame exists and on #/now once one does, so a
-test that needs a page goes to it.
+per box, and one Player page per box (#/players/<device-id>), opened with `open_player`.
+Signing in always lands on #/wall (console DDD §48), so a test that needs another page goes
+to it. As of console DDD W1 the Wall's daily face is read-only: drawing, moving and deleting
+Frames happen in Edit layout (#/wall/layout), opened with `edit_layout`.
 
 As of bead 2 a Scene is made in the Scene flow (#/scenes/new/<step>): "New Scene" on the
 Scenes page, then Kind → Photos → Frames → [Media per frame] → Playback → Review, one step
@@ -48,7 +50,7 @@ LABELS = {
 }
 
 # The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
-FACETS = {"calibration": "Calibration", "binding": "Binding", "nowshowing": "Now-showing"}
+FACETS = {"status": "Status", "binding": "Binding", "calibration": "Calibration"}
 
 
 def go(page, section):
@@ -71,6 +73,15 @@ def go(page, section):
             "navigation", name="Sections", exact=True)
     sidebar.get_by_role("link", name=LABELS[section], exact=True).click()
     expect(page.get_by_role("heading", level=1, name=LABELS[section], exact=True)).to_be_visible()
+
+
+def edit_layout(page):
+    """Open the Wall's Edit layout mode from its daily face (the Wall must be shown): click
+    **Edit layout** and wait for its "Editing layout" bar. Returns that bar (its Done)."""
+    page.get_by_role("button", name="Edit layout", exact=True).click()
+    bar = page.get_by_role("group", name="Editing layout", exact=True)
+    expect(bar).to_be_visible()
+    return bar
 
 
 def current_hash(page):
@@ -107,7 +118,7 @@ def open_player(page, name):
     """Go to Players and follow the list's link to the Player page named `name`
     (`player_name`); waits for the page's heading and returns the page on screen."""
     go(page, "players")
-    page.get_by_role("list", name="Players", exact=True).get_by_role(
+    page.get_by_role("table", name="Players", exact=True).get_by_role(
         "link", name=name, exact=True).click()
     expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
     return visible_page(page)
@@ -404,8 +415,8 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
 
 
 def open_frame(page, frame_id, facet):
-    """Open frame `frame_id` on the Wall at `facet` ("binding", "calibration" or
-    "nowshowing", the Inspector.jsx keys); returns its Inspector.
+    """Open frame `frame_id` on the Wall at `facet` ("status", "binding" or
+    "calibration", the Inspector.jsx keys); returns its Inspector.
 
     Follows the frame's route, `#/wall/frames/<id>/<facet>`, as a typed URL would: the
     frame is selected on the plan and its Inspector opens at that facet, without moving

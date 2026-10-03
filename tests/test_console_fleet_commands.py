@@ -168,6 +168,36 @@ out.sentBodies = posts.map((post) => post.body);
 out.sentUrl = posts[0]?.url;
 out.frozenBody = frozenAt1000.body;
 
+// --- sendReboot's per-device in-flight guard: a second call while a POST for that device is in flight sends nothing.
+const gated = [];
+let pending = [];
+globalThis.fetch = async (url) => {
+  gated.push(url);
+  return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+};
+const ok = () => new Response(JSON.stringify({ duplicate: false }), { status: 200 });
+// Answer every POST in flight (each with `how`), then let the sends settle.
+const answerAll = (how) => { const now = pending; pending = []; now.forEach(how); };
+const resolveOk = ({ resolve }) => resolve(ok());
+const flight = (device = "d-1") => commands.sendReboot(device, frozenAt1000, hook(read([host()], { read_at: 1005 })),
+  control());
+const words = (r) => ({ outcome: r.outcome, message: r.message });
+const first = flight();
+const secondCall = flight();
+const otherDevice = flight("d-2");
+const postsWhileInFlight = gated.length;
+answerAll(resolveOk);
+out.guard = { second: words(await secondCall), postsWhileInFlight, first: words(await first),
+  otherDevice: (await otherDevice).outcome };
+// Released after a failed request (the abort budget's rejection), and after an answer.
+const afterFirst = flight();
+answerAll(({ reject }) => reject(new DOMException("timed out", "TimeoutError")));
+out.guard.afterAnswer = (await afterFirst).outcome;
+const afterFailure = flight();
+answerAll(resolveOk);
+out.guard.afterFailure = (await afterFailure).outcome;
+out.guard.posts = gated.length;
+
 // --- appOperationState: the broker's response is read, not only Central's `state`.
 const operation = (state, extra = {}) => ({ operation_id: "o-1", command_id: "c-1",
   operator_audit_ref: "stage:1", state, command_response: null, latest_effect: null, ...extra });
@@ -321,6 +351,18 @@ def test_send_reboot_judges_the_newest_read_at_call_time_and_refuses_without_a_p
     assert send["heldRetry"]["posts"] == 1
 
 
+def test_send_reboot_holds_one_post_in_flight_per_device():
+    """The guard lives in the one send path (R1): a second call for a device while its POST is in
+    flight answers `changed` with no POST; another device is not held; the hold is released after an
+    answer and after a failed request."""
+    guard = _run()["guard"]
+    assert guard["second"] == {"outcome": "changed", "message": "A reboot for this Player is already being sent."}
+    assert guard["postsWhileInFlight"] == 2  # d-1 once, d-2 once; the second d-1 call sent nothing
+    assert guard["first"]["outcome"] == "done" and guard["otherDevice"] == "done"
+    assert guard["afterAnswer"] == "unknown" and guard["afterFailure"] == "done"
+    assert guard["posts"] == 4
+
+
 def test_a_held_retry_posts_the_identical_frozen_body():
     out = _run()
     assert out["sentBodies"] == [out["frozenBody"], out["frozenBody"]]
@@ -341,6 +383,24 @@ def test_send_reboot_is_the_only_poster_of_reboots():
     at = route.search(source).start()
     assert start < at < source.index("\n}\n", start)
     assert "rebootRefusal(request, node.latest(), control.latest().gate)" in source[start:at]
+
+
+def test_the_player_header_reboots_only_through_send_reboot():
+    # H1 (console DDD §61): Reboot moved into the Player page's header unchanged. The only
+    # callers of `sendReboot` are the reboot dialog (PlayerCommands.jsx) and the Update the
+    # wall journey; the Player page and its Health section send nothing themselves.
+    call = re.compile(r"\bsendReboot\(")
+    callers = sorted(module.name for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
+                     if module.name != "fleetCommands.js" and call.search(module.read_text()))
+    assert callers == ["PlayerCommands.jsx", "UpdateWallPage.jsx"]
+    commands = (SRC / "PlayerCommands.jsx").read_text()
+    assert len(call.findall(commands)) == 1
+    dialog = commands.index("function RebootDialog(")
+    assert dialog < call.search(commands).start() < commands.index("\n}\n", dialog)
+    for page in ("PlayerPage.jsx", "HostHealthSection.jsx"):
+        source = (SRC / page).read_text()
+        assert "fleetCommands.js" not in source and "apiWrite" not in source, page
+    assert "<RebootSection " in (SRC / "PlayerPage.jsx").read_text()
 
 
 def test_a_requested_label_says_when_central_is_not_offering_it_now():

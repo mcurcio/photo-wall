@@ -19,13 +19,18 @@ import { formatRoute, sceneCreationRoute } from "./routes.js";
  *     layer is underneath (every line says "priority N"), and the limit line.
  *     The same explanation the Showrunner's Runs "Why" panel renders.
  *
- * @param {{snapshot: object|null, frameId: string}} props
+ * `hostChip` is the Frame's host chip (HostChip.jsx, console DDD §61), rendered under the
+ * title. The Wall's Inspector passes it in, so this module, which the Show side shares for
+ * `PrecedenceExplanation`, imports no fleet host module.
+ *
+ * @param {{snapshot: object|null, frameId: string, hostChip?: React.ReactNode}} props
  */
-export function NowShowingFacet({ snapshot, frameId }) {
+export function NowShowingFacet({ snapshot, frameId, hostChip = null }) {
   const now = nowShowing(snapshot?.runtime, frameId);
   return (
     <div className="facet facet--nowshowing">
-      <h3 className="facet__title">Now-showing</h3>
+      <h3 className="facet__title">Status</h3>
+      {hostChip}
       {now === null ? (
         <p className="facet__empty">Nothing scheduled.</p>
       ) : (

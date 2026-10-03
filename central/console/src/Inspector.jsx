@@ -3,21 +3,23 @@ import React, { useEffect, useRef } from "react";
 import { BindingFacet } from "./BindingFacet.jsx";
 import { CalibrationFacet } from "./CalibrationFacet.jsx";
 import { frameHealth } from "./health.js";
+import { HostChip } from "./HostChip.jsx";
 import { NowShowingFacet } from "./NowShowingFacet.jsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 
 /**
  * Frame Inspector shell (Bead 3, read-only) — shared primitive #6.
  *
- * A tabbed, read-only view of the selected Frame with three facets:
- * **Calibration | Binding | Now-showing** (console DDD §19). `facet` selects
- * the visible tab and defaults to "calibration"; `onFacet(next)` is called
+ * A tabbed view of the selected Frame with three facets:
+ * **Status | Binding | Calibration** (console DDD §61). `facet` selects
+ * the visible tab and defaults to "status"; `onFacet(next)` is called
  * when the operator switches tabs (the open facet lives in the route,
  * `#/wall/frames/<id>/<facet>`, owned by WallPage.jsx). The facets are composed here as declarative JSX CHILDREN —
  * each is an ordinary component taking `({snapshot, frameId})` — rather than
  * registered through any imperative API.
  *
- * The Calibration tab hosts the Calibration facet: committed calibration, the draft
+ * The Status tab is the Frame's daily face: what it is planned to show and why
+ * (NowShowingFacet.jsx, which keeps its name until batch 5). The Calibration tab hosts the Calibration facet: committed calibration, the draft
  * editor, live calibration and the Frame profile. The Binding tab holds the bound
  * Player and Output and the Panel at the Player app's last enrollment.
  *
@@ -31,32 +33,36 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  * for that frame's heading. A request is consumed once — `onFocusDone` clears it — so remounting the Inspector
  * (Wall → another section → Wall) never moves focus again.
  *
- * @typedef {"calibration"|"binding"|"nowshowing"} Facet
+ * @typedef {import("./routes.js").Facet} Facet
  * With no frame selected (`frameId` null) it renders its empty state, "Select
  * a frame", so the Inspector column keeps its place in the layout.
  *
- * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet.
+ * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet. `hosts` (the
+ * shell's fleet host read) feeds the Status facet's host chip (HostChip.jsx), handed to the
+ * shared NowShowingFacet.jsx as an element so no Show module reaches it (R4).
  *
  * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string|null, facet: Facet,
+ *          hosts?: import("./fleetHosts.js").FleetHosts|null,
  *          onFacet: (facet: Facet) => void, focusRequest?: number|null,
  *          onFocusDone?: () => void}} props
  */
 const FACETS = [
-  { key: "calibration", label: "Calibration" },
+  { key: "status", label: "Status" },
   { key: "binding", label: "Binding" },
-  { key: "nowshowing", label: "Now-showing" },
+  { key: "calibration", label: "Calibration" },
 ];
 
 export function Inspector({
   snapshot,
   bootFacts = null,
+  hosts = null,
   frameId,
   facet,
   onFacet,
   focusRequest = null,
   onFocusDone = () => {},
 }) {
-  const active = facet ?? "calibration";
+  const active = facet ?? "status";
   const sectionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
 
@@ -134,8 +140,12 @@ export function Inspector({
             onFacet={onFacet}
           />
         )}
-        {active === "nowshowing" && (
-          <NowShowingFacet snapshot={snapshot} frameId={frameId} />
+        {active === "status" && (
+          <NowShowingFacet
+            snapshot={snapshot}
+            frameId={frameId}
+            hostChip={<HostChip snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
+          />
         )}
       </div>
     </section>

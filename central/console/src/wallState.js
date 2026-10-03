@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 
 import { facetFor, frameHealth } from "./health.js";
+import { DEFAULT_FACET } from "./routes.js";
 
 // The Wall's state that outlives the Wall page (flow design §6): the shell holds it,
 // so it lives here, in a module that imports no component. Shell.jsx must not reach
@@ -9,11 +10,9 @@ import { facetFor, frameHealth } from "./health.js";
 
 /**
  * @typedef {import("./routes.js").Route} Route
- * @typedef {import("./routes.js").Facet} Facet
  * @typedef {{surfaceId: string|null, setSurfaceId: (surfaceId: string|null) => void,
  *            focusRequest: number|null, clearFocus: () => void,
- *            guidanceDismissed: boolean, dismissGuidance: () => void,
- *            lastFacet: Facet, lastWall: Route,
+ *            lastWall: Route,
  *            frameRoute: (frameId: string) => Route,
  *            prepareVisit: (frameId: string) => void,
  *            visitFrame: (frameId: string) => void,
@@ -28,13 +27,18 @@ function findFrame(snapshot, frameId) {
 /**
  * What the Wall remembers while it is not mounted (the shell calls this; flow design
  * §6). The Wall page mounts only while it is current, but leaving it must not lose the
- * chosen Surface, the facet last open, the Guidance dismissal or a pending focus
- * request, so they live here, above the page. The selected frame and its facet live in
- * the route (`#/wall/frames/<id>/<facet>`).
+ * chosen Surface or a pending focus request, so they live here, above the page. The
+ * selected frame and its facet live in the route (`#/wall/frames/<id>/<facet>`). No facet
+ * is remembered: a Frame opens on Status unless a visit names its cause (console DDD §61,
+ * G3), and the Guidance banner has no dismissal (§54: nothing to dismiss, it leaves when a
+ * Frame exists).
+ *
+ * `lastWall` is the Wall's daily face as last shown, for the sidebar link; Edit layout
+ * (`#/wall/layout`) is never remembered, so the Wall link always opens the daily face.
  *
  * Visiting a frame from outside the plan (the attention strip, the Needs attention
  * page, a Player page) shows its Surface, opens the facet that shows its cause
- * (health.js `facetFor`; an ok frame keeps the facet last open) and asks the Inspector
+ * (health.js `facetFor`; an ok frame opens Status) and asks the Inspector
  * to take focus ONCE: `focusRequest` is a fresh number each time, and the Inspector
  * clears it when spent, so a later remount does not refocus. Plain selection on the
  * plan or tray (`selectPlainly`) clears it and never moves focus.
@@ -55,16 +59,11 @@ function findFrame(snapshot, frameId) {
 export function useWallMemory(route, snapshot, navigate) {
   const [surfaceId, setSurfaceId] = useState(/** @type {string|null} */ (null));
   const [focusRequest, setFocusRequest] = useState(/** @type {number|null} */ (null));
-  const [guidanceDismissed, setGuidanceDismissed] = useState(false);
   const focusSeqRef = useRef(0);
-  const lastFacetRef = useRef(/** @type {Facet} */ ("calibration"));
   const lastWallRef = useRef(/** @type {Route} */ ({ section: "wall" }));
-  if (route?.section === "wall") {
+  if (route?.section === "wall" && route.mode === undefined) {
     // Idempotent, so safe during render: the Wall as last shown, for the sidebar link.
     lastWallRef.current = route;
-    if (route.facet !== undefined) {
-      lastFacetRef.current = route.facet;
-    }
   }
 
   // The frame the route last named, once the snapshot lists it, and the frame plain
@@ -85,13 +84,12 @@ export function useWallMemory(route, snapshot, navigate) {
     }
   }
 
-  const lastFacet = lastFacetRef.current;
   const lastWall = lastWallRef.current;
   return useMemo(() => {
     const frameRoute = (frameId) => ({
       section: "wall",
       id: frameId,
-      facet: facetFor(frameHealth(snapshot, frameId), lastFacetRef.current),
+      facet: facetFor(frameHealth(snapshot, frameId), DEFAULT_FACET),
     });
     const prepareVisit = (frameId) => {
       const frame = findFrame(snapshot, frameId);
@@ -106,9 +104,6 @@ export function useWallMemory(route, snapshot, navigate) {
       setSurfaceId,
       focusRequest,
       clearFocus: () => setFocusRequest(null),
-      guidanceDismissed,
-      dismissGuidance: () => setGuidanceDismissed(true),
-      lastFacet,
       lastWall,
       frameRoute,
       prepareVisit,
@@ -125,5 +120,5 @@ export function useWallMemory(route, snapshot, navigate) {
         setSurfaceId(keepSurfaceId);
       },
     };
-  }, [surfaceId, focusRequest, guidanceDismissed, lastFacet, lastWall, snapshot, navigate]);
+  }, [surfaceId, focusRequest, lastWall, snapshot, navigate]);
 }

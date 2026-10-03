@@ -13,10 +13,11 @@ import { formatRoute, isPlainClick } from "./routes.js";
  * take focus once, as the strip's own navigation does.
  *
  * @param {{snapshot: object, central: {scheduler: string|null},
- *          wall: import("./wallState.js").WallMemory}} props
+ *          wall: import("./wallState.js").WallMemory,
+ *          hosts: import("./fleetHosts.js").FleetHosts|null, bootFacts: object|null}} props
  */
-function AttentionPage({ snapshot, central, wall }) {
-  const { frameCount, rows } = attentionView(snapshot, central);
+function AttentionPage({ snapshot, central, wall, hosts, bootFacts }) {
+  const { frameCount, rows } = attentionView(snapshot, central, hosts, bootFacts);
   const readinessFrames = readinessRecoveryFrames(snapshot);
   if (frameCount === 0) {
     return <p className="page__empty">No frames yet. Draw one on the Wall.</p>;
@@ -81,8 +82,8 @@ export const neutralRoutes = Object.freeze(
     {
       section: "attention",
       label: "Needs attention",
-      render: ({ snapshot, central, wall }) => (
-        <AttentionPage snapshot={snapshot} central={central} wall={wall} />
+      render: ({ snapshot, central, wall, hosts, bootFacts }) => (
+        <AttentionPage snapshot={snapshot} central={central} wall={wall} hosts={hosts} bootFacts={bootFacts} />
       ),
       samplePaths: SAMPLES.neutral.attention,
     },

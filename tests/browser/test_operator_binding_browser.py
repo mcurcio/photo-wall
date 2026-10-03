@@ -115,8 +115,8 @@ def test_an_enrolled_player_appears_on_the_players_list(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "players")
 
-        players = page.get_by_role("list", name="Players", exact=True)
-        row = players.get_by_role("listitem").filter(
+        players = page.get_by_role("table", name="Players", exact=True)
+        row = players.get_by_role("row").filter(
             has=page.get_by_role("link", name=name, exact=True))
         expect(row).to_have_count(1)
         expect(row).to_contain_text("Standing: Unbound · enrolled")
@@ -277,7 +277,7 @@ def test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login(p
         # console stays on the sign-in screen: NO connected content rendered.
         expect(page.get_by_label("Operator token")).to_have_value("")
         expect(page.get_by_role("button", name="Sign in", exact=True)).to_be_visible()
-        expect(page.get_by_role("list", name="Players", exact=True)).to_have_count(0)
+        expect(page.get_by_role("table", name="Players", exact=True)).to_have_count(0)
 
         # Recovery: the CORRECT token signs in and the real inventory renders,
         # and the rejection message is gone.
@@ -668,7 +668,7 @@ def test_the_players_list_names_boxes_by_their_distinct_serial_handles(page, reg
     second_player = _netbooted_player(registry, "10000000c0ffee93")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "players")
-        players = page.get_by_role("list", name="Players", exact=True)
+        players = page.get_by_role("table", name="Players", exact=True)
         first = players.get_by_role("link", name="Player …ffee42", exact=True)
         second = players.get_by_role("link", name="Player …ffee93", exact=True)
         expect(first).to_be_visible()
@@ -995,7 +995,7 @@ def test_the_players_pages_never_scroll_sideways_at_390_px(page, registry):
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "players")
-        expect(page.get_by_role("list", name="Players", exact=True)).to_be_visible()
+        expect(page.get_by_role("table", name="Players", exact=True)).to_be_visible()
         assert_fits_width(page, "Players list")
         player = open_player(page, player_name(registry, identity["player_id"]))
         expect(player.get_by_role("combobox").first).to_be_visible()

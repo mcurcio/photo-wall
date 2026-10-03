@@ -286,7 +286,9 @@ def test_layer_evidence_has_five_labelled_rows_bottom_up():
         ("Host Management", "L0"), ("App Manager", "L1"), ("App Effect Broker", "L1"),
         ("Display Host", "L1.5"), ("Player app", "L2")]
     assert layers[0]["facts"] == [["Last reported", "Host Management last reported 4 s ago"]]
-    assert "uptime: 7 seconds (proc)" in layers[0]["details"]
+    # The sample's raw lines moved to Player › Health (H1, §61); Host Management keeps its
+    # receipt and its session line.
+    assert layers[0]["details"] == ["Session s-host_core · boot boot-2"]
     assert layers[1]["facts"] == [
         ["Last reported", "App Manager last reported 30 s ago · preparation ready"]]
     assert layers[2]["facts"] == [

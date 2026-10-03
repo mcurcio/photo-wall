@@ -60,7 +60,6 @@ SHARED_WITH_SHOW = {
     "equipmentApi.js",  # UNKNOWN_MESSAGE and the equipment reads
     "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
     "framesApi.js",
-    "players.js",  # a Player page address (Wall links to the box's home); pure, no controls
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
@@ -68,6 +67,8 @@ SHARED_WITH_SHOW = {
     "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
+# players.js is not listed: since T1 the shell's own attention strip reaches it (host incidents
+# name each Bound Player, hostHealth.js), so it is one of the shell's own modules.
 
 
 class ScanError(Exception):
@@ -480,7 +481,8 @@ def test_every_section_is_in_exactly_one_route_table():
 
 
 ROUND_TRIP = r"""
-const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS } = await import(process.argv[1]);
+const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS, FACETS, FACET_ALIASES } =
+  await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
 const out = {};
 out.sections = SECTIONS;
@@ -496,7 +498,13 @@ out.invalidHashes = input.invalidHashes.map((hash) => parseRoute(hash));
 out.invalidRoutes = input.invalidRoutes.map((route) => {
   try { formatRoute(route); return "formatted"; } catch { return "refused"; }
 });
-out.landing = [landingRoute(0), landingRoute(3)];
+out.landing = [landingRoute(), landingRoute(0), landingRoute(5)];
+out.nowshowing = parseRoute("#/wall/frames/x/nowshowing");
+out.noFacet = parseRoute("#/wall/frames/x");
+out.facets = FACETS;
+out.aliases = FACET_ALIASES;
+out.layout = { hash: formatRoute({ section: "wall", mode: "layout" }),
+               route: parseRoute("#/wall/layout") };
 out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
                                 initialTarget: "frame_one" });
 out.equipment = parseRoute("#/equipment");
@@ -528,7 +536,9 @@ ROUTES = [
     {"section": "schedule", "id": "evening/program", "flow": "edit", "step": "review"},
     {"section": "wall", "id": "reception north", "facet": "calibration"},
     {"section": "wall", "id": "a/b", "facet": "binding"},
-    {"section": "wall", "id": "frames", "facet": "nowshowing"},
+    {"section": "wall", "id": "frames", "facet": "status"},
+    {"section": "wall", "id": "layout", "facet": "status"},
+    {"section": "wall", "mode": "layout"},
     {"section": "releases", "flow": "update", "id": "v0.15.0"},
     {"section": "releases", "flow": "update", "id": "v1/rc ç?#%", "tried": "player/one ç"},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": ["player/two ç", "try", "skip"]},
@@ -536,7 +546,8 @@ ROUTES = [
     {"section": "releases", "flow": "update", "id": "v1", "skipped": []},
 ]
 INVALID_HASHES = [
-    "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
+    "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x/bogus",
+    "#/wall/layout/x", "#/wall/bogus", "#/now/layout", "#/wall/layout?target=x",
     "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
     "#/equipment?target=x", "#/players/a/b", "#/players/x?target=y",
     "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
@@ -551,6 +562,9 @@ INVALID_HASHES = [
 INVALID_ROUTES = [
     {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
     {"section": "wall", "id": "x"}, {"section": "wall", "id": "x", "facet": "bogus"},
+    {"section": "wall", "id": "x", "facet": "nowshowing"},
+    {"section": "wall", "mode": "layout", "id": "x"}, {"section": "now", "mode": "layout"},
+    {"section": "wall", "mode": "bogus"}, {"section": "wall", "mode": "layout", "facet": "status"},
     {"section": "now", "flow": "new", "step": "x"}, {"section": "scenes", "flow": "edit",
                                                     "step": "x"},
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
@@ -584,11 +598,19 @@ def test_routes_parse_format_and_round_trip():
     assert all(trip["same"] for trip in out["roundTrips"]), out["roundTrips"]
     assert out["invalidHashes"] == [None] * len(INVALID_HASHES)
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
-    assert out["landing"] == [{"section": "wall"}, {"section": "now"}]
+    # The landing route is always the Wall, with no Frames and with five (console DDD §48).
+    assert out["landing"] == [{"section": "wall"}] * 3
     # The retired Equipment page's bookmark lands on the Players list, and is never formatted.
     assert out["equipment"] == {"section": "players"}
     # The renamed facet's old bookmark opens Calibration, and is never formatted (§19).
     assert out["commissioning"] == {"section": "wall", "id": "x", "facet": "calibration"}
     assert out["commissioningRoute"] == "refused"
+    # The Now-showing facet's old bookmark, and a Frame route with no facet, open Status
+    # (console DDD §61); neither is ever formatted.
+    assert out["nowshowing"] == {"section": "wall", "id": "x", "facet": "status"}
+    assert out["noFacet"] == {"section": "wall", "id": "x", "facet": "status"}
+    assert out["facets"] == ["status", "binding", "calibration"]
+    assert out["aliases"] == {"nowshowing": "status", "commissioning": "calibration"}
+    assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"

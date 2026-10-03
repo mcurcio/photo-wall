@@ -13,7 +13,10 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/sources/new/<step>           {section: "sources", flow: "new", step}
  *   #/schedule/new/<step>          {section: "schedule", flow: "new", step}
  *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
+ *   #/wall/layout                  {section: "wall", mode: "layout"} Edit layout (console DDD §61)
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
+ *   #/wall/frames/<id>             {section: "wall", id, facet: "status"}: a Frame route with
+ *                                  no facet opens Status (§61); never formatted
  *   #/players/<device-id>          {section: "players", id} one Player's page
  *   #/releases/update/<tag>        {section: "releases", flow: "update", id} Update the wall
  *   #/releases/update/<tag>/try/<player-id>  … with the operator's tried Player (Part E §25a)
@@ -25,6 +28,8 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/wall/frames/<id>/commissioning  {section: "wall", id, facet: "calibration"}: the
  *                                  renamed facet's old bookmark (console DDD §19); never
  *                                  formatted
+ *   #/wall/frames/<id>/nowshowing  {section: "wall", id, facet: "status"}: the Now-showing
+ *                                  facet's old bookmark (console DDD §61); never formatted
  *
  * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Facets are
  * the Inspector's keys. Ids and steps are URI-encoded, so an id may hold any text.
@@ -36,9 +41,10 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *
  * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"releases"|"attention"} Section
  * @typedef {"new"|"edit"|"show"|"update"} Flow
- * @typedef {"calibration"|"binding"|"nowshowing"} Facet
+ * @typedef {"status"|"binding"|"calibration"} Facet
+ * @typedef {"layout"} Mode
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
- *            initialTarget?: string, tried?: string, skipped?: string[]}} Route
+ *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[]}} Route
  *   `tried` is the Player an Update the wall journey tries the release on, `skipped` the Players
  *   it must never reboot, in the order the operator skipped them, none repeated (its URL holds
  *   only the operator's choices, never progress: Part E §25a). An empty `skipped` is the same
@@ -70,13 +76,13 @@ export function routeIdName(noun, id, { start = false } = {}) {
   return `${start ? "An" : "an"} unknown ${noun}`;
 }
 
-/** Every section, in sidebar order. */
+/** Every section, in sidebar order (console DDD §48: Wall, Show, Fleet, Needs attention). */
 export const SECTIONS = Object.freeze([
+  "wall",
   "now",
   "scenes",
   "schedule",
   "sources",
-  "wall",
   "players",
   "releases",
   "attention",
@@ -85,16 +91,23 @@ export const SECTIONS = Object.freeze([
 // Old section names that parse to a current one, so their bookmarks keep working.
 const ALIASES = Object.freeze({ equipment: "players" });
 
-/** The Inspector's facet keys (Inspector.jsx FACETS). */
-export const FACETS = Object.freeze(["calibration", "binding", "nowshowing"]);
+/** The Inspector's facet keys, in its tab order (Inspector.jsx FACETS). */
+export const FACETS = Object.freeze(["status", "binding", "calibration"]);
 
-// Old facet names that parse to a current one, so their bookmarks keep working.
-const FACET_ALIASES = Object.freeze({ commissioning: "calibration" });
+/** The facet a Frame opens on when nothing names one (console DDD §61, G3). */
+export const DEFAULT_FACET = "status";
+
+// Old facet names that parse to a current one, so their bookmarks keep working. No other
+// facet segment ever shipped, so there is no other alias.
+export const FACET_ALIASES = Object.freeze({ nowshowing: "status", commissioning: "calibration" });
+
+// The Wall's modes (`#/wall/<mode>`): Edit layout only.
+const WALL_MODES = new Set(["layout"]);
 
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "facet", "initialTarget", "tried", "skipped"];
+const KEYS = ["section", "id", "flow", "step", "facet", "mode", "initialTarget", "tried", "skipped"];
 
 /**
  * Parse a location hash (with or without its leading "#") into a Route, or null.
@@ -138,6 +151,12 @@ export function parseRoute(hash) {
   }
   if (query !== "" && !(section === "scenes" && rest.length === 2 && rest[0] === "new")) {
     return null;
+  }
+  if (section === "wall" && rest.length === 1 && WALL_MODES.has(rest[0])) {
+    return { section, mode: rest[0] };
+  }
+  if (section === "wall" && rest.length === 2 && rest[0] === "frames") {
+    return { section, id: rest[1], facet: DEFAULT_FACET };
   }
   if (section === "wall" && rest.length === 3 && rest[0] === "frames") {
     const facet = Object.hasOwn(FACET_ALIASES, rest[2]) ? FACET_ALIASES[rest[2]] : rest[2];
@@ -188,14 +207,16 @@ function updateRoute(id, tail) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, facet, initialTarget, tried, skipped } = route ?? {};
+  const { section, id, flow, step, facet, mode, initialTarget, tried, skipped } = route ?? {};
   if (initialTarget !== undefined &&
       (section !== "scenes" || flow !== "new" || facet !== undefined ||
         !FRAME_ID_PATTERN.test(initialTarget))) {
     throw new Error(`not a console route: ${JSON.stringify(route)}`);
   }
   let parts;
-  if (facet !== undefined) {
+  if (mode !== undefined) {
+    parts = [section, mode];
+  } else if (facet !== undefined) {
     parts = [section, "frames", id, facet];
   } else if (flow === "edit") {
     parts = [section, id, "edit", step];
@@ -230,14 +251,14 @@ export function sceneCreationRoute(frameId) {
 }
 
 /**
- * Where an unknown route lands (§6, Question 4): the Wall while no frame exists (its
- * Guidance banner is there), otherwise Now showing.
+ * Where an unknown route lands: always the Wall (console DDD §48, G3). With no Frames the
+ * Wall's own face is the first step (its Guidance banner), so the landing never depends on
+ * state.
  *
- * @param {number} frameCount
  * @returns {Route}
  */
-export function landingRoute(frameCount) {
-  return { section: frameCount === 0 ? "wall" : "now" };
+export function landingRoute() {
+  return { section: "wall" };
 }
 
 /**

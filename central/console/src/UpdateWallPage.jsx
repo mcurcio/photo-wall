@@ -75,7 +75,10 @@ const STEP_OF = Object.freeze({ paused: "keeping", backing_out: "looking" });
 
 const pausedWords = (deploymentId) => "Paused means this page sends no more reboots. Select is fleet-wide: any "
   + `Player that restarts for any reason, a power cut included, is offered deployment ${deploymentHandle(deploymentId)} at that boot.`;
-const keepScope = (deploymentId) => "These are the Players this console knows. Select is fleet-wide: any other Pi "
+// The Keep dialog shows only KNOWN_PLAYERS: `selectionConfirmation` beside it carries the fleet-wide claim. Choose and
+// Paused, which do not render it, carry the full `keepScope`.
+const KNOWN_PLAYERS = "These are the Players this console knows.";
+const keepScope = (deploymentId) => `${KNOWN_PLAYERS} Select is fleet-wide: any other Pi `
   + `that boots by node path is offered deployment ${deploymentHandle(deploymentId)} at its next boot.`;
 const GATE_CLOSED_KEEP = "Each Player is offered it at its next boot; this page cannot reboot them while the gate is closed.";
 const HIDDEN = "the tab was hidden; this page sends no reboots while it is not shown";
@@ -373,7 +376,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       body: (
         <>
           {selectionConfirmation(request).map((line) => <p key={line}>{line}</p>)}
-          <p>{keepScope(target.deploymentId)}</p>
+          <p>{KNOWN_PLAYERS}</p>
           <p>{canReboot ? KEEP_THEN : GATE_CLOSED_KEEP}</p>
           {canReboot && <PlanNames plan={plan} skipped={skipped} />}
         </>

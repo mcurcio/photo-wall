@@ -109,16 +109,33 @@ export function fact(spec) {
 }
 
 /**
- * The one wording of a Fact (§5 truth kinds).
+ * A reported fact's receipt alone ("first received 3 d ago", "last reported 4 s ago"), for the
+ * one line that states a record's receipt above the facts that share it; null for any other
+ * kind.
  *
  * @param {Fact} value
+ * @returns {string|null}
+ */
+export function receiptText(value) {
+  if (value?.kind !== "reported") return null;
+  return `${value.receipt === "first" ? "first received" : "last reported"} ${formatAge(value.age)} ago`;
+}
+
+/**
+ * The one wording of a Fact (§5 truth kinds). With `receipt: false`, a reported fact that
+ * names its value omits its receipt, because a line above states it once for the whole record
+ * (`receiptText`); every other wording is unchanged.
+ *
+ * @param {Fact} value
+ * @param {{receipt?: boolean}} [options]
  * @returns {string}
  */
-export function factText(value) {
+export function factText(value, { receipt = true } = {}) {
   switch (value?.kind) {
     case "set":
       return value.age === null ? value.value : `${value.value} · recorded ${formatAge(value.age)} ago`;
     case "reported":
+      if (!receipt && value.value !== null) return `${value.source} reported ${value.value}`;
       if (value.receipt === "first") {
         return `${value.source} reported ${value.value} · first received ${formatAge(value.age)} ago`;
       }

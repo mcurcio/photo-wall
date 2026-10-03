@@ -401,8 +401,8 @@ export function keepRow({ node, snapshot, playerId, target, gate, sent, waitedMs
   const offer = rebootOffer(reboot, node.read.reboot_commands, node.readAt, null);
   if (offer.offer !== "new") return row(playerId, "rebooting", `Rebooting: ${offer.reason}`);
   if (stagedThisBoot) {
-    return row(playerId, "waiting", "Waiting · it runs a Stage, which applies to this boot only; this page reboots it "
-      + "onto the selection");
+    return row(playerId, "waiting", "Waiting · it runs a Stage, which applies to this boot only; this page reboots it; "
+      + "its next boot is offered the selection");
   }
   if (target.app === null) {
     return row(playerId, "waiting", "Waiting · unknown whether it booted the selection (a release with no app cannot "

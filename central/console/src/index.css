@@ -386,12 +386,41 @@ label {
   flex: 1;
 }
 
-.console__guidance-dismiss {
-  padding: 4px 12px;
+.console__surface-filter {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 20px;
 }
 
-.console__surface-filter {
+/* Edit layout's bar (console DDD §61) and the Wall's To finish list (§54). */
+.layout__bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.layout__title {
+  margin: 0;
+  flex: 1;
+}
+
+.unfinished {
   margin-bottom: 20px;
+}
+
+.unfinished__title {
+  margin: 0 0 8px;
+}
+
+.unfinished__list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.unfinished__item {
+  padding: 2px 0;
 }
 
 .plan {
@@ -509,7 +538,9 @@ label {
   --status: var(--ok);
 }
 
-.health--todo {
+.health--todo,
+.health--notice,
+.health--unknown {
   --status: var(--todo);
 }
 
@@ -519,6 +550,8 @@ label {
 
 .health--ok,
 .health--todo,
+.health--notice,
+.health--unknown,
 .health--alarm {
   color: var(--status);
   fill: var(--status);
@@ -541,6 +574,8 @@ label {
 
 .health--ok::before,
 .health--todo::before,
+.health--notice::before,
+.health--unknown::before,
 .health--alarm::before {
   margin-right: 0.35em;
   font-size: 0.85em;
@@ -550,7 +585,9 @@ label {
   content: "●" / "";
 }
 
-.health--todo::before {
+.health--todo::before,
+.health--notice::before,
+.health--unknown::before {
   content: "■" / "";
 }
 
@@ -560,6 +597,18 @@ label {
 
 .plan__health {
   font-size: 10px;
+}
+
+/* The Status facet's host chip (HostChip.jsx): a link in a chip, words first. */
+.facet__host {
+  margin: 0 0 8px;
+}
+
+.host-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-decoration: none;
 }
 
 .inspector__health {
@@ -874,7 +923,6 @@ label {
   text-align: left;
 }
 
-.roster__standing,
 .roster__boot {
   margin: 4px 0 0;
   font-size: 12px;
@@ -931,6 +979,84 @@ label {
 .roster__empty {
   margin: 0;
   color: var(--fg-subtle);
+}
+
+/* The Players table (console DDD §61): one rendering, worst first. At phone width
+   its wrapper scrolls sideways; the page itself never does. A row's tier and an
+   item's band are a leading rule for the eye; the words already carry them (§5). */
+.players__scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.players__table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.players__table th,
+.players__table td {
+  padding: 8px 12px 8px 0;
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--border);
+}
+
+.players__table thead th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.players__table tbody th {
+  white-space: nowrap;
+}
+
+.players__cell {
+  min-width: 10rem;
+}
+
+.players__row--alarm > th {
+  box-shadow: inset 3px 0 var(--alarm);
+  padding-left: 8px;
+}
+
+.players__row--notice > th {
+  box-shadow: inset 3px 0 var(--warn);
+  padding-left: 8px;
+}
+
+.players__item--alarm,
+.players__item--notice {
+  padding-left: 6px;
+  border-left: 2px solid var(--alarm);
+}
+
+.players__item--notice {
+  border-left-color: var(--warn);
+}
+
+.players__frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.players__chip {
+  padding: 1px 8px;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.players__spares {
+  margin-top: 16px;
+}
+
+.player__host-group {
+  margin: 8px 0 0;
 }
 
 .roster__alert {

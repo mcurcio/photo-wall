@@ -45,10 +45,10 @@ def _seed(registry):
 
 def _attention(page):
     strip = page.get_by_role("region", name="Wall attention", exact=True)
-    toggle = strip.get_by_role("button", name=re.compile(r"^(Show|Hide) frames$"))
+    toggle = strip.get_by_role("button", name=re.compile(r"^(Show|Hide) list$"))
     if toggle.get_attribute("aria-expanded") != "true":
         toggle.click()
-    return strip.get_by_role("list", name="Frames needing attention", exact=True)
+    return strip.get_by_role("list", name="Frames and Players needing attention", exact=True)
 
 
 def test_a_served_interruption_shows_on_the_tile_run_chip_attention_and_output_row(page, registry):
@@ -88,9 +88,12 @@ def test_a_frame_newly_bound_to_the_lost_output_shows_nothing(page, registry):
         replacement = tile_health(page, "replacement")
         expect(replacement).to_have_text("Needs calibration")
         expect(replacement).not_to_have_accessible_name(re.compile("interrupted"))
-        expect(_attention(page)).to_contain_text("replacement")
-        expect(_attention(page)).not_to_contain_text("interrupted")
-        page.keyboard.press("Escape")  # the list overlays the page
+        # Needs calibration is the Wall's To finish item, not an incident (console DDD G2),
+        # and nothing anywhere claims the old interruption for it.
+        expect(page.get_by_role("list", name="To finish", exact=True)).to_contain_text(
+            "replacement · needs calibration")
+        expect(page.get_by_role("region", name="Wall attention", exact=True)).not_to_contain_text(
+            "interrupted")
         open_player(page, NAME)
         outputs = page.get_by_role("list", name=f"Outputs of {NAME}", exact=True)
         expect(outputs).to_contain_text("Bound to Frame replacement")

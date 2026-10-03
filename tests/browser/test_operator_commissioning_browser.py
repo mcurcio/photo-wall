@@ -75,7 +75,7 @@ def test_calibration_shows_committed_gain_and_no_equipment_or_gated_area(page, r
         # tests/test_console_routes_r4.py (the module graph) and the sample-path visits
         # in tests/browser/test_console_shell_browser.py.
         expect(inspector.get_by_role("tablist", name="Inspector facets").get_by_role("tab")).to_have_text(
-            ["Calibration", "Binding", "Now-showing"])
+            ["Status", "Binding", "Calibration"])
         calibration = inspector.get_by_role("group", name="Committed calibration")
         expect(calibration).to_be_visible()
 

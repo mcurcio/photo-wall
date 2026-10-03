@@ -191,14 +191,19 @@ def _keep(page, label="Select for every boot"):
     dialog.get_by_role("button", name=label, exact=True).click()
 
 
-def _start_rebooting(page, fleet):
-    """Keep's Select has landed: Paused, with the named plan, sends nothing until Start."""
+def _start_rebooting(page, fleet, double=False):
+    """Keep's Select has landed: Paused, with the named plan, sends nothing until Start (double-clicked
+    when `double`)."""
     keep = _section(page, "Keep")
     expect(keep).to_be_visible(timeout=10_000)
     expect(keep.get_by_role("status")).to_have_text(re.compile(r"^Paused · 0 of \d+ Players on the selection$"))
     _settle(page, times=2)
     assert fleet.reboots == []
-    keep.get_by_role("button", name="Start rebooting", exact=True).click()
+    start = keep.get_by_role("button", name="Start rebooting", exact=True)
+    if double:
+        start.dblclick()
+    else:
+        start.click()
     return keep
 
 
@@ -231,7 +236,7 @@ def test_keep_sends_one_put_then_one_reboot_at_a_time_each_after_the_previous_re
         _publish(page)
         expect(_section(page, "Choose")).to_contain_text(KEEP_WORDS)
         _keep(page)
-        keep = _start_rebooting(page, fleet)
+        keep = _start_rebooting(page, fleet, double=True)  # a double click starts one rollout: one reboot
         assert len(puts) == 1
         _settle(page)
         assert len(fleet.reboots) == 1

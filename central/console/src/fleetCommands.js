@@ -393,7 +393,8 @@ function operationState(operation, readAt) {
         fact: fact({ kind: "derived", value: "Interrupted", basis: "a later boot of this Player was admitted" }),
         prior: prior() };
     case "ended_by_later_boot":
-      // G2: the stage had finished (target or fallback running); a later boot runs the selection.
+      // G2: the stage had finished (target or fallback running); a later boot was admitted, and Central offers each
+      // boot the boot selection.
       return { state: "ended_by_later_boot", label: "Ended by a later boot",
         fact: fact({ kind: "derived", value: "Ended by a later boot",
           basis: "a later boot was admitted; Central offers each boot the boot selection" }),
@@ -403,6 +404,10 @@ function operationState(operation, readAt) {
         fact: fact({ kind: "unknown", why: `Central served an unrecognised state "${words(operation.state)}"` }) };
   }
 }
+
+/** Devices with a reboot POST in flight from this page (module state: one page, one send path). */
+const rebootsInFlight = new Set();
+const REBOOT_IN_FLIGHT_MESSAGE = "A reboot for this Player is already being sent.";
 
 /**
  * THE one send path for a reboot (§10): judge the frozen request on `node.latest()` and
@@ -420,14 +425,22 @@ function operationState(operation, readAt) {
  * @returns {Promise<RebootResult>}
  */
 export async function sendReboot(deviceId, request, node, control) {
+  // The per-device in-flight guard lives here, in the one send path, so no caller can bring back a double send.
+  // It is taken synchronously before the first await and always released: apiWrite's abort budget settles the POST.
+  if (rebootsInFlight.has(deviceId)) {
+    return { outcome: "changed", message: REBOOT_IN_FLIGHT_MESSAGE, retryable: false };
+  }
   const refusal = rebootRefusal(request, node.latest(), control.latest().gate);
   if (refusal !== null) return { outcome: "changed", message: `${refusal}.`, retryable: false };
+  rebootsInFlight.add(deviceId);
   let result;
   try {
     result = await apiWrite(`/v1/operator/node/devices/${encodeURIComponent(deviceId)}/reboots`,
       { method: "POST", body: request.body });
   } catch {
     return { outcome: "unknown", message: UNKNOWN_MESSAGE, retryable: true };
+  } finally {
+    rebootsInFlight.delete(deviceId);
   }
   return rebootResult(result);
 }

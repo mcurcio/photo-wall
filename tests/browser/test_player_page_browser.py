@@ -80,6 +80,7 @@ BANNER = ("Node management is off on this Central. It was started without node c
           "(runbook › Node control).")
 NOT_SHOWN = "Node records are not shown: node management is off (see the banner)."
 STATUS_READ = "/v1/operator/node/status"
+HOSTS_READ = "/v1/operator/node/hosts"
 
 
 class Box:
@@ -137,10 +138,12 @@ class Box:
 
 
 def _node_reads(page):
-    """Every node read the pages send, in order, except the shell's node status read."""
+    """Every node read the pages send, in order, except the shell's node status read and its
+    fleet host read (HOSTS_READ, gated with it on node control)."""
     sent = []
     page.on("request", lambda request: sent.append(request.url)
-            if "/v1/operator/node/" in request.url and STATUS_READ not in request.url else None)
+            if "/v1/operator/node/" in request.url and STATUS_READ not in request.url
+            and HOSTS_READ not in request.url else None)
     return sent
 
 
@@ -163,7 +166,7 @@ def test_the_tracer_reaches_a_player_page_from_the_list_with_standing_and_host_a
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sent = _node_reads(page)
         connect(page, origin, "players")
-        row = page.get_by_role("list", name="Players", exact=True).get_by_role("listitem").filter(
+        row = page.get_by_role("table", name="Players", exact=True).get_by_role("row").filter(
             has=page.get_by_role("link", name=NAME, exact=True))
         expect(row).to_contain_text("Standing: Unbound")
         page.wait_for_timeout(200)
@@ -255,7 +258,8 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         expect(player).to_contain_text("Standing: Unbound")
         expect(page.get_by_role("region", name="Outputs", exact=True)).to_contain_text("HDMI-A-1")
         go(page, "players")
-        expect(page.get_by_role("link", name=NAME, exact=True)).to_be_visible()
+        expect(page.get_by_role("table", name="Players", exact=True).get_by_role(
+            "link", name=NAME, exact=True)).to_be_visible()
 
 
 def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_works(page, registry):
@@ -271,6 +275,9 @@ def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_wo
     name = f"Player {request.device_id}"
     with operator_server(registry.db, registry.clock, node_control=None) as origin:
         sent = _node_reads(page)
+        host_reads = []
+        page.on("request", lambda request: host_reads.append(request.url)
+                if HOSTS_READ in request.url else None)
         connect(page, origin)
         banner = page.get_by_role("region", name="Node control", exact=True)
         expect(banner).to_have_text(BANNER)
@@ -279,7 +286,7 @@ def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_wo
         expect(banner).to_have_count(1)
         # In place of the node sections, exactly one line.
         expect(player.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
-        for section in ("Layers", "Boot", "Reboot", "App"):
+        for section in ("Health", "Layers", "Boot", "Reboot", "App"):
             expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
         expect(player).not_to_contain_text("Unknown: node management")
         # Identify, Bind, Unbind and Retire still work.
@@ -305,6 +312,7 @@ def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_wo
         expect(player).to_contain_text("Standing: Retired")
         page.wait_for_timeout(300)
         assert sent == [], "a node read was sent to a Central without node control"
+        assert host_reads == [], "the shell read fleet hosts from a Central without node control"
 
 
 def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_status_itself(
@@ -382,13 +390,60 @@ def test_a_failed_device_read_keeps_its_rows_marked_refresh_failed(page, registr
         expect(host).to_contain_text("Host Management last reported 0 s ago")
 
 
+def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, registry):
+    """H1 (§61): Reboot sits in the header behind its own boundary."""
+    box = Box(registry)
+    box.host_sample()
+
+    def drifted(route):
+        data = route.fetch().json()
+        data["reboot_commands"] = 5  # payload drift: only Reboot reads this list
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
+
+    page.route(DEVICE_READ, drifted)
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+        connect(page, origin)
+        player = open_player(page, NAME)
+        header = player.locator(".player__header")
+        expect(header.get_by_role("region", name="Reboot", exact=True).get_by_role("alert")).to_have_text(
+            "This section could not be shown. The rest of the page is current.")
+        expect(header.get_by_role("heading", level=2, name=NAME, exact=True)).to_be_visible()
+        expect(header).to_contain_text("Standing: Unbound")
+        expect(page.get_by_role("region", name="Health", exact=True)).to_contain_text(
+            "Host Management: Host Management last reported")
+
+
+def test_health_is_first_from_the_fleet_host_read_and_layers_keep_only_the_receipt(page, registry):
+    """H1 (§61): Health, from Central's real fleet host read, is the first section; its raw
+    disclosure holds the sample's lines, which left Layers; Layers keeps Host Management's
+    "Last reported" and its session line."""
+    box = Box(registry)
+    box.host_sample()
+    registry.clock.advance(2)
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+        connect(page, origin)
+        player = open_player(page, NAME)
+        expect(player.locator(".player > section.player__section").first).to_have_attribute("aria-label", "Health")
+        health = page.get_by_role("region", name="Health", exact=True)
+        expect(health).to_contain_text("Host Management: Host Management last reported 2 s ago")
+        health.get_by_text("Every reported metric", exact=True).click()
+        expect(health.get_by_role("list", name="Every reported metric", exact=True)).to_contain_text(
+            "uptime: 1 seconds (host sampler)")
+        host = _layer(page, "Host Management")
+        expect(host).to_contain_text("Last reported: Host Management last reported 2 s ago")
+        host.get_by_text("Host Management details", exact=True).click()
+        expect(host).to_contain_text("Session ")
+        expect(host).not_to_contain_text("uptime")
+        expect(host).not_to_contain_text("visible pixels")
+
+
 def test_a_box_seen_only_at_boot_is_listed_not_enrolled(page, registry):
     box = Box(registry, enrolled=False)
     box.host_sample()
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sent = _node_reads(page)
         connect(page, origin, "players")
-        row = page.get_by_role("list", name="Players", exact=True).get_by_role("listitem").filter(
+        row = page.get_by_role("table", name="Players", exact=True).get_by_role("row").filter(
             has=page.get_by_role("link", name=NAME, exact=True))
         expect(row).to_contain_text("Standing: Not enrolled")
         page.wait_for_timeout(200)
@@ -421,7 +476,7 @@ def test_the_equipment_bookmark_lands_on_players(page, registry):
         connect(page, origin)
         page.goto(origin + "/console#/equipment")
         expect(page.get_by_role("heading", level=1, name="Players", exact=True)).to_be_visible()
-        expect(page.get_by_role("list", name="Players", exact=True)).to_be_visible()
+        expect(page.get_by_role("table", name="Players", exact=True)).to_be_visible()
         assert current_hash(page) == "#/players"
         nav = page.get_by_role("navigation", name="Sections", exact=True)
         expect(nav.get_by_role("link", name="Equipment", exact=True)).to_have_count(0)
@@ -531,7 +586,8 @@ def _call_send_directly(dialog_button):
 
 
 def _reboot(page):
-    return page.get_by_role("region", name="Reboot", exact=True)
+    """Reboot, in the Player page's header (console DDD §61)."""
+    return page.locator(".player__header").get_by_role("region", name="Reboot", exact=True)
 
 
 def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page, registry):
@@ -590,6 +646,25 @@ def test_a_lost_answer_is_retried_with_the_identical_body_inside_the_window(page
         dialog.get_by_role("button", name="Retry the same request", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text("Already recorded. Requested · delivery unknown.")
         assert len(sent) == 2 and sent[0] == sent[1]
+
+
+def test_a_double_click_on_reboot_player_sends_one_post(page, registry):
+    """R1: the dialog's send, double-clicked, sends one reboot request (the dialog's hold and the
+    per-device guard inside `sendReboot`, tests/test_console_fleet_commands.py)."""
+    Box(registry)
+    _open_gate(registry)
+    with _gated_server(registry) as origin:
+        sent = _reboot_posts(page)
+        connect(page, origin)
+        open_player(page, NAME)
+        _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
+        page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True).get_by_role(
+            "button", name="Reboot Player", exact=True).dblclick()
+        expect(_reboot(page).get_by_role("status")).to_have_text("Reboot recorded. Requested · delivery unknown.")
+        page.wait_for_timeout(500)
+        assert len(sent) == 1
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
 
 
 def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_it_on(page, registry):

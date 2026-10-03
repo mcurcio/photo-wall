@@ -113,11 +113,13 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
     report_readiness(registry, player_id)
     registry.clock.advance(40)
     with operator_server(registry.db, registry.clock) as origin:
-        # The shell's one node status read (node control and the effect gate) is not a node record.
+        # The shell's one node status read (node control and the effect gate) and its one fleet
+        # host read are not a page's node record read.
         node_reads = []
         page.on("request", lambda request: node_reads.append(request.url)
                 if "/v1/operator/node/" in request.url
-                and "/v1/operator/node/status" not in request.url else None)
+                and "/v1/operator/node/status" not in request.url
+                and "/v1/operator/node/hosts" not in request.url else None)
         connect(page, origin, "wall")
         inspector = open_frame(page, FRAME, "binding")
         link = inspector.get_by_role("link", name="See its layers on the Player page", exact=True)
@@ -338,10 +340,10 @@ def _strip(page):
 
 def _open_list(page):
     """Expand the strip's disclosure (it may already be open) and return its list."""
-    toggle = _strip(page).get_by_role("button", name=re.compile(r"^(Show|Hide) frames$"))
+    toggle = _strip(page).get_by_role("button", name=re.compile(r"^(Show|Hide) list$"))
     if toggle.get_attribute("aria-expanded") != "true":
         toggle.click()
-    return _strip(page).get_by_role("list", name="Frames needing attention", exact=True)
+    return _strip(page).get_by_role("list", name="Frames and Players needing attention", exact=True)
 
 
 def _seed_attention(registry):
@@ -363,21 +365,30 @@ def _seed_attention(registry):
         width_mm=300, height_mm=500, profile=PORTRAIT))
 
 
-def test_the_strip_counts_alarms_apart_from_todos(page, registry):
+def test_the_strip_counts_incidents_and_leaves_to_dos_to_the_wall(page, registry):
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        expect(_strip(page).get_by_role("status")).to_have_text(
-            "3 frames need attention · 2 to set up")
+        # Incidents only (console DDD §61): no "to set up" count.
+        expect(_strip(page).get_by_role("status")).to_have_text("3 Frames need attention")
         entries = _open_list(page).get_by_role("listitem")
-        # Alarms first, then to-dos; each names the frame and states its fact and age.
+        # Each names the frame and states its fact and age; no structural to-do is a row.
         expect(entries).to_have_text([
             "never-reported — Enrolled 4 min ago, no report yet",
             "silent-a — Player silent · last heard 4 min ago",
             "silent-b — Player silent · last heard 4 min ago",
-            "no-player — Needs a Player",
-            "to-commission — Needs calibration",
         ])
+        # The unbound and needs-calibration Frames are the Wall's To finish items (G2).
+        expect(page.get_by_role("list", name="To finish", exact=True).get_by_role("listitem")
+               ).to_have_text(["no-player · needs a Player Binding",
+                               "silent-a · needs calibration Calibration",
+                               "to-commission · needs calibration Calibration"])
+        expect(page.get_by_text(re.compile("to set up", re.I))).to_have_count(0)
+        go(page, "attention")
+        expect(page.get_by_role("main").get_by_role("list", name="Frames and Players needing attention",
+                                                    exact=True).get_by_role("listitem")
+               ).to_have_count(3)
+        expect(page.get_by_text(re.compile("to set up", re.I))).to_have_count(0)
 
 
 def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_inspector(
@@ -385,13 +396,6 @@ def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_insp
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        _open_list(page).get_by_role("button", name="to-commission — Needs calibration").click()
-        inspector = page.get_by_role("region", name="Frame to-commission inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_have_attribute(
-            "aria-selected", "true")
-        expect(inspector.get_by_role("heading", name="Frame to-commission", exact=True)
-               ).to_be_focused()
-
         _open_list(page).get_by_role(
             "button", name="silent-a — Player silent · last heard 4 min ago").click()
         inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
@@ -399,21 +403,37 @@ def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_insp
             "aria-selected", "true")
         expect(inspector.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
 
-        # Plain selection keeps the open facet (no reset) and never moves focus.
+        # A plain tile click opens Status (console DDD §61) and never moves focus.
         page.get_by_role("button", name="Frame all-good", exact=True).click()
         inspector = page.get_by_role("region", name="Frame all-good inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+        expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
             "aria-selected", "true")
         expect(inspector.get_by_role("heading", name="Frame all-good", exact=True)
                ).not_to_be_focused()
+
+
+def test_a_needs_attention_visit_opens_the_cause_facet_and_an_ok_frame_opens_status(
+        page, registry):
+    _seed_attention(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "attention")
+        listing = page.get_by_role("main").get_by_role(
+            "list", name="Frames and Players needing attention", exact=True)
+        listing.get_by_role("link", name="silent-a — Player silent · last heard 4 min ago").click()
+        inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
+        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+        expect(inspector.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
+        assert page.evaluate("window.location.hash") == "#/wall/frames/silent-a/binding"
 
 
 def test_a_strip_focus_request_is_spent_once_and_not_replayed_on_remount(page, registry):
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        _open_list(page).get_by_role("button", name="no-player — Needs a Player").click()
-        heading = page.get_by_role("heading", name="Frame no-player", exact=True)
+        _open_list(page).get_by_role(
+            "button", name="silent-b — Player silent · last heard 4 min ago").click()
+        heading = page.get_by_role("heading", name="Frame silent-b", exact=True)
         expect(heading).to_be_focused()
         # Away to a Show page (the Wall unmounts) and back through the sidebar, which
         # returns to the Wall as it was: the frame is open again, but the spent request
@@ -435,12 +455,12 @@ def test_escape_closes_the_list_and_returns_focus_to_its_toggle(page, registry):
         entries.get_by_role("button").first.focus()
         page.keyboard.press("Escape")
         expect(entries).to_have_count(0)
-        expect(_strip(page).get_by_role("button", name="Show frames", exact=True)).to_be_focused()
+        expect(_strip(page).get_by_role("button", name="Show list", exact=True)).to_be_focused()
 
 
-def test_a_player_just_enrolled_is_not_yet_counted_as_a_todo(page, registry):
-    """Within two served report intervals of enrolling, a Player that has not reported
-    yet is settling: never ok on its tile, but not a to-do in the strip."""
+def test_a_player_awaiting_its_first_report_is_counted_not_listed(page, registry):
+    """Within the silence limit a Player that has not reported yet is no incident: never ok
+    on its tile, but counted as awaiting a first report, settling or not (console DDD G2)."""
     _bound_frame(registry, "earlier", x_mm=100)
     registry.clock.advance(5)
     _bound_frame(registry, "just-enrolled", x_mm=500)
@@ -449,10 +469,9 @@ def test_a_player_just_enrolled_is_not_yet_counted_as_a_todo(page, registry):
         settling = _health(page, "just-enrolled")
         expect(settling).to_have_accessible_name("Enrolled 0 s ago, no report yet")
         expect(settling).to_have_class(_severity("todo"))
-        expect(_strip(page).get_by_role("status")).to_have_text("1 to set up")
-        expect(_open_list(page).get_by_role("listitem")).to_have_text([
-            "earlier — Enrolled 5 s ago, no report yet",
-        ])
+        expect(_strip(page).get_by_role("status")).to_have_text(
+            "No Frame or Player needs attention · 2 awaiting a first report")
+        expect(_strip(page).get_by_role("button", name="Show list")).to_have_count(0)
 
 
 def test_the_all_clear_does_not_claim_a_report_that_has_not_arrived(page, registry):
@@ -462,7 +481,7 @@ def test_the_all_clear_does_not_claim_a_report_that_has_not_arrived(page, regist
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         expect(_strip(page).get_by_role("status")).to_have_text(
-            "No Frame needs attention · 1 awaiting a first report")
+            "No Frame or Player needs attention · 1 awaiting a first report")
 
 
 def test_showrunner_strip_entries_are_text_not_navigation(page, registry):
@@ -490,19 +509,16 @@ def test_a_stalled_scheduler_collapses_silent_frames_into_one_causal_line(page, 
         expect(entries).to_have_text([
             "3 frames silent — Central's scheduler is stale; Players may be unable to report "
             "until it recovers.",
-            "no-player — Needs a Player",
-            "to-commission — Needs calibration",
         ])
 
 
 def test_a_long_list_is_capped_with_a_count_of_the_rest(page, registry):
     for index in range(10):
-        registry.create_frame(FrameCreate(
-            id=f"frame-{index:02d}", surface_id="wall", x_mm=100 + 400 * index, y_mm=100,
-            width_mm=300, height_mm=500, profile=PORTRAIT))
+        _bound_frame(registry, f"frame-{index:02d}", x_mm=100 + 400 * index)
+    registry.clock.advance(240)  # every Player enrolled long ago and never reported
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        expect(_strip(page).get_by_role("status")).to_have_text("10 to set up")
+        expect(_strip(page).get_by_role("status")).to_have_text("10 Frames need attention")
         entries = _open_list(page).get_by_role("listitem")
         expect(entries).to_have_count(9)
         expect(entries.last).to_have_text("and 2 more")
@@ -533,10 +549,11 @@ def test_strip_navigation_leaves_the_inspector_in_view(page, registry, viewport)
     page.set_viewport_size(viewport)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        _open_list(page).get_by_role("button", name="no-player — Needs a Player").click()
-        inspector = page.get_by_role("region", name="Frame no-player inspector", exact=True)
+        _open_list(page).get_by_role(
+            "button", name="silent-b — Player silent · last heard 4 min ago").click()
+        inspector = page.get_by_role("region", name="Frame silent-b inspector", exact=True)
         expect(inspector).to_be_in_viewport()
-        expect(inspector.get_by_role("heading", name="Frame no-player", exact=True)).to_be_focused()
+        expect(inspector.get_by_role("heading", name="Frame silent-b", exact=True)).to_be_focused()
 
 
 def test_a_phone_width_page_never_scrolls_sideways(page, registry):
@@ -548,7 +565,7 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
         expect(page.get_by_role("region", name="Frame silent-b inspector", exact=True)
                ).to_be_visible()
         _open_list(page)
-        for facet in ("Calibration", "Binding", "Now-showing"):
+        for facet in ("Status", "Binding", "Calibration"):
             page.get_by_role("tab", name=facet, exact=True).click()
             assert_fits_width(page, facet)
         # Every Show page too, not only the last one visited.

@@ -127,6 +127,9 @@ out.results.gateClosedWhileShellOpen = stage.stageResult({ ok: false, status: 50
 out.results.gateway = stage.stageResult({ ok: false, status: 502, error: null }, open);
 out.results.lost = stage.stageResult(null, open);
 out.results.done = stage.stageResult({ ok: true, status: 200, data: { duplicate: false } }, open);
+// --- boundRuleLines: the rule, then its caveat; neither text is exported alone.
+out.boundRuleLines = stage.boundRuleLines();
+out.boundExports = ["BOUND_RULE", "BOUND_PROVEN"].filter((name) => name in stage);
 console.log(JSON.stringify(out));
 """
 
@@ -262,3 +265,22 @@ def test_send_stage_is_the_only_caller_of_the_app_stages_route():
     assert start < at < source.index("\n}\n", start)
     assert "stageRefusal(request, node.latest(), gate, held.get())" in source[start:at]
     assert "const gate = control.latest().gate;" in source[start:at]
+
+
+# Fragments of the bound rule (§25, D16) and its caveat: any one names the text.
+_BOUND_TEXT = re.compile(r"shows the base page while the app switches|proven on Central only")
+
+
+def test_the_bound_rule_has_one_home_and_is_shown_only_with_its_caveat():
+    """R1: stage.js `boundRuleLines` is the only export of the rule and its caveat (as releases.js
+    `selectionConfirmation` is Select's), and no other console module names either text."""
+    out = _run()
+    assert out["boundRuleLines"] == [
+        "Each Frame this Player drives shows the base page while the app switches, then rejoins its Run at the "
+        "current point (missed content is not replayed), as on Reboot.",
+        "A switch on a Frame-bound Player is proven on Central only; the Player's side of it is not yet qualified."]
+    assert out["boundExports"] == []
+    naming = sorted(module.name for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
+                    if _BOUND_TEXT.search(module.read_text()))
+    assert naming == ["stage.js"]
+    assert "BOUND_RULE" not in (SRC / "StageApp.jsx").read_text()

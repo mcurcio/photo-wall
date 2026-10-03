@@ -4,9 +4,8 @@ import { useNodeControlValue } from "./nodeControl.js";
 import { useReleaseRead } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import {
-  BOUND_PROVEN,
-  BOUND_RULE,
   boundFrames,
+  boundRuleLines,
   pendingStage,
   sendStage,
   stageBlocker,
@@ -24,13 +23,14 @@ const RELEASES = formatRoute({ section: "releases" });
 
 /**
  * The bound rule (§25, D16) with its qualification caveat: the one rendering for every Stage
- * surface, so no page can state the rule without the caveat.
+ * surface, over stage.js `boundRuleLines` (the rule, then the caveat as a note).
  */
 export function BoundRule() {
+  const [rule, ...caveats] = boundRuleLines();
   return (
     <>
-      <p>{BOUND_RULE}</p>
-      <p className="roster__note">{BOUND_PROVEN}</p>
+      <p>{rule}</p>
+      {caveats.map((line) => <p key={line} className="roster__note">{line}</p>)}
     </>
   );
 }

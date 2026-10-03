@@ -23,11 +23,12 @@ export const fleetRoutes = Object.freeze(
     {
       section: "players",
       label: "Players",
-      render: ({ snapshot, bootFacts, route, wall }) =>
+      render: ({ snapshot, bootFacts, route, wall, hosts }) =>
         route.id === undefined ? (
-          <PlayersPage snapshot={snapshot} bootFacts={bootFacts} wall={wall} />
+          <PlayersPage snapshot={snapshot} bootFacts={bootFacts} wall={wall} hosts={hosts} />
         ) : (
-          <PlayerPage key={route.id} deviceId={route.id} snapshot={snapshot} bootFacts={bootFacts} wall={wall} />
+          <PlayerPage key={route.id} deviceId={route.id} snapshot={snapshot} bootFacts={bootFacts} wall={wall}
+            hosts={hosts} />
         ),
       samplePaths: SAMPLES.fleet.players,
     },

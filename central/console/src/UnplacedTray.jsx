@@ -1,6 +1,5 @@
 import React from "react";
 
-import { deleteFrameRequest, useConfirm } from "./ConfirmAction.jsx";
 import { frameHealth } from "./health.js";
 import { project } from "./projection.js";
 
@@ -18,29 +17,32 @@ import { project } from "./projection.js";
  * tray shows exactly the frames the projection sends to `unplaced`, so the plan
  * and tray can never disagree about a frame's fate.
  *
- * DRAG-OUT (Bead 11, design J3/§12): a pointer press on a tray entry starts a
- * drag whose frame id is recorded by the caller (`onDragStart`); releasing over
- * the plan is handled by {@link Plan}'s pointer-up, which PATCHes a distinct
+ * SELECT-ONLY BY DEFAULT (console DDD §61). Without `edit` an entry only selects
+ * (on the Wall's daily face it opens the Frame's Inspector). This module imports
+ * no write module; Edit layout (LayoutEditor.jsx) passes the writes as `edit`.
+ *
+ * DRAG-OUT (Bead 11, design J3/§12; Edit layout only): a pointer press on a tray
+ * entry starts a drag whose frame id is recorded by `edit.dragStart`; releasing
+ * over the plan is handled by {@link Plan}'s pointer-up, which PATCHes a distinct
  * position. A press-release ON the entry (no drag onto the plan) stays a plain
  * click and selects the frame.
  *
- * DELETE (Bead 11; slice 2 §7): each entry carries a Delete control that opens
- * the one confirmation dialog (ConfirmAction), owned here at the tray's top
- * level; a 409 guard message (bound / live Run) is shown inside it. After a
- * delete, `onDeleted` moves focus to the plan region.
+ * DELETE (Bead 11; slice 2 §7; Edit layout only): each entry carries a Delete
+ * control calling `edit.deleteFrame`, which opens the one confirmation dialog
+ * LayoutEditor owns; `edit.status` (its status line and dialog) renders at the
+ * tray's top level.
  *
  * Each entry also states the frame's health from the one classifier
  * (health.js), the same label its plan tile would show once placed.
  *
+ * @typedef {{dragStart: (frameId: string) => void,
+ *            deleteFrame: (event: {currentTarget: Element}, frameId: string) => void,
+ *            status: React.ReactNode}} TrayEdit
+ *
  * @param {{snapshot: object|null, onSelect: (frameId: string) => void,
- *          onDragStart?: (frameId: string) => void,
- *          onDeleted?: (frameId: string) => void}} props
+ *          edit?: TrayEdit|null}} props
  */
-export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
-  const { open, confirmation } = useConfirm(null, (result, request) =>
-    onDeleted?.(request.frameId),
-  );
-
+export function UnplacedTray({ snapshot, onSelect, edit = null }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const surfaces = [...new Set(frames.map((frame) => frame.surface_id))];
   // The tray is cross-Surface; union each Surface's projected `unplaced` ids.
@@ -48,9 +50,6 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
   const unplacedIds = surfaces.flatMap(
     (surfaceId) => project(frames, surfaceId, { width: 1, height: 1 }).unplaced,
   );
-
-  const onDelete = (event, frameId) =>
-    open(event, { ...deleteFrameRequest(snapshot, frameId), frameId });
 
   return (
     <section className="tray" role="group" aria-label="Unplaced frames">
@@ -66,7 +65,7 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
                 <button
                   type="button"
                   className="tray__item"
-                  onPointerDown={() => onDragStart?.(id)}
+                  onPointerDown={edit === null ? undefined : () => edit.dragStart(id)}
                   onClick={() => onSelect(id)}
                 >
                   {id}
@@ -74,19 +73,21 @@ export function UnplacedTray({ snapshot, onSelect, onDragStart, onDeleted }) {
                 <span className={`tray__health health--${health.severity}`}>
                   {health.label}
                 </span>
-                <button
-                  type="button"
-                  className="tray__delete"
-                  onClick={(event) => onDelete(event, id)}
-                >
-                  {`Delete frame ${id}`}
-                </button>
+                {edit !== null && (
+                  <button
+                    type="button"
+                    className="tray__delete"
+                    onClick={(event) => edit.deleteFrame(event, id)}
+                  >
+                    {`Delete frame ${id}`}
+                  </button>
+                )}
               </li>
             );
           })}
         </ul>
       )}
-      {confirmation("tray__status-line")}
+      {edit?.status}
     </section>
   );
 }

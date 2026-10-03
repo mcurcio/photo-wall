@@ -1,6 +1,6 @@
 import React, { useId, useRef, useState } from "react";
 
-import { AttentionList, attentionView, frames } from "./AttentionList.jsx";
+import { AttentionList, attentionSummary, attentionView } from "./AttentionList.jsx";
 import { formatRoute, isPlainClick } from "./routes.js";
 
 // At most this many rows in the detail list; the rest are counted.
@@ -9,13 +9,15 @@ const LIST_CAP = 8;
 /**
  * The attention strip (console pass 2, slice 1 — design §5), directly under the
  * status bar: one fixed-height line saying whether any frame needs the
- * operator, with a disclosure listing which ones. The list OVERLAYS the content
+ * operator, with a disclosure listing which Frames and Players. The list OVERLAYS the content
  * below it, so opening it never reflows the page.
  *
  * Every state and label comes from the one classifier (health.js
- * `wallAttention`). The live region carries STATE ONLY ("2 frames need
- * attention · 3 to set up"); ages live in the list, outside it, so a screen
- * reader is not re-announced on every poll.
+ * `wallAttention`) and the one host classifier (hostHealth.js `hostIncidents`). It
+ * counts incidents only (AttentionList.jsx `attentionSummary`): structural to-dos are
+ * the Wall's To finish list (console DDD §61). The live region carries STATE ONLY
+ * ("2 Frames · 1 Player need attention"); ages live in the list, outside it, so a screen reader is not
+ * re-announced on every poll.
  *
  * The rows, including the one causal line that replaces the liveness alarms
  * while Central's scheduler is not ok, come from AttentionList.jsx
@@ -33,29 +35,22 @@ const LIST_CAP = 8;
  * no frames the strip renders nothing and defers to the Guidance banner.
  *
  * @param {{snapshot: object, central: {scheduler: string|null},
+ *          hosts?: import("./fleetHosts.js").FleetHosts|null,
+ *          bootFacts?: object|null,
  *          onNavigate: ((frameId: string) => void)|null,
  *          onShowAll?: () => void}} props
  */
-export function AttentionStrip({ snapshot, central, onNavigate, onShowAll }) {
+export function AttentionStrip({ snapshot, central, hosts = null, bootFacts = null, onNavigate, onShowAll }) {
   const [open, setOpen] = useState(false);
   const listId = useId();
   const toggleRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  const { frameCount, awaiting, alarms, todos, rows } = attentionView(snapshot, central);
+  const view = attentionView(snapshot, central, hosts, bootFacts);
+  const { frameCount, severity, rows } = view;
   if (frameCount === 0) {
     return null;
   }
 
-  const summary =
-    alarms.length === 0 && todos.length === 0
-      ? `No Frame needs attention${awaiting > 0 ? ` · ${awaiting} awaiting a first report` : ""}`
-      : [
-          alarms.length > 0 &&
-            `${frames(alarms.length)} ${alarms.length === 1 ? "needs" : "need"} attention`,
-          todos.length > 0 && `${todos.length} to set up`,
-        ]
-          .filter(Boolean)
-          .join(" · ");
-  const severity = alarms.length > 0 ? "alarm" : todos.length > 0 ? "todo" : "ok";
+  const summary = attentionSummary(view);
 
   return (
     <section
@@ -82,7 +77,7 @@ export function AttentionStrip({ snapshot, central, onNavigate, onShowAll }) {
             aria-controls={listId}
             onClick={() => setOpen((current) => !current)}
           >
-            {open ? "Hide frames" : "Show frames"}
+            {open ? "Hide list" : "Show list"}
           </button>
         )}
       </div>

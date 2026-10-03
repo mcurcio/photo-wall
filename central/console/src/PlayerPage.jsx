@@ -4,6 +4,7 @@ import { deprecatedBootFact } from "./bootFacts.js";
 import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./FactLine.jsx";
+import { HostHealthSection } from "./HostHealthSection.jsx";
 import { clock, fact, words } from "./facts.js";
 import {
   BOOT_FACTS_UNAVAILABLE, interruptionFor, isBound, outputLabel, outputStates,
@@ -294,18 +295,22 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
 }
 
 /**
- * One Player's home (`#/players/<device-id>`; console DDD §9, Q1 = A): the box's
- * identity and standing, its node layers bottom up, its Outputs, its boot, its reboot, its
- * app (Stage app and its operations) and its danger zone. Each section shows its own read time and sits behind
- * its own error boundary. Node records are read only here, for this box only (nodeRead.js),
+ * One Player's home (`#/players/<device-id>`; console DDD §9, Q1 = A, §61): a header with the
+ * box's identity, standing and Reboot (behind its own error boundary, so a Reboot render error
+ * leaves the header standing); then Health (HostHealthSection.jsx, from the shell's fleet host
+ * read, first), its node layers bottom up, its Outputs, its boot, its app (Stage app and its
+ * operations) and its danger zone. Each section shows its own read time and sits behind its
+ * own error boundary. Node records are read only here, for this box only (nodeRead.js),
  * never for a retired box and never while the shell's node control is not on; with node
  * control off the node sections give way to one "not shown" line (nodeControl.js). Writes stay with their aggregate: Bind goes to the Frame, Retire to
  * the Registry, Reboot and Stage app to the fleet.
  *
  * @param {{deviceId: string, snapshot: object, bootFacts: object|null,
- *          wall: import("./wallState.js").WallMemory}} props
+ *          wall: import("./wallState.js").WallMemory,
+ *          hosts?: import("./fleetHosts.js").FleetHosts|null}} props the shell's fleet host
+ *   read, null while it is skipped (node control not on): Health is then not shown
  */
-export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
+export function PlayerPage({ deviceId, snapshot, bootFacts, wall, hosts = null }) {
   const row = playersByDevice(snapshot, bootFacts).find((candidate) => candidate.deviceId === deviceId)
     ?? null;
   const retired = row?.standing === "retired";
@@ -358,7 +363,23 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
             {player !== null && <li>{`Registry Player ${player.id} · authority epoch ${player.authority_epoch}`}</li>}
           </ul>
         </details>
+        {!retired && (
+          <NodeRecords quiet>
+            <SectionBoundary title="Reboot" resetKey={node.readAt}>
+              <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
+                playerId={player?.id ?? null} />
+            </SectionBoundary>
+          </NodeRecords>
+        )}
       </header>
+
+      {!retired && hosts !== null && (
+        <NodeRecords quiet>
+          <SectionBoundary title="Health" resetKey={hosts.read?.read_at}>
+            <HostHealthSection hosts={hosts} deviceId={deviceId} />
+          </SectionBoundary>
+        </NodeRecords>
+      )}
 
       <NodeRecords>
         <SectionBoundary title="Layers" resetKey={node.readAt}>
@@ -378,13 +399,6 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
         <SectionBoundary title="Boot" resetKey={node.readAt}>
           <BootSection node={node} retired={retired} />
         </SectionBoundary>
-
-        {!retired && (
-          <SectionBoundary title="Reboot" resetKey={node.readAt}>
-            <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
-              playerId={player?.id ?? null} />
-          </SectionBoundary>
-        )}
 
         {!retired && (
           <SectionBoundary title="App" resetKey={node.operations?.read_at}>
