@@ -3560,3 +3560,32 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   `ReadWritePaths=/run/photo-wall-boot-stage`; HostCore reads it under ProtectSystem=strict (read-only is enough).
 
 - E-T3-1 ruling (orchestrator, 2026-10-03): follow the page. failed_units includes stage units; the console subtracts them. residual: with 5+ failed units a stage unit can sort past the cap into "and N more" (E-T4-4), so one cause can raise two incidents. Fix later by reserving the cap for non-stage units or carrying a stage-units count.
+
+## 2026-10-03 · 4 GB tracer T6 (implementer, docs) · design-4gb-node.md §4.3 T6
+- E-T6-1 · Only the node release's cohort tree carries `cgroup_enable=memory` (`scripts/node_release_artifacts.py`
+  `NODE_CMDLINE_TOKENS`). The general bundle's `cmdline.txt` template (`scripts/build_netboot_bundle.sh:288`) carries
+  neither it nor `photowall.node=v2`, and the runbook still tells operators to add `photowall.node=v2` per Pi through
+  iac `cmdline_extra`. A Pi opted in that way boots with the memory controller off, and its storage step now fails
+  `memory_controller_absent`. The runbook (Node control, step 2) now says to add both tokens; whether iac's
+  `players.yaml` stages the cohort tree or the general one with `cmdline_extra` was not checked (outside this repo) and
+  should be before the tracer deploys.
+- E-T6-2 · `docs/requirements.md` numbers no requirements, so R6 is a prose subsection, "Supported Player hardware",
+  under Installation model › Player provisioning; README's "8 GiB" hardware line now links to it.
+- E-T6-3 · The root import's refusal (`appliance/node/root_import.py:50-51`) stays `ValueError("root_import_capacity")`
+  with no numbers, unlike admission's `StorageShort`; the domain model says so rather than claiming every refusal
+  carries numbers.
+
+## 2026-10-03 · 4 GB tracer T5 (implementer, node-pid1 refused leg) · design-4gb-node.md §4.3 T5
+- E-T5-1 · The page names the drop-in only; it does not say how the leg starts the units. The existing inner script
+  starts storage and prepare with `check=True`, which a refusal aborts. The refused leg starts handoff alone, then
+  storage, prepare, host-core, broker and manager-supervisor as one `systemctl start` (the units' own Requires=/After=
+  decide). The display units are left out (not on the refusal path); `photo-wall-node.target` itself is not started.
+- E-T5-2 · Central is read through a new fixture route `/fixture/host` (newest `node_host_facts` row via
+  `stored_fact_values`, newest observation's metric rows); `/fixture/status` is unchanged for the other legs.
+- E-T5-3 · Not a spec error, an observation for the console/T6: in a real boot HostCore and storage race, so the first
+  facts post can carry `storage running`; the refusal then arrives with the next observation-cadence post (≤ 15 s).
+- E-T5-4 · memcg in the container: with `--cgroupns=private --privileged`, Docker Desktop (linuxkit 7.0.14) shows
+  `cpuset cpu io memory hugetlb pids rdma` in the container's `cgroup.controllers`, and the `success` leg passes locally
+  with T1 (storage mounts, class pi5-8gb). The ubuntu-24.04-arm runner was not observed directly; CI is the gate.
+
+- E-T6-1 resolved by 2d264bb: the general cmdline template owns cgroup_enable=memory; the release seal enforces exactly once for both release types.
