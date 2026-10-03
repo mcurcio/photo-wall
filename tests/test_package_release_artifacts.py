@@ -32,6 +32,7 @@ from contracts.release import (
     BOOT_ROOT,
     CHECKSUMS,
     CMDLINE,
+    CMDLINE_MEMORY_CONTROLLER,
     CMDLINE_PLACEHOLDER,
     FILES,
     IMAGES,
@@ -452,8 +453,10 @@ _TEMPLATE = cmdline_template()
     _TEMPLATE.replace("\n", f" {CMDLINE_PLACEHOLDER}\n"),
     _TEMPLATE.replace("\n", "\r\n"),
     _TEMPLATE.rstrip("\n") + " " * 4096 + "\n",
+    _TEMPLATE.replace(f" {CMDLINE_MEMORY_CONTROLLER}", ""),
+    _TEMPLATE.replace(CMDLINE_MEMORY_CONTROLLER, f"{CMDLINE_MEMORY_CONTROLLER} {CMDLINE_MEMORY_CONTROLLER}"),
 ], ids=["comment-line", "commented-out", "two-lines", "no-placeholder", "placeholder-twice",
-        "crlf", "too-long"])
+        "crlf", "too-long", "no-memory-controller", "memory-controller-twice"])
 def test_verify_refuses_a_cmdline_that_is_not_the_one_line_template(tmp_path, cmdline):
     """The firmware passes cmdline.txt verbatim: a consumer that replaces the placeholder must
     get one bootable line, so anything but one line holding the placeholder once is refused."""
@@ -462,6 +465,12 @@ def test_verify_refuses_a_cmdline_that_is_not_the_one_line_template(tmp_path, cm
            extra=((f"{_BOOT}/{CMDLINE}", cmdline.encode()),), key="boot_image")
     with pytest.raises(PackagingError, match=f"boot_tarball_cmdline_invalid:{_BOOT}/{CMDLINE}"):
         verify(destination, revision=REVISION)
+
+
+def test_the_cmdline_template_enables_the_memory_controller_exactly_once():
+    """The Pi 5 device tree's bootargs disable the memory controller; the template, which every
+    release's boot tree (node or not) is built from, is the one place that turns it back on."""
+    assert _TEMPLATE.split().count(CMDLINE_MEMORY_CONTROLLER) == 1
 
 
 def test_the_packaged_cmdline_is_the_builders_one_line_template(tmp_path):
