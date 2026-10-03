@@ -30,7 +30,7 @@ node lane. Legacy V1 paths and their limitations remain separate.
 **Console node release workflows (2026-10-02).** The console assumes node control and shows no V1-lane surface ([console DDD Part E](operator-console-ddd.md#24-what-part-e-covers-and-why)). Its read additions, each behind `admin` and `require_enabled`, none adding a migration or route:
 
 - `GET /v1/operator/node/releases` is one REPEATABLE READ READ ONLY snapshot with no lock: `read_at`; `selection {revision, deployment_id, changed_at}`, always present (revision 0 with no policy row); `deployments[]` (50 newest plus the selected one) with base tag and app; release rows gain `base_tag`, `app_environment_sha256` and `download_bytes` (G1).
-- The app-attempts read turns `target_running`/`fallback_running` into `ended_by_later_boot` once a later boot is admitted (G2), and serves `qualification {linked_app, acceptances[]}` for the current device generation, newest 5; an acceptance names `base_tag` only when its `base_content_key` is the current boot's base (G4).
+- The app-attempts read turns `target_running`/`fallback_running` into `ended_by_later_boot` once a later boot is admitted (G2); a superseded boot that claims again while still running is admitted again and its operation reads its own state once more, by design ([domain model](player-node-domain-model.md#host-report-and-reboot)), and serves `qualification {linked_app, acceptances[]}` for the current device generation, newest 5; an acceptance names `base_tag` only when its `base_content_key` is the current boot's base (G4).
 - The node device read serves `deprecated_boot {path: "offer" | "base_without_offer", recorded_at} | null` when the device's newest V1 offer or netboot-base serve is strictly newer than its newest node boot offer over every generation, all on Central's own clock (G5).
 - `NodeLifecycle.stage` no longer refuses a Frame-bound Player (G6).
 
@@ -67,6 +67,47 @@ node lane. Legacy V1 paths and their limitations remain separate.
 The handoff records repaired standalone PID1 and packaged native/GTK evidence with explicit fixture limits. Resumption corrected base PAM/logind dependencies and dependency-sensitive ABI inputs; coherent artifact rebuild and current repository checks are tracked in the resumption evidence. The final portable suite passed 2,956 tests with 1,270 explicit skips; the supplemental database suite passed 3,877 tests with 348 skips and one documented legacy expected failure. These results belong to the first resumption freeze. After the actual-unit EXDEV repair, a second portable suite passed 2,958 tests with the same 1,270 skips, and its focused PostgreSQL set passed eight tests; separate inventories preserve both scopes. The subsequent directory-policy repair passed 2,963 portable tests with the same 1,270 skips and 37 focused PostgreSQL-backed checks; the later health-path/stop-transition and transient-unit collection repair passed 2,980 portable tests with 1,270 skips and 79 affected PostgreSQL-backed checks. Each freeze has a separate source inventory; fresh actual-unit outcomes remain separate. The full production base/PXE artifact build and stage-1 mount probe passed for the stopfix node closure. Full composed cold/online lifecycle with the final Central observer, exact full-base process execution, actual Pi/PXE boot, pressure on the 8 GiB appliance, physical display continuity, and mixed serving/rollback qualification remain due. No production deployment was changed.
 
 **Status:** source-grounded implementation map with code staged in the current PR, not a deployment or physical qualification record. **Scope:** F0–F4/F6 in the [production-readiness intake](production-readiness-v0.13.md). The [control-protocol design](player-protocol-compatibility-design.md), [fleet-control design](player-fleet-control-design.md), [red/blue safety contract](player-fleet-red-blue-refinement.md) and later [node domain model](player-node-domain-model.md) own behavior in their stated stages. The node model is the selected target; this map primarily describes code already staged in the PR. This page distinguishes implemented foundations from activation and qualification gates.
+
+### Fleet host health (batch 4, 2026-10-02)
+
+The console's host-health surfaces read one admin route; Host Management gains one ingest route and one cadence rule. The design, wordings and failure table are owned by [console DDD Part H](operator-console-ddd.md#63-contract-and-model-shapes); this section maps the code.
+
+**One interval constant.** `HOST_OBSERVATION_INTERVAL_SECONDS = 15` (`contracts/node_observation.py`) is the only number; everything below derives from it:
+
+| Derived | Where | Value at 15 s |
+|---|---|---|
+| Node posting cadence: one observation per interval on Host Management's own monotonic clock, the first at once after each new session (it still samples, journals and polls commands every 2 s) | `appliance/node/host_runner.py` `_observation_due` | about one post per 16 s (the first 2 s tick at or after 15 s) |
+| Central's coalescing window | `central/fleet/node_observations.py` `_record` | 15 s |
+| `observation` daily intake cap, 2 × ⌈86,400 / interval⌉ | `central/fleet/node_sessions.py` `OBSERVATION_DAILY_CAP` | 11,520 (was 20,000) |
+| `host_facts` daily intake cap, the same formula | `node_sessions.py` `HOST_FACTS_DAILY_CAP` | 11,520 |
+| `preparation` daily intake cap, 4 × ⌈86,400 / interval⌉ (two alternating states, two boxes per serial) | `node_sessions.py` `PREPARATION_DAILY_CAP` | 23,040 (was 20,000) |
+| Host-silence limit, 4 × interval, served as `host_silent_after_seconds` | `central/fleet/host_thresholds.py` `HOST_SILENT_AFTER_SECONDS` | 60 s |
+
+**Central coalesces host observations.** `POST /v2/node/observations` stores at most one host sample per producer per interval, judged on Central's own receipt clock: when the producer's newest stored receipt (read by sequence through the primary key) satisfies 0 ≤ now − receipt < interval, Central stores nothing, claims no intake and answers 200 `{"stored": false, "disposition": "coalesced", …}`. A duplicate sequence is still judged first (`duplicate` or 409). A negative difference (Central's clock stepped back) stores. So a node on an older base that still posts every 2 s cannot reach the cap, and no node cadence is trusted for the guarantee. Deployed nodes ignore the answer. `POST /v2/node/app-preparation` coalesces the same way, keyed per (state, operation, fault): a post is stored only when the producer stored no sample with that key within the interval, so App Manager's `preparing`/`refused` alternation on every poll cannot fill the cap; G12 serves `preparation_intake_full`, and while it is true the console does not judge the (possibly frozen) newest sample ([console DDD §64](operator-console-ddd.md#64-storage-ingest-and-lifecycle)).
+
+**`POST /v2/node/host-facts`** (`NodeObservations.record_facts`) takes the Host Management session credential and a `HostFactsV2` body of at most 2,048 bytes (`contracts/node_host_facts.py`: kernel release, default-route interface, link state, IPv4 address; no base field). Historical sessions are accepted. One row per producer, and a producer is one boot:
+
+| Case | Answer |
+|---|---|
+| First document for the producer | `recorded`; `first_received_at` = `received_at` = now |
+| Higher sequence, same four values | `recorded`; sequence, payload and `received_at` move, `first_received_at` stays |
+| Higher sequence, a changed value | `recorded`; both receipts renewed |
+| Same sequence, same payload / different payload | `duplicate` / 409 `node_observation_identity_conflict` |
+| Lower sequence | `stale` |
+| Another session's producer / malformed / over the cap | 403 `node_producer_mismatch` / 422 / 429 `node_intake_capacity` |
+
+**Migration `062_node_host_facts.sql`** (forward-only) adds `node_host_facts` (`producer_id` primary key referencing `node_producers`, `sequence`, `payload` ≤ 2,048 bytes, `first_received_at`, `received_at`) and the `host_facts` kind on `node_intake_quotas`. No index is added.
+
+**G12 · `GET /v1/operator/node/hosts`** (`NodeObservations.fleet_hosts`), admin only, 503 `node_control_disabled` with node control off. One statement in one transaction at `REPEATABLE READ READ ONLY`, taking no fleet or device lock; retired and revoked devices are omitted. It serves `read_at` (Central's clock), the numbers-only `thresholds` document, and per device:
+
+- `host`: the newest sample of the **current boot's** `host_core` producer (the admission in the current generation with no `superseded_at`, then its newest-admitted producer, then `ORDER BY sequence DESC LIMIT 1` on the primary key). A superseded or duplicate-serial boot's sample is never served.
+- `previous_boot_received_at`: only when `host` is null, the newest receipt of the most recently superseded admission's `host_core` producer. No older boot is seen.
+- `intake_full`: today's `observation` quota (Central's UTC day) has reached the cap.
+- `boot`: `{base_tag}` from the current admission's node boot offer, served by the console as a `claimed` fact; null with no current boot.
+- `facts`: the current boot's `host_core` facts row only.
+- `preparation`: the newest sample of the current boot's `app_manager` producer (`state`, `fault`, `available_bytes`, `required_bytes`), so a `refused` storage sample carries its numbers.
+
+The console polls G12 once, from the shell, every 15 s, and only while the node status read says `on`. It ages every receipt against `read_at` and never against the browser's clock.
 
 ## Node implementation dispatch (2026-09-30)
 

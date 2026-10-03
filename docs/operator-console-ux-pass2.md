@@ -121,6 +121,8 @@ States are checked in order and the first match wins. "Age" is always taken from
 
 A new `AttentionStrip.jsx`, directly under the status bar.
 
+> **Superseded in part (2026-10-02).** The strip now counts incidents only ("2 Frames · 1 Player need attention") and never says "to set up": unbound and needs-calibration Frames are the Wall's To finish items, and Player rows carry host incidents ([console DDD §61](operator-console-ddd.md#61-screens)). The text below is the pass-2 design record.
+
 - **Fixed height.** It is a single line that never reflows the page. Its detail list is a disclosure that **overlays** the content below rather than pushing it down.
 - **Summary.** The live region (`role="status"`) carries **state only**, for example "2 frames need attention · 3 to set up" or "All 6 frames heard from" (renamed "All 6 Frames' Player apps reporting" by [console DDD pass 1](operator-console-ddd.md#7-gaps-ranked), because it counts Player app reports, not node health, and then "No Frame needs attention", plus "· K awaiting a first report", by its bead R0, because a settling Frame has no report yet). Ages appear as plain text outside the live region, so screen readers are not re-announced every 5 s.
 - **List.** Alarms come first, then to-dos, capped at 8 entries followed by "and M more". Each entry reads like "lobby-left — Player silent · last heard 4 min ago".

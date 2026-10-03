@@ -2632,3 +2632,308 @@ Source: NU1 fix cycle 2.
    later boot's sessions are revoked. Owed: refuse a claim for a superseded admission (node_boot_superseded) and a DB
    test that the projection never moves backwards; raise in the fleet implementation map.
 Source: batch 3 fix cycle 3.
+
+## 2026-10-02 — console DDD batch 4: bead R1 (batch-3 residuals)
+1. Supersedes fix cycle 3 item 5's stated cost (spec wrong, now corrected): the enroll-before-exit work item is not
+   re-queued for the rest of the boot. It stays `awaiting_output_link` until the next app links, then finishes as
+   `before_process_link` (`node_runtime_reconciliation.py:99-100`), so the interruption is dropped for good; it stays
+   queued for the boot only if no app ever links. The "every switch leaves one for the boot" lock-cost line is withdrawn.
+   Corrected in `player-node-domain-model.md` (Background preparation); the ordering test in
+   `tests/test_node_lifecycle.py` now links the epoch-2 app (sample 1400 after the exit's 1300) and asserts
+   `completed_at` set, `result = before_process_link`, no `node_output_losses` row. Mutation-probed (drop the
+   before-link finish): the test fails.
+2. Supersedes fix cycle 3 item 9's "owed a fix" (by design, ddd §42 G8 withdrawn): a superseded kernel boot that claims
+   again while still running is admitted again, the later boot's sessions are revoked, and its operation reads its own
+   state. Recorded in `player-node-domain-model.md` (projected states) and `player-fleet-implementation-map.md`; pinned
+   by `test_a_superseded_boot_that_claims_again_is_current_and_its_operation_reads_its_own_state`. Mutation-probed
+   (skip the revival in `_admit_boot_in`): the test fails.
+3. Spec wrong (§45 R1 acceptance, "Reboot guard"): "mutation probe: drop the guard inside `sendReboot`, the count
+   fails" cannot hold in a browser test while "the callers' own holds are left as they are": each of the three callers
+   already holds its own in-flight state synchronously (`useSendDialog` `flying`, `rebootNext`'s `sendingRef`, Back out's
+   `backOutSending`), so a double click never reaches `sendReboot` twice and dropping the inner guard changes no count.
+   As built: the double-click browser tests (Player page Reboot, Start rebooting, Back out) pin one POST per caller; the
+   guard itself is pinned under Node (`tests/test_console_fleet_commands.py`
+   `test_send_reboot_holds_one_post_in_flight_per_device`: a concurrent second call answers `changed` with no POST,
+   another device is not held, the hold is released after an answer and after a rejected request). Mutation-probed
+   there (drop the check; drop the release): each fails. Either the acceptance's probe moves to the Node test, or a
+   caller's own hold is removed so the inner guard is the only one (not done: §45 says leave them).
+4. Flaky DB test (`test_the_qualified_fallback_is_this_boots_base_and_this_device_generations_only[generation]`): NOT
+   claimed. No reproduction: 60 runs of `tests/test_node_lifecycle.py` (three concurrent `-n 4` runs at a time, so 12
+   workers) all passed; host/DB clock offset measured at under 5 ms. Candidates examined: the only real-time path in a
+   Rig test is the rollout gate (certificate stamped by host `time.time()`, checked against PostgreSQL
+   `clock_timestamp()`, 60 s expiry, 5 s future tolerance); the cohort freshness and session expiry use the test's
+   ManualClock only (`contracts/time.py` ManualClock, `principal.py:26-35`), so they cannot drift. Without the original
+   traceback no hypothesis can be confirmed. Landed instead: `tests/conftest.py` `pytest_runtest_makereport` keeps the
+   host, database and manual clocks beside the traceback of any failed `registry` test, and appends the exception and
+   readings as JSON to `PHOTO_WALL_TEST_FAILURE_LOG` when set. Owed: a residual bead (R1-flaky) that re-runs the db tier
+   with that variable set and closes the item from the first kept failure.
+5. Shared-helper note: `tests/test_node_lifecycle.py` `_accept(…)` and `_first_base_key(conn)` (plus `_first_deployment`
+   for the one test that also needs the base tag, and `_other_key`) replace the five copied inserts and derivations; the
+   inserts now name their columns. Two listing tests that stored an empty cohort now store the current one (neither
+   reads the cohort).
+Source: batch 4 bead R1.
+
+## 2026-10-02 — console DDD batch 4: bead T1 (host-health tracer)
+1. **G12 gate is stricter than "skipped when node reads are not allowed" (spec wrong).** `nodeReadsAllowed`
+   (`central/console/src/nodeControl.js`) admits `unread && failed`. The shell's node status read fires while auth is
+   still `checking` and fails 401 before sign-in, so a shell-wide poll gated on `nodeReadsAllowed` sent
+   `GET /v1/operator/node/hosts` to a Central WITHOUT node control (caught by the strengthened
+   `test_with_node_control_off_…` browser test). As built: `Shell.jsx` mounts `useFleetHosts` with
+   `skip: hidden || nodeControl.state !== "on"`. Cost: while the status read is failing, no host lines show (they
+   are hidden, not Unknown). The same pre-sign-in `failed` state is latent for page-level node reads mounted right
+   after sign-in; not touched here (owner: nodeControl.js, e.g. do not count a 401 as `failed`).
+2. **Wording forced by rule 2 (fact()).** §62's "Unknown on this boot · the previous boot's …" renders as
+   "Unknown: on this boot · the previous boot's Host Management last reported 40 s ago" (the unknown kind's one
+   wording). §62/§66's silent value "at last report, <age> ago" renders as the `reported` latest fact
+   "Host Management last reported 2 min ago · 95 °C at last report" (age through fact(), never composed by hand).
+3. **"Never reported" is judged on what G12 serves.** §62 says "no receipt in this device generation, on any boot";
+   G12 serves only the current boot's sample and the MOST RECENTLY superseded admission's receipt, so a box whose
+   previous boot never reported but an earlier boot did reads `never`. Either accept, or G12 gains "newest receipt of
+   any superseded admission in this generation" (one more lateral, still producer-scoped).
+4. **Coalescing halves the effective cadence under jitter (finding, not a fix).** The node posts when ≥15 s have
+   passed on its monotonic clock; Central coalesces when its receipt difference is <15 s. Network/processing jitter
+   makes roughly every other post land at 14.9x s and coalesce, so stored samples can be ~30 s apart. The 60 s silence
+   limit (4 × interval) still holds with two intervals of margin. If finer resolution matters, the window could be
+   e.g. interval − 1 s, derived from the same constant.
+5. **The Players card shows a Host Management line beside Temperature.** The §62 attention row carries no basis, so
+   "changing the served limit changes the silence wording" is only observable on a line that renders the silence
+   fact; the card renders `classifyHost`'s receipt item ("Host Management: Host Management silent · last reported
+   2 min ago (Central's inference: no report for over 90 s, Central's limit)") as §61's table column will (H1).
+6. **Reporting severity ignores a missing cataloged metric.** A box on an old base sends no `soc_temperature`; its item
+   reads "Unknown: not reported" but the box's severity stays `ok` (else every old-base box sorts as Unknown in H1).
+7. **The 24-hour coalescing DB test costs ~100 s** (43,199 real ingest transactions,
+   `tests/test_node_fleet_hosts.py::test_a_producer_posting_every_2_s_for_a_day_…`). Kept as specified; flag for the
+   DB-tier budget.
+8. **R4 shared list:** `players.js` left `SHARED_WITH_SHOW` (`tests/test_console_routes_r4.py`): the shell's own strip
+   now reaches it through `hostHealth.js`, so it is a shell module (the test's own rule: "a module no longer shared is
+   taken off").
+Source: batch 4 bead T1.
+
+## 2026-10-02 — console DDD batch 4: bead N1 (node numbers, App Manager room)
+1. **`preparation_room` is clamped at 0.** §63/§65 give `min(budget − used, free, MemAvailable − headroom)`, which is
+   negative when `used` exceeds the budget; `ManagerPreparationV2.available_bytes` is a `counter` (≥ 0), so a negative
+   room would make the refused sample unencodable. As built: `max(0, min(…))`. The decision is unchanged (required is
+   always > 0), proven by the old-vs-new table test (`tests/test_node_host_numbers.py`).
+2. **Thresholds serve `null` for a band a metric does not have.** §63's "—" for `*_now` notice and `*_occurred` alarm is
+   served as `null`; T1's "numbers only" test now allows null but requires one number per row.
+3. **Wording forced by fact() (as T1 item 2).** The refusal reads "App Manager last reported 6 s ago · App Manager refused
+   a preparation: needs 1.4 GB, room 0.9 GB" (the reported kind's one wording puts the receipt first), and the Storage
+   line "Host Management last reported 4 s ago · 1.2 GB free in /run"; CPU likewise.
+4. **Storage short: tier and state chosen, not specified.** The refusal item's band is `alarm` (listed with throttled-now
+   and hot as a threshold incident) and it exists only in the Reporting state, like every band. A1 may revisit.
+5. **Throttling wording details §62 leaves open.** With any `*_now` flag set, only the now words show (in §62's order:
+   Throttled, Under-voltage, Frequency capped, Soft temperature limit). Several occurred flags join with ", " and say
+   "the firmware's sticky flags"; their words are under-voltage, frequency capping, throttling, soft temperature limit.
+   Any of the eight missing reads "Unknown: not reported" for the whole item; any duplicated reads "two values reported".
+6. **Band made observable on the card.** `PlayersPage.jsx` wraps each host line in `.roster__host[data-band]` so the
+   browser test can tell alarm from notice; H1's table should carry the tier its own way and may drop the attribute.
+7. **`get_throttled` is located by glob** `/sys/devices/platform/*/*:firmware/get_throttled` (Pi 4: `soc/soc:firmware`;
+   Pi 5's platform node is named differently). The first sorted match is read; none means no rows. Bench assumption.
+8. **Storage refusal and manager_runner's failure path.** `DesiredPreparation.poll` returns after the `refused` sample
+   instead of re-raising, so `manager_runner.py`'s catch-all (`observation.failure()`, which would overwrite it with a
+   generic `fault` sample and write `preparation-local-fault`) is not reached. `preparation-local-fault` has no reader.
+   Retry is unchanged: nothing is recorded as prepared, and the next 2 s poll prepares again (`preparing` → `refused`).
+9. **`link_speed` is cataloged (Network, "1000 Mb/s") but not rendered**; the Network line is F1/H1's.
+Source: batch 4 bead N1.
+
+## 2026-10-02 — console DDD batch 4: bead F1 (host facts record, the boot's base)
+1. **"Higher sequence, same values" also rewrites the payload.** §64 says update `sequence` and `received_at` only.
+   The payload carries the sequence, so keeping the old payload would make the node's resend of the new document (the
+   same sequence) read as a different payload: 409 instead of `duplicate`. As built: `sequence`, `payload` and
+   `received_at` move; `first_received_at` stays. "Same values" compares the four facts alone.
+2. **A producer change builds a new document, like a value change.** §64's state machine names only value changes. A
+   pending or stored document under an old producer (Central re-enrolled Host Management on a refused session) would
+   be 403 forever or never sent for the new producer, so the node compares (producer, values).
+3. **Facts wording needs a receipt-less rendering (rule 2).** `factText` gained `{receipt: false}`: a `reported` fact
+   with a value reads "Host Management reported eth0 up" when one line above states the record's receipt
+   (`receiptText`: "Host facts first received 3 d ago"). Each field is still a full `reported`/`first` fact carrying
+   `facts.first_received_at`; only the rendering groups them. A null link state with a known interface reads
+   "Host Management reported eth0" plus "Unknown: Host Management could not read the link state of eth0"; a null
+   interface reads "Unknown: Host Management could not read the default-route interface" (§62 names only the kernel).
+4. **With `facts: null` only the record line shows** ("Host facts: Unknown: no host facts received on this boot") and
+   no per-field Unknown lines; the Base line always shows. A box absent from G12 reads "Unknown: not read" for both.
+5. **N1 left `tests/test_node_host_recovery.py` red** (its fake sampler had no `throttling`; 2 tests failed on macOS too).
+   Fixed here with the facts stub; that test now counts one more request (the process's first facts post).
+6. **Concurrent first inserts for one producer from two sessions** would hit the primary key (500); the node resends at
+   its next post and then reads `duplicate`/`recorded`. One session's posts are serialized by authenticate_in's
+   session row lock. Not worth an upsert today.
+7. **Kernel release is read from `/proc/sys/kernel/osrelease`** (no subprocess, sandbox-readable); every field is passed
+   through the contract's own rule (`valid_fact`) on the node, so an odd value becomes null instead of an unencodable
+   record.
+Source: batch 4 bead F1.
+
+## 2026-10-02 — console DDD batch 4: bead W1 (Wall daily face)
+
+1. **Spec wrong: "a Needs-attention visit to an unbound Frame opens Binding" (§68 row 5, Browser) cannot happen.** G2 and
+   §61 remove unbound Frames from the strip and the Needs attention page, so no attention link points at one. Built
+   instead: a Needs-attention visit to a Frame whose Player is silent opens Binding (browser), and `facetFor` on an
+   unbound Frame returns `binding` (model). The unbound Frame's own path to Binding is its To finish link (browser).
+2. **`wallAttention` without `todos` must place the non-settling awaiting-report Frame somewhere** (bound, enrolled more
+   than two report intervals ago, no report, still within the silence limit: severity `todo`, cause liveness). It is
+   evidence, not structure, so it is not a To finish item; the signature has no list for it. Counted in `awaiting`
+   ("No Frame needs attention · N awaiting a first report"), as the settling case already was; it becomes an alarm row
+   once past the limit.
+3. **One Frame can carry two To finish items.** §61's example lists "needs a Player" and "needs calibration" for one
+   Frame; a Frame with no Binding has no calibration to save, so `wallUnfinished` asks for calibration only when bound.
+   `place` is independent of the other two (a bound Frame can sit in the tray), so a Frame yields at most `place` + one
+   of `bind`/`calibrate`, in that order.
+4. **"A Frame route with no facet opens Status"** is read as the hash `#/wall/frames/<id>` parsing to
+   `{section: "wall", id, facet: "status"}`, never formatted (like the aliases). Before W1 that hash parsed to null.
+5. **Edit layout's selection is the mode's own** (the route `#/wall/layout` names no Frame). It starts at the Frame the
+   daily face last showed (`memory.lastWall.id`), so Done returns to that Frame's Status. `lastWall` never records
+   `#/wall/layout`, so the sidebar's Wall link always opens the daily face (G3).
+6. **Sidebar groups carry an accessible name each** (`<ul aria-label="Wall|Show|Fleet|Needs attention">`), no visible
+   group heading; §48 does not say whether the group names are shown.
+7. **The read-only Plan's empty hint** reads "No Frames placed on this Surface" (the old "Drag on this plan to place a
+   Frame" now shows only in Edit layout); §62 has no wording for it.
+8. **Flake seen once under `-n 6`**: `test_operator_showrunner_browser.py::test_scene_delete_refusal_names_dependent_program`
+   (Scenes flow, untouched by W1); passed 3/3 alone and in a 118-test parallel rerun.
+Source: batch 4 bead W1.
+
+## 2026-10-02 — console DDD batch 4: bead H1 (fleet host UI)
+
+1. **"Not driving a Frame … newest first" has no served time for boxes seen at boot.** The boot facts read
+   (`bootFacts.js`) keeps only `device_id` and `serial`, so a not-enrolled box has no first-boot time. H1 lists boxes
+   seen at boot first (in `playersByDevice`'s device-id order), then Unbound Players newest registration first
+   (`playersByDevice` orders them by `registered_at`, oldest first, so they are reversed). No model function was added
+   (as the bead requires). Exact newest-first ordering would need a first-boot receipt served on the netboot read.
+2. **Table cells keep each fact's label** ("Temperature: 81 °C · hot …"), because `FactLine` is the only fact
+   renderer (design rule 2) and always prints its label. The column header repeats it. §61's examples show the bare
+   value. Standing is a `FactLine` ("Standing: Bound · …"); only the Frames are chips (links to each Frame).
+3. **Bands and tiers are carried by classes** (`players__row--<severity>` on the row, `players__item--<band>` on an
+   item) and styled as a leading rule. N1's test-only `data-band` wrapper is gone.
+4. **Health is hidden, not Unknown, while the fleet host read is skipped** (node control not `on`), and for a retired
+   box (G12 omits it), as §66 has it for the list. With node control off the page still shows only the one
+   "not shown" line (Health is `NodeRecords quiet`).
+5. **The raw disclosure reads G12's `host` (this boot's newest sample)**, not the node device read that Layers used
+   before, so Health and its raw lines always show the same sample. Layers keeps "Last reported" and the session line.
+6. **Network column order**: link (and link state), then link speed, then address, then the "Host facts first received"
+   line, following §61's example "eth0 up · 1000 Mb/s · 192.168.1.40".
+Source: batch 4 bead H1.
+
+## 2026-10-02 — console DDD batch 4: bead A1 (host incidents, strip, Status chip)
+1. **The chip is handed to the Status facet, not imported by it.** `NowShowingFacet.jsx` is in the R4 test's
+   `SHARED_WITH_SHOW` (RunsRegion imports its `PrecedenceExplanation`), so importing `HostChip.jsx` there would put the
+   chip and its fleet reads in the Show side's closure. `Inspector.jsx` (Wall-only) renders `<HostChip/>` and passes
+   it as the facet's `hostChip` prop; it renders under the facet title. §61's "on the Status facet (NowShowingFacet.jsx)"
+   holds on screen; the import graph keeps it Wall-only (R4 test unchanged and green).
+2. **" · host health not read" shows only while the fleet host read is mounted** (failed, or not yet loaded). With node
+   control not `on` the shell mounts no read (`hosts` null, errata T1-1): the strip adds no suffix and the node-control
+   banner names the cause. §61/§66 do not say which; this follows §66's "host lines are hidden, not Unknown" for that case.
+3. **On a failed read the chip says "<Player> · host health not read"** instead of judging the last good values,
+   matching the strip ("no host incident is shown or cleared on stale data"). §62 has no chip wording for this case.
+4. **Incidents are exactly the classifier's alarm items** (plus Never reported's one Unknown), so the classifier's
+   existing gate (Silent and Refused band nothing but the receipt) is the one reporting gate; `hostIncidents` holds no
+   second one. A notice (warm, a sticky "occurred" flag) raises no incident. One Throttling item is one incident, its
+   now words lower-cased and joined: "throttled now · under-voltage now". Keys are `player:<device>:<item>`.
+5. **Strip labels made Player-neutral** (drift item 2): the toggle reads "Show list"/"Hide list" and the list's name
+   "Frames and Players needing attention". §61 names no label; browser tests updated.
+6. **§65's signature `hostIncidents(snapshot, read, bootFacts)` kept** (the task text omits `bootFacts`; it supplies the
+   Players' names). The chip's wording comes from a new `hostChip(name, health)` and `hostWords(item, {brief})`.
+7. **Never reported wording fixed in code** (drift item 1, errata T1-3): "no Host Management report from this boot or the
+   one before".
+Source: batch 4 bead A1.
+
+## 2026-10-02 — console DDD batch 4: bead D1 (docs)
+1. **Sidebar labels (doc wrong, corrected in §61).** §48/§61 named the Show group "Now, Scenes, Schedule, Sources"; the
+   code keeps the shipped labels "Now showing" and "Photo sources" (`showRoutes.jsx:30`, `:82`), the rename being Part F
+   S1's (batch 5). §61 and the runbook now state the shipped labels.
+2. **H1 and A1 errata folded into Part H** (§61, §62, §65, §66, §69, history); R1, T1, N1, F1 and W1 were already folded
+   by the course-correction pass. Drift item 6 (a To finish "not on the plan" link selects the last-shown Frame in Edit
+   layout) is recorded as a §69 cost.
+3. **Pre-existing broken in-page anchors in `docs/runbook.md`, not fixed (outside D1's scope):**
+   `#operator-api-reposition-and-remove-frames` and `#photo-sources-add-a-source` name no heading. `check_docs.py`
+   checks file targets only, so it passes; an anchor check would catch the class.
+4. **Historical design records left as written:** `operator-console-ux-pass2-flow.md:167` (landing `#/now` once a Frame
+   exists) and `operator-console-delivery-plan.md` bead 18 (dismissible Guidance) describe superseded behaviour as their
+   own record; `operator-console-ux-pass2.md` §5 gained a superseded note for "to set up".
+Source: batch 4 bead D1.
+
+## FX1-1 · App Manager preparation intake: coalescing and a served intake-full flag (batch 4 fix cycle 1)
+Spec wrong: §64 said "Preparation ingest is unchanged" and §66 "cleared by the next sample". App Manager samples
+`preparing` then `refused` on every 2 s poll (appliance/node/manager_desired.py:65,79); Central had no coalescing
+and a fixed 20,000/day preparation cap, so the cap filled after about 5.5 h and the newest stored sample froze
+(falsely clearing or holding the Storage incident until the UTC day rolled over).
+Correction (built): Central coalesces a preparation post when the producer stored a sample with the same
+(state, operation, fault) within one interval, on Central's receipt clock (a backward step stores);
+`PREPARATION_DAILY_CAP` = 4 x ceil(86400 / interval) replaces 20,000; G12 serves `preparation_intake_full`, and the
+classifier words Storage as Central's refusal (Unknown) while it is true. Note: the reviewer's proposed key,
+"equal to the newest stored sample", would not coalesce an alternating stream at all; the key is per state among
+the producer's recent samples instead. Cost: a state that returns within one interval of its last stored sample is
+stored again only after that interval. §63, §64 and §66 updated.
+Source: batch 4 fix cycle 1.
+
+## FX1-2 · Host facts sender: a refused session is temporary; 404 is retried (batch 4 fix cycle 1)
+Spec wrong: §64 (errata F1-2) said re-enrollment changes the producer, so a document under an old producer would be
+refused 403. The wire producer has no session in it (central/fleet/node_sessions.py:229-230), so re-enrollment
+keeps the producer and the `dropped` state entered on a 401 was never left for the boot. And `off` after one 404
+lasted until process exit.
+Correction (built): 401/403 keep the document pending (the next ensure() re-enrolls and that tick resends); 404 is
+`off` for FACTS_ROUTE_RETRY_SECONDS (3600, the process's monotonic clock), then pending; `dropped` only for other
+4xx (409, 422, ...). §64's bullets, diagram and §66 rows updated; §65 shows `_send_facts(self, now_ms)`.
+Source: batch 4 fix cycle 1.
+
+## FX2-1 · Host facts take the classifier's state (batch 4 fix cycle 2)
+Code drift (not spec-wrong): §62's Silent row and §66 say this boot's values read "… at last report" on a silent or
+refused box, but `hostHealth.js` `factItems` took no state, so a silent box's Network cell read "Host Management
+reported eth0 up" in the present tense beside "1000 Mb/s at last report".
+Correction (built): `factItems(row, read, absent, health)` requires the `classify()` result; `judgeHost` passes the
+one it computed and `hostFactItems` computes it, so no caller can word facts without the gate. On `silent` and
+`refused` every reported fact's value carries "at last report"; the record's receipt line and the `claimed` base
+are unchanged. Model tests cover silent, refused and reporting rows that carry facts, on both `hostFactItems` and
+the `judgeHost` page path (mutation probe: ignoring the state fails both).
+Source: batch 4 fix cycle 2 review (major).
+
+## FX2-2 · Facts ingest answers `historical` to a superseded boot's session (batch 4 fix cycle 2)
+Spec drift: §64's facts table listed only `recorded`, while the observation path in the same module answers
+`historical` when the session is not current. Correction (built): `record_facts` answers `historical` when
+`principal.current` is false (it still stores; G12 never serves it). §64's three storing rows updated.
+Source: batch 4 fix cycle 2 review (minor).
+
+## FX2-3 · Cross-replica clocks in coalescing and host silence (batch 4 fix cycle 2) — OPEN, spec wrong
+§60 calls coalescing and host silence "a self-comparison" with guarantee "construction". `received_at` and
+`first_received_at` are stamped by the ingesting replica's process clock (node_observations.py `_record`,
+`record_facts`, via `admission.ensure_current(self.sessions.clock)`), `_coalesced_in` compares against the same
+replica's `now`, and G12's `read_at` comes from the serving replica's clock. With several Central replicas these
+are different clocks; the error is bounded by NTP skew (a lagging ingest replica coalesces more; a leading G12
+replica calls silence early). Not fixed here: the class fix is to stamp receipts and `read_at` from PostgreSQL
+`clock_timestamp()` in the same transaction (the rollout gate's precedent), which changes every node ingest path
+and its fake-clock tests — a bead of its own, not a fix-cycle edit. Until then §60/§66 should state the skew as a
+cost instead of "self-comparison". Needs an architect decision.
+Source: batch 4 fix cycle 2 review (minor).
+
+## FX2-4 · Approved Q13/§52 record rewritten in place (batch 4 fix cycle 2) — OPEN, doc process
+Part G §52's batch-B table and the Q13 block (owner-approved 2026-10-02 with the base version inside the host facts
+record) were rewritten in place to say the base is a `claimed` tag, while §1 and Part G's status still read
+"Approved 2026-10-02 (Q12, Q13)" and Part H says it inherits G13 unchanged. The Part H history line records the
+change. Proposed: restore §52 and Q13 as approved and add an amendment line naming Part H §62/§63 and the batch-4
+gate; confirm with the owner that the gate covered dropping the base from host facts. Not edited by the fix cycle
+(an approved record is the orchestrator's/architect's to amend).
+Source: batch 4 fix cycle 2 review (minor).
+
+## FX2-5 · Host coalescing can drop a short-lived fault_code (batch 4 fix cycle 2) — OPEN, unstated cost
+`_coalesced_in`'s host branch coalesces any post within one interval of the newest stored receipt, whatever its
+`fault_code` (RecoverySupervisor.telemetry, appliance/node/recovery.py). On a pre-batch-4 base posting every 2 s, a
+recovery state shorter than about one interval can go unstored. §60 and §66 state the App Manager cost (FX1-1)
+but not this one. Not fixed here: keying host coalescing on `fault_code` (as App Manager on its key) changes the
+host cap arithmetic (OBSERVATION_DAILY_CAP = 2 x intervals assumes one stored sample per interval), so it needs
+the cap re-derived alongside it. Either build that, or add the loss to §60's costs and §66.
+Source: batch 4 fix cycle 2 review (minor).
+
+## 2026-10-02 — console DDD batch 4: architect course-correction pass (after 10 implementers)
+Dispositions of the open fix-cycle-2 items, folded into `docs/operator-console-ddd.md` (one history line):
+1. **FX2-3 (spec wrong) — CLOSED in the doc, class fix deferred.** §60 no longer calls coalescing a self-comparison
+   across replicas: receipts and G12 `read_at` are per-replica process clocks; the guarantee is construction on one
+   replica and NTP across several (§60 "What it does not cover", §63 Times, §66 row, §69 cost). The class fix (one time
+   authority: PostgreSQL `clock_timestamp()` in the same transaction, behind a connection-bound clock port) is residual
+   bead **R-clock** (§69 Deferred). Its scope includes node session issue/expiry and the status read's ages, which share
+   the class and predate batch 4 (`node_sessions.py:179-214`). Not a batch-4 blocker; owner schedules it.
+2. **FX2-5 (unstated cost) — CLOSED in the doc.** Stated as a cost (§60, §66, §69). Keying host coalescing on
+   `fault_code` is rejected: a batch-4 base posts once per interval (`host_runner.py` `_observation_due`), so it never
+   sends the intermediate sample and keying would recover nothing while forcing a cap re-derivation.
+3. **FX2-4 (doc process) — CLOSED in the doc, owner confirmation OPEN.** §52's Q13 block quotes the owner's answer
+   verbatim (base version among the host facts) with a dated amendment moving the base to a `claimed` boot-offer tag;
+   Part G's status lists every post-approval amendment (base, counts line, Frame-row host items, storage, "occurred
+   recently"). The orchestrator must confirm with the owner that the batch-4 gate covered the base change.
+4. Doc status line 3 said Part H "awaits the owner's batch-4 gate (Q14)"; corrected to approved and built.
+Source: architect course-correction after batch-4 fix cycle 2.

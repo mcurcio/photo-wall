@@ -73,6 +73,57 @@ sold.
 > Frame, then Keep (Select, then one-at-a-time reboots) or Back out, through the same
 > send functions as the homes.
 
+> **The Wall's daily face, Status and fleet host health (2026-10-02).** [Parts G and H of
+> the domain-driven console design](operator-console-ddd.md#61-screens) own these screens;
+> the shape below describes them for this document's reader.
+> - **Sidebar.** Four groups in a fixed order, each with an accessible name and no visible
+>   heading: **Wall**; **Show** (Now showing, Scenes, Schedule, Photo sources); **Fleet**
+>   (Players, Releases); **Needs attention**. Nothing reorders or counts on state, and the
+>   landing route is always `#/wall`. There is no Set up section: each home shows its own
+>   unfinished items on its own face.
+> - **The Wall's daily face** (`#/wall`) holds no write. The **Plan** is read-only: a
+>   health dot and the now-showing line per tile, and selecting a tile opens the Frame's
+>   Status. The **Unplaced tray** stays beside it as a select-only list (an entry opens its
+>   Inspector). **Edit layout** (`#/wall/layout`) holds every layout write: draw (with the
+>   Frame profile form), drag to move, Delete, and the tray's drag-out and Delete. Its header
+>   reads "Editing layout" with **Done**, which returns to the daily face. `LayoutEditor.jsx`
+>   owns these writes and hands them to `Plan.jsx` and `UnplacedTray.jsx`, which import no
+>   write module (a test pins it).
+> - **To finish.** When anything is unfinished, the Wall shows a **To finish** list, one row
+>   per item in Frame order, each with one link: "lobby-left · not on the plan" [Edit
+>   layout], "lobby-left · needs a Player" [Binding], "lobby-right · needs calibration"
+>   [Calibration] (asked only of a bound Frame). It is derived from the snapshot, with no
+>   stored flag, and it disappears when nothing is left. Fleet's own unfinished items are
+>   the Players page's **Not driving a Frame** list.
+> - **First step.** With no Frames, the **Guidance** banner is the Wall's face. It has no
+>   Dismiss: it leaves by itself when the first Frame exists, and **Add first frame** opens
+>   Edit layout.
+> - **The Frame Inspector's facets are Status · Binding · Calibration, and Status is the
+>   default.** Status is the former Now-showing facet (its file keeps the name
+>   `NowShowingFacet.jsx` until batch 5) and carries the bound Player's host chip. The route
+>   segment is `status`; the shipped `nowshowing` and `commissioning` segments still open
+>   Status and Calibration, and a Frame route with no facet opens Status. Which facet opens
+>   is `facetFor(health, "status")`: a visit from Needs attention or a Player page opens the
+>   facet that shows the cause, and an ok Frame or a plain tile click opens Status. There is
+>   no remembered last facet.
+> - **The attention strip counts incidents only:** "2 Frames · 1 Player need attention", or
+>   "No Frame or Player needs attention · 1 awaiting a first report". It never says "to set
+>   up": unbound and needs-calibration Frames are the Wall's To finish items, not attention
+>   rows. Player rows carry host incidents of Bound Players, with [Frame] and [Player] links
+>   on Wall-side and Fleet pages and plain text on Show pages (R4). While the fleet host read
+>   has failed or not yet loaded, the summary ends " · host health not read".
+> - **Players list.** One table, worst first by host tier (alarm, notice, unknown, ok),
+>   then by name, with columns Player, Standing and Frames, Host Management, Temperature,
+>   Throttling, CPU, Storage, Network and Software. It scrolls sideways at phone width, has no
+>   counts line, and lists Unbound and not-enrolled boxes again under **Not driving a Frame**.
+> - **Player page.** **Reboot** sits in the header (in its own error boundary, sending only
+>   through `sendReboot`), and **Health** is the first section: Thermal, Power and
+>   throttling, Compute, Storage, Network and Software, the host facts' one receipt line, and
+>   an "Every reported metric" disclosure. Every host value comes from G12, the fleet host
+>   read, and is worded by one classifier; the [runbook](runbook.md#host-health-on-the-players-pages)
+>   says what each state means.
+> - **Diagnostics** is a reserved home for a future debug overlay; nothing is built for it.
+
 ---
 
 ## 1. The problem in plain words
@@ -167,10 +218,10 @@ graph TD
 
   subgraph WALL["WALL MODE (home)"]
     SURF["Surface filter<br/>(text label -> filters plan)"]
-    PLAN["Per-Surface 2D plan (SVG)<br/>rects from x_mm/y_mm/w_mm/h_mm<br/>drag-to-move -> PATCH; drag-to-create -> POST"]
-    TRAY["Unplaced tray (ENTRY state)<br/>legacy/geometry-less frames;<br/>drag onto plan -> PATCH; delete -> DELETE"]
+    PLAN["Per-Surface 2D plan (SVG), read-only<br/>rects from x_mm/y_mm/w_mm/h_mm<br/>Edit layout (#/wall/layout): drag-to-move -> PATCH; drag-to-create -> POST"]
+    TRAY["Unplaced tray (ENTRY state)<br/>legacy/geometry-less frames; select-only<br/>Edit layout: drag onto plan -> PATCH; delete -> DELETE"]
     RAIL["Players section (#/players)<br/>one row per box; one Player page each"]
-    INSP["Frame Inspector<br/>Calibration | Binding | Now-showing"]
+    INSP["Frame Inspector<br/>Status | Binding | Calibration"]
   end
 
   subgraph COMM["CALIBRATION facet (Wall-only; hidden in Showrunner)"]
@@ -298,10 +349,12 @@ entries below that it changed say so; where the two differ, that glossary wins.
   never enrolled). These replace the earlier "Pending", "New" and "In service".
   Standing is a Central record, not liveness.
 - **Players list / Player page** — the fleet's homes for a Player (the
-  **Players** section, `#/players`): the list has one row per box with its standing
-  and bound Frames and makes no node read; the Player page
-  (`#/players/<device-id>`) is the one home for a box, with its node layers,
-  Outputs, boot records, reboot, app operations, Stage app and Qualified fallback,
+  **Players** section, `#/players`): the list is one table, one row per box, worst
+  host tier first, with its standing, bound Frames and host health; it makes no
+  per-box node read (its host columns come from the shell's one fleet host read).
+  The Player page (`#/players/<device-id>`) is the one home for a box, with Reboot in
+  its header, then Health, node layers,
+  Outputs, boot records, app operations, Stage app and Qualified fallback,
   each section with its own read time (no V1 section since 2026-10-02). They replace the Equipment rail and roster; the old
   `#/equipment` address opens the Players list.
 - **Releases / boot selection** — **Fleet › Releases** (`#/releases`) is the home of
@@ -352,8 +405,10 @@ entries below that it changed say so; where the two differ, that glossary wins.
 - **Calibration facet** (was **Commissioning**) — the Frame-Inspector facet,
   Wall-only and hidden from the Show sections (R4), that holds the committed
   calibration, the draft editor, Live calibration and the Frame profile. The facets
-  are **Calibration | Binding | Now-showing**; `#/wall/frames/<id>/commissioning`
-  still opens Calibration, and the console never writes that address. The Panel
+  are **Status · Binding · Calibration**, Status first and the default (2026-10-02;
+  Status was **Now-showing**); `#/wall/frames/<id>/commissioning` still opens
+  Calibration and `…/nowshowing` opens Status, and the console never writes either
+  address. The Panel
   record at enrollment and the bound Output are on **Binding**. *Retired
   (2026-10-02):* the Commissioning name and its capability-gated colour and power
   areas.
@@ -385,6 +440,16 @@ entries below that it changed say so; where the two differ, that glossary wins.
   `current.visible` (central's authored projection), joined in the browser by the
   string `"frame:<id>"`. It is what central *intends*, not proof the pixels are
   lit.
+- **Edit layout** — the Wall's mode for layout writes (`#/wall/layout`): draw, move
+  and delete Frames, and the tray's drag-out and delete. The daily face (`#/wall`)
+  holds none of them ([DDD §61](operator-console-ddd.md#61-screens)).
+- **To finish** — the Wall's list of its own unfinished items (not on the plan, needs
+  a Player, needs calibration), each linked to the mode that finishes it. Derived from
+  the snapshot; never an attention row and never a stored flag.
+- **Host health** — what Host Management reported about a box (temperature, firmware
+  throttling flags, CPU, storage, network, kernel) and Central's derived bands, read
+  from one fleet host read (G12) on Players and the Player page's **Health** section.
+  Values come only from the box's current boot.
 - **Snapshot vs Draft** — Plane A (Snapshot): one immutable timestamped read of
   inventory+runtime+media. Plane B (Draft): the operator's uncommitted edits, drag
   state, lease countdown, and in-flight optimistic mutations. A refresh replaces
@@ -409,7 +474,7 @@ render discipline. It is made explicit as **two planes**:
 - **Plane B — EDIT/DRAFT.** Separate **component-local** state (a `useDraft()`
   hook) for everything the operator is *doing*: the in-progress drag rectangle when
   placing a new Frame; the "trying" calibration values before commit; the lease
-  countdown clock; the current mode; guidance-dismissed flags; and in-flight
+  countdown clock; the current mode; and in-flight
   optimistic mutations. Because it is a distinct state cell from Plane A, it is
   **never overwritten by a snapshot refresh** — the framework keeps them apart.
 
@@ -538,7 +603,8 @@ claims a freshness or a playback it cannot prove.*
 ## 5. Walkthroughs
 
 Each step names the exact endpoint it calls. The Frame Inspector's facets are
-**Calibration | Binding | Now-showing** (named Commissioning until 2026-10-02);
+**Status · Binding · Calibration**, Status the default (Calibration was named
+Commissioning, and Status Now-showing, until 2026-10-02);
 calibration (geometry + gain) lives under **Calibration** (R4), and is reached
 only from the Wall. The walkthroughs keep the 2026-09-13 strings ("Commission the
 display", "Preview", "Recovered" banner); the current wording is in
@@ -690,6 +756,10 @@ Frames created by the old UI (all at `wall`/(0,0)) have no distinct position and
 enter through the **Unplaced tray** as a list, from which the operator drags them
 onto the plan (PATCH) or removes them (DELETE) — they are no longer permanent
 clutter.
+
+*Since 2026-10-02* these writes (draw, drag to move, Delete, the tray's drag-out and
+Delete) happen only in **Edit layout** (`#/wall/layout`); the daily Wall is read-only and
+its tray is select-only ([DDD §61](operator-console-ddd.md#61-screens)).
 
 ### J4 — Content & schedule: "what's on which Frame, when, why"
 
