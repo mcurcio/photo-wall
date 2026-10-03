@@ -9,14 +9,16 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import unicodedata
 import uuid
 from contextlib import contextmanager
+from typing import NamedTuple
 
 from psycopg.types.json import Jsonb
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from central.catalog import Candidate, CatalogSnapshot
-from central.db import MEDIA_LOCK, Database
+from central.db import MEDIA_LOCK, Database, TransactionClock
 from central.media_ports import RefreshReceipt, SourcePreviewReceipt
 from central.media_queue import MediaTaskQueue
 from central.planner import AcquisitionRequest, candidate_standing, eligible
@@ -32,12 +34,52 @@ from contracts.models import (
 )
 from contracts.time import Clock
 from media.models import (
+    Diagnostic,
+    LibraryTag,
+    MediaError,
     OriginalAsset,
     RefreshResult,
+    SourcePreview,
     SourcePreviewQuery,
-    SourcePreviewResult,
     SourceSpec,
+    StoredPreviewMember,
 )
+
+# A connection's stored tag list is re-listed once its last attempt is this old (database clock).
+TAG_LIST_SECONDS = 300
+TAG_FIELDS = ("tag_ref", "path", "name", "parent_ref")  # the served tag (R22), nothing else
+# A member of a LIVE preview: complete and unexpired by the database clock (§40 servability).
+_LIVE_MEMBER = ("FROM source_previews p, jsonb_array_elements(p.members) AS m(member) "
+                "WHERE p.status='complete' AND p.expires_at>%s")
+
+
+class ServableThumbnail(NamedTuple):
+    connection_ref: str
+    member: StoredPreviewMember  # its library identity: for the worker's fetch, never served
+
+
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def matching_tags(tags: list[dict], q: str) -> list[dict]:
+    """Tags whose path or name starts with `q` first, then those whose path contains it.
+
+    A tag with nothing visible in its path or name is never offered: there is nothing to pick
+    it by. It stays in the stored list, so `library_tags_by_id` still finds it.
+    """
+    needle = _fold(q.strip())
+    tags = [tag for tag in tags if tag["path"] and tag["name"]]
+    first = [tag for tag in tags
+             if _fold(tag["path"]).startswith(needle) or _fold(tag["name"]).startswith(needle)]
+    chosen = {tag["tag_ref"] for tag in first}
+    return first + [tag for tag in tags
+                    if tag["tag_ref"] not in chosen and needle in _fold(tag["path"])]
+
+
+def _served_tag(tag: dict) -> dict:
+    """A stored tag as the browser may receive it: `TAG_FIELDS` only (R22)."""
+    return {field: tag.get(field) for field in TAG_FIELDS}
 
 
 class StoreLimits(Model):
@@ -75,10 +117,19 @@ class JobLease(Model):
 
 
 class MediaRepository:
+    """Media persistence. Two clocks, never mixed (console DDD G11, R10):
+
+    `times` stamps and compares every media time another process (another worker
+    process included) compares, on the transaction's own connection; a process
+    clock reading is never written into a media column. `clock` stays for
+    monotonic budgets and process-local decisions (MediaStore, the worker, its
+    clients). `times` is required, so no composition can fall back silently.
+    """
+
     def __init__(self, db: Database, clock: Clock, limits: StoreLimits | None = None,
-                 *, queue: MediaTaskQueue | None = None):
+                 *, times: TransactionClock, queue: MediaTaskQueue | None = None):
         self.db, self.clock, self.limits = db, clock, limits or StoreLimits()
-        self.queue = queue
+        self.times, self.queue = times, queue
 
     @contextmanager
     def transaction(self):
@@ -90,12 +141,20 @@ class MediaRepository:
                          "ON CONFLICT(singleton) DO NOTHING", (self.limits.max_bytes,))
             yield conn
 
+    @staticmethod
+    def same_spec(stored: object, spec: SourceSpec) -> bool:
+        """Whether a stored spec means `spec` (canonical forms); an unreadable one never does."""
+        try:
+            return SourceSpec.model_validate(stored).canonical() == spec.canonical()
+        except ValidationError:
+            return False
+
     def configure_source(self, spec: SourceSpec) -> bool:
         encoded = spec.model_dump(mode="json", by_alias=True)
         with self.transaction() as conn:
             old = conn.execute("SELECT spec FROM media_sources WHERE source_ref=%s", (spec.source_ref,)).fetchone()
             if old:
-                if old["spec"] != encoded:
+                if not self.same_spec(old["spec"], spec):
                     raise RegistryError("source_revision_immutable")
                 return False
             # The legacy exact-ref API remains available; expose its first
@@ -111,7 +170,7 @@ class MediaRepository:
                 revision = head["revision"] + 1
             conn.execute("INSERT INTO media_sources(source_ref,spec) VALUES(%s,%s)", (spec.source_ref, Jsonb(encoded)))
             conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s)", (spec.source_ref, Jsonb(CatalogSnapshot(
-                source_ref=spec.source_ref, refreshed_at=self.clock.utc(), status="unavailable").model_dump(mode="json"))))
+                source_ref=spec.source_ref, refreshed_at=self.times.now_in(conn), status="unavailable").model_dump(mode="json"))))
             if head is None:
                 conn.execute("INSERT INTO media_source_names(name,current_ref,revision) VALUES(%s,%s,%s)",
                              (name, spec.source_ref, revision))
@@ -150,7 +209,7 @@ class MediaRepository:
         conn.execute("INSERT INTO media_sources(source_ref,spec) VALUES(%s,%s)",
                      (spec.source_ref, Jsonb(spec.model_dump(mode="json", by_alias=True))))
         conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s)", (spec.source_ref, Jsonb(CatalogSnapshot(
-            source_ref=spec.source_ref, refreshed_at=self.clock.utc(), status="unavailable").model_dump(mode="json"))))
+            source_ref=spec.source_ref, refreshed_at=self.times.now_in(conn), status="unavailable").model_dump(mode="json"))))
         if revision == 1:
             conn.execute("INSERT INTO media_source_names(name,current_ref,revision) VALUES(%s,%s,%s)",
                          (name, spec.source_ref, revision))
@@ -184,7 +243,7 @@ class MediaRepository:
         heads = {row["current_ref"] for row in conn.execute(
             "SELECT current_ref FROM media_source_names WHERE NOT deleted").fetchall()}
         needed = runtime_refs | heads
-        now = self.clock.utc()
+        now = self.times.now_in(conn)
         rows = conn.execute("SELECT source_ref,refresh_active,refresh_started,refresh_lease_until,"
                             "refresh_requested_revision,refresh_completed_revision "
                             "FROM media_sources WHERE refresh_active OR source_ref=ANY(%s)",
@@ -239,8 +298,8 @@ class MediaRepository:
         if self.queue is None:
             raise RegistryError("media_queue_unconfigured", 503)
         request_id = str(uuid.uuid4())
-        now = self.clock.utc()
         with self.transaction() as conn:
+            now = self.times.now_in(conn)
             conn.execute("UPDATE source_previews SET status='failed',error='preview_expired' "
                          "WHERE status='pending' AND expires_at<=%s", (now,))
             conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now - 3600,))
@@ -266,13 +325,18 @@ class MediaRepository:
             self.queue.enqueue_preview_in(conn, request_id)
         return SourcePreviewReceipt(request_id=request_id)
 
+    # The served columns only: `members` (library ids and checksums) is never read here (R22).
+    _PREVIEW_SERVED = "status,count,image_count,video_count,shown,limited,observed_at,error,expires_at"
+
     def source_preview(self, request_id: str) -> dict:
+        """The preview's served answer and `read_at`, the database's time of this read (G11)."""
         with self.db.transaction() as conn:
-            row = conn.execute("SELECT status,count,image_count,video_count,error,expires_at "
-                               "FROM source_previews WHERE request_id=%s", (request_id,)).fetchone()
+            row = conn.execute(f"SELECT {self._PREVIEW_SERVED} FROM source_previews WHERE request_id=%s",
+                               (request_id,)).fetchone()
+            read_at = self.times.now_in(conn)
         if row is None:
             raise RegistryError("source_preview_not_found", 404)
-        if row["status"] == "pending" and row["expires_at"] <= self.clock.utc():
+        if row["status"] == "pending" and row["expires_at"] <= read_at:
             with self.transaction() as conn:
                 expired = conn.execute(
                     "UPDATE source_previews SET status='failed',error='preview_expired' "
@@ -283,19 +347,22 @@ class MediaRepository:
                     # A worker may have completed between the initial read and
                     # this conditional update; report its committed result.
                     row = conn.execute(
-                        "SELECT status,count,image_count,video_count,error,expires_at "
-                        "FROM source_previews WHERE request_id=%s", (request_id,),
+                        f"SELECT {self._PREVIEW_SERVED} FROM source_previews WHERE request_id=%s",
+                        (request_id,),
                     ).fetchone()
                 else:
                     row = {**row, **expired}
+                read_at = self.times.now_in(conn)
             if row is None:
                 raise RegistryError("source_preview_not_found", 404)
+        read = {"request_id": request_id, "read_at": read_at}
         if row["status"] == "complete":
-            return {"request_id": request_id, "status": "complete", "count": row["count"],
-                    "image_count": row["image_count"], "video_count": row["video_count"]}
+            return {**read, "status": "complete", "count": row["count"],
+                    "image_count": row["image_count"], "video_count": row["video_count"],
+                    "shown": row["shown"], "limited": row["limited"], "observed_at": row["observed_at"]}
         if row["status"] == "failed":
-            return {"request_id": request_id, "status": "failed", "error": row["error"]}
-        return {"request_id": request_id, "status": "pending"}
+            return {**read, "status": "failed", "error": row["error"]}
+        return {**read, "status": "pending"}
 
     def begin_source_preview(self, request_id: str) -> SourcePreviewQuery | None:
         # Previewing is read-only and safe to repeat. Leave it pending until a
@@ -304,16 +371,22 @@ class MediaRepository:
         with self.db.transaction() as conn:
             row = conn.execute("SELECT query FROM source_previews WHERE request_id=%s "
                                "AND status='pending' AND expires_at>%s",
-                               (request_id, self.clock.utc())).fetchone()
+                               (request_id, self.times.now_in(conn))).fetchone()
             return SourcePreviewQuery.model_validate(row["query"]) if row else None
 
-    def finish_source_preview(self, request_id: str, result: SourcePreviewResult) -> bool:
+    def finish_source_preview(self, request_id: str, preview: SourcePreview) -> bool:
+        """Store the served sample and, apart, its members' library identity (never served)."""
+        result = preview.result
         with self.transaction() as conn:
-            changed = conn.execute("UPDATE source_previews SET status='complete',count=%s,image_count=%s,"
-                                   "video_count=%s,error=NULL WHERE request_id=%s AND status='pending' "
-                                   "AND expires_at>%s",
-                                   (result.count, result.image_count, result.video_count,
-                                    request_id, self.clock.utc())).rowcount
+            now = self.times.now_in(conn)
+            changed = conn.execute(
+                "UPDATE source_previews SET status='complete',count=%s,image_count=%s,video_count=%s,"
+                "shown=%s,members=%s,limited=%s,observed_at=%s,error=NULL "
+                "WHERE request_id=%s AND status='pending' AND expires_at>%s",
+                (result.count, result.image_count, result.video_count,
+                 Jsonb([member.model_dump(mode="json") for member in result.shown]),
+                 Jsonb([member.model_dump(mode="json") for member in preview.members]),
+                 result.limited, now, request_id, now)).rowcount
             return changed == 1
 
     def fail_source_preview(self, request_id: str, error: str) -> bool:
@@ -325,12 +398,119 @@ class MediaRepository:
                                    (error, request_id)).rowcount
             return changed == 1
 
-    def maintain_source_previews(self) -> None:
-        now = self.clock.utc()
+    def maintain_source_previews(self) -> frozenset[str]:
+        """Retire expired previews, then the thumbnail records no live preview selects.
+
+        A thumbnail is keyed by its original, not its own bytes, so its produced facts must not
+        outlive the previews that select it (`central.assets.library`); deleting the row (its
+        reference cascades) lets the next preview record fresh facts. Returns the thumbnail ids
+        still recorded, so the caller can discard every other file.
+        """
         with self.transaction() as conn:
+            now = self.times.now_in(conn)
             conn.execute("UPDATE source_previews SET status='failed',error='preview_expired' "
                          "WHERE status='pending' AND expires_at<=%s", (now,))
             conn.execute("DELETE FROM source_previews WHERE expires_at<=%s", (now - 3600,))
+            conn.execute("DELETE FROM assets a WHERE a.kind='library-thumbnail' AND NOT EXISTS "
+                         f"(SELECT 1 {_LIVE_MEMBER} AND m.member->>'asset_id'=a.identity)", (now,))
+            rows = conn.execute("SELECT identity FROM assets WHERE kind='library-thumbnail'")
+            return frozenset(row["identity"] for row in rows.fetchall())
+
+    def servable_thumbnail(self, asset_id: str) -> ServableThumbnail | None:
+        """The member of a live preview with this id, read from the non-served `members` column,
+        or None: only such an id may be referenced, fetched or served (§40)."""
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                f"SELECT p.query->>'connection_ref' AS connection_ref, m.member {_LIVE_MEMBER} "
+                "AND m.member->>'asset_id'=%s ORDER BY p.observed_at DESC LIMIT 1",
+                (self.times.now_in(conn), asset_id)).fetchone()
+        if row is None:
+            return None
+        try:
+            return ServableThumbnail(row["connection_ref"],
+                                     StoredPreviewMember.model_validate(row["member"]))
+        except ValidationError:
+            return None
+
+    def library_tags_due(self, connection_refs: tuple[str, ...]) -> tuple[str, ...]:
+        """The connections whose tag list was last attempted `TAG_LIST_SECONDS` ago or more."""
+        with self.db.transaction() as conn:
+            fresh = {row["connection_ref"] for row in conn.execute(
+                "SELECT connection_ref FROM library_tags WHERE checked_at>%s",
+                (self.times.now_in(conn) - TAG_LIST_SECONDS,)).fetchall()}
+        return tuple(ref for ref in connection_refs if ref not in fresh)
+
+    def retain_library_tags(self, connection_refs: tuple[str, ...]) -> None:
+        """Worker boot: drop the lists of connections it no longer holds."""
+        with self.db.transaction() as conn:
+            conn.execute("DELETE FROM library_tags WHERE connection_ref <> ALL(%s)",
+                         (list(connection_refs),))
+
+    def record_library_tags(self, connection_ref: str, tags: tuple[LibraryTag, ...] | None,
+                            error: MediaError | None = None) -> None:
+        """A listing replaces the stored list; a failure keeps it (and its age) beside the code."""
+        if (tags is None) == (error is None):
+            raise ValueError("record either tags or an error")
+        with self.db.transaction() as conn:
+            now = self.times.now_in(conn)
+            if error is None:
+                listed = Jsonb([tag.model_dump(mode="json") for tag in tags])
+                conn.execute(
+                    "INSERT INTO library_tags(connection_ref,tags,observed_at,status,error,"
+                    "checked_at) VALUES(%s,%s,%s,'ok',NULL,%s) ON CONFLICT(connection_ref) DO "
+                    "UPDATE SET tags=EXCLUDED.tags,observed_at=EXCLUDED.observed_at,status='ok',"
+                    "error=NULL,checked_at=EXCLUDED.checked_at",
+                    (connection_ref, listed, now, now))
+            else:
+                conn.execute(
+                    "INSERT INTO library_tags(connection_ref,status,error,checked_at) "
+                    "VALUES(%s,%s,%s,%s) ON CONFLICT(connection_ref) DO UPDATE SET "
+                    "status=EXCLUDED.status,error=EXCLUDED.error,checked_at=EXCLUDED.checked_at",
+                    (connection_ref, error.status, error.code, now))
+
+    def library_tags(self, connection_ref: str, q: str = "", limit: int = 20) -> dict:
+        """`GET /v1/operator/library/tags`: the stored list only (the worker lists), filtered.
+
+        `observed_at` is when the library reported the served list and `read_at` this read,
+        both on the database's clock (G11). A failed re-list serves the last list with its age.
+        """
+        row, answer = self._stored_tags(connection_ref)
+        matches = matching_tags(row["tags"] or [], q)
+        return {**answer, "total_matches": len(matches),
+                "tags": [_served_tag(tag) for tag in matches[:limit]]}
+
+    def library_tags_by_id(self, connection_ref: str, tag_refs: tuple[str, ...]) -> dict:
+        """`GET /v1/operator/library/tags?ids=`: the named tags from the stored list (C5).
+
+        A tag the stored list lacks is named in `absent` only when that list is the library's
+        whole, current list (`status = ok`): a pending or failed list proves nothing gone, so
+        it names nothing absent. Same envelope as `library_tags`.
+        """
+        row, answer = self._stored_tags(connection_ref)
+        stored = {tag["tag_ref"]: tag for tag in row["tags"] or []}
+        found = [stored[ref] for ref in tag_refs if ref in stored]
+        absent = ([ref for ref in tag_refs if ref not in stored]
+                  if row["status"] == "ok" and row["tags"] is not None else [])
+        return {**answer, "total_matches": len(found),
+                "tags": [_served_tag(tag) for tag in found], "absent": absent}
+
+    def _stored_tags(self, connection_ref: str) -> tuple[dict, dict]:
+        """One connection's stored list row and the envelope every tag answer shares."""
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT tags,observed_at,status,error FROM library_tags "
+                               "WHERE connection_ref=%s", (connection_ref,)).fetchone()
+            health = conn.execute(
+                "SELECT connection_ids FROM media_settings WHERE singleton").fetchone()
+            read_at = self.times.now_in(conn)
+        known = health["connection_ids"] if health else None
+        if known is not None and connection_ref not in known:
+            raise RegistryError("connection_unknown", 404)
+        row = row or {"tags": None, "observed_at": None, "status": "pending", "error": None}
+        answer = {"connection_ref": connection_ref, "status": row["status"],
+                  "observed_at": row["observed_at"], "read_at": read_at}
+        if row["error"] is not None:
+            answer["error"] = row["error"]
+        return row, answer
 
     def refresh_revisions(self, source_ref: str) -> tuple[int, int]:
         with self.db.transaction() as conn:
@@ -349,40 +529,60 @@ class MediaRepository:
         return self._begin_refresh(source_ref)
 
     def _begin_refresh(self, source_ref: str | None = None) -> RefreshLease | None:
-        now = self.clock.utc()
         with self.transaction() as conn:
-            if source_ref is None:
-                row = conn.execute(
-                    "SELECT * FROM media_sources WHERE "
-                    "refresh_active AND "
-                    "(next_refresh<=%s OR refresh_requested_revision>refresh_completed_revision) "
-                    "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
-                    "ORDER BY next_refresh,source_ref LIMIT 1 FOR UPDATE SKIP LOCKED",
-                    (now, now),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM media_sources WHERE source_ref=%s AND refresh_active "
-                    "AND refresh_requested_revision>refresh_completed_revision "
-                    "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
-                    "FOR UPDATE SKIP LOCKED",
-                    (source_ref, now),
-                ).fetchone()
-            if row is None:
-                return None
-            generation = row["generation"] + 1
-            # A failed/killed refresh becomes eligible after its hard request budget, not immediately.
-            conn.execute("UPDATE media_sources SET generation=%s,refresh_started=%s,refresh_lease_until=%s "
-                         "WHERE source_ref=%s", (generation, now, now + 90, row["source_ref"]))
-            return RefreshLease(source=SourceSpec.model_validate(row["spec"]), generation=generation,
-                                started_at=now, request_revision=row["refresh_requested_revision"])
+            now = self.times.now_in(conn)
+            while True:
+                row = self._due_source(conn, now, source_ref)
+                if row is None:
+                    return None
+                try:
+                    spec = SourceSpec.model_validate(row["spec"])
+                except ValidationError:
+                    # A spec this worker cannot read (a newer writer's) is that Source's
+                    # failure, recorded like a refresh's; the next due Source still runs.
+                    self._refuse_spec_in(conn, row, now)
+                    if source_ref is not None:
+                        return None
+                    continue
+                generation = row["generation"] + 1
+                # A failed/killed refresh becomes eligible after its hard request budget, not immediately.
+                conn.execute("UPDATE media_sources SET generation=%s,refresh_started=%s,refresh_lease_until=%s "
+                             "WHERE source_ref=%s", (generation, now, now + 90, row["source_ref"]))
+                return RefreshLease(source=spec, generation=generation,
+                                    started_at=now, request_revision=row["refresh_requested_revision"])
+
+    def _refuse_spec_in(self, conn, row, now: float) -> None:
+        conn.execute("UPDATE media_sources SET next_refresh=%s,status='incompatible',diagnostics=%s,"
+                     "refresh_completed_revision=GREATEST(refresh_completed_revision,%s) WHERE source_ref=%s",
+                     (now + self.limits.refresh_seconds, Jsonb([Diagnostic(code="spec_unsupported").model_dump(mode="json")]),
+                      row["refresh_requested_revision"], row["source_ref"]))
+        self.refresh_catalog_in(conn, row["source_ref"], now, "incompatible")
+
+    @staticmethod
+    def _due_source(conn, now: float, source_ref: str | None):
+        if source_ref is None:
+            return conn.execute(
+                "SELECT * FROM media_sources WHERE "
+                "refresh_active AND "
+                "(next_refresh<=%s OR refresh_requested_revision>refresh_completed_revision) "
+                "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
+                "ORDER BY next_refresh,source_ref LIMIT 1 FOR UPDATE SKIP LOCKED",
+                (now, now),
+            ).fetchone()
+        return conn.execute(
+            "SELECT * FROM media_sources WHERE source_ref=%s AND refresh_active "
+            "AND refresh_requested_revision>refresh_completed_revision "
+            "AND (refresh_lease_until IS NULL OR refresh_lease_until<=%s) "
+            "FOR UPDATE SKIP LOCKED",
+            (source_ref, now),
+        ).fetchone()
 
     @staticmethod
     def _geometry(asset: OriginalAsset):
         return asset.kind, asset.raw_width, asset.raw_height, asset.orientation, asset.duration
 
     def publish_refresh(self, lease: RefreshLease, result: RefreshResult) -> bool:
-        now = self.clock.utc()
+        """Publish under the database's time; the client's `refreshed_at` is never stored (G11)."""
         if result.snapshot.source_ref != lease.source.source_ref:
             raise RegistryError("refresh_source_mismatch")
         if len(result.assets) != len({a.asset_id for a in result.assets}):
@@ -392,6 +592,7 @@ class MediaRepository:
         if {a.asset_id for a in result.assets} != {c.asset_id for c in result.snapshot.candidates}:
             raise RegistryError("refresh_membership_mismatch")
         with self.transaction() as conn:
+            now = self.times.now_in(conn)
             row = conn.execute("SELECT * FROM media_sources WHERE source_ref=%s", (lease.source.source_ref,)).fetchone()
             if row is None or row["generation"] != lease.generation or row["refresh_started"] != lease.started_at:
                 return False
@@ -492,14 +693,15 @@ class MediaRepository:
             source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
             if source is None:
                 raise RegistryError("source_not_found", 404)
-            candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), self.clock.utc())
+            now = self.times.now_in(conn)
+            candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), now)
             if len(candidates) > 1000:
                 raise RegistryError("source_candidate_limit", 409)
             if profile is not None:
                 candidates = tuple(candidate for candidate in candidates if eligible(candidate, profile))
             snapshot_row = conn.execute("SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
                                         (source_ref,)).fetchone()
-            refreshed_at = CatalogSnapshot.model_validate(snapshot_row["snapshot"]).refreshed_at if snapshot_row else self.clock.utc()
+            refreshed_at = CatalogSnapshot.model_validate(snapshot_row["snapshot"]).refreshed_at if snapshot_row else now
             return {"source_ref": source_ref, "status": source["status"],
                     "refreshed_at": refreshed_at,
                     "count": len(candidates),
@@ -573,7 +775,7 @@ class MediaRepository:
             conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
                          "VALUES(%s,%s,%s,%s)",
                          (asset_id, Jsonb(members[asset_id].candidate.model_dump(mode="json")),
-                          source_ref, self.clock.utc()))
+                          source_ref, self.times.now_in(conn)))
         return {"asset_refs": list(asset_ids), "created": len(new)}
 
     def pin_variants_in(self, conn, pins, *, require_ready: bool) -> None:
@@ -608,15 +810,16 @@ class MediaRepository:
         if len(recipe_id) != 64 or any(c not in "0123456789abcdef" for c in recipe_id):
             raise ValueError("invalid recipe digest")
         with self.transaction() as conn:
+            now = self.times.now_in(conn)
             old = conn.execute("SELECT recipe_id FROM media_settings WHERE singleton").fetchone()["recipe_id"]
             conn.execute("UPDATE media_settings SET recipe_id=%s,worker_seen=%s,worker_error=NULL WHERE singleton",
-                         (recipe_id, self.clock.utc()))
+                         (recipe_id, now))
             if old != recipe_id:
                 conn.execute("UPDATE media_jobs SET state='failed',failure_code='recipe_changed',"
                              "retry_at=0,updated_at=%s WHERE recipe_id<>%s "
-                             "AND state IN ('queued','retry')", (self.clock.utc(), recipe_id))
+                             "AND state IN ('queued','retry')", (now, recipe_id))
                 for source in conn.execute("SELECT source_ref,status FROM media_sources").fetchall():
-                    self.refresh_catalog_in(conn, source["source_ref"], self.clock.utc(), source["status"])
+                    self.refresh_catalog_in(conn, source["source_ref"], now, source["status"])
 
     def worker_status(self, code: str | None = None,
                       connection_ids: tuple[str, ...] | list[str] | None = None):
@@ -634,12 +837,13 @@ class MediaRepository:
             # projection so its timestamp cannot make retired IDs look current.
             conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s,connection_ids=%s "
                          "WHERE singleton",
-                         (self.clock.utc(), code,
+                         (self.times.now_in(conn), code,
                           Jsonb(list(connection_ids)) if connection_ids is not None else None))
 
     def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int:
-        now, inserted = self.clock.utc(), 0
+        inserted = 0
         with self.transaction() as conn:
+            now = self.times.now_in(conn)
             recipe = conn.execute("SELECT recipe_id FROM media_settings WHERE singleton").fetchone()["recipe_id"]
             if recipe is None:
                 return 0
@@ -686,8 +890,8 @@ class MediaRepository:
                             "(SELECT COALESCE(sum(size),0) FROM media_orphans) AS total").fetchone()["total"]
 
     def claim_job(self, job_id: str | None = None) -> JobLease | None:
-        now = self.clock.utc()
         with self.transaction() as conn:
+            now = self.times.now_in(conn)
             job_filter = "" if job_id is None else "AND j.id=%s "
             parameters = (now,) if job_id is None else (now, job_id)
             row = conn.execute("SELECT j.*,a.metadata FROM media_jobs j JOIN asset_revisions a ON a.asset_id=j.asset_id "
@@ -714,13 +918,17 @@ class MediaRepository:
     def checked_job(self, conn, lease: JobLease):
         row = conn.execute("SELECT * FROM media_jobs WHERE id=%s AND attempt_token=%s "
                            "AND state IN ('running','publishing') AND lease_until>%s",
-                           (lease.job_id, lease.attempt_token, self.clock.utc())).fetchone()
+                           (lease.job_id, lease.attempt_token, self.times.now_in(conn))).fetchone()
         if row is None or row["asset_id"] != lease.asset.asset_id or row["recipe_id"] != lease.recipe_id:
             raise RegistryError("stale_job")
         return row
 
-    def catalog_in(self, conn, now, source_refs: set[str] | None = None):
-        """Exclude known impossible unsecured candidates during cooldown; locks bypass this pool."""
+    def catalog_in(self, conn, source_refs: set[str] | None = None):
+        """Exclude known impossible unsecured candidates during cooldown; locks bypass this pool.
+
+        The cooldown compares worker-written `retry_at`, so its now is the database's (G11).
+        """
+        now = self.times.now_in(conn)
         if self._candidate_capacity(conn) > self.limits.max_authored_candidates:
             raise RegistryError("authored_candidate_limit", 409)
         snapshots = {}
@@ -749,6 +957,20 @@ class MediaRepository:
         """
         with self.transaction() as conn:
             return self.health_in(conn)
+
+    def media_read(self) -> dict:
+        """`GET /v1/operator/media`: Sources, health and their `read_at` in one transaction."""
+        with self.transaction() as conn:
+            return self.media_read_in(conn)
+
+    def media_read_in(self, conn) -> dict:
+        """Sources and health with `read_at`, the database's time of this read (G11).
+
+        The one read time media ages are taken against: every compared media time
+        is the database's, so no age subtracts one process's clock from another's.
+        """
+        return {"sources": self.sources_in(conn), "health": self.health_in(conn),
+                "read_at": self.times.now_in(conn)}
 
     def health_in(self, conn) -> dict:
         """Read worker/cache health through a caller-owned transaction."""

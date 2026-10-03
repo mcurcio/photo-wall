@@ -18,6 +18,7 @@ class AssetKind(StrEnum):
     PLAYER_DEB = "player-deb"  # media-variant arrives with media (co-change bead)
     PLAYER_PAYLOAD = "player-payload"
     SEALED_ENVIRONMENT = "sealed-environment"
+    LIBRARY_THUMBNAIL = "library-thumbnail"  # a preview tile, re-encoded by the media worker
 
 
 def _positive_int(value: object, what: str) -> None:

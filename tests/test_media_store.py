@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 from test_registry import enroll, frame
 
 from central.coordination import Coordinator
+from central.db import ProcessTransactionClock
 from central.execution_repository import PostgresExecutionRepository
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore, MediaStoreError
@@ -30,7 +31,7 @@ VARIANT = b"public synthetic prepared bytes"
 def storage(registry, tmp_path):
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
-        queue=RecordingMediaQueue())
+        queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     repository.set_recipe(RECIPE)
     return MediaStore(
         repository,
@@ -334,6 +335,21 @@ def test_new_request_requires_current_exact_authority(storage, registry, fault):
         assert row(storage, "media_blobs", "digest", prepared.variant.sha256)["state"] == "ready"
         with storage.db.transaction() as conn:
             assert conn.execute("SELECT count(*) AS n FROM media_references WHERE owner LIKE 'transfer:%'").fetchone()["n"] == 0
+
+
+def test_worker_clock_ahead_never_evicts_a_pinned_blob_only_central_expires_pins(storage, registry):
+    """G11: pins carry Central's times, so `collect` never compares them with the worker's clock."""
+    with storage.worker_lock():
+        _, _, prepared = ready(storage)
+        grant(storage, registry, prepared.variant)
+        canonical = storage.root / "blobs" / prepared.variant.sha256
+        registry.clock.advance(3600)  # the worker's clock runs an hour past every pin
+        assert storage.collect(target_bytes=0).removed == 0
+        assert canonical.exists()
+        with storage.repository.transaction() as conn:
+            storage.repository.expire_pins_in(conn, 1200)  # Central's pass, on Central's clock
+        assert storage.collect(target_bytes=0).removed == 1
+        assert not canonical.exists()
 
 
 def test_quota_reduction_and_corrupt_restart_preserve_secured_logical_pin(storage, registry):

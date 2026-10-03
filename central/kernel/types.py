@@ -9,6 +9,7 @@ import semver
 from pydantic import AfterValidator
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_LIBRARY_ASSET_ID = re.compile(r"asset-[0-9a-f]{64}")  # media.models.asset_identity
 _REASON = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _MAX_TAG_LENGTH = 128
 
@@ -47,6 +48,13 @@ def require_sha256(value: str) -> str:
     return value
 
 
+def require_library_asset_id(value: str) -> str:
+    """Central's one-way id of a library item; never the library's own id (R22)."""
+    if not isinstance(value, str) or _LIBRARY_ASSET_ID.fullmatch(value) is None:
+        raise ValueError("invalid_library_asset_id")
+    return value
+
+
 def require_reason(value: str) -> str:
     if not isinstance(value, str) or _REASON.fullmatch(value) is None:
         raise ValueError("invalid_reason")
@@ -61,3 +69,4 @@ def _release_tag(value: str) -> str:
 ReleaseTag = Annotated[str, AfterValidator(_release_tag)]
 Sha256 = Annotated[str, AfterValidator(require_sha256)]
 ReasonCode = Annotated[str, AfterValidator(require_reason)]
+LibraryAssetId = Annotated[str, AfterValidator(require_library_asset_id)]

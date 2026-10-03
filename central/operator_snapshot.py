@@ -21,6 +21,8 @@ class OperatorSnapshot(Model):
     database rows in this response. ``inventory.read_at`` and
     ``player_reports_read_at`` timestamp the Player liveness sample separately;
     they are not intended to imply a visible/rendered-output observation.
+    ``media.read_at`` is the database's time of this read (console DDD G11): media
+    ages are taken against it, never against ``read_at`` or ``inventory.read_at``.
     """
 
     read_at: Instant
@@ -73,15 +75,14 @@ class OperatorSnapshotReader:
                 conn, read_at=read_at, frames=inventory.frames
             )
             runtime = self.runtime_store.read_in(conn)
-            sources = self.media.sources_in(conn)
-            health = self.media.health_in(conn)
+            media = self.media.media_read_in(conn)
             interruptions = self.coordinator.output_interruptions_in(conn)
             return OperatorSnapshot(
                 read_at=read_at,
                 player_reports_read_at=reports.read_at,
                 inventory=inventory.with_liveness(reports),
                 runtime=runtime_document(runtime, read_at),
-                media={"sources": sources, "health": health},
+                media=media,
                 readiness_diagnostics=readiness_diagnostics,
                 output_interruptions=interruptions,
             )

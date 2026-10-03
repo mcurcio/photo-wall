@@ -67,7 +67,9 @@ def create_worker_app(dsn: str) -> procrastinate.App:
               queueing_lock="media-refresh")
     async def refresh_media(context, timestamp: int):
         del timestamp
-        await context.additional_context["media_worker"].refresh_once()
+        worker = context.additional_context["media_worker"]
+        await worker.refresh_once()
+        await worker.list_tags()  # each connection's list, once it is 5 min old
 
     @app.task(name=REFRESH_MEDIA_SOURCE_TASK, queue=MEDIA_QUEUE, pass_context=True,
               retry=RefreshRetryStrategy())

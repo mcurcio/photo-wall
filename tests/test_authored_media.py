@@ -10,6 +10,7 @@ from psycopg.types.json import Jsonb
 
 from central.app import create_app
 from central.catalog import CatalogSnapshot
+from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository, StoreLimits
 from central.planner import AcquisitionRequest
 from central.runtime import Contribution, Runtime, Scene
@@ -35,7 +36,7 @@ def refresh(spec, *assets):
 
 
 def setup_source(registry, count=1, *, limits=None, assets=None):
-    repo = MediaRepository(registry.db, registry.clock, limits, queue=RecordingMediaQueue())
+    repo = MediaRepository(registry.db, registry.clock, limits, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
     repo.configure_source(spec)
     lease = repo.begin_scheduled_refresh()
@@ -179,16 +180,18 @@ def test_worker_publication_eviction_and_failure_cooldown_hydrate_authored_refs(
             original_sha256=hashlib.sha256(original_bytes).hexdigest(), recipe_id=RECIPE, build=build)
         store.publish(lease, prepared)
     with repo.db.transaction() as conn:
-        assert repo.catalog_in(conn, registry.clock.utc())[1][originals[0].asset_id].variant == variant
+        assert repo.catalog_in(conn)[1][originals[0].asset_id].variant == variant
     with store.worker_lock():
         store.collect(target_bytes=0)
     with repo.db.transaction() as conn:
-        hydrated = repo.catalog_in(conn, registry.clock.utc())[1][originals[0].asset_id]
+        hydrated = repo.catalog_in(conn)[1][originals[0].asset_id]
         assert hydrated.variant is None
         conn.execute("UPDATE media_jobs SET state='retry',retry_at=1010,failure_code='asset_missing',"
                      "variant_sha=NULL WHERE asset_id=%s", (originals[0].asset_id,))
-        assert repo.catalog_in(conn, 1000)[1][originals[0].asset_id].preparation_failure == "asset_missing"
-        assert repo.catalog_in(conn, 1011)[1][originals[0].asset_id].preparation_failure is None
+        registry.clock.wall = 1000  # the repository's media times follow this clock
+        assert repo.catalog_in(conn)[1][originals[0].asset_id].preparation_failure == "asset_missing"
+        registry.clock.advance(11)
+        assert repo.catalog_in(conn)[1][originals[0].asset_id].preparation_failure is None
 
 
 def test_scene_asset_refs_are_per_frame_and_admitted_runs_are_immutable():

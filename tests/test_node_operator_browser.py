@@ -17,6 +17,7 @@ from test_node_boot import claim_for, cold_setup
 from test_registry import enroll
 
 from central.coordination import Coordinator
+from central.db import ProcessTransactionClock
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.media_repository import MediaRepository
@@ -42,7 +43,7 @@ def test_operator_node_browser(registry):
         coordinator=coordinator, config=NodeControlConfig("node-test"),
         serving_verifier=_LocalImageVerifier())
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
-        RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock), coordinator)
+        RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)
     done = threading.Event()
     seen = {"unknown": False}
 

@@ -188,7 +188,7 @@ def test_062_applies_forward_on_a_database_at_061(history):
                              "VALUES(%s,1,'host_facts',1)", (DEVICE_ID,))
             assert conn.execute("SELECT to_regclass('node_host_facts') AS name").fetchone()["name"] is None
         registry.db.migrate()
-        assert ledger(registry.db)[-1]["name"] == "062_node_host_facts.sql"
+        assert "062_node_host_facts.sql" in [row["name"] for row in ledger(registry.db)]
         with registry.db.transaction() as conn:
             assert conn.execute("SELECT used FROM node_intake_quotas WHERE kind='preparation'"
                                 ).fetchone()["used"] == 3
@@ -202,3 +202,25 @@ def test_062_applies_forward_on_a_database_at_061(history):
                              "first_received_at,received_at) VALUES(%s,2,'{}'::bytea,2,2)", (producer,))
             with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
                 conn.execute("UPDATE node_host_facts SET payload=%s", (b"x" * 2049,))
+
+
+def test_063_retires_a_completed_count_only_preview_and_keeps_pending_ones(history):
+    # A completed preview from before 063 has no sample; it becomes expired, never a fake
+    # empty sample. A pending one stays pending, and a complete write now needs the sample.
+    with history(62) as (registry, _):
+        with registry.db.transaction() as conn:
+            for request_id, status, counts in ((uuid4(), "complete", (1, 1, 0)),
+                                               (uuid4(), "pending", (None, None, None))):
+                conn.execute("INSERT INTO source_previews(request_id,query,status,count,image_count,"
+                             "video_count,created_at,expires_at) VALUES(%s,'{}',%s,%s,%s,%s,1,2)",
+                             (request_id, status, *counts))
+        registry.db.migrate()
+        with registry.db.transaction() as conn:
+            assert sorted((row["status"], row["error"]) for row in conn.execute(
+                "SELECT status,error FROM source_previews").fetchall()) == [
+                ("failed", "preview_expired"), ("pending", None)]
+            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
+                conn.execute("UPDATE source_previews SET status='complete',count=0,image_count=0,"
+                             "video_count=0 WHERE status='pending'")
+            conn.execute("UPDATE source_previews SET status='complete',count=0,image_count=0,video_count=0,"
+                         "shown='[]',members='[]',limited=FALSE,observed_at=1 WHERE status='pending'")

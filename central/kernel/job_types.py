@@ -11,9 +11,13 @@ from typing import Any, Final, TypeAlias
 
 from central.kernel.assets import AssetKind, AssetReady
 from central.kernel.jobs import Delivery, Job, QueueName
-from central.kernel.types import Sha256
+from central.kernel.types import LibraryAssetId, Sha256
 
 _FETCH_RETRY = (timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5))
+# A preview tile is picked after every queued boot or package fetch on the shared FETCH queue
+# (procrastinate picks `priority DESC, id ASC`). Pick order only: a tile already running still
+# holds a FETCH slot for up to the client's `metadata_seconds`.
+_THUMBNAIL_PRIORITY = -50
 
 
 class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IMAGE,
@@ -38,6 +42,20 @@ class FetchSealedEnvironment(Job[AssetReady], name="sealed_environment.fetch",
     sha256: Sha256
 
 
+class FetchLibraryThumbnail(Job[AssetReady], name="library_thumbnail.fetch",
+                            asset=AssetKind.LIBRARY_THUMBNAIL,
+                            delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY,
+                                              priority=_THUMBNAIL_PRIORITY)):
+    """One preview tile; its handler's library half is injected by the media worker (R22).
+
+    Below every other FETCH job's priority: a queued OS image, package or payload fetch is
+    always picked first. A running tile still holds a FETCH slot for its attempt (at most
+    the client's metadata budget, `ImmichClient.thumbnail`).
+    """
+
+    asset_id: LibraryAssetId
+
+
 class SyncReleases(Job[None], name="releases.sync",
                    delivery=Delivery(queue=QueueName.FETCH, every=timedelta(minutes=15))):
     pass
@@ -58,7 +76,8 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
-AssetJob: TypeAlias = FetchOsImage | FetchPackage | FetchPlayerPayload | FetchSealedEnvironment
+AssetJob: TypeAlias = (FetchOsImage | FetchPackage | FetchPlayerPayload | FetchSealedEnvironment
+                       | FetchLibraryThumbnail)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
-    FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment, SyncReleases, Prefetch,
-    RescueStalledJobs, PurgeFinishedJobs)
+    FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment, FetchLibraryThumbnail,
+    SyncReleases, Prefetch, RescueStalledJobs, PurgeFinishedJobs)

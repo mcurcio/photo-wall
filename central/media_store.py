@@ -335,7 +335,7 @@ class MediaStore:
         ).fetchall()
         for source in sources:
             self.repository.refresh_catalog_in(
-                conn, source["source_ref"], self.clock.utc(), source["status"]
+                conn, source["source_ref"], self.repository.times.now_in(conn), source["status"]
             )
 
     def _mark_corrupt(self, digest: str):
@@ -352,7 +352,7 @@ class MediaStore:
     def _checked(self, conn, lease):
         row = conn.execute(
             "SELECT * FROM media_jobs WHERE id=%s AND attempt_token=%s AND lease_until>%s",
-            (lease.job_id, lease.attempt_token, self.clock.utc()),
+            (lease.job_id, lease.attempt_token, self.repository.times.now_in(conn)),
         ).fetchone()
         if (
             not row
@@ -419,7 +419,7 @@ class MediaStore:
                                 variant.sha256,
                                 Jsonb(variant.model_dump(mode="json")),
                                 variant.size,
-                                self.clock.utc(),
+                                self.repository.times.now_in(conn),
                             ),
                         )
                     result = {
@@ -434,7 +434,7 @@ class MediaStore:
                             variant.sha256,
                             Jsonb(result),
                             0 if existing else variant.size,
-                            self.clock.utc(),
+                            self.repository.times.now_in(conn),
                             lease.job_id,
                         ),
                     )
@@ -525,7 +525,7 @@ class MediaStore:
             conn.execute(
                 "UPDATE media_jobs SET state=%s,reserved_bytes=0,cleanup_state=NULL,lease_until=NULL,"
                 "updated_at=%s WHERE id=%s",
-                (target, self.clock.utc(), row["id"]),
+                (target, self.repository.times.now_in(conn), row["id"]),
             )
             if current["variant_sha"]:
                 self._refresh(conn, current["variant_sha"])
@@ -564,7 +564,7 @@ class MediaStore:
                         "retry" if retry else "failed",
                         0,
                         code,
-                        self.clock.utc(),
+                        self.repository.times.now_in(conn),
                         row["id"],
                     ),
                 )
@@ -736,9 +736,11 @@ class MediaStore:
                 with self.repository.transaction() as conn:
                     if row["state"] == "ready" and self.repository.accounted_bytes(conn) <= target:
                         continue
+                    # Any pin row protects its blob: expires_at is written on Central's clock, so
+                    # only Central expires it (Coordinator -> expire_pins_in, a read lease's close).
+                    # The worker never compares it with its own clock (console DDD §G11).
                     if conn.execute(
-                        "SELECT 1 FROM media_references WHERE digest=%s AND expires_at>%s",
-                        (row["digest"], self.clock.utc()),
+                        "SELECT 1 FROM media_references WHERE digest=%s", (row["digest"],)
                     ).fetchone():
                         continue
                     if conn.execute(
@@ -760,11 +762,12 @@ class MediaStore:
                 except OSError:
                     continue
                 with self.repository.transaction() as conn:
+                    now = self.repository.times.now_in(conn)
                     conn.execute("DELETE FROM media_references WHERE digest=%s", (row["digest"],))
                     conn.execute(
                         "UPDATE media_jobs SET variant_sha=NULL,state=CASE WHEN state='ready' "
                         "THEN 'evicted' ELSE state END,retry_at=%s,updated_at=%s WHERE variant_sha=%s",
-                        (self.clock.utc(), self.clock.utc(), row["digest"]),
+                        (now, now, row["digest"]),
                     )
                     conn.execute(
                         "DELETE FROM media_blobs WHERE digest=%s AND state='deleting'",

@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 
 from central.app import create_app
 from central.catalog import CatalogSnapshot
+from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, RuntimeConflict, Scene
@@ -23,7 +24,7 @@ def write(expected, *, favorites=None):
 
 
 def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     assert names.put("all-photos", write(None))["source_ref"] == "all-photos:1"
@@ -67,7 +68,7 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
 
 
 def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     names.put("used", write(None))
@@ -84,7 +85,7 @@ def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(registry):
 
 
 def test_rename_changes_future_scene_and_keeps_old_run(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     names.put("old", write(None))
@@ -103,7 +104,7 @@ def test_rename_changes_future_scene_and_keeps_old_run(registry):
 
 
 def test_planner_catalog_excludes_dormant_revisions(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     names.put("photos", write(None))
@@ -112,12 +113,12 @@ def test_planner_catalog_excludes_dormant_revisions(registry):
     names.put("photos", write(1, favorites=True))
     needed = runtime.read().planning_source_refs()
     with registry.db.transaction() as conn:
-        snapshots, _ = repository.catalog_in(conn, registry.clock.utc(), needed)
+        snapshots, _ = repository.catalog_in(conn, needed)
     assert set(snapshots) == {"photos:2"}
 
 
 def test_dormant_revision_stops_scheduled_refresh_and_reactivates_for_run(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     names.put("photos", write(None))
@@ -148,7 +149,7 @@ def test_dormant_revision_stops_scheduled_refresh_and_reactivates_for_run(regist
 
 
 def test_retirement_waits_for_lease_then_fences_expired_publication(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     names = SourceNameService(registry.db, repository, RuntimeStore(registry.db, registry.clock))
     names.put("photos", write(None))
     lease = repository.begin_scheduled_refresh()
@@ -170,7 +171,7 @@ def test_retirement_waits_for_lease_then_fences_expired_publication(registry):
 
 
 def test_retirement_waits_for_requested_refresh_completion(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     names.put("photos", write(None))
@@ -193,7 +194,7 @@ def test_retirement_waits_for_requested_refresh_completion(registry):
 
 
 def test_dormant_snapshot_releases_metadata_capacity_after_run_ends(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime)
     names.put("photos", write(None))
@@ -226,7 +227,7 @@ def test_dormant_snapshot_releases_metadata_capacity_after_run_ends(registry):
 
 
 def test_legacy_versions_group_and_api_reports_dependent_scene_ids(registry):
-    repository = MediaRepository(registry.db, registry.clock)
+    repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     repository.configure_source(SourceSpec(source_ref="legacy:1", connection_ref="immich-main"))
     repository.configure_source(SourceSpec(source_ref="legacy:2", connection_ref="immich-main"))
     runtime = RuntimeStore(registry.db, registry.clock)
@@ -251,7 +252,7 @@ def test_legacy_versions_group_and_api_reports_dependent_scene_ids(registry):
 
 def test_source_preview_api_is_authenticated_and_only_enqueues_unsaved_query(registry):
     queue = RecordingMediaQueue()
-    repository = MediaRepository(registry.db, registry.clock, queue=queue)
+    repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
     repository.worker_status(None, ("immich-main",))
     app = create_app(registry.db, registry.clock, "a" * 32, media_queue=queue)
     headers = {"Authorization": "Bearer " + "a" * 32}
@@ -265,7 +266,7 @@ def test_source_preview_api_is_authenticated_and_only_enqueues_unsaved_query(reg
         assert receipt["status"] == "pending"
         result = client.get(f"/v1/operator/source-previews/{receipt['request_id']}", headers=headers)
         assert result.status_code == 200
-        assert result.json() == {"request_id": receipt["request_id"], "status": "pending"}
+        assert result.json() == {"request_id": receipt["request_id"], "status": "pending", "read_at": 1000}
         unavailable = client.post("/v1/operator/source-previews", headers=headers,
                                   json={**query, "connection_ref": "removed"})
         assert unavailable.status_code == 409
@@ -293,3 +294,18 @@ def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry
         assert len(versions) == len(refs)
         assert {row["name"] for row in versions} == {"foo", "foo:bar", refs[-1]}
         assert len({(row["name"], row["revision"]) for row in versions}) == len(refs)
+
+
+def test_a_named_source_keeps_its_tags_and_an_equivalent_write_creates_nothing(registry):
+    names = SourceNameService(registry.db, MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)),
+                              RuntimeStore(registry.db, registry.clock))
+    tags = (str(uuid.UUID(int=12)), str(uuid.UUID(int=11)))
+    created = names.put("family", NamedSourceWrite(expected_revision=None, connection_ref="immich-main",
+                                                   tags=tags))
+    with registry.db.transaction() as conn:
+        spec = conn.execute("SELECT spec FROM media_sources WHERE source_ref=%s",
+                            (created["source_ref"],)).fetchone()["spec"]
+    assert spec["tags"] == sorted(tags)
+    again = names.put("family", NamedSourceWrite(expected_revision=1, connection_ref="immich-main",
+                                                 tags=tuple(reversed(tags)), media_types=("video", "image")))
+    assert again["created"] is False

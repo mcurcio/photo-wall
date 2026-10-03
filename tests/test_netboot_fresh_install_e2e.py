@@ -115,6 +115,11 @@ def _enroll(db, clock, device_id, token, *, epoch=1):
         )
 
 
+class _NoLibrary:
+    async def thumbnail(self, asset_id, into):
+        raise AssertionError("no library thumbnail in the netboot arc")
+
+
 def _executor(db, clock, cache_root, monkeypatch, *, transport=None, env=None):
     """The worker's real job execution (`build_job_runtime`, every CATALOG handler), with
     only the GitHub transport swapped when `transport` is given. `execute` is exactly what
@@ -126,7 +131,8 @@ def _executor(db, clock, cache_root, monkeypatch, *, transport=None, env=None):
                 return GitHubReleaseOrigin(REPO, transport=transport)
 
         monkeypatch.setattr(content_wiring, "GitHubReleaseOrigin", _MockedOrigin)
-    runtime = build_job_runtime(db, clock, cache_root=cache_root, env=env or {})
+    runtime = build_job_runtime(db, clock, cache_root=cache_root, env=env or {},
+                                thumbnails=_NoLibrary())
     executor = runtime._executor
 
     def execute(job):

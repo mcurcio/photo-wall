@@ -12,7 +12,7 @@ from central.media_repository import MediaRepository
 from central.registry import RegistryError
 from central.runtime_store import RuntimeStore
 from contracts.models import Identifier, Instant, Model
-from media.models import SourceSpec
+from media.models import MAX_SOURCE_TAGS, SourceSpec, TagRef
 
 NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\Z")
 
@@ -25,11 +25,13 @@ class NamedSourceWrite(Model):
     captured_from: Instant | None = None
     captured_until: Instant | None = None
     media_types: tuple[Literal["image", "video"], ...] = ("image", "video")
+    tags: tuple[TagRef, ...] = Field(default=(), max_length=MAX_SOURCE_TAGS)
 
     def spec(self, source_ref: str) -> SourceSpec:
         return SourceSpec(source_ref=source_ref, connection_ref=self.connection_ref,
                           favorites=self.favorites, captured_from=self.captured_from,
-                          captured_until=self.captured_until, media_types=self.media_types)
+                          captured_until=self.captured_until, media_types=self.media_types,
+                          tags=self.tags)
 
 
 class SourceInUse(RegistryError):
@@ -51,7 +53,7 @@ class SourceNameService:
 
     @staticmethod
     def _same(spec: dict, wanted: SourceSpec) -> bool:
-        return spec == wanted.model_dump(mode="json", by_alias=True)
+        return MediaRepository.same_spec(spec, wanted)
 
     def put(self, name: str, request: NamedSourceWrite) -> dict:
         target_name = request.new_name or name

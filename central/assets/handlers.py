@@ -1,4 +1,5 @@
-"""Job handlers of the assets domain: fetch an OS image, fetch a Player `.deb`, prefetch.
+"""Job handlers of the assets domain: fetch an OS image, a Player `.deb`, a library thumbnail;
+prefetch.
 
 Job types are imported at runtime, never under `TYPE_CHECKING`: `handler_job_type` reads each
 `handle` method's annotations with `typing.get_type_hints`.
@@ -18,6 +19,7 @@ from central.kernel.assets import AssetReady, OriginLocator
 from central.kernel.handling import OriginRejected
 from central.kernel.job_types import (
     AssetJob,
+    FetchLibraryThumbnail,
     FetchOsImage,
     FetchPackage,
     FetchPlayerPayload,
@@ -25,7 +27,7 @@ from central.kernel.job_types import (
     Prefetch,
 )
 from central.kernel.jobs import asset_key, job_keys
-from central.kernel.ports import AssetRecords, ContentCatalog, ReleaseOrigin
+from central.kernel.ports import AssetRecords, ContentCatalog, ReleaseOrigin, ThumbnailOrigin
 from central.kernel.publishing import Publisher
 from central.kernel.transactions import Transactions
 from contracts.node_boot import MAX_ENVIRONMENT_BYTES
@@ -116,6 +118,25 @@ class FetchPlayerPayloadHandler:
         except PayloadError:
             temp.unlink(missing_ok=True)
             raise OriginRejected("player_payload_invalid") from None
+
+
+class FetchLibraryThumbnailHandler:
+    """Write one library thumbnail through the media worker's injected origin (R22).
+
+    `AssetProduction` supplies the record check, the present-file shortcut, the produced-facts
+    check and the install; the reference's locator is reserved and never read
+    (`central.assets.library`): the origin finds the item from the preview's stored member.
+    """
+
+    def __init__(self, *, production: AssetProduction, origin: ThumbnailOrigin) -> None:
+        self._production = production
+        self._origin = origin
+
+    async def handle(self, job: FetchLibraryThumbnail) -> AssetReady:
+        async def write(temp: Path, _locator: OriginLocator) -> None:
+            await self._origin.thumbnail(job.asset_id, temp)
+
+        return await self._production.produce(job, write)
 
 
 class PrefetchHandler:

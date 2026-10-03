@@ -1,9 +1,11 @@
 """The one composition helper for OS images and Player `.deb`s (design §10.5), shared by both roots.
 
 `create_app` (the Central process) calls `build_content_services`: the catalog, the read-through
-reader, the pod probe and the process's one `OutcomeFeed`. It binds no handlers. Worker boot
-(`media/worker.py`) calls `build_job_runtime`: every CATALOG handler behind one `JobRuntime`, the
-one worker kind. The worker's publisher has no feed, because a worker never waits on a handle.
+reader, the library thumbnails' resolver and their own reader, the pod probe and the process's one
+`OutcomeFeed`. It binds no handlers. Worker boot (`media/worker.py`) calls `build_job_runtime`:
+every CATALOG handler behind one `JobRuntime`, the one worker kind, with the library thumbnail
+origin INJECTED (Central imports no library client); and `build_library_thumbnails` for its
+prefetch. The worker's publisher has no feed, because a worker never waits on a handle.
 
 Both build their adapters over the same `Database`, so the two roots cannot drift in how a port is
 satisfied. Nothing here opens a connection; the returned objects connect when used.
@@ -11,13 +13,15 @@ satisfied. Nothing here opens a connection; the returned objects connect when us
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
 from central.assets.handlers import (
+    FetchLibraryThumbnailHandler,
     FetchOsImageHandler,
     FetchPackageHandler,
     FetchPlayerPayloadHandler,
@@ -25,6 +29,7 @@ from central.assets.handlers import (
     PrefetchHandler,
 )
 from central.assets.layout import CacheLayout
+from central.assets.library import LibraryThumbnails
 from central.assets.production import AssetProduction
 from central.assets.reader import AssetReader, WaiterSlots
 from central.assets.store import CacheStore
@@ -42,10 +47,18 @@ from central.infra.runtime import JobRuntime
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.jobs import QueueName
+from central.kernel.ports import ThumbnailOrigin
 from central.origins.github import GitHubReleaseOrigin
 from contracts.time import Clock
 
 WAITER_SLOTS: Final = 32  # §2: the per-pod waiter cap for OS images and `.deb`s
+# Console DDD §40: cold preview tiles hold at most four HTTP waiters for two seconds, in slots of
+# their own, so 24 tiles never take the waiter slots of the console's reads or a Player's base
+# fetch. These slots bound HTTP waiters, not queue occupancy: on the shared FETCH queue a tile's
+# job sits below every boot or package fetch by priority (`FetchLibraryThumbnail`), and a running
+# tile holds a FETCH slot for at most its client's metadata budget.
+THUMBNAIL_WAITER_SLOTS: Final = 4
+THUMBNAIL_WAIT: Final = timedelta(seconds=2)
 WORKER_CONCURRENCY: Final[Mapping[QueueName, int]] = MappingProxyType(
     {QueueName.FETCH: 2, QueueName.UPKEEP: 2})
 
@@ -58,6 +71,8 @@ class ContentServices:
     reader: AssetReader
     probe: PodProbe
     feed: OutcomeFeed | None  # started and stopped by the app's lifespan
+    thumbnails: LibraryThumbnails | None = None
+    thumbnail_reader: AssetReader | None = None  # its own slots and short wait (§40)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,18 +101,48 @@ def _core(db: Database, clock: Clock, *, cache_root: Path, feed_wanted: bool) ->
     return _Core(transactions, assets, outcomes, publisher, catalog, store, feed)
 
 
-def build_content_services(db: Database, clock: Clock, *, cache_root: Path) -> ContentServices:
-    """The Central process's content services; the caller starts and stops `feed`."""
+def _thumbnails(core: _Core, servable: Callable[[str], bool]) -> LibraryThumbnails:
+    return LibraryThumbnails(servable=servable, records=core.assets,
+                             transactions=core.transactions, publisher=core.publisher)
+
+
+def _nothing_servable(_asset_id: str) -> bool:
+    return False
+
+
+def build_content_services(db: Database, clock: Clock, *, cache_root: Path,
+                           servable_thumbnail: Callable[[str], bool] = _nothing_servable,
+                           ) -> ContentServices:
+    """The Central process's content services; the caller starts and stops `feed`.
+
+    `servable_thumbnail` reads current data (`MediaRepository.servable_thumbnail`); without it
+    no thumbnail is servable, so the route answers 404 and queues nothing.
+    """
     core = _core(db, clock, cache_root=cache_root, feed_wanted=True)
     reader = AssetReader(store=core.store, records=core.assets, transactions=core.transactions,
                          publisher=core.publisher, slots=WaiterSlots(WAITER_SLOTS), clock=clock)
+    thumbnail_reader = AssetReader(
+        store=core.store, records=core.assets, transactions=core.transactions,
+        publisher=core.publisher, slots=WaiterSlots(THUMBNAIL_WAITER_SLOTS), clock=clock,
+        wait_timeout=THUMBNAIL_WAIT)
     return ContentServices(catalog=core.catalog, reader=reader, probe=PodProbe(db.healthy),
-                           feed=core.feed)
+                           feed=core.feed, thumbnails=_thumbnails(core, servable_thumbnail),
+                           thumbnail_reader=thumbnail_reader)
+
+
+def build_library_thumbnails(db: Database, clock: Clock, *, cache_root: Path) -> LibraryThumbnails:
+    """The worker's thumbnail prefetch: a publisher with no feed (it never waits), resolving
+    nothing (the worker serves no route)."""
+    return _thumbnails(_core(db, clock, cache_root=cache_root, feed_wanted=False),
+                       _nothing_servable)
 
 
 def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
-                      env: Mapping[str, str]) -> JobRuntime:
+                      env: Mapping[str, str], thumbnails: ThumbnailOrigin) -> JobRuntime:
     """Every CATALOG handler behind one `JobRuntime`; its boot checks run here.
+
+    `thumbnails` is the media worker's library origin (R22): the thumbnail handler is Central's,
+    its library half is injected, so Central imports no library client.
 
     The runtime owns the queue-ops pool (`QueueAdmin`, opened on first use) and closes it when
     `run()` ends, so no caller has a pool to remember.
@@ -123,6 +168,7 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
         FetchSealedEnvironmentHandler(production=production, origin=origin),
         FetchPlayerPayloadHandler(production=production, origin=origin,
                                   expected_abi=payload_expected_abi),
+        FetchLibraryThumbnailHandler(production=production, origin=thumbnails),
         PrefetchHandler(catalog=core.catalog, records=core.assets, store=core.store,
                         transactions=core.transactions, publisher=core.publisher),
         RescueStalledJobsHandler(admin),

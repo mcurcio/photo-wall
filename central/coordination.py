@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from psycopg.types.json import Jsonb
 from pydantic import Field
 
-from central.db import Database
+from central.db import Database, DatabaseTransactionClock
 from central.equipment_drain import fenced_players_in
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.installation_models import OutputInterruption, PlayerReports
@@ -101,7 +101,7 @@ class Coordinator:
         self.db, self.clock = db, clock
         self.limits = limits or CoordinationLimits()
         self.runtime = RuntimeStore(db, clock)
-        self.media: CoordinationMedia = media or MediaRepository(db, clock)
+        self.media: CoordinationMedia = media or MediaRepository(db, clock, times=DatabaseTransactionClock())
         self.installation = installation or PostgresInstallationRepository(clock)
         self.outcomes = outcomes or ExecutionOutcomeRouter(
             handle_runtime_outcome,
@@ -273,7 +273,7 @@ class Coordinator:
         return result
 
     def _catalog(self, conn, runtime):
-        return self.media.catalog_in(conn, self.clock.utc(), runtime.planning_source_refs())
+        return self.media.catalog_in(conn, runtime.planning_source_refs())
 
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {

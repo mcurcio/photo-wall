@@ -4,11 +4,55 @@ from contextlib import contextmanager
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
+from typing import Any, Protocol
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from contracts.time import Clock
+
 MEDIA_LOCK = 734118325
+
+
+class TransactionClock(Protocol):
+    """The time of a fact written or compared by more than one process (console DDD G11).
+
+    Read on the caller's held connection, never on one of its own: there is no
+    connection-free form, so a read inside a transaction cannot take a second pooled
+    connection. Clocks compare only to themselves (R10), so every process that
+    writes or compares such a time uses the same one.
+    """
+
+    def now_in(self, conn: Any) -> float: ...
+
+
+class DatabaseTransactionClock:
+    """PostgreSQL's clock, read on the held connection: Central and every worker process.
+
+    `clock_timestamp()` is the statement's own time, not the transaction's start
+    (`now()`), so a long transaction neither stamps nor compares a stale time. It is
+    a plain SELECT, valid inside a REPEATABLE READ READ ONLY transaction.
+    """
+
+    __slots__ = ()
+
+    def now_in(self, conn: Any) -> float:
+        return float(conn.execute(
+            "SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now").fetchone()["now"])
+
+
+class ProcessTransactionClock:
+    """A process clock behind the same port: tests (ManualClock) only, never composed in production."""
+
+    __slots__ = ("clock",)
+
+    def __init__(self, clock: Clock):
+        self.clock = clock
+
+    def now_in(self, conn: Any) -> float:
+        if conn is None:
+            raise TypeError("now_in requires the held connection")
+        return self.clock.utc()
 
 
 class Database:

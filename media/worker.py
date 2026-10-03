@@ -12,22 +12,24 @@ import re
 import signal
 import stat
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final, Literal, Protocol
 
 from pydantic import ConfigDict, Field, model_validator
 
 from central import cache_layout
+from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.catalog import CatalogSnapshot
-from central.content_wiring import build_job_runtime
-from central.db import Database
+from central.content_wiring import build_job_runtime, build_library_thumbnails
+from central.db import Database, DatabaseTransactionClock
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
     WORKER_EXITED,
     JobRuntime,
     until_stopped,
 )
+from central.kernel.assets import AssetKind
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore, MediaStoreError
@@ -35,16 +37,18 @@ from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import SystemClock
 from media.immich import ImmichClient
+from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import (
     ConnectionConfig,
     Diagnostic,
     DownloadedOriginal,
+    LibraryTag,
     MediaError,
     MediaLimits,
     OriginalAsset,
     RefreshResult,
+    SourcePreview,
     SourcePreviewQuery,
-    SourcePreviewResult,
     SourceSpec,
 )
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
@@ -115,9 +119,16 @@ class WorkerLimits(Model):
 
 class SourceClient(Protocol):
     async def refresh(self, spec: SourceSpec) -> RefreshResult: ...
-    async def preview(self, query: SourcePreviewQuery) -> SourcePreviewResult: ...
+    async def preview(self, query: SourcePreviewQuery) -> SourcePreview: ...
+    async def list_tags(self) -> tuple[LibraryTag, ...]: ...
     async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal: ...
     async def close(self) -> None: ...
+
+
+class ThumbnailPrefetch(Protocol):
+    """`central.assets.library.LibraryThumbnails`: reference and publish a preview's tiles."""
+
+    async def prefetch(self, asset_ids: Sequence[str]) -> None: ...
 
 
 class PreparationClient(Protocol):
@@ -152,7 +163,8 @@ class MediaWorker:
                  connections: Mapping[str, ConnectionConfig], *,
                  preparer: PreparationClient | None = None,
                  client_factory: Callable[[ConnectionConfig], SourceClient] | None = None,
-                 limits: WorkerLimits = WorkerLimits()):
+                 limits: WorkerLimits = WorkerLimits(),
+                 thumbnails: ThumbnailPrefetch | None = None, previews: Path | None = None):
         self.repository, self.store, self.clock, self.limits = repository, store, repository.clock, limits
         if store.repository is not repository or limits.job_seconds + 30 > repository.limits.lease_seconds:
             raise MediaError("worker_config", "incompatible")
@@ -170,6 +182,9 @@ class MediaWorker:
         self.client_factory = client_factory or (lambda config: ImmichClient(config, clock=self.clock,
             limits=MediaLimits(max_original_bytes=repository.limits.max_original_bytes)))
         self._clients: dict[str, SourceClient] = {}
+        # A completed preview's tiles are prefetched (`thumbnails`); `previews` is the thumbnail
+        # directory, swept of files whose record maintenance retired.
+        self.thumbnails, self.previews = thumbnails, previews
         self._error: str | None = None
         self._recipe: str | None = None
 
@@ -333,8 +348,45 @@ class MediaWorker:
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
-        await _blocking(self.repository.maintain_source_previews)
+        # Listed BEFORE the purge: a file written after it is never discarded by this pass.
+        files = await _blocking(self._thumbnail_files)
+        recorded = await _blocking(self.repository.maintain_source_previews)
+        await _blocking(self._discard_thumbnails, files, recorded)
         await _blocking(self.repository.worker_status, self._error, self._connection_ids())
+
+    def _thumbnail_files(self) -> dict[str, Path]:
+        """Thumbnail files by asset id (temps excluded: their writer removes them)."""
+        if self.previews is None or not self.previews.is_dir():
+            return {}
+        return {path.name.removesuffix(".jpg"): path for path in self.previews.iterdir()
+                if path.name.endswith(".jpg") and not path.name.startswith(TEMP_PREFIX)}
+
+    @staticmethod
+    def _discard_thumbnails(files: Mapping[str, Path], recorded: frozenset[str]) -> None:
+        for asset_id, path in files.items():
+            if asset_id not in recorded:
+                path.unlink(missing_ok=True)
+
+    async def list_tags(self, *, boot: bool = False) -> None:
+        """Re-list each connection's tags once its last attempt is `TAG_LIST_SECONDS` old by the
+        database clock (the refresh tick). At boot every list is replaced and the lists of
+        connections this worker no longer holds are dropped. A failure keeps the last list."""
+        refs = self._connection_ids()
+        if boot:
+            await _blocking(self.repository.retain_library_tags, refs)
+            due = refs
+        else:
+            due = await _blocking(self.repository.library_tags_due, refs)
+        for ref in due:
+            tags, error = None, None
+            try:
+                async with asyncio.timeout(self.limits.refresh_seconds):
+                    tags = await self._client(ref).list_tags()
+            except asyncio.CancelledError:
+                raise
+            except Exception as caught:
+                error = caught if isinstance(caught, MediaError) else MediaError(self._code(caught))
+            await _blocking(self.repository.record_library_tags, ref, tags, error)
 
     async def preview_source(self, request_id: str) -> None:
         """Evaluate one unsaved query through the worker-owned Immich connection."""
@@ -345,8 +397,9 @@ class MediaWorker:
             if query.connection_ref not in self.connections:
                 raise MediaError("connection_unknown", "incompatible")
             async with asyncio.timeout(self.limits.refresh_seconds):
-                result = await self._client(query.connection_ref).preview(query)
-            await _blocking(self.repository.finish_source_preview, request_id, result)
+                observed = await self._client(query.connection_ref).preview(query)
+            if await _blocking(self.repository.finish_source_preview, request_id, observed):
+                await self._prefetch(observed)
         except asyncio.CancelledError:
             await _blocking(self.repository.fail_source_preview, request_id, "worker_cancelled")
             raise
@@ -354,6 +407,16 @@ class MediaWorker:
             await _blocking(self.repository.fail_source_preview, request_id, self._code(error))
         finally:
             await _blocking(self.repository.worker_status, self._error, self._connection_ids())
+
+    async def _prefetch(self, observed: SourcePreview) -> None:
+        """Queue the completed preview's tiles once (only the completing call reaches here); a
+        failed prefetch never fails the preview: a tile's own request fetches it."""
+        if self.thumbnails is None or not observed.members:
+            return
+        try:
+            await self.thumbnails.prefetch([member.asset_id for member in observed.members])
+        except Exception:
+            logger.warning("thumbnail prefetch failed", exc_info=True)
 
     async def _close_clients(self):
         async def close(client):
@@ -399,6 +462,7 @@ async def _media_writer(worker: MediaWorker, run_queue: Callable[[], Awaitable[N
             await asyncio.sleep(standby_seconds)
         await worker._register_recipe()
         await worker.maintain()
+        await worker.list_tags(boot=True)
         await worker.refresh_once()
         await run_queue()
 
@@ -447,12 +511,24 @@ async def _entry():
     clock = SystemClock()
     db = Database(dsn)
     queue = ProcrastinateMediaQueue(dsn)
-    repository = MediaRepository(db, clock, queue=queue)
-    worker = MediaWorker(repository, MediaStore(repository, Path(root)), load_connections(Path(connection_file)))
-    # The one worker kind (design §10.5): every OS-image/`.deb` handler behind JobRuntime, in
-    # EVERY worker process; only the legacy media loop is single-writer. Its boot checks run
-    # here, so a wiring mistake fails before any job is claimed.
-    runtime = build_job_runtime(db, clock, cache_root=cache_layout.cache_root(), env=os.environ)
+    # G11: media times on the database's clock in every worker process; `clock` stays
+    # for the worker's monotonic budgets and process-local decisions.
+    repository = MediaRepository(db, clock, times=DatabaseTransactionClock(), queue=queue)
+    connections = load_connections(Path(connection_file))
+    cache_root = cache_layout.cache_root()
+    previews = ensure_previews_directory(cache_root)
+    worker = MediaWorker(repository, MediaStore(repository, Path(root)), connections,
+                         thumbnails=build_library_thumbnails(db, clock, cache_root=cache_root),
+                         previews=previews)
+    # The library half of the thumbnail fetch (R22): only this package holds the key.
+    thumbnails = LibraryThumbnailOrigin(
+        repository.servable_thumbnail, connections,
+        lambda config: ImmichClient(config, clock=clock, limits=MediaLimits()))
+    # The one worker kind (design §10.5): every asset handler behind JobRuntime, in EVERY worker
+    # process; only the legacy media loop is single-writer. Its boot checks run here, so a wiring
+    # mistake fails before any job is claimed.
+    runtime = build_job_runtime(db, clock, cache_root=cache_root, env=os.environ,
+                                thumbnails=thumbnails)
     await _blocking(repository.db.migrate)
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
@@ -463,6 +539,15 @@ async def _entry():
                 _media_writer(worker, lambda: _media_queue(app, additional_context)), runtime)
     finally:
         await worker._close_clients()
+        await thumbnails.aclose()
+
+
+def ensure_previews_directory(cache_root: Path) -> Path:
+    """ADR 0013's fourth subdirectory, created on a volume made before it existed (0700, as the
+    entrypoint and the image create the others)."""
+    previews = CacheLayout(cache_root).directory(AssetKind.LIBRARY_THUMBNAIL)
+    previews.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return previews
 
 
 def main() -> int:

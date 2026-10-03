@@ -11,7 +11,18 @@ from typing import Annotated, Literal, Self
 from uuid import UUID
 
 import httpx
-from pydantic import ConfigDict, Field, SecretStr, StrictBool, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SecretStr,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from central.catalog import Candidate, CatalogSnapshot
 from contracts.models import Digest, Identifier, Instant, Model, Positive
@@ -29,13 +40,46 @@ def canonical_uuid(value: str) -> str:
         raise ValueError("invalid UUID") from None
 
 
+# A library tag's id; tag ids may reach the browser (R22, PR 37 Q4).
+TagRef = Annotated[str, Field(max_length=36), AfterValidator(canonical_uuid)]
+MAX_SOURCE_TAGS = 4
+PREVIEW_SHOWN = 24
+
+
 class SourceQuery(Model):
+    """One library query. Media matches every tag in `tags` (and their nested tags).
+
+    Empty `tags` are omitted when serialized, so an untagged query stores exactly as it
+    did before tags existed, and an older worker (`extra='forbid'`) refuses a tagged one.
+    """
+
     model_config = ConfigDict(populate_by_name=True)
     connection_ref: Identifier
     favorites: StrictBool | None = None
     captured_from: Instant | None = None
     captured_until: Instant | None = None
     media_types: tuple[Kind, ...] = ("image", "video")
+    tags: tuple[TagRef, ...] = Field(default=(), max_length=MAX_SOURCE_TAGS)
+
+    @field_validator("tags")
+    @classmethod
+    def unique_sorted_tags(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("tags must be unique")
+        return tuple(sorted(value))
+
+    @model_serializer(mode="wrap")
+    def omit_empty_tags(self, handler: SerializerFunctionWrapHandler) -> dict:
+        data = handler(self)
+        if not self.tags:
+            data.pop("tags", None)
+        return data
+
+    def canonical(self) -> dict:
+        """The query's meaning, for comparison only (never stored): kinds as a set, unset filters dropped."""
+        data = self.model_dump(mode="json", by_alias=True, exclude_none=True)
+        data["media_types"] = sorted(data["media_types"])
+        return data
 
     @field_validator("captured_from", "captured_until", mode="before")
     @classmethod
@@ -70,15 +114,97 @@ class SourcePreviewQuery(SourceQuery):
     """An unsaved query that may be evaluated without a persistent Source."""
 
 
+# Control characters, bidi controls (LRM, RLM, ALM, embeddings, isolates) and zero-width
+# characters never reach the console (PR 37 §9): a tag name may otherwise reorder the text
+# around it, or read as empty while not being so. Stripped before any length check.
+_UNSAFE_TEXT = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+MAX_LIBRARY_TAGS = 5000
+MAX_TAG_TEXT = 1024
+
+
+def visible_text(value: object) -> object:
+    return _UNSAFE_TEXT.sub("", value) if isinstance(value, str) else value
+
+
+# Empty when nothing visible is left once stripped: the tag still exists in the library, so
+# the stored list keeps its id (a by-id lookup must never call it gone); only the search
+# hides it (`central/media_repository.py` `matching_tags`).
+TagText = Annotated[str, BeforeValidator(visible_text), Field(max_length=MAX_TAG_TEXT)]
+
+
+class LibraryTag(Model):
+    """A tag as the browser may receive it (R22): ids, path and name only.
+
+    The listed list is the library's whole list: every listed id is kept, even one whose
+    path or name has nothing visible (`""`), which the search never offers.
+    """
+
+    tag_ref: TagRef
+    path: TagText  # the full nested path, e.g. "Family/Christmas"
+    name: TagText
+    parent_ref: TagRef | None = None
+
+
+class PreviewMember(Model):
+    """A preview member as the browser may receive it (R22): no library id or checksum.
+
+    Sizes and duration are absent when the library's metadata for the item is unusable.
+    """
+
+    asset_id: Identifier
+    kind: Kind
+    captured_at: Instant
+    width: int | None = Field(default=None, gt=0, strict=True)
+    height: int | None = Field(default=None, gt=0, strict=True)
+    duration_seconds: Positive | None = None
+
+
+class StoredPreviewMember(PreviewMember):
+    """A served member plus the library identity Central keeps and never serves."""
+
+    upstream_id: str
+    checksum: Sha1
+
+    @field_validator("upstream_id")
+    @classmethod
+    def upstream_uuid(cls, value: str) -> str:
+        return canonical_uuid(value)
+
+    def served(self) -> PreviewMember:
+        return PreviewMember.model_validate(self.model_dump(include=set(PreviewMember.model_fields)))
+
+
 class SourcePreviewResult(Model):
+    """Counts of what a query selects, and its newest members.
+
+    `limited`: the query selects more than the worker currently accepts (its 1,000
+    ceiling); the counts are then lower bounds and `shown` is the newest observed.
+    """
+
     count: Count
     image_count: Count
     video_count: Count
+    shown: tuple[PreviewMember, ...] = Field(default=(), max_length=PREVIEW_SHOWN)
+    limited: StrictBool = False
 
     @model_validator(mode="after")
     def totals_match(self) -> Self:
         if self.count != self.image_count + self.video_count:
             raise ValueError("preview counts do not add up")
+        return self
+
+
+class SourcePreview(Model):
+    """A preview observation: the served result and its members' stored metadata."""
+
+    result: SourcePreviewResult
+    members: tuple[StoredPreviewMember, ...] = Field(default=(), max_length=PREVIEW_SHOWN)
+
+    @model_validator(mode="after")
+    def members_are_shown(self) -> Self:
+        if tuple(member.served() for member in self.members) != self.result.shown:
+            raise ValueError("stored members must be the shown members")
         return self
 
 
