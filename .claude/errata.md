@@ -3506,3 +3506,16 @@ due refresh (:245) also checks in, so a preparation backlog delaying maintenance
 docs/module-media-worker.md one-media-clock paragraph now states the window and cadence and links the runbook.
 HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` scan after moving base-image.yml
 :482/:490/:907 to entry points). Not blocking this PR.
+
+## 2026-10-03 · 4 GB tracer T1 (implementer) · design-4gb-node.md §4.3 T1
+- E-T1-1 · `admit_cold` second refusal: the page writes `StorageShort(incremental, min(free, available − EMERGENCY))`;
+  that room is negative when MemAvailable < 512 MiB, which a non-negative `room_bytes` (T2 `BootStageV2`) cannot carry.
+  Implemented: decision on the unclamped value (unchanged behaviour), reported room `max(0, …)`, as `preparation_room` does.
+- E-T1-2 · Rule 3 ("per-unit duplicates are deleted") vs the page: the app transient still carries `MemoryMax=2G`
+  (`appliance/node/process_linux.py` `app_unit_properties`) beside `photowallapp.slice` `MemoryMax=2G`; the page names
+  only the two `MemoryMax=4G` lines, so the 2G duplicate was kept. Needs a ruling (delete it + bind slice to a constant, or keep).
+- E-T1-3 · The storage stage no longer refuses on MemAvailable ≤ 512 MiB (the old `storage_budget`
+  `node_storage_memory_envelope`); the page's order (memcg, class, mount, size) omits it. Cold admission still refuses
+  through MemAvailable. Recorded so T6 docs do not describe the old refusal.
+
+- E-T1-2 ruling (orchestrator, 2026-10-03): keep app MemoryMax=2G for the tracer; the app memory line and single-sourcing photowallapp.slice belong to the Shape C gate.

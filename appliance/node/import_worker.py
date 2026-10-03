@@ -60,7 +60,7 @@ class RootImportWorker:
         self.store.write("import-request", {"command": encode_stage_command(command).decode()})
         record = {"command_sha256": command.command_sha256, "unit": unit, "phase": "intent", "identity": None}
         self.store.write("import-worker", record)
-        properties = ("Slice=photowallpreparation.slice", "User=root", "MemoryMax=4G", "MemorySwapMax=0",
+        properties = ("Slice=photowallpreparation.slice", "User=root", "MemorySwapMax=0",
             "CPUQuota=25%", "TasksMax=16", "IOWeight=10", "NoNewPrivileges=yes", "PrivateDevices=yes",
             "PrivateTmp=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
             "RuntimeDirectory=photo-wall-root-import", "RuntimeDirectoryMode=0700", "RuntimeDirectoryPreserve=yes",

@@ -17,8 +17,8 @@ from appliance.node.capacity import (
     OVERHEAD,
     StorageShort,
     admit_preparation,
+    device_class,
     preparation_room,
-    storage_budget,
 )
 from appliance.node.host_linux import LinuxHostSampler
 from appliance.node.manager_desired import DesiredPreparation
@@ -146,14 +146,16 @@ def test_each_name_is_emitted_once_and_the_largest_sample_fits_the_contract(tmp_
 
 
 def _old_admit(size, *, total, available, free, used):
-    """The decision before N1 (capacity.py at batch 3), kept as the reference."""
+    """The decision before N1 (capacity.py at batch 3), kept as the reference; the store cap is
+    the device class's since the 4 GB tracer (T1)."""
     incremental = 2 * size + OVERHEAD
-    return not (used + incremental > storage_budget(total, available)
+    return not (used + incremental > device_class(total).store_bytes
                 or incremental > min(free, available - EMERGENCY_HEADROOM))
 
 
 @pytest.mark.parametrize("size", [128, 200 * MIB, 984207360, GIB, 2 * GIB])
-@pytest.mark.parametrize("total,available", [(8 * GIB, 600 * MIB), (8 * GIB, 2 * GIB),
+@pytest.mark.parametrize("total,available", [(4045 * MIB, 600 * MIB), (4045 * MIB, 3 * GIB),
+                                             (8 * GIB, 600 * MIB), (8 * GIB, 2 * GIB),
                                              (8 * GIB, 3 * GIB), (8 * GIB, 7 * GIB), (16 * GIB, 12 * GIB)])
 @pytest.mark.parametrize("free,used", [(4 * GIB, 0), (4 * GIB - 1261 * MIB, 1261 * MIB),
                                        (GIB, 3 * GIB), (100 * MIB, 0), (8 * GIB, 5 * GIB)])
