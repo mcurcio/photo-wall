@@ -16,7 +16,12 @@ from central.fleet.node_sessions import (
 )
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_commands import parse_session_grant, producer_document
-from contracts.node_host_facts import encode_host_facts, parse_host_facts, stored_fact_values
+from contracts.node_host_facts import (
+    encode_host_facts,
+    fact_values_document,
+    parse_host_facts,
+    stored_fact_values,
+)
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
     encode_host_observation,
@@ -137,9 +142,11 @@ class NodeObservations:
                         "received_at": prior["received_at"], "authority_granted": False}
             # Only a new value claims intake: a same-values resend at a higher sequence (every
             # Host Management process start, so a crash loop) rewrites the row without using
-            # the day's quota, so restarts cannot outrun the derived cap.
+            # the day's quota, so restarts cannot outrun the derived cap. Both sides are plain
+            # documents (a nested `boot` included); a row stored before `boot` existed reads it
+            # as None, so it equals a post that did not read one.
             same = (prior is not None
-                    and tuple(stored_fact_values(bytes(prior["payload"])).values()) == facts.values())
+                    and stored_fact_values(bytes(prior["payload"])) == fact_values_document(facts))
             if not same:
                 claim_intake_in(conn, facts.producer.device_id, "host_facts", now)
             if prior is None:
@@ -252,6 +259,7 @@ class NodeObservations:
                 # Tolerant: an older-shape row serves its missing facts as None, never fails
                 # the read. `base_tag` is the node's own record of its base: a host report,
                 # served beside `boot.base_tag` (Central's offer), never merged with it.
+                # `facts.boot` is the node's boot stage report (None when absent or invalid).
                 facts = {"first_received_at": row["facts_first_received_at"],
                          **stored_fact_values(bytes(row["facts_payload"]))}
             devices.append({"device_id": row["device_id"], "host": host,
