@@ -10,9 +10,12 @@ import argparse
 import http.client
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
+from appliance.node.boot_stage import DIRECTORY as BOOT_STAGE_DIRECTORY
+from appliance.node.boot_stage import read_boot_report
 from appliance.node.host import HostCore
 from appliance.node.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
 from appliance.node.host_storage import FileRebootJournal, RebootDelivery
@@ -22,12 +25,17 @@ from appliance.node.recovery_linux import RecoveryObserver, RecoveryServer
 from appliance.node.session import REFUSED, NodeSession
 from appliance.node.storage import BootStore
 from contracts.node_commands import parse_reboot_request
-from contracts.node_host_facts import FACT_RULES, HostFactsV2, encode_host_facts, valid_fact
+from contracts.node_host_facts import (
+    HostFactsV2,
+    encode_host_facts,
+    fact_values_document,
+    valid_fact,
+)
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
-    HostMetricV2,
     HostObservationV2,
     encode_host_observation,
+    valid_metrics,
 )
 from contracts.node_protocol import encode_node_message
 from contracts.strict_json import loads_object
@@ -54,6 +62,8 @@ class HostRunner:
     # initramfs verified and mounted, carried into host.json by bootstrap.py from the boot
     # handoff. Reported in the facts record (`base_tag`) beside Central's offer, never as it.
     base_tag: str | None = None
+    # The base boot stages' records (boot_stage.py), folded into the facts record's `boot`.
+    boot_stage_directory: Path = BOOT_STAGE_DIRECTORY
 
     def __init__(self, store: BootStore, transport: NodeHTTP, *, serial: str,
                  offer_id: UUID, kernel_boot_id: UUID, monotonic=time.monotonic,
@@ -91,7 +101,7 @@ class HostRunner:
         now = boottime_ms()
         recovery_metrics, recovery_fault = self.recovery.telemetry()
         metrics = (self.sampler.sample() + self.sampler.throttling() + self.sampler.supervision()
-                   + recovery_metrics)
+                   + self.sampler.memory_rows() + recovery_metrics)
         self.store.write("observation", {"sampled_boottime_ms": now, "metrics": metrics})
         if not self.establish_session():
             return
@@ -105,7 +115,7 @@ class HostRunner:
         if self._observation_due():
             self._posted = (self.core.session_id, self.monotonic())
             observation = HostObservationV2(self.core.producer, self.journal.next_sequence(),
-                                            now, tuple(HostMetricV2(*row) for row in metrics),
+                                            now, valid_metrics(metrics),
                                             fault_code=recovery_fault)
             try:
                 self.session.request("POST", "/v2/node/observations", encode_host_observation(observation))
@@ -128,10 +138,15 @@ class HostRunner:
             self._facts_state = "pending"
         values = {**self.sampler.facts(),
                   "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None}
+        boot = read_boot_report(directory=self.boot_stage_directory,
+                                units=lambda: self.sampler.failed_units())
+        # Compared as the whole JSON-ready document (`boot` included), the same comparison
+        # Central makes; the candidate's sequence is spent only when something changed.
+        candidate = HostFactsV2(self.core.producer, 1, now_ms, **values, boot=boot)
         current = self._facts
-        if (current is None or current.producer != self.core.producer
-                or current.values() != tuple(values[name] for name in FACT_RULES)):
-            self._facts = HostFactsV2(self.core.producer, self.journal.next_sequence(), now_ms, **values)
+        if (current is None or current.producer != candidate.producer
+                or fact_values_document(current) != fact_values_document(candidate)):
+            self._facts = replace(candidate, sequence=self.journal.next_sequence())
             self._facts_state = "pending"
         if self._facts_state != "pending":
             return

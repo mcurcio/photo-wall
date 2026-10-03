@@ -10,19 +10,34 @@ import time
 from pathlib import Path
 
 from appliance.node.base_status import STATUS, read_supervisor_status
+from appliance.node.capacity import memory_controller_present
 from appliance.node.clock import boot_id, boottime_ms  # noqa: F401
-from contracts.node_host_facts import valid_fact
+from contracts.node_host_facts import MAX_BOOT_FAILED_UNITS, valid_fact
+from contracts.node_protocol import token
 
 # The firmware's throttle flags (console DDD §63): bits 0-3 hold now, bits 16-19 are sticky,
 # set since boot or since another firmware reader last cleared them, so "occurred" not "since boot".
 _THROTTLE_FLAGS = (("under_voltage", 0), ("frequency_capped", 1), ("throttled", 2),
                    ("soft_temperature_limit", 3))
+# The slices HostCore measures (metric suffix, cgroup directory); HostCore's own slice has no
+# OOM-kill row (contracts/node_observation.py METRIC_FAMILIES: oom_kill: base, preparation, app).
+_SLICES = (("hostcore", "photowallhostcore.slice"), ("base", "photowallbase.slice"),
+           ("preparation", "photowallpreparation.slice"), ("app", "photowallapp.slice"))
+_OOM_SLICES = ("base", "preparation", "app")
+
+
+def _unit_name(value: str) -> bool:
+    try:
+        token(value, 96)
+    except ValueError:
+        return False
+    return True
 
 
 class LinuxHostSampler:
     """`sample` and `throttling` read only /proc and /sys (no subprocess or netlink; the unit
     refuses netlink); a value that cannot be read is omitted, never sent as zero; each name
-    is emitted once. `supervision` alone runs systemctl."""
+    is emitted once. `supervision` and `failed_units` alone run systemctl."""
 
     def __init__(self, proc: Path = Path("/proc"), filesystem: Path = Path("/run"),
                  sys: Path = Path("/sys")):
@@ -182,28 +197,9 @@ class LinuxHostSampler:
         return metrics + self._soc_temperature() + self._cpu_busy() + self._link_speed()
 
     def supervision(self) -> tuple:
+        """The base supervisor's App Manager summary (the per-unit rows are retired: PID1's
+        failed units ride in the facts record, `failed_units`)."""
         rows = []
-        units = {"manager_supervisor": "photo-wall-manager-supervisor.service",
-                 "manager": "photo-wall-node-manager.service", "broker": "photo-wall-app-broker.service",
-                 "display": "photo-wall-display.service", "display_controller": "photo-wall-display-controller.service"}
-        for name, unit in units.items():
-            state = None
-            try:
-                result = subprocess.run(["/usr/bin/systemctl", "show", unit,
-                    "--property=LoadState,ActiveState"], capture_output=True, text=True,
-                    check=True, timeout=0.25, env={"PATH": "/usr/bin", "LANG": "C"})
-                if len(result.stdout) > 1024:
-                    raise ValueError("unit_observation_bound")
-                value = dict(line.split("=", 1) for line in result.stdout.splitlines())
-                if (set(value) != {"LoadState", "ActiveState"}
-                        or value["ActiveState"] not in {"active", "inactive", "failed", "activating", "deactivating", "reloading", "maintenance", "refreshing"}):
-                    raise ValueError("unit_observation_invalid")
-                state = value["ActiveState"] if value["LoadState"] == "loaded" else "absent"
-            except (OSError, ValueError, subprocess.SubprocessError):
-                pass
-            rows.extend(((name + "_known", int(state is not None), "boolean", "pid1"),
-                         (name + "_active", int(state == "active"), "boolean", "pid1"),
-                         (name + "_failed", int(state == "failed"), "boolean", "pid1")))
         try:
             value = read_supervisor_status(STATUS, kernel_boot_id=boot_id(), now_ms=boottime_ms())
         except (OSError, ValueError):
@@ -217,6 +213,56 @@ class LinuxHostSampler:
                          ("manager_summary_age", boottime_ms() - value["sampled_boottime_ms"], "milliseconds", "base_supervisor")))
         return tuple(rows)
 
+
+
+    def failed_units(self) -> tuple[tuple[str, ...], int]:
+        """PID1's failed `photo-wall-*` units on this boot, from one bounded `systemctl` call:
+        full names, sorted and unique, at most MAX_BOOT_FAILED_UNITS, and the count of the rest
+        (with any name the contract's token rule refuses, never stripped). The stage units are
+        included: their own records may be missing (killed before the exit write, or a record
+        write failed); the console subtracts them (design 4 GB node §4.3 T4). ((), 0) on error."""
+        try:
+            result = subprocess.run(["/usr/bin/systemctl", "list-units", "--state=failed", "--plain",
+                                     "--no-legend", "photo-wall-*"], capture_output=True, text=True,
+                                    check=True, timeout=0.25, env={"PATH": "/usr/bin", "LANG": "C"})
+            if len(result.stdout) > 4096:
+                raise ValueError("failed_units_bound")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return (), 0
+        names = sorted({line.split()[0] for line in result.stdout.splitlines() if line.split()})
+        valid = [name for name in names if name.startswith("photo-wall-") and _unit_name(name)]
+        kept = tuple(valid[:MAX_BOOT_FAILED_UNITS])
+        return kept, len(names) - len(kept)
+
+    def memory_rows(self) -> tuple:
+        """Memory controller presence, the CMA pool, and per slice the cgroup's peak bytes
+        (only with the controller) and OOM kills; a row whose file cannot be read is omitted."""
+        cgroup = self.sys / "fs/cgroup"
+        present = memory_controller_present(cgroup / "cgroup.controllers")
+        rows = [("memcg_present", int(present), "boolean", "cgroup")]
+        try:
+            meminfo = {fields[0].rstrip(":"): int(fields[1]) * 1024
+                       for fields in (line.split() for line in (self.proc / "meminfo").read_text().splitlines())
+                       if len(fields) == 3 and fields[2] == "kB" and fields[0] in ("CmaTotal:", "CmaFree:")}
+        except (OSError, ValueError):
+            meminfo = {}
+        rows.extend((name, meminfo[key], "bytes") for name, key in (("cma_total", "CmaTotal"), ("cma_free", "CmaFree"))
+                    if key in meminfo)
+        for name, slice_name in _SLICES:
+            if present:
+                try:
+                    rows.append((f"memory_peak:{name}", int((cgroup / slice_name / "memory.peak").read_text().strip()),
+                                 "bytes", "cgroup"))
+                except (OSError, ValueError):
+                    pass
+            if name in _OOM_SLICES:
+                try:
+                    events = dict(line.split() for line in (cgroup / slice_name / "memory.events").read_text().splitlines()
+                                  if len(line.split()) == 2)
+                    rows.append((f"oom_kill:{name}", int(events["oom_kill"]), "count", "cgroup"))
+                except (OSError, ValueError, KeyError):
+                    pass
+        return tuple(rows)
 
 
 class SystemdRebootDriver:

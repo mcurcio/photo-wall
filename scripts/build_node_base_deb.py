@@ -74,7 +74,8 @@ def stage_tree(tree: Path, destination: Path) -> str:
     (users / "photo-wall-node.conf").write_text('u pw-manager 10003 "Photo Wall manager" /nonexistent\nu pw-player 10004 "Photo Wall Player" /nonexistent\nu pw-display 10005 "Photo Wall display" /nonexistent\n')
     temporary = destination / "usr/lib/tmpfiles.d"
     temporary.mkdir(parents=True)
-    (temporary / "photo-wall-node.conf").write_text("d /run/photo-wall-node 0700 root root -\nd /run/photo-wall-app-proof 0755 root root -\n")
+    (temporary / "photo-wall-node.conf").write_text("d /run/photo-wall-node 0700 root root -\nd /run/photo-wall-app-proof 0755 root root -\n"
+                                                     "d /run/photo-wall-boot-stage 0755 root root -\n")
     # Include units, generated cohort policy and UID/tmpfiles contracts in identity.
     for path in sorted(destination.rglob("*")):
         if path.is_file() and not path.is_symlink():

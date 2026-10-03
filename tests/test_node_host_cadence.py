@@ -70,7 +70,7 @@ def _runner(monkeypatch, clock):
     runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
     runner.store = _Store()
     runner.sampler = SimpleNamespace(sample=lambda: (("uptime", 1, "seconds"),), throttling=lambda: (),
-                                     supervision=lambda: (), facts=lambda: dict.fromkeys(
+                                     supervision=lambda: (), memory_rows=lambda: (), facts=lambda: dict.fromkeys(
                                          ("kernel_release", "interface", "link_state", "address")))
     runner.delivery = SimpleNamespace(flush=lambda *args, **kwargs: 0)
     sequence = iter(range(1, 10_000))
