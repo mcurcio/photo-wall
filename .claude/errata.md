@@ -3589,3 +3589,22 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   with T1 (storage mounts, class pi5-8gb). The ubuntu-24.04-arm runner was not observed directly; CI is the gate.
 
 - E-T6-1 resolved by 2d264bb: the general cmdline template owns cgroup_enable=memory; the release seal enforces exactly once for both release types.
+
+## 2026-10-03 · 4 GB tracer coherence fix cycle 1 (implementer) · design-4gb-node.md §4.3 T4, §6
+- E-FX1-1 · Contradiction: §4.3 T4 says `boot_preparation` reads only `boot.stages` and `base_units` subtracts all three
+  stage units unconditionally; §6 relies on `failed_units` naming the stage unit when the step is killed before its
+  exit write (OOM victim, TimeoutStartSec SIGTERM) or its record write fails. Under T4 such a stop read "running" /
+  "not started" and the unit was subtracted, so nothing alarmed. Fix (§6 wins): `hostHealth.js` `stoppedStages()` is
+  the one rule both boot items read: a stage is stopped when its record is refused/failed, OR its own unit is in
+  `failed_units` while its record is `running` or absent ("boot preparation failed at <stage> (unit failed, no exit
+  record)", alarm). `base_units` subtracts a stage unit ONLY when that stage is stopped (all stopped stages, not just
+  the first shown, since later stops are effects of the first); a `done` stage's failed unit stays listed. T4's page
+  text is superseded by this entry; console DDD §62 and runbook rows updated.
+  Residual (unchanged, E-T4-4): a stage unit sorted past MAX_BOOT_FAILED_UNITS into `failed_units_more` is invisible to
+  the unit-failed rule and to the subtraction.
+- E-FX1-2 · Compatible interface additions made during T1-T5, recorded so the frozen pages stay the plan of record:
+  `mount_storage(*, controllers, meminfo)` (injected readers), `require_mounted_size`, `boot_document`,
+  `boot_from_document`, `check_metric_families`, `MAX_HOST_METRICS`.
+- E-FX1-3 · `kernel_release` narrowed from printable ASCII to `[A-Za-z0-9._+~-]{1,64}` (the `uname -r` alphabet): `"` and
+  `\` JSON-escape to 2 bytes and 64 of them overflowed MAX_HOST_FACTS_BYTES (HostRunner swallowed the ValueError, so
+  facts went silently absent). `HostFactsV2.values()` deleted; `fact_values_document` is the one "what changed".
