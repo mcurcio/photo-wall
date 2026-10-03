@@ -16,7 +16,7 @@ from test_registry import ADMIN
 from central.app import create_app
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import HOST_FACTS_DAILY_CAP, NodeControlConfig, NodeControlError
-from contracts.node_host_facts import HostFactsV2, encode_host_facts
+from contracts.node_host_facts import BootReportV2, BootStageV2, HostFactsV2, encode_host_facts
 
 VALUES = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
           "address": "192.168.1.40", "base_tag": BASE_TAG}
@@ -84,6 +84,43 @@ def test_every_ingest_case(registry):
     assert _intake(registry) == 2
 
 
+RUNNING = BootReportV2((BootStageV2("handoff", "done", None, None, None),
+                        BootStageV2("storage", "done", None, None, None),
+                        BootStageV2("prepare", "running", None, None, None)), (), 0)
+DONE = BootReportV2(tuple(BootStageV2(stage.stage, "done", None, None, None)
+                          for stage in RUNNING.stages), (), 0)
+
+
+def test_unchanged_detection_compares_boot_and_reads_an_older_row_without_it(registry):
+    boots, sessions = _rig(registry)
+    host = Host(registry, sessions, boots)
+    observations = NodeObservations(sessions)
+    producer = host.grant.producer
+    start = registry.clock.utc()
+    # An older node's document: no `boot` key, stored as it was posted.
+    _send(host, _facts(producer, 1))
+    assert "boot" not in json.loads(bytes(_row(registry)[0]["payload"]))
+    # A restart resend without boot is unchanged against that row.
+    registry.clock.advance(10)
+    _send(host, _facts(producer, 2))
+    assert _row(registry)[0]["first_received_at"] == start and _intake(registry) == 1
+    # Boot appears: a change. Then the same nested boot again: unchanged, no intake claimed.
+    registry.clock.advance(10)
+    running_at = registry.clock.utc()
+    _send(host, _facts(producer, 3, boot=RUNNING))
+    registry.clock.advance(10)
+    _send(host, _facts(producer, 4, boot=RUNNING))
+    assert _row(registry)[0]["first_received_at"] == running_at and _intake(registry) == 2
+    # A stage moves: a change, served by G12 as the stored plain document.
+    registry.clock.advance(10)
+    _send(host, _facts(producer, 5, boot=DONE))
+    assert _intake(registry) == 3
+    served = _device(observations.fleet_hosts())["facts"]
+    assert served["first_received_at"] == registry.clock.utc()
+    assert [stage["state"] for stage in served["boot"]["stages"]] == ["done", "done", "done"]
+    assert served["boot"]["failed_units"] == [] and served["boot"]["failed_units_more"] == 0
+
+
 def test_a_producer_not_the_sessions_is_refused(registry):
     boots, sessions = _rig(registry)
     host = Host(registry, sessions, boots)
@@ -141,7 +178,7 @@ def test_g12_serves_only_the_current_boots_facts_and_its_base_tag(registry):
     received = registry.clock.utc()
     _send(first, _facts(first.grant.producer, 1))
     served = _device(observations.fleet_hosts())
-    assert served["facts"] == {"first_received_at": received, **VALUES}
+    assert served["facts"] == {"first_received_at": received, **VALUES, "boot": None}
     assert served["boot"] == {"base_tag": BASE_TAG}
     # A reboot: the new admission has a session but no facts. The old boot's facts are the
     # newest facts Central holds for this box, yet they are never served.
@@ -158,7 +195,7 @@ def test_g12_serves_only_the_current_boots_facts_and_its_base_tag(registry):
     _send(second, _facts(second.grant.producer, 1, kernel_release=None, address=None))
     served = _device(observations.fleet_hosts())
     assert served["facts"] == {**VALUES, "first_received_at": registry.clock.utc(),
-                               "kernel_release": None, "address": None}
+                               "kernel_release": None, "address": None, "boot": None}
 
 
 def test_g12_boot_is_null_without_an_admission_and_base_tag_null_without_a_node_offer(registry):
