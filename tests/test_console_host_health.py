@@ -475,3 +475,179 @@ def test_a_full_app_manager_intake_is_never_judged_from_its_frozen_sample():
     assert out["prepFull"] == ["preparation", "unknown", why]
     assert out["prepFullIdle"] == ["preparation", "unknown", why]
     assert out["prepFullSeverity"] == "ok"
+
+
+BOOT_SCRIPT = r"""
+const { classifyHost, hostIncidents, playersTable } = await import(process.argv[1]);
+const { factText } = await import(process.argv[2]);
+const THRESHOLDS = { host_silent_after_seconds: 60, metrics: [] };
+const read = (devices) => ({ read_at: 1000, thresholds: THRESHOLDS, devices });
+const GiB = 2 ** 30;
+const stage = (name, state, fault = null, required = null, room = null) =>
+  ({ stage: name, state, fault, required_bytes: required, room_bytes: room });
+const boot = (stages, units = [], more = 0) => ({ stages, failed_units: units, failed_units_more: more });
+const oom = (slice, value) => ({ name: `oom_kill:${slice}`, value, unit: "count", source: "host_core" });
+const row = (fields, metrics = [], receivedAt = 996) => ({ device_id: "device-a", previous_boot_received_at: null,
+  intake_full: false, host: { received_at: receivedAt, fault_code: null, metrics },
+  ...fields });
+const withBoot = (report, metrics = [], receivedAt = 996) => row({ facts: { first_received_at: 940,
+  kernel_release: null, interface: null, link_state: null, address: null, base_tag: null, boot: report } },
+  metrics, receivedAt);
+const pick = (r, name) => {
+  const c = classifyHost(r, read([]));
+  const i = c.items.find((entry) => entry.name === name);
+  return [i.band, factText(i.fact), c.severity];
+};
+const done = ["handoff", "storage", "prepare"].map((n) => stage(n, "done"));
+const out = {};
+out.memoryClass = pick(withBoot(boot([stage("handoff", "done"),
+  stage("storage", "refused", "node_memory_class", 3.5 * GiB, 1.9e9)])), "boot_preparation");
+out.prepareRoom = pick(withBoot(boot([stage("handoff", "done"), stage("storage", "done"),
+  stage("prepare", "refused", "node_storage_capacity", 2.1e9, 1.8e9)])), "boot_preparation");
+out.failed = pick(withBoot(boot([...done.slice(0, 2), stage("prepare", "failed", "os:ENOSPC")])), "boot_preparation");
+// Out of boot order in the document, the earlier stage still wins: the cause precedes its effects.
+out.firstStopped = pick(withBoot(boot([stage("prepare", "failed", "os:ENOSPC"), stage("handoff", "done"),
+  stage("storage", "failed", "memory_controller_absent")])), "boot_preparation");
+out.stopBeatsRunning = pick(withBoot(boot([stage("handoff", "running"),
+  stage("storage", "failed", "memory_controller_absent")])), "boot_preparation");
+out.running = pick(withBoot(boot([...done.slice(0, 2), stage("prepare", "running")])), "boot_preparation");
+out.done = pick(withBoot(boot(done)), "boot_preparation");
+out.notStarted = pick(withBoot(boot([stage("handoff", "done")])), "boot_preparation");
+out.olderNode = pick(withBoot(null), "boot_preparation");
+out.noFacts = pick(row({ facts: null }), "base_units");
+out.silent = pick(withBoot(boot([stage("storage", "failed", "memory_controller_absent")]), [], 880),
+  "boot_preparation");
+const units = (list, more = 0) => pick(withBoot(boot(done, list, more)), "base_units");
+out.unitsNone = units([]);
+out.unitsStageOnly = units(["photo-wall-node-handoff.service", "photo-wall-node-prepare.service",
+  "photo-wall-node-storage.service"]);
+out.unitsOne = units(["photo-wall-app-broker.service", "photo-wall-node-prepare.service"]);
+out.unitsMore = units(["photo-wall-app-broker.service", "photo-wall-display.service"], 3);
+out.unitsUnnamed = units([], 2);
+out.oom = pick(row({}, [oom("base", 1), oom("app", 2), oom("preparation", 0)]), "out_of_memory");
+out.oomNone = pick(row({}, [oom("base", 0), oom("app", 0)]), "out_of_memory");
+out.oomAbsent = pick(row({}), "out_of_memory");
+out.oomTwice = pick(row({}, [oom("app", 1), oom("app", 2)]), "out_of_memory");
+
+// One cause, one incident: a failed prepare stage whose unit failed too raises only the stage.
+const snapshot = { inventory: { read_at: 1000, frames: [{ id: "lobby-left", player_id: "p-a",
+    output_id: "HDMI-A-1" }],
+  players: [{ id: "p-a", device_id: "device-a", registered_at: 1, last_seen: 1, retired_at: null },
+            { id: "p-b", device_id: "device-b", registered_at: 2, last_seen: 2, retired_at: null }],
+  outputs: [{ player_id: "p-a", output_id: "HDMI-A-1", observation: { connected: true } }] } };
+const failing = boot([...done.slice(0, 2), stage("prepare", "failed", "os:ENOSPC")],
+  ["photo-wall-node-prepare.service"]);
+const incidents = (report, metrics = []) => hostIncidents(snapshot,
+  read([withBoot(report, metrics), { ...withBoot(report, metrics), device_id: "device-b" }]))
+  .map(({ key, text }) => [key, text]);
+out.incidents = {
+  stageAndUnit: incidents(failing),
+  broker: incidents(boot(done, ["photo-wall-app-broker.service"])),
+  oomNotice: incidents(boot(done), [oom("app", 3)]),
+  olderNode: incidents(null),
+};
+// G2: a spare's stopped stage and failed unit are words only, never a band or a tier.
+const spare = playersTable([{ deviceId: "device-a", name: "Player device-a", standing: "unbound", frames: [] }],
+  { failed: false, error: null, read: read([withBoot(boot([stage("storage", "refused", "node_memory_class",
+    3.5 * GiB, 1.9e9)], ["photo-wall-app-broker.service"]), [oom("app", 1)])]) })[0];
+out.spare = { tier: spare.tier, bands: spare.health.items.map((i) => i.band),
+  words: spare.health.items.filter((i) => ["boot_preparation", "base_units", "out_of_memory"].includes(i.name))
+    .map((i) => factText(i.fact)) };
+console.log(JSON.stringify(out));
+"""
+
+
+def _run_boot():
+    _require_node()
+    result = subprocess.run(["node", "--input-type=module", "-e", BOOT_SCRIPT,
+                             str(SRC / "hostHealth.js"), str(SRC / "facts.js")],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_boot_preparation_names_the_first_stopped_stage_in_boot_order():
+    out = _run_boot()
+    reported = "Host Management reported "
+    receipt = " · first received 1 min ago"
+    assert out["memoryClass"] == ["alarm", f"{reported}boot preparation refused at storage: needs 3.8 GB "
+                                  f"of memory, the box has 1.9 GB{receipt}", "alarm"]
+    assert out["prepareRoom"] == ["alarm", f"{reported}boot preparation refused at prepare: needs 2.1 GB, "
+                                  f"room 1.8 GB{receipt}", "alarm"]
+    assert out["failed"] == ["alarm", f"{reported}boot preparation failed at prepare (os:ENOSPC){receipt}",
+                             "alarm"]
+    # The cause precedes its effects: boot order, not document order, and a stop before a run.
+    assert out["firstStopped"][1] == (f"{reported}boot preparation failed at storage "
+                                      f"(memory_controller_absent){receipt}")
+    assert out["stopBeatsRunning"][1] == out["firstStopped"][1]
+    assert out["running"] == [None, f"{reported}boot preparation running: prepare{receipt}", "ok"]
+    assert out["done"] == [None, f"{reported}boot preparation done{receipt}", "ok"]
+    assert out["notStarted"] == [None, f"{reported}boot preparation not started{receipt}", "ok"]
+    # An older node sends no boot report: Unknown on its item, no tier raised.
+    assert out["olderNode"] == ["unknown", "Unknown: not reported", "ok"]
+    assert out["noFacts"] == ["unknown", "Unknown: not reported", "ok"]
+    # Silent: the last report, unbanded; only the silence is judged.
+    assert out["silent"][0] is None
+    assert out["silent"][1].endswith("(memory_controller_absent) at last report" + receipt)
+
+
+def test_base_units_leave_out_the_stage_units_and_out_of_memory_is_a_notice():
+    out = _run_boot()
+    reported = "Host Management reported "
+    receipt = " · first received 1 min ago"
+    assert out["unitsNone"] == [None, f"{reported}no base unit failed on this boot{receipt}", "ok"]
+    assert out["unitsStageOnly"] == out["unitsNone"]
+    assert out["unitsOne"] == ["alarm", f"{reported}base unit failed on this boot: "
+                               f"photo-wall-app-broker.service{receipt}", "alarm"]
+    assert out["unitsMore"][1] == (f"{reported}base units failed on this boot: photo-wall-app-broker.service"
+                                   f" · photo-wall-display.service and 3 more{receipt}")
+    assert out["unitsUnnamed"][1] == f"{reported}base units failed on this boot: 2 not named{receipt}"
+    latest = "Host Management last reported 4 s ago · "
+    assert out["oom"] == ["notice", f"{latest}Out-of-memory kills on this boot: app 2 · base 1", "notice"]
+    assert out["oomNone"] == [None, f"{latest}No out-of-memory kills on this boot", "ok"]
+    assert out["oomAbsent"] == ["unknown", "Unknown: not reported", "ok"]
+    assert out["oomTwice"] == ["unknown", "Unknown: two values reported", "ok"]
+
+
+def test_one_boot_cause_raises_one_incident_for_bound_players_and_a_spare_is_never_alarmed():
+    out = _run_boot()
+    who = "Player device-a (Frame lobby-left) — "
+    incidents = out["incidents"]
+    assert incidents["stageAndUnit"] == [["player:device-a:boot_preparation",
+                                          f"{who}boot preparation failed at prepare (os:ENOSPC)"]]
+    assert incidents["broker"] == [["player:device-a:base_units",
+                                    f"{who}base unit failed on this boot: photo-wall-app-broker.service"]]
+    assert incidents["oomNotice"] == [] and incidents["olderNode"] == []
+    spare = out["spare"]
+    assert spare["tier"] is None and set(spare["bands"]) == {None}
+    assert [text.split(" · ")[0] for text in spare["words"]] == [
+        "Host Management last reported 4 s ago",
+        "Host Management reported boot preparation refused at storage: needs 3.8 GB of memory, "
+        "the box has 1.9 GB",
+        "Host Management reported base unit failed on this boot: photo-wall-app-broker.service"]
+
+
+FAMILIES_SCRIPT = r"""
+const { HOST_CATALOG, NOT_SHOWN } = await import(process.argv[1]);
+console.log(JSON.stringify({ items: Object.fromEntries(Object.entries(HOST_CATALOG).map(([name, entry]) =>
+  [name, entry.families])), notShown: NOT_SHOWN }));
+"""
+
+
+def test_every_metric_family_has_a_console_item_or_is_listed_not_shown():
+    """Each METRIC_FAMILIES key (contracts/node_observation.py) is read by exactly one
+    HOST_CATALOG item or listed in NOT_SHOWN, and neither names a family the contract lacks."""
+    from contracts.node_observation import METRIC_FAMILIES
+
+    _require_node()
+    result = subprocess.run(["node", "--input-type=module", "-e", FAMILIES_SCRIPT, str(SRC / "hostHealth.js")],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    mapped = [family for families in out["items"].values() for family in families]
+    named = mapped + out["notShown"]
+    assert len(named) == len(set(named)), "a family is read twice, or both read and not shown"
+    assert set(named) == {family.key for family in METRIC_FAMILIES}
+    # The boot items read the host facts record, not a metric family.
+    assert out["items"]["boot_preparation"] == [] and out["items"]["base_units"] == []
+    assert out["items"]["out_of_memory"] == ["oom_kill:"]

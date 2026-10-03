@@ -67,21 +67,96 @@ const THROTTLE_FLAGS = Object.freeze({
   soft_temperature_limit_occurred: FLAG("occurred", "soft temperature limit"),
 });
 
+// The base boot stages in boot order (contracts/node_host_facts.py BOOT_STAGES), and the units
+// that run them: a stage's own unit failing repeats its stage record, so `base_units` leaves
+// them out and one cause raises one incident.
+const BOOT_STAGES = Object.freeze(["handoff", "storage", "prepare"]);
+const STAGE_UNITS = Object.freeze(new Set(BOOT_STAGES.map((stage) => `photo-wall-node-${stage}.service`)));
+const STOPPED = Object.freeze(new Set(["refused", "failed"]));
+const MAX_UNITS = 4;
+const OOM_PREFIX = "oom_kill:";
+const MAX_OOM_ROWS = 3;
+
+/** The boot report of the host facts record (G12 `facts.boot`), or null when not reported. */
+function bootReport(facts) {
+  const boot = facts?.boot;
+  return boot !== null && typeof boot === "object" ? boot : null;
+}
+
 /**
- * The cataloged host items. A metric item reads the one metric its key names: its label,
+ * Boot preparation (4 GB node design §4.3, T4): the first stage in boot order that stopped
+ * (refused or failed), because the cause precedes its effects; else the first running; else
+ * done once `prepare` is done; else not started. A stop is an alarm.
+ */
+function readBootPreparation(boot) {
+  const stages = Array.isArray(boot.stages) ? boot.stages : [];
+  const ordered = BOOT_STAGES.map((name) => stages.find((stage) => stage?.stage === name))
+    .filter((stage) => stage !== undefined);
+  const stopped = ordered.find((stage) => STOPPED.has(stage.state));
+  if (stopped !== undefined) {
+    const at = `boot preparation ${stopped.state} at ${stopped.stage}`;
+    const numbers = isNumber(stopped.required_bytes) && isNumber(stopped.room_bytes);
+    if (stopped.state === "refused" && numbers) {
+      const needs = gigabytes(stopped.required_bytes);
+      const room = gigabytes(stopped.room_bytes);
+      return { band: "alarm", text: stopped.fault === "node_memory_class"
+        ? `${at}: needs ${needs} GB of memory, the box has ${room} GB`
+        : `${at}: needs ${needs} GB, room ${room} GB` };
+    }
+    return { band: "alarm", text: typeof stopped.fault === "string" ? `${at} (${stopped.fault})` : at };
+  }
+  const running = ordered.find((stage) => stage.state === "running");
+  if (running !== undefined) return { band: null, text: `boot preparation running: ${running.stage}` };
+  const prepared = ordered.some((stage) => stage.stage === "prepare" && stage.state === "done");
+  return { band: null, text: prepared ? "boot preparation done" : "boot preparation not started" };
+}
+
+/** Base units: PID1's failed photo-wall units minus the stage units. Any is an alarm. */
+function readBaseUnits(boot) {
+  const names = (Array.isArray(boot.failed_units) ? boot.failed_units : [])
+    .filter((name) => typeof name === "string" && !STAGE_UNITS.has(name));
+  const more = isNumber(boot.failed_units_more) && boot.failed_units_more > 0 ? boot.failed_units_more : 0;
+  if (names.length === 0 && more === 0) return { band: null, text: "no base unit failed on this boot" };
+  const shown = names.slice(0, MAX_UNITS);
+  const extra = more + names.length - shown.length;
+  const listed = shown.length === 0 ? `${extra} not named`
+    : `${shown.join(" · ")}${extra > 0 ? ` and ${extra} more` : ""}`;
+  return { band: "alarm",
+    text: `base ${shown.length + extra === 1 ? "unit" : "units"} failed on this boot: ${listed}` };
+}
+
+/** Out-of-memory kills per slice (`oom_kill:<slice>`), most first; any kill is a notice. */
+function readOutOfMemory(rows) {
+  const kills = rows.slice(0, MAX_OOM_ROWS).map((row) => [row.name.slice(OOM_PREFIX.length), row.value])
+    .filter(([, value]) => value > 0)
+    .sort(([a, x], [b, y]) => (y - x) || (a < b ? -1 : a > b ? 1 : 0));
+  return kills.length === 0 ? { band: null, text: "No out-of-memory kills on this boot" }
+    : { band: "notice", text: `Out-of-memory kills on this boot: ${kills.map(([slice, value]) =>
+      `${slice} ${value}`).join(" · ")}` };
+}
+
+/**
+ * The cataloged host items. A metric item reads the metric families its `families` name (an
+ * exact name, or a prefix ending in ":" that covers every `<prefix><suffix>` row): its label,
  * group, the unit Central's thresholds must name for a band to apply, its symbol and band
  * words (an item with no `bands`, like CPU, is never banded), and `format(value)`. The
  * Throttling item reads every name in its `flags`, each banded by its own served threshold,
- * and words them with `describe(rows)`.
+ * and words them with `describe(rows)`. An item with `judge` bands itself: from the metric
+ * rows of its prefix family (`judge(rows)`), or, with `boot: true` and no families, from the
+ * host facts record's boot report (`judge(boot)`), carrying that record's receipt.
+ *
+ * `families` is the item-to-family map: with NOT_SHOWN it covers every family of
+ * contracts/node_observation.py METRIC_FAMILIES (tests/test_console_host_health.py).
  */
 export const HOST_CATALOG = Object.freeze({
   soc_temperature: Object.freeze({
-    label: "Temperature", group: "Thermal", unit: "celsius", symbol: "°C",
+    label: "Temperature", group: "Thermal", unit: "celsius", symbol: "°C", families: ["soc_temperature"],
     bands: Object.freeze({ notice: "warm", alarm: "hot" }),
     format: (value) => `${value} °C`,
   }),
   throttling: Object.freeze({
     label: "Throttling", group: "Power and throttling", unit: "boolean", flags: THROTTLE_FLAGS,
+    families: Object.keys(THROTTLE_FLAGS),
     describe: (rows) => {
       const set = (when) => rows.filter((row) => row.value >= 1 && THROTTLE_FLAGS[row.name].when === when)
         .map((row) => THROTTLE_FLAGS[row.name].word);
@@ -94,15 +169,38 @@ export const HOST_CATALOG = Object.freeze({
     },
   }),
   cpu_busy: Object.freeze({
-    label: "CPU", group: "Compute", unit: "percent", format: (value) => `${value} % busy`,
+    label: "CPU", group: "Compute", unit: "percent", families: ["cpu_busy"], format: (value) => `${value} % busy`,
   }),
   runtime_available: Object.freeze({
-    label: "Storage", group: "Storage", unit: "bytes", format: (value) => `${gigabytes(value)} GB free in /run`,
+    label: "Storage", group: "Storage", unit: "bytes", families: ["runtime_available"],
+    format: (value) => `${gigabytes(value)} GB free in /run`,
+  }),
+  out_of_memory: Object.freeze({
+    label: "Out of memory", group: "Storage", families: [OOM_PREFIX], judge: readOutOfMemory,
   }),
   link_speed: Object.freeze({
-    label: "Link speed", group: "Network", unit: "megabits_per_second", format: (value) => `${value} Mb/s`,
+    label: "Link speed", group: "Network", unit: "megabits_per_second", families: ["link_speed"],
+    format: (value) => `${value} Mb/s`,
+  }),
+  boot_preparation: Object.freeze({
+    label: "Boot preparation", group: "Software", families: [], boot: true, judge: readBootPreparation,
+  }),
+  base_units: Object.freeze({
+    label: "Base units", group: "Software", families: [], boot: true, judge: readBaseUnits,
   }),
 });
+
+/**
+ * The metric families HostCore posts that no console item shows (contracts/node_observation.py
+ * METRIC_FAMILIES): they reach Central and read raw on Player › Health's "Every reported
+ * metric" and in G12. `metrics_dropped` is appended by `valid_metrics` alone.
+ */
+export const NOT_SHOWN = Object.freeze([
+  "uptime", "load_1m", "memory_total", "memory_available", "memcg_present", "cma_total", "cma_free",
+  "memory_peak:", "manager_summary_known", "manager_running", "manager_attempts",
+  "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
+  "local_recovery_active", "local_recovery_reboot", "metrics_dropped",
+]);
 
 const APP_MANAGER = LAYER_NAMES.app_manager;
 // App Manager's storage refusal (§63 "Storage short"): an item from G12's `preparation`, not a
@@ -148,12 +246,39 @@ function allUnknown(state, why) {
  */
 function readRows(name, host) {
   const entry = HOST_CATALOG[name];
-  const found = (entry.flags ? Object.keys(entry.flags) : [name]).map((metricName) =>
+  if (entry.judge !== undefined) {
+    // A prefix family: every `<prefix><suffix>` row, each name once, at least one.
+    const [prefix] = entry.families;
+    const rows = (host.metrics ?? []).filter((metric) => typeof metric?.name === "string"
+      && metric.name.startsWith(prefix) && metric.name.length > prefix.length && isNumber(metric.value));
+    if (new Set(rows.map((metric) => metric.name)).size !== rows.length) return { why: "two values reported" };
+    if (rows.length === 0) return { why: "not reported" };
+    return { rows, ...entry.judge(rows) };
+  }
+  const found = entry.families.map((metricName) =>
     (host.metrics ?? []).filter((metric) => metric?.name === metricName));
   if (found.some((rows) => rows.length > 1)) return { why: "two values reported" };
   if (found.some((rows) => rows.length === 0 || !isNumber(rows[0].value))) return { why: "not reported" };
   const rows = found.map(([metric]) => metric);
   return { rows, text: entry.flags ? entry.describe(rows) : entry.format(rows[0].value) };
+}
+
+/**
+ * One item's reading from a box's current boot, with the receipt it carries: a metric item's
+ * from this boot's newest sample (`latest`), a boot item's from the host facts record
+ * (`first`, its record's receipt, renewed by any changed value). An older node that sends no
+ * boot report reads "not reported", which raises no tier while reporting (§62 Tier).
+ */
+function readItem(name, host, facts) {
+  const entry = HOST_CATALOG[name];
+  if (entry.boot === true) {
+    const boot = bootReport(facts);
+    if (boot === null) return { why: "not reported" };
+    return { ...entry.judge(boot), receipt: { receipt: "first", receivedAt: facts.first_received_at,
+      field: "facts.first_received_at" } };
+  }
+  return { ...readRows(name, host), receipt: { receipt: "latest", receivedAt: host.received_at,
+    field: "host.received_at" } };
 }
 
 /** Central's served threshold for one metric row, when it names the catalog's unit. */
@@ -164,14 +289,17 @@ function limitFor(metric, unit, thresholds) {
 }
 
 /** One metric while reporting: its value, banded by Central's threshold when one applies. */
-function reportedMetric(name, host, readAt, thresholds) {
+function reportedMetric(name, host, facts, readAt, thresholds) {
   const entry = HOST_CATALOG[name];
-  const read = readRows(name, host);
+  const read = readItem(name, host, facts);
   if (read.why !== undefined) {
     return item(name, { fact: fact({ kind: "unknown", why: read.why }), band: "unknown" });
   }
   const reported = (band) => item(name, { band, fact: fact({ kind: "reported", source: HOST,
-    receipt: "latest", value: read.text, receivedAt: host.received_at, readAt, field: "host.received_at" }) });
+    value: read.text, readAt, ...read.receipt }) });
+  // A self-judging item's band is its own (a stopped boot stage, a failed unit, a kill), as
+  // App Manager's storage refusal's is: no Central threshold is read for it.
+  if (entry.judge !== undefined) return reported(read.band);
   if (entry.flags) {
     // Each flag is banded by its own served threshold; the item takes the worst.
     const limits = read.rows.map((metric) => [metric, limitFor(metric, entry.unit, thresholds)]);
@@ -197,14 +325,14 @@ function reportedMetric(name, host, readAt, thresholds) {
 }
 
 /** One metric as it was at this boot's last report, unbanded (silent, refused). */
-function lastReportedMetric(name, host, readAt) {
+function lastReportedMetric(name, host, facts, readAt) {
   if (host === null) {
     return item(name, { fact: fact({ kind: "unknown", why: `no ${HOST} sample from this boot` }) });
   }
-  const read = readRows(name, host);
+  const read = readItem(name, host, facts);
   if (read.why !== undefined) return item(name, { fact: fact({ kind: "unknown", why: read.why }) });
-  return item(name, { fact: fact({ kind: "reported", source: HOST, receipt: "latest",
-    value: `${read.text} at last report`, receivedAt: host.received_at, readAt, field: "host.received_at" }) });
+  return item(name, { fact: fact({ kind: "reported", source: HOST, value: `${read.text} at last report`,
+    readAt, ...read.receipt }) });
 }
 
 /**
@@ -256,6 +384,7 @@ function classify(row, read, absent) {
   const thresholds = read?.thresholds ?? null;
   const limit = isNumber(thresholds?.host_silent_after_seconds) ? thresholds.host_silent_after_seconds : null;
   const host = row.host ?? null;
+  const facts = row.facts ?? null;
   const previous = isNumber(row.previous_boot_received_at) ? row.previous_boot_received_at : null;
   if (host === null && previous === null) {
     return allUnknown("never", `no ${HOST} report from this boot or the one before`);
@@ -269,13 +398,13 @@ function classify(row, read, absent) {
       const refusal = fact({ kind: "derived", value: `Central refused ${HOST} reports today`,
         basis: "its daily intake cap for this box is full" });
       return judged("refused", [item(RECEIPT, { fact: refusal, band: "alarm", suffix: `last stored ${ago}` }),
-        ...metrics.map((name) => lastReportedMetric(name, host, readAt))], "alarm");
+        ...metrics.map((name) => lastReportedMetric(name, host, facts, readAt))], "alarm");
     }
     const silence = fact({ kind: "derived", value: `${HOST} silent · ${whose} ${ago}`,
       basis: `no report for over ${limit} s, Central's limit` });
     return judged("silent", [item(RECEIPT, { fact: silence, band: "alarm",
       brief: `${HOST} silent ${formatAge(newest.age)}` }),
-      ...metrics.map((name) => lastReportedMetric(name, host, readAt))], "alarm");
+      ...metrics.map((name) => lastReportedMetric(name, host, facts, readAt))], "alarm");
   }
   if (host === null) {
     const unknown = fact({ kind: "unknown",
@@ -284,7 +413,7 @@ function classify(row, read, absent) {
       item(name, { fact: unknown, band: "unknown" })), "unknown");
   }
   return judged("reporting", [item(RECEIPT, { fact: newest }),
-    ...metrics.map((name) => reportedMetric(name, host, readAt, thresholds)),
+    ...metrics.map((name) => reportedMetric(name, host, facts, readAt, thresholds)),
     ...storageShort(row.preparation ?? null, row.preparation_intake_full === true, readAt)]);
 }
 
@@ -476,7 +605,8 @@ export function hostWords(entry, { brief = false } = {}) {
  * Needs attention, the Players table and the chip cannot disagree. Silent and Refused carry one
  * alarm item (the receipt), because the classifier bands nothing else outside `reporting`; a
  * Reporting row's alarms are its threshold items (a now flag, the temperature alarm, App
- * Manager's storage refusal). Never reported is the one Unknown incident.
+ * Manager's storage refusal) and its boot items (a stopped boot stage, a failed base unit).
+ * Never reported is the one Unknown incident.
  */
 function incidentItems(health) {
   if (health.state === "never") return [health.items[0]];

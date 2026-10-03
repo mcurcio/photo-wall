@@ -17,9 +17,10 @@ const HOST_COLUMNS = Object.freeze([
   { title: "Temperature", metrics: ["soc_temperature"], facts: [] },
   { title: "Throttling", metrics: ["throttling"], facts: [] },
   { title: "CPU", metrics: ["cpu_busy"], facts: [] },
-  { title: "Storage", metrics: ["runtime_available", "preparation"], facts: [] },
+  { title: "Storage", metrics: ["runtime_available", "preparation", "out_of_memory"], facts: [] },
   { title: "Network", metrics: ["link_speed"], facts: ["link", "link_state", "address"], receipt: true },
-  { title: "Software", metrics: [], facts: ["kernel", "base_reported", "base", "base_mismatch"] },
+  { title: "Software", metrics: ["boot_preparation", "base_units"],
+    facts: ["kernel", "base_reported", "base", "base_mismatch"] },
 ].map(Object.freeze));
 
 /** One host column's cell for a box: its items, as the one classifier words them. */
