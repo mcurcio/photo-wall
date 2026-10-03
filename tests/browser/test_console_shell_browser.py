@@ -290,7 +290,7 @@ def test_the_poll_keeps_running_across_sections(page, registry):
             drive_poll(page)
             assert len(reads) == count + 1, section
         assert legacy_reads == [], "the console polled a separate domain read"
-        # A poll applied while Now showing is hidden is there when it is shown again.
+        # A poll applied while Now is hidden is there when it is shown again.
         report_readiness(registry, identity["player_id"])
         drive_poll(page)
         go(page, "now")
@@ -465,7 +465,7 @@ def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_hea
             page.keyboard.press(key)
             reached.add(page.evaluate(focused))
         assert "(page)" not in reached, reached
-        assert {"Close menu", "Now showing", "Needs attention"} <= reached, reached
+        assert {"Close menu", "Now", "Needs attention"} <= reached, reached
 
         page.keyboard.press("Escape")
         expect(drawer).to_be_hidden()

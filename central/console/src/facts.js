@@ -1,4 +1,5 @@
 import { formatAge } from "./health.js";
+import { clockTime } from "./timeWords.js";
 
 /**
  * Facts with their truth kind (console DDD design rule 2, docs/operator-console-ddd.md §5):
@@ -13,21 +14,27 @@ import { formatAge } from "./health.js";
  *               latest  " · last claimed <age> ago"     (a claim repeated on every check-in)
  *               first   " · first received <age> ago"   (a claim sent once)
  *   derived   Central's own conclusion: "<conclusion> (Central's inference: <basis>)"
+ *   planned   Central's Runtime projection of which Run is on top on a Frame, made before any
+ *             media is checked (§35): "On top: <scene> · <origin> (Central's Runs; <basis>; the
+ *             Panel is not observed)"; with nothing on top, "On top: nothing · no Run puts a
+ *             layer on this Frame now (Central's Runs; the Panel is not observed)". It never
+ *             carries an age: it is Central's projection at the read's own time.
  *   unknown   not observable, not served or not read: "Unknown: <why>"
  *
  * `fact()` never throws and never builds an unlabelled fact: a `reported` fact without its
  * source, receipt kind, receipt time or read time, a `claimed` one without its source (or
- * with a receipt time but no receipt kind), a `derived` one without its basis, or any of
- * them without its value, BECOMES `unknown`, naming what is missing. Ages are Central's
+ * with a receipt time but no receipt kind), a `derived` one without its basis, a `planned`
+ * one without its origin or basis, or any of them without its value, BECOMES `unknown`,
+ * naming what is missing. Ages are Central's
  * read time minus Central's receipt time (R10): no browser or node clock is involved.
  *
- * @typedef {"set"|"reported"|"claimed"|"derived"|"unknown"} FactKind
+ * @typedef {"set"|"reported"|"claimed"|"derived"|"planned"|"unknown"} FactKind
  * @typedef {{kind: FactKind, value: string|null, source: string|null,
  *            receipt: "latest"|"first"|null, age: number|null, basis: string|null,
- *            why: string|null}} Fact
+ *            origin: string|null, why: string|null}} Fact
  */
 
-const KINDS = new Set(["set", "reported", "claimed", "derived", "unknown"]);
+const KINDS = new Set(["set", "reported", "claimed", "derived", "planned", "unknown"]);
 
 const isText = (value) => typeof value === "string" && value !== "";
 const isTime = (value) => typeof value === "number" && Number.isFinite(value);
@@ -47,12 +54,24 @@ export const LAYER_NAMES = Object.freeze({
 /** A served code in words: `node_offer_superseded` -> "node offer superseded". */
 export const words = (value) => String(value ?? "unknown").replaceAll("_", " ");
 
-/** One of Central's times (epoch seconds) as a local clock time, for display only. */
-export const clock = (seconds) => new Date(seconds * 1000).toLocaleTimeString();
+/** One of Central's times (epoch seconds) as a zoned clock time (timeWords.js), for display only. */
+export const clock = (seconds) => clockTime(seconds);
 
 function build(kind, { value = null, source = null, receipt = null, age = null, basis = null,
-  why = null }) {
-  return Object.freeze({ kind, value, source, receipt, age, basis, why });
+  origin = null, why = null }) {
+  return Object.freeze({ kind, value, source, receipt, age, basis, origin, why });
+}
+
+const NOTHING_ON_TOP = "no Run puts a layer on this Frame now";
+
+/**
+ * The `planned` fact for a Frame with no visible Intent (§35): nothing on top. Its own
+ * builder, so a Scene whose id is "nothing" can never read as an empty Frame.
+ *
+ * @returns {Fact}
+ */
+export function plannedNothing() {
+  return build("planned", { origin: NOTHING_ON_TOP });
 }
 
 /** An `unknown` fact saying why. */
@@ -66,12 +85,12 @@ function unknown(why) {
  *
  * @param {{kind: FactKind, value?: string|null, source?: string|null,
  *          receipt?: "latest"|"first", receivedAt?: number|null, readAt?: number|null,
- *          basis?: string|null, why?: string|null, field?: string}} spec
+ *          basis?: string|null, origin?: string|null, why?: string|null, field?: string}} spec
  * @returns {Fact}
  */
 export function fact(spec) {
   const { kind, value = null, source = null, receipt = null, receivedAt = null, readAt = null,
-    basis = null, why = null, field = null } = spec ?? {};
+    basis = null, origin = null, why = null, field = null } = spec ?? {};
   if (!KINDS.has(kind)) {
     return unknown(`the fact's kind is not named`);
   }
@@ -87,6 +106,12 @@ export function fact(spec) {
     if (named === null) return unknown("the conclusion is not named");
     if (!isText(basis)) return unknown(`the basis for "${named}" is not named`);
     return build("derived", { value: named, basis });
+  }
+  if (kind === "planned") {
+    if (named === null) return unknown("the top Run's Scene is not served");
+    if (!isText(origin)) return unknown(`who started ${named} is not served`);
+    if (!isText(basis)) return unknown(`what Central did not check for ${named} is not named`);
+    return build("planned", { value: named, origin, basis });
   }
   if (kind === "claimed") {
     if (named === null) return unknown("the claim is not served");
@@ -147,6 +172,10 @@ export function factText(value, { receipt = true } = {}) {
           : ` · ${value.receipt === "latest" ? "last claimed" : "first received"} ${formatAge(value.age)} ago`);
     case "derived":
       return `${value.value} (Central's inference: ${value.basis})`;
+    case "planned":
+      return value.value === null
+        ? `On top: nothing · ${value.origin} (Central's Runs; the Panel is not observed)`
+        : `On top: ${value.value} · ${value.origin} (Central's Runs; ${value.basis}; the Panel is not observed)`;
     case "unknown":
       return `Unknown: ${value.why}`;
     default:

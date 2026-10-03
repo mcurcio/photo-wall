@@ -3,12 +3,12 @@ import React from "react";
 import { SourceFlow } from "./SourceFlow.jsx";
 
 /**
- * The Sources region, the Photo sources section's page (flow design §6, §7 J5): the
- * intro, then the Source cards and the Source flow (SourceFlow.jsx).
+ * The Sources region, the Sources section's page (console DDD §37): the intro, then the
+ * Source cards and the Source flow (SourceFlow.jsx).
  *
  * A Source is a saved live query with a plain operator name: Photo Wall selects
  * media that lives in the photo library and never uploads, edits or deletes anything
- * there. Nothing here names a vendor, an album, or anything a Player browses or opens.
+ * there. Nothing here names a vendor, or anything a Player browses or opens.
  *
  * @param {{snapshot: object|null, route: import("./routes.js").Route|null,
  *          navigate: (route: import("./routes.js").Route, options?: {replace?: boolean}) => void,

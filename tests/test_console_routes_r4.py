@@ -61,7 +61,7 @@ CALIBRATION_ROUTE = "}/calibration"
 # here, and none of these may be a display control or name the calibration route.
 SHARED_WITH_SHOW = {
     "ConfirmAction.jsx",  # every confirmation
-    "NowShowingFacet.jsx",  # a frame's intent, also shown on Now showing
+    "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Status facet and the Now page's Why
     "equipmentApi.js",  # UNKNOWN_MESSAGE and the equipment reads
     "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
     "framesApi.js",
@@ -69,7 +69,6 @@ SHARED_WITH_SHOW = {
     "routeSamples.json",  # every route table's sample paths
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
     "readinessRecovery.js",  # plain-language failure mapping; no controls
-    "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
 # The console's write modules: the operator write primitive and every module that wraps a
@@ -83,6 +82,8 @@ G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx
                    "unfinished.js", "hostHealth.js", "HostChip.jsx"]
 # The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
 SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
+# sceneTargets.js is not listed: since S1 join.js reads a Run's origin from showState.js, which
+# re-exports it, so the shell's own modules reach it.
 # players.js is not listed: since T1 the shell's own attention strip reaches it (host incidents
 # name each Bound Player, hostHealth.js), so it is one of the shell's own modules.
 

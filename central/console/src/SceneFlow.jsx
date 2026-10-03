@@ -39,7 +39,7 @@ const EMPTY = {};
 // Each step's heading: the one question it asks.
 const HEADINGS = {
   kind: "What kind of Scene?",
-  photos: "Which photos?",
+  photos: "Which Source?",
   frames: "Which frames?",
   media: "Which item on each frame?",
   playback: "How long each item shows",

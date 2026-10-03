@@ -109,7 +109,7 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         expect(outputs.get_by_role("note", name=f"Player readiness for {VALID_FRAME}")).to_contain_text(
             DECODE_RECOVERY)
 
-        # Now showing and its per-Frame explanation share the mapping; health is
+        # Now and its per-Frame explanation share the mapping; health is
         # still presented as report freshness, never confirmed panel output.
         go(page, "now")
         badges = page.get_by_role("group", name="Frame health", exact=True)

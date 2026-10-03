@@ -4,7 +4,7 @@ import { frameHealth } from "./health.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 
 /**
- * Frame-health badges on the Now showing page: one per Frame, labelled by the one
+ * Frame-health badges on the Now page: one per Frame, labelled by the one
  * classifier (health.js) exactly as the Wall labels it.
  *
  * A badge is a STATUS, never a control: a Frame that cannot present matters to the

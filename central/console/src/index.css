@@ -1407,7 +1407,7 @@ label {
   font-size: 13px;
 }
 
-/* Central's plan for a frame (slice 3 §10). */
+/* Central's Runs on a frame (slice 3 §10). */
 .precedence__heading {
   margin: 8px 0 4px;
   font-weight: 600;
@@ -2296,11 +2296,104 @@ label {
   color: var(--fg-muted);
 }
 
-/* The Photo sources section (flow design §7 J5; bead 3): Source cards, then the
-   Source flow, What to include → Name → Review. */
-/* Pass B's slots (SourceSteps.jsx `LibrarySlot`): out of the layout while empty. */
-.source-flow__slot:empty {
-  display: none;
+/* The Sources section (console DDD §37): Source cards, then the Source flow, Library →
+   Tags → Narrow → Name → Review, with the preview beside the criteria. */
+.source-flow__split {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: start;
+}
+
+.source-flow__selects {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+/* The tag picker (TagCombobox.jsx): a combobox, its listbox, the chosen tags as chips. */
+.tag-picker {
+  position: relative;
+  display: grid;
+  gap: 8px;
+}
+
+/* Over what follows (its static position), so opening or closing it never moves a chip. */
+.tag-picker__options {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 16rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-raised);
+}
+
+.tag-picker__option {
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.tag-picker__option--active,
+.tag-picker__option:hover {
+  background: var(--bg);
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
+}
+
+.tag-picker__option[aria-selected="true"] {
+  font-weight: 600;
+}
+
+.tag-picker__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-picker__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.tag-picker__said,
+.tag-picker p {
+  margin: 0;
+}
+
+/* The preview's tiles (PreviewPanel.jsx): fixed-size, so a late image never moves the page. */
+.source-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 96px);
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-tile img,
+.source-tile__missing {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 0.75em;
+  text-align: center;
 }
 
 .source-preview {
@@ -2324,7 +2417,7 @@ label {
 }
 
 
-/* Now showing (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
+/* Now (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
    per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */
 .show-now {
   margin-top: 12px;

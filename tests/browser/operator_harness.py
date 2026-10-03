@@ -112,8 +112,9 @@ def tile_status(page, frame_id):
 
 def tile_health(page, frame_id):
     """A plan tile's health: its visible text is the short tile label, and its accessible
-    name is the full label with the age (health.js `tileLabel` / `label`)."""
-    return tile_status(page, frame_id).get_by_role("img")
+    name is the full label with the age (health.js `tileLabel` / `label`). The tile's planned
+    fact is an image too (console DDD §35), so the health line is picked by its class."""
+    return tile_status(page, frame_id).locator(".plan__health")
 
 
 INVENTORY = "**/v1/operator/inventory"

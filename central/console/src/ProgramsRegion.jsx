@@ -28,7 +28,8 @@ import {
   separateWindows,
 } from "./scheduleFlowModel.js";
 import { ReviewStep, SceneStep, TimeZoneNote, WhenStep } from "./ScheduleSteps.jsx";
-import { isPastProgram, programState, windowLabel } from "./showState.js";
+import { isPastProgram, programState } from "./showState.js";
+import { windowLabel } from "./timeWords.js";
 import { useCardMutation } from "./useCardMutation.js";
 
 const EMPTY = {};

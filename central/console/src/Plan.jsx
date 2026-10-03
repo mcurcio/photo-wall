@@ -1,8 +1,9 @@
 import React, { useId, useRef, useState } from "react";
 
 import { FRAME_ID_PATTERN } from "./frameIds.js";
+import { factText } from "./facts.js";
 import { frameHealth } from "./health.js";
-import { nowShowing } from "./join.js";
+import { isBound, plannedFor } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
 
 /**
@@ -23,12 +24,13 @@ import { dragToPlacement, orientationCoherent, project } from "./projection.js";
  * that embeds its frame id, so tests locate frames by identity via role/text —
  * never by coordinates (design §1c, tracer testing philosophy).
  *
- * Alongside each drawn frame the plan renders a status readout (Bead 2): the
- * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`)
- * and the frame's health — a severity dot plus its short tile label (the fact
+ * Alongside each drawn frame the plan renders a status readout (Bead 2; console DDD §34):
+ * the frame's `planned` fact ("On top: <scene_id> · <origin> (Central's Runs; …)", from
+ * join.js `plannedFor`), its full text as the line's accessible name, with "Ending
+ * (outro)" beneath it only in the outro phase, and the frame's health — a severity dot plus its short tile label (the fact
  * without its age, so it fits the tile) whose accessible name is the full label
  * — from the one classifier, `frameHealth` (health.js). The readout is clipped
- * to the tile's rect, so no text ever spills over a neighbouring tile. The chip asserts operator INTENT, never
+ * to the tile's rect, so no text ever spills over a neighbouring tile. The planned fact is Central's projection, never
  * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
  * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
@@ -376,7 +378,8 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
         )}
         {placed.map(({ id, rect }, index) => {
           const selected = selection === id;
-          const now = nowShowing(snapshot?.runtime, id);
+          const planned = plannedFor(snapshot?.runtime, id, isBound(framesById.get(id)));
+          const plannedText = factText(planned.fact);
           const health = frameHealth(snapshot, id);
           return (
             <React.Fragment key={id}>
@@ -429,19 +432,19 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
                   className={`plan__dot health--${health.severity}`}
                   aria-hidden="true"
                 />
-                {now === null ? (
-                  <text x={rect.x + 22} y={rect.y + 16} className="plan__chip plan__chip--idle">
-                    Not scheduled
+                <text
+                  x={rect.x + 22}
+                  y={rect.y + 16}
+                  className={`plan__chip fact--${planned.fact.kind}${planned.sceneId === null ? " plan__chip--idle" : ""}`}
+                  role="img"
+                  aria-label={plannedText}
+                >
+                  {plannedText}
+                </text>
+                {planned.phase === "outro" && (
+                  <text x={rect.x + 22} y={rect.y + 30} className="plan__phase">
+                    Ending (outro)
                   </text>
-                ) : (
-                  <>
-                    <text x={rect.x + 22} y={rect.y + 16} className="plan__chip">
-                      {`Scheduled: ${now.scene_id}`}
-                    </text>
-                    <text x={rect.x + 22} y={rect.y + 30} className="plan__phase">
-                      {`Phase: ${now.phase}`}
-                    </text>
-                  </>
                 )}
                 <text
                   x={rect.x + 22}

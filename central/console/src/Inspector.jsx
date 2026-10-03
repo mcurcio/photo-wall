@@ -4,8 +4,8 @@ import { BindingFacet } from "./BindingFacet.jsx";
 import { CalibrationFacet } from "./CalibrationFacet.jsx";
 import { frameHealth } from "./health.js";
 import { HostChip } from "./HostChip.jsx";
-import { NowShowingFacet } from "./NowShowingFacet.jsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
+import { StatusFacet } from "./StatusFacet.jsx";
 
 /**
  * Frame Inspector shell (Bead 3, read-only) — shared primitive #6.
@@ -18,8 +18,8 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  * each is an ordinary component taking `({snapshot, frameId})` — rather than
  * registered through any imperative API.
  *
- * The Status tab is the Frame's daily face: what it is planned to show and why
- * (NowShowingFacet.jsx, which keeps its name until batch 5). The Calibration tab hosts the Calibration facet: committed calibration, the draft
+ * The Status tab is the Frame's daily face: which Run is on top in Central's Runtime (the
+ * `planned` fact) and why (StatusFacet.jsx). The Calibration tab hosts the Calibration facet: committed calibration, the draft
  * editor, live calibration and the Frame profile. The Binding tab holds the bound
  * Player and Output and the Panel at the Player app's last enrollment.
  *
@@ -38,8 +38,8 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
  * a frame", so the Inspector column keeps its place in the layout.
  *
  * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet. `hosts` (the
- * shell's fleet host read) feeds the Status facet's host chip (HostChip.jsx), handed to the
- * shared NowShowingFacet.jsx as an element so no Show module reaches it (R4).
+ * shell's fleet host read) feeds the Status facet's host chip (HostChip.jsx), handed to
+ * StatusFacet.jsx as an element, so the facet imports no fleet host module (R4).
  *
  * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string|null, facet: Facet,
  *          hosts?: import("./fleetHosts.js").FleetHosts|null,
@@ -141,7 +141,7 @@ export function Inspector({
           />
         )}
         {active === "status" && (
-          <NowShowingFacet
+          <StatusFacet
             snapshot={snapshot}
             frameId={frameId}
             hostChip={<HostChip snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}

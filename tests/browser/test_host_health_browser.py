@@ -488,6 +488,10 @@ def test_the_status_chip_names_the_worst_item_and_links_to_the_player(page, regi
         inspector = open_frame(page, FRAME, "status")
         chip = inspector.get_by_role("link", name=f"{name} · throttled now", exact=True)
         expect(chip).to_have_attribute("href", f"#/players/{device}")
+        # Under the chip, the first line is the Frame's planned fact (console DDD §34, S1).
+        expect(inspector.locator(".facet__host + .facet__planned")).to_contain_text(
+            "On top: nothing · no Run puts a layer on this Frame now (Central's Runs; the Panel "
+            "is not observed)")
         document["devices"] = [_row(device, 880.0, 50)]
         page.reload()
         expect(inspector.get_by_role("link", name=f"{name} · Host Management silent 2 min", exact=True)

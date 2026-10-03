@@ -32,13 +32,13 @@ import { sourceRefreshMessage } from "./useSourceRefresh.js";
 
 /** The two kinds of Scene, as the Kind step and Review word them. */
 export const KIND_LABELS = Object.freeze({
-  live: "Live from a photo source",
+  live: "Live from a Source",
   authored: "Hand-picked per frame",
 });
 
 const KIND_HINTS = {
-  live: "Each frame shows the photo source's media as it changes.",
-  authored: "You choose one item from the photo source for each frame.",
+  live: "Each frame shows the Source's media as it changes.",
+  authored: "You choose one item from the Source for each frame.",
 };
 
 /**
@@ -361,7 +361,7 @@ function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onR
       {(state === null || state.state !== "ok") && (
         <div className="scene-flow__source-manage">
           <p>Your Scene draft stays open in this tab while you manage Sources.</p>
-          <button type="button" onClick={onManage}>Manage in Photo sources</button>
+          <button type="button" onClick={onManage}>Manage in Sources</button>
         </div>
       )}
     </section>

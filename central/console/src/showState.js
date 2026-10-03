@@ -1,6 +1,7 @@
 import { ageAt, formatAge } from "./health.js";
 import { frameOf, LIVE_PHASES, toTarget } from "./join.js";
 import { sceneFrames } from "./sceneTargets.js";
+import { clockTime, windowLabel } from "./timeWords.js";
 
 export { sceneFrames, sceneSourceRefs, sceneHasAuthoredMedia } from "./sceneTargets.js";
 
@@ -8,8 +9,9 @@ export { sceneFrames, sceneSourceRefs, sceneHasAuthoredMedia } from "./sceneTarg
  * Program and Run display states (pass 2 slice 3 §9). Pure reads of the served
  * `/v1/operator/runtime` payload: every sentence restates a served fact, aged
  * on Central's clock (`current.now`), and states its limit. "Ran" and
- * "running" describe Central's plan, never what a panel showed (R2); times come
- * from the Run (`started_at`, `ended_at`), never from the Program's window.
+ * "running" describe Central's Runs, never what a panel showed (R2); times come
+ * from the Run (`started_at`, `ended_at`), never from the Program's window, and every
+ * clock time is zoned (timeWords.js).
  *
  * @typedef {"ok"|"todo"|"alarm"} Severity
  * @typedef {{state: string, label: string, severity: Severity, hint: string|null}} ProgramState
@@ -28,28 +30,36 @@ export function cycleWording(scene) {
     : null;
 }
 
-const pad = (value) => String(value).padStart(2, "0");
-
-/** A local clock time, "18:00", with seconds only when they are not zero. */
-export function clockTime(epochSeconds) {
-  const date = new Date(epochSeconds * 1000);
-  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  return date.getSeconds() === 0 ? time : `${time}:${pad(date.getSeconds())}`;
-}
-
-/** A Program window in local time: "Tue 2 Mar 18:00–20:00". */
-export function windowLabel(program) {
-  const day = (epoch) =>
-    new Date(epoch * 1000).toLocaleDateString(undefined, {
-      weekday: "short",
-      day: "numeric",
-      month: "short",
-    });
-  const start = day(program.starts_at);
-  const end = day(program.ends_at);
-  return start === end
-    ? `${start} ${clockTime(program.starts_at)}–${clockTime(program.ends_at)}`
-    : `${start} ${clockTime(program.starts_at)} – ${end} ${clockTime(program.ends_at)}`;
+/**
+ * Who started a Run (§34, §35): the one home of a Run's origin, read by the Run cards and by
+ * the Frame's `planned` fact (join.js `plannedFor`). A child Run's `program_id` is null
+ * (central/runtime.py), so a child names its root's Run; a root names its Program, or says
+ * it was started directly. `programListed` is false when the Program is no longer stored
+ * (`remove_program` drops it after reconciling), and its words then say so; a removed
+ * Program is never linked.
+ *
+ * @param {object|null|undefined} runtime the served runtime (snapshot.runtime)
+ * @param {{run_id: string, root_id: string, parent_id: string|null, program_id: string|null}} run
+ * @returns {{kind: "program"|"direct"|"child", words: string, programListed: boolean}}
+ */
+export function runOrigin(runtime, run) {
+  if (run.parent_id != null) {
+    const root = (runtime?.current?.runs ?? []).find((candidate) => candidate.run_id === run.root_id);
+    return {
+      kind: "child",
+      words: root === undefined ? "part of another Run" : `part of ${root.scene_id}'s Run`,
+      programListed: false,
+    };
+  }
+  if (run.program_id != null) {
+    const listed = runtime?.programs?.[run.program_id] !== undefined;
+    return {
+      kind: "program",
+      words: listed ? `Program ${run.program_id}` : `Program ${run.program_id}, since removed`,
+      programListed: listed,
+    };
+  }
+  return { kind: "direct", words: "started directly (Show now or the API)", programListed: false };
 }
 
 /**
@@ -72,7 +82,7 @@ export function protectorOf(snapshot, admission) {
 }
 
 const RAN_HINT =
-  "Central's plan: if Central was down during the window, it caught up without showing anything.";
+  "Central's Runs: if Central was down during the window, it caught up without showing anything.";
 
 /**
  * One stored Program's display state (§9), first match: details older than a
@@ -204,12 +214,7 @@ export function runRows(snapshot) {
   };
   const row = (run) => ({
     run,
-    origin:
-      run.parent_id !== null
-        ? `part of ${byId.get(run.root_id)?.scene_id ?? "another Run"}`
-        : run.program_id != null
-          ? `Program ${run.program_id}`
-          : "activated directly",
+    origin: runOrigin(runtime, run).words,
     started: `Started${ago(run.started_at)}`,
     status: status(run),
     finishing: run.phase !== "body" || run.finish_requested_at != null,

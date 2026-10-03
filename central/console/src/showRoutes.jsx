@@ -27,7 +27,7 @@ export const showRoutes = Object.freeze(
   [
     {
       section: "now",
-      label: "Now showing",
+      label: "Now",
       // The Show-now flow (#/now/show/<step>) lives in the Runs region; while it shows a
       // step, the media pipeline is left out (rule 1: one question on screen).
       render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
@@ -79,7 +79,7 @@ export const showRoutes = Object.freeze(
     },
     {
       section: "sources",
-      label: "Photo sources",
+      label: "Sources",
       render: ({ snapshot, route, navigate, markDraft, handOffs }) => (
         <SourcesRegion
           snapshot={snapshot}

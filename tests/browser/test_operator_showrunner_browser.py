@@ -58,6 +58,7 @@ from psycopg.types.json import Jsonb
 from test_registry import ADMIN, enroll
 
 from central.catalog import CatalogSnapshot
+from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.planner import AcquisitionRequest
@@ -115,7 +116,7 @@ def _seed_source(registry, photos=()):
     repository (built in create_app) shares it and accepts the refresh.
     """
     queue = RecordingMediaQueue()
-    repository = MediaRepository(registry.db, registry.clock, queue=queue)
+    repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
     repository.configure_source(
         SourceSpec(source_ref=SOURCE, connection_ref="fixture-library"))
     if photos:
@@ -307,8 +308,11 @@ def test_sources_have_no_immich_or_album_language(page, registry):
             "edits or deletes anything there.", exact=True)).to_be_visible()
         _assert_neutral(sources)
 
-        # Bead 3: every step of the Source flow, Advanced open, says the same.
+        # Every step of the Source flow, Advanced open, says the same (one connection is
+        # known, so the flow opens on Tags).
         form = start_source(page)
+        _assert_neutral(sources)
+        source_continue(page, "Narrow")
         _assert_neutral(sources)
         source_continue(page, "Name")
         form.get_by_role("button", name="Advanced", exact=True).click()
@@ -319,11 +323,11 @@ def test_sources_have_no_immich_or_album_language(page, registry):
 
 
 def _assert_neutral(region):
-    """No vendor, album or "open in" words in what `region` shows (design D-e)."""
+    """No vendor, album or "open in" words, and no noun but Source, in what `region` shows
+    (design D-e; console DDD §37)."""
     copy = region.inner_text().lower()
-    assert "immich" not in copy
-    assert "album" not in copy
-    assert "open in" not in copy
+    for retired in ("immich", "album", "open in", "photo source", "match preview"):
+        assert retired not in copy, retired
 
 
 # Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
@@ -1134,7 +1138,7 @@ LONG_ID = "reception" + "northwallleftofthemainentrance" * 3  # no break opportu
 
 def _seed_long_ids(registry):
     """A Source, Scene, Program and live Run whose ids are long unbroken strings."""
-    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue()).configure_source(
+    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock)).configure_source(
         SourceSpec(source_ref=LONG_ID + ":1", connection_ref="fixture-library"))
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(
@@ -1277,7 +1281,7 @@ def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
         show_now(page, SCENE_ID, 0)
         run_row = page.get_by_role("region", name="Runs", exact=True).get_by_role("listitem").first
         expect(run_row).to_contain_text(once)
-        expect(run_row).to_contain_text("activated directly")
+        expect(run_row).to_contain_text("started directly (Show now or the API)")
 
 
 def test_why_states_admission_order_and_the_limit_line(page, registry):
@@ -1295,7 +1299,8 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
             "group", name="Why", exact=True)
         why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
-            f"Central's plan for {VALID_FRAME}: intro (priority 0, activated directly) on top.")
+            f"Central's Runs on {VALID_FRAME}: intro (priority 0, part of evening's Run, started "
+            "directly, by Show now or the API) on top.")  # a child names its root's Run (§35)
         rows = why.get_by_role("list", name="Contribution precedence").get_by_role("listitem")
         expect(rows).to_have_count(2)
         expect(rows.nth(1)).to_have_text(
@@ -1327,11 +1332,28 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         why = runs.get_by_role("group", name="Why", exact=True)
         why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
-            f"Central's plan for {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
+            f"Central's Runs on {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
         expect(why.get_by_role("list", name="Contribution precedence").get_by_role("listitem").nth(1)).to_have_text(
             "morning (priority 1) is underneath: evening has priority 5.")
         expect(runs.get_by_role("listitem").filter(has_text="Scene evening")).to_contain_text(
             "Program weekday-evenings")
+        # The Now page names the zone its clock times use.
+        expect(runs).to_contain_text(re.compile(r"Times in .+ \(this browser's time zone\)"))
+
+        # The Program's Run is the planned fact on the read-only Wall tile and on Frame ›
+        # Status (console DDD §35): Central's Runs, never what the Panel shows.
+        planned = ("On top: evening · Program weekday-evenings (Central's Runs; media not "
+                   "checked; the Panel is not observed)")
+        go(page, "wall")
+        tile = page.get_by_role("group", name=f"Frame {VALID_FRAME} status", exact=True)
+        expect(tile).to_contain_text(planned)
+        expect(tile.get_by_role("img", name=planned, exact=True)).to_have_count(1)
+        expect(tile).not_to_contain_text("Ending (outro)")
+        page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
+        inspector = page.get_by_role("region", name=f"Frame {VALID_FRAME} inspector", exact=True)
+        expect(inspector).to_contain_text(planned)
+        expect(inspector).to_contain_text(
+            f"Central's Runs on {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")
 
         go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
@@ -1569,7 +1591,7 @@ def test_the_windows_helper_keeps_local_time_across_a_dst_change(page, registry)
         author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
         go(page, "schedule")
         programs = page.get_by_role("region", name="Programs", exact=True)
-        expect(programs).to_contain_text("Times in Europe/London")
+        expect(programs).to_contain_text("Times in Europe/London (this browser's time zone)")
         # British Summer Time starts at 01:00 UTC on Sunday 28 March 2027.
         form = schedule_program(page, "Evening", SCENE_ID, "2027-03-27T18:00",
                                 "2027-03-27T20:00", 0, windows=2, submit=False)
@@ -1578,6 +1600,12 @@ def test_the_windows_helper_keeps_local_time_across_a_dst_change(page, registry)
         bodies = _program_puts(page)
         form.get_by_role("button", name="Add separate windows", exact=True).click()
         expect(programs.get_by_label("Program evening-2", exact=True)).to_be_visible()
+        # Every Program card's clock times carry their zone (console DDD §35): GMT before the
+        # change, BST (or its offset, in a locale with no abbreviation for it) after.
+        expect(programs.get_by_label("Program evening-1", exact=True)).to_contain_text(
+            re.compile(r"18:00–20:00 GMT"))
+        expect(programs.get_by_label("Program evening-2", exact=True)).to_contain_text(
+            re.compile(r"18:00–20:00 (BST|UTC\+01:00)"))
         first, second = sorted(bodies, key=lambda body: body["program_id"])
         # 18:00 GMT then 18:00 BST: 23 hours apart, not 24.
         assert second["starts_at"] - first["starts_at"] == 23 * 3600
@@ -1681,24 +1709,27 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        # Bead 3: the filters are the Source flow's first step, "What to include".
+        # Pass 5: the connection is its own step (no Source yet, nothing reported), and the
+        # filters are "Narrow it down".
         form = start_source(page)
+        form.get_by_label("Connection name", exact=True).fill("fixture-library")
+        source_continue(page, "Tags")
+        source_continue(page, "Narrow")
         form.get_by_label("Favourites", exact=True).select_option("only")
-        until = form.get_by_label("Taken until", exact=True)
-        form.get_by_label("Taken from", exact=True).fill("2024-01-01")
+        until = form.get_by_label("Dated until", exact=True)
+        form.get_by_label("Dated from", exact=True).fill("2024-01-01")
         until.fill("2023-06-01")
         expect(until).to_have_accessible_description(
-            re.compile("'Taken until' must be after 'Taken from'."))
+            re.compile("'Dated until' must be after 'Dated from'."))
         until.fill("2025-01-01")
         source_continue(page, "Name")
         form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
-        form.get_by_label("Connection name", exact=True).fill("fixture-library")
         source_continue(page, "Review")
         with page.expect_response(
             lambda r: r.url.endswith("/v1/operator/source-names/" + quote(NEW_SOURCE, safe=""))
             and r.request.method == "PUT"
         ) as info:
-            form.get_by_role("button", name="Save source", exact=True).click()
+            form.get_by_role("button", name="Save Source", exact=True).click()
         assert info.value.status == 200
         body = info.value.request.post_data_json
         assert body["favorites"] is True
@@ -2020,7 +2051,7 @@ def _set_source(registry, ref, **columns):
     """A configured Source whose served refresh columns are set directly: the facts a
     worker's refreshes would have left (no worker runs in these checks)."""
     spec = columns.pop("spec", {})
-    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue()).configure_source(
+    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock)).configure_source(
         SourceSpec(source_ref=ref, connection_ref="fixture-library", **spec))
     if columns:
         assignments = ",".join(f"{name}=%s" for name in columns)
@@ -2060,9 +2091,9 @@ def test_the_media_pipeline_states_each_source(page, registry):
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
         expect(state("fresh:1")).to_contain_text(
             "refreshed 1 min ago · 790 valid in the last refresh · 10 items pending or rejected"
-            " · photos only · only favourites · taken 2024")
+            " · favourites only · photos only · dated 2024")
         expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
-        expect(state("failing:1")).to_contain_text("Library unreachable · last good 2 h ago")
+        expect(state("failing:1")).to_contain_text("Your photo library is unreachable · last good refresh 2 h ago")
         expect(state("failing:1")).to_contain_text("source unavailable")
         expect(state("empty:1")).to_contain_text("nothing valid in the last refresh")
 
@@ -2070,7 +2101,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
         page.clock.run_for(5000)
         expect(state("fresh:1")).to_contain_text("Refresh overdue by 6 min")
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
-        expect(state("failing:1")).to_contain_text("Library unreachable")
+        expect(state("failing:1")).to_contain_text("Your photo library is unreachable")
         copy = pipeline.inner_text()
         for claim in ("LIVE", "online", "connected", "Immich"):
             assert claim not in copy
@@ -2078,7 +2109,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
 
 def test_the_media_pipeline_states_each_worker_state(page, registry):
     _seed(registry)
-    repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue())
+    repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     repository.health()  # the settings row, as Central's first media read makes it
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
@@ -2101,6 +2132,31 @@ def test_the_media_pipeline_states_each_worker_state(page, registry):
         registry.clock.advance(2 * 300 + 60 - 20 + 1)
         page.clock.run_for(5000)
         expect(worker).to_have_text("quiet for 11 min")
+
+
+def test_media_ages_are_taken_against_the_media_read_time_not_the_inventory_read_time(page, registry):
+    """G11: media times are the database's, so the worker fact ages against `media.read_at`.
+    The stub moves `inventory.read_at` (Central's process clock) an hour away from it."""
+    _seed(registry)
+    repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
+                                 times=ProcessTransactionClock(registry.clock))
+    repository.worker_status(None)
+    seen = registry.clock.utc()
+
+    def skewed(route):
+        response = route.fetch()
+        body = response.json()
+        body["media"]["read_at"] = seen + 30
+        body["inventory"]["read_at"] = seen + 3600
+        route.fulfill(response=response, json=body)
+
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now", paused_at=registry.clock.utc())
+        page.route("**/v1/operator/snapshot", skewed)
+        page.clock.run_for(5000)
+        worker = _pipeline(page).get_by_label("Media worker", exact=True)
+        expect(worker).to_have_text(re.compile(r"^checked in 30 s ago · "))
+        expect(worker).to_have_class(re.compile(r"\bhealth--ok\b"))
 
 
 def _why_chain(page, frame_id=VALID_FRAME):
@@ -2138,7 +2194,7 @@ def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page,
         chain = _why_chain(page)
         expect(_stop(chain)).to_have_count(1)
         expect(_stop(chain)).to_contain_text(re.compile(
-            rf"Run ended\? {SCENE_ID}'s Run ended at \d\d:\d\d(:\d\d)? after one cycle; if its "
+            rf"Run ended\? {SCENE_ID}'s Run ended at \d\d:\d\d(:\d\d)? \S+ after one cycle; if its "
             r"last item was a photo, the frame keeps that still \(a video is not kept\)\."))
         expect(chain.get_by_role("listitem").first).to_contain_text(
             f"No Scene is intended for {VALID_FRAME} now.")
@@ -2186,7 +2242,7 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
         expect(_stop(chain)).to_contain_text(
             "Check this frame Nothing usable yet: 2 still preparing.")
 
-        repository = MediaRepository(registry.db, registry.clock, queue=queue)
+        repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
         repository.set_recipe("a" * 64)  # the worker checks in with its recipe
         repository.request_acquisitions((AcquisitionRequest(
             asset_id=portrait_a.asset.asset_id, assignment_ids=("a",), earliest_start=now),))
@@ -2238,7 +2294,7 @@ def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(p
 
 @pytest.mark.browser_context_args(timezone_id="Europe/London")
 def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, registry):
-    """§7 "taken until" is exclusive: a window ending at local midnight on 1 April
+    """§7 "dated until" is exclusive: a window ending at local midnight on 1 April
     names 31 March, though that day was 23 h long (mutation probe: until - 86400)."""
     _seed(registry)
     london = ZoneInfo("Europe/London")
@@ -2248,10 +2304,10 @@ def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, reg
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         expect(_pipeline(page).get_by_label("Refresh of spring", exact=True)).to_contain_text(
-            re.compile(r"taken (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
+            re.compile(r"dated (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
 
 
-def test_the_chooser_says_taken_and_readiness_and_waits_while_loading(page, registry):
+def test_the_chooser_says_dated_and_readiness_and_waits_while_loading(page, registry):
     """§14 labels and §6 "Loading compatible media…" (a state, never "No compatible
     media" while the read is in flight); "(2)" only for a remaining duplicate."""
     _seed(registry)
@@ -2280,7 +2336,7 @@ def test_the_chooser_says_taken_and_readiness_and_waits_while_loading(page, regi
         reads.release()
         expect(choice.get_by_role("option").first).to_have_text("Choose compatible media")
         labels = sorted(choice.get_by_role("option").all_inner_texts()[1:])
-        taken = r" · taken .+ \d\d:\d\d(:\d\d)? · preparing"
+        taken = r" · dated .+ \d\d:\d\d(:\d\d)? \S+ · preparing"
         assert len(labels) == 3, labels
         assert re.fullmatch(r"Photo 108×192" + taken, labels[0]), labels
         assert re.fullmatch(r"Photo 108×192" + taken + r" \(2\)", labels[1]), labels

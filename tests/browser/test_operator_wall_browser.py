@@ -121,19 +121,27 @@ def _seed_now_showing(registry):
     return player_id
 
 
-def test_tile_shows_scheduled_intent_frame_health_and_never_claims_live(page, registry):
+DIRECT_PLANNED = (f"On top: {SCENE} · started directly, by Show now or the API (Central's Runs; "
+                  "media not checked; the Panel is not observed)")
+NOTHING_PLANNED = ("On top: nothing · no Run puts a layer on this Frame now (Central's Runs; the "
+                   "Panel is not observed)")
+
+
+def test_tile_shows_the_planned_fact_frame_health_and_never_claims_live(page, registry):
     player_id = _seed_now_showing(registry)
     # The Player is heard, so each tile's health reaches its Panel/calibration rows.
     report_readiness(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
 
-        # The frame a live Run targets shows the intended now-showing chip -- the
-        # scene_id joined by the STRING "frame:<id>" -- plus its phase, located by
-        # frame identity (its status group), not by coordinates.
+        # The frame a live Run targets shows its `planned` fact (console DDD §35) -- the
+        # scene_id joined by the STRING "frame:<id>", who started its Run, and that media
+        # was not checked -- located by frame identity (its status group), not by
+        # coordinates. "Ending (outro)" shows only in the outro phase.
         showing = page.get_by_role("group", name=f"Frame {SHOWING} status", exact=True)
-        expect(showing).to_contain_text(f"Scheduled: {SCENE}")
-        expect(showing).to_contain_text("Phase: body")
+        expect(showing).to_contain_text(DIRECT_PLANNED)
+        expect(showing.get_by_role("img", name=DIRECT_PLANNED, exact=True)).to_have_count(1)
+        expect(showing).not_to_contain_text("Ending (outro)")
         # Its bound output had a display at Player start; it was never commissioned.
         expect(tile_health(page, SHOWING)).to_have_accessible_name("Needs calibration")
 
@@ -176,11 +184,11 @@ def test_selecting_frame_opens_inspector_at_status_with_binding_and_calibration(
         expect(inspector).to_contain_text(player_id)
         expect(inspector).to_contain_text("HDMI-A-1")
 
-        # Status facet: the intended scene_id (joined by the STRING
+        # Status facet: the planned fact (the scene_id joined by the STRING
         # "frame:<id>") plus the precedence-ranked "why" -- the frame's
         # contributions ranked by (priority, root_order, admission_order).
         inspector.get_by_role("tab", name="Status", exact=True).click()
-        expect(inspector).to_contain_text(f"Intended scene: {SCENE}")
+        expect(inspector).to_contain_text(DIRECT_PLANNED)
         why = inspector.get_by_role("list", name="Why")
         expect(why).to_contain_text(SCENE)
         expect(why).to_contain_text("priority")
@@ -188,6 +196,29 @@ def test_selecting_frame_opens_inspector_at_status_with_binding_and_calibration(
         # Honesty (design §6a): the Inspector asserts intent, never confirmed
         # playback -- "LIVE" appears nowhere.
         expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
+
+
+def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, registry):
+    """A Run on top of an unbound Frame is still Central's Runs, but the Planner gives an
+    unbound Frame no layers (central/planner.py), so the basis says so, on the tile and on
+    Frame › Status (console DDD §35)."""
+    registry.create_frame(FrameCreate(
+        id="spare-frame", surface_id="wall", x_mm=100, y_mm=100,
+        width_mm=300, height_mm=500, profile=PORTRAIT))
+    store = RuntimeStore(registry.db, registry.clock)
+    store.command("set_scene", Scene(
+        scene_id=SCENE, loop=True, cycle_seconds=30,
+        contributions=(Contribution(target="frame:spare-frame", source_refs=("lobby-photos:1",)),)))
+    store.command("activate", SCENE, "spare-activation", registry.clock.utc())
+    planned = (f"On top: {SCENE} · started directly, by Show now or the API (Central's Runs; "
+               "this Frame is unbound, so Central sends it no layers; the Panel is not observed)")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        expect(page.get_by_role("group", name="Frame spare-frame status", exact=True)).to_contain_text(planned)
+        page.get_by_role("button", name="Frame spare-frame", exact=True).click()
+        inspector = page.get_by_role("region", name="Frame spare-frame inspector", exact=True)
+        expect(inspector).to_contain_text(planned)
+        expect(inspector).not_to_contain_text("media not checked")
 
 
 def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, registry):
@@ -203,7 +234,7 @@ def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, 
         expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
             "aria-selected", "true")
 
-        expect(inspector).to_contain_text("Nothing scheduled.")
+        expect(inspector).to_contain_text(NOTHING_PLANNED)
         expect(inspector).to_contain_text("Frame new-frame starts selected on its Frames step")
         expect(inspector).to_contain_text("Show now or Schedule it")
         inspector.get_by_role("link", name="Make a Scene", exact=True).click()

@@ -174,7 +174,7 @@ def test_a_write_401_from_a_confirmation_signs_in_by_keyboard_and_keeps_it(page,
 
 def _live_run_with_cancel_open(page):
     """Show the Scene now, open "Cancel run" on its Run from the Schedule page's history
-    (Schedule, then Now showing), and return the Runs region and the open dialog."""
+    (Schedule, then Now), and return the Runs region and the open dialog."""
     author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
     go(page, "schedule")
     show_now(page, SCENE_ID, 0)
@@ -200,7 +200,7 @@ def test_browser_back_cancels_an_idle_show_confirmation_and_leaves_the_page_usab
         go(page, "scenes")
         assert current_hash(page) == "#/scenes"
 
-        # Back on Now showing the idle confirmation is gone (cancelled, as Esc would), and
+        # Back on Now the idle confirmation is gone (cancelled, as Esc would), and
         # the Run was not cancelled.
         go(page, "now")
         expect(page.get_by_role("dialog")).to_have_count(0)

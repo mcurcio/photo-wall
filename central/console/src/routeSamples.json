@@ -17,7 +17,7 @@
       "#/schedule/new/review",
       "#/schedule/sample-program/edit/review"
     ],
-    "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
+    "sources": ["#/sources", "#/sources/new/library", "#/sources/new/tags", "#/sources/new/narrow", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
   },
   "wall": {
     "wall": [
