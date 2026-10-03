@@ -67,15 +67,17 @@ const THROTTLE_FLAGS = Object.freeze({
   soft_temperature_limit_occurred: FLAG("occurred", "soft temperature limit"),
 });
 
-// The base boot stages in boot order (contracts/node_host_facts.py BOOT_STAGES), and the units
-// that run them: a stage's own unit failing repeats its stage record, so `base_units` leaves
-// them out and one cause raises one incident.
-const BOOT_STAGES = Object.freeze(["handoff", "storage", "prepare"]);
-const STAGE_UNITS = Object.freeze(new Set(BOOT_STAGES.map((stage) => `photo-wall-node-${stage}.service`)));
+// The base boot stages in boot order (contracts/node_host_facts.py BOOT_STAGES), the unit that
+// runs each (appliance/systemd), the most failed units a boot report names
+// (MAX_BOOT_FAILED_UNITS) and the most `oom_kill:` rows a sample carries (its METRIC_FAMILIES
+// max_rows): bound to the contracts by tests/test_console_host_health.py.
+export const BOOT_STAGES = Object.freeze(["handoff", "storage", "prepare"]);
+export const STAGE_UNITS = Object.freeze(Object.fromEntries(BOOT_STAGES.map((stage) =>
+  [stage, `photo-wall-node-${stage}.service`])));
+export const MAX_UNITS = 4;
+export const MAX_OOM_ROWS = 3;
 const STOPPED = Object.freeze(new Set(["refused", "failed"]));
-const MAX_UNITS = 4;
 const OOM_PREFIX = "oom_kill:";
-const MAX_OOM_ROWS = 3;
 
 /** The boot report of the host facts record (G12 `facts.boot`), or null when not reported. */
 function bootReport(facts) {
@@ -84,16 +86,37 @@ function bootReport(facts) {
 }
 
 /**
- * Boot preparation (4 GB node design §4.3, T4): the first stage in boot order that stopped
- * (refused or failed), because the cause precedes its effects; else the first running; else
- * done once `prepare` is done; else not started. A stop is an alarm.
+ * The base stages that stopped, in boot order, each as `{stage, record}` (`record` absent when
+ * the stage wrote none). A stage stops when its record says refused or failed, or when PID1
+ * lists its own unit failed while its record is `running` or absent: the process was killed
+ * before its exit write (an out-of-memory victim, TimeoutStartSec's SIGTERM) or the write
+ * failed (4 GB node design §6). Both boot items read this one rule.
+ */
+function stoppedStages(boot) {
+  const stages = Array.isArray(boot.stages) ? boot.stages : [];
+  const units = new Set(Array.isArray(boot.failed_units) ? boot.failed_units : []);
+  return BOOT_STAGES.flatMap((name) => {
+    const record = stages.find((stage) => stage?.stage === name);
+    const unitFailed = units.has(STAGE_UNITS[name]) && (record === undefined || record.state === "running");
+    return STOPPED.has(record?.state) || unitFailed ? [{ stage: name, record }] : [];
+  });
+}
+
+/**
+ * Boot preparation (4 GB node design §4.3, T4, §6): the first stage in boot order that stopped,
+ * because the cause precedes its effects; else the first running; else done once `prepare` is
+ * done; else not started. A stop is an alarm.
  */
 function readBootPreparation(boot) {
   const stages = Array.isArray(boot.stages) ? boot.stages : [];
   const ordered = BOOT_STAGES.map((name) => stages.find((stage) => stage?.stage === name))
     .filter((stage) => stage !== undefined);
-  const stopped = ordered.find((stage) => STOPPED.has(stage.state));
-  if (stopped !== undefined) {
+  const [first] = stoppedStages(boot);
+  if (first !== undefined && !STOPPED.has(first.record?.state)) {
+    return { band: "alarm", text: `boot preparation failed at ${first.stage} (unit failed, no exit record)` };
+  }
+  if (first !== undefined) {
+    const stopped = first.record;
     const at = `boot preparation ${stopped.state} at ${stopped.stage}`;
     const numbers = isNumber(stopped.required_bytes) && isNumber(stopped.room_bytes);
     if (stopped.state === "refused" && numbers) {
@@ -111,10 +134,15 @@ function readBootPreparation(boot) {
   return { band: null, text: prepared ? "boot preparation done" : "boot preparation not started" };
 }
 
-/** Base units: PID1's failed photo-wall units minus the stage units. Any is an alarm. */
+/**
+ * Base units: PID1's failed photo-wall units, less the unit of each stage boot preparation
+ * reads as stopped (its stop is that item's incident, so one cause raises one). A stage unit
+ * whose stage did not stop stays listed. Any is an alarm.
+ */
 function readBaseUnits(boot) {
+  const repeated = new Set(stoppedStages(boot).map(({ stage }) => STAGE_UNITS[stage]));
   const names = (Array.isArray(boot.failed_units) ? boot.failed_units : [])
-    .filter((name) => typeof name === "string" && !STAGE_UNITS.has(name));
+    .filter((name) => typeof name === "string" && !repeated.has(name));
   const more = isNumber(boot.failed_units_more) && boot.failed_units_more > 0 ? boot.failed_units_more : 0;
   if (names.length === 0 && more === 0) return { band: null, text: "no base unit failed on this boot" };
   const shown = names.slice(0, MAX_UNITS);

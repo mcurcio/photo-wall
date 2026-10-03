@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 from dataclasses import dataclass
 from typing import Final
 
@@ -36,10 +37,14 @@ _STAGE_FIELDS: Final[frozenset[str]] = frozenset(
 _BOOT_FIELDS: Final[frozenset[str]] = frozenset({"stages", "failed_units", "failed_units_more"})
 
 
+# A `uname -r` string's characters (6.6.51+rpt-rpi-v8, 6.1.0-13-arm64, 6.8.0-rc1~x): none needs
+# JSON escaping, so 64 of them encode as 64 bytes and the record's byte budget holds.
+_KERNEL_RELEASE: Final = re.compile(r"[A-Za-z0-9._+~-]{1,64}")
+
+
 def _kernel_release(value: str) -> None:
-    # Printable ASCII without spaces; "+" occurs (6.6.51+rpt-rpi-v8), so it is not a token.
-    if (not isinstance(value, str) or not 1 <= len(value) <= 64
-            or any(not "!" <= character <= "~" for character in value)):
+    # "+" occurs (6.6.51+rpt-rpi-v8), so it is not a token.
+    if not isinstance(value, str) or _KERNEL_RELEASE.fullmatch(value) is None:
         raise ValueError("invalid_host_fact_kernel_release")
 
 
@@ -181,10 +186,6 @@ class HostFactsV2:
             value = getattr(self, name)
             if value is not None:
                 rule(value)
-
-    def values(self) -> tuple:
-        """The facts alone, in `FACT_RULES` order, then `boot`: what "a value changed" compares."""
-        return (*(getattr(self, name) for name in FACT_RULES), self.boot)
 
 
 def fact_values_document(facts: HostFactsV2) -> dict:

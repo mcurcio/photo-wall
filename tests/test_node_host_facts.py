@@ -21,6 +21,7 @@ from contracts.node_host_facts import (
     fact_values_document,
     parse_host_facts,
     stored_fact_values,
+    valid_fact,
 )
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2
@@ -69,7 +70,7 @@ def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_no
                                        "link_state": "up", "address": "192.168.1.40", "base_tag": None,
                                        "boot": None}
     assert stored_fact_values(json.dumps(_document(link_state="UP")).encode())["link_state"] is None
-    assert tuple(stored_fact_values(encode_host_facts(_facts())).values()) == _facts().values()
+    assert stored_fact_values(encode_host_facts(_facts())) == fact_values_document(_facts())
     assert set(stored_fact_values(b"not json").values()) == {None}
 
 
@@ -93,7 +94,7 @@ def test_a_boot_report_round_trips_and_a_document_without_boot_encodes_as_before
     # An older node's document (no `boot` key) still validates, and boot=None omits the key.
     assert "boot" not in json.loads(encode_host_facts(_facts()))
     assert parse_host_facts(encode_host_facts(_facts())).boot is None
-    assert value.values()[-1] == BOOT and value.values() != _facts().values()
+    assert fact_values_document(value) != fact_values_document(_facts())
 
 
 def test_the_worst_case_boot_report_fits_the_facts_record():
@@ -102,7 +103,10 @@ def test_the_worst_case_boot_report_fits_the_facts_record():
     units = tuple(sorted(f"photo-wall-{index}" + "u" * 76 + ".service" for index in range(4)))
     assert all(len(unit) == 96 for unit in units)
     producer = NodeProducerV2("s" * 256, "device-" + "a" * 64, 2**63 - 1, uuid4(), "host_core", uuid4())
-    worst = HostFactsV2(producer, 2**63 - 1, 2**63 - 1, "k" * 64, "e" * 15, "lowerlayerdown",
+    # The kernel release's worst case is its longest-encoding allowed character, 64 times.
+    kernel = max((chr(code) for code in range(128) if valid_fact("kernel_release", chr(code))),
+                 key=lambda character: len(json.dumps(character)))
+    worst = HostFactsV2(producer, 2**63 - 1, 2**63 - 1, kernel * 64, "e" * 15, "lowerlayerdown",
                         "255.255.255.255", "t" * 128, BootReportV2(stages, units, 2**63 - 1))
     assert len(encode_host_facts(worst)) <= MAX_HOST_FACTS_BYTES
 
@@ -170,6 +174,8 @@ def test_stored_values_equal_the_posted_document_with_and_without_boot():
 REFUSED = {
     "a space in the kernel release": {"kernel_release": "6.6 51"},
     "a 65-character kernel release": {"kernel_release": "6" * 65},
+    "a quote in the kernel release": {"kernel_release": '6.6"51'},
+    "a backslash in the kernel release": {"kernel_release": "6.6\\51"},
     "an unknown link state": {"link_state": "UP"},
     "a non-canonical address": {"address": "192.168.001.040"},
     "an IPv6 address": {"address": "::1"},
@@ -335,7 +341,7 @@ def test_facts_are_sent_once_per_process_start_and_unchanged_facts_send_nothing(
     runner, sent = _runner(monkeypatch, clock, facts, {})
     _run(runner, clock, 200)
     assert len(sent) == 1 and sent[0][0] == 100.0
-    assert parse_host_facts(sent[0][1]).values() == (*VALUES.values(), None, None)
+    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "boot": None}
     # A process start (a new runner) sends again; Central answers duplicate or keeps
     # first_received_at.
     again, resent = _runner(monkeypatch, clock, facts, {})

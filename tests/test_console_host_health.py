@@ -517,11 +517,21 @@ out.olderNode = pick(withBoot(null), "boot_preparation");
 out.noFacts = pick(row({ facts: null }), "base_units");
 out.silent = pick(withBoot(boot([stage("storage", "failed", "memory_controller_absent")]), [], 880),
   "boot_preparation");
-const units = (list, more = 0) => pick(withBoot(boot(done, list, more)), "base_units");
+const units = (list, more = 0, stages = done) => pick(withBoot(boot(stages, list, more)), "base_units");
 out.unitsNone = units([]);
-out.unitsStageOnly = units(["photo-wall-node-handoff.service", "photo-wall-node-prepare.service",
-  "photo-wall-node-storage.service"]);
-out.unitsOne = units(["photo-wall-app-broker.service", "photo-wall-node-prepare.service"]);
+// A stage unit is left out only when its stage reads stopped; a done stage's failed unit stays.
+out.unitsStageOnly = units(["photo-wall-node-prepare.service"], 0,
+  [...done.slice(0, 2), stage("prepare", "failed", "os:ENOSPC")]);
+out.unitsDoneStage = units(["photo-wall-node-prepare.service"]);
+out.unitsOne = units(["photo-wall-app-broker.service", "photo-wall-node-prepare.service"], 0,
+  [...done.slice(0, 2), stage("prepare", "running")]);
+// Killed before its exit write (out-of-memory victim, TimeoutStartSec SIGTERM), or the record
+// write failed: PID1's failed unit stops the stage, on both boot items.
+const killedPrepare = boot([...done.slice(0, 2), stage("prepare", "running")], ["photo-wall-node-prepare.service"]);
+const noRecords = boot([], ["photo-wall-node-storage.service"]);
+out.killed = { prepare: pick(withBoot(killedPrepare), "boot_preparation"),
+  prepareUnits: pick(withBoot(killedPrepare), "base_units"),
+  storage: pick(withBoot(noRecords), "boot_preparation"), storageUnits: pick(withBoot(noRecords), "base_units") };
 out.unitsMore = units(["photo-wall-app-broker.service", "photo-wall-display.service"], 3);
 out.unitsUnnamed = units([], 2);
 out.oom = pick(row({}, [oom("base", 1), oom("app", 2), oom("preparation", 0)]), "out_of_memory");
@@ -542,6 +552,10 @@ const incidents = (report, metrics = []) => hostIncidents(snapshot,
   .map(({ key, text }) => [key, text]);
 out.incidents = {
   stageAndUnit: incidents(failing),
+  refusedAndUnit: incidents(boot([stage("handoff", "done"), stage("storage", "refused", "node_memory_class",
+    3.5 * GiB, 1.9e9)], ["photo-wall-node-storage.service"])),
+  killedPrepare: incidents(killedPrepare),
+  noRecords: incidents(noRecords),
   broker: incidents(boot(done, ["photo-wall-app-broker.service"])),
   oomNotice: incidents(boot(done), [oom("app", 3)]),
   olderNode: incidents(null),
@@ -586,6 +600,15 @@ def test_boot_preparation_names_the_first_stopped_stage_in_boot_order():
     # An older node sends no boot report: Unknown on its item, no tier raised.
     assert out["olderNode"] == ["unknown", "Unknown: not reported", "ok"]
     assert out["noFacts"] == ["unknown", "Unknown: not reported", "ok"]
+    # A stage killed before its exit write, or whose record write failed, reads stopped by its
+    # failed unit (4 GB node design §6), and the unit is not repeated under base units.
+    killed = out["killed"]
+    assert killed["prepare"] == ["alarm", f"{reported}boot preparation failed at prepare (unit failed, "
+                                 f"no exit record){receipt}", "alarm"]
+    assert killed["storage"] == ["alarm", f"{reported}boot preparation failed at storage (unit failed, "
+                                 f"no exit record){receipt}", "alarm"]
+    assert killed["prepareUnits"][:2] == killed["storageUnits"][:2] == [
+        None, f"{reported}no base unit failed on this boot{receipt}"]
     # Silent: the last report, unbanded; only the silence is judged.
     assert out["silent"][0] is None
     assert out["silent"][1].endswith("(memory_controller_absent) at last report" + receipt)
@@ -596,7 +619,10 @@ def test_base_units_leave_out_the_stage_units_and_out_of_memory_is_a_notice():
     reported = "Host Management reported "
     receipt = " · first received 1 min ago"
     assert out["unitsNone"] == [None, f"{reported}no base unit failed on this boot{receipt}", "ok"]
-    assert out["unitsStageOnly"] == out["unitsNone"]
+    # The stopped stage's unit is left out; the box's alarm is boot preparation's.
+    assert out["unitsStageOnly"][:2] == out["unitsNone"][:2] and out["unitsStageOnly"][2] == "alarm"
+    assert out["unitsDoneStage"] == ["alarm", f"{reported}base unit failed on this boot: "
+                                     f"photo-wall-node-prepare.service{receipt}", "alarm"]
     assert out["unitsOne"] == ["alarm", f"{reported}base unit failed on this boot: "
                                f"photo-wall-app-broker.service{receipt}", "alarm"]
     assert out["unitsMore"][1] == (f"{reported}base units failed on this boot: photo-wall-app-broker.service"
@@ -615,6 +641,13 @@ def test_one_boot_cause_raises_one_incident_for_bound_players_and_a_spare_is_nev
     incidents = out["incidents"]
     assert incidents["stageAndUnit"] == [["player:device-a:boot_preparation",
                                           f"{who}boot preparation failed at prepare (os:ENOSPC)"]]
+    assert incidents["refusedAndUnit"] == [["player:device-a:boot_preparation",
+                                            f"{who}boot preparation refused at storage: needs 3.8 GB of "
+                                            "memory, the box has 1.9 GB"]]
+    assert incidents["killedPrepare"] == [["player:device-a:boot_preparation",
+                                           f"{who}boot preparation failed at prepare (unit failed, no exit record)"]]
+    assert incidents["noRecords"] == [["player:device-a:boot_preparation",
+                                       f"{who}boot preparation failed at storage (unit failed, no exit record)"]]
     assert incidents["broker"] == [["player:device-a:base_units",
                                     f"{who}base unit failed on this boot: photo-wall-app-broker.service"]]
     assert incidents["oomNotice"] == [] and incidents["olderNode"] == []
@@ -628,9 +661,11 @@ def test_one_boot_cause_raises_one_incident_for_bound_players_and_a_spare_is_nev
 
 
 FAMILIES_SCRIPT = r"""
-const { HOST_CATALOG, NOT_SHOWN } = await import(process.argv[1]);
+const { HOST_CATALOG, NOT_SHOWN, BOOT_STAGES, STAGE_UNITS, MAX_UNITS, MAX_OOM_ROWS } =
+  await import(process.argv[1]);
 console.log(JSON.stringify({ items: Object.fromEntries(Object.entries(HOST_CATALOG).map(([name, entry]) =>
-  [name, entry.families])), notShown: NOT_SHOWN }));
+  [name, entry.families])), notShown: NOT_SHOWN,
+  boot: { stages: BOOT_STAGES, units: STAGE_UNITS, maxUnits: MAX_UNITS, maxOomRows: MAX_OOM_ROWS } }));
 """
 
 
@@ -651,3 +686,22 @@ def test_every_metric_family_has_a_console_item_or_is_listed_not_shown():
     # The boot items read the host facts record, not a metric family.
     assert out["items"]["boot_preparation"] == [] and out["items"]["base_units"] == []
     assert out["items"]["out_of_memory"] == ["oom_kill:"]
+
+
+def test_the_boot_items_constants_are_the_contracts_and_the_unit_files():
+    """hostHealth.js's boot stages, stage unit names, failed-unit cap and out-of-memory row cap
+    equal contracts/node_host_facts.py, the oom_kill family's max_rows and appliance/systemd."""
+    from contracts.node_host_facts import BOOT_STAGES, MAX_BOOT_FAILED_UNITS
+    from contracts.node_observation import METRIC_FAMILIES
+
+    _require_node()
+    result = subprocess.run(["node", "--input-type=module", "-e", FAMILIES_SCRIPT, str(SRC / "hostHealth.js")],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    boot = json.loads(result.stdout)["boot"]
+    assert tuple(boot["stages"]) == BOOT_STAGES
+    assert boot["maxUnits"] == MAX_BOOT_FAILED_UNITS
+    assert boot["maxOomRows"] == next(family.max_rows for family in METRIC_FAMILIES if family.key == "oom_kill:")
+    assert list(boot["units"]) == list(BOOT_STAGES)
+    systemd = Path(__file__).resolve().parents[1] / "appliance" / "systemd"
+    assert set(boot["units"].values()) == {path.name for path in systemd.glob("photo-wall-node-*.service")}
