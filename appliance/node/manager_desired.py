@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from uuid import UUID
 
+from appliance.node.capacity import StorageShort
 from appliance.node.clock import boot_id
 from appliance.node.http import NodeHTTP
 from appliance.node.manager_observation import PreparationObservation
@@ -70,7 +71,14 @@ class DesiredPreparation:
             preparer = DownloadPreparer(self.directory / "downloads", url=url,
                 **{key: self.config[key] for key in ("base_abi", "graphics_abi", "plugin_abi")},
                 claim=self.session.claim, retain_root=False)
-            preparer.prepare(reference)
+            try:
+                preparer.prepare(reference)
+            except StorageShort as short:
+                # The admission's own two numbers (console DDD §63). Nothing is recorded as
+                # prepared, so the next poll retries, as after any other failure.
+                self.observation.sample("refused", command=command, fault="node_storage_capacity",
+                                        available_bytes=short.room, required_bytes=short.required)
+                return
             archives.append(reference.environment_sha256)
         result = {"command_sha256": command.command_sha256, "operation_id": str(command.operation_id), "archives": archives}
         write_atomically(self.directory / "prepared.json", json.dumps(result, sort_keys=True).encode(), mode=0o600)

@@ -33,6 +33,7 @@ from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
 from contracts.node_commands import MAX_COMMAND_BYTES, encode_session_grant, parse_session_claim
 from contracts.node_display import MAX_DISPLAY_BYTES
+from contracts.node_host_facts import MAX_HOST_FACTS_BYTES
 from contracts.node_lifecycle import MAX_LIFECYCLE_BYTES
 from contracts.node_observation import MAX_OBSERVATION_BYTES
 from contracts.node_preparation import MAX_PREPARATION_BYTES
@@ -209,6 +210,11 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         raw = await body(request, MAX_OBSERVATION_BYTES)
         return await invoke(observations.record, *_credentials(request), raw)
 
+    @app.post("/v2/node/host-facts")
+    async def host_facts(request: Request):
+        raw = await body(request, MAX_HOST_FACTS_BYTES)
+        return await invoke(observations.record_facts, *_credentials(request), raw)
+
     @app.post("/v2/node/app-links")
     async def app_link(request: Request):
         raw = await body(request, MAX_NODE_LINK_BYTES)
@@ -320,6 +326,10 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.get("/v1/operator/node/devices/{device_id}/app-attempts", dependencies=[Depends(admin)])
     async def app_status(device_id: str):
         return await invoke(lifecycle.status, device_id)
+
+    @app.get("/v1/operator/node/hosts", dependencies=[Depends(admin)])
+    async def fleet_hosts():
+        return await invoke(observations.fleet_hosts)
 
     @app.get("/v1/operator/node/devices/{device_id}", dependencies=[Depends(admin)])
     async def status(device_id: str):

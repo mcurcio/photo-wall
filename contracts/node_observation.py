@@ -4,12 +4,16 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
+from typing import Final
 
 from contracts.node_commands import producer_document, producer_from_document
 from contracts.node_protocol import NodeProducerV2, counter, token
 from contracts.strict_json import loads_object
 
 MAX_OBSERVATION_BYTES = 16384
+# Host Management posts one observation per interval (console DDD §63). Central derives its
+# coalescing window, its daily observation cap and its host-silence limit from this one number.
+HOST_OBSERVATION_INTERVAL_SECONDS: Final[int] = 15
 
 
 @dataclass(frozen=True, slots=True)

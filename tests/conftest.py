@@ -1,6 +1,8 @@
 """Shared fixtures; each database test owns a whole disposable database (support/database.py)."""
 
+import json
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -101,6 +103,33 @@ def database_provisioner(request):
     databases = TestDatabases(server_dsn(), request.config.stash[_RUN_ID])
     yield databases
     databases.close()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """A failed test on a `registry` keeps its three clocks beside the traceback: the host's wall
+    clock, PostgreSQL's `clock_timestamp()` and the test's ManualClock. Rig tests open the rollout
+    gate with a certificate stamped by the host clock and checked against the database clock, so a
+    load- or drift-dependent failure (console DDD §45, residual R1-flaky) names its clocks. With
+    PHOTO_WALL_TEST_FAILURE_LOG set, the exception and the readings are appended there as JSON."""
+    outcome = yield
+    report = outcome.get_result()
+    registry = getattr(item, "funcargs", {}).get("registry")
+    if not report.failed or call.when != "call" or not isinstance(registry, Registry):
+        return
+    readings = {"test": item.nodeid, "host_time": time.time(), "manual_utc": registry.clock.utc(),
+                "manual_monotonic": registry.clock.monotonic()}
+    try:
+        with registry.db.transaction() as conn:
+            readings["database_time"] = float(conn.execute(
+                "SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now").fetchone()["now"])
+    except Exception as exc:  # the database may be what failed; the readings still count
+        readings["database_time"] = f"unreadable: {exc!r}"
+    report.sections.append(("clocks", json.dumps(readings)))
+    log = os.environ.get("PHOTO_WALL_TEST_FAILURE_LOG")
+    if log:
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**readings, "exception": str(report.longrepr)}) + "\n")
 
 
 @pytest.fixture
