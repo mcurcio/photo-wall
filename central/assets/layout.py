@@ -5,7 +5,8 @@ Every name is content-keyed: an OS image by the sha256 of its base tarball
 (`apps/app-<sha256>.deb`). A re-cut is a new name, so a late run can only write the same bytes to
 the same file. A library thumbnail (`previews/asset-<id>.jpg`) is keyed by its ORIGINAL's identity
 (Central's one-way asset id), not its own bytes, so its record lives only while a live preview
-selects it (`central.assets.library`). Temp files start with `TEMP_PREFIX`, which no final name can, so a temp is never
+selects it (`central.assets.library`) and a re-production replaces its produced facts
+(`AssetKind.keyed_by_content`). Temp files start with `TEMP_PREFIX`, which no final name can, so a temp is never
 mistaken for an asset.
 """
 

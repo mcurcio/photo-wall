@@ -207,7 +207,8 @@ def test_the_planned_fact_origins_and_zoned_times():
 
 DISPLAY_FORMATTERS = re.compile(r"toLocaleTimeString|toLocaleString|toLocaleDateString|Intl\.DateTimeFormat")
 RETIRED_WORDS = ("Scheduled:", "Intended scene", "Now showing", "Central's plan",
-                 "Why each frame shows what it does", "meant to show")
+                 "Why each frame shows what it does", "meant to show", "No Scene is intended",
+                 "No contributions target")
 
 
 def _console_modules():

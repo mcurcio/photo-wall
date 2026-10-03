@@ -21,6 +21,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from central.infra.runtime import COMPLETION_NOT_RECORDED, WORKER_EXITED
 from tests.test_console_flow import _require_node
 
 SRC = Path(__file__).parents[1] / "central/console/src"
@@ -88,6 +89,11 @@ out.overLimit = media.sourceState({ status: "incompatible", next_refresh: 1000, 
   diagnostics: [{ code: "source_limit" }], spec: {} }, 1000).label;
 out.tagMissing = media.sourceState({ status: "incompatible", next_refresh: 1000, last_success: 900,
   diagnostics: [{ code: "tag_missing" }], spec: {} }, 1000).label;
+const failing = (diagnostics) => media.sourceState({ status: "incompatible", next_refresh: 1000,
+  last_success: 940, diagnostics, spec: {} }, 1000, false).label;
+out.refusals = [failing([{ code: "spec_unsupported" }]), failing([{ code: "connection_mismatch" }]),
+                failing([{ code: "upstream_unavailable" }]), failing([{ code: "brand_new_code" }]),
+                failing([])];
 out.tagMissingPreview = said({ phase: "failed", answer: null, previous: null, code: "tag_missing" });
 out.state = media.sourceState({ status: "ok", next_refresh: 1000, last_success: 990, counts: { valid: 3 },
   spec: specs[0] }, 1000).label;
@@ -174,7 +180,8 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
 
     assert out["selection"] == [
         "Selects media tagged Family/Christmas (and nested tags) · favourites only · photos and videos",
-        "Selects everything in your library · no favourites · photos only · dated 3 Mar 2025 to 5 Mar 2025",
+        "Selects everything on your library's timeline (not archived, hidden or other users' media)"
+        " · no favourites · photos only · dated 3 Mar 2025 to 5 Mar 2025",
         "Selects media tagged with all of Family, a tag that no longer exists in your library "
         "(each with its nested tags) · videos only",
         "Selects media tagged a tag Photo Wall has not looked up yet (and nested tags) · photos and videos",
@@ -195,8 +202,20 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
         assert [part for part in parts if part in untagged] == untagged, entry
     assert out["agree"][1]["named"][0] == "tagged Family and Pets"
     # Over the worker's ceiling: Photo Wall's limit, never "your photo library is unsupported".
-    assert out["overLimit"] == ("Over Photo Wall's current 1,000-match limit · narrow it with tags or "
-                                "dates · never refreshed successfully")
+    # `source_limit` covers the worker's byte and request bounds too, so not the count alone.
+    assert out["overLimit"] == ("Over Photo Wall's current size limits for one Source (at most 1,000 "
+                                "matches) · narrow it with tags or dates · never refreshed successfully")
+    # Photo Wall's own refusals never read as the library's fault (§39 R21); an unknown code
+    # or none reads neutrally. Mutation probe: restore a fall-through keyed on `status`.
+    good = " · last good refresh 1 min ago"
+    assert out["refusals"] == [
+        "This media worker can't read this Source's settings · update the media worker" + good,
+        "The media worker's library connection doesn't match this Source · check the worker's "
+        "connections" + good,
+        "Your photo library is unreachable" + good,
+        "Refresh failed (brand new code)" + good,
+        "Refresh failed (incompatible)" + good,
+    ]
     # A tag deleted in the library: its own cause, never "unsupported" and never "nothing matches".
     assert out["tagMissing"] == ("Your photo library no longer has a tag this Source uses · edit its tags"
                                  " · last good refresh 1 min ago")
@@ -249,6 +268,46 @@ COMMENT = re.compile(r"/\*.*?\*/|(?<![:\w])//[^\n]*", re.DOTALL)
 def _console_strings_of(text):
     """Source text without its comments: its strings, JSX text and code."""
     return COMMENT.sub("", text)
+
+
+# Every code a refresh can record (central/media_repository.py, media/worker.py and the
+# adapter media/immich.py), harvested from the code that raises them.
+_RAISED = re.compile(r'(?:MediaError\((?:"[a-z_]+" if \w+ else )?|Diagnostic\(code=|missing=|return |\bcode = )"([a-z_]+)"')
+
+
+def _served_refusal_codes() -> set[str]:
+    root = SRC.parents[2]
+    codes = set()
+    for path in ("media/immich.py", "media/worker.py", "central/media_repository.py"):
+        codes |= set(_RAISED.findall((root / path).read_text()))
+    return codes | {WORKER_EXITED, COMPLETION_NOT_RECORDED}
+
+
+def test_every_served_refusal_code_has_one_owner():
+    """One closed table names the owner of every refusal code (sourceWords.js SOURCE_REFUSALS):
+    the library only for what it reported, and Photo Wall's own refusals never worded as the
+    library's (§39 R21). A new code with no row fails here."""
+    _require_node()
+    script = r"""
+const words = await import(process.argv[1]);
+console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRARY, words.PHOTO_WALL] }));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", (SRC / "sourceWords.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+    served = _served_refusal_codes()
+    assert {"spec_unsupported", "connection_mismatch", "source_limit", "upstream_timeout",
+            "worker_internal", "tag_missing"} <= served
+    assert sorted(served - set(out["table"])) == []
+    library, photo_wall = out["owners"]
+    for code, entry in out["table"].items():
+        assert entry["owner"] in (library, photo_wall), code
+        if entry["owner"] == photo_wall:
+            assert not entry["state"].startswith("Your photo library"), code
+    for code in ("spec_unsupported", "connection_mismatch", "connection_unknown", "source_limit",
+                 "owner_mismatch", "worker_timeout"):
+        assert out["table"][code]["owner"] == photo_wall, code
 
 
 def test_no_console_string_says_photo_source_album_or_the_librarys_vendor():

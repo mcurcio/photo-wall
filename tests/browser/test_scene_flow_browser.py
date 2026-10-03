@@ -79,7 +79,7 @@ def _steps(page):
         ("failed", lambda registry, now: _set_source(
             registry, SOURCE, status="unavailable", next_refresh=now + 30,
             refresh_completed_revision=0, refresh_requested_revision=1,
-            diagnostics=[{"code": "source_unavailable"}],
+            diagnostics=[{"code": "upstream_unavailable"}],
         ), "Your photo library is unreachable", "last refresh failed"),
         ("empty", lambda registry, now: _set_source(
             registry, SOURCE, status="ok", next_refresh=now + 30, last_success=now,

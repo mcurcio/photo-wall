@@ -19,7 +19,7 @@
 import { localDayStart } from "./authoring.js";
 import { editedId, flowKeys } from "./flow/instance.js";
 import { namedSource, sourceDay, sourceName } from "./sourceNames.js";
-import { datedWords, favouritesWords, kindsWords, tagWords } from "./sourceWords.js";
+import { datedWords, favouritesWords, kindsWords, tagWords, UNTAGGED_SELECTION } from "./sourceWords.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 
@@ -303,7 +303,7 @@ export function sourceAnswers(draft, rule = null, tagPaths = {}) {
 }
 
 /** How Review says no tags: the Source takes everything the other criteria allow. */
-export const NO_TAGS = "No tags: everything in your library";
+export const NO_TAGS = `No tags: ${UNTAGGED_SELECTION}`;
 
 /**
  * What a Source selects, in words (§39 selection summary, a `set` fact: the Source's own
@@ -321,7 +321,7 @@ export function selectionWords(query, tagPaths = {}) {
   const tags = query?.tags ?? [];
   const named = tags.map((tag) => tagWords(tag, tagPaths));
   return [
-    tags.length === 0 ? "Selects everything in your library"
+    tags.length === 0 ? `Selects ${UNTAGGED_SELECTION}`
       : tags.length === 1 ? `Selects media tagged ${named[0]} (and nested tags)`
         : `Selects media tagged with all of ${named.join(", ")} (each with its nested tags)`,
     favouritesWords(query?.favorites),

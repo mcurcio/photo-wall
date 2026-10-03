@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from fakes.transactions import FakeTransaction
 
+from central.assets.library import THUMBNAIL_REFERENCE
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
@@ -112,6 +113,18 @@ def test_record_produced_is_write_once(repo):
     with pytest.raises(ProducedFactsConflict):
         repo.record_produced(KEY, AssetReady(size=11, sha256=SHA_A))
     assert repo.get(KEY).produced == facts
+
+
+def test_an_identity_keyed_thumbnail_takes_new_produced_facts(repo):
+    """A library thumbnail is keyed by its original, so the library may regenerate its bytes:
+    after a purge the re-produced facts replace the recorded ones instead of conflicting for
+    good (B5-FC2-4). Mutation probe: drop `OR NOT keyed_by_content` from the UPDATE."""
+    key = AssetKey(AssetKind.LIBRARY_THUMBNAIL, "asset-" + "c" * 64)
+    assert not key.kind.keyed_by_content and KEY.kind.keyed_by_content
+    repo.reference(key, THUMBNAIL_REFERENCE)
+    repo.record_produced(key, AssetReady(size=10, sha256=SHA_A))
+    repo.record_produced(key, AssetReady(size=11, sha256=SHA_B))
+    assert repo.get(key).produced == AssetReady(size=11, sha256=SHA_B)
 
 
 @pytest.mark.parametrize("kind", [k for k in AssetKind if k is not AssetKind.LIBRARY_THUMBNAIL])

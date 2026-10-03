@@ -9,8 +9,10 @@ published for it. `prefetch` references and publishes a just-completed preview's
 Every reference carries the same reserved locator: the library's address is held only by the
 media worker (R22), whose injected `ThumbnailOrigin` finds the item from the preview's stored
 member, so no handler reads this locator. A thumbnail is keyed by its original's identity, not
-its own bytes, so its record must not outlive the previews that select it: the media worker's
-maintenance deletes the records (and files) of thumbnails no live preview selects
+its own bytes (`AssetKind.keyed_by_content` is False), so the library may regenerate it: after a
+purged cache, a re-production's new bytes replace its produced facts instead of failing for good.
+Its record must not outlive the previews that select it: the media worker's maintenance deletes
+the records (and files) of thumbnails no live preview selects
 (`MediaRepository.maintain_source_previews`), and the next preview starts a fresh record.
 """
 

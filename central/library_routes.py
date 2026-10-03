@@ -25,14 +25,12 @@ from typing import Any, Final
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
-from starlette.datastructures import MutableHeaders
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from central.assets.reader import Unavailable
 from central.content_routes import ClientDisconnected, until_disconnect
 from central.content_wiring import ContentServices
 from central.media_ports import MediaApplication
-from central.operator_auth import OPERATOR_PREFIX
+from central.operator_auth import OPERATOR_PREFIX, add_prefix_headers
 from contracts.models import Identifier
 from media.models import MAX_SOURCE_TAGS, TagRef
 
@@ -60,26 +58,6 @@ class LibraryQueryStrings(logging.Filter):
         return True
 
 
-class _LibraryCorp:
-    """`Cross-Origin-Resource-Policy: same-origin` on every answer under `LIBRARY_PREFIX`,
-    including the shared admin dependency's 401 and FastAPI's 422, which no route here builds."""
-
-    def __init__(self, app: ASGIApp):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith(LIBRARY_PREFIX):
-            await self.app(scope, receive, send)
-            return
-
-        async def send_corp(message: Message) -> None:
-            if message["type"] == "http.response.start":
-                MutableHeaders(scope=message).update(_CORP)
-            await send(message)
-
-        await self.app(scope, receive, send_corp)
-
-
 def install_access_log_filter() -> None:
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(existing, LibraryQueryStrings) for existing in access.filters):
@@ -99,7 +77,9 @@ def _read_all(fd: int) -> bytes:
 def mount_library_routes(app: FastAPI, *, admin: Any, media: MediaApplication,
                          content: ContentServices | None) -> None:
     install_access_log_filter()
-    app.add_middleware(_LibraryCorp)
+    # Every answer under the prefix, the admin dependency's 401, FastAPI's 422 and an
+    # unhandled 500 included (`add_prefix_headers`).
+    add_prefix_headers(app, LIBRARY_PREFIX, _CORP)
 
     @app.get(LIBRARY_PREFIX + "tags", dependencies=[Depends(admin)])
     def library_tags(connection: Identifier,

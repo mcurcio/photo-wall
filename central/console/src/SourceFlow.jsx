@@ -30,7 +30,7 @@ import {
   unannouncedWords,
 } from "./sourceFlowModel.js";
 import { libraryName } from "./sourcePreview.js";
-import { OVER_LIMIT, OWNER_MISMATCH, TAG_GONE } from "./sourceWords.js";
+import { refusalIssue, TAG_GONE } from "./sourceWords.js";
 import { LibraryStep, NameStep, NarrowStep, SourceReview, TagsStep } from "./SourceSteps.jsx";
 import { namedSource, sourceName } from "./sourceNames.js";
 import { sourceRefreshPath } from "./mediaApi.js";
@@ -447,20 +447,11 @@ function SourceCards({ sources, now, connections, reported, onRefresh, refreshin
   );
 }
 
-const SOURCE_ISSUES = {
-  unsupported_version: "This Photo Wall release does not support your photo library's version.",
-  upstream_permission: "Your photo library refused access. Check the library key's permissions.",
-  owner_mismatch: OWNER_MISMATCH,
-  source_limit: OVER_LIMIT,
-  tag_missing: TAG_GONE,
-  connection_unknown: "Connection is not configured in the media worker.",
-};
-
 function sourceIssue(source, now) {
   const diagnostics = source.diagnostics ?? [];
   const details = [...new Set(diagnostics.map((entry) => entry.code))]
     .slice(0, 3)
-    .map((code) => SOURCE_ISSUES[code] ?? codeWords(code))
+    .map(refusalIssue)
     .join(" · ");
   if (source.status !== "ok") return details;
   const state = sourceState(source, now, false);

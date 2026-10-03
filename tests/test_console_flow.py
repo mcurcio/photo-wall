@@ -415,7 +415,7 @@ def test_hand_offs_and_source_flow_shape():
         "revision": 3}
     assert out["answers"] == [
         {"label": "Connection name", "field": "connection", "value": None},
-        {"label": "Tags in your library", "field": "tags", "value": "No tags: everything in your library"},
+        {"label": "Tags in your library", "field": "tags", "value": "No tags: everything on your library's timeline (not archived, hidden or other users' media)"},
         {"label": "Media type", "field": "type", "value": "Photos and videos"},
         {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
         {"label": "Dated from", "field": "from", "value": "2024-01-01"},
@@ -450,7 +450,8 @@ console.log(JSON.stringify([
     assert states[0]["state"] == "never-refreshed"
     assert states[0]["label"] == "Awaiting refresh"
     assert states[1]["state"] == "failing"
-    assert states[1]["label"] == "Your photo library is unsupported · never refreshed successfully"
+    # No code: the status alone names no owner, so it reads neutrally (§39 R21).
+    assert states[1]["label"] == "Refresh failed (incompatible) · never refreshed successfully"
 
 
 def test_source_health_qualifies_partial_refresh_without_marking_it_failed():

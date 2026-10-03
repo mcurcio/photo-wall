@@ -4,7 +4,8 @@ Every method runs inside the caller's transaction (`pg_connection(tx)`), so it b
 from a worker thread.
 
 An asset row, once created, is never deleted here, and its produced facts are never cleared:
-`retire` deletes only the reference.
+`retire` deletes only the reference. They are write-once for every content-keyed kind; a kind not
+`keyed_by_content` (a library thumbnail) has them replaced by a later production.
 """
 
 from __future__ import annotations
@@ -92,10 +93,12 @@ class PgAssetRecords:
 
     def record_produced(self, tx: Transaction, key: AssetKey, facts: AssetReady) -> None:
         conn = pg_connection(tx)
+        # Write-once only where the key fixes the bytes; an identity-keyed kind takes the new
+        # facts, so a regenerated file after a purge never wedges its record.
         written = conn.execute(
             "UPDATE assets SET produced_size=%s, produced_sha256=%s "
-            "WHERE kind=%s AND identity=%s AND produced_sha256 IS NULL",
-            (facts.size, facts.sha256, key.kind.value, key.identity),
+            "WHERE kind=%s AND identity=%s AND (produced_sha256 IS NULL OR NOT %s)",
+            (facts.size, facts.sha256, key.kind.value, key.identity, key.kind.keyed_by_content),
         ).rowcount
         if written:
             return

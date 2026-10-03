@@ -90,19 +90,32 @@ export function datedWords(from, until) {
   return null;
 }
 
-// --- What a Source's own failures say, one home for the preview and the Source card.
+/**
+ * What an untagged Source takes: the media worker's search asks for the library's timeline
+ * only (media/immich.py `_walk`), and drops archived, hidden, locked, trashed, offline and
+ * other users' media, so "everything in your library" would claim more than it selects.
+ */
+export const UNTAGGED_SELECTION = "everything on your library's timeline (not archived, hidden or other users' media)";
+
+// --- What a Source's own failures say, one home for the preview, the Source card and the
+// --- media pipeline.
 
 /**
- * The media worker's current membership ceiling (media/immich.py `_walk`): a refresh over it
- * REFUSES the whole Source (`source_limit`, status incompatible), so it selects nothing; only
- * a preview cuts the list short. The worker's current behaviour, not a product rule (§44, Q8b).
+ * A preview that counted more than 1,000 matches (`limited`, media/immich.py `_walk`'s
+ * count ceiling): a refresh over it REFUSES the whole Source (`source_limit`, status
+ * incompatible), so it selects nothing; only a preview cuts the list short. The worker's
+ * current behaviour, not a product rule (§44, Q8b). Said only where the walk counted more.
  */
 export const OVER_LIMIT =
   "Photo Wall currently refuses a Source with more than 1,000 matches; saved like this it " +
   "selects nothing. Narrow it with tags or dates.";
 
-/** A saved Source refused at that ceiling: Photo Wall's limit, never a fault in the library. */
-export const OVER_LIMIT_STATE = "Over Photo Wall's current 1,000-match limit · narrow it with tags or dates";
+/**
+ * A saved Source refused by `source_limit`. The worker raises it for its match ceiling and
+ * for its per-refresh byte and request bounds alike, so it never claims the count alone.
+ */
+const SIZE_LIMIT_STATE =
+  "Over Photo Wall's current size limits for one Source (at most 1,000 matches) · narrow it with tags or dates";
 
 /** The library key belongs to another library user (`owner_mismatch`). */
 export const OWNER_MISMATCH = "The library key belongs to a different user.";
@@ -110,5 +123,118 @@ export const OWNER_MISMATCH = "The library key belongs to a different user.";
 /** What a Source card says when a tag it selects by is no longer in the library (§39). */
 export const TAG_GONE = "A tag this Source uses no longer exists in your library.";
 
-/** A saved Source refused because a tag it uses is gone (`tag_missing`, the worker's check). */
-export const TAG_MISSING_STATE = "Your photo library no longer has a tag this Source uses · edit its tags";
+/**
+ * Who produced a refusal (§39, R21: the library is the origin only of what it reports).
+ * `LIBRARY`: the photo library answered it. `PHOTO_WALL`: Central or its media worker
+ * produced it (its limits, its configuration, its version), never worded as the library's.
+ */
+export const LIBRARY = "library";
+export const PHOTO_WALL = "photo-wall";
+
+const library = (state, issue = undefined) => Object.freeze({ owner: LIBRARY, state, issue });
+const photoWall = (state, issue = undefined) => Object.freeze({ owner: PHOTO_WALL, state, issue });
+
+const UNREACHABLE = library("Your photo library is unreachable");
+const REFUSED_ACCESS = library("Your photo library refused access",
+  "Your photo library refused access. Check the library key's permissions.");
+const UNREADABLE = library("Your photo library sent an answer Photo Wall can't read");
+const ITEM = (state) => library(state);
+const CONNECTION = photoWall(
+  "The media worker's library connection settings are invalid · check its configuration");
+const WORKER_FAILED = photoWall("The media worker failed during the refresh · check its logs");
+
+/**
+ * The one closed table from a served refusal code to its owner and words: `state` is the
+ * Source's state label, `issue` (when it differs) the Source card's sentence. Every code a
+ * refresh can record is here (tests/test_console_sources.py harvests them from
+ * media/immich.py, media/worker.py and central/media_repository.py); an unknown code reads
+ * neutrally ({@link refusalState}), never as the library's fault.
+ */
+export const SOURCE_REFUSALS = Object.freeze({
+  // The library's answers.
+  upstream_unavailable: UNREACHABLE,
+  upstream_timeout: UNREACHABLE,
+  upstream_permission: REFUSED_ACCESS,
+  asset_permission: REFUSED_ACCESS,
+  upstream_schema: UNREADABLE,
+  upstream_pagination: UNREADABLE,
+  upstream_encoding: UNREADABLE,
+  upstream_integrity: UNREADABLE,
+  upstream_redirect: library("Your photo library redirected Photo Wall's request"),
+  unsupported_version: library("Your photo library is unsupported",
+    "This Photo Wall release does not support your photo library's version."),
+  tag_missing: library("Your photo library no longer has a tag this Source uses · edit its tags", TAG_GONE),
+  metadata_invalid: ITEM("Your photo library sent an item Photo Wall can't read"),
+  metadata_mismatch: ITEM("Your photo library sent an item that doesn't match its listing"),
+  metadata_pending_or_changed: ITEM("Your photo library's item details are still settling"),
+  metadata_pending_or_invalid: ITEM("Your photo library's item details are still settling"),
+  asset_missing: ITEM("Your photo library no longer has an item"),
+  asset_unavailable: ITEM("Your photo library could not serve an item"),
+  asset_changed: ITEM("An item changed in your photo library while it was fetched"),
+  asset_integrity: ITEM("An item from your photo library arrived damaged"),
+  unsupported_media: ITEM("Your photo library has an item Photo Wall can't show"),
+  unsupported_color: ITEM("Your photo library has an item in colours Photo Wall can't show"),
+  thumbnail_unsupported: ITEM("Your photo library sent a thumbnail Photo Wall can't show"),
+  thumbnail_invalid: ITEM("Your photo library sent a thumbnail Photo Wall can't read"),
+  thumbnail_not_ready: ITEM("Your photo library's thumbnail isn't ready yet"),
+  // Photo Wall's own: its limits, its configuration, its version, its worker.
+  source_limit: photoWall(SIZE_LIMIT_STATE,
+    "Photo Wall currently refuses a Source this large (at most 1,000 matches, within its size " +
+    "limits); saved like this it selects nothing. Narrow it with tags or dates."),
+  tag_limit: photoWall("Over Photo Wall's current limits on library tags"),
+  asset_oversize: photoWall("An item is over Photo Wall's current size limit"),
+  thumbnail_oversize: photoWall("A thumbnail is over Photo Wall's current size limit"),
+  preparation_limit: photoWall("An item is over Photo Wall's current preparation limits"),
+  preparation_invalid: photoWall("Photo Wall could not prepare an item"),
+  preparation_io: WORKER_FAILED,
+  preparation_timeout: photoWall("Preparing an item ran out of time"),
+  preparation_tool_missing: photoWall("The media worker is missing a preparation tool · check its install"),
+  preparation_build_changed: photoWall("The media worker's preparation changed while it ran"),
+  recipe_changed: photoWall("Photo Wall's preparation recipe changed while it ran"),
+  destination_exists: WORKER_FAILED,
+  staging_io: WORKER_FAILED,
+  staging_cleanup: WORKER_FAILED,
+  spec_unsupported: photoWall(
+    "This media worker can't read this Source's settings · update the media worker",
+    "This media worker is older than the Source's settings. Update the media worker."),
+  connection_mismatch: photoWall(
+    "The media worker's library connection doesn't match this Source · check the worker's connections"),
+  connection_unknown: photoWall(
+    "The media worker has no library connection for this Source · check the worker's connections",
+    "Connection is not configured in the media worker."),
+  connection_config: CONNECTION,
+  connection_file: CONNECTION,
+  worker_config: photoWall("The media worker's settings are invalid · check its configuration"),
+  owner_mismatch: photoWall("The library key belongs to a different user · check the worker's library key",
+    OWNER_MISMATCH),
+  worker_timeout: photoWall("The media worker's refresh ran out of time"),
+  worker_cancelled: photoWall("The media worker stopped during the refresh"),
+  worker_exited: WORKER_FAILED,
+  completion_not_recorded: WORKER_FAILED,
+  worker_io: WORKER_FAILED,
+  worker_internal: WORKER_FAILED,
+  clock_invalid: photoWall("The media worker's clock is invalid · check its host"),
+});
+
+/** A code as words: "spec_unsupported" -> "spec unsupported". */
+function codeText(code) {
+  return String(code).replaceAll("_", " ");
+}
+
+/**
+ * A failing Source's state words from its refusal code; with no code, or a code the table
+ * does not hold, a neutral "Refresh failed (…)" that blames no one.
+ *
+ * @param {string|null|undefined} code the refusal's diagnostic code
+ * @param {string|null|undefined} status the Source's status, said only when there is no code
+ * @returns {string}
+ */
+export function refusalState(code, status = null) {
+  if (code && Object.hasOwn(SOURCE_REFUSALS, code)) return SOURCE_REFUSALS[code].state;
+  return `Refresh failed (${codeText(code || status || "unknown")})`;
+}
+
+/** A Source card's sentence for a reported code: its table sentence, else the code in words. */
+export function refusalIssue(code) {
+  return (Object.hasOwn(SOURCE_REFUSALS, code) ? SOURCE_REFUSALS[code].issue : undefined) ?? codeText(code);
+}

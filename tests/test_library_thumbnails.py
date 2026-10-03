@@ -352,6 +352,56 @@ def test_a_servable_thumbnail_answers_within_about_two_seconds_then_serves(route
     assert b"SyntheticCam" not in served.content
 
 
+class RegeneratingOrigin:
+    """The library's thumbnail for one item, regenerated (new bytes) between fetches."""
+
+    def __init__(self):
+        self.colour, self.calls = (200, 30, 30), 0
+
+    async def thumbnail(self, asset_id, into):
+        self.calls += 1
+        output = io.BytesIO()
+        Image.new("RGB", (400, 300), self.colour).save(output, "JPEG")
+        into.write_bytes(reencode_thumbnail(output.getvalue()))
+
+
+def test_a_purged_then_regenerated_thumbnail_serves_again_and_is_not_refetched(route, registry):
+    """A thumbnail is keyed by its original, so after a cache purge the library's regenerated
+    bytes REPLACE its produced facts (`AssetKind.keyed_by_content`) instead of turning it
+    terminal `not_reproducible` while previews keep selecting it (B5-FC2-4); once served, a
+    tile request is a hit that publishes no fetch. Covers a repeated preview keeping the record
+    past the first one's expiry. Mutation probe: raise `not_reproducible` for every kind in
+    `AssetProduction.produce` and the second fetch is terminal."""
+    app, root = route
+    repo, member = app.state.media_repository, stored_member(9)
+    origin = RegeneratingOrigin()
+    runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
+                                thumbnails=origin)
+    job = FetchLibraryThumbnail(asset_id=member.asset_id)
+    previews = ensure_previews_directory(root)
+    _complete(repo, member)
+    asyncio.run(build_library_thumbnails(registry.db, registry.clock, cache_root=root)
+                .prefetch([member.asset_id]))
+    with TestClient(app) as client:
+        for colour in ((200, 30, 30), (30, 200, 30), (30, 30, 200)):
+            origin.colour = colour
+            for stale in previews.iterdir():  # the purge
+                stale.unlink()
+            assert asyncio.run(runtime._executor.execute(job, 0)) == "ok"
+            jobs = _thumbnail_jobs(registry.db)
+            served = [client.get(_url(member.asset_id), headers=AUTH) for _ in range(3)]
+            assert [response.status_code for response in served] == [200, 200, 200]
+            with Image.open(io.BytesIO(served[0].content)) as image:
+                assert image.convert("RGB").getpixel((10, 10))[colour.index(200)] > 150
+            assert _thumbnail_jobs(registry.db) == jobs  # hits: nothing re-fetched
+            # A repeated preview keeps the record past the first one's expiry.
+            registry.clock.advance(500)
+            _complete(repo, member)
+            registry.clock.advance(200)
+            assert member.asset_id in repo.maintain_source_previews()
+    assert origin.calls == 3
+
+
 @pytest.mark.parametrize("asset_id", ["asset-" + "e" * 64, "not-an-asset", "asset-" + "E" * 64])
 def test_an_id_no_live_preview_selects_is_404_and_queues_nothing(route, registry, asset_id):
     app, _ = route
@@ -387,6 +437,24 @@ def test_signed_out_and_player_credentials_get_one_401_for_any_id(route, registr
     assert known.json() == unknown.json() == {"error": "unauthorized"}
     assert known.headers["cross-origin-resource-policy"] == "same-origin"  # every answer
     _nothing_queued(registry.db)
+
+
+def test_an_unhandled_library_500_still_carries_corp_and_no_store(route, monkeypatch):
+    """Starlette answers an unhandled exception outside every user middleware; the 500 handler
+    applies the same prefix table (`add_prefix_headers`), so CORP holds on every answer.
+    Mutation probe: register the library's CORP as a bare middleware and this fails."""
+    app, _ = route
+    member = stored_member(10)
+    _complete(app.state.media_repository, member)
+
+    async def boom(_asset_id):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(app.state.content.thumbnails, "resolve", boom)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(_url(member.asset_id), headers=AUTH)
+    assert response.status_code == 500 and "boom" not in response.text
+    assert response.headers["cross-origin-resource-policy"] == "same-origin"
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_create_app_keeps_library_query_strings_out_of_the_access_log(route):

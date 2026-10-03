@@ -3347,3 +3347,44 @@ engine without `timeZoneName: "longOffset"` throws (reproduced under Node 16: `o
 out of range"), so `offsetLabel`'s "local time" fallback is unreachable; fix: catch RangeError -> null, with a test.
 Minor, noted not fixed: the Source card says "the media worker accepted N in that refresh" while `sourceState`
 (`mediaHealth.js:198`) still says "N valid in the last refresh" for the same count — two wordings, two surfaces.
+
+## B5-FC3 · Batch 5 fix cycle 3 — majors FIXED; minors FIXED or deferred (implementer)
+B5-FC3-1 · FIXED (major, refusal ownership): the console's status fall-through ("Your photo library is unsupported"
+for every `incompatible`) is gone. One closed table, `central/console/src/sourceWords.js` `SOURCE_REFUSALS`, maps each
+refusal code to its owner (`LIBRARY` or `PHOTO_WALL`) and its state words (and the card sentence where it differs);
+`mediaHealth.js` `sourceState` and `SourceFlow.jsx` `sourceIssue` both read it, and a code it does not hold, or a
+failing Source with no code, reads neutrally ("Refresh failed (…)"). `spec_unsupported`, `connection_mismatch`, every
+`connection_*`/`worker_*` code and `owner_mismatch` are Photo Wall's. `tests/test_console_sources.py`
+`test_every_served_refusal_code_has_one_owner` harvests the codes raised in media/immich.py, media/worker.py and
+central/media_repository.py and fails on a code with no row (a lower bound: a code built at run time is not harvested;
+it still reads neutrally). Runbook "Failing" row corrected. Browser fixtures that used `source_unavailable` (a worker
+status, never a Source diagnostic) now use `upstream_unavailable`.
+B5-FC3-2 · FIXED (major, B5-FC2-4): `AssetKind.keyed_by_content` (False only for `library-thumbnail`) lets a
+re-production's new bytes replace `produced` (`AssetProduction.produce` no longer raises `not_reproducible` for it;
+`PgAssetRecords.record_produced` updates instead of conflicting). DB test: purge + regenerate three times, across a
+repeated preview past the first one's expiry, serves each time and later GETs publish nothing. Cost: between a
+re-fetch's install and its recorded facts a same-size tile can be served with the previous `Digest`.
+B5-FC3-3 · FIXED (minors): `source_limit` worded as Photo Wall's size limits ("at most 1,000 matches"), the 1,000-count
+sentence kept only for a preview that counted more; untagged selection is "everything on your library's timeline (not
+archived, hidden or other users' media)"; Why's empty Intended? uses `factText(plannedNothing())` and the precedence
+empty state "No Run puts a layer on this Frame now." (both added to RETIRED_WORDS); one `add_prefix_headers` table
+drives the no-store and CORP middleware AND the unhandled-500 handler (`_LibraryCorp`/`_NoStoreOperator` deleted),
+with a 500 test; DDD §38/§43 and module-central-cache.md no longer claim `facts_conflict`.
+B5-FC3-4 · DEFERRED (minor, unmeasured): tile requests' pre-slot DB/thread work (servability, reference write,
+`_open_first`, `_touch`) is not bounded by the four thumbnail slots, and the thumbnail `AssetReader._touched` grows per
+previewed id for the process's life. Needs a route-scoped bound and a touch-less reader; a non-blocking cap would 503
+a 24-tile grid, so it is a design choice, not a trivial fix.
+B5-FC3-A1 · OPEN (minor, architect check of fix cycle 3): `sourceWords.js` `refusalIssue` falls back to the raw code
+(`codeText`) when a row has no `issue`, not to the row's `state`, so a failing Source's card shows Status "Your photo
+library is unreachable · …" beside Issue "upstream unavailable", and "connection mismatch" / "worker exited" for Photo
+Wall's rows (probe: node import of sourceWords.js). DDD §39 says the card sentence is given only "where it differs".
+Fix: `issue ?? state`; keep the code-in-words fallback for codes outside the table; one test per owner. Also
+`codeText` duplicates `mediaHealth.js` `codeWords` (rule of two: one home in `sourceWords.js`, imported by mediaHealth).
+B5-FC3-A2 · OPEN (doc, architect check of fix cycle 3): docs/central-system-architecture.md:394-399 still says every
+produced fact is write-once and any differing re-production is `not_reproducible`; `AssetKind.keyed_by_content` makes
+`library-thumbnail` the one exception. Needs one clause there (documentation bead).
+B5-FC3-A3 · NOTED (pre-existing, not fix-cycle drift): `media_repository.py:256` and `:267` reset a Source to
+`status='unavailable', diagnostics='[]'` on reactivation and on an expired-lease fence; with any completed revision,
+`sourceState` now reads "Refresh failed (unavailable)" (before: "Your photo library is unreachable", which blamed the
+library for Central's own reset). Neutral, but "failed" overstates a reset awaiting its refresh; candidate for its own
+code or an "Awaiting refresh" branch.

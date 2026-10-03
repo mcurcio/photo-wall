@@ -256,7 +256,7 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
 def test_a_source_over_the_workers_ceiling_names_photo_walls_limit_not_the_library(page, registry):
     """A refresh over the worker's 1,000-match ceiling refuses the Source (`source_limit`,
     status incompatible): the card says it is Photo Wall's limit, never that the library is
-    unsupported. Mutation probe: drop the `source_limit` branch in `sourceState`."""
+    unsupported. Mutation probe: drop the `source_limit` row in sourceWords.js `SOURCE_REFUSALS`."""
     _seed(registry)
     _set_source(registry, "all-photos:1", status="incompatible",
                 next_refresh=registry.clock.utc() + 30,
@@ -266,10 +266,12 @@ def test_a_source_over_the_workers_ceiling_names_photo_walls_limit_not_the_libra
         connect(page, origin)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
-        expect(card).to_contain_text("Over Photo Wall's current 1,000-match limit · narrow it with tags or dates")
         expect(card).to_contain_text(
-            "Photo Wall currently refuses a Source with more than 1,000 matches; saved like this it "
-            "selects nothing. Narrow it with tags or dates.")
+            "Over Photo Wall's current size limits for one Source (at most 1,000 matches) · narrow it "
+            "with tags or dates")
+        expect(card).to_contain_text(
+            "Photo Wall currently refuses a Source this large (at most 1,000 matches, within its size "
+            "limits); saved like this it selects nothing. Narrow it with tags or dates.")
         expect(card).not_to_contain_text("unsupported")
 
 

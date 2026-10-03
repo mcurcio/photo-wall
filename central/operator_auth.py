@@ -26,6 +26,9 @@ derive from: `OperatorAuth.require_scoped` refuses, at app construction, any rou
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.dependencies.models import Dependant
 from fastapi.responses import PlainTextResponse, Response
@@ -132,23 +135,43 @@ def _sign_in_origin(request: Request) -> str:
     return origin
 
 
-class _NoStoreOperator:
-    """`Cache-Control: no-store` on every `/v1/operator/*` response this middleware sees."""
+class _PrefixHeaders:
+    """Fixed headers on every response under one path prefix that this middleware sees."""
 
-    def __init__(self, app: ASGIApp):
-        self.app = app
+    def __init__(self, app: ASGIApp, *, prefix: str, headers: Mapping[str, str]):
+        self.app, self.prefix, self.headers = app, prefix, dict(headers)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith(OPERATOR_PREFIX):
+        if scope["type"] != "http" or not scope["path"].startswith(self.prefix):
             await self.app(scope, receive, send)
             return
 
-        async def send_no_store(message: Message) -> None:
+        async def send_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
-                MutableHeaders(scope=message)["Cache-Control"] = NO_STORE
+                MutableHeaders(scope=message).update(self.headers)
             await send(message)
 
-        await self.app(scope, receive, send_no_store)
+        await self.app(scope, receive, send_headers)
+
+
+def add_prefix_headers(app: FastAPI, prefix: str, headers: Mapping[str, str]) -> None:
+    """Put `headers` on every response under `prefix`: the user middleware for every answer a
+    route or FastAPI builds, and the same table for the unhandled-500 handler, which Starlette's
+    outermost ServerErrorMiddleware runs outside every user middleware (`OperatorAuth.install`).
+    The one way a prefix gets fixed headers, so no answer under it can miss them."""
+    table = getattr(app.state, "prefix_headers", None)
+    if table is None:
+        table = app.state.prefix_headers = []
+    table.append((prefix, dict(headers)))
+    app.add_middleware(_PrefixHeaders, prefix=prefix, headers=headers)
+
+
+def _prefix_headers_for(app: Any, path: str) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for prefix, extra in getattr(app.state, "prefix_headers", ()):
+        if path.startswith(prefix):
+            headers.update(extra)
+    return headers
 
 
 def _depends_on(dependant: Dependant, call: object) -> bool:
@@ -210,13 +233,13 @@ class OperatorAuth:
                 response.headers.append("set-cookie", header)
             return response
 
-        app.add_middleware(_NoStoreOperator)
+        add_prefix_headers(app, OPERATOR_PREFIX, {"Cache-Control": NO_STORE})
 
         # An unhandled exception is answered by Starlette's outermost ServerErrorMiddleware,
-        # outside every user middleware; this handler is where that response is built.
+        # outside every user middleware; this handler is where that response is built, from
+        # the same prefix table (`add_prefix_headers`).
         async def server_error(request: Request, exc: Exception) -> Response:
-            headers = {"Cache-Control": NO_STORE} if request.url.path.startswith(
-                OPERATOR_PREFIX) else None
+            headers = _prefix_headers_for(request.app, request.url.path) or None
             return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
 
         app.add_exception_handler(Exception, server_error)

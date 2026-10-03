@@ -2079,7 +2079,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
                 counts=good, spec={"favorites": True, "media_types": ("image",),
                                    "captured_from": _utc(2024), "captured_until": _utc(2025)})
     _set_source(registry, "failing:1", next_refresh=now + 30, last_success=now - 7200,
-                status="unavailable", diagnostics=[{"code": "source_unavailable"}])
+                status="unavailable", diagnostics=[{"code": "upstream_unavailable"}])
     _set_source(registry, "empty:1", next_refresh=now + 30, last_success=now, status="ok",
                 counts={"valid": 0})
     with operator_server(registry.db, registry.clock) as origin:
@@ -2094,7 +2094,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
             " · favourites only · photos only · dated 2024")
         expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
         expect(state("failing:1")).to_contain_text("Your photo library is unreachable · last good refresh 2 h ago")
-        expect(state("failing:1")).to_contain_text("source unavailable")
+        expect(state("failing:1")).to_contain_text("upstream unavailable")
         expect(state("empty:1")).to_contain_text("nothing valid in the last refresh")
 
         registry.clock.advance(30 + 125 + 240)  # every refresh is 6 min past due
@@ -2197,7 +2197,7 @@ def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page,
             rf"Run ended\? {SCENE_ID}'s Run ended at \d\d:\d\d(:\d\d)? \S+ after one cycle; if its "
             r"last item was a photo, the frame keeps that still \(a video is not kept\)\."))
         expect(chain.get_by_role("listitem").first).to_contain_text(
-            f"No Scene is intended for {VALID_FRAME} now.")
+            "On top: nothing · no Run puts a layer on this Frame now")
         # The chain is its own group: the ranked list is not in it.
         expect(chain.get_by_role("list", name="Contribution precedence")).to_have_count(0)
 

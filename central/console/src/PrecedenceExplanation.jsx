@@ -11,7 +11,7 @@ import React from "react";
  */
 export function PrecedenceExplanation({ explanation, listLabel, listClass, emptyClass }) {
   if (explanation === null) {
-    return <p className={emptyClass}>No contributions target this frame.</p>;
+    return <p className={emptyClass}>No Run puts a layer on this Frame now.</p>;
   }
   return (
     <div className="precedence">

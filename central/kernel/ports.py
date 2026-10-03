@@ -87,7 +87,8 @@ class AssetRecords(Protocol):
         ...
 
     def record_produced(self, tx: Transaction, key: AssetKey, facts: AssetReady) -> None:
-        """Write-once: equal facts -> no-op; different -> ProducedFactsConflict; absent -> no-op."""
+        """Write-once for a content-keyed kind: equal facts -> no-op; different ->
+        ProducedFactsConflict. A kind not `keyed_by_content` takes the new facts. Absent -> no-op."""
         ...
 
     def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:

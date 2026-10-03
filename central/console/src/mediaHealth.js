@@ -1,10 +1,10 @@
 import { ageAt, formatAge, frameHealth, gigabytes } from "./health.js";
-import { factText } from "./facts.js";
+import { factText, plannedNothing } from "./facts.js";
 import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
 import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import {
-  datedWords, favouritesWords, kindsWords, OVER_LIMIT_STATE, TAG_MISSING_STATE, tagCountWords,
+  datedWords, favouritesWords, kindsWords, refusalState, tagCountWords,
 } from "./sourceWords.js";
 import { captureDay, clockTime } from "./timeWords.js";
 
@@ -107,16 +107,6 @@ export function workerState(health, now) {
   };
 }
 
-// §39: the photo library is the reporting origin.
-const SOURCE_FAILURES = {
-  unavailable: "Your photo library is unreachable",
-  permission: "Your photo library refused access",
-  incompatible: "Your photo library is unsupported",
-};
-
-// A Source's refusals that name their own cause (sourceWords.js), first match wins.
-const OWN_FAILURES = { source_limit: OVER_LIMIT_STATE, tag_missing: TAG_MISSING_STATE };
-
 /** A local date, "3 Mar 2025" (timeWords.js). */
 const day = captureDay;
 
@@ -169,12 +159,13 @@ export function sourceState(source, now, includeFilters = true) {
     const good = source.last_success == null
       ? "never refreshed successfully"
       : `last good refresh ${age(ageAt(now, source.last_success))} ago`;
-    // Two refusals are not the library's fault: over the worker's ceiling (`source_limit`,
-    // Photo Wall's own limit) and a tag the Source uses gone (`tag_missing`). Neither falls
-    // through to the "unsupported" wording, which sends the operator to the wrong fix.
-    const code = (source.diagnostics ?? []).find((entry) => Object.hasOwn(OWN_FAILURES, entry?.code ?? ""))?.code;
-    const failure = code !== undefined ? OWN_FAILURES[code]
-      : SOURCE_FAILURES[source.status] ?? `Your photo library: ${codeWords(source.status)}`;
+    // One closed table names each refusal's owner and words (sourceWords.js
+    // SOURCE_REFUSALS, §39 R21): Photo Wall's own refusals never read as the library's
+    // fault, and a code it does not hold reads neutrally. A failed refresh records one
+    // Source-level code; per-item codes carry an asset id.
+    const diagnostics = source.diagnostics ?? [];
+    const code = (diagnostics.find((entry) => entry?.code && !entry.asset_id) ?? diagnostics[0])?.code;
+    const failure = refusalState(code, source.status);
     return said("failing", "alarm", `${failure} · ${good}`);
   }
   if (!source.next_refresh) {
@@ -337,7 +328,8 @@ export function whyNothingNew(snapshot, frameId, check = null) {
     steps.push({
       title: "Intended?",
       state: ended === null ? "stop" : "info",
-      text: `No Scene is intended for ${frameId} now.`,
+      // The empty branch in the same `planned` wording as the top Run (§35).
+      text: `${factText(plannedNothing())}.`,
     });
     steps.push(ended === null ? skip("Run ended?") : endedStep(snapshot, ended, frameId));
   }

@@ -8,7 +8,9 @@ renamed into place. `produce` writes no record: the runtime writes `produced` an
 
 Any reference may supply the bytes: an asset's key is the sha256 of its upstream file, and every
 download is checked against its locator's sha (`ReleaseOrigin.download`), so each reference names
-the same bytes. A late run can only write the same bytes under the same name.
+the same bytes. A late run can only write the same bytes under the same name. The one exception
+is a kind not `keyed_by_content` (a library thumbnail, keyed by its original): its re-produced
+bytes may differ after a purge, and replace the recorded facts.
 """
 
 from __future__ import annotations
@@ -103,8 +105,10 @@ class AssetProduction:
         try:
             await _write_from_any(temp, asset, write)
             facts = await asyncio.to_thread(self._store.measure, temp)
-            if asset.produced is not None and facts != asset.produced:
+            if asset.produced is not None and facts != asset.produced and key.kind.keyed_by_content:
                 # The key fixes the bytes, so this is a bug, never a re-cut (a re-cut is a new key).
+                # A kind keyed by its origin's identity (a library thumbnail) may be regenerated
+                # upstream: its new facts replace the recorded ones (`AssetKind.keyed_by_content`).
                 raise TerminalFailure("not_reproducible")
             if not _meets_references(asset, facts):
                 raise TerminalFailure("digest_mismatch")
