@@ -17,16 +17,24 @@
       "#/schedule/new/review",
       "#/schedule/sample-program/edit/review"
     ],
-    "sources": ["#/sources", "#/sources/new/include", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
+    "sources": ["#/sources", "#/sources/new/library", "#/sources/new/tags", "#/sources/new/narrow", "#/sources/new/name", "#/sources/new/review", "#/sources/sample/edit/review"]
   },
   "wall": {
     "wall": [
       "#/wall",
-      "#/wall/frames/sample-frame/commissioning",
+      "#/wall/layout",
+      "#/wall/frames/sample-frame/status",
       "#/wall/frames/sample-frame/binding",
-      "#/wall/frames/sample-frame/nowshowing"
+      "#/wall/frames/sample-frame/calibration"
+    ]
+  },
+  "fleet": {
+    "players": [
+      "#/players",
+      "#/players/device-0000000000000000000000000000000000000000000000000000000000000000"
     ],
-    "equipment": ["#/equipment"]
+    "releases": ["#/releases", "#/releases/update/v0.15.0", "#/releases/update/v0.15.0/try/sample-player",
+      "#/releases/update/v0.15.0/skip/sample-player", "#/releases/update/v0.15.0/try/sample-player/skip/other-player/third-player"]
   },
   "neutral": {
     "attention": ["#/attention"]

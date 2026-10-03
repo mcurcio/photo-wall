@@ -5,6 +5,7 @@ from test_operator_frames import ADMIN, AUTH
 from test_readiness_diagnostics import _offer, _report, _seed
 
 from central.app import create_app
+from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository, StoreLimits
 from contracts.models import Failure
 
@@ -16,7 +17,7 @@ def test_operator_snapshot_is_admin_authenticated(registry):
 
 
 def test_read_only_media_health_uses_the_same_defaults_without_initializing_row(registry):
-    media = MediaRepository(registry.db, registry.clock)
+    media = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     with registry.db.transaction() as conn:
         conn.execute("SET TRANSACTION READ ONLY")
         health = media.health_in(conn)

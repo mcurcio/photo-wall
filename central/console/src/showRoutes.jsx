@@ -16,7 +16,7 @@ import { SourcesRegion } from "./SourcesRegion.jsx";
  * HTML `hidden` attribute (rule 2), so a draft in any of them survives a section
  * change, a Wall visit, a poll and a session expiry.
  *
- * R4: this module, and everything it imports, never reaches the Commissioning facet
+ * R4: this module, and everything it imports, never reaches the Calibration facet
  * or the Inspector that hosts it; frame health appears only as status badges.
  * tests/test_console_routes_r4.py walks the imports to prove it, and a browser test
  * visits every `samplePaths` entry (routeSamples.json, `show`).
@@ -27,7 +27,7 @@ export const showRoutes = Object.freeze(
   [
     {
       section: "now",
-      label: "Now showing",
+      label: "Now",
       // The Show-now flow (#/now/show/<step>) lives in the Runs region; while it shows a
       // step, the media pipeline is left out (rule 1: one question on screen).
       render: ({ snapshot, route, navigate, recentScene, markDraft }) => (
@@ -79,7 +79,7 @@ export const showRoutes = Object.freeze(
     },
     {
       section: "sources",
-      label: "Photo sources",
+      label: "Sources",
       render: ({ snapshot, route, navigate, markDraft, handOffs }) => (
         <SourcesRegion
           snapshot={snapshot}

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import io
 import json
 import math
 import os
@@ -18,27 +19,65 @@ from pathlib import Path
 from typing import Self
 
 import httpx
+from PIL import Image, ImageOps
 
 from central.catalog import CatalogSnapshot
 from contracts.time import Clock, SystemClock
 from media.models import (
+    MAX_LIBRARY_TAGS,
+    MAX_TAG_TEXT,
+    PREVIEW_SHOWN,
     ConnectionConfig,
     Diagnostic,
     DownloadedOriginal,
+    LibraryTag,
     MediaError,
     MediaLimits,
     OriginalAsset,
     RefreshCounts,
     RefreshResult,
+    SourcePreview,
     SourcePreviewQuery,
     SourcePreviewResult,
     SourceQuery,
     SourceSpec,
+    StoredPreviewMember,
     asset_identity,
     canonical_uuid,
 )
 
 _SUPPORTED_VERSIONS = frozenset({(2, 5, 6), (3, 1, 0)})
+# Library thumbnails (PR 37 §7): bounded bytes and pixels, three decoders, one re-encoding.
+THUMBNAIL_BYTES = 1024**2
+THUMBNAIL_PIXELS = 4_000_000
+THUMBNAIL_EDGE = 320
+_THUMBNAIL_FORMATS = ("JPEG", "PNG", "WEBP")
+_THUMBNAIL_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
+def reencode_thumbnail(data: bytes) -> bytes:
+    """Photo Wall's own JPEG of a library thumbnail, never the library's bytes.
+
+    The size is read from the header and checked before any decode; the output is a new image
+    holding pixels only, so no EXIF, XMP, ICC or comment survives (R25).
+    """
+    try:
+        with Image.open(io.BytesIO(data), formats=_THUMBNAIL_FORMATS) as image:
+            width, height = image.size
+            if width * height > THUMBNAIL_PIXELS:
+                raise MediaError("thumbnail_oversize", "incompatible")
+            upright = ImageOps.exif_transpose(image)
+            upright.thumbnail((THUMBNAIL_EDGE, THUMBNAIL_EDGE))
+            pixels = upright.convert("RGB")
+        clean = Image.new("RGB", pixels.size)
+        clean.paste(pixels)
+        output = io.BytesIO()
+        clean.save(output, "JPEG", quality=80)
+        return output.getvalue()
+    except MediaError:
+        raise
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        raise MediaError("thumbnail_invalid", "incompatible") from None
 
 
 @dataclass
@@ -55,8 +94,8 @@ class _Budget:
         now = self.clock.monotonic()
         if not math.isfinite(now) or now < self.started:
             raise MediaError("clock_invalid")
-        if now >= self.deadline:
-            raise MediaError("upstream_timeout")
+        if now >= self.deadline:  # Photo Wall's own time limit, never the library's answer
+            raise MediaError("time_budget")
         return self.deadline - now
 
 
@@ -108,8 +147,11 @@ def _integer(value: object, *, code: str = "upstream_schema", minimum: int = 0) 
 
 def _dimension(value: object, limit: int) -> int:
     if (isinstance(value, bool) or not isinstance(value, (int, float))
-            or not 0 < value <= limit or not math.isfinite(value) or value != int(value)):
+            or (isinstance(value, float) and (not math.isfinite(value) or value != int(value)))
+            or not 0 < value):
         raise MediaError("metadata_invalid", "incompatible")
+    if value > limit:  # a well-formed item over Photo Wall's own limit
+        raise MediaError("item_over_limits", "incompatible")
     return int(value)
 
 
@@ -188,10 +230,14 @@ class ImmichClient:
         )
 
     @staticmethod
-    def _status(response: httpx.Response, *, original: bool = False) -> None:
+    def _status(response: httpx.Response, *, original: bool = False,
+                missing: str | None = None) -> None:
         status = response.status_code
         if 300 <= status < 400:
             raise MediaError("upstream_redirect", "incompatible")
+        if missing is not None and status in (400, 404):
+            # The library answers BadRequest for an absent tag id (PR 37 §6).
+            raise MediaError(missing, "incompatible")
         if status in (401, 403):
             raise MediaError("asset_permission" if original else "upstream_permission", "permission")
         if original and status == 400:
@@ -218,7 +264,7 @@ class ImmichClient:
         return int(value)
 
     async def _json(self, method: str, path: str, budget: _Budget, *, body: dict | None = None,
-                    original: bool = False) -> dict:
+                    original: bool = False, array: bool = False, missing: str | None = None):
         remaining = min(budget.remaining(), self.limits.metadata_seconds)
         request_deadline = self.clock.monotonic() + remaining
         try:
@@ -228,7 +274,7 @@ class ImmichClient:
                     follow_redirects=False,
                 ) as response:
                     budget.remaining()
-                    self._status(response, original=original)
+                    self._status(response, original=original, missing=missing)
                     length = self._length(response)
                     if length is not None and length > self.limits.max_json_bytes:
                         raise MediaError("source_limit", "incompatible")
@@ -251,9 +297,12 @@ class ImmichClient:
                     if length is not None and len(data) != length:
                         raise MediaError("upstream_integrity", "incompatible")
                     try:
-                        return _object(json.loads(data, parse_constant=_no_constants))
+                        value = json.loads(data, parse_constant=_no_constants)
                     except (ValueError, RecursionError, UnicodeError):
                         raise MediaError("upstream_schema", "incompatible") from None
+                    if array and not isinstance(value, list):
+                        raise MediaError("upstream_schema", "incompatible")
+                    return value if array else _object(value)
         except (TimeoutError, httpx.TimeoutException):
             raise MediaError("upstream_timeout") from None
         except httpx.HTTPError:
@@ -306,7 +355,7 @@ class ImmichClient:
         width = _dimension(exif.get("exifImageWidth"), self.limits.max_dimension)
         height = _dimension(exif.get("exifImageHeight"), self.limits.max_dimension)
         if width * height > self.limits.max_pixels:
-            raise MediaError("metadata_invalid", "incompatible")
+            raise MediaError("item_over_limits", "incompatible")
         orientation = exif.get("orientation")
         if orientation is not None and orientation not in tuple(str(i) for i in range(1, 9)):
             raise MediaError("metadata_invalid", "incompatible")
@@ -328,8 +377,10 @@ class ImmichClient:
                     raise MediaError("metadata_invalid", "incompatible")
                 hours, minutes, seconds = value.split(":")
                 duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-            if not 0 < duration <= self.limits.max_video_seconds:
+            if not 0 < duration:
                 raise MediaError("metadata_invalid", "incompatible")
+            if duration > self.limits.max_video_seconds:
+                raise MediaError("item_over_limits", "incompatible")
         return OriginalAsset(
             connection_id=self.config.connection_id, upstream_id=head.upstream_id,
             original_sha1=head.original_sha1, kind=head.kind, captured_at=head.captured_at,
@@ -337,13 +388,32 @@ class ImmichClient:
             file_size=size, duration=duration,
         )
 
+    async def _confirm_tags(self, spec: SourceQuery, budget: _Budget) -> None:
+        """Each of the query's tags still exists (at most four small reads), or `tag_missing`.
+
+        Without it a tag deleted in the library would make `tagIds` match nothing, and the
+        Source would read `ok` with no members: a failure shown as "nothing matches" (R6).
+        """
+        for tag in spec.tags:
+            row = await self._json("GET", f"tags/{tag}", budget, missing="tag_missing")
+            if _uuid(row.get("id")) != tag:
+                raise MediaError("upstream_schema", "incompatible")
+
     async def _walk(self, spec: SourceQuery, kind: str, with_exif: bool,
-                    budget: _Budget, version: tuple[int, int, int]) -> dict[str, _Member]:
+                    budget: _Budget, version: tuple[int, int, int],
+                    *, partial: bool = False) -> tuple[dict[str, _Member], bool]:
+        """One kind's complete membership, and whether it was cut at the ceiling.
+
+        Over the ceiling a refresh refuses (`source_limit`); a `partial` walk (a preview)
+        answers the newest page it observed and says it was limited.
+        """
         ceiling = min(self.limits.max_candidates + 1, 1000)
         body = dict(size=min(self.limits.page_size, ceiling), order="desc", type=kind.upper(),
                     visibility="timeline", isOffline=False, withDeleted=False, withExif=with_exif)
         if spec.favorites is not None:
             body["isFavorite"] = spec.favorites
+        if spec.tags:
+            body["tagIds"] = list(spec.tags)
         for field, value in (("takenAfter", spec.captured_from), ("takenBefore", spec.captured_until)):
             if value is not None:
                 body[field] = datetime.fromtimestamp(value, timezone.utc).isoformat()
@@ -372,11 +442,14 @@ class ImmichClient:
             budget.examined += count
             if budget.examined > self.limits.max_examined_rows:
                 raise MediaError("source_limit", "incompatible")
+            limited = False
             if next_page is not None:
-                if body["size"] >= ceiling:
+                if body["size"] < ceiling:
+                    body["size"] = ceiling
+                    continue
+                if not partial:
                     raise MediaError("source_limit", "incompatible")
-                body["size"] = ceiling
-                continue
+                limited = True
             members = {}
             seen = set()
             for raw in items:
@@ -396,8 +469,10 @@ class ImmichClient:
                         problem = error.code
                 members[head.upstream_id] = _Member(head, asset, problem)
                 if len(members) > self.limits.max_candidates:
-                    raise MediaError("source_limit", "incompatible")
-            return members
+                    if not partial:
+                        raise MediaError("source_limit", "incompatible")
+                    limited = True
+            return members, limited
 
     async def refresh(self, spec: SourceSpec) -> RefreshResult:
         """Produce one bounded observed membership; never substitute failure for empty."""
@@ -415,11 +490,12 @@ class ImmichClient:
                 raise MediaError("connection_mismatch", "incompatible")
             async with asyncio.timeout(self.limits.refresh_seconds):
                 version = await self._check(budget)
+                await self._confirm_tags(spec, budget)
                 walks: list[dict[str, _Member]] = []
                 for with_exif in (False, True):
                     members: dict[str, _Member] = {}
                     for kind in spec.media_types:
-                        members.update(await self._walk(spec, kind, with_exif, budget, version))
+                        members.update((await self._walk(spec, kind, with_exif, budget, version))[0])
                         if len(members) > self.limits.max_candidates:
                             raise MediaError("source_limit", "incompatible")
                     walks.append(members)
@@ -460,8 +536,8 @@ class ImmichClient:
                                          examined=budget.examined, search_requests=budget.search_requests,
                                          json_bytes=budget.json_bytes),
                 )
-        except TimeoutError:
-            error = MediaError("upstream_timeout")
+        except TimeoutError:  # the whole refresh's limit (`refresh_seconds`) is Photo Wall's
+            error = MediaError("time_budget")
         except MediaError as caught:
             error = caught
         return RefreshResult(
@@ -475,29 +551,131 @@ class ImmichClient:
                                  json_bytes=budget.json_bytes if budget else 0),
         )
 
-    async def preview(self, query: SourcePreviewQuery) -> SourcePreviewResult:
-        """Count a complete, bounded query observation without acquiring or saving media."""
+    def _preview_member(self, member: _Member) -> StoredPreviewMember:
+        head, asset = member.head, member.asset
+        return StoredPreviewMember(
+            asset_id=asset_identity(self.config.connection_id, head.upstream_id, head.original_sha1),
+            kind=head.kind, captured_at=head.captured_at,
+            width=asset.original_width if asset else None,
+            height=asset.original_height if asset else None,
+            duration_seconds=asset.duration if asset else None,
+            upstream_id=head.upstream_id, checksum=head.original_sha1,
+        )
+
+    async def preview(self, query: SourcePreviewQuery) -> SourcePreview:
+        """Count a bounded query observation and keep its newest members; acquire nothing.
+
+        Each kind is walked as a refresh walks it (with `tagIds`), the counts are summed
+        and the newest members across kinds are kept. Over the worker's ceiling the
+        answer is `limited`: the counts are lower bounds, never a refusal.
+        """
         budget = self._budget(self.limits.refresh_seconds)
         try:
             if query.connection_ref != self.config.connection_id:
                 raise MediaError("connection_mismatch", "incompatible")
             async with asyncio.timeout(self.limits.refresh_seconds):
                 version = await self._check(budget)
+                await self._confirm_tags(query, budget)
                 counts = {"image": 0, "video": 0}
-                total = 0
+                limited = False
+                found: list[StoredPreviewMember] = []
                 for kind in query.media_types:
-                    members = await self._walk(query, kind, False, budget, version)
+                    members, cut = await self._walk(query, kind, True, budget, version, partial=True)
                     counts[kind] = len(members)
-                    total += len(members)
-                    if total > self.limits.max_candidates:
-                        raise MediaError("source_limit", "incompatible")
-                return SourcePreviewResult(
-                    count=total,
-                    image_count=counts["image"],
-                    video_count=counts["video"],
+                    limited = limited or cut
+                    found.extend(self._preview_member(member) for member in members.values())
+                limited = limited or len(found) > self.limits.max_candidates
+                found.sort(key=lambda member: (-member.captured_at, member.asset_id))
+                stored = tuple(found[:PREVIEW_SHOWN])
+                return SourcePreview(
+                    result=SourcePreviewResult(
+                        count=counts["image"] + counts["video"], image_count=counts["image"],
+                        video_count=counts["video"], shown=tuple(member.served() for member in stored),
+                        limited=limited,
+                    ),
+                    members=stored,
                 )
-        except TimeoutError:
+        except TimeoutError:  # the whole preview's limit is Photo Wall's
+            raise MediaError("time_budget") from None
+
+    async def list_tags(self) -> tuple[LibraryTag, ...]:
+        """The library's tags as ids, paths and names; over the caps `tag_limit`, never a cut."""
+        budget = self._budget(self.limits.refresh_seconds)
+        try:
+            async with asyncio.timeout(self.limits.refresh_seconds):
+                await self._check(budget)
+                rows = await self._json("GET", "tags", budget, array=True)
+        except TimeoutError:  # the whole listing's limit is Photo Wall's
+            raise MediaError("time_budget") from None
+        except MediaError as error:
+            if error.code == "source_limit":  # over the 2 MiB JSON cap
+                raise MediaError("tag_limit", "incompatible") from None
+            raise
+        if len(rows) > MAX_LIBRARY_TAGS:
+            raise MediaError("tag_limit", "incompatible")
+        tags = []
+        for raw in rows:
+            row = _object(raw)
+            path, name, parent = row.get("value"), row.get("name"), row.get("parentId")
+            if not isinstance(path, str) or not isinstance(name, str):
+                raise MediaError("upstream_schema", "incompatible")
+            if len(path) > MAX_TAG_TEXT or len(name) > MAX_TAG_TEXT:
+                raise MediaError("tag_limit", "incompatible")
+            tag_ref, parent_ref = _uuid(row.get("id")), None if parent is None else _uuid(parent)
+            # Every listed id is kept, even one with nothing visible once stripped (B5-FC1):
+            # the stored list is the library's whole list, so a by-id lookup trusts it.
+            tags.append(LibraryTag(tag_ref=tag_ref, path=path, name=name, parent_ref=parent_ref))
+        return tuple(sorted(tags, key=lambda tag: (tag.path, tag.tag_ref)))
+
+    async def thumbnail(self, upstream_id: str, checksum: str) -> bytes:
+        """Re-check the item is still this connection's servable original, then fetch its
+        thumbnail and return Photo Wall's own re-encoding of it."""
+        try:
+            upstream_id = canonical_uuid(upstream_id)
+        except ValueError:
+            raise MediaError("asset_changed", "incompatible") from None
+        # One tile holds one of Central's FETCH slots for this attempt, so it gets the metadata
+        # budget, not a refresh's: four small requests (version, owner, asset, thumbnail).
+        budget = self._budget(self.limits.metadata_seconds)
+        try:
+            async with asyncio.timeout(self.limits.metadata_seconds):
+                await self._check(budget)
+                raw = await self._json("GET", f"assets/{upstream_id}", budget, original=True)
+                head = self._head(raw)
+                if (head is None or head.upstream_id != upstream_id
+                        or head.original_sha1 != checksum):
+                    raise MediaError("asset_changed", "incompatible")
+                data = await self._thumbnail_bytes(upstream_id, budget)
+        except (TimeoutError, httpx.TimeoutException):
             raise MediaError("upstream_timeout") from None
+        except httpx.HTTPError:
+            raise MediaError("upstream_unavailable") from None
+        return await asyncio.to_thread(reencode_thumbnail, data)
+
+    async def _thumbnail_bytes(self, upstream_id: str, budget: _Budget) -> bytes:
+        remaining = budget.remaining()
+        async with self._client.stream(
+            "GET", f"assets/{upstream_id}/thumbnail", params={"size": "thumbnail"},
+            follow_redirects=False, timeout=self._timeout(remaining),
+        ) as response:
+            if response.status_code == 404:
+                raise MediaError("thumbnail_not_ready")
+            self._status(response, original=True)
+            length = self._length(response)
+            if length is not None and length > THUMBNAIL_BYTES:
+                raise MediaError("thumbnail_oversize", "incompatible")
+            content_type = response.headers.get("content-type", "").split(";")[0].strip()
+            if content_type.lower() not in _THUMBNAIL_TYPES:
+                raise MediaError("thumbnail_unsupported", "incompatible")
+            data = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+                budget.remaining()
+                data.extend(chunk)
+                if len(data) > THUMBNAIL_BYTES:
+                    raise MediaError("thumbnail_oversize", "incompatible")
+            if not data or (length is not None and len(data) != length):
+                raise MediaError("upstream_integrity", "incompatible")
+            return bytes(data)
 
     async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal:
         """Recheck revision, then exclusively create/verify a caller-owned staging file.

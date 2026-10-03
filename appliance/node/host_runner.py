@@ -19,18 +19,48 @@ from appliance.node.host_storage import FileRebootJournal, RebootDelivery
 from appliance.node.http import NodeHTTP
 from appliance.node.recovery import RecoverySupervisor
 from appliance.node.recovery_linux import RecoveryObserver, RecoveryServer
-from appliance.node.session import NodeSession
+from appliance.node.session import REFUSED, NodeSession
 from appliance.node.storage import BootStore
 from contracts.node_commands import parse_reboot_request
-from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
+from contracts.node_host_facts import FACT_RULES, HostFactsV2, encode_host_facts, valid_fact
+from contracts.node_observation import (
+    HOST_OBSERVATION_INTERVAL_SECONDS,
+    HostMetricV2,
+    HostObservationV2,
+    encode_host_observation,
+)
 from contracts.node_protocol import encode_node_message
 from contracts.strict_json import loads_object
 
 
 class HostRunner:
+    # The observation cadence (console DDD §63): every tick samples and journals; one
+    # observation is posted per contract interval on this process's own monotonic clock, and
+    # the first at once after each new session. `_posted` is (session id, monotonic seconds)
+    # of the last post. Central coalesces faster posts anyway; this only saves it the work.
+    monotonic = staticmethod(time.monotonic)
+    _posted: tuple | None = None
+    # The host facts sender (console DDD §64), in memory only: `_facts` is the document last
+    # built (None before the first post) and `_facts_state` one of "pending", "stored",
+    # "dropped" or "off". A process start therefore sends once. "off" (a Central replica
+    # without the route, 404) lasts FACTS_ROUTE_RETRY_SECONDS on this process's monotonic
+    # clock (`_facts_off_at`), then the document is pending again, so a rolling deploy or a
+    # rollback does not silence facts for the rest of the boot.
+    FACTS_ROUTE_RETRY_SECONDS = 3600
+    _facts: HostFactsV2 | None = None
+    _facts_state: str = "pending"
+    _facts_off_at: float | None = None
+    # The base this boot runs, as the node records it: the tag of the boot offer whose base the
+    # initramfs verified and mounted, carried into host.json by bootstrap.py from the boot
+    # handoff. Reported in the facts record (`base_tag`) beside Central's offer, never as it.
+    base_tag: str | None = None
+
     def __init__(self, store: BootStore, transport: NodeHTTP, *, serial: str,
-                 offer_id: UUID, kernel_boot_id: UUID):
+                 offer_id: UUID, kernel_boot_id: UUID, monotonic=time.monotonic,
+                 base_tag: str | None = None):
         self.store, self.transport = store, transport
+        self.base_tag = base_tag
+        self.monotonic = monotonic
         self.journal = FileRebootJournal(store)
         self.delivery = RebootDelivery(store)
         self.session = NodeSession(store, transport, owner="host_core", serial=serial,
@@ -60,7 +90,8 @@ class HostRunner:
     def tick(self) -> None:
         now = boottime_ms()
         recovery_metrics, recovery_fault = self.recovery.telemetry()
-        metrics = self.sampler.sample() + self.sampler.supervision() + recovery_metrics
+        metrics = (self.sampler.sample() + self.sampler.throttling() + self.sampler.supervision()
+                   + recovery_metrics)
         self.store.write("observation", {"sampled_boottime_ms": now, "metrics": metrics})
         if not self.establish_session():
             return
@@ -71,14 +102,58 @@ class HostRunner:
         except (OSError, ValueError, http.client.HTTPException):
             if self.store.failed:
                 raise
-        observation = HostObservationV2(self.core.producer, self.journal.next_sequence(),
-                                        now, tuple(HostMetricV2(*row) for row in metrics), fault_code=recovery_fault)
-        try:
-            self.session.request("POST", "/v2/node/observations", encode_host_observation(observation))
-        except (OSError, ValueError, http.client.HTTPException):
-            pass
+        if self._observation_due():
+            self._posted = (self.core.session_id, self.monotonic())
+            observation = HostObservationV2(self.core.producer, self.journal.next_sequence(),
+                                            now, tuple(HostMetricV2(*row) for row in metrics),
+                                            fault_code=recovery_fault)
+            try:
+                self.session.request("POST", "/v2/node/observations", encode_host_observation(observation))
+            except (OSError, ValueError, http.client.HTTPException):
+                pass
+            self._send_facts(now)
         self.delivery.flush(self.journal, session_id=self.claim.session_id,
                             send=self._send_evidence, budget=2)
+
+    def _send_facts(self, now_ms: int) -> None:
+        """The §64 state machine, run once per observation post: facts are read here only, so
+        a flapping link sends at most one document per interval. A new document (next journal
+        sequence) is built on the first post and whenever a value or the producer changed;
+        otherwise a pending document is resent unchanged: after no answer, a 5xx, a 429 or a
+        refused session (401/403). A refusal of the document itself (another 4xx) drops it
+        until a value changes; a 404 turns facts off for FACTS_ROUTE_RETRY_SECONDS."""
+        if self._facts_state == "off":
+            if self.monotonic() - self._facts_off_at < self.FACTS_ROUTE_RETRY_SECONDS:
+                return
+            self._facts_state = "pending"
+        values = {**self.sampler.facts(),
+                  "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None}
+        current = self._facts
+        if (current is None or current.producer != self.core.producer
+                or current.values() != tuple(values[name] for name in FACT_RULES)):
+            self._facts = HostFactsV2(self.core.producer, self.journal.next_sequence(), now_ms, **values)
+            self._facts_state = "pending"
+        if self._facts_state != "pending":
+            return
+        try:
+            status, _ = self.session.request("POST", "/v2/node/host-facts", encode_host_facts(self._facts))
+        except (OSError, ValueError, http.client.HTTPException):
+            return  # no answer: the same document at the next post
+        if status == 200:  # recorded, duplicate or stale
+            self._facts_state = "stored"
+        elif status == 404:
+            self._facts_state, self._facts_off_at = "off", self.monotonic()
+        elif status in REFUSED or status == 429:
+            # A refused session (401/403) is temporary: the next ensure() enrolls a new one
+            # under the same producer, and that tick's post resends this document.
+            return
+        elif 400 <= status < 500:
+            self._facts_state = "dropped"  # Central refused this document (409, 422, ...)
+
+    def _observation_due(self) -> bool:
+        if self._posted is None or self._posted[0] != self.core.session_id:
+            return True
+        return self.monotonic() - self._posted[1] >= HOST_OBSERVATION_INTERVAL_SECONDS
 
     def _poll_commands(self) -> None:
         status, raw = self.session.request("GET", "/v2/node/commands")
@@ -104,13 +179,14 @@ def main() -> None:
     if args.config.is_symlink() or info.st_uid != 0 or info.st_mode & 0o077:
         raise ValueError("host_configuration_ownership")
     value = loads_object(args.config.read_bytes(), max_bytes=8192)
-    if value is None or set(value) != {"central", "serial", "offer_id"}:
+    if value is None or set(value) != {"central", "serial", "offer_id", "base_tag"}:
         raise ValueError("host_configuration_invalid")
     kernel_boot_id = boot_id()
     store = BootStore(args.state, boot_id=kernel_boot_id,
                       policy={"owner": "host_core", "offer_id": value["offer_id"], "serial": value["serial"]})
     runner = HostRunner(store, NodeHTTP(value["central"], timeout=0.5), serial=value["serial"],
-                        offer_id=UUID(value["offer_id"]), kernel_boot_id=kernel_boot_id)
+                        offer_id=UUID(value["offer_id"]), kernel_boot_id=kernel_boot_id,
+                        base_tag=value["base_tag"])
     recovery = runner.recovery
     server = RecoveryServer(recovery)
     last_tick = 0.0

@@ -17,6 +17,7 @@ from test_node_boot import claim_for, cold_setup
 from test_registry import enroll
 
 from central.coordination import Coordinator
+from central.db import ProcessTransactionClock
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.media_repository import MediaRepository
@@ -42,7 +43,7 @@ def test_operator_node_browser(registry):
         coordinator=coordinator, config=NodeControlConfig("node-test"),
         serving_verifier=_LocalImageVerifier())
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
-        RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock), coordinator)
+        RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)
     done = threading.Event()
     seen = {"unknown": False}
 
@@ -75,7 +76,7 @@ def test_operator_node_browser(registry):
             if server.started:
                 break
             time.sleep(0.01)
-        print(f"NODE_BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/equipment", flush=True)
+        print(f"NODE_BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/players/{DEVICE_ID}", flush=True)
         print(f"NODE_BROWSER_CURRENT_BOOT {second.kernel_boot_id}", flush=True)
         assert done.wait(330), "operator browser fixture timed out"
         with registry.db.transaction() as conn:

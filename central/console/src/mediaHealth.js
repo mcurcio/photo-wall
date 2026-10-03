@@ -1,12 +1,19 @@
-import { ageAt, formatAge, frameHealth } from "./health.js";
-import { LIVE_PHASES, rankedContributions, toTarget } from "./join.js";
-import { clockTime, cycleWording, runScene } from "./showState.js";
+import { ageAt, formatAge, frameHealth, gigabytes } from "./health.js";
+import { fact, factText, plannedNothing, words } from "./facts.js";
+import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
+import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
+import {
+  datedWords, favouritesWords, kindsWords, refreshFact, refusalState, tagCountWords,
+} from "./sourceWords.js";
+import { captureDay, clockTime } from "./timeWords.js";
 
 /**
  * The media pipeline in words (pass 2 slice 3 §14). Pure reads of the served
  * `/v1/operator/media` payload (`health`, `sources`) and the runtime, aged on
- * Central's clock (the inventory's `read_at`). Everything here is Central's:
+ * the database's clock (`media.read_at`, G11): the worker and Central stamp
+ * every media time on it, so no age subtracts one process's clock from
+ * another's (R10). Everything here is Central's:
  * the worker fetches from the photo library and prepares media, and Players
  * receive it only from Central (requirements: Players are library-unaware).
  * Nothing here says a panel shows anything (R2).
@@ -24,13 +31,18 @@ export const SOURCE_REFRESH_SECONDS = 30;
 // One refresh may run this long (media/worker.py WorkerLimits.refresh_seconds).
 export const REFRESH_RUN_SECONDS = 65;
 // Past these, a missed beat is not jitter: two intervals plus slack. A pytest
-// pins the three constants above to the worker's schedule.
+// pins the three constants above to the worker's schedule, and WORKER_QUIET_AFTER
+// to the worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
 export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
 export const REFRESH_OVERDUE_AFTER = 2 * SOURCE_REFRESH_SECONDS + REFRESH_RUN_SECONDS;
 
-/** Central's clock for media ages: the inventory's read time. */
+/**
+ * The read time media ages are taken against: `media.read_at`, the database's
+ * time of the read (G11). Never `inventory.read_at` (Central's process clock):
+ * media times are the database's, and clocks compare only to themselves.
+ */
 export function mediaNow(snapshot) {
-  return snapshot?.inventory?.read_at;
+  return snapshot?.media?.read_at;
 }
 
 /** "4 min" for a known age; fails closed to "an unknown time" (no read time). */
@@ -38,17 +50,10 @@ function age(seconds) {
   return Number.isFinite(seconds) ? formatAge(Math.max(0, seconds)) : "an unknown time";
 }
 
-/** A code as words: "storage_pressure" → "storage pressure". */
-export function codeWords(code) {
-  return String(code).replaceAll("_", " ");
-}
+/** A code as words: "storage_pressure" → "storage pressure" (the one helper, facts.js `words`). */
+export const codeWords = words;
 
 const WORKER_ERRORS = { storage_pressure: "storage is full" };
-
-/** "4.1 of 8 GB" (decimal gigabytes, one place). */
-function gigabytes(bytes) {
-  return `${Number((Number(bytes ?? 0) / 1e9).toFixed(1))}`;
-}
 
 /**
  * The worker's jobs of its current recipe (central/media_repository.py
@@ -75,7 +80,7 @@ export function workerLoad(health) {
  * quiet past {@link WORKER_QUIET_AFTER}, ok.
  *
  * @param {object|null} health `/v1/operator/media` `health`
- * @param {number} now Central's clock
+ * @param {number} now `media.read_at`, the database's clock (G11)
  * @param {boolean} includeFilters include the Source's criteria in the label (default true)
  * @returns {Classified|null} null when the media read carried no health
  */
@@ -97,66 +102,40 @@ export function workerState(health, now) {
   return {
     state: "ok",
     severity: "ok",
-    label: `checked in ${age(since)} ago · ${workerLoad(health)}`,
+    // The worker's own check-in, received and read on the database's clock (G11, §39).
+    label: factText(fact({
+      kind: "reported",
+      source: "Media worker",
+      receipt: "latest",
+      value: workerLoad(health),
+      receivedAt: health.worker_seen,
+      readAt: now,
+      field: "the media worker's check-in time",
+    })),
   };
 }
 
-const SOURCE_FAILURES = {
-  unavailable: "Library unreachable",
-  permission: "Library refused access",
-  incompatible: "Library unsupported",
-};
-
-/** A local date, "3 Mar 2025". */
-function day(epochSeconds) {
-  return new Date(epochSeconds * 1000).toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
-}
-
-/** Whether an instant is local midnight on 1 January. */
-function newYear(epochSeconds) {
-  const date = new Date(epochSeconds * 1000);
-  return date.getMonth() === 0 && date.getDate() === 1 && date.getHours() === 0 &&
-    date.getMinutes() === 0 && date.getSeconds() === 0;
-}
+/** A local date, "3 Mar 2025" (timeWords.js). */
+const day = captureDay;
 
 /**
- * A Source's filters in words (§7, §14): its kinds, favourites and capture
- * window ("taken until" is exclusive). "photos only · only favourites ·
- * taken 2024". Empty when it takes everything.
+ * A Source's filters in words (§7, §14, §39), from the one home of a Source's selection
+ * words (sourceWords.js), in `selectionWords`' order: its tags ("2 tags", or their paths
+ * when every one is given in `tagPaths`), favourites, a single kind and its dated window.
+ * "2 tags · favourites only · photos only · dated 2024". Empty when it takes everything.
  *
  * @param {object|null} spec the stored SourceSpec
+ * @param {Readonly<Record<string, string|null>>|null} [tagPaths] id -> path, when loaded
  * @returns {string[]}
  */
-export function sourceFilters(spec) {
-  const filters = [];
+export function sourceFilters(spec, tagPaths = null) {
   const kinds = spec?.media_types ?? ["image", "video"];
-  if (kinds.length === 1) {
-    filters.push(kinds[0] === "image" ? "photos only" : "videos only");
-  }
-  if (spec?.favorites === true) {
-    filters.push("only favourites");
-  } else if (spec?.favorites === false) {
-    filters.push("no favourites");
-  }
-  const from = spec?.captured_from ?? null;
-  const until = spec?.captured_until ?? null;
-  if (from !== null && until !== null) {
-    const year = new Date(from * 1000).getFullYear();
-    const wholeYear =
-      newYear(from) && newYear(until) && new Date(until * 1000).getFullYear() === year + 1;
-    // "Taken until" is exclusive: the last day named is the one holding its
-    // last included second, so a day made 23 or 25 h long by DST is still whole.
-    filters.push(wholeYear ? `taken ${year}` : `taken ${day(from)} to ${day(until - 1)}`);
-  } else if (from !== null) {
-    filters.push(`taken from ${day(from)}`);
-  } else if (until !== null) {
-    filters.push(`taken before ${day(until)}`);
-  }
-  return filters;
+  return [
+    tagCountWords(spec?.tags, tagPaths),
+    favouritesWords(spec?.favorites),
+    kinds.length === 1 ? kindsWords(kinds) : null,
+    datedWords(spec?.captured_from, spec?.captured_until),
+  ].filter((part) => part !== null);
 }
 
 /**
@@ -167,10 +146,10 @@ export function sourceFilters(spec) {
  * not items ready for any frame. The label carries the Source's filters.
  *
  * @param {object} source a `/v1/operator/media` `sources` row
- * @param {number} now Central's clock
+ * @param {number} now `media.read_at`, the database's clock (G11)
  * @returns {Classified}
  */
-export function sourceState(source, now, includeFilters = true) {
+export function sourceState(source, now, includeFilters = true, connections = []) {
   const filters = sourceFilters(source.spec);
   const said = (state, severity, label) => ({
     state,
@@ -187,8 +166,14 @@ export function sourceState(source, now, includeFilters = true) {
   if (source.status !== "ok") {
     const good = source.last_success == null
       ? "never refreshed successfully"
-      : `last good ${age(ageAt(now, source.last_success))} ago`;
-    const failure = SOURCE_FAILURES[source.status] ?? `Library ${codeWords(source.status)}`;
+      : `last good refresh ${age(ageAt(now, source.last_success))} ago`;
+    // One closed table names each refusal's owner and words (sourceWords.js
+    // SOURCE_REFUSALS, §39 R21): Photo Wall's own refusals never read as the library's
+    // fault, and a code it does not hold reads neutrally. A failed refresh records one
+    // Source-level code; per-item codes carry an asset id.
+    const diagnostics = source.diagnostics ?? [];
+    const code = (diagnostics.find((entry) => entry?.code && !entry.asset_id) ?? diagnostics[0])?.code;
+    const failure = refusalState(code, source.status);
     return said("failing", "alarm", `${failure} · ${good}`);
   }
   if (!source.next_refresh) {
@@ -208,8 +193,9 @@ export function sourceState(source, now, includeFilters = true) {
   const qualifier = partialCount > 0
     ? ` · ${partialCount} item${partialCount === 1 ? "" : "s"} pending or rejected`
     : "";
-  return said("ok", "ok",
-    `refreshed ${age(ageAt(now, source.last_success))} ago · ${valid} valid in the last refresh${qualifier}`);
+  // The refresh's one home (sourceWords.js `refreshFact`), so a Source card that shows this
+  // label states its refresh once, as the library's `reported` fact.
+  return said("ok", "ok", `${factText(refreshFact(source, now, connections))}${qualifier}`);
 }
 
 // --- One candidate's standing for a frame, as Central serves it.
@@ -223,7 +209,7 @@ const STANDING_WORDS = {
 };
 
 /**
- * Chooser labels, in the candidates' order: "Photo 108×192 · taken 3 Mar 2025
+ * Chooser labels, in the candidates' order: "Photo 108×192 · dated 3 Mar 2025
  * 14:02 · ready", with " (2)" added only to a label that repeats an earlier one.
  * The readiness is the candidate's served `standing` for the chooser's frame.
  *
@@ -235,7 +221,7 @@ export function candidateLabels(candidates) {
   return candidates.map((candidate) => {
     const kind = candidate.kind === "video" ? "Video" : "Photo";
     const label =
-      `${kind} ${candidate.original_width}×${candidate.original_height} · taken ` +
+      `${kind} ${candidate.original_width}×${candidate.original_height} · dated ` +
       `${day(candidate.captured_at)} ${clockTime(candidate.captured_at)} · ` +
       (STANDING_WORDS[candidate.standing] ?? codeWords(candidate.standing));
     const repeat = (seen.get(label) ?? 0) + 1;
@@ -334,6 +320,7 @@ export function whyNothingNew(snapshot, frameId, check = null) {
   const runtime = snapshot?.runtime;
   const now = mediaNow(snapshot);
   const [winner] = rankedContributions(runtime, frameId);
+  const bound = isBound((snapshot?.inventory?.frames ?? []).find((frame) => frame.id === frameId));
   const ended = winner === undefined ? lastEnded(runtime, frameId) : null;
   const skip = (title) => ({ title, state: "skip", text: "Not reached." });
   const steps = [];
@@ -342,14 +329,16 @@ export function whyNothingNew(snapshot, frameId, check = null) {
     steps.push({
       title: "Intended?",
       state: "ok",
-      text: `Central's plan puts ${winner.scene_id} (priority ${winner.priority}) here.`,
+      // The top Run in the `planned` wording (§35): Central's Runs, never the Panel's output.
+      text: `${factText(plannedFact(runtime, winner, bound))}; priority ${winner.priority}.`,
     });
     steps.push({ title: "Run ended?", state: "ok", text: "No: its Run is still going." });
   } else {
     steps.push({
       title: "Intended?",
       state: ended === null ? "stop" : "info",
-      text: `No Scene is intended for ${frameId} now.`,
+      // The empty branch in the same `planned` wording as the top Run (§35).
+      text: `${factText(plannedNothing())}.`,
     });
     steps.push(ended === null ? skip("Run ended?") : endedStep(snapshot, ended, frameId));
   }

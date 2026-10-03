@@ -1,15 +1,20 @@
 import React, { useId, useRef, useState } from "react";
 
-import { deleteFrameRequest, useConfirm } from "./ConfirmAction.jsx";
-import { createFrame, dropFromTray, FRAME_ID_PATTERN, moveFrame } from "./framesApi.js";
+import { FRAME_ID_PATTERN } from "./frameIds.js";
+import { factText } from "./facts.js";
 import { frameHealth } from "./health.js";
-import { nowShowing } from "./join.js";
+import { isBound, plannedFor } from "./join.js";
 import { dragToPlacement, orientationCoherent, project } from "./projection.js";
-import { useMutate } from "./useMutate.js";
 
 /**
  * Per-Surface plan (Bead 1 read-only tracer; Bead 2 status chips; Bead 10 spatial
- * editing — drag-to-create + drag-to-move).
+ * editing — drag-to-create + drag-to-move; console DDD §61: read-only unless in Edit layout).
+ *
+ * READ-ONLY BY DEFAULT (console DDD G3). Without `edit` the plan only selects: a click or
+ * Enter/Space on a tile calls `onSelect`, and a drag does nothing. This module imports no
+ * write module (framesApi writes, ConfirmAction, useMutate; tests/test_console_wall_layout.py
+ * scans it): every write arrives as an `edit` handler from LayoutEditor.jsx, the Wall's
+ * Edit layout mode (`#/wall/layout`), which owns them.
  *
  * Renders the selected Surface's placed frames as hand-coded SVG `<rect>`
  * elements from their committed `x_mm/y_mm/width_mm/height_mm`, scaled to fit the
@@ -19,35 +24,45 @@ import { useMutate } from "./useMutate.js";
  * that embeds its frame id, so tests locate frames by identity via role/text —
  * never by coordinates (design §1c, tracer testing philosophy).
  *
- * Alongside each drawn frame the plan renders a status readout (Bead 2): the
- * intended now-showing chip "Scheduled: <scene_id>" + phase (from `nowShowing`)
- * and the frame's health — a severity dot plus its short tile label (the fact
+ * Alongside each drawn frame the plan renders a status readout (Bead 2; console DDD §34):
+ * the frame's `planned` fact ("On top: <scene_id> · <origin> (Central's Runs; …)", from
+ * join.js `plannedFor`), its full text as the line's accessible name, with "Ending
+ * (outro)" beneath it only in the outro phase, and the frame's health — a severity dot plus its short tile label (the fact
  * without its age, so it fits the tile) whose accessible name is the full label
  * — from the one classifier, `frameHealth` (health.js). The readout is clipped
- * to the tile's rect, so no text ever spills over a neighbouring tile. The chip asserts operator INTENT, never
+ * to the tile's rect, so no text ever spills over a neighbouring tile. The planned fact is Central's projection, never
  * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
  * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
  * an in-progress rectangle (Plane B, held as component-local drag state) and, on
  * release, opens a minimal new-frame form to capture the Frame id (slice 2 §8:
  * readable, checked as you type against FRAME_ID_PATTERN, never generated) and
- * the display `FrameProfile`; submitting POSTs a new Frame via {@link createFrame}. A pointer drag that starts
- * ON an existing frame repositions it via {@link moveFrame} (`PATCH`,
- * last-write-wins, no token — §9a). Both writes go through the shared
+ * the Frame profile (`FrameProfile`); submitting calls `edit.createFrame`. A pointer drag
+ * that starts ON an existing frame repositions it via `edit.moveFrame` (`PATCH`,
+ * last-write-wins, no token — §9a). LayoutEditor runs both through the shared
  * `useMutate()` hook so the plan corrects from the next Plane A snapshot. A press
  * that does not move beyond a small threshold stays a plain click (selection).
  *
  * Origin-stacked / geometry-less frames are NOT drawn here; they belong to the
  * Unplaced tray (see UnplacedTray.jsx).
  *
- * DELETE (slice 2 §7) opens the one confirmation dialog (ConfirmAction), which
- * captures the frame's binding and live Runs when it opens and shows a refusal
- * inside itself. After a delete the plan region takes focus and a status line
- * says what happened. `regionRef` (optional) is attached to the plan region so
- * the Unplaced tray can move focus here after its own delete.
+ * DELETE (slice 2 §7): `edit.deleteFrame` opens the one confirmation dialog, which
+ * LayoutEditor owns; `edit.status` (its status line and dialog) renders inside the plan
+ * region, so after a delete the plan region takes focus and its status line says what
+ * happened. `regionRef` (optional) is attached to the plan region so the Unplaced tray
+ * can move focus here after its own delete.
+ *
+ * @typedef {{createFrame: (id: string, placement: object, profile: object) => Promise<{ok: boolean, error?: string}>,
+ *            moveFrame: (frameId: string, placement: object) => Promise<{ok: boolean, error?: string}>,
+ *            takeTrayDrag: () => string|null,
+ *            dropFromTray: (frameId: string, pxRect: object, viewport: object, surfaceId: string) => void,
+ *            deleteFrame: (event: {currentTarget: Element}, frameId: string) => void,
+ *            status: React.ReactNode}} PlanEdit
+ *   `takeTrayDrag` returns, and clears, the Unplaced tray entry being dragged (or null).
  *
  * @param {{snapshot: object|null, surfaceId: string|null,
- *          selection: string|null, onSelect: (frameId: string) => void}} props
+ *          selection: string|null, onSelect: (frameId: string) => void,
+ *          regionRef?: React.MutableRefObject<HTMLElement|null>, edit?: PlanEdit|null}} props
  */
 const VIEWPORT = { width: 960, height: 600 };
 
@@ -89,28 +104,10 @@ function frameIdProblem(id) {
   return FRAME_ID_PATTERN.test(id) ? null : `Frame id: ${FRAME_ID_HINT}`;
 }
 
-export function Plan({
-  snapshot,
-  surfaceId,
-  selection,
-  onSelect,
-  onDeleted,
-  trayDragRef,
-  onTrayDrop,
-  regionRef,
-  addFrameButtonRef,
-}) {
-  const mutate = useMutate();
+export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit = null }) {
   const svgRef = useRef(null);
   const ownRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const planRef = regionRef ?? ownRegionRef;
-  // The delete confirmation: after a delete, or when its opener is gone, the
-  // plan region takes focus.
-  const focusPlan = () => planRef.current?.focus();
-  const { open, confirmation } = useConfirm(focusPlan, () => {
-    onDeleted?.();
-    focusPlan();
-  });
   // Each tile's status readout is clipped to its rect, so no text leaves the tile.
   const clipPrefix = "plan-clip" + useId().replace(/[^A-Za-z0-9_-]/g, "");
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
@@ -196,14 +193,11 @@ export function Plan({
     // RELEASED over the plan drops that frame onto the plan: PATCH a distinct
     // position so it leaves the tray (design J3/§12). The tray press captured no
     // pointer on the SVG, so `dragRef` is null — this branch owns the release.
-    const trayFrameId = trayDragRef?.current ?? null;
+    const trayFrameId = edit.takeTrayDrag();
     if (trayFrameId != null) {
-      onTrayDrop?.();
       if (surfaceId != null) {
         const pt = toViewbox(svgRef.current, event);
-        mutate(() =>
-          dropFromTray(trayFrameId, { x: pt.x, y: pt.y, w: 1, h: 1 }, VIEWPORT, surfaceId),
-        ).catch(() => {});
+        edit.dropFromTray(trayFrameId, { x: pt.x, y: pt.y, w: 1, h: 1 }, VIEWPORT, surfaceId);
       }
       return;
     }
@@ -252,15 +246,13 @@ export function Plan({
     };
     const placement = dragToPlacement(moved, VIEWPORT, surfaceId);
     const frame = framesById.get(finished.frameId);
-    mutate(() =>
-      moveFrame(finished.frameId, {
-        surface_id: placement.surface_id,
-        x_mm: placement.x_mm,
-        y_mm: placement.y_mm,
-        width_mm: frame?.width_mm ?? placement.width_mm,
-        height_mm: frame?.height_mm ?? placement.height_mm,
-      }),
-    ).catch(() => {});
+    edit.moveFrame(finished.frameId, {
+      surface_id: placement.surface_id,
+      x_mm: placement.x_mm,
+      y_mm: placement.y_mm,
+      width_mm: frame?.width_mm ?? placement.width_mm,
+      height_mm: frame?.height_mm ?? placement.height_mm,
+    }).catch(() => {});
   };
 
   const openMeasuredCreate = () => {
@@ -281,7 +273,7 @@ export function Plan({
 
   const submitPlacement = (event) => {
     event.preventDefault();
-    if (placementForm == null || surfaceId == null) {
+    if (edit === null || placementForm == null || surfaceId == null) {
       return;
     }
     const numeric = Object.fromEntries(Object.entries(placement).map(([key, value]) => [key, Number(value)]));
@@ -314,25 +306,23 @@ export function Plan({
     const checkedWidth = placementForm.mode === "edit" ? Number(effectiveProfile?.width_px) : widthPx;
     const checkedHeight = placementForm.mode === "edit" ? Number(effectiveProfile?.height_px) : heightPx;
     if (!orientationCoherent(numeric.width_mm, numeric.height_mm, checkedWidth, checkedHeight)) {
-      setFormError("Display profile must match the frame's orientation.");
+      setFormError("Frame profile must match the frame's orientation.");
       return;
     }
     if (placementForm.mode === "edit") {
-      mutate(() => moveFrame(placementForm.frameId, framePlacement)).then((result) => {
+      edit.moveFrame(placementForm.frameId, framePlacement).then((result) => {
         if (result.ok) { setPlacementForm(null); setFormError(null); }
         else setFormError(`Could not save placement: ${result.error}`);
       }).catch((error) => setFormError(`Could not save placement: ${error?.message ?? "server error"}`));
       return;
     }
     const id = frameId;
-    mutate(() =>
-      createFrame(id, framePlacement, {
-        width_px: widthPx,
-        height_px: heightPx,
-        diagonal_inches: diagonal,
-        video: profile.video,
-      }),
-    )
+    edit.createFrame(id, framePlacement, {
+      width_px: widthPx,
+      height_px: heightPx,
+      diagonal_inches: diagonal,
+      video: profile.video,
+    })
       .then((result) => {
         if (result.ok) {
           setPlacementForm(null);
@@ -350,7 +340,7 @@ export function Plan({
     if (selection == null) {
       return;
     }
-    open(event, deleteFrameRequest(snapshot, selection));
+    edit.deleteFrame(event, selection);
   };
 
   const draftRect = draft;
@@ -370,9 +360,11 @@ export function Plan({
         width={VIEWPORT.width}
         height={VIEWPORT.height}
         preserveAspectRatio="xMinYMin meet"
-        onPointerDown={beginCreate}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
+        {...(edit === null ? {} : {
+          onPointerDown: beginCreate,
+          onPointerMove,
+          onPointerUp,
+        })}
       >
         {placed.length === 0 && draftRect == null && (
           <text
@@ -381,12 +373,13 @@ export function Plan({
             textAnchor="middle"
             className="plan__empty-hint"
           >
-            Drag on this plan to place a Frame
+            {edit === null ? "No Frames placed on this Surface" : "Drag on this plan to place a Frame"}
           </text>
         )}
         {placed.map(({ id, rect }, index) => {
           const selected = selection === id;
-          const now = nowShowing(snapshot?.runtime, id);
+          const planned = plannedFor(snapshot?.runtime, id, isBound(framesById.get(id)));
+          const plannedText = factText(planned.fact);
           const health = frameHealth(snapshot, id);
           return (
             <React.Fragment key={id}>
@@ -396,7 +389,9 @@ export function Plan({
                 tabIndex={0}
                 aria-label={`Frame ${id}`}
                 aria-pressed={selected}
-                onPointerDown={(event) => beginMove(event, id, rect)}
+                {...(edit === null
+                  ? { onClick: () => onSelect(id) }
+                  : { onPointerDown: (event) => beginMove(event, id, rect) })}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
@@ -437,19 +432,19 @@ export function Plan({
                   className={`plan__dot health--${health.severity}`}
                   aria-hidden="true"
                 />
-                {now === null ? (
-                  <text x={rect.x + 22} y={rect.y + 16} className="plan__chip plan__chip--idle">
-                    Not scheduled
+                <text
+                  x={rect.x + 22}
+                  y={rect.y + 16}
+                  className={`plan__chip fact--${planned.fact.kind}${planned.sceneId === null ? " plan__chip--idle" : ""}`}
+                  role="img"
+                  aria-label={plannedText}
+                >
+                  {plannedText}
+                </text>
+                {planned.phase === "outro" && (
+                  <text x={rect.x + 22} y={rect.y + 30} className="plan__phase">
+                    Ending (outro)
                   </text>
-                ) : (
-                  <>
-                    <text x={rect.x + 22} y={rect.y + 16} className="plan__chip">
-                      {`Scheduled: ${now.scene_id}`}
-                    </text>
-                    <text x={rect.x + 22} y={rect.y + 30} className="plan__phase">
-                      {`Phase: ${now.phase}`}
-                    </text>
-                  </>
                 )}
                 <text
                   x={rect.x + 22}
@@ -475,11 +470,13 @@ export function Plan({
         )}
       </svg>
 
-      <button ref={addFrameButtonRef} type="button" disabled={surfaceId == null || placementForm != null} onClick={openMeasuredCreate}>
-        Add frame with measurements
-      </button>
+      {edit !== null && (
+        <button type="button" disabled={surfaceId == null || placementForm != null} onClick={openMeasuredCreate}>
+          Add frame with measurements
+        </button>
+      )}
 
-      {placementForm != null && (
+      {edit !== null && placementForm != null && (
         <form className="plan__new-frame" aria-label={placementForm.mode === "create" ? "New frame" : `Place frame ${placementForm.frameId}`} onSubmit={submitPlacement}>
           <h3 className="plan__new-frame-title">{placementForm.mode === "create" ? "New frame" : `Edit placement for ${placementForm.frameId}`}</h3>
           {placementForm.mode === "create" && <>
@@ -521,7 +518,7 @@ export function Plan({
           </label>
           {placementForm.mode === "create" && <>
           <label className="plan__new-frame-field">
-            Display width (px)
+            Pixel width (px)
             <input
               type="number"
               min="1"
@@ -530,7 +527,7 @@ export function Plan({
             />
           </label>
           <label className="plan__new-frame-field">
-            Display height (px)
+            Pixel height (px)
             <input
               type="number"
               min="1"
@@ -571,7 +568,7 @@ export function Plan({
         </form>
       )}
 
-      {selection != null && (
+      {edit !== null && selection != null && (
         <div
           className="plan__selection"
           role="group"
@@ -585,7 +582,7 @@ export function Plan({
           </button>
         </div>
       )}
-      {confirmation("plan__status-line")}
+      {edit?.status}
     </section>
   );
 }

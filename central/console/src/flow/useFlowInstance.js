@@ -212,9 +212,11 @@ export function useFlowInstance({
         open(routeKey);
       }
     } else if (place === "open" && step === null) {
-      navigate(keys.toRoute(routeKey, lastStepRef.current ?? keys.firstStep(routeKey)), {
-        replace: true,
-      });
+      // The step it last showed, else its first; a step the flow no longer has (its steps
+      // follow live data, sourceFlowModel.js `sourceSteps`) falls to the first it has.
+      const target = [lastStepRef.current, keys.firstStep(routeKey)]
+        .find((candidate) => steps.some((known) => known.id === candidate)) ?? steps[0].id;
+      navigate(keys.toRoute(routeKey, target), { replace: true });
     } else if (step !== null && !visited.has(step)) {
       setVisited((previous) => new Set(previous).add(step));
     }

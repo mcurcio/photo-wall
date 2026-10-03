@@ -13,7 +13,18 @@ import re
 import sys
 
 import pytest
-from console_tasks import LABELS, author_scene, connect, current_hash, go, show_now, visit
+from console_tasks import (
+    LABELS,
+    author_scene,
+    connect,
+    current_hash,
+    edit_layout,
+    go,
+    open_player,
+    player_name,
+    show_now,
+    visit,
+)
 from operator_harness import SNAPSHOT, RequestGate, operator_server, sign_in
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import SCENE_ID, SOURCE, VALID_FRAME, _seed, _seed_source
@@ -45,16 +56,16 @@ def _frame(registry, frame_id, *, x_mm=100, surface="wall"):
 # --- Landing (item 9: CI's race).
 
 # When the first snapshot's content is committed (its status bar appears) and BEFORE React
-# runs that render's effects, the hash moves to #/wall as a sidebar link does: the rendered
+# runs that render's effects, the hash moves to #/scenes as a sidebar link does: the rendered
 # route is still null, and the `hashchange` is queued behind the effect. A MutationObserver
 # callback runs at the end of the commit's task, between the two.
-_CHOOSE_WALL_AT_FIRST_SNAPSHOT = """
+_CHOOSE_SCENES_AT_FIRST_SNAPSHOT = """
 (() => {
   let done = false;
   new MutationObserver(() => {
     if (!done && document.querySelector('[aria-label="Snapshot status"]') !== null) {
       done = true;
-      window.location.hash = "#/wall";
+      window.location.hash = "#/scenes";
     }
   }).observe(document, {childList: true, subtree: true});
 })();
@@ -63,14 +74,14 @@ _CHOOSE_WALL_AT_FIRST_SNAPSHOT = """
 
 def test_a_section_chosen_as_the_first_snapshot_renders_is_not_replaced_by_landing(
         page, registry):
-    _frame(registry, "first")  # with a frame the landing route is #/now, not #/wall
-    page.add_init_script(_CHOOSE_WALL_AT_FIRST_SNAPSHOT)
+    _frame(registry, "first")  # the landing route is #/wall, so choose another section
+    page.add_init_script(_CHOOSE_SCENES_AT_FIRST_SNAPSHOT)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        expect(_heading(page, "wall")).to_be_visible()
+        expect(_heading(page, "scenes")).to_be_visible()
         page.wait_for_timeout(300)  # any landing replace would have run by now
-        assert current_hash(page) == "#/wall"
-        expect(_heading(page, "wall")).to_be_visible()
+        assert current_hash(page) == "#/scenes"
+        expect(_heading(page, "scenes")).to_be_visible()
 
 
 def _expire_on_next_poll(page):
@@ -102,9 +113,9 @@ def test_a_poll_401_under_an_open_confirmation_signs_in_by_mouse_and_keeps_it(pa
     player_id = identity["player_id"]
     handle = player_id[-6:]
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "equipment", paused_at=registry.clock.utc())
-        page.get_by_role("group", name="Pending players", exact=True).get_by_role(
-            "button", name=f"Retire player {player_id}", exact=True).click()
+        connect(page, origin, paused_at=registry.clock.utc())
+        player = open_player(page, player_name(registry, player_id))
+        player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Retire player {handle}?", exact=True)
         typed = dialog.get_by_label(f"Type {handle} to confirm", exact=True)
         typed.press_sequentially(handle[:3])
@@ -126,14 +137,14 @@ def test_a_poll_401_under_an_open_confirmation_signs_in_by_mouse_and_keeps_it(pa
         expect(typed).to_be_focused()
         page.keyboard.type(handle[3:])
         dialog.get_by_role("button", name="Confirm retire", exact=True).click()
-        retired = page.get_by_role("group", name="Retired players", exact=True)
-        expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        expect(player).to_contain_text("Standing: Retired")
 
 
 def test_a_write_401_from_a_confirmation_signs_in_by_keyboard_and_keeps_it(page, registry):
     _frame(registry, "first")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
+        edit_layout(page)
         page.get_by_role("button", name="Frame first", exact=True).click()
         page.get_by_role("button", name="Delete frame first", exact=True).click()
         dialog = page.get_by_role("dialog", name="Delete frame first?", exact=True)
@@ -163,7 +174,7 @@ def test_a_write_401_from_a_confirmation_signs_in_by_keyboard_and_keeps_it(page,
 
 def _live_run_with_cancel_open(page):
     """Show the Scene now, open "Cancel run" on its Run from the Schedule page's history
-    (Schedule, then Now showing), and return the Runs region and the open dialog."""
+    (Schedule, then Now), and return the Runs region and the open dialog."""
     author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,))
     go(page, "schedule")
     show_now(page, SCENE_ID, 0)
@@ -189,7 +200,7 @@ def test_browser_back_cancels_an_idle_show_confirmation_and_leaves_the_page_usab
         go(page, "scenes")
         assert current_hash(page) == "#/scenes"
 
-        # Back on Now showing the idle confirmation is gone (cancelled, as Esc would), and
+        # Back on Now the idle confirmation is gone (cancelled, as Esc would), and
         # the Run was not cancelled.
         go(page, "now")
         expect(page.get_by_role("dialog")).to_have_count(0)
@@ -254,13 +265,13 @@ def test_a_route_typed_before_the_first_snapshot_is_never_replaced(page, registr
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         # A fresh load at a known route: the landing route never applies.
-        page.goto(origin + "/console#/equipment")
-        expect(_heading(page, "equipment")).to_be_visible()
+        page.goto(origin + "/console#/players")
+        expect(_heading(page, "players")).to_be_visible()
         page.wait_for_timeout(300)
-        assert current_hash(page) == "#/equipment"
+        assert current_hash(page) == "#/players"
         visit(page, "#/nope")
-        expect(_heading(page, "now")).to_be_visible()
-        assert current_hash(page) == "#/now"
+        expect(_heading(page, "wall")).to_be_visible()
+        assert current_hash(page) == "#/wall"
 
 
 # --- The Surface follows a routed frame (item 4).
@@ -275,7 +286,7 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         # Plain selection on Surface A remembers A.
         page.get_by_role("button", name="Frame a1", exact=True).click()
         expect(surface).to_have_value("A")
-        go(page, "equipment")
+        go(page, "players")
 
         visit(page, "#/wall/frames/b1/binding")
         expect(page.get_by_role("region", name="Frame b1 inspector", exact=True)).to_be_visible()
@@ -283,7 +294,7 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         expect(page.get_by_role("button", name="Frame b1", exact=True)).to_be_visible()
         # Back to a1's route: its Surface again.
         page.go_back()
-        expect(_heading(page, "equipment")).to_be_visible()
+        expect(_heading(page, "players")).to_be_visible()
         page.go_back()
         expect(page.get_by_role("region", name="Frame a1 inspector", exact=True)).to_be_visible()
         expect(surface).to_have_value("A")
@@ -293,16 +304,20 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
 
 
 def test_show_all_focuses_the_needs_attention_heading(page, registry):
-    _frame(registry, "no-player")
+    # An incident (a Player enrolled long ago that never reported), so the strip lists a row.
+    identity, _key, _request = enroll(registry, count=1)
+    _frame(registry, "dark")
+    registry.bind("dark", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.clock.advance(240)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
         strip = page.get_by_role("region", name="Wall attention", exact=True)
-        strip.get_by_role("button", name="Show frames", exact=True).click()
+        strip.get_by_role("button", name="Show list", exact=True).click()
         strip.get_by_role("link", name="Show all", exact=True).click()
         expect(_heading(page, "attention")).to_be_focused()
         assert current_hash(page) == "#/attention"
         # Again from the page itself: the route does not change, and focus still moves.
-        strip.get_by_role("button", name="Show frames", exact=True).click()
+        strip.get_by_role("button", name="Show list", exact=True).click()
         strip.get_by_role("link", name="Show all", exact=True).click()
         expect(_heading(page, "attention")).to_be_focused()
 
@@ -320,8 +335,8 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
             drawer.get_by_role("link", name="Scenes", exact=True).click(
                 modifiers=[new_tab_modifier])
         other.value.close()
-        # This tab did not follow the link: still on Now showing, the drawer still open.
-        assert current_hash(page) == "#/now"
+        # This tab did not follow the link: still on the Wall, the drawer still open.
+        assert current_hash(page) == "#/wall"
         expect(drawer).to_be_visible()
         page.keyboard.press("Escape")
         expect(menu).to_be_focused()

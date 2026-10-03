@@ -78,21 +78,32 @@ def load_current_node_app_link_in(conn, principal):
     link even when a later control delivery supersedes its original proof receipt.
     """
     producer = principal.grant.producer
-    row = conn.execute("SELECT l.payload FROM node_app_links l "
+    current = load_current_node_app_link_for_device_in(conn, producer.device_id, producer.device_generation)
+    if current is None or current[0].producer.kernel_boot_id != producer.kernel_boot_id:
+        return None
+    return current[0]
+
+
+def load_current_node_app_link_for_device_in(conn, device_id: str, generation: int):
+    """The current boot's accepted link and Central's admission time, or None.
+
+    The device-keyed half of `load_current_node_app_link_in`, for the operator read
+    (console DDD Part E G4): a link whose boot or Registry epoch is no longer current is
+    not the app a qualification would observe.
+    """
+    row = conn.execute("SELECT l.payload,l.admitted_at FROM node_app_links l "
                        "JOIN node_producers p USING(producer_id) "
                        "JOIN node_boot_admissions b USING(admission_id) "
                        "JOIN node_sessions s ON s.producer_id=p.producer_id AND s.revoked_at IS NULL "
                        "WHERE l.device_id=%s AND l.device_generation=%s AND l.superseded_at IS NULL "
-                       "AND b.superseded_at IS NULL", (producer.device_id, producer.device_generation)).fetchone()
+                       "AND b.superseded_at IS NULL", (device_id, generation)).fetchone()
     if row is None:
         return None
     link = parse_node_app_link(bytes(row["payload"])).challenge
-    if link.producer.kernel_boot_id != producer.kernel_boot_id:
-        return None
-    control = load_current_app_control_in(conn, producer.device_id)
+    control = load_current_app_control_in(conn, device_id)
     if control is None or (control.player_id, control.authority_epoch) != (link.player_id, link.authority_epoch):
         return None
-    return link
+    return link, row["admitted_at"]
 
 
 def load_current_node_app_link_for_player_in(conn, player_id: str, authority_epoch: int, now: float):

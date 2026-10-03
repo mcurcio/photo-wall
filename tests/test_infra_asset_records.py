@@ -12,6 +12,7 @@ import psycopg
 import pytest
 from fakes.transactions import FakeTransaction
 
+from central.assets.library import THUMBNAIL_REFERENCE
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
@@ -114,7 +115,19 @@ def test_record_produced_is_write_once(repo):
     assert repo.get(KEY).produced == facts
 
 
-@pytest.mark.parametrize("kind", list(AssetKind))
+def test_an_identity_keyed_thumbnail_takes_new_produced_facts(repo):
+    """A library thumbnail is keyed by its original, so the library may regenerate its bytes:
+    after a purge the re-produced facts replace the recorded ones instead of conflicting for
+    good (B5-FC2-4). Mutation probe: drop `OR NOT keyed_by_content` from the UPDATE."""
+    key = AssetKey(AssetKind.LIBRARY_THUMBNAIL, "asset-" + "c" * 64)
+    assert not key.kind.keyed_by_content and KEY.kind.keyed_by_content
+    repo.reference(key, THUMBNAIL_REFERENCE)
+    repo.record_produced(key, AssetReady(size=10, sha256=SHA_A))
+    repo.record_produced(key, AssetReady(size=11, sha256=SHA_B))
+    assert repo.get(key).produced == AssetReady(size=11, sha256=SHA_B)
+
+
+@pytest.mark.parametrize("kind", [k for k in AssetKind if k is not AssetKind.LIBRARY_THUMBNAIL])
 @pytest.mark.parametrize("locator_sha", [None, SHA_B])
 def test_a_reference_whose_locator_does_not_name_its_key_is_refused(repo, kind, locator_sha):
     # 028's CHECK: production may fetch from ANY reference of a key, and `download` checks the
@@ -128,6 +141,24 @@ def test_a_reference_whose_locator_does_not_name_its_key_is_refused(repo, kind, 
     assert repo.count("assets") == 0 and repo.count("asset_references") == 0  # rolled back
     good = AssetReference("v1.0.0", OriginLocator("https://example.test/a", SHA_A, 10), None, None)
     assert repo.reference(key, good) is True
+
+
+@pytest.mark.parametrize("stray", [
+    AssetReference("library-preview", OriginLocator("https://library.example/a", None, None),
+                   None, None),
+    AssetReference("v1.0.0", OriginLocator("http://library.invalid/", None, None), None, None),
+    AssetReference("library-preview", OriginLocator("http://library.invalid/", SHA_A, 10),
+                   None, None),
+])
+def test_a_thumbnail_admits_only_the_reserved_reference(repo, stray):
+    # 064: a thumbnail's locator never names an address or bytes (the media worker alone holds
+    # the library's); `central.assets.library.THUMBNAIL_REFERENCE` is the one row allowed.
+    from central.assets.library import THUMBNAIL_REFERENCE
+
+    key = AssetKey(AssetKind.LIBRARY_THUMBNAIL, "asset-" + SHA_A)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        repo.reference(key, stray)
+    assert repo.reference(key, THUMBNAIL_REFERENCE) is True
 
 
 def test_touch_served_sets_last_served_at(repo):

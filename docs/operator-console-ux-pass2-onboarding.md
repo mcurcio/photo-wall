@@ -1,6 +1,6 @@
 # Operator Console Pass 2, Slice 2: Safe Onboarding
 
-**Date:** 2026-09-28 · **Status:** design-gate artifact, awaiting owner approval.
+**Date:** 2026-09-28 · **Status:** design-gate artifact, awaiting owner approval. The roster (§5) and the standing words (§4) were later replaced by the Players list and Player pages, [console DDD pass 1](operator-console-ddd.md#9-screens-and-read-models): standing reads Unbound, Bound or Retired, and a bound Output reads "Bound to Frame lobby-left". [console DDD pass 3](operator-console-ddd.md#19-screens) renamed the post-bind CTA "Calibrate this Frame" (it opens the Calibration facet, formerly Commissioning), offers Identify Panel on any unbound connected Output, and replaced the Recovered banner with the enrolled fact on the Player page. [Console DDD Part E](operator-console-ddd.md#24-what-part-e-covers-and-why) then deleted the boot-outcome label (`bootOutcomeLabel`) and every V1 boot field from the console: the netboot read supplies only the device id and serial.
 **Builds on:** [the approved console design](operator-console-ux-design.md) (R1–R4, journey J1) and [slice 1](operator-console-ux-pass2.md) (`health.js` is the one classifier; the write fence; the 5 s poll).
 **Layer:** a console increment plus two small backend changes that only refuse more (Questions 2 and 5): one shared frame-id rule, and a retire precondition. No migration. One new console read of an existing admin route (`GET /v1/operator/netboot`).
 **Size:** 7 beads (5 console, 1 backend, 1 docs), about 750 net production lines and 600 test lines.

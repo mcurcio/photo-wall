@@ -46,6 +46,123 @@ T0 changes **no shape**: it adds a layer to the existing Wall-First + Showrunner
 design. T1/T2 are real multi-layer engineering programs, stated as costs, not
 sold.
 
+> **Superseded in part (2026-10-02).** The [domain-driven console design](operator-console-ddd.md)
+> now owns the Frame's facets and the Panel words. The **Commissioning** facet is
+> the **Calibration** facet (committed calibration, the draft editor, Live
+> calibration and the Frame profile); its equipment block moved to **Binding**
+> ([pass 3](operator-console-ddd.md#19-screens)). The capability-gated colour and
+> power areas, the capability gate and the **T0/T1/T2 scope tiers** are retired
+> from the console: panel colour and display power are feature proposals, each
+> arriving with its own served read. The console says **Panel** for the display
+> hardware ("Display" survives only in Display Host). The tier and Commissioning
+> text below is kept as the record of the 2026-09-13 gate, not as current design.
+
+> **Fleet releases and the V2-only console (2026-10-02).** [Part E of the
+> domain-driven console design](operator-console-ddd.md#24-what-part-e-covers-and-why)
+> owns these screens. The console assumes node control: when Central runs without
+> it, one **banner** sits above every page and node pages show one "not shown" line,
+> and a Pi whose newest boot was by the deprecated path gets one warning line on its
+> Player page. There is **no V1 section** anywhere (no V1 boot offers, V1 fleet
+> policy, maintenance requests or V1 records). The fleet group is **Players,
+> Releases**: **Fleet › Releases** (`#/releases`) holds the boot selection,
+> deployments (Select), the release catalog (Publish, Check GitHub releases now) and
+> the effect gate; the Player page's App section gains **Stage app** (on bound or
+> unbound Players; a bound switch follows the reboot rule) and **Qualified
+> fallback**. The guided **Update the wall** journey
+> (`#/releases/update/<tag>[/try/<player>][/skip/<player>…]`) walks Publish, an optional try on one
+> Frame, then Keep (Select, then one-at-a-time reboots) or Back out, through the same
+> send functions as the homes.
+
+> **The Wall's daily face, Status and fleet host health (2026-10-02).** [Parts G and H of
+> the domain-driven console design](operator-console-ddd.md#61-screens) own these screens;
+> the shape below describes them for this document's reader.
+> - **Sidebar.** Four groups in a fixed order, each with an accessible name and no visible
+>   heading: **Wall**; **Show** (Now, Scenes, Schedule, Sources); **Fleet**
+>   (Players, Releases); **Needs attention**. Nothing reorders or counts on state, and the
+>   landing route is always `#/wall`. There is no Set up section: each home shows its own
+>   unfinished items on its own face.
+> - **The Wall's daily face** (`#/wall`) holds no write. The **Plan** is read-only: a
+>   health dot and the `planned` fact per tile (see the Show and Sources note below), and selecting a tile opens the Frame's
+>   Status. The **Unplaced tray** stays beside it as a select-only list (an entry opens its
+>   Inspector). **Edit layout** (`#/wall/layout`) holds every layout write: draw (with the
+>   Frame profile form), drag to move, Delete, and the tray's drag-out and Delete. Its header
+>   reads "Editing layout" with **Done**, which returns to the daily face. `LayoutEditor.jsx`
+>   owns these writes and hands them to `Plan.jsx` and `UnplacedTray.jsx`, which import no
+>   write module (a test pins it).
+> - **To finish.** When anything is unfinished, the Wall shows a **To finish** list, one row
+>   per item in Frame order, each with one link: "lobby-left · not on the plan" [Edit
+>   layout], "lobby-left · needs a Player" [Binding], "lobby-right · needs calibration"
+>   [Calibration] (asked only of a bound Frame). It is derived from the snapshot, with no
+>   stored flag, and it disappears when nothing is left. Fleet's own unfinished items are
+>   the Players page's **Not driving a Frame** list.
+> - **First step.** With no Frames, the **Guidance** banner is the Wall's face. It has no
+>   Dismiss: it leaves by itself when the first Frame exists, and **Add first frame** opens
+>   Edit layout.
+> - **The Frame Inspector's facets are Status · Binding · Calibration, and Status is the
+>   default.** Status is the former Now-showing facet (`StatusFacet.jsx` since batch 5) and
+>   carries the bound Player's host chip, then the Frame's `planned` fact. The route
+>   segment is `status`; the shipped `nowshowing` and `commissioning` segments still open
+>   Status and Calibration, and a Frame route with no facet opens Status. Which facet opens
+>   is `facetFor(health, "status")`: a visit from Needs attention or a Player page opens the
+>   facet that shows the cause, and an ok Frame or a plain tile click opens Status. There is
+>   no remembered last facet.
+> - **The attention strip counts incidents only:** "2 Frames · 1 Player need attention", or
+>   "No Frame or Player needs attention · 1 awaiting a first report". It never says "to set
+>   up": unbound and needs-calibration Frames are the Wall's To finish items, not attention
+>   rows. Player rows carry host incidents of Bound Players, with [Frame] and [Player] links
+>   on Wall-side and Fleet pages and plain text on Show pages (R4). While the fleet host read
+>   has failed or not yet loaded, the summary ends " · host health not read".
+> - **Players list.** One table, worst first by host tier (alarm, notice, unknown, ok),
+>   then by name, with columns Player, Standing and Frames, Host Management, Temperature,
+>   Throttling, CPU, Storage, Network and Software. It scrolls sideways at phone width, has no
+>   counts line, and lists Unbound and not-enrolled boxes again under **Not driving a Frame**.
+> - **Player page.** **Reboot** sits in the header (in its own error boundary, sending only
+>   through `sendReboot`), and **Health** is the first section: Thermal, Power and
+>   throttling, Compute, Storage, Network and Software, the host facts' one receipt line, and
+>   an "Every reported metric" disclosure. Every host value comes from G12, the fleet host
+>   read, and is worded by one classifier; the [runbook](runbook.md#host-health-on-the-players-pages)
+>   says what each state means.
+> - **Diagnostics** is a reserved home for a future debug overlay; nothing is built for it.
+
+> **Show and Sources (2026-10-02, batch 5).** [Part F of the domain-driven console
+> design](operator-console-ddd.md#33-what-part-f-covers-and-why) owns these screens and their
+> wordings; this note describes them for this document's reader.
+> - **Now** (`#/now`) is the Show group's Runs page, and the Show now flow's section label.
+>   It names Central's live Runs, never what Panels show (the earlier label is retired).
+> - **The `planned` fact.** Which Run is on top on a Frame is Central's Runtime projection,
+>   made before any media is chosen, so it is a labelled fact, never device truth. The Plan
+>   tile and Frame › Status show it as one line: "On top: xmas · Program dec-evenings
+>   (Central's Runs; media not checked; the Panel is not observed)". It always names who
+>   started the Run (a Program, "started directly, by Show now or the API", or "part of
+>   <root>'s Run"), and on an unbound Frame its basis reads "this Frame is unbound, so
+>   Central sends it no layers". It is a fact on the **Status** facet, not a facet of its
+>   own: there is no Planned or Now-showing facet. The Why heading reads "Central's Runs on
+>   <frame>: …". Every clock time states its zone ("18:00 BST"; one module, `timeWords.js`).
+> - **Sources** (`#/sources`) is the one noun for a saved library query (the requirements'
+>   AssetSource). Media lives in the operator's photo library; Photo Wall only selects it,
+>   and the console says so. A card shows the selection summary, the last refresh as a
+>   reported fact, and Edit, Refresh and Delete; it shows no thumbnails. A Source's dates
+>   are the library's own dates and read "dated" everywhere (the summary, the state label
+>   on Now and the Scene flow, the media chooser), one home for those words.
+> - **The Source flow asks one question per step:** Which library connection? → Choose tags
+>   → Narrow it down (optional) → Name this Source → Check your Source. The connection step
+>   is skipped when exactly one connection is known. Every step has its default filled.
+> - **The tag picker** ("Tags in your library") is a type-ahead combobox over the library's
+>   own tag list, which the media worker reads and Central stores: at most four tags, all of
+>   which a photo must carry; each tag includes everything nested under it, so a nested tag
+>   replaces its ancestor and an ancestor of a chosen tag is refused with its reason. A
+>   saved tag is named by a lookup by id in that stored list, so it reads by its path
+>   however many tags the library has, and as gone only when the current list lacks it.
+> - **The preview panel** sits beside Choose tags, Narrow and Check, and follows every
+>   change: a reported count ("Your photo library reported 128 photos and 4 videos · first
+>   received 12 s ago") and the newest 24 tiles, dated by the library's own dates. A failure
+>   is never worded as "nothing matches": the earlier answer stays with "Photo Wall can't
+>   reach your photo library right now." More than 1,000 matches reads "Photo Wall currently
+>   refuses a Source with more than 1,000 matches; saved like this it selects nothing.
+>   Narrow it with tags or dates." (the worker's current behaviour, not a product rule;
+>   see the [media module](module-media.md#open-gaps)). Tiles come
+>   through Central; the browser never receives the library's address, key or photo ids.
+
 ---
 
 ## 1. The problem in plain words
@@ -140,17 +257,15 @@ graph TD
 
   subgraph WALL["WALL MODE (home)"]
     SURF["Surface filter<br/>(text label -> filters plan)"]
-    PLAN["Per-Surface 2D plan (SVG)<br/>rects from x_mm/y_mm/w_mm/h_mm<br/>drag-to-move -> PATCH; drag-to-create -> POST"]
-    TRAY["Unplaced tray (ENTRY state)<br/>legacy/geometry-less frames;<br/>drag onto plan -> PATCH; delete -> DELETE"]
-    RAIL["Equipment rail<br/>Pending / Retired players"]
-    INSP["Frame Inspector<br/>Commissioning | Binding | Now-showing"]
+    PLAN["Per-Surface 2D plan (SVG), read-only<br/>rects from x_mm/y_mm/w_mm/h_mm<br/>Edit layout (#/wall/layout): drag-to-move -> PATCH; drag-to-create -> POST"]
+    TRAY["Unplaced tray (ENTRY state)<br/>legacy/geometry-less frames; select-only<br/>Edit layout: drag onto plan -> PATCH; delete -> DELETE"]
+    RAIL["Players section (#/players)<br/>one row per box; one Player page each"]
+    INSP["Frame Inspector<br/>Status | Binding | Calibration"]
   end
 
-  subgraph COMM["COMMISSIONING facet (Wall-only; hidden in Showrunner)"]
-    GEO["Geometry + SDR gain calibration<br/>(T0 - real today)"]
-    DFACTS["Read-only facts<br/>OutputReport connected (live Display readback)<br/>+ FrameProfile (Frame facts)"]
-    COLOR["Panel color / white-balance<br/>gated 'not yet available' until T1"]
-    POWER["Display power / CEC params<br/>gated 'not yet available' until T2"]
+  subgraph COMM["CALIBRATION facet (Wall-only; hidden in Showrunner)"]
+    GEO["Geometry + SDR gain calibration<br/>draft editor + Live calibration"]
+    DFACTS["Frame profile (Frame facts)<br/>+ mismatch note vs the Panel record<br/>at the Player app's last enrollment"]
   end
 
   subgraph SHOW["SHOWRUNNER MODE"]
@@ -160,8 +275,6 @@ graph TD
     RUN["Runs (activate / finish / cancel)"]
     BADGE["calibration_valid badge<br/>(Frame health - STATUS, not a control)"]
   end
-
-  CAP{"Capability gate<br/>(derived from a wired path,<br/>default closed)"}
 
   MODE -->|Installation| WALL
   MODE -->|Showrunner| SHOW
@@ -175,8 +288,6 @@ graph TD
   PLAN -->|select Frame| INSP
   INSP --> COMM
   SURF -.filters.-> PLAN
-  CAP -.enables.-> COLOR
-  CAP -.enables.-> POWER
 ```
 
 **The four rules the whole console obeys:**
@@ -225,9 +336,20 @@ layer, so honesty is enforced by *where a control may render*, not only by
 wording). It is orthogonal to R3: Commissioning writes (calibration) already use
 Plane B and the preview lease unchanged.
 
+*Wording note (2026-10-02):* R4's hardware facet is now the **Calibration** facet
+and holds calibration and the Frame profile only; the gated colour and power areas
+are removed, and the Panel record at enrollment is shown on Binding
+([pass 3](operator-console-ddd.md#19-screens)). The rule itself is unchanged: no
+Show or neutral page reaches the Calibration facet (`tests/test_console_routes_r4.py`).
+
 ---
 
 ## 3. Glossary
+
+*Wording note (2026-10-02):* the [domain-driven console design](operator-console-ddd.md#3-glossary-the-consoles-words)
+pass 1 owns the fleet words (Player, Player app, Host Management, App Manager, App
+Effect Broker, Display Host, Output, Panel, Binding, standing, boot path). The
+entries below that it changed say so; where the two differ, that glossary wins.
 
 - **Surface** — a single flat 2D millimetre coordinate space (origin upper-left,
   +x right, +y down) that Frames sit within. It is a bare TEXT label on frames
@@ -246,51 +368,132 @@ Plane B and the preview lease unchanged.
   Frame-vs-Player (decision 0006). *Counter-example:* swapping the panel does not
   change the Frame; the Frame's mm aperture, location, identity, normalized
   calibration corners, and schedule all persist. The Display is reached only
-  through the selected Frame's Commissioning facet — never a competing unit of
-  selection. Distinct from Surface / Frame / Player / Output / Binding / Panel.
+  through the selected Frame (its Calibration and Binding facets since 2026-10-02)
+  — never a competing unit of selection. Distinct from Surface / Frame / Player / Output / Binding / Panel.
+  *Renamed (2026-10-02):* the console now calls this hardware the **Panel**, as the
+  requirements do, and no longer says "Display" for it. "Display" survives only in
+  **Display Host** (the node layer, L1.5, that owns final scanout and reports
+  `presented_to_compositor` per Output, which is not proof of Panel pixels).
 - **Player** — a replaceable Raspberry Pi; `player_id` is a deterministic hash of
   its hardware serial; it re-enrolls fresh every boot with a new `authority_epoch`
-  and holds no authoritative state. A disposable box behind a Frame.
+  and holds no authoritative state. A disposable box behind a Frame. Since
+  2026-10-02 the console keys a Player by its fleet **device** identity
+  (`device-` + sha256 of `pi:<normalized serial>`), because a box exists from its
+  first netboot; the Registry enrollment (`player_id`, `authority_epoch`) is a fact
+  on the Player. The serial is a LAN claim, never verified physical identity. The
+  **Player app** (one enrollment epoch) is a different thing from the box.
+- **Standing** — where a Player stands with the Registry, first match: **Retired**
+  (`retired_at` set), **Unbound** (enrolled, no Output bound), **Bound** (at least
+  one Output bound), or **Not enrolled** (Central saw the box at netboot but it
+  never enrolled). These replace the earlier "Pending", "New" and "In service".
+  Standing is a Central record, not liveness.
+- **Players list / Player page** — the fleet's homes for a Player (the
+  **Players** section, `#/players`): the list is one table, one row per box, worst
+  host tier first, with its standing, bound Frames and host health; it makes no
+  per-box node read (its host columns come from the shell's one fleet host read).
+  The Player page (`#/players/<device-id>`) is the one home for a box, with Reboot in
+  its header, then Health, node layers,
+  Outputs, boot records, app operations, Stage app and Qualified fallback,
+  each section with its own read time (no V1 section since 2026-10-02). They replace the Equipment rail and roster; the old
+  `#/equipment` address opens the Players list.
+- **Releases / boot selection** — **Fleet › Releases** (`#/releases`) is the home of
+  the fleet-wide release aggregates: the **boot selection** (the one deployment Central
+  offers every node-path boot from now on, with its revision), the deployments
+  (Publish creates them, permanently) and the release catalog GitHub releases reported,
+  plus the effect gate's state and reason. Owned by
+  [DDD Part E](operator-console-ddd.md#25-screens).
+- **Update the wall** — the guided journey over Releases and the Player page:
+  Publish, optionally try on one Frame (qualify, then Stage), look, then Keep (Select,
+  then reboot Players one at a time, each after the previous rejoined) or Back out.
+  Central stores no rollout; progress is re-derived from Central's reads
+  ([DDD §25a](operator-console-ddd.md#25a-update-the-wall-guided-journey-nu1)).
 - **Output** — one HDMI port on a Player (≤2). The thing a Binding attaches to a
   Frame. An unbound Output shows nothing.
-- **Binding** — the one current Output→Frame association. Changing it bumps the
+- **Binding** — the one current Output→Frame association, worded "Bound to Frame X",
+  never "shows" (it is Central's assignment, not observed output). Changing it bumps the
   Frame's `generation`, clears any preview, and marks calibration invalid (but
   does **not** erase the committed calibration blob — see [§1b](#1b-verified-facts-about-todays-code)).
-- **Panel / FrameProfile** — `FrameProfile {width_px, height_px, diagonal_inches,
+- **Panel / FrameProfile** — the **Panel** is the display hardware at a Frame (see
+  Display above); it is not a stored entity. `FrameProfile {width_px, height_px, diagonal_inches,
   video}` are **Frame facts**: operator-declared at `create_frame`, read-only,
   persisting across a panel swap. The only **live Display readback** is
   `OutputReport {width_px, height_px, connected}` from enrollment. Distinct from
   the Frame's mm aperture; a 1080×1920 panel behind a 300×500 mm aperture is
-  normal.
+  normal. *Reworded (2026-10-02):* `OutputReport.connected` is not live readback but
+  an enrollment record, and `connected=false` is Central's own write (enrollment first
+  marks every Output not connected). Everywhere, fleet and Wall, it reads "No Panel
+  listed as connected at the Player app's last enrollment (may be stale)" or "Panel
+  connected at the Player app's last enrollment (may be stale)"; the Binding facet and
+  the Player page show it, and the Frame-health alarm uses the same wording. Display
+  Host's **current** per-Output connector, admitted surface and compositor receipt are
+  shown only on the Player page, as Display Host reports, never as Panel pixels.
 - **Calibration** — output-pixel correction bound to the Frame: `revision` (bumps
   on commit), `rotation`, four projective `corners`, a `crop` rectangle, and SDR
   `gain`. **Preview** pushes proposed values to the panel under a 30-second lease;
   **commit** saves a new revision against an `expected_revision`; **generation** is
   a separate optimistic token bumped by binding changes. A future **photometric**
   (color/white-balance) field would ride this same model (T1, [§7.3](#73-panel-color--white-balance-t1)).
-- **Commissioning** — the layer (and the Frame-Inspector facet) where the
-  Display↔Frame hardware relationship is set up: geometry + SDR gain today; panel
-  color (T1) and display power/params (T2) as capability-gated areas. Hidden in
-  Showrunner (R4).
-- **Capability gate** — a rendered branch that shows a hardware control **only
+  *Renamed (2026-10-02):* both calibration paths are called **Live calibration**.
+  The legacy lease path reads "Show on the Panel", "Show again", "Save without
+  acknowledgment" and "Stop live calibration" (it has no acknowledgment, so its
+  commit is never called Save calibration); the native Display Host path reads
+  "Start live calibration" and "Stop live calibration", and its **Save calibration**
+  is enabled only once Display Host acknowledges the latest edit
+  ([pass 3 §20](operator-console-ddd.md#20-one-live-calibration-noun-two-honest-verbs)).
+  The "Preview"/"Commit"/"Trial" wording below is the 2026-09-13 design's.
+- **Calibration facet** (was **Commissioning**) — the Frame-Inspector facet,
+  Wall-only and hidden from the Show sections (R4), that holds the committed
+  calibration, the draft editor, Live calibration and the Frame profile. The facets
+  are **Status · Binding · Calibration**, Status first and the default (2026-10-02;
+  Status was **Now-showing**); `#/wall/frames/<id>/commissioning` still opens
+  Calibration and `…/nowshowing` opens Status, and the console never writes either
+  address. The Panel
+  record at enrollment and the bound Output are on **Binding**. *Retired
+  (2026-10-02):* the Commissioning name and its capability-gated colour and power
+  areas.
+- **Output interrupted** — a Frame-health alarm (after Player app silent): Central's
+  inference, from its linked Output-loss record for the Frame's current Binding,
+  that the Output was lost, from what a node layer actually reported (the App
+  Effect Broker an app process exit, Display Host an invalidated or withdrawn
+  surface); "the Run continues" is added only when a live Run targets the Frame.
+  Absence of one is never worded as health.
+- **Capability gate** *(retired 2026-10-02 with the gated areas; kept as the
+  2026-09-13 definition)* — a rendered branch that shows a hardware control **only
   when the capability is derived from a real wired path** (a player session that
   negotiated the command protocol; a build whose model carries the field),
   defaulting closed to an explicit "not yet available." A stored boolean that
   merely *claims* the capability is a bug caught by a mutation probe
   ([§7.6](#76-capability-gating--derived-not-declared)).
-- **Scope tier (T0 / T1 / T2)** — the staged scope of the Display dimension: T0
+- **Scope tier (T0 / T1 / T2)** *(retired 2026-10-02: no longer console
+  vocabulary; colour and power are feature proposals)* — the staged scope of the
+  Display dimension as gated on 2026-09-13: T0
   UX-only (this pass), T1 a photometric backend program, T2 a CEC/actuator
   cross-layer epic. The owner picks how far to go ([§10](#10-decisions-that-are-yours)).
-- **Source** — a saved Immich *query* with a plain operator name (e.g.
-  `holiday`) and internal immutable revisions: live eligibility, not a downloaded album. Players never see it.
+- **Source** — a saved *query* on the operator's photo library with a plain operator
+  name (e.g. `holiday`) and internal immutable revisions: live eligibility, not a
+  downloaded album. It selects by tags, media type, favourites and dates; the media stays
+  in the library. Players never see it. The console's one word for it (the requirements'
+  AssetSource), used everywhere.
 - **Scene / Program / Run** — a **Scene** is a per-target composition of
   contributions (media/black/actuator); a **Program** binds a Scene to a *single*
   time window with a priority; a **Run** is a live execution instance with phases
   body/outro/completed/cancelled.
-- **Intended now-showing** — for a Frame, the winning `Intent` from
-  `current.visible` (central's authored projection), joined in the browser by the
-  string `"frame:<id>"`. It is what central *intends*, not proof the pixels are
-  lit.
+- **`planned` fact** (was *intended now-showing*) — for a Frame, the winning `Intent`
+  from `current.visible` (central's authored projection), joined in the browser by the
+  string `"frame:<id>"`, worded with its Run's origin and basis: "On top: xmas · Program
+  p (Central's Runs; media not checked; the Panel is not observed)". It is what central
+  *intends*, before any media is chosen, not proof the pixels are lit. Shown on the Plan
+  tile and Frame › Status ([Part F §35](operator-console-ddd.md#35-the-planned-truth-kind-and-show-wording)).
+- **Edit layout** — the Wall's mode for layout writes (`#/wall/layout`): draw, move
+  and delete Frames, and the tray's drag-out and delete. The daily face (`#/wall`)
+  holds none of them ([DDD §61](operator-console-ddd.md#61-screens)).
+- **To finish** — the Wall's list of its own unfinished items (not on the plan, needs
+  a Player, needs calibration), each linked to the mode that finishes it. Derived from
+  the snapshot; never an attention row and never a stored flag.
+- **Host health** — what Host Management reported about a box (temperature, firmware
+  throttling flags, CPU, storage, network, kernel) and Central's derived bands, read
+  from one fleet host read (G12) on Players and the Player page's **Health** section.
+  Values come only from the box's current boot.
 - **Snapshot vs Draft** — Plane A (Snapshot): one immutable timestamped read of
   inventory+runtime+media. Plane B (Draft): the operator's uncommitted edits, drag
   state, lease countdown, and in-flight optimistic mutations. A refresh replaces
@@ -315,7 +518,7 @@ render discipline. It is made explicit as **two planes**:
 - **Plane B — EDIT/DRAFT.** Separate **component-local** state (a `useDraft()`
   hook) for everything the operator is *doing*: the in-progress drag rectangle when
   placing a new Frame; the "trying" calibration values before commit; the lease
-  countdown clock; the current mode; guidance-dismissed flags; and in-flight
+  countdown clock; the current mode; and in-flight
   optimistic mutations. Because it is a distinct state cell from Plane A, it is
   **never overwritten by a snapshot refresh** — the framework keeps them apart.
 
@@ -325,7 +528,7 @@ Plane B.** When a refresh reveals that committed state moved underneath an open
 draft (e.g. `revision` or `generation` advanced on the Frame being calibrated),
 the console does **not** discard the draft; it raises a "committed changed
 underneath you" banner and lets the operator decide. This is the documented
-exception to "pure render from snapshot": the Commissioning facet reads Plane B for
+exception to "pure render from snapshot": the Calibration facet reads Plane B for
 its calibration handles and Plane A only for the committed baseline and conflict
 detection.
 
@@ -386,6 +589,19 @@ The console uses the aggregate endpoint for Plane A, because independent legacy
 requests cannot promise a shared database view. The older routes are not removed
 or repurposed.
 
+### Output interruptions
+
+*Added 2026-10-02 ([console DDD §16](operator-console-ddd.md#16-backend-reads-the-pass-2-gate-q3-and-q4)).*
+The snapshot also carries `output_interruptions`, read in the same repeatable-read
+transaction: each unresolved Output-loss record that fences a Frame's **current**
+Binding (the Player's current authority epoch, and the same Frame, Player, Output
+and binding generation), shaped `{frame_id, player_id, output_id,
+binding_generation, cause_layer, interrupted_at}`. `cause_layer` is the owner of
+the producer that reported the loss. A loss from an earlier Binding or epoch is
+not served, so the console matches rows by Frame id alone. Its Frame reads
+**Output interrupted** (Central's inference, with Central's record age), and "the
+Run continues" when a live Run targets it; a Frame with no row shows nothing, never "not interrupted".
+
 ### Scene-card summaries
 
 Scene cards summarize the complete stored Scene tree. A recursive projection
@@ -399,7 +615,7 @@ candidate is currently ready or that a Player has displayed it.
 ### 4b. Calibration commit / conflict decision table
 
 Every calibration write sends `expected_revision` and `expected_generation`. On
-entering the Commissioning facet the console fetches a **fresh inventory** so it
+entering the Calibration facet the console fetches a **fresh inventory** so it
 starts from truth (the single preview slot is not otherwise polled elsewhere).
 
 | Who is asking | Result | Why |
@@ -431,8 +647,15 @@ claims a freshness or a playback it cannot prove.*
 ## 5. Walkthroughs
 
 Each step names the exact endpoint it calls. The Frame Inspector's facets are
-**Commissioning | Binding | Now-showing**; calibration (geometry + gain) lives
-under **Commissioning** (R4), and is reached only in Wall mode.
+**Status · Binding · Calibration**, Status the default (Calibration was named
+Commissioning, and Status Now-showing, until 2026-10-02);
+calibration (geometry + gain) lives under **Calibration** (R4), and is reached
+only from the Wall. The walkthroughs keep the 2026-09-13 strings ("Commission the
+display", "Preview", "Recovered" banner); the current wording is in
+[pass 3 §19–§20](operator-console-ddd.md#19-screens): the CTA is "Calibrate this
+Frame", the legacy path's verbs are "Show on the Panel" and "Save without
+acknowledgment", the gated areas are removed, and the Recovered banner is replaced
+by the enrolled fact on the Player page.
 
 ### J1 — Onboarding: pending → bind → commission → showing (with auto-recovery)
 
@@ -543,7 +766,7 @@ sequenceDiagram
   UI->>UI: frames with no distinct geometry -> Unplaced tray (list)
   loop each frame tile
     UI->>UI: join runtime - visible.filter(e => e.target === "frame:"+id)
-    UI->>UI: chip = "Scheduled: <scene_id>" + phase; NOT "LIVE"
+    UI->>UI: chip = planned fact "On top: …" (Central's Runs; batch 5, was "Scheduled:"); NOT "LIVE"
     UI->>UI: connectivity dot from observation.connected (superseded by pass 2: enrollment-time only; now last-heard liveness)
     UI->>UI: calibration_valid badge (Frame health - status, not a control)
   end
@@ -577,6 +800,10 @@ Frames created by the old UI (all at `wall`/(0,0)) have no distinct position and
 enter through the **Unplaced tray** as a list, from which the operator drags them
 onto the plan (PATCH) or removes them (DELETE) — they are no longer permanent
 clutter.
+
+*Since 2026-10-02* these writes (draw, drag to move, Delete, the tray's drag-out and
+Delete) happen only in **Edit layout** (`#/wall/layout`); the daily Wall is read-only and
+its tray is select-only ([DDD §61](operator-console-ddd.md#61-screens)).
 
 ### J4 — Content & schedule: "what's on which Frame, when, why"
 
@@ -635,6 +862,9 @@ for the Display layer — is treated in [§7.6](#76-capability-gating--derived-n
   that value is enrollment-time only; the console now shows last-heard liveness and
   display detection at Player start, per the reworded R2; see [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal).)* The "why" from
   precedence is real and rendered.
+- *Superseded (2026-10-02, batch 5):* the chip is now the `planned` fact ("On top: …
+  (Central's Runs; media not checked; the Panel is not observed)"), which names who started
+  the Run; see [Part F §35](operator-console-ddd.md#35-the-planned-truth-kind-and-show-wording).
 - **Stated plainly:** the console shows what central *intends* per Frame, joined
   with connectivity. It cannot confirm the pixels are lit — there is no
   execution/render readback in `/inventory`+`/runtime`.
@@ -654,7 +884,7 @@ for the Display layer — is treated in [§7.6](#76-capability-gating--derived-n
   claim the refresh model never reconciled.
 - **The fix:** two explicit planes ([§4a](#4a-the-two-plane-state-model)); a
   refresh replaces Plane A only; no auto-renew (visible countdown + explicit
-  expiry + Re-preview); poll `/inventory` while the Commissioning facet is open so
+  expiry + Re-preview); poll `/inventory` while the Calibration facet is open so
   overtaken previews and committed-elsewhere changes surface as their own states.
 - **Stated plainly:** preview is a shared single slot with no lock; the console
   shows the *server's* `expires_at`, and a second operator can overtake the wall.
@@ -682,6 +912,12 @@ stateDiagram-v2
 ---
 
 ## 7. The commissioning layer
+
+> **Superseded (2026-10-02).** This section is the 2026-09-13 record. The console
+> no longer has a Commissioning facet, capability gates or scope tiers: the facet is
+> the Calibration facet, the equipment block is on Binding, and colour and power
+> are feature proposals without a console seam
+> ([pass 3](operator-console-ddd.md#19-screens)).
 
 This layer folds the owner's Display/hardware dimension into the existing shape.
 It adds R4, a Commissioning facet, and the Display as a first-class console
@@ -909,6 +1145,10 @@ for inherently non-spatial content.
 
 ### 8b. Where Commissioning lives — Facet vs third Mode (chosen: Shape 1)
 
+*Renamed (2026-10-02):* the chosen facet is now the **Calibration** facet
+([pass 3](operator-console-ddd.md#19-screens)); the facet-versus-mode reasoning below
+still holds.
+
 **Shape 1 — Commissioning FACET in the Frame Inspector (chosen):** the facets
 become `Commissioning | Binding | Now-showing`; you commission the Display where
 it physically sits on the Wall plan (select the Frame → Commissioning), and it is
@@ -1042,6 +1282,11 @@ The calibration lifecycle state machine is in
 | Q9 | Vanilla zero-build, or a framework with a build? | **RESOLVED — React with a SMALL self-hosted build (owner decision; reverses the prior vanilla recommendation).** A bundler (Vite recommended, esbuild acceptable) compiles real JSX + hooks into **one bundled JS/CSS served same-origin** under `script-src 'self'` — no CDN. The two hard surfaces (per-Surface SVG plan; 4-corner + crop pointer-drag calibration on a live preview) are React components with hand-coded SVG + Pointer Events *inside* React; the two-plane model (R3/§4a) becomes framework-enforced state instead of hand-rolled render discipline. | Adds a **Node build toolchain + a CI build step** to a Python repo that has neither today, and a built `dist` artifact to serve same-origin. | **Rejected:** (1) **vanilla zero-build** — keeps a zero-build stack but loses reactive ergonomics for a 9-domain console (the two-plane tax stays hand-rolled); (2) **React-no-build via `htm`** — keeps zero-build and same-origin but loses real JSX. Both declined in favour of JSX + hooks; the "vendor one same-origin ES module" escape valve is now moot. |
 
 ### The scope-tier gate — how far into the Display dimension to go now
+
+> **Retired (2026-10-02).** T0 was delivered; the tiers are no longer console
+> vocabulary, and T1/T2 are feature proposals, not open tiers. Q7's facet is now the
+> Calibration facet and Q8's CTA reads "Calibrate this Frame"
+> ([pass 3](operator-console-ddd.md#19-screens)). The table is the 2026-09-13 record.
 
 This is the new owner decision. The tiers are cumulative; T0 is recommended in
 this pass, T1 and T2 as separately-greenlit programs.
@@ -1230,6 +1475,9 @@ full, ordered slice/bead plan is a separate delivery artifact,
    Run control, "why" panel — with the `calibration_valid` Frame-health badge and
    **no** Commissioning surface (R4).
 8. Guidance banner + snapshot clock + refresh model.
+
+*(2026-10-02: the Commissioning facet is now the Calibration facet and the gated
+areas are removed; see [pass 3](operator-console-ddd.md#19-screens).)*
 
 **T1 and T2 are separate programs, not slices of this pass.** T1 (photometric
 field + render stage + capability signal) is a medium central/renderer/contract

@@ -2,20 +2,21 @@ import React, { useCallback, useId, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { ChevronIcon } from "./icons.jsx";
 import { explainPrecedence, LIVE_PHASES } from "./join.js";
 import { WhyNothingNew } from "./MediaPipeline.jsx";
-import { PrecedenceExplanation } from "./NowShowingFacet.jsx";
+import { PrecedenceExplanation } from "./PrecedenceExplanation.jsx";
 import { SHOW_KEYS } from "./showNowModel.js";
 import { ShowNowFlow } from "./ShowNowFlow.jsx";
 import { runRows } from "./showState.js";
 import { FrameChips } from "./TargetPicker.jsx";
+import { zoneNote } from "./timeWords.js";
 import { useMutate } from "./useMutate.js";
 
 /**
- * The Runs region of the Now showing page (Bead 16; pass 2 slice 3 §9–§11; flow design
+ * The Runs region of the Now page (Bead 16; pass 2 slice 3 §9–§11; flow design
  * §7 J7 and "See what is showing and why").
  *
  *  1. SHOW NOW — the Show-now flow (ShowNowFlow.jsx), Scene → Review → "Activate now".
@@ -25,11 +26,11 @@ import { useMutate } from "./useMutate.js";
  *     day) as cards from showState.js `runRows`: live roots with their child Scenes
  *     nested, then a closed "Recently ended" list. Finish asks for a natural end;
  *     Cancel stops now and goes through ConfirmAction.
- *  3. WHY — per frame, "Why?" opens Central's plan for it (join.js `explainPrecedence`,
- *     the Now-showing facet's explanation) and "Why nothing new?" the media chain
+ *  3. WHY — per frame, "Why?" opens Central's Runs on it (join.js `explainPrecedence`,
+ *     PrecedenceExplanation.jsx, shared with the Wall's Status facet) and "Why nothing new?" the media chain
  *     (MediaPipeline.jsx `WhyNothingNew`), each a disclosure.
  *
- * Everything here is Central's plan (intent), never a readback of what a panel shows
+ * Everything here is Central's Runs (intent), never a readback of what a panel shows
  * (R2). Every write wraps the shared `useMutate()` hook (primitive #7), so Plane A
  * refreshes exactly once after it.
  *
@@ -82,8 +83,9 @@ export function RunsRegion({ snapshot, route, navigate, recentScene, markDraft }
 
       <div className="run-cards" hidden={inFlow}>
         <p className="run-control__note">
-          Central&apos;s plan: what each frame is meant to show now, not a readback of the panels.
+          Central&apos;s Runs, not a readback of the panels. Each Frame&apos;s Why? shows which Run is on top there.
         </p>
+        <p className="program-scheduling__zone">{zoneNote()}</p>
         {rows.live.length === 0 ? (
           <p className="run-control__empty">No Run is running.</p>
         ) : (
@@ -226,7 +228,7 @@ function EndedRuns({ title, rows, snapshot }) {
 }
 
 /**
- * Why each frame shows what Central plans for it (§10) and why nothing new shows there
+ * Central's Runs per frame, the top one in the `planned` wording (§10, §35), and why nothing new
  * (§14): one row per frame, each with two disclosures. Which are open is kept here
  * (the page never unmounts), and a closed one renders nothing.
  */
@@ -243,7 +245,7 @@ function WhyPanel({ snapshot }) {
     });
   return (
     <div className="why-frames" role="group" aria-label="Why">
-      <h3 className="why-frames__title">Why each frame shows what it does</h3>
+      <h3 className="why-frames__title">Central's Runs per frame, and why nothing new</h3>
       {frames.length === 0 ? (
         <p className="run-control__empty">No frames yet.</p>
       ) : (

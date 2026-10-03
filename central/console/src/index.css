@@ -234,7 +234,6 @@ label {
 .tray__delete,
 .facet__field dd,
 .inspector__title,
-.console__recovery-text,
 .showrunner__badge {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -387,12 +386,41 @@ label {
   flex: 1;
 }
 
-.console__guidance-dismiss {
-  padding: 4px 12px;
+.console__surface-filter {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 20px;
 }
 
-.console__surface-filter {
+/* Edit layout's bar (console DDD §61) and the Wall's To finish list (§54). */
+.layout__bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.layout__title {
+  margin: 0;
+  flex: 1;
+}
+
+.unfinished {
   margin-bottom: 20px;
+}
+
+.unfinished__title {
+  margin: 0 0 8px;
+}
+
+.unfinished__list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.unfinished__item {
+  padding: 2px 0;
 }
 
 .plan {
@@ -510,7 +538,9 @@ label {
   --status: var(--ok);
 }
 
-.health--todo {
+.health--todo,
+.health--notice,
+.health--unknown {
   --status: var(--todo);
 }
 
@@ -520,6 +550,8 @@ label {
 
 .health--ok,
 .health--todo,
+.health--notice,
+.health--unknown,
 .health--alarm {
   color: var(--status);
   fill: var(--status);
@@ -542,6 +574,8 @@ label {
 
 .health--ok::before,
 .health--todo::before,
+.health--notice::before,
+.health--unknown::before,
 .health--alarm::before {
   margin-right: 0.35em;
   font-size: 0.85em;
@@ -551,7 +585,9 @@ label {
   content: "●" / "";
 }
 
-.health--todo::before {
+.health--todo::before,
+.health--notice::before,
+.health--unknown::before {
   content: "■" / "";
 }
 
@@ -561,6 +597,18 @@ label {
 
 .plan__health {
   font-size: 10px;
+}
+
+/* The Status facet's host chip (HostChip.jsx): a link in a chip, words first. */
+.facet__host {
+  margin: 0 0 8px;
+}
+
+.host-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-decoration: none;
 }
 
 .inspector__health {
@@ -804,23 +852,6 @@ label {
   font-weight: 600;
 }
 
-/* Bead 9 — recovery banner, bind/unbind facet. */
-.console__recovery {
-  margin: 0 0 16px;
-  padding: 12px 16px;
-  border: 1px solid var(--accent-soft);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent-soft) 15%, transparent);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
-.console__recovery-text {
-  margin: 0;
-}
-
 .console__auth-error {
   margin: 0 0 16px;
   padding: 12px 16px;
@@ -830,9 +861,8 @@ label {
   color: var(--fg);
 }
 
-/* Equipment roster (slice 2 §5): groups by standing, one card per Player. On a
-   narrow screen it sits below the plan and tray; ids wrap and actions wrap
-   under the facts. */
+/* Players list and Player page (console DDD §9): one card per box, and on a box's
+   page its Outputs; ids wrap and actions wrap under the facts. */
 .roster {
   margin: 24px 0 0;
   display: flex;
@@ -893,7 +923,6 @@ label {
   text-align: left;
 }
 
-.roster__standing,
 .roster__boot {
   margin: 4px 0 0;
   font-size: 12px;
@@ -950,6 +979,84 @@ label {
 .roster__empty {
   margin: 0;
   color: var(--fg-subtle);
+}
+
+/* The Players table (console DDD §61): one rendering, worst first. At phone width
+   its wrapper scrolls sideways; the page itself never does. A row's tier and an
+   item's band are a leading rule for the eye; the words already carry them (§5). */
+.players__scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.players__table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.players__table th,
+.players__table td {
+  padding: 8px 12px 8px 0;
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--border);
+}
+
+.players__table thead th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+.players__table tbody th {
+  white-space: nowrap;
+}
+
+.players__cell {
+  min-width: 10rem;
+}
+
+.players__row--alarm > th {
+  box-shadow: inset 3px 0 var(--alarm);
+  padding-left: 8px;
+}
+
+.players__row--notice > th {
+  box-shadow: inset 3px 0 var(--warn);
+  padding-left: 8px;
+}
+
+.players__item--alarm,
+.players__item--notice {
+  padding-left: 6px;
+  border-left: 2px solid var(--alarm);
+}
+
+.players__item--notice {
+  border-left-color: var(--warn);
+}
+
+.players__frames {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.players__chip {
+  padding: 1px 8px;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+
+.players__spares {
+  margin-top: 16px;
+}
+
+.player__host-group {
+  margin: 8px 0 0;
 }
 
 .roster__alert {
@@ -1300,7 +1407,7 @@ label {
   font-size: 13px;
 }
 
-/* Central's plan for a frame (slice 3 §10). */
+/* Central's Runs on a frame (slice 3 §10). */
 .precedence__heading {
   margin: 8px 0 4px;
   font-weight: 600;
@@ -2042,7 +2149,7 @@ label {
 /* A region whose title repeats its page's heading keeps it for assistive
    technology only. */
 .page--scenes .showrunner__region-title,
-.page--equipment .roster__title {
+.page--players .roster__title {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -2052,7 +2159,7 @@ label {
   white-space: nowrap;
 }
 
-.page--equipment .roster {
+.page--players .roster {
   margin-top: 0;
 }
 
@@ -2189,11 +2296,104 @@ label {
   color: var(--fg-muted);
 }
 
-/* The Photo sources section (flow design §7 J5; bead 3): Source cards, then the
-   Source flow, What to include → Name → Review. */
-/* Pass B's slots (SourceSteps.jsx `LibrarySlot`): out of the layout while empty. */
-.source-flow__slot:empty {
-  display: none;
+/* The Sources section (console DDD §37): Source cards, then the Source flow, Library →
+   Tags → Narrow → Name → Review, with the preview beside the criteria. */
+.source-flow__split {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: start;
+}
+
+.source-flow__selects {
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+/* The tag picker (TagCombobox.jsx): a combobox, its listbox, the chosen tags as chips. */
+.tag-picker {
+  position: relative;
+  display: grid;
+  gap: 8px;
+}
+
+/* Over what follows (its static position), so opening or closing it never moves a chip. */
+.tag-picker__options {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 16rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-raised);
+}
+
+.tag-picker__option {
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.tag-picker__option--active,
+.tag-picker__option:hover {
+  background: var(--bg);
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
+}
+
+.tag-picker__option[aria-selected="true"] {
+  font-weight: 600;
+}
+
+.tag-picker__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tag-picker__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.tag-picker__said,
+.tag-picker p {
+  margin: 0;
+}
+
+/* The preview's tiles (PreviewPanel.jsx): fixed-size, so a late image never moves the page. */
+.source-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 96px);
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-tile img,
+.source-tile__missing {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 96px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 0.75em;
+  text-align: center;
 }
 
 .source-preview {
@@ -2217,7 +2417,7 @@ label {
 }
 
 
-/* Now showing (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
+/* Now (flow design §7 J7, bead 5): the Show-now flow, Run cards and the
    per-frame Why disclosures (their toggles reuse the Advanced toggle's look). */
 .show-now {
   margin-top: 12px;
@@ -2305,14 +2505,116 @@ label {
   border-left: 2px solid var(--border);
 }
 
-/* Player fleet policy is a separate, independently timed Equipment read. */
-.fleet { margin-block: 1rem 2rem; padding: 1rem; border: 1px solid var(--line, #657082); border-radius: .5rem; }
-.fleet__heading, .fleet__controls { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
-.fleet__heading h2 { margin-inline-end: auto; }
-.fleet__note { color: var(--muted, #586578); }
-.fleet__devices { display: grid; gap: .75rem; padding: 0; list-style: none; }
-.fleet__device { padding: .75rem; border: 1px solid var(--line, #657082); border-radius: .4rem; }
-.fleet__device h3 { margin-block: 0 .5rem; overflow-wrap: anywhere; }
-.fleet__device p { margin-block: .35rem; overflow-wrap: anywhere; }
-.fleet__controls select { max-width: 100%; margin-inline: .4rem; }
-.fleet__notice { margin-block: .75rem; }
+/* Node control off (Part E §25): the one banner above every page; and a Player's
+   deprecated-path boot line. Both name a misconfiguration, so they read as warnings. */
+.node-banner {
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 6px;
+}
+.node-banner p { margin: 0; }
+.player__warning {
+  padding-left: 12px;
+  border-left: 4px solid var(--warn);
+}
+
+/* The Player page (console DDD §9): one section per aggregate part, each with its own
+   read time; facts carry their truth kind (FactLine.jsx). */
+.player {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.player__name {
+  margin: 0;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.player__header p,
+.player__frames {
+  margin: 4px 0 0;
+}
+.player__section {
+  min-width: 0;
+  padding: 12px 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+.player__section-title {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.player__section-failed {
+  margin: 0;
+  color: var(--alarm);
+  font-weight: 600;
+}
+.player__read-time {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.player__layers {
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.player__layer-title {
+  margin: 0;
+  font-size: 14px;
+}
+.player__details {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+.player__reboot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+}
+.player__reason {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.player__commands {
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.player__command {
+  min-width: 0;
+}
+.player__state {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.fact {
+  margin: 2px 0 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.fact__label {
+  color: var(--fg-muted);
+}
+.fact--unknown {
+  color: var(--fg-subtle);
+}

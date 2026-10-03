@@ -5,8 +5,10 @@ operation never resolves mutable desired policy after issue. Central does not
 authorize the stop: the broker prepares, verifies roots, stops the old process it
 was told about, starts the target, falls back if needed, and reports each effect.
 Central projects operation state from the latest reported effect. Exact roots
-remain retained by their published deployment/acceptance owners. Frame-bound
-Players are refused at stage time until a bound switch policy is selected.
+remain retained by their published deployment/acceptance owners. A Frame-bound
+Player's switch follows the operator-reboot rule (D16): Runtime interrupts each bound
+Output from the observed process exit and the new app rejoins the Run at its current
+point; bindings and calibration are untouched.
 """
 from __future__ import annotations
 
@@ -19,7 +21,10 @@ from psycopg.types.json import Jsonb
 
 from central.fleet.models import OfferAsset
 from central.fleet.node_acceptance import current_cohort_in
-from central.fleet.node_app_links import load_current_node_app_link_in
+from central.fleet.node_app_links import (
+    load_current_node_app_link_for_device_in,
+    load_current_node_app_link_in,
+)
 from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from central.fleet.rollout_gate import RolloutEffectGate
@@ -131,10 +136,6 @@ class NodeLifecycle:
             link = load_current_node_app_link_in(conn, principal)
             if link is None:
                 raise NodeControlError("node_app_current_process_unlinked")
-            # Owner default (Q1): a Frame-bound Player is refused here; a Frame bound
-            # after staging follows the reboot rule from the observed process exit.
-            if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s", (link.player_id,)).fetchone():
-                raise NodeControlError("bound_switch_policy_unselected")
             if conn.execute("SELECT 1 FROM active_equipment_drains WHERE player_id=%s",
                             (link.player_id,)).fetchone():
                 raise NodeControlError("node_app_existing_drain")
@@ -290,13 +291,18 @@ class NodeLifecycle:
 
     def status(self, device_id: str) -> dict:
         """Project the latest operation from its latest reported effect and every earlier one as
-        superseded; transport is never an effect."""
+        superseded; transport is never an effect. Once a later boot is admitted, an unfinished
+        latest operation reads interrupted_by_reboot and a finished one ended_by_later_boot.
+        `qualification` (console DDD Part E G4) serves what a qualification would observe and
+        what earlier ones recorded; whether an acceptance fits is `_qualified_fallback_in`'s
+        judgement at stage time, never this read's."""
         self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
             generation = self.sessions.lock_device_generation_in(conn, device_id)
             now = self.sessions.clock.utc()
-            current = conn.execute("SELECT kernel_boot_id FROM node_boot_admissions WHERE device_id=%s "
-                                   "AND device_generation=%s AND superseded_at IS NULL",
+            current = conn.execute("SELECT b.kernel_boot_id,o.offer_payload FROM node_boot_admissions b "
+                                   "LEFT JOIN node_boot_offers o ON o.offer_id=b.offer_id WHERE b.device_id=%s "
+                                   "AND b.device_generation=%s AND b.superseded_at IS NULL",
                                    (device_id, generation)).fetchone()
             operations = conn.execute("SELECT * FROM node_app_operations WHERE device_id=%s "
                 "AND device_generation=%s ORDER BY sequence DESC LIMIT 25", (device_id, generation)).fetchall()
@@ -310,13 +316,35 @@ class NodeLifecycle:
                 # A later stage replaces this one whatever it reported; latest_effect keeps that detail.
                 state = ("superseded" if index > 0
                          else _TERMINAL_STATES.get(event["phase"], "switching") if event else "staged")
+                # A stage is desired state for its own boot only; a later admitted boot runs the
+                # boot selection's app, so a completed stage no longer describes the box either.
                 rebooted = current is not None and current["kernel_boot_id"] != command.producer.kernel_boot_id
                 if rebooted and state in ("staged", "switching", "effect_unknown"):
                     state = "interrupted_by_reboot"
+                elif rebooted and state in ("target_running", "fallback_running"):
+                    state = "ended_by_later_boot"
                 results.append({"operation_id": str(operation["operation_id"]),
                     "command_id": str(operation["command_id"]), "operator_audit_ref": operation["operator_audit_ref"],
                     "state": state, "command_response": dict(response) if response else None,
                     "latest_effect": {"phase": event["phase"], "sequence": event["sequence"],
                                       "received_at": event["received_at"]} if event else None,
                     "physical_output": "unknown", "artifact_roots_retained": True})
-            return {"device_id": device_id, "generation": generation, "read_at": now, "operations": results}
+            return {"device_id": device_id, "generation": generation, "read_at": now, "operations": results,
+                    "qualification": self._qualification_in(conn, device_id, generation, current)}
+
+    @staticmethod
+    def _qualification_in(conn, device_id, generation, current) -> dict:
+        """The current boot's linked app and this generation's newest five acceptances. A base
+        tag is named only for the base this boot runs; an acceptance's record holds the base's
+        content key alone."""
+        linked = load_current_node_app_link_for_device_in(conn, device_id, generation)
+        payload = current["offer_payload"] if current is not None else None
+        base = parse_node_boot_offer(bytes(payload)).base if payload is not None else None
+        acceptances = conn.execute("SELECT environment_sha256,base_content_key,accepted_at "
+            "FROM node_environment_acceptances WHERE device_id=%s AND device_generation=%s "
+            "ORDER BY accepted_at DESC LIMIT 5", (device_id, generation)).fetchall()
+        return {"linked_app": None if linked is None else {
+                    "environment_sha256": linked[0].environment_sha256, "admitted_at": linked[1]},
+                "acceptances": [{**row, "base_tag": base.tag if base is not None
+                                 and base.content_key == row["base_content_key"] else None}
+                                for row in acceptances]}

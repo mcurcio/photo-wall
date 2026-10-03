@@ -2,15 +2,18 @@ import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState }
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
 import { useBootFacts } from "./bootFacts.js";
+import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
+import { useFleetHosts } from "./fleetHosts.js";
+import { NodeControlBanner, NodeControlContext, useNodeControl } from "./nodeControl.js";
 import { PageHiddenContext } from "./pageVisibility.js";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { showRoutes } from "./showRoutes.jsx";
 import { useRoute } from "./useRoute.js";
 import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
-import { useRecovery, useWallMemory } from "./wallState.js";
+import { useWallMemory } from "./wallState.js";
 import { wallRoutes } from "./wallRoutes.jsx";
 
 /**
@@ -19,11 +22,11 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            route: import("./routes.js").Route,
  *            navigate: (route: import("./routes.js").Route, options?: import("./useRoute.js").NavigateOptions) => void,
  *            wall: import("./wallState.js").WallMemory,
- *            recovery: {recovered: string[], dismiss: () => void},
  *            recentScene: {sceneId: string, seq: number}|null,
  *            rememberScene: (sceneId: string) => void,
  *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void,
- *            handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>}} RouteContext
+ *            handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>,
+ *            hosts: import("./fleetHosts.js").FleetHosts|null}} RouteContext
  *   `recentScene` is the Scene the operator last saved or picked on a Scene card
  *   (`rememberScene`, called by the Scene flow): the Schedule and Show-now flows
  *   prefill their Scene step from its `sceneId`. Each hand-over is an event with its own
@@ -31,6 +34,8 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *   it holds an unsaved draft; the sidebar then marks that section "Draft".
  *   `handOffs` is the one pending inline hand-off between flows (flow/handOff.js: the
  *   Scene flow's "New selection from your photo library" runs the Source flow inline).
+ *   `hosts` is the shell's one fleet host read (fleetHosts.js), null until node control is
+ *   read `on` (nodeControl.js) and while the shell is signed out.
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
  *            samplePaths: string[]}} RouteEntry
@@ -42,13 +47,19 @@ const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 // The drawer serves narrow screens only (index.css repeats this breakpoint).
 const WIDE = "(min-width: 850px)";
 
-// Sidebar groups, in order: Show, Wall, neutral.
-const TABLES = [showRoutes, wallRoutes, neutralRoutes];
-const ENTRIES = TABLES.flat();
+// Sidebar groups, in a fixed order (console DDD §48): Wall; Show (Now, Scenes, Schedule,
+// Sources); Fleet (Players, Releases); Needs attention. Nothing reorders or counts on state.
+const GROUPS = [
+  { name: "Wall", table: wallRoutes },
+  { name: "Show", table: showRoutes },
+  { name: "Fleet", table: fleetRoutes },
+  { name: "Needs attention", table: neutralRoutes },
+];
+const ENTRIES = GROUPS.flatMap((group) => group.table);
 const SHOW = new Set(showRoutes.map((entry) => entry.section));
 
 /**
- * The sidebar's links, one group per route table. The current section's link is
+ * The sidebar's links, one named group per route table, in GROUPS order. The current section's link is
  * marked `aria-current="page"` (and, visibly, by weight and a leading bar as well as
  * the tint). `onChoose(section)` runs on a plain click (not one opening another tab),
  * before the link changes the hash. A section in `drafts` carries the word "Draft"
@@ -58,8 +69,8 @@ function SectionNav({ current, hrefFor, onChoose, drafts }) {
   const markerId = useId();
   return (
     <nav className="nav" aria-label="Sections">
-      {TABLES.map((table) => (
-        <ul key={table[0].section} className="nav__group">
+      {GROUPS.map(({ name, table }) => (
+        <ul key={name} className="nav__group" aria-label={name}>
           {table.map(({ section, label }) => (
             <li key={section}>
               <a
@@ -156,11 +167,12 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  *
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
- * status and alert regions leave the accessibility tree). Wall and neutral sections
- * mount only while current, so no hidden page ever holds Commissioning DOM (R4).
+ * status and alert regions leave the accessibility tree). Wall, fleet and neutral
+ * sections mount only while current, so no hidden page ever holds Calibration DOM
+ * (R4) and a Player page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
- * once, and an unknown route is replaced by the landing route once the snapshot says
- * whether any frame exists.
+ * once, and an unknown route is replaced by the landing route once the first snapshot
+ * is in. The landing route is always the Wall (routes.js `landingRoute`).
  *
  * FOCUS. "Skip to content" is a button (a link would change the route) that focuses
  * `<main>`. Each page has an `<h1 tabIndex=-1>`. The drawer is a native `<dialog>`
@@ -171,6 +183,10 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * route that goes elsewhere first drops the request. A sidebar link on a wide screen
  * leaves focus on the link.
  *
+ * NODE CONTROL. One read of node status (nodeControl.js `useNodeControl`), provided to every
+ * page by context: the one source of the effect gate, and the banner above every page when
+ * this Central runs without node control.
+ *
  * `hidden` (the sign-in overlay; App.jsx) hides the whole shell and makes it inert
  * while keeping it, and every draft in it, mounted.
  *
@@ -180,12 +196,21 @@ export function Shell({ hidden = false }) {
   const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
   // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
-  // the Equipment roster and the output chooser.
+  // the Players pages and the output chooser.
   const bootFacts = useBootFacts(snapshot);
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
+  // Node control (Part E §25): ONE node status read, the effect gate's one source.
+  const nodeControl = useNodeControl({ skip: hidden });
+  // The fleet host read (console DDD §63 G12): ONE poll, here, for every page and the strip.
+  // Unlike a page's node read it runs on every page, so it waits for node control to be read
+  // `on`: `nodeReadsAllowed` also admits a FAILED status read, and the status read sent while
+  // sign-in is still being checked fails 401, which would send this poll to a Central
+  // without node control.
+  const hostsSkipped = hidden || nodeControl.state !== "on";
+  const fleetHosts = useFleetHosts({ skip: hostsSkipped });
+  const hosts = hostsSkipped ? null : fleetHosts;
   const wall = useWallMemory(route, snapshot, navigate);
-  const recovery = useRecovery(snapshot);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
   const [recentScene, setRecentScene] = useState(
@@ -223,15 +248,14 @@ export function Shell({ hidden = false }) {
   const current = route?.section ?? null;
   const entry = ENTRIES.find((candidate) => candidate.section === current) ?? null;
   const hasSnapshot = snapshot !== null;
-  const frameCount = snapshot?.inventory?.frames?.length ?? 0;
 
   useEffect(() => {
     // `ifUnknown`: the hash may already name a section this render has not seen yet (a
     // link clicked between the first snapshot's render and this effect); it wins.
     if (route === null && hasSnapshot) {
-      navigate(landingRoute(frameCount), { replace: true, ifUnknown: true });
+      navigate(landingRoute(), { replace: true, ifUnknown: true });
     }
-  }, [route, hasSnapshot, frameCount, navigate]);
+  }, [route, hasSnapshot, navigate]);
 
   useEffect(() => {
     document.title = entry === null ? "Photo Wall" : `${entry.label} · Photo Wall`;
@@ -309,14 +333,14 @@ export function Shell({ hidden = false }) {
       route,
       navigate,
       wall,
-      recovery,
       recentScene,
       rememberScene,
       markDraft,
       handOffs,
+      hosts,
     }),
-    [snapshot, bootFacts, health, route, navigate, wall, recovery, recentScene, rememberScene, markDraft,
-      handOffs],
+    [snapshot, bootFacts, health, route, navigate, wall, recentScene, rememberScene, markDraft, handOffs,
+      hosts],
   );
 
   return (
@@ -371,6 +395,8 @@ export function Shell({ hidden = false }) {
           <AttentionStrip
             snapshot={snapshot}
             central={health}
+            hosts={hosts}
+            bootFacts={bootFacts}
             onNavigate={current === null || SHOW.has(current) ? null : wall.visitFrame}
             onShowAll={() => focusHeadingOf("attention")}
           />
@@ -382,19 +408,22 @@ export function Shell({ hidden = false }) {
           <SectionNav current={current} hrefFor={hrefFor} drafts={drafts} />
         </div>
         <main ref={mainRef} className="shell__main" tabIndex={-1}>
+          <NodeControlBanner control={nodeControl} />
           {current === null && <p className="page__loading">Loading…</p>}
-          {showRoutes.map((show) => (
-            <Page
-              key={show.section}
-              entry={show}
-              ctx={ctx}
-              ready={ready}
-              hidden={show.section !== current}
-            />
-          ))}
-          {entry !== null && !SHOW.has(entry.section) && (
-            <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
-          )}
+          <NodeControlContext.Provider value={nodeControl}>
+            {showRoutes.map((show) => (
+              <Page
+                key={show.section}
+                entry={show}
+                ctx={ctx}
+                ready={ready}
+                hidden={show.section !== current}
+              />
+            ))}
+            {entry !== null && !SHOW.has(entry.section) && (
+              <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
+            )}
+          </NodeControlContext.Provider>
         </main>
       </div>
 

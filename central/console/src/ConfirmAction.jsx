@@ -1,17 +1,11 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import {
-  ALREADY_MESSAGE,
-  CHANGED_MESSAGE,
-  retirePlayer,
-  unbind,
-  unbindSequence,
-  UNKNOWN_MESSAGE,
-} from "./equipmentApi.js";
+import { ALREADY_MESSAGE, retirePlayer, unbind, unbindSequence } from "./equipmentApi.js";
 import { deleteFrame } from "./framesApi.js";
 import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
 import { liveRunsFor } from "./join.js";
 import { usePageHidden } from "./pageVisibility.js";
+import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { frameStoredReferences } from "./sceneTargets.js";
 import { useMutate } from "./useMutate.js";
 
@@ -55,7 +49,10 @@ import { useMutate } from "./useMutate.js";
  * @typedef {{frameId: string, outcome: string, label: string}} FrameResult
  * @typedef {{state: ConfirmState, message: string|null, results?: FrameResult[]}} ConfirmResult
  * @typedef {{key: string, title: string, body: React.ReactNode, confirmLabel: string,
- *            handle?: string|null, run: () => Promise<ConfirmResult>}} ConfirmRequest
+ *            handle?: string|null, progress?: string,
+ *            run: () => Promise<ConfirmResult>}} ConfirmRequest
+ *   `progress` replaces "Sending…" while in flight, for a write whose work happens inside its
+ *   request (a release publish says what Central is downloading).
  *
  * @param {{request: ConfirmRequest,
  *          onClose: (result: ConfirmResult|null) => void}} props
@@ -244,7 +241,7 @@ export function ConfirmAction({ request, onClose }) {
           </div>
           {phase === "in-flight" && (
             <p className="confirm__progress" role="status">
-              Sending…
+              {request.progress ?? "Sending…"}
             </p>
           )}
         </>
@@ -376,8 +373,8 @@ function frameReferenceRefusal(result) {
     actions.push("Review the queued activations and retry after Central resolves them.");
   }
   const guidance = actions.length > 0
-    ? ` Refresh Equipment. ${actions.join(" ")}`
-    : " Refresh Equipment to see the current references before retrying.";
+    ? ` Press Refresh. ${actions.join(" ")}`
+    : " Press Refresh to see the current references before retrying.";
   return `This Frame is still referenced.${reported}${guidance}`;
 }
 
@@ -422,7 +419,7 @@ export function deleteFrameRequest(snapshot, frameId) {
           </>
         )}
         <p>Central checks references again when you confirm.</p>
-        <p>Cannot be undone: recreating the id starts uncommissioned.</p>
+        <p>Cannot be undone: recreating the id starts uncalibrated.</p>
       </>
     ),
     run: async () => {
@@ -469,7 +466,7 @@ export function unbindRequest(snapshot, bootFacts, frameId) {
     body: (
       <>
         <p>{`Frame ${frameId} stops being served by ${output}.`}</p>
-        <p>Its calibration is kept but marked invalid, so it must be re-commissioned.</p>
+        <p>Its calibration is kept but marked invalid, so it must be calibrated again.</p>
         <RunList runs={runs} lead="Its live Runs lose this frame:" />
         {siblings.length > 0 && (
           <p>
@@ -518,7 +515,7 @@ export function retireRequest(snapshot, bootFacts, playerId) {
         </ul>
         <p>
           No undo, even after re-imaging: the id comes from the serial. To replace a Pi,
-          unbind it instead. Its netboot record still counts toward the release frontier.
+          unbind it instead.
         </p>
       </>
     ),
@@ -527,7 +524,7 @@ export function retireRequest(snapshot, bootFacts, playerId) {
 }
 
 /**
- * Unbind every Output of an in-service Player (the Equipment roster). Captures
+ * Unbind every Output of a bound Player (its Player page). Captures
  * each bound Frame with its generation and live Runs; the write is the
  * sequence in equipmentApi.js `unbindSequence`, and the dialog ends in a
  * terminal "K of N unbound" summary with each Frame's result.
@@ -552,14 +549,18 @@ export function unbindAllRequest(snapshot, bootFacts, playerId) {
     });
   return {
     key: `unbind-all:${playerId}`,
-    title: `Unbind all outputs of player ${handle}?`,
+    title: `Unbind each Output of Player ${handle}?`,
     confirmLabel: "Confirm unbind all",
     body: (
       <>
         <p className="confirm__id">{`Player ${playerId}.`}</p>
         <p>
+          Central unbinds them one at a time. One that changed since you opened this is
+          skipped; if an outcome is unknown, the rest are not attempted.
+        </p>
+        <p>
           Each listed Frame stops being served. Its calibration is kept but marked invalid,
-          so it must be re-commissioned:
+          so it must be calibrated again:
         </p>
         <ul className="confirm__frames" aria-label="Frames to unbind">
           {targets.map((target) => (

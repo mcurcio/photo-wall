@@ -19,7 +19,8 @@ import { useMutate } from "./useMutate.js";
  *
  * @param {string} frameId
  * @param {object} body the CalibrationRequest payload
- * @returns {Promise<object>} the parsed success body (preview: {calibration, expires_at})
+ * @returns {Promise<object>} the parsed success body (preview: {calibration, expires_at,
+ *   lease_seconds})
  */
 async function postCalibration(frameId, body) {
   const result = await apiWrite(`/v1/operator/frames/${frameId}/calibration`, {
@@ -38,7 +39,7 @@ async function postCalibration(frameId, body) {
 }
 
 /**
- * Calibration control hook for the open Commissioning facet (Bead 8, design
+ * Calibration control hook for the open Calibration facet (Bead 8, design
  * §4b/§6b/J2). HIGH-RISK concurrency surface — the load-bearing guarantees:
  *
  *  1. EVERY op carries BOTH optimistic tokens — `expected_revision` AND
@@ -48,8 +49,11 @@ async function postCalibration(frameId, body) {
  *     stale commit 409 instead of silently succeeding against state the operator
  *     never reviewed: if committed advanced underneath, the baseline token no
  *     longer matches the server and the write is refused.
- *  2. The countdown is derived from the SERVER's `expires_at` (from the preview
- *     response), never a per-tab claim; there is NO client auto-renew and NO
+ *  2. The countdown is derived from the SERVER's lease duration (`lease_seconds` in the
+ *     preview response), counted on this browser's own monotonic clock
+ *     (`performance.now()`) from the answer's arrival, never by comparing Central's
+ *     absolute `expires_at` with the browser's clock (R10: clocks compare only to
+ *     themselves), and never a per-tab claim; there is NO client auto-renew and NO
  *     silent re-preview. The countdown reaching zero does NOT flip the panel to
  *     "expired" — expiry is authoritative SERVER state, detected by the poll (see
  *     3), so a skewed or slow client clock can never fake or hide expiry.
@@ -88,7 +92,7 @@ export function useCalibration(frameId, trying) {
   // re-binding on every render.
   const baselineRef = useRef(/** @type {{revision:number, generation:number, configuration_revision:number}|null} */ (null));
   const seededForRef = useRef(/** @type {string|null} */ (null));
-  const expiresAtRef = useRef(/** @type {number|null} */ (null));
+  const leaseEndsRef = useRef(/** @type {number|null} */ (null));
   // The configuration_revision our OWN preview is expected to reach. A preview
   // bumps configuration_revision by exactly one (registry.py:339) and touches
   // neither revision nor generation, so a second tab overtaking the single
@@ -115,7 +119,7 @@ export function useCalibration(frameId, trying) {
       generation: frame.generation ?? 0,
       configuration_revision: frame.configuration_revision ?? 1,
     };
-    expiresAtRef.current = null;
+    leaseEndsRef.current = null;
     previewConfigRevisionRef.current = null;
     setStatus("committed");
     setCountdown(null);
@@ -146,7 +150,7 @@ export function useCalibration(frameId, trying) {
     if (revision !== baseline.revision || generation !== baseline.generation) {
       setStatus("overtaken");
       setCountdown(null);
-      expiresAtRef.current = null;
+      leaseEndsRef.current = null;
       return;
     }
     if (current === "previewing") {
@@ -155,7 +159,7 @@ export function useCalibration(frameId, trying) {
         // the expiry's configuration_revision bump so it is not later misread as
         // a third-party change.
         baseline.configuration_revision = live.configuration_revision ?? baseline.configuration_revision;
-        expiresAtRef.current = null;
+        leaseEndsRef.current = null;
         previewConfigRevisionRef.current = null;
         setCountdown(null);
         setStatus("expired");
@@ -173,7 +177,7 @@ export function useCalibration(frameId, trying) {
         if (liveConfig > ownConfig) {
           setStatus("overtaken");
           setCountdown(null);
-          expiresAtRef.current = null;
+          leaseEndsRef.current = null;
           previewConfigRevisionRef.current = null;
         } else {
           // Only our own single self-bump so far; absorb it so a later foreign
@@ -195,20 +199,20 @@ export function useCalibration(frameId, trying) {
     }
   }, [snapshot, frameId]);
 
-  // Countdown ticker (display only). Recomputes remaining seconds from the
-  // server's expires_at each tick; clamped at 0. Reaching 0 does NOT expire the
-  // lease — only the server-state poll does.
+  // Countdown ticker (display only). Recomputes remaining seconds from the lease's end on
+  // this browser's monotonic clock each tick; clamped at 0. It can read up to one request's
+  // latency long. Reaching 0 does NOT expire the lease — only the server-state poll does.
   useEffect(() => {
     if (status !== "previewing") {
       return undefined;
     }
     const tick = () => {
-      const expiresAt = expiresAtRef.current;
-      if (expiresAt == null) {
+      const endsAt = leaseEndsRef.current;
+      if (endsAt == null) {
         setCountdown(null);
         return;
       }
-      setCountdown(Math.max(0, Math.round(expiresAt - Date.now() / 1000)));
+      setCountdown(Math.max(0, Math.round((endsAt - performance.now()) / 1000)));
     };
     tick();
     const id = setInterval(tick, 1000);
@@ -247,7 +251,8 @@ export function useCalibration(frameId, trying) {
       try {
         const result = op === "commit" ? await mutate(run) : await run();
         if (op === "preview") {
-          expiresAtRef.current = result.expires_at ?? null;
+          leaseEndsRef.current = Number.isFinite(result.lease_seconds) && result.lease_seconds > 0
+            ? performance.now() + result.lease_seconds * 1000 : null;
           // Our own preview bumps configuration_revision by exactly one; record
           // the value it reaches so the poll can tell our self-bump from a
           // foreign preview that later overtakes the single slot.
@@ -255,7 +260,7 @@ export function useCalibration(frameId, trying) {
           setStatus("previewing");
         } else {
           // commit and revert both return the panel to committed.
-          expiresAtRef.current = null;
+          leaseEndsRef.current = null;
           previewConfigRevisionRef.current = null;
           setCountdown(null);
           setStatus("committed");

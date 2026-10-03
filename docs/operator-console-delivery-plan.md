@@ -8,6 +8,12 @@ go/no-go on the T0 build. It is produced per the `implementation-workflow` model
 green-alone beads, compile-unit boundaries, one frozen page per slice,
 depth-before-breadth, docs as their own beads, one full verify per bead.
 
+> **Historical (2026-10-02).** This plan was delivered. Its Commissioning facet,
+> capability gate and T0/T1/T2 scope are no longer current: the facet is the
+> Calibration facet, the gated areas and `capability.js`/`GatedArea.jsx` are
+> deleted, and the tiers are not console vocabulary
+> ([console DDD pass 3](operator-console-ddd.md#19-screens)).
+
 **Scope (owner-decided).** IN: the full console redesign (J1–J4), the Q4 minimal
 backend (`PATCH` + `DELETE /v1/operator/frames/{id}`), and **T0 only** of the
 Display/Commissioning dimension. OUT (separate future programs, not sliced here):

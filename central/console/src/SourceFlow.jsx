@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { sourceProblems } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
+import { factText } from "./facts.js";
 import { useProblems } from "./Field.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { inStepOrder } from "./flow/steps.js";
@@ -12,51 +13,53 @@ import { useHandOffTo } from "./flow/useHandOff.js";
 import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { editedId, editKey } from "./flow/instance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
-import { codeWords, mediaNow, sourceFilters, sourceState } from "./mediaHealth.js";
+import { learnPaths, readTagsById } from "./libraryTags.js";
+import { codeWords, mediaNow, sourceState } from "./mediaHealth.js";
 import {
   buildSourceSpec,
+  connectionAnnounced,
   connectionRule,
   NEW_SOURCE_DRAFT,
   seedSource,
+  selectionWords,
   sourceAdvancedFields,
-  SOURCE_FIELD_STEP,
-  SOURCE_KEYS,
-  SOURCE_STEPS,
+  sourceFieldStep,
+  SOURCE_HEADINGS,
+  sourceKeys,
+  sourceSteps,
+  unannouncedWords,
 } from "./sourceFlowModel.js";
-import { IncludeStep, NameStep, SourceReview } from "./SourceSteps.jsx";
+import { refreshFact, refusalIssue, TAG_GONE } from "./sourceWords.js";
+import { LibraryStep, NameStep, NarrowStep, SourceReview, TagsStep } from "./SourceSteps.jsx";
 import { namedSource, sourceName } from "./sourceNames.js";
 import { sourceRefreshPath } from "./mediaApi.js";
 import { useCardMutation } from "./useCardMutation.js";
+import { usePreview } from "./usePreview.js";
 
 const EMPTY = [];
-
-// Each step's heading: the one question it asks.
-const HEADINGS = {
-  include: "What to include",
-  name: "Name this photo source",
-  review: "Check your photo source",
-};
+const PREVIEWED = new Set(["tags", "narrow", "review"]);
 
 /**
- * The Photo sources section's content (flow design §7 J5, "Add a photo source"): the
- * Source cards, each with Refresh, and the Source flow, What to include → Name →
- * Review.
+ * The Sources section's content (console DDD §37, pass 5): the Source cards, each with
+ * Refresh, Edit and Delete, and the Source flow, one question per step: Which library
+ * connection? → Choose tags → Narrow it down → Name this Source → Check your Source.
  *
- * THE CONTAINER owns the flow's one draft (`useFlowDraft`) and never unmounts (the
- * shell keeps Show sections mounted, rule 2), so a step change, a section change, a
- * poll or the sign-in overlay cannot lose the draft. The step views (SourceSteps.jsx)
- * hold no draft state.
+ * THE CONTAINER owns the flow's one draft (`useFlowDraft`), the preview (usePreview.js)
+ * and the tag paths it has learnt, and never unmounts (the shell keeps Show sections
+ * mounted, rule 2), so a step change, a section change, a poll or the sign-in overlay
+ * cannot lose them. The step views (SourceSteps.jsx) hold no draft state.
  *
  * ROUTES AND STEPS are the flow kit's (flow/useFlowInstance.js): `#/sources` shows the
- * cards and "New source"; `#/sources/new/<step>` shows a step (sourceFlowModel.js
- * `SOURCE_KEYS`). Continue checks its own step; Save checks them all and routes each
- * problem through `SOURCE_FIELD_STEP` (opening Advanced for the connection when it
- * sits there).
+ * cards and "New Source"; `#/sources/new/<step>` shows a step. The connection rule
+ * (sourceFlowModel.js `connectionRule`) runs on every render over the worker's reported
+ * connections: with exactly one, the connection step is skipped and a new Source opens
+ * on Choose tags (`sourceSteps`, `sourceKeys`). Continue checks its own step; Save checks
+ * them all and routes each problem to its step (`sourceFieldStep`).
  *
- * THE CONNECTION RULE (sourceFlowModel.js `connectionRule`) uses the worker's
- * reported connection IDs on every render. Until a worker reports them, saved
- * Sources guide a manual fallback marked as uncertain. The seed prefills a
- * single known connection.
+ * THE PREVIEW is what the draft's criteria select, re-asked on each change (R23) while
+ * the Tags, Narrow or Review step shows; it is never draft state (asking never dirties
+ * a draft) and needs an announced connection: a typed or unreported name gets §37's
+ * sentence instead.
  *
  * INLINE (flow/handOff.js). When the Scene flow hands off to "sources", the flow opens
  * its new instance, says whom it is for, and returns there: after Save with
@@ -81,6 +84,16 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     () => connectionRule(connectionIds, sources, value.connectionRef),
     [connectionIds, sources, value.connectionRef],
   );
+  // The flow's shape follows the rule, except for an edit whose saved connection is no
+  // longer reported: choosing the one that is must not take its step away mid-answer.
+  const seededRule = useMemo(
+    () => connectionRule(connectionIds, sources, draft.seeded?.connectionRef ?? ""),
+    [connectionIds, sources, draft.seeded],
+  );
+  const layout = seededRule.selectedUnavailable ? seededRule : rule;
+  const steps = sourceSteps(layout);
+  const fieldStep = sourceFieldStep(layout);
+  const keys = sourceKeys(layout);
   const now = mediaNow(snapshot);
   const sourceRefresh = useCardMutation();
   const editingName = editedId(draft.key);
@@ -98,43 +111,54 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     } else if (rule.selectedUnavailable) {
       found.push({ field: "connection", message: "Choose a connection currently configured in the media worker." });
     }
-    return inStepOrder(found, SOURCE_FIELD_STEP, SOURCE_STEPS);
-  }, [value, editingName, rule]);
+    return inStepOrder(found, fieldStep, steps);
+  }, [value, rule, fieldStep, steps]);
   const problems = useProblems(problemList);
 
-  // Preview is deliberately transient: it belongs to this open draft and exact
-  // filter payload, never to the saved Source draft itself.
+  // The draft's stored body: its preview asks exactly what Save would store.
+  const spec = useMemo(() => buildSourceSpec({
+    ...value,
+    expectedRevision: editingName === null ? null : draft.baseRevision,
+    newName: editingName !== null && value.sourceName.trim() !== editingName
+      ? value.sourceName.trim() : null,
+    originalCapturedFrom: editingName !== null && value.capturedFrom === draft.seeded?.capturedFrom
+      ? stored?.spec?.captured_from ?? null : undefined,
+    originalCapturedUntil: editingName !== null && value.capturedUntil === draft.seeded?.capturedUntil
+      ? stored?.spec?.captured_until ?? null : undefined,
+    connectionRef: value.connectionRef.trim(),
+  }), [value, editingName, draft.baseRevision, draft.seeded, stored]);
   const previewPayload = useMemo(() => {
-    const originalCapturedFrom = editingName !== null && value.capturedFrom === draft.seeded?.capturedFrom
-      ? stored?.spec?.captured_from ?? null : undefined;
-    const originalCapturedUntil = editingName !== null && value.capturedUntil === draft.seeded?.capturedUntil
-      ? stored?.spec?.captured_until ?? null : undefined;
-    const spec = buildSourceSpec({
-      ...value,
-      connectionRef: value.connectionRef.trim(),
-      expectedRevision: null,
-      originalCapturedFrom,
-      originalCapturedUntil,
-    });
     const { expected_revision: _revision, new_name: _newName, ...payload } = spec;
     return payload;
-  }, [value, editingName, draft.seeded, stored]);
-  const previewKey = JSON.stringify(previewPayload);
-  const [previewRequest, setPreviewRequest] = useState(null);
-  const [previewState, setPreviewState] = useState(null);
-  const previewGeneration = useRef(0);
-  const startedPreviewRequest = useRef(0);
-  const previewRequestId = useRef(0);
-  const requestPreview = useCallback((requestId = null) => {
-    previewRequestId.current += 1;
-    setPreviewRequest({
-      id: previewRequestId.current,
-      key: previewKey,
-      draftId: draft.id,
-      payload: previewPayload,
-      requestId,
+  }, [spec]);
+
+  const announced = connectionAnnounced(rule, value.connectionRef);
+  const invalidWindow = problemList.some(({ field }) => field === "from" || field === "until");
+  const blocked = rule.shown === "blocked"
+    ? "Configure a connection in the media worker to see what this selects."
+    : value.connectionRef.trim() === "" ? "Choose a library connection to see what this selects."
+      : !announced ? unannouncedWords(rule)
+        : invalidWindow ? "Correct the dates to see what this selects." : null;
+
+  // The tag paths learnt from the library's tag list (id -> path; null once a lookup by id
+  // names it absent). Never draft state: learning a name dirties nothing.
+  const [paths, setPaths] = useState({});
+  const learn = useCallback((list) => {
+    setPaths((known) => learnPaths(known, list));
+  }, []);
+  // The draft's tags not yet named (an edit's saved tags, beyond the first 20 the picker
+  // reads) are looked up by id, so Review and the chips name them (C5).
+  const connectionRef = value.connectionRef.trim();
+  const unnamed = announced ? (value.tags ?? []).filter((ref) => !Object.hasOwn(paths, ref)) : EMPTY;
+  const unnamedKey = JSON.stringify([connectionRef, unnamed]);
+  useEffect(() => {
+    if (unnamed.length === 0) return undefined;
+    let current = true;
+    readTagsById(connectionRef, unnamed).then((answers) => {
+      if (current) setPaths((known) => answers.reduce((next, answer) => learnPaths(next, answer), known));
     });
-  }, [previewKey, draft.id, previewPayload]);
+    return () => { current = false; };
+  }, [unnamedKey]); // `unnamed` is rebuilt each render; its content is the key
 
   // One confirmation for this section (discarding a draft); its `after` runs once done.
   const confirm = useConfirm(
@@ -148,12 +172,12 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     route,
     navigate,
     markDraft,
-    keys: SOURCE_KEYS,
+    keys,
     refs,
     availability: (key) => editedId(key) !== null && !namedSource(sources, editedId(key)) ? "missing" : "ok",
-    steps: SOURCE_STEPS,
-    fieldStep: SOURCE_FIELD_STEP,
-    advancedFields: sourceAdvancedFields(rule),
+    steps,
+    fieldStep,
+    advancedFields: sourceAdvancedFields(layout),
     problemList,
     problems,
     confirm,
@@ -161,109 +185,12 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
   });
   const { step } = flow;
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Source" });
-
-  useEffect(() => {
-    if (previewRequest === null || previewRequest.id <= startedPreviewRequest.current ||
-        previewRequest.key !== previewKey || previewRequest.draftId !== draft.id ||
-        step !== "include" || draft.id === null) return undefined;
-    startedPreviewRequest.current = previewRequest.id;
-    const generation = ++previewGeneration.current;
-    const draftId = previewRequest.draftId;
-    let cancelled = false;
-    let timer = null;
-    let deadlineTimer = null;
-    let deadlineExpired = false;
-    let requestId = previewRequest.requestId;
-    let postPending = false;
-    const current = () => !cancelled && generation === previewGeneration.current && draft.isOpen(draftId);
-    const publish = (state) => {
-      if (!state.busy && !state.timedOut && deadlineTimer !== null) {
-        window.clearTimeout(deadlineTimer);
-        deadlineTimer = null;
-      }
-      if (current()) setPreviewState({ ...state, key: previewKey, draftId });
-    };
-    const wait = () => new Promise((resolve) => { timer = window.setTimeout(resolve, 1000); });
-    const run = async () => {
-      if (requestId === null) {
-        postPending = true;
-        publish({ busy: true, message: "Requesting a match preview…", result: null, error: false });
-        let response;
-        try {
-          response = await apiWrite("/v1/operator/source-previews", {
-            method: "POST",
-            body: previewRequest.payload,
-          });
-        } catch {
-          postPending = false;
-          publish({ busy: false, message: "The preview request outcome is unknown. Try again.", error: true });
-          return;
-        }
-        postPending = false;
-        if (!current()) return;
-        if (!response.ok || response.status !== 202 || !response.data?.request_id) {
-          const detail = response.error ? codeWords(response.error) : `HTTP ${response.status}`;
-          publish({ busy: false, message: `Could not request a preview: ${detail}.`, error: true });
-          return;
-        }
-        requestId = response.data.request_id;
-      }
-      publish({ busy: true, message: "Checking the photo library…", result: null, error: false });
-      deadlineTimer = window.setTimeout(() => {
-        deadlineExpired = true;
-        publish({ busy: false, timedOut: true, requestId, message: null, error: false });
-      }, 80000);
-      while (true) {
-        await wait();
-        if (!current() || deadlineExpired) return;
-        let poll;
-        try {
-          poll = await apiWrite(`/v1/operator/source-previews/${encodeURIComponent(requestId)}`, { method: "GET" });
-        } catch {
-          if (deadlineExpired) return;
-          // A read timeout is safe to retry with the same request ID. Keep trying
-          // until the independent overall deadline instead of failing early.
-          continue;
-        }
-        if (!current() || deadlineExpired) return;
-        if (!poll.ok) {
-          if (poll.status >= 500) continue;
-          const detail = poll.error ? codeWords(poll.error) : `HTTP ${poll.status}`;
-          publish({ busy: false, message: `Could not read the preview result: ${detail}.`, error: true });
-          return;
-        }
-        if (poll.data?.status === "complete") {
-          publish({ busy: false, result: poll.data, message: null, error: false });
-          return;
-        }
-        if (poll.data?.status === "failed") {
-          publish({ busy: false, message: `The preview failed: ${codeWords(poll.data.error ?? "unknown_error")}.`, error: true });
-          return;
-        }
-        if (poll.data?.status !== "pending") {
-          publish({ busy: false, message: "The preview returned an unknown status. Try again.", error: true });
-          return;
-        }
-      }
-    };
-    run();
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-      if (deadlineTimer !== null) window.clearTimeout(deadlineTimer);
-      if (requestId !== null || postPending) {
-        setPreviewState((previous) => {
-          if (previous?.key !== previewKey || previous?.draftId !== draftId || !previous.busy) {
-            return previous;
-          }
-          return requestId !== null
-            ? { ...previous, busy: false, timedOut: true, requestId, message: null }
-            : { ...previous, busy: false, timedOut: false,
-              message: "The preview request outcome is unknown. Request a new preview when ready.", error: true };
-        });
-      }
-    };
-  }, [previewRequest, previewKey, step, draft.id]);
+  const preview = usePreview({
+    key: blocked === null && draft.id !== null ? `${draft.id}:${JSON.stringify(previewPayload)}` : null,
+    payload: previewPayload,
+    active: PREVIEWED.has(step),
+    connection: value.connectionRef.trim(),
+  });
 
   // Refresh re-runs a saved query (POST …/sources/{ref}/refresh) through the shared
   // card mutation, so the cards refresh exactly once after the write.
@@ -291,17 +218,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       const result = await sent.request(() =>
         apiWrite(`/v1/operator/source-names/${encodeURIComponent(name)}`, {
           method: "PUT",
-          body: buildSourceSpec({
-            ...value,
-            expectedRevision: editingName === null ? null : draft.baseRevision,
-            newName: editingName !== null && value.sourceName.trim() !== editingName
-              ? value.sourceName.trim() : null,
-            originalCapturedFrom: editingName !== null && value.capturedFrom === draft.seeded?.capturedFrom
-              ? stored?.spec?.captured_from ?? null : undefined,
-            originalCapturedUntil: editingName !== null && value.capturedUntil === draft.seeded?.capturedUntil
-              ? stored?.spec?.captured_until ?? null : undefined,
-            connectionRef: value.connectionRef.trim(),
-          }),
+          body: spec,
         }),
       );
       if (result === null) {
@@ -327,7 +244,7 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
       confirmLabel: "Confirm delete",
       body: (
         <>
-          <p>{`This removes Source ${name} from new selections. It does not delete photos from Immich.`}</p>
+          <p>{`This removes Source ${name} from new selections. It does not delete anything in your photo library.`}</p>
           <p>If a Scene uses this Source, choose a different Source for that Scene before deleting.</p>
         </>
       ),
@@ -349,38 +266,22 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     });
   };
 
-  const previewMatches = previewState?.key === previewKey && previewState?.draftId === draft.id
-    ? previewState : null;
-  const invalidWindow = sourceProblems(value).some(({ field }) => field === "from" || field === "until");
-  const canPreview = value.connectionRef.trim() !== "" && !rule.selectedUnavailable &&
-    rule.shown !== "blocked" && !invalidWindow;
-  const previewHint = rule.selectedUnavailable
-    ? "Choose a connection currently configured in the media worker."
-    : rule.shown === "blocked"
-      ? "Configure a connection in the media worker before previewing."
-      : value.connectionRef.trim() === ""
-        ? rule.shown === "chooser"
-          ? "Choose a configured connection above before previewing."
-          : "Choose or enter a connection on the Name step before previewing."
-        : invalidWindow ? "Correct the capture date range before previewing." : null;
+  const panel = { preview, connections: rule.values, blocked };
   const stepProps = { value, patch: draft.patch, problems };
   const views = {
-    include: () => (
-      <IncludeStep
+    library: () => <LibraryStep {...stepProps} rule={rule} />,
+    tags: () => (
+      <TagsStep
         {...stepProps}
-        rule={rule}
-        preview={{
-          ...(previewMatches ?? {}),
-          canRequest: canPreview,
-          hint: previewHint,
-          onRequest: () => requestPreview(previewMatches?.timedOut ? previewMatches.requestId : null),
-        }}
+        panel={panel}
+        tags={announced ? { connection: value.connectionRef.trim(), paths, onLearn: learn } : null}
       />
     ),
+    narrow: () => <NarrowStep {...stepProps} panel={panel} />,
     name: () => (
       <NameStep
         {...stepProps}
-        rule={rule}
+        rule={layout}
         advanced={flow.advanced("name")}
         editing={editingName !== null}
       />
@@ -396,7 +297,8 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
         {editingName !== null && (
           <p>Changes to this Source apply to future Runs. Runs already started keep their saved selection.</p>
         )}
-        <SourceReview value={value} onChange={flow.openField} />
+        <SourceReview value={value} onChange={flow.openField} rule={layout} paths={paths} spec={spec}
+          panel={panel} />
       </>
     ),
   };
@@ -405,21 +307,21 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     <FlowFrame
       flow={flow}
       draft={draft}
-      keys={SOURCE_KEYS}
-      noun="photo source"
-      sectionLabel="Photo sources"
+      keys={keys}
+      noun="Source"
+      sectionLabel="Sources"
       confirm={confirm}
       problems={problems}
       handOff={handOff}
-      newLabel="New source"
-      cards={<SourceCards sources={sources} now={now} onRefresh={refreshSource} refreshingSources={sourceRefresh.pending} refreshFeedback={sourceRefresh.feedback} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
-      title={editingName === null ? "New photo source" : `Edit Source ${editingName}`}
-      steps={SOURCE_STEPS}
+      newLabel="New Source"
+      cards={<SourceCards sources={sources} now={now} connections={rule.values} reported={rule.reported} onRefresh={refreshSource} refreshingSources={sourceRefresh.pending} refreshFeedback={sourceRefresh.feedback} onEdit={(name, event) => flow.start(editKey(name), event)} onDelete={deleteSource} busy={write.busy} />}
+      title={editingName === null ? "New Source" : `Edit Source ${editingName}`}
+      steps={steps}
       formLabel="Configure a Source"
-      heading={HEADINGS[step]}
+      heading={SOURCE_HEADINGS[step]}
       busy={write.busy}
       onWrite={onSave}
-      writeLabel={editingName === null ? "Save source" : "Save changes"}
+      writeLabel={editingName === null ? "Save Source" : "Save changes"}
       writeDisabled={write.busy || stale}
       problemsLabel="Source problems"
     >
@@ -429,34 +331,69 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
 }
 
 /**
- * The saved Sources as summary cards: each by its plain logical name, with its status, when it
- * last succeeded (or that no refresh has succeeded), what it includes
- * and its connection, and Refresh ("Refresh <ref>").
+ * The tag paths of the saved Sources' tags (console DDD §39): each announced connection's
+ * saved tags are looked up by id once per snapshot of Sources (C5), so a tag is named
+ * however long the library's list is, and one an `ok` list lacks reads as gone. A pending
+ * or failed list names nothing gone, so those tags stay unknown, never "gone".
+ */
+function useSavedTagPaths(sources, connections, reported) {
+  const [paths, setPaths] = useState({});
+  const wanted = useMemo(() => {
+    const byConnection = new Map();
+    for (const source of sources) {
+      const ref = source.spec?.connection_ref;
+      if (!reported || !connections.includes(ref) || !(source.spec?.tags?.length > 0)) continue;
+      byConnection.set(ref, [...(byConnection.get(ref) ?? []), ...source.spec.tags]);
+    }
+    return byConnection;
+  }, [sources, connections, reported]);
+  const wantedKey = JSON.stringify([...wanted]);
+  useEffect(() => {
+    let current = true;
+    for (const [connection, tags] of wanted) {
+      readTagsById(connection, tags).then((answers) => {
+        if (current) setPaths((known) => answers.reduce((next, answer) => learnPaths(next, answer), known));
+      });
+    }
+    return () => { current = false; };
+  }, [wantedKey]); // `wanted` is rebuilt each render; its content is the key
+  return paths;
+}
+
+/**
+ * The saved Sources as summary cards: each by its plain logical name, with its status (for a
+ * Source whose last refresh succeeded, that refresh as the library's report, sourceWords.js
+ * `refreshFact`, said once), or that no refresh has succeeded, what it selects, its
+ * connection, whether a tag it uses is gone, and Refresh, Edit and Delete. No thumbnails:
+ * those live in the flow's preview (§37; card tiles are deferred, §44).
  *
  * @param {{sources: ReadonlyArray<object>, onRefresh: (sourceRef: string) => void,
  *          refreshingSources: Set<string>, refreshFeedback: Record<string, string|null>}} props
  */
-function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedback, onEdit, onDelete, busy }) {
+function SourceCards({ sources, now, connections, reported, onRefresh, refreshingSources, refreshFeedback, onEdit, onDelete, busy }) {
+  const paths = useSavedTagPaths(sources, connections, reported);
   if (sources.length === 0) {
     return <p className="showrunner__empty">No Sources yet.</p>;
   }
   return (
     <ul className="card-grid" role="list">
       {sources.map((source) => {
-        const state = sourceState(source, now, false);
+        const state = sourceState(source, now, false, connections);
         const refreshing = refreshingSources.has(source.source_ref);
         const feedback = Object.hasOwn(refreshFeedback, source.source_ref)
           ? refreshFeedback[source.source_ref] : null;
+        const gone = (source.spec?.tags ?? []).some((tag) => Object.hasOwn(paths, tag) && paths[tag] === null);
         return <li key={source.source_ref} className="card-grid__item">
           <SummaryCard
             title={sourceName(source)}
             lines={[
               { label: "Status", value: state.label },
-              ...(state.state === "never-refreshed" ? [] : [{
+              // An ok Source's Status already states its refresh (sourceState's one fact).
+              ...(state.state === "never-refreshed" || state.state === "ok" ? [] : [{
                 label: "Refreshed",
-                value: source.last_success
-                  ? `Last refreshed ${new Date(source.last_success * 1000).toLocaleString()}`
-                  : "No successful refresh",
+                value: source.last_success == null ? "No successful refresh"
+                  : source.status === "ok" ? factText(refreshFact(source, now, connections))
+                    : "The last refresh failed (see Status)",
               }]),
               ...(source.diagnostics?.length
                 ? [{ label: source.status === "ok" ? "Partial refresh" : "Issue",
@@ -468,7 +405,8 @@ function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedba
                     value: <span role="status" aria-live="polite">{feedback}</span>,
                   }]
                 : []),
-              { label: "Includes", value: includesWords(source.spec) },
+              { label: "Selects", value: selectionWords(source.spec, paths) },
+              ...(gone ? [{ label: "Tags", value: TAG_GONE }] : []),
               { label: "Connection", value: source.spec?.connection_ref ?? "" },
             ]}
             actions={
@@ -491,18 +429,12 @@ function SourceCards({ sources, now, onRefresh, refreshingSources, refreshFeedba
   );
 }
 
-const SOURCE_ISSUES = {
-  unsupported_version: "This Photo Wall release does not support the Immich version.",
-  upstream_permission: "Immich denied access. Check the API key permissions.",
-  owner_mismatch: "The Immich key belongs to a different user.",
-  connection_unknown: "Connection is not configured in the media worker.",
-};
-
 function sourceIssue(source, now) {
   const diagnostics = source.diagnostics ?? [];
-  const details = [...new Set(diagnostics.map((entry) => entry.code))]
+  // One sentence per distinct code, then per distinct sentence (two codes may share a row).
+  const details = [...new Set([...new Set(diagnostics.map((entry) => entry.code))]
     .slice(0, 3)
-    .map((code) => SOURCE_ISSUES[code] ?? codeWords(code))
+    .map(refusalIssue))]
     .join(" · ");
   if (source.status !== "ok") return details;
   const state = sourceState(source, now, false);
@@ -511,10 +443,4 @@ function sourceIssue(source, now) {
   return `Refresh succeeded with ${count} item${count === 1 ? "" : "s"} pending or rejected` +
     (details === "" ? "." : `: ${details}.`) +
     (state.state === "ok" ? " Usable items remain available." : "");
-}
-
-/** What a stored spec includes, in words: its filters, or everything. */
-function includesWords(spec) {
-  const filters = sourceFilters(spec);
-  return filters.length === 0 ? "All photos and videos" : filters.join(" · ");
 }

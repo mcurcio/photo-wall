@@ -324,9 +324,14 @@ out.none = hand.settleHandOff(null, 1);
 
 // --- The Source flow's shape (sourceFlowModel.js).
 out.steps = source.SOURCE_STEPS.map((step) => [step.id, step.label]);
-out.fieldSteps = ["type", "favorites", "from", "until", "ref", "connection"]
-  .map((field) => steps.stepOfField(source.SOURCE_FIELD_STEP, field));
-const K = source.SOURCE_KEYS;
+const several = source.connectionRule(["a", "b"], []);
+const one = source.connectionRule(["a"], []);
+out.oneSteps = source.sourceSteps(one).map((step) => step.id);
+out.fieldSteps = ["connection", "tags", "type", "favorites", "from", "until", "ref"]
+  .map((field) => steps.stepOfField(source.sourceFieldStep(several), field));
+out.oneConnectionStep = steps.stepOfField(source.sourceFieldStep(one), "connection");
+out.oneFirst = source.sourceKeys(one).firstStep("new");
+const K = source.sourceKeys(several);
 out.keys = [K.fromRoute({ section: "sources", flow: "new", step: "name" }),
             K.fromRoute({ section: "sources", id: "spring", flow: "edit", step: "review" }),
             K.fromRoute({ section: "sources" }),
@@ -347,13 +352,16 @@ out.advanced = [[], [spec("home")], [spec("a"), spec("b")]]
 out.seeds = [source.seedSource([], null)("new"), source.seedSource([spec("home")], null)("new").connectionRef,
              source.seedSource([spec("a"), spec("b")])("new").connectionRef];
 out.seedEdit = source.seedSource([{ name: "spring", revision: 3, source_ref: "spring:3",
-  spec: { connection_ref: "home", media_types: ["image"], favorites: true } }])("edit/spring");
+  spec: { connection_ref: "home", media_types: ["image"], favorites: true, tags: ["tag-1"] } }])("edit/spring");
 out.answers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, favorites: "only",
                                      capturedFrom: "2024-01-01", sourceName: " spring " });
+out.oneAnswers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, tags: ["t1", "t2"], connectionRef: "a" },
+                                      one, { t1: "Family", t2: null }).map((row) => [row.field, row.value]);
 out.problems = authoring.sourceProblems(source.NEW_SOURCE_DRAFT).map((p) => p.field);
 out.spec = source.buildSourceSpec({ expectedRevision: 2, connectionRef: "home",
                                     mediaType: "image", favorites: "not" });
 out.specBoth = source.buildSourceSpec({ connectionRef: "h", mediaType: "both" });
+out.specTagged = source.buildSourceSpec({ connectionRef: "h", mediaType: "image", tags: out.seedEdit.tags });
 console.log(JSON.stringify(out));
 """
 
@@ -377,12 +385,18 @@ def test_hand_offs_and_source_flow_shape():
     assert out["settled"] == {"next": None, "settled": True}
     assert out["none"] == {"next": None, "settled": False}
 
-    assert out["steps"] == [["include", "What to include"], ["name", "Name"], ["review", "Review"]]
-    assert out["fieldSteps"] == ["include", "include", "include", "include", "name", "name"]
+    assert out["steps"] == [["library", "Library"], ["tags", "Tags"], ["narrow", "Narrow"],
+                            ["name", "Name"], ["review", "Review"]]
+    # One known connection: no connection step; it sits under Name's Advanced, and a new
+    # Source opens on Choose tags.
+    assert out["oneSteps"] == ["tags", "narrow", "name", "review"]
+    assert out["fieldSteps"] == ["library", "tags", "narrow", "narrow", "narrow", "narrow", "name"]
+    assert out["oneConnectionStep"] == "name"
+    assert out["oneFirst"] == "tags"
     assert out["keys"] == ["new", "edit/spring", None, None]
-    assert out["route"] == {"section": "sources", "flow": "new", "step": "include"}
+    assert out["route"] == {"section": "sources", "flow": "new", "step": "library"}
     assert out["editRoute"] == {"section": "sources", "id": "spring", "flow": "edit", "step": "review"}
-    assert out["describe"] == "a new photo source"
+    assert out["describe"] == "a new Source"
     # The legacy connection rule keeps manual entry until the worker reports. Explicit
     # empty and removed saved connections are represented separately from unknown.
     assert out["rules"] == [
@@ -394,22 +408,29 @@ def test_hand_offs_and_source_flow_shape():
     assert out["advanced"] == [[], ["connection"], []]
     assert out["seeds"] == [
         {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
-         "sourceName": "", "connectionRef": "", "newConnection": False}, "home", ""]
+         "sourceName": "", "connectionRef": "", "newConnection": False, "tags": []}, "home", ""]
     assert out["seedEdit"] == {
         "mediaType": "image", "favorites": "only", "capturedFrom": "", "capturedUntil": "",
-        "sourceName": "spring", "connectionRef": "home", "newConnection": False, "revision": 3}
+        "sourceName": "spring", "connectionRef": "home", "newConnection": False, "tags": ["tag-1"],
+        "revision": 3}
     assert out["answers"] == [
-        {"label": "Media type", "field": "type", "value": "Images and video"},
+        {"label": "Connection name", "field": "connection", "value": None},
+        {"label": "Tags in your library", "field": "tags", "value": "No tags: everything on your library's timeline only (not archived, hidden or other users' media)"},
+        {"label": "Media type", "field": "type", "value": "Photos and videos"},
         {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
-        {"label": "Taken from", "field": "from", "value": "2024-01-01"},
-        {"label": "Taken until", "field": "until", "value": "No limit"},
-        {"label": "Source name", "field": "ref", "value": "spring"},
-        {"label": "Connection name", "field": "connection", "value": None}]
+        {"label": "Dated from", "field": "from", "value": "2024-01-01"},
+        {"label": "Dated until", "field": "until", "value": "No limit"},
+        {"label": "Source name", "field": "ref", "value": "spring"}]
+    # The one connection is answered last (under Name's Advanced); a gone tag says so.
+    assert out["oneAnswers"][0] == ["tags", "Family and a tag that no longer exists in your library"]
+    assert out["oneAnswers"][-1] == ["connection", "a"]
     assert out["problems"] == ["ref", "connection"]
     assert out["spec"] == {"expected_revision": 2, "connection_ref": "home",
                            "media_types": ["image"], "favorites": False}
     assert out["specBoth"]["media_types"] == ["image", "video"]
     assert "favorites" not in out["specBoth"] and "captured_from" not in out["specBoth"]
+    # A saved Source's tags travel through its draft to the write; an untagged one sends none.
+    assert out["specTagged"]["tags"] == ["tag-1"] and "tags" not in out["spec"]
 
 
 def test_source_health_separates_unattempted_from_failed_first_refresh():
@@ -429,7 +450,8 @@ console.log(JSON.stringify([
     assert states[0]["state"] == "never-refreshed"
     assert states[0]["label"] == "Awaiting refresh"
     assert states[1]["state"] == "failing"
-    assert states[1]["label"] == "Library unsupported · never refreshed successfully"
+    # No code: the status alone names no owner, so it reads neutrally (§39 R21).
+    assert states[1]["label"] == "Refresh failed (incompatible) · never refreshed successfully"
 
 
 def test_source_health_qualifies_partial_refresh_without_marking_it_failed():
@@ -450,9 +472,10 @@ console.log(JSON.stringify([
     partial, healthy = json.loads(result.stdout)
     assert partial["state"] == "ok"
     assert partial["severity"] == "ok"
-    assert partial["label"] == "refreshed 1 min ago · 3 valid in the last refresh · 3 items pending or rejected"
+    assert partial["label"] == ("Your photo library last reported 1 min ago · the media worker accepted 3 "
+                                "in that refresh · 3 items pending or rejected")
     assert healthy["state"] == "ok"
-    assert healthy["label"] == "refreshed 1 min ago · 3 valid in the last refresh"
+    assert healthy["label"] == "Your photo library last reported 1 min ago · the media worker accepted 3 in that refresh"
 
 
 def test_program_edit_retains_later_repeated_hour_occurrence():

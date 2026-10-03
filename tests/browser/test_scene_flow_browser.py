@@ -51,6 +51,7 @@ from test_operator_showrunner_browser import (
 from test_registry import ADMIN
 
 from central.catalog import CatalogSnapshot
+from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from media.models import RefreshResult
 
@@ -78,8 +79,8 @@ def _steps(page):
         ("failed", lambda registry, now: _set_source(
             registry, SOURCE, status="unavailable", next_refresh=now + 30,
             refresh_completed_revision=0, refresh_requested_revision=1,
-            diagnostics=[{"code": "source_unavailable"}],
-        ), "Library unreachable", "last refresh failed"),
+            diagnostics=[{"code": "upstream_unavailable"}],
+        ), "Your photo library is unreachable", "last refresh failed"),
         ("empty", lambda registry, now: _set_source(
             registry, SOURCE, status="ok", next_refresh=now + 30, last_success=now,
             counts={"valid": 0, "discovered": 0, "pending": 0, "rejected": 0},
@@ -143,9 +144,9 @@ def test_refresh_source_from_scene_photos_preserves_draft_and_reports_request(
             "Refresh requested."
         )
         form.get_by_role("region", name="Source media status").get_by_role(
-            "button", name="Manage in Photo sources", exact=True
+            "button", name="Manage in Sources", exact=True
         ).click()
-        expect(page.get_by_role("heading", level=1, name="Photo sources", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Sources", exact=True)).to_be_visible()
         expect(page.get_by_role("region", name="Sources", exact=True)).to_contain_text("holiday")
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
@@ -189,7 +190,7 @@ def test_completed_source_refresh_reloads_authored_candidates_once(page, registr
         assert response.value.status == 202
         requested_revision = response.value.json()["requested_revision"]
 
-        repository = MediaRepository(registry.db, registry.clock, queue=queue)
+        repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
         lease = repository.begin_requested_refresh(SOURCE)
         assert lease is not None and lease.request_revision == requested_revision
         assert repository.publish_refresh(lease, RefreshResult(
@@ -233,7 +234,7 @@ def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page,
     _seed_source(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, VALID_FRAME, "commissioning")
+        inspector = open_frame(page, VALID_FRAME, "calibration")
         inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
         assert current_hash(page) == f"#/scenes/new/kind?target={VALID_FRAME}"
         form = scene_form(page)
@@ -273,7 +274,7 @@ def test_commissioning_link_keeps_an_existing_dirty_scene_draft(page, registry):
         form = start_scene(page)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         go(page, "wall")
-        inspector = open_frame(page, VALID_FRAME, "commissioning")
+        inspector = open_frame(page, VALID_FRAME, "calibration")
         inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
         expect(form.get_by_role("status")).to_contain_text(
             f"Your open Scene draft was kept. Frame {VALID_FRAME} was not added.")
@@ -724,7 +725,7 @@ def test_a_save_that_lands_after_the_operator_left_keeps_them_where_they_went(pa
         # The draft ended: the write's `finish` has run, and left the location alone.
         expect(_scenes_link(page)).to_have_accessible_description("")
         assert current_hash(page) == "#/now"
-        expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
 
         page.go_back()
         expect(page.get_by_role("heading", level=1, name="Scenes", exact=True)).to_be_visible()

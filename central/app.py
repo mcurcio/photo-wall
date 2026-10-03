@@ -24,7 +24,7 @@ from central.content_catalog.catalog import CatalogError
 from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
-from central.db import Database
+from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
 from central.fleet.node_routes import mount_node_routes
@@ -32,6 +32,7 @@ from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.rollout_gate import ServingImageVerifier
 from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
+from central.library_routes import mount_library_routes
 from central.mdns_advertise import MdnsCentralAdvertiser
 from central.media_gateway import MediaGateway
 from central.media_ports import (
@@ -151,8 +152,10 @@ def create_app(
     node_control: NodeControlConfig | None = None,
     node_serving_verifier: ServingImageVerifier | None = None,
     node_serving_verifier_factory=None,
+    media_times: TransactionClock | None = None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
+    clock_injected = clock
     owns_db = db is None
     db = db or Database(os.environ["PHOTO_WALL_DATABASE_URL"])
     clock = clock or SystemClock()
@@ -167,7 +170,11 @@ def create_app(
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
     )
-    media_repository = MediaRepository(db, clock, queue=media_queue)
+    # G11: media times are the database's in production. A test that injects its own
+    # clock (as run_scheduler above) keeps them on it unless it passes media_times.
+    media_times = media_times or (
+        DatabaseTransactionClock() if clock_injected is None else ProcessTransactionClock(clock_injected))
+    media_repository = MediaRepository(db, clock, times=media_times, queue=media_queue)
     media_application: MediaApplication = media_repository
     coordinator = Coordinator(
         db,
@@ -193,7 +200,10 @@ def create_app(
     # no job handlers; the worker runs them. Built only against a real Database;
     # tests inject fakes.
     content = content or (
-        build_content_services(db, clock, cache_root=cache_layout.cache_root())
+        build_content_services(
+            db, clock, cache_root=cache_layout.cache_root(),
+            servable_thumbnail=lambda asset_id: (
+                media_repository.servable_thumbnail(asset_id) is not None))
         if isinstance(db, Database)
         else None
     )
@@ -773,7 +783,7 @@ def create_app(
 
     @app.get("/v1/operator/media", dependencies=[Depends(admin)])
     def media_state():
-        return {"sources": media_application.sources(), "health": media_application.health()}
+        return media_application.media_read()
 
     @app.put("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
     def configure_source_name(name: str, request: NamedSourceWrite):
@@ -877,6 +887,7 @@ def create_app(
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
         return coordinator.runtime.command_current(operation, run_id)
 
+    mount_library_routes(app, admin=admin, media=media_application, content=content)
     if content is not None:
         mount_content_routes(app, content)
     mount_fleet_routes(app, db=db, clock=clock, admin=admin, content=content)

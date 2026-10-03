@@ -18,6 +18,18 @@ class AssetKind(StrEnum):
     PLAYER_DEB = "player-deb"  # media-variant arrives with media (co-change bead)
     PLAYER_PAYLOAD = "player-payload"
     SEALED_ENVIRONMENT = "sealed-environment"
+    LIBRARY_THUMBNAIL = "library-thumbnail"  # a preview tile, re-encoded by the media worker
+
+    @property
+    def keyed_by_content(self) -> bool:
+        """Whether a key of this kind fixes its bytes, so its produced facts are write-once.
+
+        A library thumbnail is keyed by its ORIGINAL's identity, not its own bytes: the library
+        may regenerate it, so after a purged cache a re-production may yield different bytes,
+        which REPLACE its produced facts (`AssetProduction`, `AssetRecords.record_produced`).
+        Every other kind is content-keyed (a re-cut is a new key), so differing bytes are a bug.
+        """
+        return self is not AssetKind.LIBRARY_THUMBNAIL
 
 
 def _positive_int(value: object, what: str) -> None:

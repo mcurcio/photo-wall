@@ -8,7 +8,7 @@ export const NOT_CONFIRMED = "may have been saved: Central did not answer.";
 
 /**
  * A flow's final write (flow design §6 History, §7), written once for every flow: Save
- * Scene, Save source, Schedule Program and Activate now.
+ * Scene, Save Source, Schedule Program and Activate now.
  *
  * SEND. `send(flow, write)` checks every problem (the kit's `flow.checkAll`; nothing is
  * sent while one remains, or while a write is in flight), clears the status line, marks

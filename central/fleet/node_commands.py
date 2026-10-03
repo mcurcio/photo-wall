@@ -29,6 +29,14 @@ from contracts.node_commands import (
 )
 from contracts.node_protocol import counter, identifier, token
 
+# The one definition of an outstanding reboot command (alias ``c`` on
+# node_reboot_commands, one ``%s`` for Central's now): unexpired on Central's
+# clock and not rejected. Received, accepted and initiated commands stay
+# outstanding until they expire, because HostCore dedupes only by command id.
+# The fence below and the operator device read both use it, scoped by session.
+OUTSTANDING_REBOOT_SQL = ("(c.expires_at>%s AND NOT EXISTS (SELECT 1 FROM node_command_responses r "
+                          "WHERE r.command_id=c.command_id AND r.decision='rejected'))")
+
 
 @dataclass(frozen=True, slots=True)
 class OperatorReboot:
@@ -98,6 +106,11 @@ class NodeCommands:
                     raise NodeControlError("node_reboot_expired", 410)
                 return {"command": json.loads(bytes(prior["payload"])), "duplicate": True,
                         "effect_established": False}
+            # One outstanding reboot per session; the locks above serialize issuers.
+            if conn.execute("SELECT 1 FROM node_reboot_commands c WHERE c.session_id=%s "
+                            f"AND {OUTSTANDING_REBOOT_SQL} LIMIT 1",
+                            (request.session_id, now)).fetchone():
+                raise NodeControlError("node_reboot_outstanding", 409)
             command = RebootRequest(request.command_id, "0" * 64, grant.session_id,
                                      grant.offer_id, grant.producer)
             command = replace(command, command_sha256=reboot_digest(command))

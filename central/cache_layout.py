@@ -2,7 +2,8 @@
 
 The app owns the layout: it reads ONE optional env, ``PHOTO_WALL_CACHE_ROOT``
 (baked default ``/var/cache/photo-wall``), and derives the three domain
-subdirectories -- ``media/``, ``apps/``, ``os-images/`` -- as INTERNAL CONSTANTS.
+subdirectories -- ``media/``, ``apps/``, ``os-images/``, ``previews/`` -- as INTERNAL
+CONSTANTS.
 It never reads a per-domain path env. Relocating one domain onto another medium
 is a Kubernetes ``subPath`` mount at the fixed in-container subdir path; the app
 never sees it.
@@ -28,6 +29,7 @@ DEFAULT_CACHE_ROOT = "/var/cache/photo-wall"
 MEDIA_SUBDIR = "media"
 APPS_SUBDIR = "apps"
 OS_IMAGES_SUBDIR = "os-images"
+PREVIEWS_SUBDIR = "previews"  # library preview thumbnails (console DDD §38), re-encoded copies
 
 
 def cache_root(env: dict | None = None) -> Path:

@@ -99,14 +99,16 @@ def test_full_backlog_does_not_delay_command_poll_and_evidence_is_bounded(
     runner.session = SimpleNamespace(claim=SimpleNamespace(session_id=core.session_id), ensure=lambda: grant,
                                      request=lambda method, path, body=None: transport.request(method, path, body))
     runner.sampler = SimpleNamespace(
-        sample=lambda: (("uptime", 1, "seconds"),), supervision=lambda: ()
+        sample=lambda: (("uptime", 1, "seconds"),), throttling=lambda: (), supervision=lambda: (),
+        facts=lambda: dict.fromkeys(("kernel_release", "interface", "link_state", "address")),
     )
     runner.delivery = RebootDelivery(store)
     monkeypatch.setattr("appliance.node.host_runner.boottime_ms", lambda: 20)
     runner.tick()
     assert calls[0][:2] == ("GET", "/v2/node/commands")
     assert driver.calls == expected
-    assert len(calls) == 4  # One poll, one observation, at most two evidence sends.
+    # One poll, one observation, the process's first host facts, at most two evidence sends.
+    assert len(calls) == 5
     assert len(core.journal.data["records"]) == 1024
     assert "observation" in store.values
 

@@ -46,6 +46,11 @@ from contracts.player_control import (
 )
 from contracts.time import Clock
 
+# A calibration preview's lease. The preview answer serves it as a duration (`lease_seconds`)
+# beside Central's absolute `expires_at`, so a browser counts down on its own clock and never
+# compares Central's clock with its own (console DDD R10).
+CALIBRATION_LEASE_SECONDS = 30
+
 
 class RegistryError(Exception):
     def __init__(self, code: str, status: int = 409, *, details: dict | None = None):
@@ -760,9 +765,11 @@ class Registry:
                     raise RegistryError("frame_unbound")
                 if operation == "preview":
                     proposed = calibration.model_copy(update={"revision": current.revision})
+                    expires = now + CALIBRATION_LEASE_SECONDS
                     conn.execute("UPDATE frames SET preview=%s,preview_expires=%s WHERE id=%s",
-                                 (Jsonb(proposed.model_dump()), now + 30, frame_id))
-                    result = {"calibration": proposed.model_dump(), "expires_at": now + 30}
+                                 (Jsonb(proposed.model_dump()), expires, frame_id))
+                    result = {"calibration": proposed.model_dump(), "expires_at": expires,
+                              "lease_seconds": CALIBRATION_LEASE_SECONDS}
                 else:
                     committed = calibration.model_copy(update={"revision": current.revision + 1})
                     conn.execute("UPDATE frames SET calibration=%s,calibration_valid=true,preview=NULL,"

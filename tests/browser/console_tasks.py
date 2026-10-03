@@ -11,18 +11,22 @@ Tests that are *about* a form (its validation, focus, descriptions or chooser co
 their direct locators; these helpers are for tests that only need the task done.
 
 As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #/schedule,
-#/sources, #/wall, #/equipment, #/attention), reached from the sidebar (a drawer under
-850 px). Signing in lands on #/wall while no frame exists and on #/now once one does, so a
-test that needs a page goes to it.
+#/sources, #/wall, #/players, #/attention), reached from the sidebar (a drawer under
+850 px). As of the console DDD pass 1 (B1) the boxes live on Players: a list with one row
+per box, and one Player page per box (#/players/<device-id>), opened with `open_player`.
+Signing in always lands on #/wall (console DDD §48), so a test that needs another page goes
+to it. As of console DDD W1 the Wall's daily face is read-only: drawing, moving and deleting
+Frames happen in Edit layout (#/wall/layout), opened with `edit_layout`.
 
 As of bead 2 a Scene is made in the Scene flow (#/scenes/new/<step>): "New Scene" on the
 Scenes page, then Kind → Photos → Frames → [Media per frame] → Playback → Review, one step
 at a time behind Continue. `author_scene` walks it; `start_scene`, `scene_continue` and
 `scene_form` are its parts, for tests about the flow's own steps.
 
-As of bead 3 a Photo source is added in the Source flow (#/sources/new/<step>): "New
-source", then What to include → Name → Review. `add_source` walks it; `start_source`,
-`source_continue`, `source_form` and `answer_connection` are its parts.
+A Source is added in the Source flow (#/sources/new/<step>, console DDD §37): "New
+Source", then Library → Tags → Narrow → Name → Review (no Library step when exactly one
+connection is known). `add_source` walks it; `start_source`, `source_continue`,
+`source_step`, `source_form` and `answer_connection` are its parts.
 
 As of bead 4 a Program is scheduled in the Schedule flow (#/schedule/new/<step>): "Schedule
 a Program" on the Schedule page, then Scene → When → Review. `schedule_program` walks it;
@@ -38,20 +42,21 @@ from playwright.sync_api import expect
 # The sections of §6, grouped as its route tables group them, and their sidebar labels
 # (each page's <h1> reads the same).
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
-WALL_SECTIONS = frozenset({"wall", "equipment"})
-SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | {"attention"}
+WALL_SECTIONS = frozenset({"wall"})
+FLEET_SECTIONS = frozenset({"players", "releases"})
+SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | {"attention"}
 LABELS = {
-    "now": "Now showing", "scenes": "Scenes", "schedule": "Schedule", "sources": "Photo sources",
-    "wall": "Wall", "equipment": "Equipment", "attention": "Needs attention",
+    "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
+    "wall": "Wall", "players": "Players", "releases": "Releases", "attention": "Needs attention",
 }
 
 # The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
-FACETS = {"commissioning": "Commissioning", "binding": "Binding", "nowshowing": "Now-showing"}
+FACETS = {"status": "Status", "binding": "Binding", "calibration": "Calibration"}
 
 
 def go(page, section):
-    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "equipment"
-    or "attention". Name the section the test is about (a Run test goes to "now", a
+    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "players",
+    "releases" or "attention". Name the section the test is about (a Run test goes to "now", a
     Program test to "schedule").
 
     Clicks the section's sidebar link by its accessible name; on a narrow screen, where
@@ -69,6 +74,15 @@ def go(page, section):
             "navigation", name="Sections", exact=True)
     sidebar.get_by_role("link", name=LABELS[section], exact=True).click()
     expect(page.get_by_role("heading", level=1, name=LABELS[section], exact=True)).to_be_visible()
+
+
+def edit_layout(page):
+    """Open the Wall's Edit layout mode from its daily face (the Wall must be shown): click
+    **Edit layout** and wait for its "Editing layout" bar. Returns that bar (its Done)."""
+    page.get_by_role("button", name="Edit layout", exact=True).click()
+    bar = page.get_by_role("group", name="Editing layout", exact=True)
+    expect(bar).to_be_visible()
+    return bar
 
 
 def current_hash(page):
@@ -92,6 +106,25 @@ def visible_page(page):
     return page.locator("main > section:not([hidden])")
 
 
+def player_name(registry, player_id, serial=None):
+    """A Player's name on the Players pages (players.js `playerName`): "Player …<last six of
+    its serial>" when its box netbooted with `serial`, else "Player <device id>"."""
+    if serial:
+        return f"Player …{serial[-6:]}"
+    device_id = next(p.device_id for p in registry.inventory().players if p.id == player_id)
+    return f"Player {device_id}"
+
+
+def open_player(page, name):
+    """Go to Players and follow the list's link to the Player page named `name`
+    (`player_name`); waits for the page's heading and returns the page on screen."""
+    go(page, "players")
+    page.get_by_role("table", name="Players", exact=True).get_by_role(
+        "link", name=name, exact=True).click()
+    expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
+    return visible_page(page)
+
+
 def connect(page, origin, section=None, *, paused_at=None):
     """Sign in (operator_harness.sign_in, owned by pass A), then `go` to `section` if given.
 
@@ -107,7 +140,7 @@ def connect(page, origin, section=None, *, paused_at=None):
 
 
 # The Scene flow's kinds (flow design §7 J4, step 1), by their labels.
-LIVE = "Live from a photo source"
+LIVE = "Live from a Source"
 HAND_PICKED = "Hand-picked per frame"
 
 
@@ -141,7 +174,7 @@ def start_scene(page, *, hand_picked=False):
 
 
 def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, submit=True):
-    """Author a Scene from Photo source `source` on `frames` through the Scene flow and,
+    """Author a Scene from Source `source` on `frames` through the Scene flow and,
     with `submit`, save it.
 
     `frames` is the target frame ids for a Scene live from the source, or a
@@ -187,9 +220,9 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
 
 
 def source_form(page):
-    """The Source flow's current step: the form "Configure a Source" in the Sources region
-    (bead 3). Every step renders it, with the step's fields and its Back and Continue
-    (Review: Save source)."""
+    """The Source flow's current step: the form "Configure a Source" in the Sources region.
+    Every step renders it, with the step's fields and its Back and Continue (Review: Save
+    Source)."""
     return page.get_by_role("region", name="Sources", exact=True).get_by_role(
         "form", name="Configure a Source", exact=True)
 
@@ -203,22 +236,29 @@ def source_continue(page, step=None):
             "[aria-current=step]")).to_contain_text(step)
 
 
+def source_step(page):
+    """The Source flow's current step, by its stepper label ("Library", "Tags", …)."""
+    current = page.get_by_role("navigation", name="Steps", exact=True).locator("[aria-current=step]")
+    expect(current).to_have_count(1)
+    return current.locator("span").last.inner_text().strip()
+
+
 def start_source(page):
-    """Go to Photo sources and press "New source"; returns the flow's form, on its first
-    step, "What to include"."""
+    """Go to Sources and press "New Source"; returns the flow's form, on its first step
+    (Library, or Tags when exactly one connection is known)."""
     go(page, "sources")
     page.get_by_role("region", name="Sources", exact=True).get_by_role(
-        "button", name="New source", exact=True).click()
+        "button", name="New Source", exact=True).click()
     form = source_form(page)
-    expect(form.get_by_role("heading", name="What to include", exact=True)).to_be_visible()
+    expect(form).to_be_visible()
     return form
 
 
 def answer_connection(form, connection):
-    """Answer "Connection name" on the Name step however the connection rule shows it: a
-    text field (no Source yet), under Advanced (every Source names the same one; opened
-    here first) or a chooser (several; "Another connection…" and "New connection name"
-    for one no Source uses yet)."""
+    """Answer "Connection name" however the connection rule shows it: a text field on the
+    Library step (no Source yet), under the Name step's Advanced (one known connection;
+    opened here first) or a chooser on the Library step (several; "Another connection…"
+    and "New connection name" for one no Source uses yet)."""
     field = form.get_by_label("Connection name", exact=True)
     if not field.is_visible():
         form.get_by_role("button", name="Advanced", exact=True).click()
@@ -232,19 +272,24 @@ def answer_connection(form, connection):
 
 
 def add_source(page, source_ref, connection, *, media_type=None, submit=True):
-    """Configure a Photo source named `source_ref` (`name:rev`) on library `connection`
-    through the Source flow: What to include → Name → Review, then Save source.
+    """Configure a Source named `source_ref` (`name:rev`) on library `connection` through
+    the Source flow: [Library] → Tags (none) → Narrow → Name → Review, then Save Source.
 
     `media_type` picks "Media type" ("image", "video"); None keeps the flow's default.
     With `submit`, saves, waits (on success) for the saved Source's card and returns the PUT
     response; without it, returns the flow's form on Review, filled and unsaved.
     """
     form = start_source(page)
+    if source_step(page) == "Library":
+        answer_connection(form, connection)
+        source_continue(page, "Tags")
+    source_continue(page, "Narrow")
     if media_type is not None:
         form.get_by_label("Media type", exact=True).select_option(media_type)
     source_continue(page, "Name")
     form.get_by_label("Source name", exact=True).fill(source_ref)
-    answer_connection(form, connection)
+    if form.get_by_role("button", name="Advanced", exact=True).count():
+        answer_connection(form, connection)
     source_continue(page, "Review")
     if not submit:
         return form
@@ -252,7 +297,7 @@ def add_source(page, source_ref, connection, *, media_type=None, submit=True):
         lambda r: r.url.endswith("/v1/operator/source-names/" + quote(source_ref, safe=""))
         and r.request.method == "PUT"
     ) as info:
-        form.get_by_role("button", name="Save source", exact=True).click()
+        form.get_by_role("button", name="Save Source", exact=True).click()
     if info.value.ok:
         # The flow ended on the cards, which list it (the refresh after the save landed).
         expect(page.get_by_role("region", name="Sources", exact=True).get_by_role(
@@ -333,7 +378,7 @@ def show_form(page):
 
 
 def start_show_now(page, scene_id=None):
-    """Go to Now showing, press "Show now" and, with `scene_id`, choose it as "Scene to
+    """Go to Now, press "Show now" and, with `scene_id`, choose it as "Scene to
     activate"; returns the flow's form, on its Scene step."""
     go(page, "now")
     page.get_by_role("region", name="Runs", exact=True).get_by_role(
@@ -356,7 +401,7 @@ def show_advanced(form):
 def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit=True):
     """Show Scene `scene_id` now and return the activation's POST response.
 
-    Bead 5: the Show-now flow (#/now/show/<step>): "Show now" on Now showing, Scene →
+    Bead 5: the Show-now flow (#/now/show/<step>): "Show now" on Now, Scene →
     Review, then "Activate now". `priority` fills "Activation priority" under Review's
     Advanced; None keeps its default (the highest priority among the live Runs covering
     the Scene's frames, or 0). `repeat` is the label of the "if it is already running"
@@ -383,8 +428,8 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
 
 
 def open_frame(page, frame_id, facet):
-    """Open frame `frame_id` on the Wall at `facet` ("binding", "commissioning" or
-    "nowshowing", the Inspector.jsx keys); returns its Inspector.
+    """Open frame `frame_id` on the Wall at `facet` ("status", "binding" or
+    "calibration", the Inspector.jsx keys); returns its Inspector.
 
     Follows the frame's route, `#/wall/frames/<id>/<facet>`, as a typed URL would: the
     frame is selected on the plan and its Inspector opens at that facet, without moving

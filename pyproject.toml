@@ -96,7 +96,8 @@ forbidden_modules = [
 [[tool.importlinter.contracts]]
 name = "Central content-serving layers"
 type = "layers"
-layers = ["central.app : central.content_wiring : central.content_routes", "central.infra",
+layers = ["central.app : central.content_wiring : central.content_routes : central.library_routes",
+          "central.infra",
           "central.content_catalog | central.assets | central.health",
           "central.origins", "central.kernel"]
 
@@ -106,6 +107,14 @@ type = "forbidden"
 source_modules = ["central.kernel", "central.origins", "central.content_catalog",
                   "central.assets", "central.health"]
 forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
+
+[[tool.importlinter.contracts]]
+# R22: only the media worker holds a library's address and key. Central's thumbnail handler gets
+# its library half injected (`build_job_runtime(thumbnails=...)`), never by import.
+name = "Central imports no library client"
+type = "forbidden"
+source_modules = ["central"]
+forbidden_modules = ["media.immich", "media.library_thumbnails", "media.worker"]
 
 [[tool.importlinter.contracts]]
 name = "Kernel is vocabulary only"

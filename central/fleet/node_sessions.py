@@ -6,9 +6,11 @@ A session is a serial claim; it does not authenticate a physical device.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from hmac import compare_digest
+from typing import Final
 from uuid import UUID, uuid4
 
 from psycopg.types.json import Jsonb
@@ -27,6 +29,7 @@ from contracts.node_commands import (
     producer_document,
     scope_for_owner,
 )
+from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2, digest, token
 from contracts.time import Clock
 
@@ -58,9 +61,22 @@ class NodePrincipal:
     current: bool
 
 
+# Twice one producer's stored samples per UTC day at one per interval (console DDD §60, §63):
+# room for two boxes claiming one serial. Derived, never written as a number.
+OBSERVATION_DAILY_CAP: Final[int] = 2 * math.ceil(86400 / HOST_OBSERVATION_INTERVAL_SECONDS)
+# Host facts are read at most once per observation post (§64), so the same formula bounds them.
+HOST_FACTS_DAILY_CAP: Final[int] = 2 * math.ceil(86400 / HOST_OBSERVATION_INTERVAL_SECONDS)
+# App Manager samples are coalesced per (state, operation, fault) per interval (§64), so a box
+# alternating two states (`preparing`/`refused`, or `preparing`/`fault` on older bases) stores
+# two per interval; twice that leaves room for two boxes claiming one serial.
+PREPARATION_DAILY_CAP: Final[int] = 4 * math.ceil(86400 / HOST_OBSERVATION_INTERVAL_SECONDS)
+
+
 def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
     """Device/day caps are deliberately generous but finite across replicas."""
-    limits = {"session": 1024, "evidence": 100000, "observation": 20000, "command": 1024, "display": 500000, "preparation": 20000}
+    limits = {"session": 1024, "evidence": 100000, "observation": OBSERVATION_DAILY_CAP,
+              "command": 1024, "display": 500000, "preparation": PREPARATION_DAILY_CAP,
+              "host_facts": HOST_FACTS_DAILY_CAP}
     day = int(now) // 86400
     row = conn.execute("INSERT INTO node_intake_quotas(device_id,day,kind,used) "
                        "VALUES(%s,%s,%s,1) ON CONFLICT(device_id,day,kind) DO UPDATE "

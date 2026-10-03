@@ -140,6 +140,10 @@ def test_advancing_real_owner_witnesses_qualify_without_cached_repeats(registry)
         row = conn.execute('SELECT evidence FROM node_environment_acceptances').fetchone()
         assert row['evidence']['physical_pixels']=='unknown'
         assert len(row['evidence']['sample_ids'])==7
+    # G4: the operator read lists the qualified environment (the gate plays no part in a read).
+    from central.fleet.node_lifecycle import NodeLifecycle
+    [listed] = NodeLifecycle(witness.sessions, None).status(DEVICE_ID)['qualification']['acceptances']
+    assert listed['environment_sha256']==witness.proof.challenge.environment_sha256 and listed['base_tag'] is not None
 
 
 @pytest.mark.parametrize('tag',['synthetic','trial-not-normal-media'])

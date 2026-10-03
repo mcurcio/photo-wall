@@ -315,7 +315,7 @@ export function editableDraft(scene) {
  */
 
 /**
- * A new Scene's defaults, each with its source: live from a photo source; 30 s per
+ * A new Scene's defaults, each with its source: live from a Source; 30 s per
  * cycle; loop on, so a Scene keeps playing until its Program ends (slice 3 Question 1).
  *
  * @type {Readonly<SceneDraft>}
@@ -397,11 +397,6 @@ export function newActivationKey() {
  */
 export function toEpochSeconds(local) {
   return local ? new Date(local).getTime() / 1000 : NaN;
-}
-
-/** The browser's time zone, which every entered and shown time uses (§6). */
-export function timeZoneName() {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
 
 /** Scene, window and priority problems shared by one Program and the helper. */
@@ -591,7 +586,7 @@ export function sourceProblems({ sourceName, connectionRef, capturedFrom, captur
   const from = localDayStart(capturedFrom);
   const until = localDayStart(capturedUntil);
   if (from !== null && until !== null && until <= from) {
-    problems.push({ field: "until", message: "'Taken until' must be after 'Taken from'." });
+    problems.push({ field: "until", message: "'Dated until' must be after 'Dated from'." });
   }
   return problems;
 }

@@ -21,12 +21,14 @@ class PreparationObservation:
         self.store.write("preparation-observation", {**row, "pending": None})
         return True
 
-    def sample(self, state: str, *, command=None, fault: str | None = None) -> None:
+    def sample(self, state: str, *, command=None, fault: str | None = None,
+               available_bytes: int | None = None, required_bytes: int | None = None) -> None:
         grant = self.session.grant
         if grant is None or not self.flush():
             return
         row = self.store.read("preparation-observation") or {"sequence": 0}
-        context = {"state": state, "operation": str(command.operation_id) if command else None, "fault": fault}
+        context = {"state": state, "operation": str(command.operation_id) if command else None, "fault": fault,
+                   "available_bytes": available_bytes, "required_bytes": required_bytes}
         now = boottime_ms()
         if row.get("context") == context and now - row["sampled"] < 10_000:
             return
@@ -34,7 +36,7 @@ class PreparationObservation:
             operation_id=command.operation_id if command else None,
             target_sha256=command.target.environment_sha256 if command else None,
             fallback_sha256=command.fallback.environment_sha256 if command and command.fallback else None,
-            fault=fault)
+            available_bytes=available_bytes, required_bytes=required_bytes, fault=fault)
         self.store.write("preparation-observation", {"sequence": event.sequence, "sampled": now,
             "context": context, "pending": encode_manager_preparation(event).decode()})
         self.flush()

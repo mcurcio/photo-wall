@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useMemo } from "react";
 
 import { Guidance } from "./Guidance.jsx";
 import { Inspector } from "./Inspector.jsx";
+import { LayoutEditor } from "./LayoutEditor.jsx";
 import { Plan } from "./Plan.jsx";
-import { routeIdName } from "./routes.js";
+import { DEFAULT_FACET, routeIdName } from "./routes.js";
 import { UnplacedTray } from "./UnplacedTray.jsx";
+import { WallUnfinished } from "./WallUnfinished.jsx";
 
 /**
  * @typedef {import("./routes.js").Route} Route
@@ -12,42 +14,28 @@ import { UnplacedTray } from "./UnplacedTray.jsx";
  */
 
 /**
- * The Wall page (#/wall, #/wall/frames/<id>/<facet>): the recovery banner, the
- * first-run Guidance, the Surface filter, the per-Surface Plan, the Unplaced tray and
- * the Frame Inspector.
+ * The Wall page (#/wall, #/wall/frames/<id>/<facet>, #/wall/layout; console DDD §61).
  *
- * The selected frame and its open facet are the route's. Selecting a frame on the plan
- * or tray, or switching facet, REPLACES the history entry (so Back leaves the Wall
- * rather than stepping through selections) and never moves focus. A frame id that the
+ * THE DAILY FACE (#/wall, #/wall/frames/…) holds no write (G3): the first-run Guidance
+ * (with no Frames), the To finish list (WallUnfinished.jsx), the Surface filter with
+ * **Edit layout**, the read-only Plan, the select-only Unplaced tray and the Frame
+ * Inspector. Plan and tray are rendered without `edit`, so a drag moves nothing.
+ *
+ * EDIT LAYOUT (#/wall/layout) is LayoutEditor.jsx, which owns every Plan and tray write;
+ * its Done returns here (to the Frame it had selected, at Status).
+ *
+ * The selected frame and its open facet are the route's; a Frame opens on Status
+ * (`DEFAULT_FACET`) unless the route names a facet. Selecting a frame on the plan or tray
+ * opens its Status, and switching facet, REPLACES the history entry (so Back leaves the
+ * Wall rather than stepping through selections) and never moves focus. A frame id that the
  * loaded snapshot does not list reads "This no longer exists".
  *
- * Unplaced-tray drag-out (Bead 11). The dragged frame id lives in a REF so the plan's
- * pointer-up reads it synchronously (a full press->move->release can fire before React
- * re-renders — cf. Plan's own dragRef). A window-level pointer-up clears it so a press
- * that does NOT land on the plan (a plain tray click, or a release anywhere else)
- * cancels the drag rather than leaving a stale id that a later plan release would
- * wrongly consume. The plan's own handler runs first (React binds at the root, below
- * window in the bubble path), so a genuine drop is read and cleared before this reset.
- *
  * @param {{snapshot: object, bootFacts: object|null, route: Route,
+ *          hosts?: import("./fleetHosts.js").FleetHosts|null,
  *          navigate: (route: Route, options?: {replace?: boolean}) => void,
- *          memory: WallMemory, recovery: {recovered: string[], dismiss: () => void}}} props
+ *          memory: WallMemory}} props
  */
-export function WallPage({ snapshot, bootFacts, route, navigate, memory, recovery }) {
-  const trayDragRef = useRef(/** @type {string|null} */ (null));
-  // Reuse the Plan's measured-create action so onboarding opens the same form as
-  // the existing control, with the Plan remaining the owner of creation state.
-  const addFrameButtonRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
-  // The plan region: the focus successor of a delete from the plan or the tray.
-  const planRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
-  useEffect(() => {
-    const clear = () => {
-      trayDragRef.current = null;
-    };
-    window.addEventListener("pointerup", clear);
-    return () => window.removeEventListener("pointerup", clear);
-  }, []);
-
+export function WallPage({ snapshot, bootFacts, hosts = null, route, navigate, memory }) {
   const frames = snapshot?.inventory?.frames ?? [];
   // Surfaces present in the snapshot, sorted for a deterministic default. A new
   // installation has no Frames to derive one from, but the first drag still
@@ -64,7 +52,7 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
     routeFrameId === null ? undefined : frames.find((frame) => frame.id === routeFrameId);
   const stale = routeFrameId !== null && routeFrame === undefined;
   const selection = stale ? null : routeFrameId;
-  const facet = route.facet ?? memory.lastFacet;
+  const facet = route.facet ?? DEFAULT_FACET;
 
   // The chosen Surface; before one is chosen, a deep-linked frame's, then the first.
   const activeSurface =
@@ -74,12 +62,59 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
 
   const wallRoute = () => navigate({ section: "wall" }, { replace: true });
 
-  // Plain selection (plan or tray): keeps the Surface in view and the open facet, and
-  // never moves focus.
+  // Plain selection (plan or tray): keeps the Surface in view, opens Status, and never
+  // moves focus.
   const selectFrame = (frameId) => {
     memory.selectPlainly(frameId, activeSurface);
-    navigate({ section: "wall", id: frameId, facet }, { replace: true });
+    navigate({ section: "wall", id: frameId, facet: DEFAULT_FACET }, { replace: true });
   };
+
+  const filter = (
+    <div className="console__surface-filter">
+      <label className="console__surface-field">
+        Surface
+        <select
+          aria-label="Surface"
+          value={activeSurface ?? ""}
+          onChange={(event) => {
+            memory.setSurfaceId(event.target.value);
+            if (route.mode === undefined) {
+              wallRoute();
+            }
+          }}
+        >
+          {surfaces.map((surface) => (
+            <option key={surface} value={surface}>
+              {surface}
+            </option>
+          ))}
+        </select>
+      </label>
+      {route.mode === undefined && (
+        <button
+          type="button"
+          className="console__button"
+          onClick={() => navigate({ section: "wall", mode: "layout" })}
+        >
+          Edit layout
+        </button>
+      )}
+    </div>
+  );
+
+  if (route.mode === "layout") {
+    return (
+      <LayoutEditor
+        snapshot={snapshot}
+        surfaceId={activeSurface}
+        filter={filter}
+        initialFrameId={memory.lastWall.id ?? null}
+        onDone={(frameId) =>
+          navigate(frameId === null ? { section: "wall" }
+            : { section: "wall", id: frameId, facet: DEFAULT_FACET })}
+      />
+    );
+  }
 
   // On the first run there is no frame to inspect, so there is no Inspector column;
   // with frames, the plan column and the Inspector sit side by side on wide screens
@@ -89,68 +124,19 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
   return (
     <div className={split ? "console__body console__body--split" : "console__body"}>
       <div className="console__main">
-        {recovery.recovered.length > 0 && (
-          <div className="console__recovery" role="status">
-            <p className="console__recovery-text">
-              Recovered — already bound (serial match, not identity):{" "}
-              {recovery.recovered.join(", ")}
-            </p>
-            <button type="button" onClick={recovery.dismiss}>
-              Dismiss
-            </button>
-          </div>
-        )}
         <Guidance
           snapshot={snapshot}
-          dismissed={memory.guidanceDismissed}
-          onAddFirstFrame={() => addFrameButtonRef.current?.click()}
-          onDismiss={memory.dismissGuidance}
+          onAddFirstFrame={() => navigate({ section: "wall", mode: "layout" })}
         />
-        <div className="console__surface-filter">
-          <label className="console__surface-field">
-            Surface
-            <select
-              aria-label="Surface"
-              value={activeSurface ?? ""}
-              onChange={(event) => {
-                memory.setSurfaceId(event.target.value);
-                wallRoute();
-              }}
-            >
-              {surfaces.map((surface) => (
-                <option key={surface} value={surface}>
-                  {surface}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
+        <WallUnfinished snapshot={snapshot} />
+        {filter}
         <Plan
           snapshot={snapshot}
           surfaceId={activeSurface}
           selection={selection}
           onSelect={selectFrame}
-          onDeleted={wallRoute}
-          regionRef={planRegionRef}
-          addFrameButtonRef={addFrameButtonRef}
-          trayDragRef={trayDragRef}
-          onTrayDrop={() => {
-            trayDragRef.current = null;
-          }}
         />
-        <UnplacedTray
-          snapshot={snapshot}
-          onSelect={selectFrame}
-          onDragStart={(id) => {
-            trayDragRef.current = id;
-          }}
-          onDeleted={(id) => {
-            if (id === routeFrameId) {
-              wallRoute();
-            }
-            planRegionRef.current?.focus();
-          }}
-        />
+        <UnplacedTray snapshot={snapshot} onSelect={selectFrame} />
       </div>
       {split && (
         <aside className="console__side">
@@ -164,6 +150,7 @@ export function WallPage({ snapshot, bootFacts, route, navigate, memory, recover
             <Inspector
               snapshot={snapshot}
               bootFacts={bootFacts}
+              hosts={hosts}
               frameId={selection}
               facet={facet}
               onFacet={(next) =>

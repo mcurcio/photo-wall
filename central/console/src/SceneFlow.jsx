@@ -11,7 +11,7 @@ import {
   UNAUTHORABLE_REASON,
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
-import { UNKNOWN_MESSAGE } from "./equipmentApi.js";
+import { UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { useProblems } from "./Field.jsx";
 import { FlowFrame } from "./flow/FlowFrame.jsx";
 import { editedId, editKey } from "./flow/instance.js";
@@ -39,7 +39,7 @@ const EMPTY = {};
 // Each step's heading: the one question it asks.
 const HEADINGS = {
   kind: "What kind of Scene?",
-  photos: "Which photos?",
+  photos: "Which Source?",
   frames: "Which frames?",
   media: "Which item on each frame?",
   playback: "How long each item shows",

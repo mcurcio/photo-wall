@@ -1,31 +1,23 @@
 import React from "react";
 
 /**
- * Non-blocking, dismissible first-run guidance banner (Bead 18, design Q8:
- * always-visible inventory + a non-blocking guidance banner carries onboarding,
- * NOT a modal wizard that gates the console).
+ * The Wall's first step (Bead 18; console DDD §54, §61): a non-blocking guidance banner,
+ * NOT a modal wizard that gates the console.
  *
  * First-run is inferred from Plane A: an installation with no Frames yet has an
  * empty canvas, so the banner points the installer at the first steps (draw a
- * Frame, power on one Pi, bind the Frame to one of its Outputs, commission the
- * display — slice 2 §5). Once any Frame exists the banner never shows.
+ * Frame, power on one Pi, bind the Frame to one of its Outputs, calibrate the
+ * Frame — slice 2 §5). It renders only while there are no Frames, and has no
+ * dismissal: it leaves by itself when the first Frame exists, and the Wall's To
+ * finish list takes over (G2). **Add first frame** calls `onAddFirstFrame`, with
+ * which the Wall opens Edit layout (`#/wall/layout`).
  *
- * The dismissed flag lives in PLANE B — the navigation shell's state, never in
- * the snapshot — so a Plane A refresh (poll, after-mutate, explicit Refresh)
- * replaces the fetched inventory alone and CANNOT resurrect a banner the
- * operator has dismissed (the two-plane rule, design §4a: a refresh merges
- * nothing into Plane B). The shell holds it, not this component, because the
- * Wall page mounts only while it is current (flow design §6): leaving the Wall
- * must not undo a dismissal either.
- *
- * @param {{snapshot: object|null, dismissed: boolean, onAddFirstFrame: () => void,
- *          onDismiss: () => void}} props
+ * @param {{snapshot: object|null, onAddFirstFrame: () => void}} props
  * @returns {JSX.Element|null}
  */
-export function Guidance({ snapshot, dismissed, onAddFirstFrame, onDismiss }) {
+export function Guidance({ snapshot, onAddFirstFrame }) {
   const frames = snapshot?.inventory?.frames ?? [];
-  const firstRun = frames.length === 0;
-  if (!firstRun || dismissed) {
+  if (frames.length > 0) {
     return null;
   }
 
@@ -37,18 +29,11 @@ export function Guidance({ snapshot, dismissed, onAddFirstFrame, onDismiss }) {
     >
       <p className="console__guidance-text">
         Add a frame, power on one Pi, bind the frame to one of its outputs, then
-        commission the display. To show photos, make a Scene targeting that Frame,
+        calibrate the Frame. To show photos, make a Scene targeting that Frame,
         then Show now or Schedule it.
       </p>
       <button type="button" onClick={onAddFirstFrame}>
         Add first frame
-      </button>
-      <button
-        type="button"
-        className="console__guidance-dismiss"
-        onClick={onDismiss}
-      >
-        Dismiss guidance
       </button>
     </aside>
   );

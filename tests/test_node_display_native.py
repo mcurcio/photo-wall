@@ -18,6 +18,7 @@ from test_fleet_attempts import DEVICE_ID, OFFER_ID, SERIAL
 from test_registry import frame
 
 from central.coordination import Coordinator
+from central.db import ProcessTransactionClock
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
@@ -59,7 +60,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
         from central.operator_snapshot import OperatorSnapshotReader
         from central.runtime_store import RuntimeStore
         reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
-            RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock), coordinator)
+            RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)
 
         @app.get("/v1/operator/snapshot")
         def snapshot():

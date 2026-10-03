@@ -2023,3 +2023,1486 @@ node_component_inputs.manifest hashes source-tree file bytes only, not mode/syml
 content_version does include mode). An executable-bit-only change to a component source file would not change the
 cache key. Not exploitable today (no declared builder executes source files directly). Fix if a builder ever does:
 include mode in the manifest entry. Source: review of the component-cache bead.
+
+## 2026-10-02 — console DDD §5 rule 2: `claimed` receipt requirement contradicts its own wording pattern
+Rule 2 says a `claimed` fact without "source and receipt" becomes `unknown`, but the truth-kinds table's
+pattern and example ("Serial …a1b2c3 (claimed, unverified)") carry neither, and the serial claim has no
+served receipt time (`/v1/operator/netboot` rows hold no first-seen time). B1 implemented: `claimed`
+requires value + source (rendered "(claimed at boot by <source>, unverified)"); the receipt is optional
+and appended as "· first received <age> ago" when served (the current node session's boot has one, from
+`boot_claims[].first_received_at`). Doc fix (B4): state that `claimed` requires its source, receipt only
+when Central serves one. Source: B1 implementation, central/console/src/facts.js.
+
+## 2026-10-02 — console DDD §10: a Requested reboot can be retried only by the page that sent it
+§10 says "While the latest request is Requested, 'Reboot Player' offers only that retry". The device
+read (`node_observations.py` `status`, `reboot_commands[]`) serves command_id, audit ref, issued_at,
+expires_at and the command payload, but NOT the request's `device_generation`, `rollout_generation` or
+`valid_for_seconds`, all of which are in Central's request hash (`node_commands.py:59-64`). A retry
+rebuilt from the read would therefore risk 409 `node_reboot_identity_conflict`. B2 implemented: the
+retry re-sends the frozen body the page holds in memory; a Requested request this page does not hold
+(another tab, a reload, navigation away) disables Reboot with "a reboot request is Requested until
+<time>; only that request can be retried" until its window ends. No new command id is ever sent while
+Requested. Doc fix (B4): say the retry is offered from the page that sent the request. Source: B2,
+central/console/src/fleetCommands.js `rebootBlocked`, PlayerCommands.jsx `RebootSection`.
+
+## 2026-10-02 — console DDD §10 state wordings vs §5 rule 2 (reported wording pattern)
+The §10 tables word reported states as "Rejected by Host Management", "Accepted by App Effect Broker;
+preparing", etc., which do not fit rule 2's one `reported` wording ("<Layer> reported <fact> · first
+received <age> ago"). B2 renders each request/operation as the §10 wording (the named state, verbatim)
+plus an "Evidence:" line that is a rule-2 `fact()` carrying the receipt, e.g. 'Host Management reported
+a "rejected" response · first received 2 s ago'. Also: an app operation `staged` + `received` response
+is not in the §10 table; B2 words it "Received by App Effect Broker". Doc fix (B4): state that §10
+wordings are state labels and the receipt is shown as a fact beside them; add the `received` row.
+Source: B2, central/console/src/fleetCommands.js.
+
+## 2026-10-02 — console DDD §5: a `claimed` fact needs a receipt kind (latest vs first)
+§5's `claimed` pattern has one receipt wording, " · first received <age> ago". The T0 app claims
+(`V1Offers.jsx` `t0Claim`) carry the LATEST serial check-in's receipt (`age_seconds` is read_at minus the
+newest check-in row, `central/fleet/policy.py:82`; every check-in inserts a row,
+`central/fleet/service.py:555-572`), so they read "first received 3 s ago" for a claim days old — the
+§3 "Last reported" vs "First received" confusion. Fix cycle 1 implemented: `claimed` takes the same
+receipt kind as `reported`; latest renders " · last claimed <age> ago", first renders " · first received
+<age> ago"; a claimed receipt time without a kind becomes `unknown`. T0 claims use latest; the current
+node session's boot claim keeps first (`node_boot_offers` row per boot). Doc §5 truth-kinds row and
+rule 2 updated in place. Source: fix cycle 1 review, central/console/src/facts.js.
+
+## 2026-10-02 — console DDD §10/§11: the sending page's held request blocks a new command id on its own
+§10 "no page ever sends a new command id while Requested" was enforced only from the device read; a
+read that started before the POST committed came back without the new request and re-enabled "Reboot
+Player" for up to one read interval, and a held retryable request bypassed a DIFFERENT Requested one.
+Fix cycle 1: `fleetCommands.js` gains `heldReboot(request, result)` and `rebootOffer(target, latest,
+readAt, held) -> {offer: new | retry | blocked}`; `rebootBlocked` and `rebootRequest` take `held`. The
+held request (done, already, or retryable unknown) is offered for retry while the read lists it as the
+latest Requested request, or, unlisted, while no other request is Requested and Central's read time is
+before the frozen `retryUntil` (= the freeze-time read_at + window, never later than Central's own
+expires_at). `useNodeDevice.refresh` queues one follow-up read instead of dropping it. Doc §11 updated
+in place. Source: fix cycle 1 review.
+
+## 2026-10-02 — console DDD §10 (deferred): interrupted/superseded hide the broker's answer; Requested ignores gate/session
+Two §10 gaps found in fix cycle 1 review, NOT implemented (each changes §10 rows; owner/doc decision):
+(1) `interrupted_by_reboot` and `superseded` replace whatever the broker reported
+(`node_lifecycle.py:310-315`, "latest_effect keeps that detail"), but §10 shows only the state label, so
+a rejected stage later interrupted reads "Interrupted" with the rejection hidden. Proposed: keep the
+label and add the served `command_response` / `latest_effect` as an extra Evidence fact. (2) The
+Requested label "Central offers it to Host Management until <time>" keys on expires_at only, but
+`node_commands.py:130-138` stops offering when the gate closes, its generation moves, or the targeted
+session stops authenticating. Proposed: "Requested · Central is not offering it now (<gate closed |
+session no longer current>)", non-terminal. Source: fix cycle 1 review (minor findings).
+
+## 2026-10-02 — console DDD §9: a layer with no current session hid its last receipt time
+§9 Layers read only `current` sessions, so a host whose session lapsed (fixed `session_seconds`, renewed only
+on re-enrollment, `central/fleet/node_sessions.py:43,231`) read "Unknown: no current Host Management session"
+although the device read still serves non-current sessions with their latest sample and `received_at`
+(`central/fleet/node_observations.py:62-90`). That broke R4 (named cause with last evidence time) and gap 2.
+Fix cycle 2: `nodeRead.js` `nodeRow` falls back to the owner's newest non-current session holding the layer's
+evidence, renders its receipt as `reported` latest/first as before, and adds a `set` "Session: No current
+<layer> session; the evidence above is from its last session". Unknown only when no session of the owner has
+a sample. §9 failure table gained the row. Source: fix cycle 1 review (major), central/console/src/nodeRead.js.
+
+## 2026-10-02 — correction to the "held request blocks a new command id" entry above; stale dialogs
+The entry above claims `retryUntil` is "never later than Central's own expires_at". False when the session's
+expiry caps Central's window (`expires_at = min(now + valid_for, session expires_at)`,
+`central/fleet/node_commands.py:98`); harmless (it ends in 410 or changed). Separately, `retryUntil` is anchored
+at the read the dialog opened on, so a dialog held open past 30 s reopened the stale-read race (a new command id
+while one is Requested). Fix cycle 2: `fleetCommands.js` `rebootStale(request, latest, readAt)` refuses any send
+(first or retry) once Central's read time reaches `retryUntil` and the read does not list the request as the
+latest; the dialog says "This request is out of date; close and reopen". Residual (not closable from the
+console): a POST whose commit is delayed past a read and whose answer is lost is still invisible to that read.
+§10 and §11 updated in place. Source: fix cycle 1 review (minor).
+
+## 2026-10-02 — console DDD §10: Requested label applied for gate closed / session not current
+Applies item (2) of the deferred entry above, without an owner ruling (orchestrator instruction; flagged). The
+Requested label reads "Requested · Central is not offering it now (effect gate closed | session no longer
+current)" while the read shows the gate not open or the targeted `command.command_session_id` not among the
+current sessions; the state stays `requested`, non-terminal. NOT covered: the request's own gate generation and
+scope are not served in `reboot_commands`, so a gate that closed and reopened (generation moved) is not
+detected. Item (1) of that entry (interrupted/superseded hiding the broker's answer) remains deferred.
+Source: fix cycle 1 review (minor), central/console/src/fleetCommands.js `rebootCommandState`.
+
+## 2026-10-02 — console DDD §5 vs §9: ManagementFacts is a rule-2 exception in pass 1
+§5 rule 2 says fleet views render facts only through `fact()`, but §9 has the V1 section reuse
+`ManagementFacts`, which renders its V1 loader session, V1 app attempt and authenticated OS attempt claim
+(with a local-clock receipt time) as plain "V1 record" lines. Decision (fix cycle 2): recorded as rule 2's one
+pass-1 exception in §5; routing the claim through `fact()` (`claimed`, source, latest receipt) and the session
+and attempt as `set` is scheduled for pass 2. Source: fix cycle 1 review (minor).
+
+## 2026-10-02 — console DDD: pass-1 errata folded into the design doc; open items assigned
+All 2026-10-02 console DDD entries above are now reflected in docs/operator-console-ddd.md. Open items:
+item (1) of the "§10 (deferred)" entry (superseded / interrupted_by_reboot hide the broker's earlier answer)
+is assigned to bead R0 (§10 rows, §23). The residual race in the "correction … stale dialogs" entry is
+stated in §10 "What the console cannot close"; R0 closes the single-page class (one send rule,
+`rebootPermit`, judged on the newest read; `sendReboot` takes only a permit), and the cross-page race is
+owner question Q4 (a `node_reboot_outstanding` fence in `NodeCommands.request_reboot`). Source: pass-1
+residual review (major: open dialog sends a new command id while a different request is Requested).
+
+## 2026-10-02 — console DDD R0 (built): spec gaps found while implementing
+Bead R0 built to Q4 = yes. Findings for the doc (E1 or the batch review to fold in):
+1. §21 sketch `panelAtEnrollment(observation, readAt)` cannot build its `reported` fact: `fact()` needs a receipt
+   time, and the observation carries none (the receipt is the Player's `last_seen`, Central's enrollment record).
+   Built as `panelAtEnrollment(observation, readAt, enrolledAt)` in players.js. D1 calls it the same way.
+2. §10 retry row says a held request may be re-sent when "the read lists it as outstanding OR Central's read time
+   is before its retryUntil"; the paragraph above it says the held request "counts as outstanding until a read lists
+   it, or until Central's read time passes its frozen retryUntil". These disagree when a read lists the held request
+   as NOT outstanding (rejected, or expired) inside its window. Built to the paragraph: once listed, Central's served
+   `outstanding` decides; unlisted, `readAt < retryUntil` decides. Consequence: a retry after the window is refused
+   in the console once a read past the window has arrived; the 410 "Outcome unknown" answer is reached only when the
+   retry is sent before that read (the B2 browser test now holds the device read to show it).
+3. §11 sketch has no name for the dialog's disabled-state check. Built as one exported `rebootRefusal(request,
+   nodeDevice)` in fleetCommands.js (= `rebootOffer` with the request as `held`, "retry" meaning sendable), used by
+   both the dialog (read on screen) and `sendReboot` (on `node.latest()`), so there is still one rule.
+4. Browser acceptance "a direct sendReboot call refuses": a click on a disabled button runs nothing, so the browser
+   test calls the dialog's React `onClick` from the button's `__reactProps$` key (React 18 internals). That is the
+   only way a built bundle exposes the send path; the mutation probe (remove the call-time check) fails it, with
+   the fence answering 409 to the leaked POST.
+5. Pass-1 residual "fleet strings say display": the `outputStates` no-display label is now "No Panel listed at the
+   last enrollment" (not the residual's "No Panel detected at last Player start", which §19 shows is Central's
+   enrollment record, not a Player start report). The Wall's Frame-health alarm wording stays for D1.
+6. docs/runbook.md still quotes the old all-clear "All 6 Frames' Player apps reporting"; E1 should change it to
+   "No Frame needs attention" (· K awaiting a first report).
+Source: R0 implementation.
+
+## 2026-10-02 — console DDD C1 (built): spec gaps found while implementing
+Bead C1 built to Q3 = A (the interruption read). Findings for the doc (E1 or the batch review to fold in):
+1. §15 wording "Output interrupted (Central's inference: <Layer> reported the Output lost · recorded <age> ago) · the
+   Run continues" does not fit one `fact()`: the `derived` pattern ends at the closing parenthesis. Built as a
+   `derived` fact (basis "<Layer> reported the Output lost · recorded <age> ago") plus the fixed suffix
+   `RUN_CONTINUES`. §18's `interruptionFor(...) -> {fact}` therefore returns `{fact, label}` (label = the full
+   wording, used by Frame health), and `FactLine` gained an optional `suffix` prop so the Player page's Output row
+   still renders through the one fact renderer ("Interruption: <fact> · the Run continues").
+2. §23 C1 acceptance wants "· the Run continues" on the Run chip, which renders `tileLabel` (no age). The tile label
+   is therefore "Output interrupted · the Run continues" (the plan tile shows the same); the full label with the
+   age is the tile's accessible name, Attention's row and the Inspector header.
+3. §18 names `snapshot.output_interruptions`; the console's snapshot object is camelCased by useSnapshot.js
+   (`readinessDiagnostics`), so the client key is `outputInterruptions`, required to be an array like
+   `readiness_diagnostics` (a malformed snapshot is refused whole).
+4. Unnamed in the doc, chosen by convention: FrameHealth cause "output" (a new cause group; readinessRecovery.js
+   still shows readiness guidance beside it, as for every non-liveness cause), facet "binding". The served
+   `cause_layer` is Central's producer owner code (`display_host`, …, including `player_runtime`), worded in the
+   console through a new `LAYER_NAMES` in facts.js ("Player app" for `player_runtime`, which §15 does not list).
+   nodeRead.js still spells its five layer names inline (DRY residual; not touched to keep C1 in scope).
+5. health.js now imports facts.js, which imports `formatAge` from health.js: an ES-module cycle, safe because
+   both sides only call hoisted function declarations at call time. It also makes facts.js one of the shell's own
+   modules, so R0's `facts.js` entry in tests/test_console_routes_r4.py SHARED_WITH_SHOW is removed (the test
+   requires the declared set to equal the reached set).
+6. The read's `bindings.frame_id = loss.frame_id` predicate is an equivalent mutant under today's Registry (every
+   bind or unbind bumps `frames.generation`, so the generation join already excludes a rebound Output); kept to
+   mirror Runtime's exact fence key. The generation and epoch predicates are each mutation-probed by the DB tests.
+Source: C1 implementation.
+
+## 2026-10-02 — console DDD C2 (built): spec gaps found while implementing
+
+1. §15's three per-Output phrases are `reported`, latest, so they render through the one `reported` wording
+   ("Display Host last reported <age> ago · <phrase>"). The null-surface line therefore reads "Display Host last
+   reported N s ago · Display Host reported no app surface admitted" (the source is named twice), and each Output's
+   receipt age repeats on its three lines. All three lines carry the label "Output <id>", so PlayerPage keys layer
+   facts by label and index instead of label alone. The acceptance phrase is present verbatim.
+2. §23's "no display string says 'visible'" is built as scoped to the Display Host row (its facts and details).
+   The pass-1 Host Management and broker details still say "Host samples do not show visible pixels" and "A running
+   process is not visible output" (negations, outside C2); D1/E1 may reword them if the rule is meant console-wide.
+3. §16 does not define `receipt.matches_surface`. Built as: the exchange has an admitted surface and the receipt's
+   whole Surface (Output key, process, app epoch, binding generation, configuration revision, Frame) equals it,
+   the same comparison qualification uses (`node_acceptance.py`, `exchange.receipt.surface != exchange.admitted`).
+   A receipt for another surface reads "No compositor receipt for that surface in this report".
+4. Unnamed in the doc, chosen by convention: an empty `display_outputs` reads "Last reported: Unknown: Display Host
+   has reported no Output on this boot"; an absent field (an older Central) reads "Unknown: display_outputs not
+   served"; the row details list each admitted surface's configuration revision. The read's `p.owner =
+   'display_host'` predicate is an equivalent mutant (the `DisplayExchange` contract already requires a
+   display_host producer); kept to state §16's scope. Read is capped at LIMIT 64 like the device read's other lists.
+5. §15 calls the authenticated OS attempt claim `claimed`; only its `reported` state is a claim. Its other states
+   (`none`, `invalid_stored_report`, `context_mismatch`) are Central's own record and render `set`. The claim's
+   local "received <time>" became the fact's latest-receipt age (fleet `read_at` minus the report's `received_at`).
+   Labels are "V1 loader OS session", "V1 app attempt", "V1 authenticated OS attempt claim"; a Central that serves
+   no management block reads Unknown. The loader session's `expires_at` stays a local clock time (display only).
+6. The browser test stores its Display Host exchange by direct insert (the display owner's decision path needs a
+   linked app process and Runtime authority; tests/test_node_display.py proves that path).
+Source: C2 implementation.
+
+## 2026-10-02 — console DDD D1 (built): spec gaps found while implementing
+
+1. §20's gap-17 wording for Unbind each Output ("if one fails, the rest stay as they are") contradicts
+   `equipmentApi.js` `unbindSequence`: a refused ("changed") or already-done Frame is skipped and the sequence
+   continues; only an unknown outcome stops it, leaving the rest not attempted. Built to the behaviour: "Central
+   unbinds them one at a time. One that changed since you opened this is skipped; if an outcome is unknown, the
+   rest are not attempted." The dialog title is §20's "Unbind each Output of Player X?"; the Player page's danger
+   button still reads "Unbind all outputs" (§20 names only the dialog).
+2. §19 does not name the Panel alarm's facet, state key or short label. Built: state `no-panel-at-enrollment`,
+   cause `panel`, facet `binding` (the Panel at enrollment moved there, so the alarm opens where its record is),
+   tile label "No Panel listed at the last enrollment". The wording lives once in health.js
+   (`NO_PANEL_AT_ENROLLMENT`), which players.js `panelAtEnrollment` imports, so health.js does not import players.js
+   (players.js already imports health.js; this avoids a second ESM cycle). The alarm label is the bare wording,
+   without the fact's "· recorded <age> ago".
+3. §19's enrolled wording "Player app enrolled <age> ago (authority epoch N)" is not the `set` pattern's
+   "<value> · recorded <age> ago". Built to §19 verbatim: a `set` fact whose value carries Central's age
+   (`read_at - last_seen`), Unknown when either time is missing. Label "Enrollment" in the Player page header.
+4. tests/test_console_routes_r4.py's calibration-route scan matched "/calibration", which the Calibration facet's
+   own route sample (`#/wall/frames/<id>/calibration` in routeSamples.json) now contains. Narrowed to
+   "}/calibration" (the API path after an interpolated Frame id); the Wall-side positive control still finds it.
+   FactLine.jsx joins SHARED_WITH_SHOW: the Binding facet renders the Panel at enrollment through it (rule 2).
+5. Central answers `identify_unsupported` with 409, like the other refusals, so `identifyOutput` maps it by error
+   code. Whether a Player app offered Identify is not served on the snapshot, so `identifyOffer` cannot disable on
+   it; §19's table already makes it an outcome.
+6. The moved block keeps its resolution line: "Output resolution at that enrollment: W × H" under the Binding
+   facet's Panel record (connected only). Not in §19's table; carried from the moved block.
+7. The "display for the Panel" sweep also reached files §19 does not list: Plan.jsx's new-Frame form labels read
+   "Pixel width (px)"/"Pixel height (px)" (as the Calibration facet's profile), framesApi.js and the facet say
+   "Frame profile must match the frame's orientation", Guidance says "calibrate the Frame", ConfirmAction says
+   "calibrated again"/"uncalibrated", and ManagementFacts' "No commissioned session recorded" reads "No loader OS
+   session recorded" (the retired word, in the V1 block). Native refusal codes are reworded from their conditions in
+   `node_display.py` (no current Display Host session; no exchange for the Output in 10 s; admitted surface or its
+   receipt does not match).
+8. The native-path browser test stubs Central's capability and trial answers at the network (`page.route`); a real
+   `native_trial` needs a Display Host session, a linked app process and a matching receipt (tests/
+   test_node_calibration.py proves Central's side). The health honesty test now allows the one "connected" that §19
+   mandates (the Panel record at enrollment).
+9. Renaming Commissioning.jsx broke a link in docs/production-readiness-v0.13.md; its target is retargeted to
+   CalibrationFacet.jsx so check_docs stays green. Its prose ("Preview") and docs/operator-console-delivery-plan.md's
+   history are left for E1. Browser test files keep their names; test functions are renamed, and conftest's evidence
+   key follows the provenance test.
+Source: D1 implementation.
+
+## 2026-10-02 — console DDD E1 (built): batch-2 errata folded into the design doc; items left open
+The R0, C1, C2 and D1 entries above that change doc statements are now reflected in docs/operator-console-ddd.md
+(§10 retry row and `rebootRefusal`; §15 interruption wording, `player_runtime` → "Player app", Display Host row
+Unknown cases, V1 claim states; §16 `matches_surface`, Q3/Q4 answers; §18 `interruptionFor` → {fact, label};
+§19 Panel alarm state/cause/facet, `identify_unsupported`; §20 Unbind each Output wording; §21
+`panelAtEnrollment(observation, readAt, enrolledAt)`). Left open:
+1. §13 "Deferred", §17 and §22 still describe the node release workflows as deferred; the owner chose Q5 = design
+   next. Left untouched by instruction (a separate design run replaces §17); the status line and history record Q5.
+2. The pass-1 Host Management and broker detail strings still say "visible" in negations (C2 item 2); recorded in
+   §15 as scoped to the Display Host row, not reworded.
+3. docs/runbook.md has two in-page anchors that match no heading under a GitHub-style slug
+   (`#operator-api-reposition-and-remove-frames`, `#photo-sources-add-a-source`); both predate this batch, and
+   check_docs.py checks file links only. Not fixed (outside E1).
+Source: E1 implementation.
+
+## 2026-10-02 — console DDD batch 2, fix cycle 1: spec defects found in review (folded into the doc)
+1. §16 "Lock cost" claimed the display read was "bounded by one boot's producers times its Outputs". The built SQL
+   (`SELECT DISTINCT ON(output_id) ... LIMIT 64`) read and sorted every exchange of the boot (exchanges are immutable
+   and never pruned; ~1 per 3 s per Output) inside the fleet-lock hold. Code fixed: `DISPLAY_OUTPUTS_SQL` in
+   `central/fleet/node_display.py` is a recursive skip-scan plus one LIMIT 1 probe per (producer, Output) through
+   `node_display_output_latest`; the DB test seeds 20,000 exchanges and asserts the plan reads < 50 exchange rows
+   (mutation-probed: the old SQL reads 20,008). §16 paragraph restated to the real bound.
+2. §15 worded the interruption basis "<Layer> reported the Output lost". No layer reports that: the owner of each
+   fact kind is fixed (contracts/node_protocol.py `owners`), and Central records a loss only from an App Effect
+   Broker app-process exit (applied to every linked Output) or a Display Host invalidated/withdrawn surface
+   (node_runtime_reconciliation.py:117-139). §15 now words the basis per cause layer (`LOSS_REPORTS` in health.js);
+   other layers read "<Layer> sent the evidence Central linked to this Output".
+3. §15 mandated "· the Run continues" on every interruption, but a loss is recorded for any bound Frame linked to
+   the app process, Run or not. The suffix is now added only when `liveRunsFor` lists a live Run on the Frame
+   (tile, Attention, Inspector and the Player page's Output row alike).
+4. §19 worded `identify_unsupported` as "did not offer Identify when it enrolled"; Central raises it when no
+   current-epoch control session is negotiated at schema 2 with `identify_output` (registry.py:434-441), which also
+   covers open and legacy sessions. Now "Central has not negotiated Identify with this Player app's current
+   enrollment" (equipmentApi.js, §19, runbook).
+5. D1's `trial_current_output_required` wording named only the stale-exchange trigger; node_display.py raises it also
+   when there is no current app-process link or Binding. Reworded to the union (LiveCalibrationTrial.jsx).
+6. §16 said the console never re-derives `outstanding`, but the device read served `outstanding` and the responses
+   from separate READ COMMITTED statements, so a mid-read rejection could tear them. Both now come from one statement
+   (node_observations.py); §16 states it.
+7. Two wordings for the one "another request is outstanding" outcome: `REBOOT_OUTSTANDING` now is §16's 409 wording
+   and both paths use it (§10 table updated).
+Source: batch-2 review, fix cycle 1.
+
+## 2026-10-02 — console DDD batch 2, fix cycle 2: spec defects found in review (folded into the doc)
+1. §15's failure row "An exchange payload drifts → 'This section could not be shown' in Layers only · Per-section
+   boundary" was false: Display Host exchanges are decoded server-side in `display_outputs_in`, inside
+   `NodeObservations.status` (node_observations.py:125), and `invoke` (node_routes.py) maps the ValueError to a 422
+   for the whole device read, taking Reboot with it. Code fixed: decoding is contained per Output; an undecodable
+   stored exchange is served as `{output_id, received_at, undecodable: true}` and the console shows one Unknown fact
+   for that Output ("Central could not decode Display Host's last exchange for this Output"). §15 row split into the
+   server-side (decode) and client-side (shape) cases; §22 "Wire coupling" restated.
+2. §18 sketched `interruptionFor -> {fact, label}`; since fix cycle 1 item 3 the code returns a conditional `suffix`
+   too (consumed by PlayerPage.jsx and frameHealth). §18 now `{fact, suffix: string|null, label: string}`.
+Source: batch-2 review, fix cycle 2.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NV1: where the frozen page met reality
+1. Order. §32 orders NR1 before NV1 and has NR1 create `polledRead.js`; this run built NV1 first (no earlier bead).
+   NV1 needed a second polled read (`useNodeControl`) and DRY forbids a copy, so NV1 created `polledRead.js`
+   (`usePolledRead(load, {cadenceMs, skip, initial}) -> {value, refresh, latest}`) and moved `useNodeDevice` onto it.
+   NR1 reuses it and must not recreate it. The sketch's `error` output is omitted: `load` folds failures into its
+   value (both callers do), so the hook has none to report.
+2. NV1 acceptance "one 'not shown' line ... on Releases" and the Reboot gate-reason "+ link" to Releases › Effect gate
+   cannot be met before NR1 creates `#/releases`. `NodeRecords` (nodeControl.js) is ready for ReleasesPage; the link
+   lands with NR1/NR2 (a link now would hit an unknown route and fall back to the landing page).
+3. §28 sketches `useNodeControl() -> {state, gate, readAt, ...}`. Node status serves no read time (§26 says so
+   itself), so there is no `readAt`. Added `failed: boolean` instead: `unread` covers both "no answer yet" and "read
+   failed", and the two must differ — node reads are skipped before the first answer (so a Central without node
+   control receives zero node reads, the browser acceptance) but sent after a failed status read (§30: "pages show
+   their own read failures"). Rule: `nodeReadsAllowed(control)`.
+4. §28 says `NodeDevice` "gains deprecatedBoot (G5) as served". Not added: the field is already on the served read
+   (`node.read.deprecated_boot`); a copied field is a second source. `deprecatedBootFact(deprecatedBoot, readAt)`
+   takes Central's read time too, for the age (§26 "recorded <age>").
+5. §25 and §26 word the deprecated-path line differently. Rendered as §26's fact (label "Booted by the deprecated
+   path", value "Central's newest boot record for this box is a deprecated boot offer | a base image served without
+   an offer", Central's age) with §25's tail as the FactLine suffix: "its kernel command line lacks
+   photowall.node=v2; Select and Stage do not reach it". ND1 should keep one wording.
+6. G5 "the device's latest node boot offer": implemented over every device generation (`node_boot_offers` by
+   `device_id`), so a node offer from an earlier generation still counts as the box's newest node boot. Ties go to
+   the node offer (strictly newer only), and between the two deprecated records to `offer`.
+7. The Reboot gate reason is `effectGateFact`'s whole wording, so on a real Central it reads "Reboot unavailable:
+   Effect gate closed · Central's reason: no deployment certification has opened it · recorded <Central's time>."
+Source: NV1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NR1: where the frozen page met reality
+1. G1 field list. The Publish dialog must say how much Central downloads (§26 "Publish in flight": "1.2 GB"), but
+   G1 serves no size. Release rows also serve `download_bytes` (sum of every artifact's `size_bytes`; a publish
+   downloads all of them with or without the app). Additive, read from the stored manifest through its parser.
+2. §28 sketch `publishOffer -> ... | {offer: "in_flight" | "unknown"}`. Added held state `recorded` (Central answered
+   published/duplicate, no read lists the id yet): calling it in flight would be untrue, and offering Publish again
+   would break the one-POST hold. Row words: "Published; the next read lists its deployment".
+3. §28 says Publish sends only when the derived id is not listed; §30 says a release whose derived id was
+   hand-published with another document "reads Central's identity-conflict words". Reconciled: `publishOffer` returns
+   `blocked` with those words (no POST), so both hold. "Published from" is absent there, as §26 requires.
+4. "The next read decides" (§27 Select, unknown answer). `usePolledRead.refresh()` returns at once when a read is in
+   flight (it queues), so awaiting it does not mean "a read after the answer". `useReleaseRead` numbers reads by START
+   (`seq`) and exposes `startedReads()`; the first read with `seq` > the count taken at the answer settles it. A read
+   showing the revision unchanged reads "changed" per the §27 diagram, although nothing changed in that case; NR2/ND1
+   may want distinct words ("Central did not record it; review it").
+5. Scope bleed taken from NR2, each because NR1 cannot render without it: the empty-state lines (an empty list must
+   say something; §25 wording used verbatim), the Select no-app sentence (§28 has NR1's `selectionRequest` freeze
+   `noApp`), and the Select codes `node_deployment_unknown`/`invalid_node_boot_selection` plus
+   `node_deployment_identity_conflict` in `releaseResult`. Every other Publish code takes the fail-closed default
+   until NR2 (so an origin 503 reads "Central refused: <code>", refused, not unknown).
+6. Deferred to NR2 as planned: Publish without its app, Send again after an unknown Publish (until then a lost
+   Publish answer holds the row until a read lists the id or the page reloads), Check GitHub releases now, the Effect
+   gate section, and therefore NV1's Reboot gate-reason link to Releases › Effect gate (NV1 errata item 2; the
+   other half, Releases' one "not shown" line with zero release reads, is now built and browser-tested).
+7. `ConfirmAction` gained an optional `progress` (replaces "Sending…" in flight) for the Publish in-flight sentence;
+   `gigabytes` moved from mediaHealth.js to health.js (one byte formatter, now shared with Releases).
+Source: NR1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NR2: where the frozen page met reality
+1. §26 "origin unavailable (any `OriginUnavailable` reason)" / "origin rejected (any `OriginRejected` reason)" is
+   worded by exception class, but the console keys on the code (§26's own rule), and Central serves the reason
+   string as the code (`node_routes.py` `publish_release`). Listed explicitly from `central/origins/github.py`:
+   unavailable = origin_unreachable, origin_error, rate_limited, manifest_unavailable, download_truncated,
+   download_corrupt (unknown, "send again"); rejected = download_not_found, download_encoding, download_too_large,
+   download_rejected, list_invalid, node_release_invalid (refused). A new origin reason takes the default (refused),
+   so the list must follow github.py.
+2. §28 sketches one `releaseResult(result) -> outcome`. A single table across verbs would word a Publish code served
+   to Select (e.g. an origin reason would read "unknown"). §26 tables are per verb, so `releaseResult(result, done,
+   codes)` takes the verb's own table (SELECT_CODES, PUBLISH_CODES, CHECK_CODES = {}).
+3. `HeldPublishes` gained `frozen(id)`: Send again must send the identical body (§27, NR2 acceptance), and the body
+   carries `operator_audit_ref` dated from the read the dialog opened on, so it cannot be rebuilt later. `sendPublish`
+   takes `{again}` and re-sends only `held.frozen(id)` (by identity), only while held `unknown`, and only while the
+   newest read still lists the release.
+4. `deploymentId` on catalog rows (NR1's `releaseHome`) is kept but no longer rendered: with Publish without its app a
+   release has two derived ids, and each publish choice now shows its own "Published as deployment X" line. NU1 may
+   use the field, or remove it.
+5. §25 says the reboot dialog change adds "no new module edge". The link uses `formatRoute` (the one route
+   formatter), so PlayerCommands.jsx now imports routes.js, a pure module PlayerPage.jsx already imports. The R4
+   graph is unchanged in reach. A hard-coded "#/releases" would avoid the edge but bypass the route formatter.
+6. The Reboot gate link comes from a structural flag, not a string match: `rebootTarget` marks gate refusals
+   (`gate: true`: closed, unreadable, generation not served) and `rebootOffer` passes it through. NS1's
+   `stageBlocker` should set the same flag for its gate blocker.
+7. Routes have no in-page anchors (hash routing), so "Releases › Effect gate" links to `#/releases`; the Effect gate
+   section is the last section on that page.
+8. The NV1 "not shown" line on Releases was already built and browser-tested by NR1 (NR1 errata 6); NR2 added nothing.
+9. Disconnect probe: a client disconnect does not cancel the publish handler (uvicorn 0.34.2, Starlette 0.46.2,
+   BaseHTTPMiddleware stack). Recorded in docs/player-fleet-implementation-map.md. It is a scratch probe, not a CI
+   test. The §31 assumption holds for these versions only.
+Source: NR2 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NS1: where the frozen page met reality
+1. G6 proof, how "rejoins the Run at its current point" happens in code: the old app's observed exit interrupts each
+   bound Output (`node_output_losses` keyed on the old authority epoch). The new app process then re-enrolls in the
+   Registry, which bumps the authority epoch (the PID1 fixture already asserts `authority_epoch` advances across a
+   switch), so the old-epoch losses no longer fence and the planner commits the Run's current layers for the new epoch.
+   That is the same path as a reboot. The DB test (`test_a_bound_players_switch_follows_the_operator_reboot_rule`)
+   drives exactly that: Stage while bound → exit → both Outputs interrupted, bindings and frames rows (calibration,
+   `calibration_valid`, generation) byte-equal → re-enroll → commits on both Outputs at epoch 2, Runtime
+   `export_state()` equal except `now`. Order kept: the rule half was run green with the refusal still in place, then
+   the refusal was deleted and the test extended through `stage()`. Docs still saying Central refuses a bound stage
+   (`player-node-domain-model.md` "D16 app-upgrade scope", design-decisions D16) are ND1's.
+2. §28 sketches `appOperationState` under stage.js. It stays in fleetCommands.js (its §10 home, the Player page and the
+   fleet-commands model test already import it there); `ended_by_later_boot` was added there, with the broker's earlier
+   report kept as `prior`, as Interrupted does.
+3. §28 `stageBlocker -> {reason: Fact}`: returns `{reason: string, gate?: true}` instead, the `rebootTarget` shape, so
+   the gate reason is the one `effectGateFact` wording and the Releases link keys on the structural flag (NR2 errata 6).
+   Beyond §25's four served blockers it also blocks when the device generation, the gate generation or the app-attempts
+   read is not served: without them `stageRequest` cannot bind a fence or judge "switching".
+4. A lost Stage answer (§27 "resend byte-identical"): the resend is offered only while the held request is NOT listed
+   by the app-attempts read. If Central did record it, the next read lists it and the console refuses any resend
+   ("Central already recorded this stage"): the read is the authority, and a resend would only return `duplicate`.
+   `HeldStages` holds `in_flight | recorded | unknown` like Publish's hold; it ends once a read lists the operation.
+5. `rollout_gate_closed` (§26 "Effect gate closed: <reason words>") carries no reason in Central's answer
+   (`invoke` maps `RolloutGateError` to its message as the code). The words come from the shell's gate via the new
+   `nodeControl.js` `effectGateReason` (extracted from `effectGateFact`, one wording). If the shell still reads the
+   gate open, the answer reads "Effect gate closed: its reason is not readable here (see Releases › Effect gate)".
+6. Unworded by §26 and so on the default ("Central refused: <code>"): `node_app_stage_invalid` (the route's 422 for a
+   body it cannot parse), `node_control_disabled`, and the deleted `bound_switch_policy_unselected`.
+7. §25 "Any later boot … runs the boot selection (deployment X)" with no selection: worded "(none: Central refuses
+   every boot)", the Releases empty-selection fact.
+8. DRY: RebootDialog's guarded-modal lifecycle moved to `useSendDialog.js`; RebootDialog and StageDialog both use it.
+   Reboot browser tests unchanged and green.
+9. Test fixture: `tests/test_node_lifecycle.py` `Rig` gained `gate_seconds` (the gate certificate expires on wall
+   time; browser tests use 300 s like `_open_gate`).
+Source: NS1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NS2: where the frozen page met reality
+
+1. §29 G4 serves `acceptances[] {environment_sha256, base_tag, accepted_at}`, but an acceptance row stores only
+   `base_content_key` (migration 056); no tag is recorded anywhere keyed by content key except inside boot offers and
+   deployment documents. Built: each acceptance serves `base_content_key` and `base_tag`, the tag named only when the
+   key equals the base of the boot this generation currently runs (one offer parse per read), else `null`, worded
+   "on a base other than the one this boot runs". Resolving older bases would parse every offer of the generation on
+   every 5 s read (a reboot-looping Pi has hundreds); not done.
+2. §29 "G4 adds two indexed queries": `node_environment_acceptances` has no `(device_id, device_generation)` index
+   (only the PK and `qualification_id`); the G4 query and Stage's `_qualified_fallback_in` both scan. Rows are few
+   (one per accepted qualification); no migration added. Raise if acceptances grow.
+3. §27 "no progress for 2 min": the page's monotonic clock starts at the first sample, which is sent at once, so 60
+   waiting answers 2 s apart cover 118 s and the 61st (at 120 s) stops it. A hidden tab samples nothing; its pause
+   counts at most 5 s towards the limit (Central's own window restarts after a 5 s gap anyway), so returning to the
+   tab never stops sampling on time spent away.
+4. §28 `sendBegin(deviceId, request, node)`: "Player bound" is a snapshot fact, not in the node read, so `sendBegin`
+   takes `{node, snapshot, playerId}`; it judges `beginOffer` on `node.latest()` and the snapshot at call time, and
+   also refuses when the linked environment changed since the request was built.
+5. §28 `useQualificationSampler -> {answer, stop}`: returns the sampler state (`phase`, `answer`, `stopped`); the
+   operator's Stop is the caller passing `active: false` ("Stop sampling" button). The load itself returns its state
+   unchanged once accepted or stopped, so a tick firing before React re-renders cannot POST (mutation-probed).
+6. Not done: §32 NS2's "first step" (the still-photo and witness-cadence probe on a real Player). It needs Display
+   Host buffers from real hardware; nothing here can produce them. The 2-minute stop shows the failure either way.
+7. NS1 test defect fixed: `test_a_lost_stage_answer_resends_the_identical_body…` chose "the first radio"; the release
+   read lists deployments published at one instant in no fixed order, so the first was sometimes the running app's own
+   deployment and Central refused `node_app_qualified_fallback_required` (about 1 run in 3). It now names
+   `fixture.deployments[0]`.
+Source: NS2 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead NU1: where the frozen page met reality
+
+1. §29 G7 not built. It is §31's open owner choice, and the NU1 brief said "composed only from the existing send
+   functions and reads; no new Central feature". Built §31's "No" column, tightened: a Player is on the selection
+   when THIS PAGE rebooted it after Select and its Host Management session is on a later kernel boot id than the
+   frozen request's (`kernelBootId`, two ids, no clocks); for a Player this page did not reboot, when its linked app
+   (G4) is the target's. A no-app release cannot be recognised that way, so its rows read "Waiting · unknown whether
+   it booted the selection" and are rebooted to make sure. Stated cost: after a reload, a base-only release whose app
+   equals the old one reads every Player Rejoined without a reboot (Done), and a Player running the target as a
+   Stage reads Rejoined. G7 (+10/+30) removes both; it stays the owner's call.
+2. §25a assumes "the tried Player's latest stage is the target's" is readable, but the app-attempts read serves no
+   deployment per operation (`node_lifecycle.py` `status()`, the `results.append` fields). Built: a stage is the
+   target's when this page holds it (operation id), or when it reads `target_running` while the linked app is the
+   target's. After a reload, a target stage that is staged, switching, `fallback_running` or `effect_unknown` shows as
+   Staging (Stage offered, with "Sends a newer stage. It replaces…") instead of Looking. Serving `deployment_id` per
+   operation (one field) would close it; not done for the same "no new Central feature" reason.
+3. §25a interface sketch: `keepRow` takes one object `{node, snapshot, playerId, target, gate, sent, waitedMs,
+   skipped}` (the gate decides Cannot reboot; `sent` carries the frozen reboot and the page's monotonic send time);
+   `keepPlan(snapshot, bootFacts, tried)` (names need boot facts); `journeyStep` also returns `paused` and
+   `done:{kept|backed_out}`; added `journeyTarget`, `tryWithdrawn`, `keepPause`, `keepCount`.
+4. §25a "Not rejoined: Rebooting or Rejoining for 10 min": also applied to a row this page did not reboot that runs
+   the target's app but never reports ready (waited since rolling began), else it would hold the rollout silently.
+5. §25a reads "app-attempts for the active row only": `useNodeDevice` always reads both; every planned row reads
+   both every 15 s (5 s active). Not split, to keep one node-read hook.
+6. Pause actions: Retry forgets this page's sent record and resumes (the row re-derives; Central's served
+   `outstanding` still blocks a duplicate), rather than re-sending the frozen body: a Not-rejoined retry needs a new
+   command id. Skip resumes when it skips the paused row. A hidden tab pauses rolling (Resume needed).
+7. Staging: only a Central refusal returns to Choose (base mismatch also withdraws Try for this target; a missing
+   qualified fallback goes to Qualifying once). A send-rule refusal before any request (stale fences, held stage)
+   stays on Staging with its words. Stage is inline on the journey with the target fixed (the Player page's dialog
+   lists deployments for choice); Back out sends at once ("Back out: reboot <name>"), Keep and Publish confirm.
+8. Browser evidence (`tests/browser/test_update_wall_browser.py`): Central is real for catalog, Publish, Select,
+   Registry, bindings and readiness; the node layer (device reads, app-attempts, reboot/stage/qualification writes,
+   samples, node status) is a test stand-in, so a box "reboots onto the selection" between reads. The send rules
+   against Central's real owners stay in `test_player_page_browser.py`. Mutation probes run: dropping the Rejoined
+   wait sends 3 reboots at once (fails); starting rolling on open fails the reload test; a 100 min wait fails the
+   10 min stall test.
+Source: NU1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E), bead ND1: docs folded; items left open
+1. Part E folded into docs/operator-console-ddd.md as §24–§32 with every batch-3 errata item that changes a statement
+   (NV1–NU1 above) applied in place; its per-Part history became one History line. §17 now records Q5 and points to
+   Part E; its constraint table is gone (restated as R13–R18). G7 is recorded as not built and the one open owner
+   choice; NS2's real-Player probe as not run.
+2. Scope beyond §32's ND1 list, each because a doc still presented the V1 lane as current: README's console paragraph
+   (Player page "V1 boot offers", fleet side now "Players and Releases") and the status line of
+   operator-console-ux-pass2-onboarding.md (bootOutcomeLabel deleted).
+3. Left open: the runbook's V1 provisioning sections (0009 `.deb` promote with curl, 0010, 0012) are kept, each with a
+   "Deprecated lane" note, because the V1 backend still runs until the follow-up; the 0010 worker settings are shared
+   with the node catalog fill. README's provisioning overview (lines 7–26, 105–117) still describes the `.deb`
+   promotion path as the provisioning model; it belongs to the V1 follow-up (item 1b and 5), not rewritten here.
+   Neither tells an operator boot selection needs curl.
+4. ND1 delta is about +690 docs lines net, against §32's +280/−120: the folded Part E alone is about 610 lines.
+Source: ND1 implementation.
+
+## 2026-10-02 — console DDD batch 3 (Part E): architect course-correction pass (after 5 implementers)
+1. NU1 drift, high: `updateWall.js` `keepRow` line 224 (`onSelection = sent != null ? booted : target.app !== null && linked === target.app`)
+   reads a Player this page did not reboot as on the selection whenever its linked app equals the target's. For a base-only
+   release (same app environment, new base) every row reads Rejoined at once and `journeyStep` returns Done with zero reboots,
+   in the same session, not only after a reload as NU1 errata 1 and §31 said. That is Central intent shown as device truth.
+   Design changed (§25a Keep table, §28 choices, §31): the linked app counts only when it identifies the target, i.e. no other
+   listed deployment or catalog release pairs that app environment with a different base (`appIdentifiesTarget(read, target)`,
+   pure, on the release read). Otherwise the row is Waiting · unknown, and the page reboots it to make sure (as for no-app).
+2. NU1 drift, medium: `UpdateWallPage.jsx` lines 357 and 361 branch on `outcome.message === \`${FALLBACK_REQUIRED}.\`` /
+   `BASE_MISMATCH`, so changing the wording changes the behaviour. Design changed (§25a failures, §26, §28): `releaseResult`
+   returns `{outcome, message, code}` and the journey keys on `node_app_qualified_fallback_required` / `node_app_target_base_mismatch`.
+Both are owed by an NU1 correction bead; the doc states the target.
+Source: architect course-correction pass.
+
+## 2026-10-02 — console DDD batch 3 (Part E): NU1 correction bead (fix cycle 1)
+1. Course-correction items 1 and 2 applied: `updateWall.js` `appIdentifiesTarget(read, target)` (carried on the target as
+   `appIdentifies`); `releaseResult` returns `code`; the journey's Stage branches go through a pure
+   `stageFollowUp(outcome, refusals)` keyed on `STAGE_REFUSAL` codes (`stage.js`); the refusal words are no longer exported.
+2. Wider than the review asked: a Player this page did not reboot is never on the selection while its latest app operation
+   is not ended by a later boot (ANY stage on the current boot, including a rejected or pending one), not only "the target's
+   stage". Conservative by design: such a Player is rebooted, which is the guaranteed path. The tried Player therefore reads
+   "Waiting · it runs a Stage, which applies to this boot only" and is rebooted first, as §25a intended.
+3. Spec change (review major): Select lands in Paused, not Keeping; no reboot is sent until "Start rebooting". Choose shows
+   the named plan with Skip/Include, the Keep confirmation names the Players in order and the skipped ones. §25a diagram and
+   Keep paragraph edited in place.
+4. Keep table kind: Rejoined (and Rejoining, Not rejoined) is the page's `derived` inference over a claimed boot and reported
+   readiness, shown as an Evidence fact naming its basis; the table said `claimed` + `reported`. Edited in place.
+5. Deferred, open choice: G4 `linked_app` still names an app after Central accepted its observed exit (review minor). Not
+   trivial (a Central read change under the fleet lock). Exposure now: a staged Player is covered by item 2; any other Player
+   with a dead app has a bound Output not ready, so its row reads Rejoining and pauses at 10 min, never Rejoined. Options stay:
+   (A) serve null/`exited` from the projection's accepted AppProcessFact, or (B) reword as "last linked app".
+6. Update the wall's "Send again" title now reads "... with its app again?" (the Releases wording), because both pages render
+   `releases.js` `publishConfirmation`. Deep freeze and audit reference moved to `frozenRequest.js` (fleetCommands, releases,
+   stage, qualification).
+7. G6 node half: `docs/player-node-domain-model.md` reworded (the DB test proves Central's half; the node half is
+   unqualified because the PID1 switch scenario refuses bound Players). A bound PID1 leg was not added.
+Source: NU1 correction bead.
+
+## 2026-10-02 — console DDD batch 3 (Part E): NU1 fix cycle 2 (review blockers)
+1. Spec gap (review blocker 1), fixed: the Keep plan was re-derived live and skips were page memory, so a Player enrolled
+   after the Keep confirmation was rebooted unnamed, and a skip was lost on reload (one Resume rebooted it). Now:
+   (a) skips are operator choices and live in the URL: `#/releases/update/<tag>[/try/<player>]/skip/<id>[/<id>…]`
+   (routes.js `skipped`, routeSamples.json, R4 round trip); (b) the rollout a confirmation names is frozen in page memory
+   (`freezeRollout`) and rolling reboots only its Players (`rolloutMembers`); any other Player reads "Not in this rollout"
+   and is never rebooted; (c) a Resume with no frozen rollout (a reload, or a target already selected) opens a confirmation
+   naming the Players it will reboot, in order. §25a's placement line ("hash holds target release, tried Player") and the
+   Keep paragraph need these three statements; the doc bead owes them.
+2. Spec wrong (review blocker 2): §25a's Rejoined source "every bound Output reports ready in the snapshot (`outputStates`)"
+   names no readiness at all: `outputStates` is binding standing and `frameHealth` is liveness. Corrected source: a row is
+   Rejoined only when (i) the snapshot lists the Player app's enrollment on the new boot (its `authority_epoch` is greater
+   than the epoch in the snapshot the reboot was sent on: Central's counter, never a clock; `playerEpoch`), (ii) every
+   bound Output's Frame is live, and (iii) Central serves no current `readinessDiagnostics` row for any bound Frame. A
+   current readiness failure is Not rejoined and pauses rolling with that failure's recovery words. The Evidence basis now
+   names exactly that and says it is not proof the Output shows its assignment. Without (i) the readiness check is
+   ineffective: the browser probe sent a second reboot from a snapshot read before the new boot enrolled (old liveness, no
+   diagnostics). Stated cost: Central serves no per-Output playback commitment to the console, so a failure reported after
+   the first good report on the new epoch is not seen before the next Player is rebooted. A served per-Output commit fact
+   would close it; that is a read gate (§29), not raised as built.
+3. G6 residual (review major), not built here: no CI leg drives a real broker and Display Host through a bound switch
+   (tests/node_pid1_central_fixture.py `fixture_requires_unbound_player`). Owed: a residual bead for one bound PID1 leg
+   (broker emits `exited`, each bound Output gets a `node_output_losses` row, Display Host diagnoses then admits the new
+   process, epoch-2 commits). Until it is green, the journey's Try step says "A switch on a Frame-bound Player is proven on
+   Central only; the Player's side of it is not yet qualified."
+4. G6 ordering (review minor), test added: when the new app enrolls before the reconciler reads the old app's exit, no
+   interruption fact is recorded (`node_output_losses` stays empty), epoch 1 is refused as `stale_authority`, bindings and
+   calibration are kept, and epoch 2 rejoins at the Run's current point. The G6 row should state that the interruption fact
+   may be absent in that order.
+5. G4 generation fence (review minor), test added: an acceptance under another device generation is not listed.
+6. Lock cost (review minor), doc correction owed: G4's status read takes `players` and `player_control_sessions` FOR SHARE
+   (acceptance_query.py `load_current_app_control_in`) inside the fleet-lock hold, and the journey's per-Player poll is two
+   fleet-lock holds (device read and app-attempts, nodeRead.js), so twelve Players at 15 s are about 1.6 holds a second,
+   not "about one". Not changed in code: dropping FOR SHARE in a shared query is outside this bead.
+7. Wording (review minor): the Back-out outcome is a `derived` fact; the Keep confirm button reads "Select for every boot"
+   in both gate states; the counts carry a `derived` "On the selection" fact. The "n of m Players on the selection" words
+   stay as §25a states them.
+8. Still open, owner choices (not applied): errata NU1-correction item 5 (G4 `linked_app` after an accepted exit, A or B),
+   G7 and a per-operation deployment id (one gate decision), NS2's real-Player still-photo probe, ND1 item 3.
+Source: NU1 fix cycle 2.
+
+## 2026-10-02 — console DDD batch 3 (Part E): fix cycle 3 (final review residuals)
+1. R17 drift (major), fixed: Select's confirmation words have one home, releases.js `selectionConfirmation` (contents,
+   `SELECT_SCOPE`, `SELECT_NO_APP` when the deployment has no app). Releases' Select dialog and the journey's Keep dialog
+   both render it, so Keep now states the fleet-wide scope and the no-app offer; the page-local constants are deleted.
+2. Bound-rule caveat (major), fixed: `BOUND_PROVEN` moved to stage.js and `StageApp.jsx` `BoundRule` renders the rule
+   with its caveat; the Player page's Stage dialog and the journey's Try both use it. Remove the caveat when the bound PID1
+   switch leg (NU1 fix cycle 2 item 3) is green. §25/§29 G6 and the runbook say so.
+3. G4 fallback fence (major), tests added: `_qualified_fallback_in` refuses an acceptance on another base or under
+   another device generation, alone or when newest. Mutation-probed (base OR TRUE, generation OR TRUE): each fails.
+4. G2 arms (major), tests added: Staged and EffectUnknown read interrupted_by_reboot after a later boot. Mutation-probed
+   (drop staged; drop effect_unknown; effect_unknown sent to ended_by_later_boot): each fails.
+5. G6 ordering (major), NU1 fix cycle 2 item 4 applied as docs (option B): the G6 row and domain model :117 state that
+   when the new app enrolls before Central reconciles the old app's exit, no interruption fact is recorded and the exit's
+   work item stays `awaiting_output_link`, re-queued every 5 s for the boot. The ordering test pins both. Not fixed in
+   code: recording the loss under a superseded epoch or finishing the work item as superseded touches the reconciler's
+   epoch/fence semantics (effect authority) and is owed as its own residual bead. Secondary (not G6's): the exit work
+   item of every switch, bound or not, stays queued for the boot and takes the Coordination, Runtime and fleet locks on
+   each retry.
+6. Back out (major), fixed: a synchronous in-flight hold (ref set before the await, button disabled) makes a second click
+   send nothing; the browser test double-clicks and asserts one reboot.
+7. Wording (minor), fixed in code, tests and §25/§25a/§26/§31 and the runbook: the boot selection is Central's offer
+   ("is offered"), never what the Player runs; the ended_by_later_boot basis reads "a later boot was admitted; Central
+   offers each boot the boot selection". The rolling rule is scoped to "this page", and §31 states that two pages (or a
+   page plus a Player-page Reboot) can have two Players rebooting at once.
+8. Step strip (minor), fixed: Back out marks Look as current, not Done, until journeyStep returns done.
+9. Finding (minor), not in this batch's scope: `_admit_boot_in` (node_sessions.py:152-157) revives a superseded admission
+   when a late claim for its kernel boot arrives, so ended_by_later_boot can flip back to target_running and the live
+   later boot's sessions are revoked. Owed: refuse a claim for a superseded admission (node_boot_superseded) and a DB
+   test that the projection never moves backwards; raise in the fleet implementation map.
+Source: batch 3 fix cycle 3.
+
+## 2026-10-02 — console DDD batch 4: bead R1 (batch-3 residuals)
+1. Supersedes fix cycle 3 item 5's stated cost (spec wrong, now corrected): the enroll-before-exit work item is not
+   re-queued for the rest of the boot. It stays `awaiting_output_link` until the next app links, then finishes as
+   `before_process_link` (`node_runtime_reconciliation.py:99-100`), so the interruption is dropped for good; it stays
+   queued for the boot only if no app ever links. The "every switch leaves one for the boot" lock-cost line is withdrawn.
+   Corrected in `player-node-domain-model.md` (Background preparation); the ordering test in
+   `tests/test_node_lifecycle.py` now links the epoch-2 app (sample 1400 after the exit's 1300) and asserts
+   `completed_at` set, `result = before_process_link`, no `node_output_losses` row. Mutation-probed (drop the
+   before-link finish): the test fails.
+2. Supersedes fix cycle 3 item 9's "owed a fix" (by design, ddd §42 G8 withdrawn): a superseded kernel boot that claims
+   again while still running is admitted again, the later boot's sessions are revoked, and its operation reads its own
+   state. Recorded in `player-node-domain-model.md` (projected states) and `player-fleet-implementation-map.md`; pinned
+   by `test_a_superseded_boot_that_claims_again_is_current_and_its_operation_reads_its_own_state`. Mutation-probed
+   (skip the revival in `_admit_boot_in`): the test fails.
+3. Spec wrong (§45 R1 acceptance, "Reboot guard"): "mutation probe: drop the guard inside `sendReboot`, the count
+   fails" cannot hold in a browser test while "the callers' own holds are left as they are": each of the three callers
+   already holds its own in-flight state synchronously (`useSendDialog` `flying`, `rebootNext`'s `sendingRef`, Back out's
+   `backOutSending`), so a double click never reaches `sendReboot` twice and dropping the inner guard changes no count.
+   As built: the double-click browser tests (Player page Reboot, Start rebooting, Back out) pin one POST per caller; the
+   guard itself is pinned under Node (`tests/test_console_fleet_commands.py`
+   `test_send_reboot_holds_one_post_in_flight_per_device`: a concurrent second call answers `changed` with no POST,
+   another device is not held, the hold is released after an answer and after a rejected request). Mutation-probed
+   there (drop the check; drop the release): each fails. Either the acceptance's probe moves to the Node test, or a
+   caller's own hold is removed so the inner guard is the only one (not done: §45 says leave them).
+4. Flaky DB test (`test_the_qualified_fallback_is_this_boots_base_and_this_device_generations_only[generation]`): NOT
+   claimed. No reproduction: 60 runs of `tests/test_node_lifecycle.py` (three concurrent `-n 4` runs at a time, so 12
+   workers) all passed; host/DB clock offset measured at under 5 ms. Candidates examined: the only real-time path in a
+   Rig test is the rollout gate (certificate stamped by host `time.time()`, checked against PostgreSQL
+   `clock_timestamp()`, 60 s expiry, 5 s future tolerance); the cohort freshness and session expiry use the test's
+   ManualClock only (`contracts/time.py` ManualClock, `principal.py:26-35`), so they cannot drift. Without the original
+   traceback no hypothesis can be confirmed. Landed instead: `tests/conftest.py` `pytest_runtest_makereport` keeps the
+   host, database and manual clocks beside the traceback of any failed `registry` test, and appends the exception and
+   readings as JSON to `PHOTO_WALL_TEST_FAILURE_LOG` when set. Owed: a residual bead (R1-flaky) that re-runs the db tier
+   with that variable set and closes the item from the first kept failure.
+5. Shared-helper note: `tests/test_node_lifecycle.py` `_accept(…)` and `_first_base_key(conn)` (plus `_first_deployment`
+   for the one test that also needs the base tag, and `_other_key`) replace the five copied inserts and derivations; the
+   inserts now name their columns. Two listing tests that stored an empty cohort now store the current one (neither
+   reads the cohort).
+Source: batch 4 bead R1.
+
+## 2026-10-02 — console DDD batch 4: bead T1 (host-health tracer)
+1. **G12 gate is stricter than "skipped when node reads are not allowed" (spec wrong).** `nodeReadsAllowed`
+   (`central/console/src/nodeControl.js`) admits `unread && failed`. The shell's node status read fires while auth is
+   still `checking` and fails 401 before sign-in, so a shell-wide poll gated on `nodeReadsAllowed` sent
+   `GET /v1/operator/node/hosts` to a Central WITHOUT node control (caught by the strengthened
+   `test_with_node_control_off_…` browser test). As built: `Shell.jsx` mounts `useFleetHosts` with
+   `skip: hidden || nodeControl.state !== "on"`. Cost: while the status read is failing, no host lines show (they
+   are hidden, not Unknown). The same pre-sign-in `failed` state is latent for page-level node reads mounted right
+   after sign-in; not touched here (owner: nodeControl.js, e.g. do not count a 401 as `failed`).
+2. **Wording forced by rule 2 (fact()).** §62's "Unknown on this boot · the previous boot's …" renders as
+   "Unknown: on this boot · the previous boot's Host Management last reported 40 s ago" (the unknown kind's one
+   wording). §62/§66's silent value "at last report, <age> ago" renders as the `reported` latest fact
+   "Host Management last reported 2 min ago · 95 °C at last report" (age through fact(), never composed by hand).
+3. **"Never reported" is judged on what G12 serves.** §62 says "no receipt in this device generation, on any boot";
+   G12 serves only the current boot's sample and the MOST RECENTLY superseded admission's receipt, so a box whose
+   previous boot never reported but an earlier boot did reads `never`. Either accept, or G12 gains "newest receipt of
+   any superseded admission in this generation" (one more lateral, still producer-scoped).
+4. **Coalescing halves the effective cadence under jitter (finding, not a fix).** The node posts when ≥15 s have
+   passed on its monotonic clock; Central coalesces when its receipt difference is <15 s. Network/processing jitter
+   makes roughly every other post land at 14.9x s and coalesce, so stored samples can be ~30 s apart. The 60 s silence
+   limit (4 × interval) still holds with two intervals of margin. If finer resolution matters, the window could be
+   e.g. interval − 1 s, derived from the same constant.
+5. **The Players card shows a Host Management line beside Temperature.** The §62 attention row carries no basis, so
+   "changing the served limit changes the silence wording" is only observable on a line that renders the silence
+   fact; the card renders `classifyHost`'s receipt item ("Host Management: Host Management silent · last reported
+   2 min ago (Central's inference: no report for over 90 s, Central's limit)") as §61's table column will (H1).
+6. **Reporting severity ignores a missing cataloged metric.** A box on an old base sends no `soc_temperature`; its item
+   reads "Unknown: not reported" but the box's severity stays `ok` (else every old-base box sorts as Unknown in H1).
+7. **The 24-hour coalescing DB test costs ~100 s** (43,199 real ingest transactions,
+   `tests/test_node_fleet_hosts.py::test_a_producer_posting_every_2_s_for_a_day_…`). Kept as specified; flag for the
+   DB-tier budget.
+8. **R4 shared list:** `players.js` left `SHARED_WITH_SHOW` (`tests/test_console_routes_r4.py`): the shell's own strip
+   now reaches it through `hostHealth.js`, so it is a shell module (the test's own rule: "a module no longer shared is
+   taken off").
+Source: batch 4 bead T1.
+
+## 2026-10-02 — console DDD batch 4: bead N1 (node numbers, App Manager room)
+1. **`preparation_room` is clamped at 0.** §63/§65 give `min(budget − used, free, MemAvailable − headroom)`, which is
+   negative when `used` exceeds the budget; `ManagerPreparationV2.available_bytes` is a `counter` (≥ 0), so a negative
+   room would make the refused sample unencodable. As built: `max(0, min(…))`. The decision is unchanged (required is
+   always > 0), proven by the old-vs-new table test (`tests/test_node_host_numbers.py`).
+2. **Thresholds serve `null` for a band a metric does not have.** §63's "—" for `*_now` notice and `*_occurred` alarm is
+   served as `null`; T1's "numbers only" test now allows null but requires one number per row.
+3. **Wording forced by fact() (as T1 item 2).** The refusal reads "App Manager last reported 6 s ago · App Manager refused
+   a preparation: needs 1.4 GB, room 0.9 GB" (the reported kind's one wording puts the receipt first), and the Storage
+   line "Host Management last reported 4 s ago · 1.2 GB free in /run"; CPU likewise.
+4. **Storage short: tier and state chosen, not specified.** The refusal item's band is `alarm` (listed with throttled-now
+   and hot as a threshold incident) and it exists only in the Reporting state, like every band. A1 may revisit.
+5. **Throttling wording details §62 leaves open.** With any `*_now` flag set, only the now words show (in §62's order:
+   Throttled, Under-voltage, Frequency capped, Soft temperature limit). Several occurred flags join with ", " and say
+   "the firmware's sticky flags"; their words are under-voltage, frequency capping, throttling, soft temperature limit.
+   Any of the eight missing reads "Unknown: not reported" for the whole item; any duplicated reads "two values reported".
+6. **Band made observable on the card.** `PlayersPage.jsx` wraps each host line in `.roster__host[data-band]` so the
+   browser test can tell alarm from notice; H1's table should carry the tier its own way and may drop the attribute.
+7. **`get_throttled` is located by glob** `/sys/devices/platform/*/*:firmware/get_throttled` (Pi 4: `soc/soc:firmware`;
+   Pi 5's platform node is named differently). The first sorted match is read; none means no rows. Bench assumption.
+8. **Storage refusal and manager_runner's failure path.** `DesiredPreparation.poll` returns after the `refused` sample
+   instead of re-raising, so `manager_runner.py`'s catch-all (`observation.failure()`, which would overwrite it with a
+   generic `fault` sample and write `preparation-local-fault`) is not reached. `preparation-local-fault` has no reader.
+   Retry is unchanged: nothing is recorded as prepared, and the next 2 s poll prepares again (`preparing` → `refused`).
+9. **`link_speed` is cataloged (Network, "1000 Mb/s") but not rendered**; the Network line is F1/H1's.
+Source: batch 4 bead N1.
+
+## 2026-10-02 — console DDD batch 4: bead F1 (host facts record, the boot's base)
+1. **"Higher sequence, same values" also rewrites the payload.** §64 says update `sequence` and `received_at` only.
+   The payload carries the sequence, so keeping the old payload would make the node's resend of the new document (the
+   same sequence) read as a different payload: 409 instead of `duplicate`. As built: `sequence`, `payload` and
+   `received_at` move; `first_received_at` stays. "Same values" compares the four facts alone.
+2. **A producer change builds a new document, like a value change.** §64's state machine names only value changes. A
+   pending or stored document under an old producer (Central re-enrolled Host Management on a refused session) would
+   be 403 forever or never sent for the new producer, so the node compares (producer, values).
+3. **Facts wording needs a receipt-less rendering (rule 2).** `factText` gained `{receipt: false}`: a `reported` fact
+   with a value reads "Host Management reported eth0 up" when one line above states the record's receipt
+   (`receiptText`: "Host facts first received 3 d ago"). Each field is still a full `reported`/`first` fact carrying
+   `facts.first_received_at`; only the rendering groups them. A null link state with a known interface reads
+   "Host Management reported eth0" plus "Unknown: Host Management could not read the link state of eth0"; a null
+   interface reads "Unknown: Host Management could not read the default-route interface" (§62 names only the kernel).
+4. **With `facts: null` only the record line shows** ("Host facts: Unknown: no host facts received on this boot") and
+   no per-field Unknown lines; the Base line always shows. A box absent from G12 reads "Unknown: not read" for both.
+5. **N1 left `tests/test_node_host_recovery.py` red** (its fake sampler had no `throttling`; 2 tests failed on macOS too).
+   Fixed here with the facts stub; that test now counts one more request (the process's first facts post).
+6. **Concurrent first inserts for one producer from two sessions** would hit the primary key (500); the node resends at
+   its next post and then reads `duplicate`/`recorded`. One session's posts are serialized by authenticate_in's
+   session row lock. Not worth an upsert today.
+7. **Kernel release is read from `/proc/sys/kernel/osrelease`** (no subprocess, sandbox-readable); every field is passed
+   through the contract's own rule (`valid_fact`) on the node, so an odd value becomes null instead of an unencodable
+   record.
+Source: batch 4 bead F1.
+
+## 2026-10-02 — console DDD batch 4: bead W1 (Wall daily face)
+
+1. **Spec wrong: "a Needs-attention visit to an unbound Frame opens Binding" (§68 row 5, Browser) cannot happen.** G2 and
+   §61 remove unbound Frames from the strip and the Needs attention page, so no attention link points at one. Built
+   instead: a Needs-attention visit to a Frame whose Player is silent opens Binding (browser), and `facetFor` on an
+   unbound Frame returns `binding` (model). The unbound Frame's own path to Binding is its To finish link (browser).
+2. **`wallAttention` without `todos` must place the non-settling awaiting-report Frame somewhere** (bound, enrolled more
+   than two report intervals ago, no report, still within the silence limit: severity `todo`, cause liveness). It is
+   evidence, not structure, so it is not a To finish item; the signature has no list for it. Counted in `awaiting`
+   ("No Frame needs attention · N awaiting a first report"), as the settling case already was; it becomes an alarm row
+   once past the limit.
+3. **One Frame can carry two To finish items.** §61's example lists "needs a Player" and "needs calibration" for one
+   Frame; a Frame with no Binding has no calibration to save, so `wallUnfinished` asks for calibration only when bound.
+   `place` is independent of the other two (a bound Frame can sit in the tray), so a Frame yields at most `place` + one
+   of `bind`/`calibrate`, in that order.
+4. **"A Frame route with no facet opens Status"** is read as the hash `#/wall/frames/<id>` parsing to
+   `{section: "wall", id, facet: "status"}`, never formatted (like the aliases). Before W1 that hash parsed to null.
+5. **Edit layout's selection is the mode's own** (the route `#/wall/layout` names no Frame). It starts at the Frame the
+   daily face last showed (`memory.lastWall.id`), so Done returns to that Frame's Status. `lastWall` never records
+   `#/wall/layout`, so the sidebar's Wall link always opens the daily face (G3).
+6. **Sidebar groups carry an accessible name each** (`<ul aria-label="Wall|Show|Fleet|Needs attention">`), no visible
+   group heading; §48 does not say whether the group names are shown.
+7. **The read-only Plan's empty hint** reads "No Frames placed on this Surface" (the old "Drag on this plan to place a
+   Frame" now shows only in Edit layout); §62 has no wording for it.
+8. **Flake seen once under `-n 6`**: `test_operator_showrunner_browser.py::test_scene_delete_refusal_names_dependent_program`
+   (Scenes flow, untouched by W1); passed 3/3 alone and in a 118-test parallel rerun.
+Source: batch 4 bead W1.
+
+## 2026-10-02 — console DDD batch 4: bead H1 (fleet host UI)
+
+1. **"Not driving a Frame … newest first" has no served time for boxes seen at boot.** The boot facts read
+   (`bootFacts.js`) keeps only `device_id` and `serial`, so a not-enrolled box has no first-boot time. H1 lists boxes
+   seen at boot first (in `playersByDevice`'s device-id order), then Unbound Players newest registration first
+   (`playersByDevice` orders them by `registered_at`, oldest first, so they are reversed). No model function was added
+   (as the bead requires). Exact newest-first ordering would need a first-boot receipt served on the netboot read.
+2. **Table cells keep each fact's label** ("Temperature: 81 °C · hot …"), because `FactLine` is the only fact
+   renderer (design rule 2) and always prints its label. The column header repeats it. §61's examples show the bare
+   value. Standing is a `FactLine` ("Standing: Bound · …"); only the Frames are chips (links to each Frame).
+3. **Bands and tiers are carried by classes** (`players__row--<severity>` on the row, `players__item--<band>` on an
+   item) and styled as a leading rule. N1's test-only `data-band` wrapper is gone.
+4. **Health is hidden, not Unknown, while the fleet host read is skipped** (node control not `on`), and for a retired
+   box (G12 omits it), as §66 has it for the list. With node control off the page still shows only the one
+   "not shown" line (Health is `NodeRecords quiet`).
+5. **The raw disclosure reads G12's `host` (this boot's newest sample)**, not the node device read that Layers used
+   before, so Health and its raw lines always show the same sample. Layers keeps "Last reported" and the session line.
+6. **Network column order**: link (and link state), then link speed, then address, then the "Host facts first received"
+   line, following §61's example "eth0 up · 1000 Mb/s · 192.168.1.40".
+Source: batch 4 bead H1.
+
+## 2026-10-02 — console DDD batch 4: bead A1 (host incidents, strip, Status chip)
+1. **The chip is handed to the Status facet, not imported by it.** `NowShowingFacet.jsx` is in the R4 test's
+   `SHARED_WITH_SHOW` (RunsRegion imports its `PrecedenceExplanation`), so importing `HostChip.jsx` there would put the
+   chip and its fleet reads in the Show side's closure. `Inspector.jsx` (Wall-only) renders `<HostChip/>` and passes
+   it as the facet's `hostChip` prop; it renders under the facet title. §61's "on the Status facet (NowShowingFacet.jsx)"
+   holds on screen; the import graph keeps it Wall-only (R4 test unchanged and green).
+2. **" · host health not read" shows only while the fleet host read is mounted** (failed, or not yet loaded). With node
+   control not `on` the shell mounts no read (`hosts` null, errata T1-1): the strip adds no suffix and the node-control
+   banner names the cause. §61/§66 do not say which; this follows §66's "host lines are hidden, not Unknown" for that case.
+3. **On a failed read the chip says "<Player> · host health not read"** instead of judging the last good values,
+   matching the strip ("no host incident is shown or cleared on stale data"). §62 has no chip wording for this case.
+4. **Incidents are exactly the classifier's alarm items** (plus Never reported's one Unknown), so the classifier's
+   existing gate (Silent and Refused band nothing but the receipt) is the one reporting gate; `hostIncidents` holds no
+   second one. A notice (warm, a sticky "occurred" flag) raises no incident. One Throttling item is one incident, its
+   now words lower-cased and joined: "throttled now · under-voltage now". Keys are `player:<device>:<item>`.
+5. **Strip labels made Player-neutral** (drift item 2): the toggle reads "Show list"/"Hide list" and the list's name
+   "Frames and Players needing attention". §61 names no label; browser tests updated.
+6. **§65's signature `hostIncidents(snapshot, read, bootFacts)` kept** (the task text omits `bootFacts`; it supplies the
+   Players' names). The chip's wording comes from a new `hostChip(name, health)` and `hostWords(item, {brief})`.
+7. **Never reported wording fixed in code** (drift item 1, errata T1-3): "no Host Management report from this boot or the
+   one before".
+Source: batch 4 bead A1.
+
+## 2026-10-02 — console DDD batch 4: bead D1 (docs)
+1. **Sidebar labels (doc wrong, corrected in §61).** §48/§61 named the Show group "Now, Scenes, Schedule, Sources"; the
+   code keeps the shipped labels "Now showing" and "Photo sources" (`showRoutes.jsx:30`, `:82`), the rename being Part F
+   S1's (batch 5). §61 and the runbook now state the shipped labels.
+2. **H1 and A1 errata folded into Part H** (§61, §62, §65, §66, §69, history); R1, T1, N1, F1 and W1 were already folded
+   by the course-correction pass. Drift item 6 (a To finish "not on the plan" link selects the last-shown Frame in Edit
+   layout) is recorded as a §69 cost.
+3. **Pre-existing broken in-page anchors in `docs/runbook.md`, not fixed (outside D1's scope):**
+   `#operator-api-reposition-and-remove-frames` and `#photo-sources-add-a-source` name no heading. `check_docs.py`
+   checks file targets only, so it passes; an anchor check would catch the class.
+4. **Historical design records left as written:** `operator-console-ux-pass2-flow.md:167` (landing `#/now` once a Frame
+   exists) and `operator-console-delivery-plan.md` bead 18 (dismissible Guidance) describe superseded behaviour as their
+   own record; `operator-console-ux-pass2.md` §5 gained a superseded note for "to set up".
+Source: batch 4 bead D1.
+
+## FX1-1 · App Manager preparation intake: coalescing and a served intake-full flag (batch 4 fix cycle 1)
+Spec wrong: §64 said "Preparation ingest is unchanged" and §66 "cleared by the next sample". App Manager samples
+`preparing` then `refused` on every 2 s poll (appliance/node/manager_desired.py:65,79); Central had no coalescing
+and a fixed 20,000/day preparation cap, so the cap filled after about 5.5 h and the newest stored sample froze
+(falsely clearing or holding the Storage incident until the UTC day rolled over).
+Correction (built): Central coalesces a preparation post when the producer stored a sample with the same
+(state, operation, fault) within one interval, on Central's receipt clock (a backward step stores);
+`PREPARATION_DAILY_CAP` = 4 x ceil(86400 / interval) replaces 20,000; G12 serves `preparation_intake_full`, and the
+classifier words Storage as Central's refusal (Unknown) while it is true. Note: the reviewer's proposed key,
+"equal to the newest stored sample", would not coalesce an alternating stream at all; the key is per state among
+the producer's recent samples instead. Cost: a state that returns within one interval of its last stored sample is
+stored again only after that interval. §63, §64 and §66 updated.
+Source: batch 4 fix cycle 1.
+
+## FX1-2 · Host facts sender: a refused session is temporary; 404 is retried (batch 4 fix cycle 1)
+Spec wrong: §64 (errata F1-2) said re-enrollment changes the producer, so a document under an old producer would be
+refused 403. The wire producer has no session in it (central/fleet/node_sessions.py:229-230), so re-enrollment
+keeps the producer and the `dropped` state entered on a 401 was never left for the boot. And `off` after one 404
+lasted until process exit.
+Correction (built): 401/403 keep the document pending (the next ensure() re-enrolls and that tick resends); 404 is
+`off` for FACTS_ROUTE_RETRY_SECONDS (3600, the process's monotonic clock), then pending; `dropped` only for other
+4xx (409, 422, ...). §64's bullets, diagram and §66 rows updated; §65 shows `_send_facts(self, now_ms)`.
+Source: batch 4 fix cycle 1.
+
+## FX2-1 · Host facts take the classifier's state (batch 4 fix cycle 2)
+Code drift (not spec-wrong): §62's Silent row and §66 say this boot's values read "… at last report" on a silent or
+refused box, but `hostHealth.js` `factItems` took no state, so a silent box's Network cell read "Host Management
+reported eth0 up" in the present tense beside "1000 Mb/s at last report".
+Correction (built): `factItems(row, read, absent, health)` requires the `classify()` result; `judgeHost` passes the
+one it computed and `hostFactItems` computes it, so no caller can word facts without the gate. On `silent` and
+`refused` every reported fact's value carries "at last report"; the record's receipt line and the `claimed` base
+are unchanged. Model tests cover silent, refused and reporting rows that carry facts, on both `hostFactItems` and
+the `judgeHost` page path (mutation probe: ignoring the state fails both).
+Source: batch 4 fix cycle 2 review (major).
+
+## FX2-2 · Facts ingest answers `historical` to a superseded boot's session (batch 4 fix cycle 2)
+Spec drift: §64's facts table listed only `recorded`, while the observation path in the same module answers
+`historical` when the session is not current. Correction (built): `record_facts` answers `historical` when
+`principal.current` is false (it still stores; G12 never serves it). §64's three storing rows updated.
+Source: batch 4 fix cycle 2 review (minor).
+
+## FX2-3 · Cross-replica clocks in coalescing and host silence (batch 4 fix cycle 2) — OPEN, spec wrong
+§60 calls coalescing and host silence "a self-comparison" with guarantee "construction". `received_at` and
+`first_received_at` are stamped by the ingesting replica's process clock (node_observations.py `_record`,
+`record_facts`, via `admission.ensure_current(self.sessions.clock)`), `_coalesced_in` compares against the same
+replica's `now`, and G12's `read_at` comes from the serving replica's clock. With several Central replicas these
+are different clocks; the error is bounded by NTP skew (a lagging ingest replica coalesces more; a leading G12
+replica calls silence early). Not fixed here: the class fix is to stamp receipts and `read_at` from PostgreSQL
+`clock_timestamp()` in the same transaction (the rollout gate's precedent), which changes every node ingest path
+and its fake-clock tests — a bead of its own, not a fix-cycle edit. Until then §60/§66 should state the skew as a
+cost instead of "self-comparison". Needs an architect decision.
+Source: batch 4 fix cycle 2 review (minor).
+
+## FX2-4 · Approved Q13/§52 record rewritten in place (batch 4 fix cycle 2) — OPEN, doc process
+Part G §52's batch-B table and the Q13 block (owner-approved 2026-10-02 with the base version inside the host facts
+record) were rewritten in place to say the base is a `claimed` tag, while §1 and Part G's status still read
+"Approved 2026-10-02 (Q12, Q13)" and Part H says it inherits G13 unchanged. The Part H history line records the
+change. Proposed: restore §52 and Q13 as approved and add an amendment line naming Part H §62/§63 and the batch-4
+gate; confirm with the owner that the gate covered dropping the base from host facts. Not edited by the fix cycle
+(an approved record is the orchestrator's/architect's to amend).
+Source: batch 4 fix cycle 2 review (minor).
+
+## FX2-5 · Host coalescing can drop a short-lived fault_code (batch 4 fix cycle 2) — OPEN, unstated cost
+`_coalesced_in`'s host branch coalesces any post within one interval of the newest stored receipt, whatever its
+`fault_code` (RecoverySupervisor.telemetry, appliance/node/recovery.py). On a pre-batch-4 base posting every 2 s, a
+recovery state shorter than about one interval can go unstored. §60 and §66 state the App Manager cost (FX1-1)
+but not this one. Not fixed here: keying host coalescing on `fault_code` (as App Manager on its key) changes the
+host cap arithmetic (OBSERVATION_DAILY_CAP = 2 x intervals assumes one stored sample per interval), so it needs
+the cap re-derived alongside it. Either build that, or add the loss to §60's costs and §66.
+Source: batch 4 fix cycle 2 review (minor).
+
+## 2026-10-02 — console DDD batch 4: architect course-correction pass (after 10 implementers)
+Dispositions of the open fix-cycle-2 items, folded into `docs/operator-console-ddd.md` (one history line):
+1. **FX2-3 (spec wrong) — CLOSED in the doc, class fix deferred.** §60 no longer calls coalescing a self-comparison
+   across replicas: receipts and G12 `read_at` are per-replica process clocks; the guarantee is construction on one
+   replica and NTP across several (§60 "What it does not cover", §63 Times, §66 row, §69 cost). The class fix (one time
+   authority: PostgreSQL `clock_timestamp()` in the same transaction, behind a connection-bound clock port) is residual
+   bead **R-clock** (§69 Deferred). Its scope includes node session issue/expiry and the status read's ages, which share
+   the class and predate batch 4 (`node_sessions.py:179-214`). Not a batch-4 blocker; owner schedules it.
+2. **FX2-5 (unstated cost) — CLOSED in the doc.** Stated as a cost (§60, §66, §69). Keying host coalescing on
+   `fault_code` is rejected: a batch-4 base posts once per interval (`host_runner.py` `_observation_due`), so it never
+   sends the intermediate sample and keying would recover nothing while forcing a cap re-derivation.
+3. **FX2-4 (doc process) — CLOSED in the doc, owner confirmation OPEN.** §52's Q13 block quotes the owner's answer
+   verbatim (base version among the host facts) with a dated amendment moving the base to a `claimed` boot-offer tag;
+   Part G's status lists every post-approval amendment (base, counts line, Frame-row host items, storage, "occurred
+   recently"). The orchestrator must confirm with the owner that the batch-4 gate covered the base change.
+4. Doc status line 3 said Part H "awaits the owner's batch-4 gate (Q14)"; corrected to approved and built.
+Source: architect course-correction after batch-4 fix cycle 2.
+
+## 2026-10-02 — console DDD batch 4: fix cycle 3 (residuals + owner base decision)
+
+## FX3-1 · G1 was unenforced and false for Needs attention — FIXED
+`hostHealth.js` imported `hostRow` from `fleetHosts.js` (the polling hook, which imports `apiWrite.js`), so
+AttentionList/AttentionStrip/hostHealth/HostChip reached the write primitive; no test covered the attention modules.
+Fix (built): `hostRow` moved into `hostHealth.js`; `tests/test_console_routes_r4.py` gains G1 tests over the bundler
+graph (`G1_LIST_MODULES` reach no `WRITE_MODULES`, no route table, shell module or `*Page.jsx`), a positive control,
+and a copy-mutation self-test. `WRITE_MODULES` and the scan closure now live in the R4 suite;
+`test_console_wall_layout.py` imports them. Mutation-probed on the real tree: re-adding the fleetHosts import fails
+4 G1 cases with `{'apiWrite.js'}`.
+
+## FX3-2 · Coalescing compared Central receipt clocks across replicas — FIXED (supersedes FX2-3 for coalescing)
+`_coalesced_in` now compares the incoming `sampled_boottime_ms` with the stored sample's (host: the newest by
+sequence; App Manager: the recent rows with the same key), 0 <= diff < interval*1000. One producer = one boot =
+one kernel boot clock, so a clock is compared only with itself. Cost: a node that misreports its boot clock defeats
+coalescing for its own producer only; the cap and `intake_full` still bound it. FX2-3 / R-clock still cover
+receipts, G12 `read_at`, host silence and the status read's ages. DB tests: a stepped Central clock and two replicas
+skewed +/-40 s; a receipt-clock mutant fails 3 of them. Doc §60/§64/§66/§69 updated.
+
+## FX3-3 · Players table alarmed on spares and sorted retired boxes above healthy ones — FIXED
+New pure model `hostHealth.js` `playersTable(rows, hosts)`: Bound rows judged and tiered worst first; spares
+(Unbound, Not enrolled) unbanded (items `band: null`, no tier) below them; retired rows unjudged and last, rendering
+`RETIRED_NOT_READ` (moved to `players.js`, shared with PlayerPage). Decision to flag: Player › Health for a spare
+still shows bands (it is that box's own page); only the fleet table drops them. Model + browser tests, mutation-probed.
+
+## FX3-4 · Facts intake could be spent by restart loops — PARTLY FIXED
+`record_facts` claims `host_facts` intake only when values change (same-values resend at a higher sequence rewrites
+the row for free). §64's cap claim corrected. DEFERRED: serving `facts_intake_full` in G12 and wording it in
+`hostFactItems` (only a burst of real changes can now reach the cap).
+
+## FX3-5 · Owner decision: the node reports its own base — BUILT; spec finding
+`HostFactsV2.base_tag` (token<=128, nullable, in `values()`), bootstrap writes `base_tag` into `host.json` from the
+verified handoff offer, `host_runner` requires it in its config and reports it, G12 serves `facts.base_tag`, the
+console shows "Host Management reported base X" beside "Central's offer: base Y (claimed …)" plus a derived
+"Base differs: …" fact (no band, no incident). FINDING: the base image carries no build-time version (squashfs is
+content-addressed; tags are assigned at release), so the node's only self-record is the handoff offer tag its
+initramfs verified against the mounted bytes; a mismatch means a different offer than the admission Central holds,
+not different bytes. Stated as a cost in §52. Wire: HostFactsV2's exact key set gained `base_tag`; safe only because
+batch 4 is not on main (no deployed node sends host facts yet). FX2-4 closed.
+
+## FX3-CC · Architect course-correction after fix cycle 3 — DOCS ONLY
+Doc drift fixed in place (no code change): Part G status, Part H's inherited list and the top status still called
+the base a `claimed`-only tag pending owner confirmation; G13's field list omitted `base_tag`; §60's jitter bullet
+still reasoned about receipts (now: node-side poll latency between the tick's `sampled_boottime_ms` stamp and the
+monotonic due check can coalesce one post, gap ≤ ~30 s; the first post after a new session is coalesced when within
+one interval of the last stored sample); §61's Software example showed one base; §62's at-last-report / no-facts rows
+did not say which base lines change; §66 limited coalescing's guarantee to one replica; the fleet map named `_record`
+for the window; the runbook's Players ordering, Software column and no-facts row were stale, and it gains a
+"Base differs" row. FX3-3 (bands on a spare's own Health page) is recorded in §61 and put to the owner in §69.
+
+
+## FX4-1 · Releases browser race: "response arrived" was read as "page took in the read" — FIXED (test bug)
+CI 37085580521 / 37066151357 failed `test_a_dialog_frozen_before_another_pages_selection_sends_no_put` (`puts == []`):
+Playwright's response event fires on headers, before `apiWrite`'s `response.json()`, so Select judged the previous read
+and Central's expected_revision 409 fenced it (CHANGED passed). Fix: `usePolledRead` returns `busy`, set when a flight
+starts and cleared in the same synchronous step that commits the flight's last value (after the ref), so
+`busy === false` in the DOM implies `latest()` returns that read; `useReleaseRead` passes it through; ReleasesPage's
+read line is `role=status name="Release read"` with `aria-busy`; `_read_once` waits for aria-busy to clear (drive_poll
+pattern). Send rule unchanged; `test_centrals_409_reads_changed` documents the 409 as the fence for an unsettled read.
+Mutation-probed with a held body: without the wait one PUT is sent; with it `_read_once` blocks until released, then
+zero PUTs. Not done: the other `usePolledRead` pages (nodeRead, nodeControl, fleetHosts, qualification) get `busy`
+from the hook but render no aria-busy yet; Update the wall's read line is not a status region.
+
+## FX4-2 · "Base differs" cannot mean a different offer — DOCS CORRECTED (supersedes FX3-5's claim)
+FX3-5, §52 and the runbook said a mismatch means "a boot from a different offer than the admission Central holds".
+The code cannot produce that: Host Management claims with the handoff's `offer_id` (host_runner.py:186), every claim of
+a boot must present the admission's `offer_id` (node_sessions.py:168 `node_boot_adoption_mismatch`), and G12 joins the
+facts of the current admission's producer to that same offer's stored payload (node_observations `_FLEET_HOSTS_SQL`).
+Both tags are copies of ONE offer (node: handoff copy; Central: stored payload), so they differ only on a defect (the
+node reports a tag its handoff does not hold, or Central stored a payload other than the one it served). §52, §69 and
+the runbook row now say so; the runbook action is "report it as a bug". No code change.
+
+## FX4-3 · Spares were unbanded only in CSS; the words still carried Central's judgement — FIXED
+`playersTable` read a spare through `judgeHost` then stripped bands, so its words kept "· hot", "silent · …", "at last
+report" and "Central's threshold/limit". Now `describeSpare` reads the box with Central's thresholds withheld, then
+unbands what remains (Unknown, App Manager's refusal). Cost: a long-silent spare's values read with their receipt age,
+not "at last report". Model test asserts the words (no hot/warm/silent/at last report/Central's …), mutation-probed;
+browser test likewise. Player › Health for a spare still bands (FX3-3, owner question §69, unchanged).
+
+## FX4-4 · PID1 outage scenario: outage trigger raced the broker — FIXED (test bug)
+`central_outage_after_accept` started the outage on the App Manager's target-artifact request, which says nothing about
+the App Effect Broker (independent app-commands poll). On 7758772 the manager won; the broker never accepted, no
+online.json, no switch. The fixture now starts the outage only when BOTH Central recorded the broker's response to this
+stage's command (a `node_app_responses` row joined to the operation, checked on a 200 POST /v2/node/app-responses) AND
+the target artifact was served. Diagnostics: `prepared.json` captured; absent online.json recorded as
+`broker_never_accepted.txt`. Not run locally (needs the node components + fixture image build); CI node-pid1 matrix is
+the gate, outage needs reruns to show the race gone.
+
+## FX4-5 · Minors — FIXED
+G1: the Needs attention page moved from neutralRoutes.jsx into `AttentionPage.jsx`, now a G1 list module (its reach,
+minus itself, holds no page or write; the classifier-mutation test covers it). G12: stored host facts are read through
+`stored_fact_values` (contracts/node_host_facts.py), tolerant per field (missing/refused fact -> None), so one
+older-shape row cannot fail the fleet read or the same-values comparison; ingest stays strict. Unit-tested; no DB test
+of an old row through G12 itself.
+
+## 2026-10-02 — console DDD batch 5 (Part F): architect reconcile before implementation
+
+## B5-0 · G11's DatabaseClock(db) -> Clock was wrong — DOC CORRECTED (spec wrong, found at reconcile)
+Part F §41/§42 composed a process-wide `DatabaseClock(db) -> Clock` into `MediaRepository`. Against the code:
+(1) `repository.clock` flows into `MediaStore`, `MediaWorker`, `Preparer`, `ImmichClient` and the installation
+repository (`media/worker.py:156-170`, `central/media_store.py:141-142`), so the swap re-means about thirty call
+sites, most of them monotonic budgets; (2) clock reads happen inside held transactions
+(`central/media_repository.py:307`, `:316`), so a clock taking its own pooled connection can exhaust the
+ten-connection pool (`central/db.py:15-27`). Correction (§41, §42, bead M1): a connection-bound
+`TransactionClock.now_in(conn)` used only where a media time another process compares is written or compared;
+the process `Clock` stays for budgets. Same port as Part H's deferred R-clock (§69). G11 cut out of L2 as bead M1.
+
+## B5-1 · Part F reconciled with Parts G/H as built — DOCS ONLY
+Planned facet → Status facet (W1 built it; S1 adds the `planned` fact; `NowShowingFacet.jsx` → `StatusFacet.jsx`,
+`PrecedenceExplanation` split so the Show side imports no Wall-facet module); `ShowNowFlow.jsx:233` also says
+"Now showing" and S1 renames it; Q8 kept (requirements.md unchanged, gaps in §44), Q9 = A, Q10 = yes, Q11 moot.
+
+## B5-S1-1 · "import HostChip into StatusFacet -> R4 fails" is void after the split — SPEC WRONG (found at S1)
+S1's mutation probe assumes the Status facet is shared with the Show side. Splitting `PrecedenceExplanation.jsx`
+out (§34) makes `StatusFacet.jsx` Wall-only, so importing `HostChip.jsx` there is not an R4 violation and
+`tests/test_console_routes_r4.py` stays green (probed: 35 passed). The property R4 protects still holds by
+construction: the same import into the now-shared `PrecedenceExplanation.jsx` fails R4 (`['HostChip.jsx']` in the
+Show and shell closures; probed). S1 keeps `hostChip` handed in by `Inspector.jsx` as specified, but no test binds
+"the facet does not import HostChip" and none is owed. §45's S1 probe list should name the shared module instead.
+
+## B5-S1-2 · §35's unbound row omits "; the Panel is not observed" — WORDING RULE WINS (found at S1)
+§35's rule says a `planned` fact's wording ALWAYS ends "(Central's Runs; …; the Panel is not observed)"; its table
+row for an unbound Frame ends "…so Central sends it no layers)". S1 follows the rule: "On top: xmas · Program p
+(Central's Runs; this Frame is unbound, so Central sends it no layers; the Panel is not observed)". The table row
+should be corrected in D1.
+
+## B5-S1-3 · Two direct-origin wordings, one home — NOTED (S1)
+§34 words a direct Run card "started directly (Show now or the API)"; §35 words the planned fact "started directly,
+by Show now or the API" (a parenthesis inside the fact's own parenthesis). S1 keeps both: `runOrigin` (showState.js)
+owns the card words, and join.js `originPhrase` maps only the `direct` kind to the comma form for the planned fact and
+the Why heading/rows. `sceneTargets.js` left `SHARED_WITH_SHOW` in the R4 test because join.js now imports
+showState.js (which re-exports it), making it one of the shell's own modules.
+
+## B5-L1-1 · The preview answer grows flat; "counts.images" / "code" in §41 and the tracer are not the served names — SPEC WRONG (found at L1)
+§41 sketches `source_preview(request_id) -> {status, counts?, shown?, limited?, code?, observed_at?, read_at}` and the
+tracer says `counts.images = 1`. The existing resource serves flat `count`, `image_count`, `video_count` and `error`
+(`central/media_repository.py` `source_preview`), and §38 says the resource GROWS. L1 keeps the flat fields and adds
+`shown`, `limited`, `observed_at` (complete only) and `read_at` (every status). L3 and D1 should cite `image_count`,
+`video_count` and `error`, not `counts.*` / `code`.
+
+## B5-L1-2 · Served sizes need the preview walk to ask for metadata; sizes are nullable — SPEC GAP (found at L1)
+The count-only preview walked with `withExif=false`, which carries no usable sizes or video duration (the fixture's
+top-level `width`/`height` are decoys the adapter never trusts). L1's preview walks each kind once WITH metadata and
+takes sizes and duration from `_original` (orientation-corrected). A member whose library metadata is unusable is still
+counted and shown, with `width`, `height` and `duration_seconds` null (`PreviewMember`). L3's tile alt text must allow
+a missing duration.
+
+## B5-L1-3 · L1's ages cross two process clocks until M1 — NOTED (L1; G11 was a non-goal)
+`observed_at` is stamped by the writer's process clock in `finish_source_preview` (the media worker's) and `read_at`
+by Central's in `source_preview`, so "first received N s ago" subtracts one process clock from another until M1. M1's
+list must include both: `finish_source_preview`'s `observed_at` and `source_preview`'s `read_at` (and the expiry
+comparisons beside them) go through `TransactionClock.now_in(conn)`.
+
+## B5-L1-4 · Things L1 had to touch that the bead row does not name — NOTED (L1)
+(1) `central/source_names.py` `NamedSourceWrite` re-declares the query fields; without `tags` there a tagged Source
+cannot be saved, and its `_same` compared raw JSON, so it now uses `MediaRepository.same_spec` (one canonical compare
+for both write paths). (2) The console draft carries a saved Source's `tags` through `seedSource` and
+`buildSourceSpec` (no picker), or editing a tagged Source would silently save it untagged; the tracer's browser test
+uses that path. (3) Migration 063 replaces the unnamed state CHECK, which PostgreSQL named `source_previews_check1`
+(`source_previews_check` is `expires_at > created_at`); a completed row written before 063 has no sample and is retired
+as `failed`/`preview_expired`, never back-filled with an empty one. (4) `tests/test_node_upgrade_history.py` asserted
+062 is the last migration; it now asserts 062 is applied. (5) An unreadable stored spec records `status=incompatible`,
+diagnostic `spec_unsupported`, pushes `next_refresh` by `refresh_seconds` and completes the requested revision, so
+neither the scheduled tick nor a requested refresh loops on it.
+
+## B5-L1-5 · "Showing the newest 24." is not rendered in L1 — DEFERRED to L3 (L1)
+§39's over-the-limit row ends "Showing the newest 24."; with no tiles until L2/L3 that sentence would describe nothing
+on screen, so L1 renders the fact and "Photo Wall currently stops at 1,000 matches; narrow it with tags or dates."
+only. `sourcePreview.js` `previewFacts(answer) -> {fact, notes}` is L3's starting point (§41 sketches
+`previewFacts(answer, readAt, connections) -> Fact[]`; `read_at` now travels in the answer).
+
+## B5-M1-1 · `media_references.expires_at` is cross-process but stays on process clocks — SPEC GAP, DEFERRED to R-clock (M1)
+M1's inventory missed one column. `media_references` rows are written by Central (Runtime pins from plan validity,
+`coordination.py` `pin_variants_in`; transfer grants `now + _TRANSFER_SECONDS` in `MediaStore.open_read`, whose `now`
+also feeds `media_authorized_in`) and compared by the worker's `MediaStore.collect` against the worker's process clock
+(`media_store.py` collect, "expires_at>%s"). A worker clock ahead of Central's evicts a pinned blob early. Not moved:
+the pins are Runtime plan times on Central's process clock and `open_read`'s `now` is Runtime authorization time, so
+moving only the media side would compare a database time with a Runtime time. It belongs to R-clock (§69), which
+puts Runtime receipts on the same `TransactionClock`; a comment marks the comparison in `collect`.
+
+## B5-M1-2 · The catalog's retry cooldown crossed clocks; `catalog_in` loses its `now` — NOTED (M1)
+`_hydrate_candidates` compares worker-written `media_jobs.retry_at` ("state='retry' AND retry_at>now") and
+`catalog_in(conn, now, …)` took `now` from the Coordinator's process clock. M1 makes `catalog_in(conn, source_refs)`
+read `now_in(conn)` itself, and changes the `CoordinationMedia` port to match (§41 does not list it).
+`media_jobs.earliest_start` stays: it is a Planner time on Central's clock, used only for ordering.
+
+## B5-M1-3 · Composition defaults — DECISION, flagged (M1)
+`MediaRepository(…, *, times)` is required (a missing `times` is a TypeError, pinned by a test). `create_app` gains
+`media_times`; when omitted it is `DatabaseTransactionClock()` unless the caller injected its own `clock`, in which case
+it is `ProcessTransactionClock(clock)` — the same "an injected clock means a test" convention `run_scheduler` already
+uses at `app.py`, so the 31 test files that build the app with `ManualClock` stay deterministic. Production builds the
+app with no clock. The `coordination.py` fallback (`media or …`) composes `DatabaseTransactionClock()`.
+
+## B5-L2-1 · Thumbnails break two asset-layer invariants the design did not account for — SPEC WRONG (found at L2)
+§38 keeps thumbnails "on the asset layer" and §43 says "the asset layer refetches", but the layer assumes a key fixes
+the bytes: (a) migration 028's `asset_references_locator_names_the_key` CHECK requires every reference's locator
+digest to equal the key, and Central holds no library address (R22); (b) produced facts are write-once
+(`record_produced`, `AssetProduction` "not_reproducible"), while a thumbnail is keyed by its ORIGINAL (asset id) and
+its bytes change when the library regenerates it or Pillow changes — a purge then a refetch would fail forever (PR 37
+§7 "Why thumbnails are not Asset records" foresaw this). L2 keeps the asset layer and closes both: 064 narrows the
+CHECK so a `library-thumbnail` admits exactly one reserved reference (`owner=library-preview`,
+`locator_url=http://library.invalid/`, no digests; `central/assets/library.py THUMBNAIL_REFERENCE`, which no handler
+reads), and `MediaRepository.maintain_source_previews` deletes the records of thumbnails no live preview selects
+(the worker then sweeps their files from `previews/`), so facts live only as long as a live preview. Residual: a file
+re-written between the purge and the sweep of one maintenance pass can be swept; the next request refetches it.
+
+## B5-L2-2 · The thumbnail handler is Central's; only its library half is in media/ — DECISION, flagged (L2)
+The bead says "its handler lives in media/". The handler needs the asset layer's cache store, record check and
+install (`AssetProduction`), which are built inside `build_job_runtime`. Following the existing `ReleaseOrigin` /
+`FetchPackageHandler` split, `FetchLibraryThumbnailHandler` is in `central/assets/handlers.py` and calls a
+`ThumbnailOrigin` port (`central/kernel/ports.py`); `media/library_thumbnails.py LibraryThumbnailOrigin` implements
+it (servability re-read, `ImmichClient.thumbnail`, private O_EXCL write) and is injected via
+`build_job_runtime(..., thumbnails=)` (required keyword). A new import-linter contract, "Central imports no library
+client", forbids `central` from importing `media.immich`, `media.library_thumbnails` and `media.worker`.
+
+## B5-L2-3 · Tag list choices L3 and D1 should cite — DECISION, flagged (L2)
+(1) The re-list gate is the last ATTEMPT (`library_tags.checked_at`) older than 300 s by the database clock, so a
+failing library is asked every 5 min, not every 30 s tick; `observed_at` stays the served list's own age. (2) Boot
+lists every connection regardless of age and drops rows of connections the worker no longer holds; a failed boot
+list keeps the last list (no fingerprint, §38). (3) The served tag is `{tag_ref, path, name, parent_ref}` — PR 37
+§7's shape; §38's boundary table says "tag id, path, name" but L3's nested-tag replacement needs the parent.
+(4) `GET /v1/operator/library/tags?connection=&q=&limit=` answers `{connection_ref, status, error?, observed_at,
+read_at, total_matches, tags}`; `status` is `pending` before the first listing (200, empty), `ok`, or the failure
+status with the last list; 404 `connection_unknown` when the worker's reported list excludes the connection; 422 for
+`q` > 128 chars or `limit` outside 1–20. Names and paths are stripped of C0/C1 controls, LRM/RLM and the bidi
+embeddings/isolates at construction (`media.models.LibraryTag`). No per-pod parsed cache: each GET parses the stored
+list (≤ 5,000 tags).
+
+## B5-L2-4 · Thumbnail route as built — NOTED (L2)
+Errors: 404 `thumbnail_unknown` (also for a malformed id, not PR 37's 422), 403 `origin_mismatch` for a sent
+`Sec-Fetch-Site` other than `same-origin`, 503 `thumbnail_<reason>` with `Retry-After` (`thumbnail_busy`,
+`thumbnail_timeout`, or the fetch's failure reason); CORP on every answer; a served tile adds `nosniff` and
+`default-src 'none'; sandbox`. The route lives in the new top-layer `central/library_routes.py`, which also installs
+the access-log filter (query strings dropped under `/v1/operator/library/`). `build_content_services` gains
+`servable_thumbnail` (default: nothing servable). Each fetch checks the library version and owner again (three
+library requests per tile; PR 37's once-a-minute check is not built). Proven where: the "fifth concurrent cold
+request is busy at once" acceptance is tested on the composed thumbnail reader (`tests/test_content_wiring.py`),
+not over HTTP (TestClient serializes requests); the access-log filter is tested on the `uvicorn.access` logger,
+not through a running uvicorn.
+
+## B5-L2-5 · For D1 — NOTED (L2)
+ADR 0013 and the central-cache module gain `previews/` (Dockerfile both stages, entrypoint loop, worker boot
+`ensure_previews_directory`) and the `library-thumbnail` kind with its record lifecycle (B5-L2-1); migration 064
+(tag table, kind CHECK, narrowed locator CHECK); the media worker doc gains the tag tick/boot and the prefetch.
+
+## B5-L3-1 · The tag GET cannot name a saved tag in a library with more than 20 tags — SPEC GAP (found at L3)
+§39 asks the Source card and Review to name a saved Source's tags ("tagged Family/Christmas") and to say "A tag this
+Source uses no longer exists in your library." The served route (B5-L2-3) answers at most 20 tags matching `q` against
+path or name; it has no lookup by tag id. L3 therefore names a saved tag only once some read has served it, and says
+"gone" only when a no-search read served the library's WHOLE list (`status=ok`, `total_matches <= tags served`)
+without it (`libraryTags.js learnPaths`). Otherwise it reads "a tag Photo Wall has not looked up yet", never "gone".
+Cost: in a library with more than 20 tags, an edited Source's chips and the card summary read that phrase until the
+operator types the tag, and a deleted tag is never reported on the card. Fix (not built, a backend residual): an
+`ids=` parameter (at most 4 UUIDs) on `GET /v1/operator/library/tags` answering those tags and naming the absent
+ones; the console then passes `whole` for those ids.
+
+## B5-L3-2 · Preview signatures as built — DECISION, flagged (L3)
+§41 sketches `sourcePreview.js usePreview(query)` and `previewFacts(answer, readAt, connections) -> Fact[]`. Built:
+the hook is `usePreview.js` (React), so `sourcePreview.js` stays pure and Node-testable; `previewFacts(preview,
+connections) -> {facts, notes, answer}` takes the whole panel state (`{phase, answer, previous, stillLooking, code,
+connection}`), because a failure's words depend on whether an earlier answer is on screen and §39 orders plain
+statements after the fact; `read_at` travels in the answer (B5-L1-5). Supersession: every run of the request loop
+takes a sequence number and the hook's cleanup moves it on; only the current run writes state (probed). A criteria
+change waits 400 ms (PR 37 §8) before it POSTs. Failure codes `upstream_unavailable`, `upstream_timeout`,
+`worker_timeout`, `worker_cancelled`, `preview_expired` (and a lost/5xx/429 POST or poll, or a 404 GET) are retried
+on the same 2→30 s schedule; `upstream_permission`, `asset_permission`, `owner_mismatch` read as "key not allowed";
+any other code is final and reads "Unknown: the preview failed (<code>)". "Showing the newest N." shows whenever the
+count exceeds the tiles, not only over the limit (it is the §44 paged-view gap's wording).
+
+## B5-L3-3 · The connection step's skip rule, and steps that follow live data — DECISION, flagged (L3)
+The Library step is skipped when `connectionRule` says `advanced` (exactly one known connection, including the
+pre-report guidance from saved Sources); that connection keeps its place under the Name step's Advanced, as before.
+An edit whose saved connection is no longer reported keeps its seed-time shape (`SourceFlow.jsx` `layout`), so
+choosing the one reported connection does not remove the step the operator is answering. The flow kit now normalises
+a route whose step the flow no longer has to its first step (`useFlowInstance.js`), so a worker report arriving
+mid-flow cannot loop the route. §37's unannounced sentence ("This connection isn't set up yet …") is shown for every
+unannounced connection, including a name from saved Sources while the worker has not reported its list, where "isn't
+set up yet" may be untrue; a separate sentence for that case is a wording question for D1.
+
+## B5-L3-4 · Wording choices beyond §39 — DECISION, flagged (L3)
+Labels "Dated from"/"Dated until" (and the window problem "'Dated until' must be after 'Dated from'."), media-type
+choices "Photos and videos"/"Photos only"/"Videos only", Scene Photos-step heading "Which Source?" (§37), New Source /
+Save Source / "This Source is for your Scene." (the kit's noun). `mediaHealth.js SOURCE_FAILURES` now read "Your
+photo library is unreachable / refused access / is unsupported" and "last good refresh <age> ago" (§39) everywhere
+they show (Now's pipeline, the Scene flow, cards). `sourceFilters` (Now, the Scene flow's Source status) still says
+"taken 2024"; only the new `selectionWords` says "dated" — D1 or a follow-up should make them one. The card's
+"Refreshed" line is the `reported` fact only for a Source whose status is ok; a failing Source points to Status (its
+"last good refresh" age), so no line says "last reported" for a library that last refused.
+
+## B5-A5 · After-5 course-correction — DOC UPDATED; correction bead C5 owed before verify (architect)
+Folded into Part F (§35, §37–§45, history): B5-S1-1/2/3, B5-L1-1..5, B5-M1-1..3, B5-L2-1..5, B5-L3-1..4. L2's thumbnail
+closure (064 reserved reference + per-live-preview record lifecycle; Central handler + injected ThumbnailOrigin) is
+CONFIRMED with costs stated in §38. Drift found by the architect, owed by C5 (§45): (1) `mediaHealth.js:342`
+"Central's plan puts <scene> (priority N) here." states the top Run outside the `planned` wording and escapes the
+S1 scan, which bans only "Central's plan for" (`tests/test_console_planned.py:188`) — reword and widen the scan to
+the class "Central's plan"; (2) two homes for a Source's selection words: `mediaHealth.js:131-157` `sourceFilters`
+("taken", "only favourites", omits tags) vs `sourceFlowModel.js:326` `selectionWords` ("dated", "favourites only",
+tags) — one home; (3) B5-L3-1's `ids=` tag lookup is built in batch 5, not deferred; (4) B5-L3-3's pre-report
+sentence decided in §37. Residuals (not batch 5): `media_references.expires_at` with R-clock; `create_app`'s
+injected-clock inference replaced by tests passing `media_times`.
+
+## B5-BV · Before-verify course-correction — DOC UPDATED; C5 and new docs bead D2 owed before verify (architect)
+No new spec error since B5-A5; every B5-S1/L1/M1/L2/L3 item is already folded into Part F and D1 corrected §35's
+unbound row (B5-S1-2). C5 is NOT built at 07965d6: `mediaHealth.js:342` still says "Central's plan puts …" and
+`tests/test_console_planned.py:188` still bans only "Central's plan for"; `sourceFilters` (`mediaHealth.js:131-157`)
+and the chooser string (`mediaHealth.js:235`, not `:223`, which is its comment) still say "taken";
+`central/library_routes.py` has no `ids=`; `SourceFlow.jsx:141` shows `UNANNOUNCED_CONNECTION` before the worker
+reports. §45 C5 item 4 pinned: branch at `SourceFlow.jsx:141` on `rule.reported`, the sentence beside
+`UNANNOUNCED_CONNECTION` (`sourceFlowModel.js:259`); the Name step hints (`SourceSteps.jsx:233`, `:292`) stay.
+D1 ran before C5 (its spec_wrong "order conflict"), so D2 (C5's docs follow-up) is added after C5; the verify waits
+for both. Static gates at this point: ruff clean, lint-imports 7/7 kept, check_docs passes, uv.lock unchanged.
+
+## B5-FX1 · Batch 5 fix cycle 1 — C5 and D2 BUILT, review findings folded in (implementer)
+C5 as §45 specifies, with these decisions: (1) `join.js` gains `plannedFact(runtime, intent, bound)` and
+`intentOrigin(runtime, intent)`, the one home of the `planned` fact and its origin; `whyNothingNew`'s Intended? step
+reads "<planned fact>; priority N." and `explainPrecedence` now names a child's root Run ("part of xmas's Run, Program
+…"), fixing the review's minor (the Why heading misattributed a child to the Program). RETIRED_WORDS bans "Central's
+plan" and the old Now heading "Why each frame shows what it does" (renamed "Central's Runs per frame, and why nothing
+new"). (2) One home is a NEW pure module `sourceWords.js` (imports only `timeWords.js`, so `mediaHealth.js`'s Show-side
+closure gains nothing of the Source flow): `tagWords`, `tagCountWords`, `favouritesWords`, `kindsWords`, `datedWords`.
+`sourceFilters(spec, tagPaths=null)` now orders tags · favourites · single kind · dated (selectionWords' order, was
+kinds first) and a whole local year reads "dated 2024" in BOTH homes. Tags read "N tag(s)" unless every path is given.
+(3) `ids` is a repeated query parameter (`?connection=&ids=a&ids=b`), typed `TagRef` (normalised, so an uppercase
+UUID is accepted and canonicalised; malformed → 422), 1–4, `q` with `ids` → 422 `ids_with_query`; answer is the
+`library_tags` envelope plus `absent`. `MediaApplication.library_tags_by_id` added. (4) `unannouncedWords(rule)` and
+`UNREPORTED_CONNECTIONS` beside `UNANNOUNCED_CONNECTION`.
+Review findings fixed: (a) SPEC-WRONG §38/L1: L1 dropped PR 37's `GET tags/{id}` existence check, so a deleted tag
+read ok-empty (R6). Restored in `ImmichClient._confirm_tags` for refresh and preview (400/404 → incompatible/
+tag_missing); console maps tag_missing to TAG_GONE (card, preview) and "Your photo library no longer has a tag this
+Source uses · edit its tags" (state). (b) Over-limit: OVER_LIMIT now says the worker refuses the Source and that a
+saved one selects nothing; a `source_limit` Source's state reads "Over Photo Wall's current 1,000-match limit · …",
+never "unsupported"; SOURCE_ISSUES gains source_limit and tag_missing. (c) `FetchLibraryThumbnail` priority −50 and
+the thumbnail client's budget is `metadata_seconds` (15 s), not `refresh_seconds`; the content_wiring comment and §40
+now say the slots bound HTTP waiters, not queue occupancy, and four library requests per tile (B5-L2-4 said three).
+(d) CORP on every LIBRARY_PREFIX answer via a middleware (the 401 and 422 had none). (e) owner_mismatch is no longer
+"key not allowed" in the preview; it shares OWNER_MISMATCH with the card.
+DEFERRED (minor, not trivial): TAG_GONE rendered as a `reported` fact with the tag list's observed_at; zone label on
+dated windows in the card/Review and the Narrow hints; servable check and reference write in one transaction
+(`LibraryThumbnails._reference_if_servable`); boot tag listing moved off the path before `run_queue()`.
+Docs (D2): DDD header, §8 rows 4–5, Part F status, §35, §38, §39, §40, §43, §44, §45 C5 "As built", order and
+history; runbook (pre-report sentence, over-limit, tag lookup, Failing row, Now heading, "dated" chooser); console UX
+design; module-media (`GET /tags/{id}`, over-limit wording); module-central-cache (priority); the two folded-in pass-2
+docs' "taken" examples. `requirements.md` unchanged.
+
+## B5-FC1 · Fix-cycle course-correction — DOC UPDATED; no blocker; residuals named (architect)
+Checked C5 + D2 (working tree over ddffa1d) against Part F and the owner answers (Q8a/b, Q9 = A, Q10 = yes):
+requirements.md and uv.lock untouched; ruff clean; lint-imports 7/7 kept; check_docs passes. Doc drift fixed in
+Part F (one history line): §33 Q8(b) still quoted "Photo Wall currently stops at 1,000 matches" (now the built
+refusal sentence); §40 and §44 still said three library requests per tile, and `module-media.md:105` too (four:
+version, owner, asset, thumbnail); §38 and §44 still stated the pre-priority FETCH cost (now: a queued Player fetch is
+picked first; one can wait behind a running tile's attempt, ≤ 15 s metadata budget, when both FETCH slots hold
+tiles); §39 had no preview row for `owner_mismatch` or `tag_missing`; §41 lacked `_confirm_tags`, `plannedFact`/
+`intentOrigin`, `sourceWords.js`, `readTagsById`, `unannouncedWords`, and said `sourceState` uses `selectionWords`
+(it shares the pieces). New findings, residual (not batch 5): (1) FALSE "GONE": `media/immich.py` `list_tags` skips
+a tag whose name strips to nothing (`except ValidationError: continue`), yet `library_tags_by_id` treats an `ok`
+list as every id the library holds, so such a tag reads "no longer exists" while the refresh (`_confirm_tags`)
+succeeds — §43 "None yet"; fix: the stored list keeps every listed id and only the search hides unnamed ones.
+(2) OVERCLAIM: `central/kernel/job_types.py:18` and `tests/test_library_thumbnails.py:59` say tiles "never delay" a
+Player; priority guarantees pick order only — reword to "picked after every queued fetch".
+
+## B5-FC2 · Fix cycle 2 (implementer) — B5-M1-1 SPEC WRONG, now fixed; B5-FC1 (1)(2) fixed; residuals named
+B5-FC2-1 · B5-M1-1's deferral reasoning was wrong (review finding, verified): the worker need not read
+`media_references.expires_at` at all. Central already deletes expired pins on its own clock every coordination
+pass (`coordination.py` → `media_repository.py` `expire_pins_in`) and a read lease's close deletes its transfer
+grant. FIXED: `MediaStore.collect` now treats any pin row as protecting its blob (`WHERE digest=%s`, no time).
+Rule: a `media_references` row is expired only by the process whose clock wrote it. Cost: a Central that stops
+running coordination passes leaves pins, so their blobs are never evicted (fails safe for playback, costs disk).
+G11 now has no cross-process media-time exception; DDD §42 "as built", §43 row and §44 updated. Test:
+`test_worker_clock_ahead_never_evicts_a_pinned_blob_only_central_expires_pins` (mutation: restoring the
+`expires_at>%s` comparison fails it). Central's own `open_read` comparison is a Central-replica time (R-clock).
+B5-FC2-2 · B5-FC1 (1) FIXED: `LibraryTag` path/name may be empty once stripped (`TagText` max length only);
+`list_tags` keeps every listed id; `matching_tags` hides tags with an empty path or name; the console's
+`learnPaths` no longer infers "gone" from an unfiltered search (it would now be wrong, since search hides unnamed
+tags) — only a by-id `absent` says gone; `tagWords` renders `""` as "a tag with no visible name in your library".
+The sanitizer also strips U+061C ALM, U+200B–U+200D and U+FEFF. B5-FC1 (2) FIXED: the comment and test docstring
+say pick order only; the test now asserts the DEFERRED job's priority via `_deferrer` (wiring, not declaration).
+B5-FC2-3 · RESIDUAL (R-clock): the asset layer's `job_outcomes.retry_not_before`/`updated_at` are stamped on the
+worker's clock (`central/infra/execution.py`) and compared on Central's (`central/infra/publisher.py`); thumbnails
+inherit this from the OS-image path. Named in DDD G11's limits and the R-clock scope.
+B5-FC2-4 · RESIDUAL (code): an identity-keyed `library-thumbnail` record that outlives a lost file can reach a
+terminal `not_reproducible` (`central/assets/production.py`) if the library's thumbnail bytes changed (e.g.
+regenerated after rotation, same checksum), and stays so while previews keep the record live. Fix direction: for
+kinds whose references state no expected digest, let re-production replace `produced`, with a test (record,
+delete file, change origin bytes, assert the next fetch serves). Not done in this cycle: it touches the asset
+layer's write-once invariant and needs its own design check.
+B5-FC2-5 · Minors done this cycle: Now's Runs note no longer claims per-Frame intent (and "meant to show" joins
+RETIRED_WORDS); the runbook calls the planned fact Central's Runtime projection; the tag picker announces the
+on-screen sentence (pending, unread, failed) instead of "No tags match" (`libraryTags.js` `pickerAnnouncement`);
+the Narrow step's From hint names the browser's zone; the Source card's refresh fact credits the count to the
+media worker; DDD §39's tag-gone row is `reported` (the console still renders it as a plain line — B5-FX1
+residual stands); the console UX diagram's "Scheduled:" chip line is annotated. Still deferred under B5-FX1:
+DATES_NOTE beside the dated window on the card and in Review.
+
+## B5-FC2C · Fix-cycle-2 course-correction — DOC UPDATED; no blocker; residuals listed (architect)
+Checked fix cycle 2 (working tree over 9fcc051) against Part F and the owner answers (Q8a/b, Q9 = A, Q10 = yes):
+requirements.md and uv.lock untouched; ruff clean; lint-imports 7/7 kept; check_docs passes; the touched console and
+library tests pass under Node 20 (23 passed). B5-FC2-1 confirmed: `expire_pins_in` (`central/media_repository.py:803-806`)
+deletes every expired `media_references` row, grants included, on Central's pass (`central/coordination.py:488`), and no
+worker path reads `expires_at` (`central/media_store.py:742`). Doc drift fixed (DDD one history line): §44's findings row
+still carved out `media_references.expires_at`; `module-media-worker.md` "One media clock" still stated the exception as
+live (the fix cycle's "fixed in docs" missed it); `module-media.md` tag lists and `module-media-store.md` `collect()`
+did not describe unnamed tags or pin-row protection; §43's purged-cache row said a regenerated tile recovers "when the
+preview expires" (B5-FC2-4: terminal `not_reproducible` while any live preview keeps the record); R-clock (§69) did not
+name `media_references.expires_at` across Central replicas; §45's order still listed the fixed fix-c1 findings as
+residuals. New finding, residual: `central/console/src/timeWords.js:27-31` `zonePart` does not catch the RangeError an
+engine without `timeZoneName: "longOffset"` throws (reproduced under Node 16: `occurrenceTime` throws "Value longOffset
+out of range"), so `offsetLabel`'s "local time" fallback is unreachable; fix: catch RangeError -> null, with a test.
+Minor, noted not fixed: the Source card says "the media worker accepted N in that refresh" while `sourceState`
+(`mediaHealth.js:198`) still says "N valid in the last refresh" for the same count — two wordings, two surfaces.
+
+## B5-FC3 · Batch 5 fix cycle 3 — majors FIXED; minors FIXED or deferred (implementer)
+B5-FC3-1 · FIXED (major, refusal ownership): the console's status fall-through ("Your photo library is unsupported"
+for every `incompatible`) is gone. One closed table, `central/console/src/sourceWords.js` `SOURCE_REFUSALS`, maps each
+refusal code to its owner (`LIBRARY` or `PHOTO_WALL`) and its state words (and the card sentence where it differs);
+`mediaHealth.js` `sourceState` and `SourceFlow.jsx` `sourceIssue` both read it, and a code it does not hold, or a
+failing Source with no code, reads neutrally ("Refresh failed (…)"). `spec_unsupported`, `connection_mismatch`, every
+`connection_*`/`worker_*` code and `owner_mismatch` are Photo Wall's. `tests/test_console_sources.py`
+`test_every_served_refusal_code_has_one_owner` harvests the codes raised in media/immich.py, media/worker.py and
+central/media_repository.py and fails on a code with no row (a lower bound: a code built at run time is not harvested;
+it still reads neutrally). Runbook "Failing" row corrected. Browser fixtures that used `source_unavailable` (a worker
+status, never a Source diagnostic) now use `upstream_unavailable`.
+B5-FC3-2 · FIXED (major, B5-FC2-4): `AssetKind.keyed_by_content` (False only for `library-thumbnail`) lets a
+re-production's new bytes replace `produced` (`AssetProduction.produce` no longer raises `not_reproducible` for it;
+`PgAssetRecords.record_produced` updates instead of conflicting). DB test: purge + regenerate three times, across a
+repeated preview past the first one's expiry, serves each time and later GETs publish nothing. Cost: between a
+re-fetch's install and its recorded facts a same-size tile can be served with the previous `Digest`.
+B5-FC3-3 · FIXED (minors): `source_limit` worded as Photo Wall's size limits ("at most 1,000 matches"), the 1,000-count
+sentence kept only for a preview that counted more; untagged selection is "everything on your library's timeline (not
+archived, hidden or other users' media)"; Why's empty Intended? uses `factText(plannedNothing())` and the precedence
+empty state "No Run puts a layer on this Frame now." (both added to RETIRED_WORDS); one `add_prefix_headers` table
+drives the no-store and CORP middleware AND the unhandled-500 handler (`_LibraryCorp`/`_NoStoreOperator` deleted),
+with a 500 test; DDD §38/§43 and module-central-cache.md no longer claim `facts_conflict`.
+B5-FC3-4 · DEFERRED (minor, unmeasured): tile requests' pre-slot DB/thread work (servability, reference write,
+`_open_first`, `_touch`) is not bounded by the four thumbnail slots, and the thumbnail `AssetReader._touched` grows per
+previewed id for the process's life. Needs a route-scoped bound and a touch-less reader; a non-blocking cap would 503
+a 24-tile grid, so it is a design choice, not a trivial fix.
+B5-FC3-A1 · OPEN (minor, architect check of fix cycle 3): `sourceWords.js` `refusalIssue` falls back to the raw code
+(`codeText`) when a row has no `issue`, not to the row's `state`, so a failing Source's card shows Status "Your photo
+library is unreachable · …" beside Issue "upstream unavailable", and "connection mismatch" / "worker exited" for Photo
+Wall's rows (probe: node import of sourceWords.js). DDD §39 says the card sentence is given only "where it differs".
+Fix: `issue ?? state`; keep the code-in-words fallback for codes outside the table; one test per owner. Also
+`codeText` duplicates `mediaHealth.js` `codeWords` (rule of two: one home in `sourceWords.js`, imported by mediaHealth).
+B5-FC3-A2 · OPEN (doc, architect check of fix cycle 3): docs/central-system-architecture.md:394-399 still says every
+produced fact is write-once and any differing re-production is `not_reproducible`; `AssetKind.keyed_by_content` makes
+`library-thumbnail` the one exception. Needs one clause there (documentation bead).
+B5-FC3-A3 · NOTED (pre-existing, not fix-cycle drift): `media_repository.py:256` and `:267` reset a Source to
+`status='unavailable', diagnostics='[]'` on reactivation and on an expired-lease fence; with any completed revision,
+`sourceState` now reads "Refresh failed (unavailable)" (before: "Your photo library is unreachable", which blamed the
+library for Central's own reset). Neutral, but "failed" overstates a reset awaiting its refresh; candidate for its own
+code or an "Awaiting refresh" branch.
+
+## PR41-FR · Final fix round for the whole PR (implementer)
+
+PR41-FR-A1 · APPLIED (B5-FC3-A1): `refusalIssue` returns the row's `issue ?? state`, the code in words only for a code
+outside `SOURCE_REFUSALS`; `codeText` deleted, one helper `facts.js` `words` (`mediaHealth.js` `codeWords` is it).
+Test: every row's issue equals `issue || state`, one per owner, unknown code in words; mutation (`issue ?? words(code)`)
+fails it.
+PR41-FR-A2 · APPLIED (B5-FC3-A2): central-system-architecture.md §three facts names the one `keyed_by_content=False`
+kind (`library-thumbnail`), whose facts a later production replaces.
+PR41-FR-1 · FIXED (major, owner class): codes are single-owner where raised. media/immich.py raises `item_over_limits`
+for `max_dimension`, `max_pixels`, `max_video_seconds` (malformed values stay `metadata_invalid`) and `time_budget` for
+`_Budget.remaining` and the `asyncio.timeout(refresh_seconds)` of refresh, preview and tag listing (one request's own
+deadline stays `upstream_timeout`). Both are Photo Wall rows; `metadata_pending_or_invalid` is Photo Wall's neutral
+"No item this Source found could be used · see each item's reason"; `unsupported_version` moved to Photo Wall ("This
+Photo Wall release doesn't support your photo library's version · check the supported versions"). The worker's
+`_PERMANENT` gained `item_over_limits`. New test `test_a_code_raised_for_photo_walls_own_limits_is_never_the_librarys`
+(AST harvest of media/immich.py: codes raised under a `limits`/`limit` comparison, in `_Budget.remaining`, or in a
+TimeoutError handler of `asyncio.timeout(self.limits.refresh_seconds)` must not be library-owned; `_text`'s schema
+length bound is excluded by name). Mutation (`metadata_invalid` for the video limit) fails it.
+PR41-FR-2 · FIXED (major, preview table): `sourcePreview.js` reads `SOURCE_REFUSALS` (rows carry `preview: "retry" |
+"key"`); UNREACHABLE, KEY_REFUSED and FAILURE_NOTES deleted. The phase "unreachable" is now "retrying": "can't reach
+your photo library" only for library-owned codes; `preview_expired` (new Photo Wall row), `worker_timeout`,
+`worker_cancelled` retry in their own words. Any other row fails with "the preview failed" + the row's card sentence.
+DDD §39 preview rows updated. Browser test: a stopped worker's preview never says "can't reach your photo library".
+PR41-FR-3 · FIXED (major): `AssetProduction.produce` raises TerminalFailure(`thumbnail_unknown`) for a missing record of
+a kind not `keyed_by_content` (one shared constant `kernel.ports.THUMBNAIL_UNKNOWN` for route, origin and production).
+DB test `test_a_fetch_for_a_retired_record_never_blocks_the_next_preview`; mutation (transient again) fails it.
+Decision flagged: the condition reuses `keyed_by_content` as the finding specified; the real property is "records
+retire with their selector", which today coincides with it. A future non-content-keyed kind whose record is not
+liveness-retired would need its own property.
+PR41-FR-4 · FIXED (major, R10): the calibration preview answer serves `lease_seconds` (registry
+`CALIBRATION_LEASE_SECONDS`) beside `expires_at`; `useCalibration.js` counts it down on `performance.now()` from the
+answer's arrival (can read up to one request's latency long; the end stays the poll's). Scan test
+`test_the_browser_clock_is_never_compared_with_a_served_time` bans Date.now() outside useSnapshot.js and authoring.js.
+Browser countdown pins 29/19 -> 30/20.
+PR41-FR-5 · FIXED (major): `sourceWords.js` `refreshFact` is the one home of a Source's refresh; `sourceState`'s ok label
+is that fact (+ qualifier, filters), and the card drops its separate Refreshed line for an ok Source (overdue/empty keep
+it). `workerState`'s ok line is a `reported` fact ("Media worker last reported 20 s ago · …"). Runbook rows updated.
+PR41-FR-6 · FIXED (major): `health.js` `livenessFact` (Player app layer, `reported`) is the one builder for the Wall's
+liveness and the Player page's Player app row: "Player app last reported 4 s ago", "Player app silent · last reported
+2 h ago", tile "Player app silent". "Player silent", "last heard", "Last heard" added to RETIRED_WORDS. DDD §55 J1,
+runbook liveness rows updated.
+PR41-FR-7 · PARTLY FIXED (major, held request): `sendOutcome.js` holds UNKNOWN_MESSAGE, CHANGED_MESSAGE, RESEND_LABEL
+("Send the same request again", now the reboot, stage and publish confirm label; the reboot opener reads "Send the
+reboot request again"), `answerUnknown(result, centralRefusal)` (the one 5xx rule, the verb passing which served codes
+are its own refusals; equipment, reboot and release classifiers use it) and `useHeldRequests` (publish holds use it
+directly, `useHeldStage` is built on it). RESIDUAL: Reboot's held request still lives in component state
+(PlayerCommands.jsx, UpdateWallPage.jsx) plus the module-level `rebootsInFlight` set; moving it onto `useHeldRequests`
+touches two pages' dialog flows and was not cheap in this round. Needs its own bead.
+PR41-FR-8 · FIXED (major, display read): `DISPLAY_OUTPUTS_SQL` reads only the newest 4 display_host producers of the
+current admission (`_MAX_PRODUCERS`, by admitted_at), picks each Output's winner in SQL (DISTINCT ON, LIMIT 64) and
+fetches `request` only for the winners. DB test with 12 flooding producers asserts the plan reads at most
+4×(2×64+2)+64 exchange rows; mutation (no producer LIMIT) reads 1600 and fails it. Semantics change: a Display Host
+restarted more than 4 times in one boot no longer contributes its oldest producers' Outputs (DDD §16 lock-cost text
+updated). Chosen over newest-producer-only to keep the existing test's "older producer's other Output still served".
+PR41-FR-9 · FIXED (minors): timeline qualifier said for every selection (`TIMELINE_ONLY`, last part); the regenerate
+test's "GETs publish nothing" now drops the queued job first and asserts 0 (mutation: publish on every read fails it);
+the "previous Digest" cost restated in module-central-cache.md and DDD §38 (the reader checks size only; the route sends
+no Digest); `add_prefix_headers` registers the unhandled-500 handler with its table (bare-app test), doc string fixed.
+PR41-FR-10 · DEFERRED (minor): Player page "enrolled" twice (`playerStanding` from `registered_at` beside
+`enrolledFact` from `last_seen`); the finding's fix text was truncated in the brief, so the wording choice is open.
+
+## HC · Worker healthcheck course-correction (architect, 2026-10-03)
+HC-1 · FIXED, failure class: FIRST-PARTY COMPOSITION HIDDEN IN YAML. compose.yaml's worker healthcheck was an inline
+`python -c` snippet that built `MediaRepository(Database(...), SystemClock())`. G11 made `times=` a required keyword, and
+nothing reached the snippet (not ruff, not lint-imports, not a test), so it failed only at `docker compose up --wait`
+(TypeError). It also compared the probe's `time.time()` with a database-clock `worker_seen`, an R10/G11 violation no
+clock scan could see. Fix: `python -m media.healthcheck`, composed by `media.worker.build_repository` (the same root as
+the worker entry), aged by `MediaRepository.worker_age()` on `times.now_in(conn)`; media/healthcheck.py joins the G11
+module scan. GUARD: tests/test_compose_healthchecks.py refuses a compose healthcheck whose inline snippet imports a
+first-party package. Guard limits (residual HC-3): it scans `test:` lines line-by-line, so a block-style list
+(`test:` then `- python` items) or a CMD-SHELL string using `python3 -c` passes unchecked; it covers compose.yaml and
+tests/integration/*.yml only. The same class exists in CI YAML: .github/workflows/base-image.yml:482, :490, :907
+import scripts.*/contracts.* inside `python3 -c` (caught only when that workflow runs). Stronger form: parse the YAML
+(PyYAML is not a dependency today), reject any `-c` payload naming a first-party package in compose AND workflow files,
+and require every `-m <module>` to resolve (importlib.util.find_spec).
+HC-2 · STOP (spec contradiction, needs an implementer cycle): media/task_queue.py sets WORKER_CHECK_IN_SECONDS=30 and
+WORKER_FRESH_SECONDS=35 claiming "the worker checks in at least once per refresh tick". False when idle:
+media/worker.py:247-250 `refresh_once` returns before any `worker_status` when no Source is due, and `list_tags` never
+checks in; the guaranteed cadence is boot plus maintenance every 5 min (MAINTENANCE_CRON), which
+central/console/src/mediaHealth.js:27 already states as WORKER_CHECK_IN_SECONDS=300, pinned by
+tests/test_media_queue.py:204. Same-name constants now disagree (30 vs 300). A busy worker also exceeds 35 s while one
+refresh runs (WorkerLimits.refresh_seconds=65; check-in after publish). Predicted effect: an idle stack's worker turns
+unhealthy about 65 s after boot (35 s + 3 retries x 10 s) until the next maintenance pass, so a second
+`docker compose up -d --wait` (runbook launch and Recovery) fails. Spec (runbook "remains healthy while idle"):
+derive the worker cadence from MAINTENANCE_CRON in one Python constant, set the healthcheck window to the console's
+worker-quiet window (2 x 300 + 60 = 660 s), leave REFRESH_CRON its own literal, and pin the console's
+WORKER_QUIET_AFTER formula to the Python window. Cost: a hung worker reads unhealthy up to 11 min late (compose only
+consumes health for `--wait`; nothing restarts on unhealthy). Alternative: a check-in on every refresh tick (idle path
+included), a worker behaviour change that adds one media-locked write per 30 s, with a window of at least
+65 + 30 + slack s.
+HC-3 · RESIDUAL: guard limits in HC-1. Import cost is NOT a residual: `import media.healthcheck` takes about 0.29 s
+warm vs 0.25 s for central.db + central.media_repository + media.task_queue alone (measured locally), because
+task_queue already pulls procrastinate.
+HC-2 · FIXED (implementer, 2026-10-03): media/task_queue.py now has one cadence, `WORKER_CHECK_IN_SECONDS =
+MAINTENANCE_MINUTES * 60` (MAINTENANCE_CRON is built from MAINTENANCE_MINUTES), and `WORKER_FRESH_SECONDS =
+2 * WORKER_CHECK_IN_SECONDS + 60` = 660 s; REFRESH_CRON is its own literal again. media.healthcheck compares with `<=`
+like the console's `since <= WORKER_QUIET_AFTER`. tests/test_media_queue.py
+`test_the_worker_healthcheck_window_is_the_console_worker_quiet_window` evaluates the console's
+`WORKER_QUIET_AFTER = a * WORKER_CHECK_IN_SECONDS + b` against WORKER_FRESH_SECONDS (mutation: +59 fails it). Cost stated
+in docs/runbook.md: a hung worker can read healthy for up to 11 minutes.
+HC-3 · PARTLY FIXED (implementer, 2026-10-03): tests/test_compose_healthchecks.py now scans healthchecks structurally
+(flow list, block list, string/CMD-SHELL, block scalar, `{test: ...}` flow mapping; no PyYAML), follows CMD-SHELL and
+`sh -c` into shell words, refuses `python*/-c` payloads importing first-party code, and requires every `python -m`
+module to resolve (importlib.util.find_spec); parametrised probes cover each form. RESIDUAL: not extended to
+.github/workflows/*.yml because existing CI steps violate it: base-image.yml:482 (`python3 -c` importing
+scripts.module_closure), :490 (`.venv/bin/python -c` importing contracts.player_payload and scripts.*), :907 (`python3 -c`
+importing contracts.release). Moving those to `python -m` entry points (or a scripts/ CLI) and then scanning workflow
+`run:` blocks is a separate bead.
+HC-2 · VERIFIED AGAINST SPEC (architect, 2026-10-03): diff matches the HC-2 spec point by point (one cadence from
+MAINTENANCE_MINUTES; window 2 x 300 + 60 = 660; REFRESH_CRON own literal; console formula pinned). `<=` in
+media.healthcheck is an implementer choice beyond spec, accepted (matches the console's `since <= WORKER_QUIET_AFTER`).
+Cadence re-checked in code: boot check-in is `set_recipe` (central/media_repository.py:815) via `_register_recipe`
+before the boot `maintain()` (media/worker.py:463-464); every preparation job (worker.py:347), preview (:409) and
+due refresh (:245) also checks in, so a preparation backlog delaying maintenance behind MEDIA_STORAGE_LOCK still checks in.
+docs/module-media-worker.md one-media-clock paragraph now states the window and cadence and links the runbook.
+HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` scan after moving base-image.yml
+:482/:490/:907 to entry points). Not blocking this PR.

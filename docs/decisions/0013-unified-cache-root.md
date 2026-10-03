@@ -10,6 +10,23 @@ incomplete miss-tolerance, a missed activation gate, an inverted withdraw sweep,
 an under-booked telemetry subsystem — see [How the design got here](#how-the-design-got-here).
 Nothing else ships beside it.
 
+## Amended: a fourth subdirectory, `previews/` (2026-10-02)
+
+The operator console's Source preview (console batch 5,
+[console design §38](../operator-console-ddd.md#38-pr-37-folded-in-what-changes)) adds a
+fourth domain subdirectory, `previews/` (`PREVIEWS_SUBDIR`), holding the asset kind
+`library-thumbnail` (`AssetKind.LIBRARY_THUMBNAIL`): re-encoded thumbnails of the
+operator's photo library, whose source of truth is that library. It follows this
+decision's rules unchanged: an internal constant under the one cache root (rule 2), a
+miss-tolerant read that fetches and 503s (rule 1), and its own record lifecycle with a
+filesystem sweep (rule 3). The Dockerfile creates it in both stages, the entrypoint's
+`install -d` loop includes it, and the media worker creates it at boot on a volume made
+before it existed. Because a thumbnail is keyed by its original, not its own bytes, its
+record lives only while a live preview selects it, and migration 064 gives its asset
+reference one reserved no-address shape; the [central cache](../module-central-cache.md#library-thumbnails-previews)
+owns that description. Statements below that list three subdirectories are the 2026-09
+record; this section is the current index.
+
 **What you are being asked:** approve treating Central's on-disk assets as **one
 cache** the app owns and Kubernetes places, where **every file is disposable** and
 every read regenerates on a miss. This unbreaks netboot (broken now) as Slice 1,

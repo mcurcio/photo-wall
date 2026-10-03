@@ -10,12 +10,29 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
-from central.fleet.node_boot import NodeBootService, NodeDeployment
+from central.fleet.node_boot import NodeBootService, NodeDeployment, parse_node_deployment
 from central.fleet.node_sessions import NodeControlError
 from central.kernel.assets import OriginLocator
 from central.origins.github import GitHubReleaseOrigin
 from contracts.node_protocol import digest, identifier, token
 from contracts.node_release import parse_node_release
+
+
+def _deployment_row(row) -> dict:
+    deployment = parse_node_deployment(bytes(row["document"]))
+    app = deployment.app_environment
+    return {"deployment_id": str(row["deployment_id"]), "published_at": row["published_at"],
+            "base_tag": deployment.base.tag, "app_environment_sha256": app.environment_sha256 if app else None}
+
+
+def _release_row(row) -> dict:
+    release = parse_node_release(bytes(row["document"]))
+    app = release.app_environment
+    # `download_bytes`: what a publish downloads and hash-checks, every asset, app or not.
+    return {"manifest_sha256": row["manifest_sha256"], "tag": row["tag"], "revision": row["revision"],
+            "discovered_at": row["discovered_at"], "verified_at": row["verified_at"],
+            "base_tag": release.base.tag, "app_environment_sha256": app.environment_sha256 if app else None,
+            "download_bytes": sum(asset.size_bytes for asset in release.artifacts)}
 
 
 class NodeReleaseCatalog:
@@ -24,12 +41,38 @@ class NodeReleaseCatalog:
         self.origin = origin or GitHubReleaseOrigin.from_env()
 
     def list(self):
+        """The release read (console DDD Part E G1, R18): the boot selection, the deployments and
+        the release catalog under ONE read-only snapshot, so a selection's revision, the
+        deployments it can name and the releases they came from agree. No lock is taken.
+
+        `selection` is always present: revision 0 with no policy row, the value Central's own
+        compare-and-set compares against then (`NodeBootService.select`). `deployments` are the
+        50 newest by `published_at` plus the selected one, wherever it falls. Every base and app
+        is read from the stored canonical documents through their one parser."""
         self.sessions.require_enabled()
         with self.sessions.db.transaction() as conn:
-            return {"releases": [dict(row) for row in conn.execute(
-                "SELECT c.manifest_sha256,c.tag,c.revision,c.discovered_at,v.verified_at "
+            # Must precede the first data query (operator_snapshot.py does the same).
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            read_at = self.sessions.clock.utc()
+            policy = conn.execute("SELECT revision,deployment_id,changed_at FROM node_boot_policy "
+                                  "WHERE singleton").fetchone()
+            selected = policy["deployment_id"] if policy else None
+            deployments = conn.execute(
+                "SELECT deployment_id,document,published_at FROM node_deployments WHERE deployment_id IN ("
+                "SELECT deployment_id FROM node_deployments ORDER BY published_at DESC, deployment_id LIMIT 50) "
+                "OR deployment_id=%s ORDER BY published_at DESC, deployment_id", (selected,)).fetchall()
+            releases = conn.execute(
+                "SELECT c.manifest_sha256,c.tag,c.revision,c.document,c.discovered_at,v.verified_at "
                 "FROM node_release_catalog c LEFT JOIN node_release_verifications v USING(manifest_sha256) "
-                "ORDER BY c.discovered_at DESC LIMIT 100").fetchall()]}
+                "ORDER BY c.discovered_at DESC LIMIT 100").fetchall()
+        return {
+            "read_at": read_at,
+            "selection": {"revision": policy["revision"] if policy else 0,
+                          "deployment_id": str(selected) if selected else None,
+                          "changed_at": policy["changed_at"] if policy else None},
+            "deployments": [_deployment_row(row) for row in deployments],
+            "releases": [_release_row(row) for row in releases],
+        }
 
     def _load(self, manifest_sha256):
         digest(manifest_sha256)

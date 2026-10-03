@@ -10,6 +10,7 @@ from pydantic import Field, JsonValue, model_validator
 from contracts.enrollment import OutputReport
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
 from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model
+from contracts.node_commands import Owner
 
 
 class PlayerInventory(Model):
@@ -62,6 +63,23 @@ class PlayerReports(Model):
 
     read_at: Instant
     reports: Mapping[Identifier, Instant]
+
+
+class OutputInterruption(Model):
+    """An unresolved Output loss that fences a Frame's CURRENT Binding (console DDD §16).
+
+    Served only when the loss matches the Player's current authority epoch and the Frame's
+    current Binding (same Frame, Player, Output and binding generation): the exact key Runtime
+    fences on. `cause_layer` is the owner of the node producer that reported the loss;
+    `interrupted_at` is when Central recorded it (Central's clock). Central records only the
+    losses it could link, so the absence of a row says nothing about the Output."""
+
+    frame_id: Identifier
+    player_id: Identifier
+    output_id: Identifier
+    binding_generation: int = Field(ge=0, strict=True)
+    cause_layer: Owner
+    interrupted_at: Instant
 
 
 class InstallationInventory(Model):

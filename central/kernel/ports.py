@@ -13,15 +13,11 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeAlias
+from typing import Final, Protocol, TypeAlias, get_args
 
 from central.kernel.assets import Asset, AssetKey, AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import (
     AssetJob,
-    FetchOsImage,
-    FetchPackage,
-    FetchPlayerPayload,
-    FetchSealedEnvironment,
 )
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version, require_reason, require_sha256
@@ -52,8 +48,7 @@ class Candidates:
     def __post_init__(self) -> None:
         jobs = self.jobs
         if (not isinstance(jobs, tuple) or not jobs
-                or not all(isinstance(job, (FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment))
-                           for job in jobs)):
+                or not all(isinstance(job, get_args(AssetJob)) for job in jobs)):
             raise ValueError("invalid_candidates")
         if len(set(jobs)) != len(jobs):
             raise ValueError("duplicate_candidate")
@@ -92,7 +87,8 @@ class AssetRecords(Protocol):
         ...
 
     def record_produced(self, tx: Transaction, key: AssetKey, facts: AssetReady) -> None:
-        """Write-once: equal facts -> no-op; different -> ProducedFactsConflict; absent -> no-op."""
+        """Write-once for a content-keyed kind: equal facts -> no-op; different ->
+        ProducedFactsConflict. A kind not `keyed_by_content` takes the new facts. Absent -> no-op."""
         ...
 
     def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:
@@ -227,3 +223,20 @@ class ReleaseOrigin(Protocol):
     async def list_releases(self, *, etag: str | None) -> ReleaseListing: ...
 
     async def download(self, locator: OriginLocator, into: Path, *, max_bytes: int) -> None: ...
+
+
+# The one refusal for a thumbnail no live preview selects: the route's, the origin's and the
+# production's (a retired record), so a later preview or GET asks again.
+THUMBNAIL_UNKNOWN: Final = "thumbnail_unknown"
+
+
+class ThumbnailOrigin(Protocol):
+    """Writes one library thumbnail, implemented by the media worker, which alone holds the
+    library's address and key (R22); Central names the item only by its one-way asset id.
+
+    `into` follows `ReleaseOrigin.download`'s contract: it must not exist, is created `O_EXCL`
+    mode 0600, holds only Photo Wall's own re-encoding (no metadata) and is removed on any
+    failure. Raises `OriginUnavailable` (retry later) or `TerminalFailure` (for example the id
+    is no longer servable, or the library refuses the item)."""
+
+    async def thumbnail(self, asset_id: str, into: Path) -> None: ...

@@ -9,7 +9,7 @@
 # not own). See docs/module-media-worker.md.
 #
 # ONLY when the container is started as root does this entrypoint materialize
-# the single cache root's domain subdirs (media/ apps/ os-images/) owned by a
+# the single cache root's domain subdirs (media/ apps/ os-images/ previews/) owned by a
 # configurable uid/gid, then drop to that uid via gosu before exec'ing the real
 # command. A platform expresses the desired identity with
 # PHOTO_WALL_PUID/PHOTO_WALL_PGID and starts the container as root (a
@@ -52,7 +52,7 @@ if [ "$(id -u)" = "0" ]; then
     # handed to us bare and root-owned; this is the step that makes it writable
     # for PUID before the privilege drop.
     CACHE_ROOT="${PHOTO_WALL_CACHE_ROOT:-/var/cache/photo-wall}"
-    for sub in media apps os-images; do
+    for sub in media apps os-images previews; do
         install -d -o "$PUID" -g "$PGID" -m 0700 "$CACHE_ROOT/$sub"
     done
     exec gosu "$PUID:$PGID" "$@"

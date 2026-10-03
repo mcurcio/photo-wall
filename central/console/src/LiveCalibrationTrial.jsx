@@ -3,13 +3,13 @@ import { apiWrite } from "./apiWrite.js";
 import { useMutate } from "./useMutate.js";
 
 const refusal = {
-  trial_display_unavailable: "The base display service is unavailable. Check that the Player is connected.",
-  trial_current_output_required: "Waiting for current display evidence. Retry when the Output is connected.",
-  trial_admitted_surface_required: "The current app surface is not admitted yet. Wait for the diagnostic handoff.",
-  trial_latest_not_presented: "The latest edit has not been presented. Save remains unavailable.",
-  trial_sequence_conflict: "Another request changed this Trial. Refresh its status before editing again.",
-  trial_already_active: "A Trial is already active for this Frame. Wait for it to end or expire.",
-  trial_frame_unbound: "Bind this Frame to an Output before beginning a Trial.",
+  trial_display_unavailable: "Central holds no current Display Host session for this Player. Check that the Player is running.",
+  trial_current_output_required: "Central has no Display Host report for this Output in the last 10 seconds, or no current app process link for this Frame. Retry when the Output is connected and the Player app is running.",
+  trial_admitted_surface_required: "Display Host has not admitted and acknowledged the current app surface yet. Wait, then retry.",
+  trial_latest_not_presented: "Display Host has not acknowledged the latest edit. Save calibration stays unavailable.",
+  trial_sequence_conflict: "Another request changed this live calibration. Refresh its status before editing again.",
+  trial_already_active: "Live calibration is already running for this Frame. Wait for it to stop or expire.",
+  trial_frame_unbound: "Bind this Frame to an Output before starting live calibration.",
 };
 const geometryKey = (value) => JSON.stringify([value.corners, value.crop, value.rotation, value.gain]);
 
@@ -27,7 +27,12 @@ export function useCalibrationCapability(frameId, generation) {
   return [capability, () => setRetry((value) => value + 1)];
 }
 
-/** The existing editor owns the draft. This component owns only a leased Trial. */
+/**
+ * Live calibration with Display Host acknowledgment (`native_trial`; console DDD §20). The
+ * existing editor owns the draft; this component owns only the leased session Central calls a
+ * calibration trial. Save calibration is enabled only once Display Host acknowledges that the
+ * latest edit was presented to the compositor (R7), which is not proof of what the Panel shows.
+ */
 export function LiveCalibrationTrial({ frameId, trying, calibrated }) {
   const [row, setRow] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -61,7 +66,7 @@ export function LiveCalibrationTrial({ frameId, trying, calibrated }) {
       setRow(result.data);
       setError(null);
     } catch {
-      if (alive.current) setError("Display connection unavailable. The local Trial lease still expires.");
+      if (alive.current) setError("Central did not answer. Live calibration still ends when its lease expires.");
     } finally {
       gate.current = false;
       if (alive.current) setBusy(false);
@@ -89,18 +94,18 @@ export function LiveCalibrationTrial({ frameId, trying, calibrated }) {
   }, [active, run]);
   const presented = active && row.presented_sequence === row.sequence &&
     row.presented_sha256 === row.candidate_sha256 && !changed;
-  return <section className="facet__section facet__section--lease" role="group" aria-label="Live calibration trial">
-    <h4 className="facet__subtitle">Live calibration trial</h4>
-    <p className="facet__note">Edits appear on the display during a short operational Trial. Save is available only after the latest edit has a compositor presentation receipt. The provisional limits are 5 seconds without an edit and 30 seconds total; an expired Trial must be started again.</p>
+  return <section className="facet__section facet__section--lease" role="group" aria-label="Live calibration">
+    <h4 className="facet__subtitle">Live calibration</h4>
+    <p className="facet__note">Central sends each edit to Display Host while live calibration runs. Save calibration is available only after Display Host acknowledges that the latest edit was presented to the compositor. The provisional limits are 5 seconds without an edit and 30 seconds total; once it expires, start again.</p>
     {!calibrated && <p className="facet__note">First calibration uses a synthetic canvas. Its neutral starting transform is provisional until you Save; it does not enable Scene playback.</p>}
     <div className="calib__actions">
-      {!active && <button type="button" className="calib__action" disabled={busy} onClick={() => run("begin")}>{row ? "Start another Trial" : "Begin Trial"}</button>}
+      {!active && <button type="button" className="calib__action" disabled={busy} onClick={() => run("begin")}>{row ? "Start again" : "Start live calibration"}</button>}
       {active && <>
         <button type="button" className="calib__action" disabled={busy || !presented} onClick={() => run("save")}>Save calibration</button>
-        <button type="button" className="calib__action" disabled={busy} onClick={() => run("end")}>End Trial</button>
+        <button type="button" className="calib__action" disabled={busy} onClick={() => run("end")}>Stop live calibration</button>
       </>}
     </div>
-    <p role="status">{active ? (changed ? "Draft edit pending." : presented ? `Edit ${row.sequence} presented on the display.` : `Waiting for presentation of edit ${row.sequence}.`) : row ? `Trial ${row.state}. Your draft is retained.` : "Begin when the bound display is connected and admitted."}</p>
+    <p role="status">{active ? (changed ? "Draft edit pending." : presented ? `Edit ${row.sequence} presented to the compositor by Display Host · not proof of what the Panel shows` : `Waiting for Display Host to acknowledge edit ${row.sequence}.`) : row ? `Live calibration ${row.state}; your draft is kept` : "Start when Display Host reports the bound Output connected and the app surface admitted."}</p>
     {error && <p role="alert">{error} <button type="button" disabled={busy} onClick={() => { setError(null); if (active) run("status"); }}>Retry status</button></p>}
   </section>;
 }

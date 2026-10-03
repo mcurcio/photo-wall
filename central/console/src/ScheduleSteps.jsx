@@ -1,13 +1,13 @@
 import React from "react";
 
-import { draftId, idFromName, MAX_WINDOWS, planWindows, timeZoneName } from "./authoring.js";
+import { draftId, idFromName, MAX_WINDOWS, planWindows, toEpochSeconds } from "./authoring.js";
 import { Field, IdField, idNeeded, NameField, PriorityField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { OfferedScene } from "./flow/InstanceNotice.jsx";
 import { effectiveProgramTimes, separateWindows } from "./scheduleFlowModel.js";
 import { ScenePicker } from "./ScenePicker.jsx";
-import { windowLabel } from "./showState.js";
+import { dateTime, occurrenceTime, windowLabel, zoneNote } from "./timeWords.js";
 
 /**
  * The Schedule flow's step views (flow design §7 J6): views over the draft that
@@ -53,24 +53,18 @@ function windowCount(value) {
   return Number.isInteger(count) && count >= 1 && count <= MAX_WINDOWS ? count : null;
 }
 
-/** A `datetime-local` value in words, in the browser's time zone. */
+/** A `datetime-local` value in words, in the browser's time zone: "Tue 2 Mar 2027 18:00 GMT". */
 function localWords(local) {
-  return new Date(local).toLocaleString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return dateTime(toEpochSeconds(local), { year: true });
 }
 
 /**
- * "Times in Europe/London": the zone every entered and shown time uses (slice 3 §6).
+ * "Times in Europe/London (this browser's time zone)": the zone every entered and shown time
+ * uses (slice 3 §6; console DDD §35).
  * If the browser and the wall are in different zones, this is the only warning.
  */
 export function TimeZoneNote() {
-  return <p className="program-scheduling__zone">{`Times in ${timeZoneName()}`}</p>;
+  return <p className="program-scheduling__zone">{zoneNote()}</p>;
 }
 
 /**
@@ -327,13 +321,7 @@ export function ReviewStep({ value, patch, problems, advanced, onChange, editabl
 function repeatedOccurrenceCopy(value) {
   if (!value.expected) return [];
   const times = effectiveProgramTimes(value);
-  const format = (seconds) => {
-    const date = new Date(seconds * 1000);
-    const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(date);
-    const offset = new Intl.DateTimeFormat(undefined, { timeZoneName: "longOffset" })
-      .formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? "local time";
-    return `${clock} (${offset})`;
-  };
+  const format = occurrenceTime;
   return [
     times.retainedStart ? `Saved start occurrence: ${format(value.expected.starts_at)}` : null,
     times.retainedEnd ? `Saved end occurrence: ${format(value.expected.ends_at)}` : null,

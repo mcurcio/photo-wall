@@ -53,7 +53,7 @@ const UNKNOWN_ACTIVATION =
   "Changing the form makes this a new activation.";
 
 /**
- * Show now (flow design §7 J7), on the Now showing page: Scene → Review, then the
+ * Show now (flow design §7 J7), on the Now page: Scene → Review, then the
  * activation (POST `/v1/operator/activations`), whose synchronous Admission is said at
  * the moment, from served facts only (slice 3 §11).
  *
@@ -230,7 +230,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
       draft={draft}
       keys={SHOW_KEYS}
       noun="activation"
-      sectionLabel="Now showing"
+      sectionLabel="Now"
       confirm={confirm}
       problems={problems}
       said={

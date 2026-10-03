@@ -2,8 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 
 import { isBound } from "./health.js";
 import { boundOutput } from "./join.js";
-import { derive } from "./capability.js";
-import { GatedArea } from "./GatedArea.jsx";
 import { LiveCalibrationTrial, useCalibrationCapability } from "./LiveCalibrationTrial.jsx";
 import { useCalibration } from "./useCalibration.js";
 import { useDraft } from "./useDraft.js";
@@ -13,20 +11,20 @@ import { useMutate } from "./useMutate.js";
 import { formatRoute, sceneCreationRoute } from "./routes.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 
-// Operator-facing lease/conflict copy, verbatim from design §4b / J2 (the
-// authoritative decision table). The countdown banner is display; the panel's
-// actual expiry is server-authoritative and surfaced by the overtake poll.
-const EXPIRED_MESSAGE = "Panel is back on committed. Re-preview to keep trying.";
+// Operator-facing lease/conflict copy for live calibration without acknowledgment (console
+// DDD §20). The countdown is Central's lease; its actual end is server-authoritative and
+// surfaced by the overtake poll.
+const EXPIRED_MESSAGE = "Live calibration expired; your draft is kept";
 const OVERTAKEN_MESSAGE =
-  "Committed elsewhere / your preview was superseded — re-review.";
+  "Someone saved a calibration for this Frame meanwhile; review it, then start again";
 const CONFLICT_MESSAGES = {
   // Stale expected_revision → calibration_revision_conflict (design §4b).
   revision: "Another session changed this frame's calibration — reload and re-review.",
   // Stale expected_generation → binding_generation_conflict (design §4b).
   generation:
-    "This Frame's binding changed — its display is no longer under your control; reload.",
-  // preview/commit refused because the frame is no longer bound.
-  unbound: "This Frame is no longer bound to a display — bind it before calibrating.",
+    "This Frame's binding changed — its Output is no longer under your control; reload.",
+  // show/save refused because the frame is no longer bound.
+  unbound: "This Frame is no longer bound to an Output — bind it before calibrating.",
   // A non-token failure (validation/network); never mapped to a token conflict,
   // and deliberately worded so it cannot be mistaken for a specific conflict.
   error: "Calibration request failed — reload and try again.",
@@ -75,25 +73,21 @@ function matchesCommitted(trying, calibration) {
 }
 
 /**
- * Commissioning facet — read-only readback (Bead 4) + calibration draft editing
- * (Bead 7, design §J2/§4a/§6b).
- *
- * The Display↔Frame hardware relationship. The upper sections show committed
- * calibration, editable Frame profile facts, the Display as detected
- * at the last Player start, and bound equipment; they gate unavailable hardware areas; see the section comments
- * below and design §7.
+ * Calibration facet (console DDD §19): the committed
+ * calibration, the draft editor, live calibration (§20) and the Frame profile. The bound
+ * Output and the Panel at enrollment live on the Binding facet, the Frame's other side.
  *
  * The lower **Adjust calibration** section is Plane B (design §4a): the operator
  * directly manipulates corner/crop handles and the SDR gain, all writing to a
  * component-local {@link useDraft} draft that a snapshot refresh NEVER
  * overwrites. Every geometry edit is validated by the SAME convex test + `1e-6`
  * epsilon + winding as the server (convex.js): a folded/thin quad or empty crop
- * snaps the handle back with an inline message and sends NO request. Preview and
- * commit (network writes) are Bead 8; this bead performs no writes.
+ * snaps the handle back with an inline message and sends NO request. Live calibration
+ * (the network writes) is below the editor, one section per path Central serves (§20).
  *
  * @param {{snapshot: object|null, frameId: string}} props
  */
-export function Commissioning({ snapshot, frameId }) {
+export function CalibrationFacet({ snapshot, frameId }) {
   const frames = snapshot?.inventory?.frames ?? [];
   const frame = frames.find((candidate) => candidate.id === frameId);
   const calibration = frame?.calibration ?? {};
@@ -131,8 +125,8 @@ export function Commissioning({ snapshot, frameId }) {
 
   if (!frame) {
     return (
-      <div className="facet facet--commissioning">
-        <h3 className="facet__title">Commissioning</h3>
+      <div className="facet facet--calibration">
+        <h3 className="facet__title">Calibration</h3>
         <p className="facet__empty">This frame is no longer in the inventory.</p>
       </div>
     );
@@ -186,23 +180,23 @@ export function Commissioning({ snapshot, frameId }) {
       if (result.ok) {
         setProfileDraft(null);
         setProfileStatus(result.changed
-          ? "Display profile saved. Recalibrate this Frame before showing content."
-          : "Display profile already matches; calibration was not changed.");
+          ? "Frame profile saved. Calibrate this Frame again before showing content."
+          : "Frame profile already matches; calibration was not changed.");
       } else if (result.code === "binding_generation_conflict") {
         setProfileError("This Frame's equipment changed while you were editing. Reload its facts before retrying.");
       } else if (result.code === "frame_bound") {
-        setProfileError("Unbind this Frame before changing its display profile. Your draft is preserved.");
+        setProfileError("Unbind this Frame before changing its Frame profile. Your draft is preserved.");
       } else if (result.code === "frame_in_use") {
         setProfileError("Finish or cancel the active Run targeting this Frame, then retry. Your draft is preserved.");
       } else if (result.code === "oriented_profile") {
-        setProfileError("Display profile must match the frame's orientation. Your draft is preserved.");
+        setProfileError("Frame profile must match the frame's orientation. Your draft is preserved.");
       } else if (result.code === "unknown_frame") {
         setProfileError("This Frame no longer exists. Reload the wall to continue.");
       } else {
-        setProfileError(`Could not save the display profile (${result.code}). Your draft is preserved.`);
+        setProfileError(`Could not save the Frame profile (${result.code}). Your draft is preserved.`);
       }
     } catch (failure) {
-      setProfileError(`Could not save the display profile: ${failure?.message ?? "server error"}. Your draft is preserved.`);
+      setProfileError(`Could not save the Frame profile: ${failure?.message ?? "server error"}. Your draft is preserved.`);
     } finally {
       setProfileSaving(false);
     }
@@ -212,12 +206,6 @@ export function Commissioning({ snapshot, frameId }) {
     ? calibration.corners.map((point) => `(${point[0]}, ${point[1]})`).join(" ")
     : "—";
   const cropText = Array.isArray(calibration.crop) ? calibration.crop.join(", ") : "—";
-
-  // The would-be live hardware controls. They are the CHILDREN of GatedArea, so
-  // they exist in the DOM ONLY when derive() returns "derived-true" from a real
-  // wired path — which T0 never does. Do not lift these out of the gate.
-  const colorState = derive("photometric_calibration", snapshot);
-  const powerState = derive("display_command", snapshot);
 
   const dirty = !matchesCommitted(trying, calibration);
 
@@ -286,11 +274,10 @@ export function Commissioning({ snapshot, frameId }) {
   // banner kind; a success clears it. The poll independently drives expired /
   // overtaken through `status`.
   //
-  // A successful manual Revert also DISCARDS the local draft back to committed
-  // (parity with the legacy page's single-field revert): Revert clears the panel
-  // preview server-side AND returns the editable draft to committed, so the
-  // operator is back on truth. (Lease EXPIRY is different — it keeps the trying
-  // values for Re-preview; that path never runs clearDraft.)
+  // A successful Stop (the "revert" op) also DISCARDS the local draft back to
+  // committed: it clears the Player app's lease server-side AND returns the editable
+  // draft to committed, so the operator is back on truth. (Lease EXPIRY is
+  // different — it keeps the draft for Show again; that path never runs clearDraft.)
   const runOp = async (op) => {
     const result = await calibrate(op);
     setConflict(result.ok ? null : result.conflict);
@@ -306,8 +293,8 @@ export function Commissioning({ snapshot, frameId }) {
   const polygonPoints = handles.map((handle) => `${handle.x},${handle.y}`).join(" ");
 
   return (
-    <div className="facet facet--commissioning">
-      <h3 className="facet__title">Commissioning</h3>
+    <div className="facet facet--calibration">
+      <h3 className="facet__title">Calibration</h3>
 
       <section className="facet__section" role="group" aria-label="Committed calibration">
         <h4 className="facet__subtitle">Committed calibration</h4>
@@ -331,6 +318,9 @@ export function Commissioning({ snapshot, frameId }) {
         </dl>
       </section>
 
+      {!bound && (
+        <p className="facet__empty" role="status">No Output bound. Bind one on the Binding facet.</p>
+      )}
       {bound && frame.calibration_valid === true && FRAME_ID_PATTERN.test(frameId) && (
         <section className="facet__section facet__section--content" role="group" aria-label="Choose content">
           <h4 className="facet__subtitle">Ready to choose content?</h4>
@@ -344,7 +334,7 @@ export function Commissioning({ snapshot, frameId }) {
       )}
       {bound && frame.calibration_valid === true && !FRAME_ID_PATTERN.test(frameId) && (
         <p className="facet__note" role="status">
-          This Frame is commissioned, but its id cannot be targeted by a Scene. Scene targets need an id of 96 characters or fewer without a colon.
+          This Frame is calibrated, but its id cannot be targeted by a Scene. Scene targets need an id of 96 characters or fewer without a colon.
         </p>
       )}
 
@@ -352,7 +342,7 @@ export function Commissioning({ snapshot, frameId }) {
         <h4 className="facet__subtitle">Adjust calibration</h4>
         <p className="facet__note">
           Drag the corner and crop handles or edit the values; changes stay a
-          local draft until you preview or commit.
+          local draft until live calibration sends them or you save.
         </p>
 
         <svg
@@ -487,13 +477,14 @@ export function Commissioning({ snapshot, frameId }) {
       <section
         className="facet__section facet__section--lease"
         role="group"
-        aria-label="Preview and commit"
+        aria-label="Live calibration"
       >
-        <h4 className="facet__subtitle">Preview and commit</h4>
+        <h4 className="facet__subtitle">Live calibration</h4>
         <p className="facet__note">
-          Preview pushes the draft to the panel under a 30-second server lease;
-          Commit saves it as a new revision. There is no auto-renew — on expiry
-          the panel returns to committed and the draft is kept for Re-preview.
+          Show on the Panel sends the draft to the Player app under a 30-second lease
+          from Central. No layer acknowledges what is presented on this path, so its
+          save is a save without acknowledgment. There is no auto-renew: when the lease
+          ends, the Player app returns to the saved calibration and your draft is kept.
         </p>
 
         <div className="calib__actions">
@@ -503,7 +494,7 @@ export function Commissioning({ snapshot, frameId }) {
             disabled={!bound}
             onClick={() => runOp("preview")}
           >
-            Preview
+            Show on the Panel
           </button>
           <button
             type="button"
@@ -511,14 +502,14 @@ export function Commissioning({ snapshot, frameId }) {
             disabled={!bound}
             onClick={() => runOp("commit")}
           >
-            Commit
+            Save without acknowledgment
           </button>
           <button
             type="button"
             className="calib__action"
             onClick={() => runOp("revert")}
           >
-            Revert
+            Stop live calibration
           </button>
           {leaseStatus === "expired" ? (
             <button
@@ -527,7 +518,7 @@ export function Commissioning({ snapshot, frameId }) {
               disabled={!bound}
               onClick={() => runOp("preview")}
             >
-              Re-preview
+              Show again
             </button>
           ) : null}
         </div>
@@ -536,9 +527,9 @@ export function Commissioning({ snapshot, frameId }) {
           <p
             className="calib__countdown"
             role="timer"
-            aria-label="Preview lease countdown"
+            aria-label="Live calibration countdown"
           >
-            {`Previewing on the panel — lease expires in ${countdown}s.`}
+            {`Central sent the draft to the Player app; live calibration ends in ${countdown} s. No layer acknowledges what is presented on this path.`}
           </p>
         ) : null}
 
@@ -553,11 +544,10 @@ export function Commissioning({ snapshot, frameId }) {
         {calibrationCapability && <button type="button" onClick={retryCapability}>Retry capability</button>}
       </section>}
 
-
-      <section className="facet__section" role="group" aria-label="Frame facts">
-        <h4 className="facet__subtitle">Frame facts</h4>
+      <section className="facet__section" role="group" aria-label="Frame profile">
+        <h4 className="facet__subtitle">Frame profile</h4>
         <p className="facet__note">
-          Operator-declared at frame creation; persist across a panel swap.
+          Operator-declared at frame creation; persists across a Panel swap.
         </p>
         <dl className="facet__fields">
           <div className="facet__field">
@@ -579,18 +569,18 @@ export function Commissioning({ snapshot, frameId }) {
         </dl>
         {reportedProfileMismatch ? (
           <p className="facet__note" role="status">
-            {`The Player reported ${observation.width_px} × ${observation.height_px} at its last start; this observation may be stale. The Frame profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `Committed rotation ${rotation}° was considered.` : "Calibration is not yet valid for this binding."} Verify the display and intended rotation, and restart the Player if the display changed. If the profile is wrong, unbind this Frame, edit its profile, then bind and calibrate it.`}
+            {`The Player app reported ${observation.width_px} × ${observation.height_px} at its last enrollment; this record may be stale. The Frame profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `Committed rotation ${rotation}° was considered.` : "Calibration is not yet valid for this binding."} Verify the Panel and intended rotation, and restart the Player app if the Panel changed. If the profile is wrong, unbind this Frame, edit its profile, then bind and calibrate it.`}
           </p>
         ) : null}
         {profileDraft == null ? (
           <>
-            <button ref={profileEditButtonRef} type="button" onClick={beginProfileEdit}>Edit profile</button>
+            <button ref={profileEditButtonRef} type="button" onClick={beginProfileEdit}>Edit Frame profile</button>
             {profileStatus ? <p className="facet__draft-status" role="status">{profileStatus}</p> : null}
           </>
         ) : (
-          <form className="facet__profile-form" onSubmit={saveProfile} aria-label="Edit display profile">
+          <form className="facet__profile-form" onSubmit={saveProfile} aria-label="Edit Frame profile">
             <p className="facet__note">
-              Changing the persistent display profile requires this Frame to be unbound and any active Run to finish or be cancelled. The change clears calibration; recalibrate before showing content.
+              Changing the Frame profile requires this Frame to be unbound and any active Run to finish or be cancelled. The change clears calibration; recalibrate before showing content.
             </p>
             <label>Pixel width
               <input autoFocus type="number" min="1" max="16384" step="1" value={profileDraft.width_px}
@@ -615,67 +605,6 @@ export function Commissioning({ snapshot, frameId }) {
             }}>Cancel</button>
           </form>
         )}
-      </section>
-
-      <section className="facet__section" role="group" aria-label="Display at last Player start">
-        <h4 className="facet__subtitle">Display at last Player start</h4>
-        <p className="facet__note">
-          Reported by the Player when it started; a display change after that is not seen.
-        </p>
-        {observation ? (
-          <dl className="facet__fields">
-            <div className="facet__field">
-              <dt>Display</dt>
-              <dd>{observation.connected ? "Detected" : "Not detected"}</dd>
-            </div>
-            <div className="facet__field">
-              <dt>Output resolution</dt>
-              <dd>{`${observation.width_px} × ${observation.height_px}`}</dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="facet__empty">
-            {bound
-              ? "No report from the bound output."
-              : "No Display bound — bind a Player output first."}
-          </p>
-        )}
-      </section>
-
-      <section className="facet__section" role="group" aria-label="Display equipment">
-        <h4 className="facet__subtitle">Display equipment</h4>
-        {bound ? (
-          <dl className="facet__fields">
-            <div className="facet__field">
-              <dt>Player</dt>
-              <dd>{frame.player_id}</dd>
-            </div>
-            <div className="facet__field">
-              <dt>Output</dt>
-              <dd>{frame.output_id}</dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="facet__empty">Unbound</p>
-        )}
-      </section>
-
-      <section className="facet__section" role="group" aria-label="Panel color correction">
-        <h4 className="facet__subtitle">Panel color correction</h4>
-        <GatedArea state={colorState}>
-          <button type="button" className="facet__hardware-control">
-            Adjust panel color correction
-          </button>
-        </GatedArea>
-      </section>
-
-      <section className="facet__section" role="group" aria-label="Display power and parameters">
-        <h4 className="facet__subtitle">Display power and parameters</h4>
-        <GatedArea state={powerState}>
-          <button type="button" className="facet__hardware-control">
-            Set display power
-          </button>
-        </GatedArea>
       </section>
     </div>
   );

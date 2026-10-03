@@ -1,10 +1,11 @@
 import { apiWrite } from "./apiWrite.js";
+import { answerUnknown, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 
 /**
  * The one equipment write module (slice 2 §6): bind, unbind, retire and identify, each
  * with its message table. Every write goes through {@link apiWrite} (the write
- * fence) and answers ONE result shape, so the Binding facet, the Equipment
- * roster and the confirmation dialogs read the same outcomes:
+ * fence) and answers ONE result shape, so the Binding facet, the Player page
+ * and the confirmation dialogs read the same outcomes:
  *
  *  - "done":    2xx.
  *  - "already": the effect is already in place (unbind: 404 not_bound or
@@ -23,11 +24,8 @@ import { apiWrite } from "./apiWrite.js";
  * @typedef {{outcome: Outcome, code: string|null, message: string|null}} EquipmentResult
  */
 
-export const UNKNOWN_MESSAGE = "Central did not answer. Check this after the next refresh.";
-
-// The one wording of the "changed" and "already" outcomes in the confirmation
-// dialogs (ConfirmAction.jsx); bind words its own conflict in BIND_MESSAGES.
-export const CHANGED_MESSAGE = "Changed since you opened this. Reopen to review.";
+// UNKNOWN_MESSAGE and CHANGED_MESSAGE live with the outcome pattern (sendOutcome.js); the
+// "already" wording of the confirmation dialogs (ConfirmAction.jsx) is the equipment writes'.
 export const ALREADY_MESSAGE = "Already done.";
 
 const GONE_PLAYER = "That Player is no longer available. Choose another.";
@@ -66,7 +64,7 @@ async function send(path, init, messages, already, fallback) {
   if (result.ok) {
     return { outcome: "done", code: null, message: null };
   }
-  if (result.status >= 500) {
+  if (answerUnknown(result)) { // any 5xx: no equipment refusal is served as one
     return { outcome: "unknown", code: null, message: UNKNOWN_MESSAGE };
   }
   const code = result.error ?? String(result.status);
@@ -139,9 +137,12 @@ export function retirePlayer(playerId) {
 }
 
 /**
- * Ask a pending Player to briefly identify one connected, unbound Output.
- * Acceptance means Central queued the request, not that anything was observed
- * on the display. The roster owns the success wording and never claims output.
+ * Ask a Player app to briefly identify one connected, unbound Output (console DDD §19;
+ * players.js `identifyOffer` decides where it is offered). Acceptance means Central queued
+ * the request, not that anything was observed on the Panel. The caller owns the success
+ * wording and never claims output. `identify_unsupported` names its cause: Central has not
+ * negotiated Identify with this Player app's current enrollment (no schema-2 control session
+ * on the current epoch offering `identify_output`).
  *
  * @param {string} playerId
  * @param {string} outputId
@@ -149,7 +150,7 @@ export function retirePlayer(playerId) {
  */
 export async function identifyOutput(playerId, outputId) {
   const unknown =
-    "The request outcome is unknown. Check the display before trying again.";
+    "The request outcome is unknown. Check the Panel before trying again.";
   let result;
   try {
     result = await apiWrite(
@@ -168,10 +169,11 @@ export async function identifyOutput(playerId, outputId) {
   return {
     outcome: "refused",
     code: result.error ?? String(result.status),
-    message:
-      result.status === 404 || result.status === 409
-        ? "This Output changed or the Player is no longer eligible. Refresh Equipment before trying again."
-        : "Identify was refused. Refresh Equipment and try again.",
+    message: result.error === "identify_unsupported"
+      ? "Central has not negotiated Identify with this Player app's current enrollment"
+      : result.status === 404 || result.status === 409
+        ? "This Output changed or the Player is no longer eligible. Press Refresh before trying again."
+        : "Identify was refused. Press Refresh and try again.",
   };
 }
 

@@ -43,7 +43,7 @@ _FAKE_BIN = {
     "gosu": '#!/bin/sh\nshift\nexec "$@"\n',
 }
 
-_SUBDIRS = ("media", "apps", "os-images")
+_SUBDIRS = ("media", "apps", "os-images", "previews")
 
 
 def _run(tmp_path, env_overrides):

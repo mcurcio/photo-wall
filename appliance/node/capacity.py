@@ -41,13 +41,29 @@ def admit_cold(references, *, total: int, available: int, free: int,
     return incremental
 
 
-def admit_preparation(size_bytes: int, *, total: int, available: int, free: int,
-                      used: int) -> int:
-    incremental = 2 * size_bytes + OVERHEAD
+class StorageShort(ValueError):
+    """A preparation refused for storage: its two numbers, under the existing
+    `node_storage_capacity` message, so every current ValueError catcher is unchanged."""
+
+    def __init__(self, required: int, room: int):
+        super().__init__("node_storage_capacity")
+        self.required, self.room = required, room
+
+
+def preparation_room(*, total: int, available: int, free: int, used: int) -> int:
+    """The bytes a new preparation may stage: the smaller of the store budget left, the free
+    bytes, and MemAvailable above the emergency headroom; never below 0 (a refusal needs
+    `required > room`, and required always exceeds 0, so the clamp changes no decision)."""
     # The global reserve determines the whole-store cap once. MemAvailable already
     # excludes old root/app resident pages; compare only incremental staging plus
     # emergency headroom, never subtract the full reserve a second time.
-    if used + incremental > storage_budget(total, available) or incremental > min(free, available - EMERGENCY_HEADROOM):
-        raise ValueError("node_storage_capacity")
-    return incremental
+    return max(0, min(storage_budget(total, available) - used, free, available - EMERGENCY_HEADROOM))
 
+
+def admit_preparation(size_bytes: int, *, total: int, available: int, free: int,
+                      used: int) -> int:
+    incremental = 2 * size_bytes + OVERHEAD
+    room = preparation_room(total=total, available=available, free=free, used=used)
+    if incremental > room:
+        raise StorageShort(incremental, room)
+    return incremental

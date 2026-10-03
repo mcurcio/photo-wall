@@ -13,8 +13,23 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/sources/new/<step>           {section: "sources", flow: "new", step}
  *   #/schedule/new/<step>          {section: "schedule", flow: "new", step}
  *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
+ *   #/wall/layout                  {section: "wall", mode: "layout"} Edit layout (console DDD §61)
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
+ *   #/wall/frames/<id>             {section: "wall", id, facet: "status"}: a Frame route with
+ *                                  no facet opens Status (§61); never formatted
+ *   #/players/<device-id>          {section: "players", id} one Player's page
+ *   #/releases/update/<tag>        {section: "releases", flow: "update", id} Update the wall
+ *   #/releases/update/<tag>/try/<player-id>  … with the operator's tried Player (Part E §25a)
+ *   #/releases/update/<tag>[/try/<player-id>]/skip/<player-id>[/<player-id>…]  … and the
+ *                                  Players the operator skipped in Keep's plan (Part E §25a)
  *   #/<section>                    {section} for every section
+ *   #/equipment                    {section: "players"}: the retired Equipment page's
+ *                                  bookmark (console DDD §9); never formatted
+ *   #/wall/frames/<id>/commissioning  {section: "wall", id, facet: "calibration"}: the
+ *                                  renamed facet's old bookmark (console DDD §19); never
+ *                                  formatted
+ *   #/wall/frames/<id>/nowshowing  {section: "wall", id, facet: "status"}: the Now-showing
+ *                                  facet's old bookmark (console DDD §61); never formatted
  *
  * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Facets are
  * the Inspector's keys. Ids and steps are URI-encoded, so an id may hold any text.
@@ -24,11 +39,16 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"equipment"|"attention"} Section
- * @typedef {"new"|"edit"|"show"} Flow
- * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
+ * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"releases"|"attention"} Section
+ * @typedef {"new"|"edit"|"show"|"update"} Flow
+ * @typedef {"status"|"binding"|"calibration"} Facet
+ * @typedef {"layout"} Mode
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
- *            initialTarget?: string}} Route
+ *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[]}} Route
+ *   `tried` is the Player an Update the wall journey tries the release on, `skipped` the Players
+ *   it must never reboot, in the order the operator skipped them, none repeated (its URL holds
+ *   only the operator's choices, never progress: Part E §25a). An empty `skipped` is the same
+ *   route as none.
  */
 
 /**
@@ -56,24 +76,38 @@ export function routeIdName(noun, id, { start = false } = {}) {
   return `${start ? "An" : "an"} unknown ${noun}`;
 }
 
-/** Every section, in sidebar order. */
+/** Every section, in sidebar order (console DDD §48: Wall, Show, Fleet, Needs attention). */
 export const SECTIONS = Object.freeze([
+  "wall",
   "now",
   "scenes",
   "schedule",
   "sources",
-  "wall",
-  "equipment",
+  "players",
+  "releases",
   "attention",
 ]);
 
-/** The Inspector's facet keys (Inspector.jsx FACETS). */
-export const FACETS = Object.freeze(["commissioning", "binding", "nowshowing"]);
+// Old section names that parse to a current one, so their bookmarks keep working.
+const ALIASES = Object.freeze({ equipment: "players" });
+
+/** The Inspector's facet keys, in its tab order (Inspector.jsx FACETS). */
+export const FACETS = Object.freeze(["status", "binding", "calibration"]);
+
+/** The facet a Frame opens on when nothing names one (console DDD §61, G3). */
+export const DEFAULT_FACET = "status";
+
+// Old facet names that parse to a current one, so their bookmarks keep working. No other
+// facet segment ever shipped, so there is no other alias.
+export const FACET_ALIASES = Object.freeze({ nowshowing: "status", commissioning: "calibration" });
+
+// The Wall's modes (`#/wall/<mode>`): Edit layout only.
+const WALL_MODES = new Set(["layout"]);
 
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "facet", "initialTarget"];
+const KEYS = ["section", "id", "flow", "step", "facet", "mode", "initialTarget", "tried", "skipped"];
 
 /**
  * Parse a location hash (with or without its leading "#") into a Route, or null.
@@ -103,7 +137,11 @@ export function parseRoute(hash) {
   if (parts.some((part) => part === "")) {
     return null;
   }
-  const [section, ...rest] = parts;
+  const [named, ...rest] = parts;
+  if (Object.hasOwn(ALIASES, named)) {
+    return rest.length === 0 && query === "" ? { section: ALIASES[named] } : null;
+  }
+  const section = named;
   if (!SECTIONS.includes(section)) {
     return null;
   }
@@ -114,8 +152,21 @@ export function parseRoute(hash) {
   if (query !== "" && !(section === "scenes" && rest.length === 2 && rest[0] === "new")) {
     return null;
   }
-  if (section === "wall" && rest.length === 3 && rest[0] === "frames" && FACETS.includes(rest[2])) {
-    return { section, id: rest[1], facet: rest[2] };
+  if (section === "wall" && rest.length === 1 && WALL_MODES.has(rest[0])) {
+    return { section, mode: rest[0] };
+  }
+  if (section === "wall" && rest.length === 2 && rest[0] === "frames") {
+    return { section, id: rest[1], facet: DEFAULT_FACET };
+  }
+  if (section === "wall" && rest.length === 3 && rest[0] === "frames") {
+    const facet = Object.hasOwn(FACET_ALIASES, rest[2]) ? FACET_ALIASES[rest[2]] : rest[2];
+    if (FACETS.includes(facet)) return { section, id: rest[1], facet };
+  }
+  if (section === "players" && rest.length === 1) {
+    return { section, id: rest[0] };
+  }
+  if (section === "releases" && rest[0] === "update" && rest.length >= 2) {
+    return updateRoute(rest[1], rest.slice(2));
   }
   if (section === "now" && rest.length === 2 && rest[0] === "show") {
     return { section, flow: "show", step: rest[1] };
@@ -135,6 +186,20 @@ export function parseRoute(hash) {
   return null;
 }
 
+/** An Update the wall route from its tag and the segments after it, or null. */
+function updateRoute(id, tail) {
+  const route = { section: "releases", flow: "update", id };
+  let rest = tail;
+  if (rest[0] === "try" && rest.length >= 2) {
+    route.tried = rest[1];
+    rest = rest.slice(2);
+  }
+  if (rest.length === 0) return route;
+  const skipped = rest.slice(1);
+  if (rest[0] !== "skip" || skipped.length === 0 || new Set(skipped).size !== skipped.length) return null;
+  return { ...route, skipped };
+}
+
 /**
  * Format a Route as a location hash ("#/…"). Throws if `route` is not a Route.
  *
@@ -142,19 +207,26 @@ export function parseRoute(hash) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, facet, initialTarget } = route ?? {};
+  const { section, id, flow, step, facet, mode, initialTarget, tried, skipped } = route ?? {};
   if (initialTarget !== undefined &&
       (section !== "scenes" || flow !== "new" || facet !== undefined ||
         !FRAME_ID_PATTERN.test(initialTarget))) {
     throw new Error(`not a console route: ${JSON.stringify(route)}`);
   }
   let parts;
-  if (facet !== undefined) {
+  if (mode !== undefined) {
+    parts = [section, mode];
+  } else if (facet !== undefined) {
     parts = [section, "frames", id, facet];
   } else if (flow === "edit") {
     parts = [section, id, "edit", step];
+  } else if (flow === "update") {
+    parts = [section, "update", id, ...(tried === undefined ? [] : ["try", tried]),
+      ...(Array.isArray(skipped) && skipped.length > 0 ? ["skip", ...skipped] : [])];
   } else if (flow !== undefined) {
     parts = [section, flow, step];
+  } else if (id !== undefined) {
+    parts = [section, id];
   } else {
     parts = [section];
   }
@@ -179,14 +251,14 @@ export function sceneCreationRoute(frameId) {
 }
 
 /**
- * Where an unknown route lands (§6, Question 4): the Wall while no frame exists (its
- * Guidance banner is there), otherwise Now showing.
+ * Where an unknown route lands: always the Wall (console DDD §48, G3). With no Frames the
+ * Wall's own face is the first step (its Guidance banner), so the landing never depends on
+ * state.
  *
- * @param {number} frameCount
  * @returns {Route}
  */
-export function landingRoute(frameCount) {
-  return { section: frameCount === 0 ? "wall" : "now" };
+export function landingRoute() {
+  return { section: "wall" };
 }
 
 /**
@@ -201,7 +273,14 @@ export function sameRoute(a, b) {
     return a == b;
   }
   const extra = Object.keys(b).filter((key) => !KEYS.includes(key) && b[key] !== undefined);
-  return extra.length === 0 && KEYS.every((key) => a[key] === b[key]);
+  return extra.length === 0 && KEYS.every((key) => sameValue(a[key], b[key]));
+}
+
+// A list key (`skipped`) compares element by element, and an empty list is the same as none.
+function sameValue(x, y) {
+  if (!Array.isArray(x) && !Array.isArray(y)) return x === y;
+  const [xs, ys] = [x ?? [], y ?? []];
+  return Array.isArray(xs) && Array.isArray(ys) && xs.length === ys.length && xs.every((item, at) => item === ys[at]);
 }
 
 /**

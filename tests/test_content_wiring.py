@@ -38,6 +38,13 @@ MIGRATION_022 = (Path(__file__).parents[1] / "central" / "migrations"
                  / "022_retire_release_queue.sql")
 
 
+class NoLibrary:
+    """The injected thumbnail origin: wiring never calls it at build time."""
+
+    async def thumbnail(self, asset_id, into):
+        raise AssertionError("not called at build time")
+
+
 class StubDatabase:
     """Only what the wiring reads at build time; any query would fail loudly."""
 
@@ -53,14 +60,16 @@ class StubDatabase:
 def test_build_job_runtime_passes_every_boot_check(tmp_path):
     # JobRuntime.__init__ raises unless every CATALOG type has exactly one handler and the
     # concurrency map names exactly the catalog's queues.
-    runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV)
+    runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
+                                thumbnails=NoLibrary())
     assert isinstance(runtime, JobRuntime)
     assert dict(WORKER_CONCURRENCY) == {QueueName.FETCH: 2, QueueName.UPKEEP: 2}
 
 
 def test_the_job_runtime_owns_and_closes_its_queue_ops_pool(tmp_path):
     # No caller-held pool: `run()` closes it when the runtime ends (JobRuntime tests prove when).
-    runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV)
+    runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
+                                thumbnails=NoLibrary())
     assert [type(owned) for owned in runtime._owned] == [QueueAdmin]
 
 
@@ -70,6 +79,54 @@ def test_build_content_services_owns_one_feed_and_binds_no_handler(tmp_path):
     assert isinstance(services.feed, OutcomeFeed)
     assert services.probe.ready() is True
     assert WAITER_SLOTS == 32
+
+
+def test_cold_thumbnails_wait_two_seconds_in_four_slots_of_their_own(tmp_path):
+    """Console DDD §40: a fifth concurrent cold tile is busy at once, and while four wait the
+    shared reader (Players' bases, packages) keeps every one of its slots."""
+    from datetime import timedelta
+
+    from central.assets.reader import Unavailable
+    from central.content_wiring import THUMBNAIL_WAIT
+    from central.kernel.job_types import FetchLibraryThumbnail
+    from central.kernel.ports import Candidates
+    from central.kernel.publishing import Pending
+
+    services = build_content_services(StubDatabase(), ManualClock(0.0), cache_root=tmp_path)
+    reader = services.thumbnail_reader
+    assert THUMBNAIL_WAIT == timedelta(seconds=2) and reader._wait_timeout == THUMBNAIL_WAIT
+    candidates = Candidates(jobs=(FetchLibraryThumbnail(asset_id="asset-" + "a" * 64),),
+                            pinned=True)
+
+    async def main():
+        release = asyncio.Event()
+
+        class Handle:
+            async def wait(self, *, timeout):
+                await release.wait()
+                return Pending()
+
+        async def publish(job):
+            return Handle()
+
+        reader._open_first = lambda jobs: None  # always cold
+        reader._publish_request = publish
+        waiting = [asyncio.create_task(reader.read(candidates)) for _ in range(4)]
+        async with asyncio.timeout(5):
+            while reader._slots.in_use < 4:
+                await asyncio.sleep(0.005)
+        fifth = await asyncio.wait_for(reader.read(candidates), 0.5)
+        assert fifth == Unavailable("busy", 5)
+        assert services.reader._slots.in_use == 0
+        release.set()
+        assert await asyncio.gather(*waiting) == [Unavailable("timeout", 5)] * 4
+
+    asyncio.run(main())
+
+
+def test_without_servability_no_thumbnail_resolves(tmp_path):
+    services = build_content_services(StubDatabase(), ManualClock(0.0), cache_root=tmp_path)
+    assert asyncio.run(services.thumbnails.resolve("asset-" + "a" * 64)) is None
 
 
 def test_the_worker_module_imports_without_the_release_queue():
@@ -207,6 +264,9 @@ class MediaStub:
     async def maintain(self) -> None:
         self.boot.append(("maintain", self.store.held))
 
+    async def list_tags(self, *, boot: bool = False) -> None:
+        self.boot.append(("tags" if boot else "tick tags", self.store.held))
+
     async def refresh_once(self) -> bool:
         self.boot.append(("refresh", self.store.held))
         return False
@@ -244,7 +304,8 @@ def test_the_media_loop_stands_by_while_another_process_writes_and_jobs_run_mean
 
     asyncio.run(main())
     assert store.attempts == 4 and queue_ran == [True]
-    assert media.boot == [("recipe", True), ("maintain", True), ("refresh", True)]
+    # Boot replaces every connection's tag list (console DDD §38), under the writer lock.
+    assert media.boot == [("recipe", True), ("maintain", True), ("tags", True), ("refresh", True)]
     assert not store.held  # released on stop
 
 

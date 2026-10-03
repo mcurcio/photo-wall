@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 import procrastinate
 
@@ -15,7 +15,17 @@ from central.media_queue import (
 )
 
 REFRESH_CRON = "* * * * * */30"
-MAINTENANCE_CRON = "*/5 * * * * 0"
+MAINTENANCE_MINUTES: Final = 5
+MAINTENANCE_CRON = f"*/{MAINTENANCE_MINUTES} * * * * 0"
+# The guaranteed check-in (`worker_status`) cadence: boot plus every maintenance pass. A refresh
+# tick checks in only when a Source is due (`MediaWorker.refresh_once`), so an idle worker is
+# quiet between maintenance passes.
+WORKER_CHECK_IN_SECONDS: Final = MAINTENANCE_MINUTES * 60
+# A check-in older than this marks the worker unhealthy (`media.healthcheck`). It is the
+# console's worker-quiet window (central/console/src/mediaHealth.js WORKER_QUIET_AFTER: two
+# check-in intervals plus a minute); tests/test_media_queue.py pins the two equal. Cost: a hung
+# worker reads healthy for up to 11 minutes (Compose consumes worker health only for `--wait`).
+WORKER_FRESH_SECONDS: Final = 2 * WORKER_CHECK_IN_SECONDS + 60
 
 
 class MediaTaskFailed(RuntimeError):
@@ -67,7 +77,9 @@ def create_worker_app(dsn: str) -> procrastinate.App:
               queueing_lock="media-refresh")
     async def refresh_media(context, timestamp: int):
         del timestamp
-        await context.additional_context["media_worker"].refresh_once()
+        worker = context.additional_context["media_worker"]
+        await worker.refresh_once()
+        await worker.list_tags()  # each connection's list, once it is 5 min old
 
     @app.task(name=REFRESH_MEDIA_SOURCE_TASK, queue=MEDIA_QUEUE, pass_context=True,
               retry=RefreshRetryStrategy())

@@ -3,21 +3,26 @@ import React from "react";
 import { Field } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
+import { PreviewPanel } from "./PreviewPanel.jsx";
 import {
   ANOTHER_CONNECTION,
   FAVOURITES_CHOICES,
   MEDIA_TYPE_CHOICES,
+  selectionWords,
   SOURCE_LABELS,
   sourceAnswers,
 } from "./sourceFlowModel.js";
+import { TagCombobox } from "./TagCombobox.jsx";
+import { zoneName } from "./timeWords.js";
 
 /**
- * The Source flow's step views (flow design §7 J5): views over the draft that
- * SourceFlow.jsx owns. They hold no draft state. Labels and accessible names are the
- * single form's (rule 3; sourceFlowModel.js `SOURCE_LABELS`).
+ * The Source flow's step views (console DDD §37): views over the draft that SourceFlow.jsx
+ * owns. They hold no draft state. Labels and accessible names are sourceFlowModel.js
+ * `SOURCE_LABELS`.
  *
  * Every view takes `{value, patch, problems}`: the draft value, the draft's patch and
- * the flow's `useProblems`.
+ * the flow's `useProblems`. The Tags, Narrow and Review steps also take `panel`: the
+ * preview panel's props (PreviewPanel.jsx), the same preview on all three.
  *
  * @typedef {import("./sourceFlowModel.js").SourceDraft} SourceDraft
  * @typedef {{value: SourceDraft, patch: (partial: Partial<SourceDraft>) => void,
@@ -86,27 +91,54 @@ function InputField({
 }
 
 /**
- * PASS B'S SLOT (flow design §2 req 3, §7 J5; library design §8). An empty container
- * that pass B fills: `criteria` with its tag picker, `preview` with the previews of
- * what the Source selects. It renders nothing in this pass: no role, no text, no
- * space (index.css hides it while empty), so nothing is announced or promised.
+ * Step 1, Which library connection? (skipped when exactly one is known): the connection
+ * rule's chooser for several, the setup prerequisite when the worker reports none, or a
+ * typed name, marked uncertain, until the worker reports its list.
  *
- * @param {{name: "criteria"|"preview"}} props
+ * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>}} props
  */
-export function LibrarySlot({ name, children = null }) {
-  return <div className={`source-flow__slot source-flow__slot--${name}`} data-slot={name}>{children}</div>;
+export function LibraryStep({ value, patch, problems, rule }) {
+  return <ConnectionField value={value} patch={patch} problems={problems} rule={rule} />;
 }
 
 /**
- * Step 1, What to include: "Media type" (default images and video), "Favourites"
- * (default any), "Taken from" and "Taken until" (empty), then pass B's criteria and
- * preview slots.
+ * Step 2, Choose tags: the tag picker over the connection's tags, beside what the chosen
+ * tags select. Zero tags is allowed: everything in the library.
  *
- * @param {StepProps} props
+ * @param {StepProps & {panel: object, tags: {connection: string,
+ *          paths: Readonly<Record<string, string|null>>, onLearn: Function}|null}} props
  */
-export function IncludeStep({ value, patch, problems, preview, rule }) {
+export function TagsStep({ value, patch, problems, panel, tags }) {
+  if (tags === null) {
+    return <PreviewPanel {...panel} />; // it says why there are no tags or preview
+  }
   return (
-    <>
+    <div className="source-flow__split">
+      <div className="source-flow__criteria">
+        <TagCombobox
+          id={problems.idFor("tags")}
+          connection={tags.connection}
+          value={value.tags ?? []}
+          paths={tags.paths}
+          onChange={(next) => patch({ tags: next })}
+          onLearn={tags.onLearn}
+        />
+      </div>
+      <PreviewPanel {...panel} />
+    </div>
+  );
+}
+
+/**
+ * Step 3, Narrow it down (optional): "Media type" (default photos and videos),
+ * "Favourites" (default any), "Dated from" and "Dated until" (empty), beside the same
+ * preview, following the criteria.
+ *
+ * @param {StepProps & {panel: object}} props
+ */
+export function NarrowStep({ value, patch, problems, panel }) {
+  return (
+    <div className="source-flow__split">
       <div className="source-flow__criteria">
         <ChoiceField
           field="type"
@@ -125,11 +157,11 @@ export function IncludeStep({ value, patch, problems, preview, rule }) {
         <InputField
           field="from"
           type="date"
-          hint="From the start of this day."
+          hint={`From the start of this day in this browser's time zone (${zoneName()}).`}
           value={value.capturedFrom}
           onChange={(capturedFrom) => {
             patch({ capturedFrom });
-            problems.touch("until"); // the window's problem is said beside "Taken until"
+            problems.touch("until"); // the window's problem is said beside "Dated until"
           }}
           problems={problems}
         />
@@ -141,34 +173,9 @@ export function IncludeStep({ value, patch, problems, preview, rule }) {
           onChange={(capturedUntil) => patch({ capturedUntil })}
           problems={problems}
         />
-        <LibrarySlot name="criteria" />
       </div>
-      <LibrarySlot name="preview">
-        <section className="source-preview" aria-label="Photo match preview">
-          <h3>Preview matches</h3>
-          {rule?.shown === "chooser" && (
-            <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
-          )}
-          {preview?.message && <p role={preview.error ? "alert" : "status"}>{preview.message}</p>}
-          {preview?.result && (
-            <p role="status">
-              {preview.result.count === 0
-                ? "No photos or videos match these filters."
-                : `${preview.result.count} matching ${preview.result.count === 1 ? "item" : "items"}: ${preview.result.image_count} ${preview.result.image_count === 1 ? "image" : "images"} and ${preview.result.video_count} ${preview.result.video_count === 1 ? "video" : "videos"}.`}
-            </p>
-          )}
-          {preview?.timedOut && <p role="status">The preview is still processing. You can request it again.</p>}
-          <p className="source-preview__note">A match preview checks the library query. It does not mean the items are prepared or ready to show.</p>
-          <button type="button" disabled={preview?.busy || !preview?.canRequest} onClick={preview?.onRequest}>
-            {preview?.busy ? "Checking matches…" : preview?.timedOut ? "Check again" : "Preview matches"}
-          </button>
-          {!preview?.canRequest && !preview?.message && preview?.hint && <p>{preview.hint}</p>}
-          {rule?.shown === "field" && value.connectionRef.trim() !== "" && (
-            <p className="source-preview__note">Central cannot verify this connection name yet; the worker will check it.</p>
-          )}
-        </section>
-      </LibrarySlot>
-    </>
+      <PreviewPanel {...panel} />
+    </div>
   );
 }
 
@@ -224,7 +231,7 @@ export function ConnectionChooser({ value, patch, problems, rule }) {
         <InputField
           field="connection"
           label={ANOTHER_CONNECTION.label}
-          hint="The media worker has not reported its configured connections yet. Enter a name only if it is already configured there; this form does not set the Immich URL or API key."
+          hint="The media worker has not reported its configured connections yet. Enter a name only if it is already configured there; this form does not set the library's address or key."
           value={value.connectionRef}
           onChange={(connectionRef) => patch({ connectionRef })}
           problems={problems}
@@ -235,30 +242,33 @@ export function ConnectionChooser({ value, patch, problems, rule }) {
 }
 
 /**
- * Step 2, Name: a plain Source name (required), then "Connection name" as the
- * connection rule says (sourceFlowModel.js `connectionRule`): an explicit setup
- * prerequisite when the worker reports none; one known connection under Advanced;
- * a chooser for several or a removed saved name; or an uncertain manual fallback
- * until the worker reports its list.
+ * The connection as the connection rule asks it (sourceFlowModel.js `connectionRule`): an
+ * explicit setup prerequisite when the worker reports none; a chooser for several or a
+ * removed saved name; the one known connection (under the Name step's Advanced); or an
+ * uncertain typed name until the worker reports its list.
  *
- * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>,
- *          advanced: {open: boolean, onToggle: () => void}}} props
+ * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>}} props
  */
-export function NameStep({ value, patch, problems, rule, advanced, editing = false }) {
-  const connection = rule.shown === "blocked" ? (
-    <>
-      <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
-        {(props) => (
-          <select {...props} value="" disabled>
-            <option value="">No connections configured</option>
-          </select>
-        )}
-      </Field>
-      <p role="status">Add a connection to the media worker's private configuration and restart the worker. Then return here to create the Source.</p>
-    </>
-  ) : rule.shown === "chooser" ? (
-      <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />
-    ) : rule.reported ? (
+function ConnectionField({ value, patch, problems, rule }) {
+  if (rule.shown === "blocked") {
+    return (
+      <>
+        <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
+          {(props) => (
+            <select {...props} value="" disabled>
+              <option value="">No connections configured</option>
+            </select>
+          )}
+        </Field>
+        <p role="status">Add a connection to the media worker's private configuration and restart the worker. Then return here to create the Source.</p>
+      </>
+    );
+  }
+  if (rule.shown === "chooser") {
+    return <ConnectionChooser value={value} patch={patch} problems={problems} rule={rule} />;
+  }
+  if (rule.reported) {
+    return (
       <Field id={problems.idFor("connection")} label={SOURCE_LABELS.connection} reason={problems.reasonFor("connection")}>
         {(props) => (
           <select
@@ -274,17 +284,29 @@ export function NameStep({ value, patch, problems, rule, advanced, editing = fal
           </select>
         )}
       </Field>
-    ) : (
-      <InputField
-        field="connection"
-        hint={rule.shown === "field"
-          ? "The media worker has not reported its configured connections yet. You can enter a name, but Central cannot verify it. This form does not set the Immich URL or API key."
-          : "Central has not received the worker's connection list yet. This saved name may need checking in the worker configuration."}
-        value={value.connectionRef}
-        onChange={(connectionRef) => patch({ connectionRef })}
-        problems={problems}
-      />
     );
+  }
+  return (
+    <InputField
+      field="connection"
+      hint={rule.shown === "field"
+        ? "The media worker has not reported its configured connections yet. You can enter a name, but Central cannot verify it. This form does not set the library's address or key."
+        : "Central has not received the worker's connection list yet. This saved name may need checking in the worker configuration."}
+      value={value.connectionRef}
+      onChange={(connectionRef) => patch({ connectionRef })}
+      problems={problems}
+    />
+  );
+}
+
+/**
+ * Step 4, Name this Source: a plain Source name (required); with exactly one known
+ * connection, that connection under Advanced (the connection step was skipped).
+ *
+ * @param {StepProps & {rule: ReturnType<typeof import("./sourceFlowModel.js").connectionRule>,
+ *          advanced: {open: boolean, onToggle: () => void}}} props
+ */
+export function NameStep({ value, patch, problems, rule, advanced, editing = false }) {
   return (
     <>
       <InputField
@@ -296,31 +318,37 @@ export function NameStep({ value, patch, problems, rule, advanced, editing = fal
         onChange={(sourceName) => patch({ sourceName })}
         problems={problems}
       />
-      {rule.shown === "advanced" ? (
+      {rule.shown === "advanced" && (
         <Advanced
           summary={`Connection: ${value.connectionRef.trim() || "none"}`}
           open={advanced.open}
           onToggle={advanced.onToggle}
         >
-          {connection}
+          <ConnectionField value={value} patch={patch} problems={problems} rule={rule} />
         </Advanced>
-      ) : (
-        connection
       )}
     </>
   );
 }
 
 /**
- * Step 3, Review: every answer, each with "Change" (`onChange(field)` routes to the
- * field's step, and opens Advanced for the connection when it sits there).
+ * Step 5, Check your Source: what it selects, every answer with "Change" (`onChange(field)`
+ * routes to the field's step, and opens Advanced for the connection when it sits there),
+ * and the preview.
  *
- * @param {{value: SourceDraft, onChange: (field: string) => void}} props
+ * @param {{value: SourceDraft, onChange: (field: string) => void, rule: object,
+ *          paths: Readonly<Record<string, string|null>>, spec: object, panel: object}} props
  */
-export function SourceReview({ value, onChange }) {
-  const rows = sourceAnswers(value).map((answer) => ({
+export function SourceReview({ value, onChange, rule, paths, spec, panel }) {
+  const rows = sourceAnswers(value, rule, paths).map((answer) => ({
     ...answer,
     value: answer.value ?? <NotChosen />,
   }));
-  return <CheckAnswers rows={rows} onChange={onChange} />;
+  return (
+    <>
+      <p className="source-flow__selects">{selectionWords(spec, paths)}</p>
+      <CheckAnswers rows={rows} onChange={onChange} />
+      <PreviewPanel {...panel} />
+    </>
+  );
 }

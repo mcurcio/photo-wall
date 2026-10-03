@@ -82,7 +82,7 @@ services:
     cpus: 2
     stop_grace_period: 40s
     healthcheck:
-      test: ["CMD", "python", "-c", "import os,time; from central.db import Database; from central.media_repository import MediaRepository; from contracts.time import SystemClock; h=MediaRepository(Database(os.environ['PHOTO_WALL_DATABASE_URL']),SystemClock()).health(); raise SystemExit(0 if h['worker_seen'] and time.time()-h['worker_seen']<35 else 1)"]
+      test: ["CMD", "python", "-m", "media.healthcheck"]
       interval: 10s
       timeout: 15s
       start_period: 30s

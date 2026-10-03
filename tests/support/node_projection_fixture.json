@@ -1,0 +1,19 @@
+{
+  "_comment": "Pinned by tests/test_console_node_projection.py; decoded by tests/test_console_players.py.",
+  "projection": [
+    {
+      "payload": "{\"message\":{\"covered_through_sequence\":3,\"facts\":[{\"app_epoch\":1,\"environment_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"process\":{\"invocation_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000387\"},\"pid\":100,\"start_ticks\":11,\"type\":\"NodeProcessIdentity\"},\"state\":\"exited\",\"type\":\"AppProcessFact\"}],\"producer\":{\"device_generation\":1,\"device_id\":\"device-abababababababababababababababababababababababababababababababab\",\"incarnation_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000386\"},\"installation_audience\":\"node-test\",\"kernel_boot_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000385\"},\"owner\":\"app_effect_broker\",\"type\":\"NodeProducerV2\"},\"sampled_boottime_ms\":1003,\"snapshot_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000389\"},\"stream_gap\":false,\"type\":\"NodeSnapshotV2\"},\"schema\":2}",
+      "fact_index": 0,
+      "sequence": 3,
+      "observed_boottime_ms": 1003,
+      "received_at": 1000.0
+    },
+    {
+      "payload": "{\"message\":{\"covered_through_sequence\":9,\"facts\":[{\"app_epoch\":2,\"environment_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"process\":{\"invocation_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000388\"},\"pid\":101,\"start_ticks\":12,\"type\":\"NodeProcessIdentity\"},\"state\":\"running\",\"type\":\"AppProcessFact\"}],\"producer\":{\"device_generation\":1,\"device_id\":\"device-abababababababababababababababababababababababababababababababab\",\"incarnation_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000386\"},\"installation_audience\":\"node-test\",\"kernel_boot_id\":{\"uuid\":\"00000000-0000-0000-0000-000000000385\"},\"owner\":\"app_effect_broker\",\"type\":\"NodeProducerV2\"},\"sampled_boottime_ms\":1009,\"snapshot_id\":{\"uuid\":\"00000000-0000-0000-0000-00000000038a\"},\"stream_gap\":false,\"type\":\"NodeSnapshotV2\"},\"schema\":2}",
+      "fact_index": 0,
+      "sequence": 9,
+      "observed_boottime_ms": 1009,
+      "received_at": 1100.0
+    }
+  ]
+}

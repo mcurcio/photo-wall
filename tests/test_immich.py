@@ -96,6 +96,7 @@ class Upstream:
         self.overrides = {}
         self.search = None
         self.on_request = None
+        self.missing_tags = set()  # tag ids `GET tags/{id}` answers 400 for, as the library does
 
     def handle(self, request):
         self.requests.append(request)
@@ -126,6 +127,12 @@ class Upstream:
             selected = rows[offset:offset + body["size"]]
             next_page = str(body["page"] + 1) if offset + body["size"] < len(rows) else None
             return httpx.Response(200, json=page(selected, next_page))
+        if path.startswith("/api/tags/"):
+            assert request.method == "GET"
+            tag_id = path.rsplit("/", 1)[-1]
+            if tag_id in self.missing_tags:
+                return httpx.Response(400, json={"message": "Tag not found"})
+            return httpx.Response(200, json={"id": tag_id, "name": "t", "value": "t"})
         if path.endswith("/original"):
             assert request.method == "GET"
             assert dict(request.url.params) == {"edited": "false"}
@@ -209,13 +216,30 @@ def test_qualified_video_duration_is_normalized_and_rechecked_on_download(tmp_pa
 @pytest.mark.parametrize("version,duration", [
     ((2, 5, 6), 10_250), ((3, 1, 0), "0:00:10.250"),
     ((3, 1, 0), None), ((3, 1, 0), True), ((3, 1, 0), 10.25),
-    ((3, 1, 0), 0), ((3, 1, 0), -1), ((3, 1, 0), 300_001),
+    ((3, 1, 0), 0), ((3, 1, 0), -1),
 ])
 def test_video_duration_rejects_wrong_version_shape_and_out_of_bounds(version, duration):
     upstream = Upstream([asset(kind="VIDEO", duration=duration)], version=version)
     result = refresh(upstream, source(media_types=("video",)))
     assert_failed(result, "incompatible", "metadata_pending_or_invalid")
     assert "metadata_invalid" in codes(result)
+
+
+@pytest.mark.parametrize("kind,changes", [
+    ("VIDEO", {"duration": "0:05:00.001"}),  # over max_video_seconds (300 s)
+    ("IMAGE", {"exifInfo": {"exifImageWidth": 16385, "exifImageHeight": 10, "orientation": "1",
+                            "fileSizeInByte": len(ORIGINAL)}}),  # over max_dimension
+    ("IMAGE", {"exifInfo": {"exifImageWidth": 16000, "exifImageHeight": 16000, "orientation": "1",
+                            "fileSizeInByte": len(ORIGINAL)}}),  # over max_pixels
+])
+def test_a_well_formed_item_over_photo_walls_limits_is_its_own_code(kind, changes):
+    """Photo Wall's limits are its own refusal (`item_over_limits`), never `metadata_invalid`,
+    which says the library's answer was malformed (console DDD §39 R21)."""
+    upstream = Upstream([asset(kind=kind, **changes)])
+    media_types = ("video",) if kind == "VIDEO" else ("image",)
+    result = refresh(upstream, source(media_types=media_types))
+    assert_failed(result, "incompatible", "metadata_pending_or_invalid")
+    assert "item_over_limits" in codes(result) and "metadata_invalid" not in codes(result)
 
 
 def test_empty_discovery_is_success_but_missing_exif_is_pending():
@@ -495,16 +519,18 @@ def test_pending_diagnostics_are_bounded_without_losing_counts_or_summary():
     assert len(result.diagnostics) <= 3
 
 
-@pytest.mark.parametrize("bounds,advance", [
-    ({"metadata_seconds": 2, "refresh_seconds": 60}, 3),
-    ({"metadata_seconds": 15, "refresh_seconds": 10}, 6),
+@pytest.mark.parametrize("bounds,advance,code", [
+    # One request over its own deadline: the library answered too slowly.
+    ({"metadata_seconds": 2, "refresh_seconds": 60}, 3, "upstream_timeout"),
+    # The whole refresh over Photo Wall's own time limit: never worded as the library's.
+    ({"metadata_seconds": 15, "refresh_seconds": 10}, 6, "time_budget"),
 ])
-def test_metadata_and_aggregate_deadlines_use_injected_monotonic_clock(bounds, advance):
+def test_metadata_and_aggregate_deadlines_use_injected_monotonic_clock(bounds, advance, code):
     upstream = Upstream([asset()])
     clock = ManualClock(NOW)
     upstream.on_request = lambda request: clock.advance(advance) if "/search/" in request.url.path else None
     result = refresh(upstream, limits=MediaLimits(**bounds), clock=clock)
-    assert_failed(result, "unavailable")
+    assert_failed(result, "unavailable", code)
 
 
 @pytest.mark.parametrize("fault", ["initial_monotonic", "backward_monotonic", "later_utc"])
@@ -742,7 +768,7 @@ def test_plain_http_requires_explicit_isolated_network_opt_in():
         connection(allow_http=False)
 
 
-def test_preview_counts_complete_filtered_members_without_exif_or_downloads():
+def test_preview_counts_complete_filtered_members_without_downloads():
     upstream = Upstream([
         asset(1, kind="IMAGE", isFavorite=False),
         asset(2, kind="IMAGE", isFavorite=True),
@@ -754,21 +780,72 @@ def test_preview_counts_complete_filtered_members_without_exif_or_downloads():
         captured_from=datetime(2025, 1, 1, tzinfo=UTC).timestamp(),
         captured_until=datetime(2027, 1, 1, tzinfo=UTC).timestamp(),
     )
-    result = asyncio.run(preview(upstream, query))
-    assert result.model_dump() == {"count": 2, "image_count": 1, "video_count": 1}
+    observed = asyncio.run(preview(upstream, query))
+    result = observed.result
+    assert (result.count, result.image_count, result.video_count, result.limited) == (2, 1, 1, False)
+    assert {member.kind for member in result.shown} == {"image", "video"}
+    video = next(member for member in result.shown if member.kind == "video")
+    assert (video.width, video.height, video.duration_seconds) == (3200, 2400, 10.0)
+    shown_ids = [member.asset_id for member in result.shown]
+    assert shown_ids == sorted(shown_ids)  # equal capture times: asset_id order
     searches = upstream.searches
     assert len(searches) == 2
-    assert all(not body["withExif"] and body["isFavorite"] is False for body in searches)
+    assert all(body["isFavorite"] is False and "tagIds" not in body for body in searches)
     assert all("takenAfter" in body and "takenBefore" in body for body in searches)
     assert not any(request.url.path.endswith("/original") for request in upstream.requests)
 
 
-def test_preview_refuses_incomplete_or_over_limit_membership():
-    upstream = Upstream([asset(1), asset(2)])
-    query = SourcePreviewQuery(connection_ref="main", media_types=("image",))
-    with pytest.raises(MediaError) as error:
-        asyncio.run(preview(upstream, query, limits=MediaLimits(max_candidates=1)))
-    assert error.value.code == "source_limit"
+def test_tags_reach_every_per_kind_walk_of_refresh_and_preview():
+    upstream = Upstream([asset(1), asset(2, kind="VIDEO")])
+    tags = (str(UUID(int=901)), str(UUID(int=900)))
+    refresh(upstream, source(media_types=("image", "video"), tags=tags))
+    asyncio.run(preview(upstream, SourcePreviewQuery(connection_ref="main", tags=tags)))
+    assert len(upstream.searches) == 6  # refresh: two passes x two kinds; preview: two kinds
+    assert all(body["tagIds"] == sorted(tags) for body in upstream.searches)
+
+
+def test_a_tag_deleted_in_the_library_fails_as_tag_missing_never_an_ok_empty():
+    """R6 (PR 37 §6): each tag is confirmed with `GET tags/{id}` before any search, so a
+    deleted tag fails the refresh and the preview as `incompatible/tag_missing`; `tagIds`
+    alone would match nothing and read as an ok, empty Source. Mutation probe: drop
+    `_confirm_tags` and the refresh reads ok with no members."""
+    kept, gone = str(UUID(int=900)), str(UUID(int=901))
+    upstream = Upstream([asset(1)])
+    upstream.missing_tags.add(gone)
+    result = refresh(upstream, source(tags=(kept, gone)))
+    assert_failed(result, "incompatible", "tag_missing")
+    assert upstream.searches == []  # refused before any search
+    with pytest.raises(MediaError) as caught:
+        asyncio.run(preview(upstream, SourcePreviewQuery(connection_ref="main", tags=(gone,))))
+    assert (caught.value.code, caught.value.status) == ("tag_missing", "incompatible")
+    checked = [request.url.path for request in upstream.requests if "/api/tags/" in request.url.path]
+    assert checked[:2] == [f"/api/tags/{kept}", f"/api/tags/{gone}"]
+
+
+def test_a_both_kinds_preview_shows_the_newest_24_across_kinds_and_sums_counts():
+    def captured(day):
+        return datetime(2026, 1, 1, tzinfo=UTC).replace(day=day).isoformat().replace("+00:00", "Z")
+    rows = [asset(n, kind="IMAGE", captured=captured(n)) for n in range(1, 21)]
+    rows += [asset(100 + n, kind="VIDEO", captured=captured(n).replace("T00", "T12")) for n in range(1, 21)]
+    observed = asyncio.run(preview(Upstream(rows), SourcePreviewQuery(connection_ref="main")))
+    result = observed.result
+    assert (result.count, result.image_count, result.video_count, result.limited) == (40, 20, 20, False)
+    assert len(result.shown) == 24
+    times = [member.captured_at for member in result.shown]
+    assert times == sorted(times, reverse=True)
+    assert min(times) == datetime(2026, 1, 9, tzinfo=UTC).timestamp()  # 12 days of both kinds
+    assert [member.served() for member in observed.members] == list(result.shown)
+
+
+def test_over_the_ceiling_a_preview_is_limited_while_a_refresh_still_refuses():
+    rows = [asset(n) for n in range(1, 41)]
+    limits = MediaLimits(max_candidates=30)
+    observed = asyncio.run(preview(Upstream(rows), SourcePreviewQuery(connection_ref="main",
+                                                                      media_types=("image",)),
+                                   limits=limits))
+    assert observed.result.limited is True
+    assert observed.result.count >= 30 and len(observed.result.shown) == 24
+    assert_failed(refresh(Upstream(rows), limits=limits), "incompatible", "source_limit")
 
 
 def preview(upstream, query, *, limits=None):

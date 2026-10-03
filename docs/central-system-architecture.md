@@ -397,6 +397,10 @@ class Publisher(Protocol):
   write-once). A re-production must match that digest before the rename, else
   `TerminalFailure("not_reproducible")`. So a plan never holds an unservable digest, and nothing
   erases facts: an OS image is keyed by its tarball's sha256, so a release re-cut is a new key.
+  The one exception is a kind not `keyed_by_content` (`AssetKind`, only `library-thumbnail`,
+  keyed by its original's identity): a later production's facts replace the recorded ones,
+  because the library may regenerate the bytes; its record lives only while a live preview
+  selects it, and a fetch that finds it retired is terminal `thumbnail_unknown`.
   **`job_outcomes`** holds only the latest written *status* per `(job type, subject)`, last write
   wins. The runtime writes the facts, the status and `NOTIFY job_outcome, <lock key>` in one
   transaction, and `Ready.result` is read from the Asset record. Status is stored

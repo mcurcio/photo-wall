@@ -26,6 +26,7 @@ from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response as Http11Response
 
+from central.db import ProcessTransactionClock
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
@@ -1679,7 +1680,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
 
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
-        queue=RecordingMediaQueue())
+        queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     repository.set_recipe(RECIPE)
     storage = MediaStore(repository, tmp_path / "central-media")
     with storage.worker_lock():

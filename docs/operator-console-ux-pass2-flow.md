@@ -43,7 +43,7 @@ flowchart LR
     end
     subgraph WALL["wallRoutes: mounted only while current"]
       PLAN["Wall #/wall/frames/id/facet"]
-      EQ["Equipment #/equipment"]
+      EQ["Equipment<br/>(replaced by Players #/players)"]
     end
     subgraph NEU["neutralRoutes"]
       ATT["Needs attention #/attention"]
@@ -124,8 +124,8 @@ flowchart LR
 | Scenes | `#/scenes`, `#/scenes/new/<step>`, `#/scenes/<id>/edit/<step>` | `SceneList` as cards; the Scene flow | show |
 | Schedule | `#/schedule`, `#/schedule/new/<step>` | Program cards ("Past" collapsed); the Schedule flow | show |
 | Photo sources | `#/sources`, `#/sources/new/<step>` | Source cards with Refresh; the Source flow | show |
-| Wall | `#/wall`, `#/wall/frames/<id>/<facet>` (facet: `binding`, `commissioning` or `nowshowing`, the `Inspector.jsx:43-45` keys) | Surface filter, `Plan`, `UnplacedTray`, `Inspector`, `Guidance` (unchanged) | wall |
-| Equipment | `#/equipment` | `EquipmentRoster`, unchanged | wall |
+| Wall | `#/wall`, `#/wall/frames/<id>/<facet>` (facet: `calibration`, `binding` or `nowshowing`; `commissioning` was renamed `calibration` by [console DDD pass 3](operator-console-ddd.md#19-screens) and still parses to it) | Surface filter, `Plan`, `UnplacedTray`, `Inspector`, `Guidance` (unchanged) | wall |
+| Equipment (replaced) | none: the old address opens `#/players` | Replaced by the Players list and Player pages in the fleet route table, [console DDD pass 1](operator-console-ddd.md#9-screens-and-read-models) | wall |
 | Needs attention | `#/attention` | The attention strip's expanded list, full width. Each item links to `#/wall/frames/<id>/<facetFor(...)>` | neutral |
 
 **Frozen surfaces (one page per slice later; bodies are not designed here).**
@@ -145,15 +145,15 @@ flowchart TB
   App --> Shell --> useRoute --> routes
   Shell --> showRoutes & wallRoutes & neutralRoutes
   showRoutes --> Flows["SceneFlow, SourceFlow, ScheduleFlow, ShowNowFlow"] --> flowkit["flow/*"] & Regions["Field, pickers, SceneList, RunsRegion, MediaPipeline"]
-  wallRoutes --> Plan & Inspector --> Commissioning
+  wallRoutes --> Plan & Inspector --> CalibrationFacet
   neutralRoutes --> AttentionList --> health
 ```
 
 **R4, with its guarantee stated honestly.**
-- Commissioning is reachable only through `wallRoutes`.
-- **What enforces it (a CI test, not a boot check):** a pytest walks the imports reachable from `showRoutes.jsx` and `neutralRoutes.jsx` and fails if any module of the Wall-only closure is among them (everything `wallRoutes.jsx` reaches except the shell's own modules and a declared list shared with the Show side, which the test checks is exact and holds no display control), or if one of them names the `/calibration` route. It also walks the shell's own graph from `main.jsx`, stopping at `wallRoutes.jsx`, so the shell reaches them only through the Wall table (the Wall state the shell holds lives in `wallState.js`, which imports no component). The graph is the bundler's (esbuild's metafile), cross-checked module by module against an import scan, and a disagreement is an error. The scan fails closed too: an `import`, `export … from`, `import(…)` or `import.meta` it cannot read or resolve is an error. A browser test visits every `samplePaths` entry of `showRoutes` and `neutralRoutes` and finds no Commissioning landmark.
+- The Calibration facet (named Commissioning until 2026-10-02) is reachable only through `wallRoutes`.
+- **What enforces it (a CI test, not a boot check):** a pytest walks the imports reachable from `showRoutes.jsx` and `neutralRoutes.jsx` and fails if any module of the Wall-only closure is among them (everything `wallRoutes.jsx` reaches except the shell's own modules and a declared list shared with the Show side, which the test checks is exact and holds no display control), or if one of them names the `/calibration` route. It also walks the shell's own graph from `main.jsx`, stopping at `wallRoutes.jsx`, so the shell reaches them only through the Wall table (the Wall state the shell holds lives in `wallState.js`, which imports no component). The graph is the bundler's (esbuild's metafile), cross-checked module by module against an import scan, and a disagreement is an error. The scan fails closed too: an `import`, `export … from`, `import(…)` or `import.meta` it cannot read or resolve is an error. A browser test visits every `samplePaths` entry of `showRoutes` and `neutralRoutes` and finds no Calibration facet landmark.
 - **Hiding uses the HTML `hidden` attribute, not CSS classes,** so hidden sections leave the accessibility tree and their `role="status"` and `alert` regions are not announced.
-- **Why hidden Show pages do not weaken it:** Wall sections unmount when they are not current. The always-mounted Show sections, hidden when not current, therefore contain no Commissioning DOM.
+- **Why hidden Show pages do not weaken it:** Wall sections unmount when they are not current. The always-mounted Show sections, hidden when not current, therefore contain no Calibration facet DOM.
 - `useMode` and the mode toggle are deleted.
 
 **Hash routing details.**

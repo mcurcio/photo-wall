@@ -3,12 +3,17 @@ tables' sample paths, and the hash routes' round trip.
 
 R4: Display controls are reachable only from the Wall side. The shell mounts Show sections
 always (hidden when not current) and Wall sections only while current, so R4 holds as long as
-nothing the Show and neutral route tables import can reach a module only the Wall needs (the
-WALL-ONLY CLOSURE: everything `wallRoutes.jsx` reaches but the shell's own modules and the
-modules declared shared with the Show side, `SHARED_WITH_SHOW`), no Show or neutral module
-names the display's calibration route, and the shell's own modules reach the Wall's only
+nothing the Show, fleet and neutral route tables import can reach a module only the Wall needs
+(the WALL-ONLY CLOSURE: everything `wallRoutes.jsx` reaches but the shell's own modules and the
+modules declared shared with the other sides, `SHARED_WITH_SHOW`), no Show, fleet or neutral
+module names the display's calibration route, and the shell's own modules reach the Wall's only
 through `wallRoutes.jsx`. The browser half (tests/browser/test_console_shell_browser.py)
 visits every sample path.
+
+G1 (console DDD §49) by the same graph: the worklists (Needs attention, the Wall's To finish
+list), the one host classifier they read and the Status host chip import models, never a page
+module (a route table, the shell or a `*Page.jsx`) and never a write module (`WRITE_MODULES`),
+followed transitively. A worklist only links; the write lives in the home it links to.
 
 THE MODULE GRAPH is the bundler's: esbuild (shipped with Vite in the console's
 node_modules) bundles the entry points with a metafile, whose `inputs` list every module and
@@ -43,25 +48,45 @@ CONSOLE = Path(__file__).parents[1] / "central/console"
 SRC = CONSOLE / "src"
 ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
-TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "neutral": "neutralRoutes.jsx"}
-DISPLAY_CONTROLS = {"Commissioning.jsx", "Inspector.jsx", "useCalibration.js"}
-# The display's calibration route (central/app.py): only the Wall side may name it.
-CALIBRATION_ROUTE = "/calibration"
-# Modules the Wall table reaches that the Show side uses too, besides the shell's own. The
+TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
+          "neutral": "neutralRoutes.jsx"}
+DISPLAY_CONTROLS = {"CalibrationFacet.jsx", "Inspector.jsx", "useCalibration.js"}
+# The display's calibration route (central/app.py `/v1/operator/frames/{frame_id}/calibration`):
+# only the Wall side may name it. Matched with the interpolated Frame id's closing brace, so the
+# Calibration facet's own hash (`#/wall/frames/<id>/calibration`, a route sample) is not it.
+CALIBRATION_ROUTE = "}/calibration"
+# Modules the Wall table reaches that the Show, fleet or neutral sides use too, besides the
+# shell's own. The
 # rest of the Wall's closure is Wall-only: sharing another module is a design decision, made
 # here, and none of these may be a display control or name the calibration route.
 SHARED_WITH_SHOW = {
     "ConfirmAction.jsx",  # every confirmation
-    "NowShowingFacet.jsx",  # a frame's intent, also shown on Now showing
-    "equipmentApi.js",  # UNKNOWN_MESSAGE and the equipment reads
+    "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Status facet and the Now page's Why
+    "equipmentApi.js",  # the equipment reads and writes
+    "sendOutcome.js",  # the one outcome pattern: UNKNOWN_MESSAGE, CHANGED_MESSAGE, held requests
+    "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
     "framesApi.js",
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
     "readinessRecovery.js",  # plain-language failure mapping; no controls
-    "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
+# The console's write modules: the operator write primitive and every module that wraps a
+# write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
+# Every write path reaches `apiWrite.js`, so a closure that holds none of these holds no write.
+WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.js",
+                 "equipmentApi.js"}
+# G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
+# Wall's To finish list and model, the one host classifier they read, and the Status host chip.
+G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "WallUnfinished.jsx",
+                   "unfinished.js", "hostHealth.js", "HostChip.jsx"]
+# The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
+SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
+# sceneTargets.js is not listed: since S1 join.js reads a Run's origin from showState.js, which
+# re-exports it, so the shell's own modules reach it.
+# players.js is not listed: since T1 the shell's own attention strip reaches it (host incidents
+# name each Bound Player, hostHealth.js), so it is one of the shell's own modules.
 
 
 class ScanError(Exception):
@@ -286,6 +311,28 @@ def reachable(graph, entry, *, stop=frozenset()):
     return {module.name for module in seen}
 
 
+def scan_closure(path, root=CONSOLE):
+    """The names of every console module `path` reaches by the import scan (`_imports`, which
+    fails closed), followed transitively, `path` included. For a copy of the sources that the
+    bundler is not run over (the mutation probes)."""
+    seen, stack = set(), [path.resolve()]
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        if module.suffix in {".js", ".jsx"}:
+            stack.extend(_imports(module, root) - seen)
+    return {module.name for module in seen}
+
+
+def g1_forbidden(names):
+    """Of module `names`, those a G1 list module must never reach: page and write modules."""
+    return {name for name in names
+            if name in WRITE_MODULES or name in SHELL_PAGES or name in TABLES.values()
+            or name.endswith("Page.jsx")}
+
+
 @pytest.fixture(scope="module")
 def graph(tmp_path_factory):
     """The console's module graph from its entry point and route tables."""
@@ -415,8 +462,8 @@ def _wall_only(graph):
         TABLES["wall"]}
 
 
-@pytest.mark.parametrize("table", ["show", "neutral"])
-def test_show_and_neutral_routes_never_reach_the_wall_only_closure(graph, table):
+@pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
+def test_show_fleet_and_neutral_routes_never_reach_the_wall_only_closure(graph, table):
     modules = reachable(graph, TABLES[table])
     assert "health.js" in modules  # the walk reached past the table itself
     assert not modules & _wall_only(graph), sorted(modules & _wall_only(graph))
@@ -437,12 +484,13 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     # The declared sharing is exactly what the Show and neutral sides reach of the Wall's
     # closure (a module no longer shared is taken off), and none of it is a display control.
     wall = reachable(graph, TABLES["wall"]) - _shell_own(graph)
-    shown = reachable(graph, TABLES["show"]) | reachable(graph, TABLES["neutral"])
+    shown = (reachable(graph, TABLES["show"]) | reachable(graph, TABLES["fleet"])
+             | reachable(graph, TABLES["neutral"]))
     assert wall & shown == SHARED_WITH_SHOW
     assert not SHARED_WITH_SHOW & DISPLAY_CONTROLS
 
 
-@pytest.mark.parametrize("table", ["show", "neutral"])
+@pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
 def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, table):
     modules = reachable(graph, TABLES[table])
     assert {"ReadinessNotice.jsx", "readinessRecovery.js"} <= modules
@@ -450,11 +498,48 @@ def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, t
 
 
 def test_the_wall_routes_do_reach_display_controls(graph):
-    # Positive control: the closure holds Commissioning and the calibration write, where
+    # Positive control: the closure holds the Calibration facet and the calibration write, where
     # they are meant to be.
     assert DISPLAY_CONTROLS <= _wall_only(graph)
     assert any(CALIBRATION_ROUTE in module.read_text() for module in graph
                if module.name in _wall_only(graph))
+
+
+# --- G1.
+
+
+@pytest.mark.parametrize("name", G1_LIST_MODULES)
+def test_g1_list_modules_reach_no_page_and_no_write_module(graph, name):
+    modules = reachable(graph, name)
+    assert name in modules and len(modules) > 1  # the walk reached past the module itself
+    # The Needs attention page is itself a page; what it reaches must not be one.
+    reached = modules - {name}
+    assert not g1_forbidden(reached), sorted(g1_forbidden(reached))
+
+
+def test_g1_list_modules_are_in_the_graph_and_the_homes_do_reach_writes(graph):
+    # Positive controls: every listed module is one the console builds (a renamed file cannot
+    # drop out of the check silently), and the homes the lists link to own the writes.
+    names = {module.name for module in graph}
+    assert set(G1_LIST_MODULES) <= names
+    assert "apiWrite.js" in reachable(graph, "PlayerPage.jsx")
+    assert "framesApi.js" in reachable(graph, "LayoutEditor.jsx")
+
+
+def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
+    # A mutation of the guarded files, in a copy: the classifier importing its lookup from the
+    # polling hook again (as batch 4 first did) puts the write primitive in the closure of
+    # Needs attention, and the check names it.
+    src = tmp_path / "src"
+    src.mkdir()
+    for module in SRC.iterdir():
+        if module.is_file():
+            (src / module.name).write_bytes(module.read_bytes())
+    assert not g1_forbidden(scan_closure(src / "AttentionList.jsx", tmp_path))
+    classifier = src / "hostHealth.js"
+    classifier.write_text('import { useFleetHosts } from "./fleetHosts.js";\n' + classifier.read_text())
+    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js", "HostChip.jsx"):
+        assert "apiWrite.js" in g1_forbidden(scan_closure(src / name, tmp_path)), name
 
 
 @pytest.mark.parametrize("table", sorted(TABLES))
@@ -469,11 +554,12 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "equipment", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention"])
 
 
 ROUND_TRIP = r"""
-const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS } = await import(process.argv[1]);
+const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS, FACETS, FACET_ALIASES } =
+  await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
 const out = {};
 out.sections = SECTIONS;
@@ -489,9 +575,20 @@ out.invalidHashes = input.invalidHashes.map((hash) => parseRoute(hash));
 out.invalidRoutes = input.invalidRoutes.map((route) => {
   try { formatRoute(route); return "formatted"; } catch { return "refused"; }
 });
-out.landing = [landingRoute(0), landingRoute(3)];
+out.landing = [landingRoute(), landingRoute(0), landingRoute(5)];
+out.nowshowing = parseRoute("#/wall/frames/x/nowshowing");
+out.noFacet = parseRoute("#/wall/frames/x");
+out.facets = FACETS;
+out.aliases = FACET_ALIASES;
+out.layout = { hash: formatRoute({ section: "wall", mode: "layout" }),
+               route: parseRoute("#/wall/layout") };
 out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
                                 initialTarget: "frame_one" });
+out.equipment = parseRoute("#/equipment");
+out.commissioning = parseRoute("#/wall/frames/x/commissioning");
+out.commissioningRoute = (() => { try {
+  return formatRoute({ section: "wall", id: "x", facet: "commissioning" });
+} catch { return "refused"; } })();
 out.badTargetRoute = (() => { try {
   return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
 } catch { return "refused"; } })();
@@ -500,8 +597,10 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "equipment", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention")
 ] + [
+    {"section": "players", "id": "device-" + "a" * 64},
+    {"section": "players", "id": "a/b ç?#%"},
     {"section": "now", "flow": "show", "step": "review"},
     {"section": "scenes", "flow": "new", "step": "kind"},
     {"section": "scenes", "flow": "new", "step": "kind", "initialTarget": "portrait-1"},
@@ -512,24 +611,46 @@ ROUTES = [
     {"section": "sources", "id": "all-photos", "flow": "edit", "step": "review"},
     {"section": "schedule", "flow": "new", "step": "when"},
     {"section": "schedule", "id": "evening/program", "flow": "edit", "step": "review"},
-    {"section": "wall", "id": "reception north", "facet": "commissioning"},
+    {"section": "wall", "id": "reception north", "facet": "calibration"},
     {"section": "wall", "id": "a/b", "facet": "binding"},
-    {"section": "wall", "id": "frames", "facet": "nowshowing"},
+    {"section": "wall", "id": "frames", "facet": "status"},
+    {"section": "wall", "id": "layout", "facet": "status"},
+    {"section": "wall", "mode": "layout"},
+    {"section": "releases", "flow": "update", "id": "v0.15.0"},
+    {"section": "releases", "flow": "update", "id": "v1/rc ç?#%", "tried": "player/one ç"},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": ["player/two ç", "try", "skip"]},
+    {"section": "releases", "flow": "update", "id": "v1", "tried": "p", "skipped": ["q"]},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": []},
 ]
 INVALID_HASHES = [
-    "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x", "#/wall/frames/x/bogus",
-    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x",
+    "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x/bogus",
+    "#/wall/layout/x", "#/wall/bogus", "#/now/layout", "#/wall/layout?target=x",
+    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
+    "#/equipment?target=x", "#/players/a/b", "#/players/x?target=y",
     "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
     "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
     "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
     "#/sources/new/name?target=frame",
+    "#/releases/update", "#/releases/update/v1/try", "#/releases/update/v1/other/p",
+    "#/releases/update/v1/try/p/x", "#/releases/v1", "#/releases/update/v1?target=x",
+    "#/releases/update/v1/skip", "#/releases/update/v1/try/p/skip", "#/releases/update/v1/skip/a/a",
+    "#/releases/update/v1/skip/a?target=x",
 ]
 INVALID_ROUTES = [
     {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
     {"section": "wall", "id": "x"}, {"section": "wall", "id": "x", "facet": "bogus"},
+    {"section": "wall", "id": "x", "facet": "nowshowing"},
+    {"section": "wall", "mode": "layout", "id": "x"}, {"section": "now", "mode": "layout"},
+    {"section": "wall", "mode": "bogus"}, {"section": "wall", "mode": "layout", "facet": "status"},
     {"section": "now", "flow": "new", "step": "x"}, {"section": "scenes", "flow": "edit",
                                                     "step": "x"},
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
+    {"section": "equipment"}, {"section": "scenes", "id": "x"},
+    {"section": "players", "id": "x", "tried": "p"}, {"section": "releases", "flow": "update"},
+    {"section": "scenes", "flow": "update", "id": "x"},
+    {"section": "players", "id": "x", "skipped": ["p"]},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": ["a", "a"]},
+    {"section": "releases", "flow": "update", "id": "v1", "skipped": [""]},
 ]
 
 
@@ -554,6 +675,19 @@ def test_routes_parse_format_and_round_trip():
     assert all(trip["same"] for trip in out["roundTrips"]), out["roundTrips"]
     assert out["invalidHashes"] == [None] * len(INVALID_HASHES)
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
-    assert out["landing"] == [{"section": "wall"}, {"section": "now"}]
+    # The landing route is always the Wall, with no Frames and with five (console DDD §48).
+    assert out["landing"] == [{"section": "wall"}] * 3
+    # The retired Equipment page's bookmark lands on the Players list, and is never formatted.
+    assert out["equipment"] == {"section": "players"}
+    # The renamed facet's old bookmark opens Calibration, and is never formatted (§19).
+    assert out["commissioning"] == {"section": "wall", "id": "x", "facet": "calibration"}
+    assert out["commissioningRoute"] == "refused"
+    # The Now-showing facet's old bookmark, and a Frame route with no facet, open Status
+    # (console DDD §61); neither is ever formatted.
+    assert out["nowshowing"] == {"section": "wall", "id": "x", "facet": "status"}
+    assert out["noFacet"] == {"section": "wall", "id": "x", "facet": "status"}
+    assert out["facets"] == ["status", "binding", "calibration"]
+    assert out["aliases"] == {"nowshowing": "status", "commissioning": "calibration"}
+    assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"

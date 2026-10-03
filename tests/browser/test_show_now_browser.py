@@ -191,11 +191,11 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
         assert current_hash(page) == "#/now"
 
-        # Central's plan puts the new Run on top of the frame.
+        # Central's Runs put the new Run on top of the frame.
         why = _runs(page).get_by_role("group", name="Why", exact=True)
         why.get_by_role("button", name=f"Why? {VALID_FRAME}", exact=True).click()
         expect(why).to_contain_text(
-            f"Central's plan for {VALID_FRAME}: {SCENE_ID} (priority 5, activated directly) on top.")
+            f"Central's Runs on {VALID_FRAME}: {SCENE_ID} (priority 5, started directly, by Show now or the API) on top.")
 
         # A Scene on frames no Run covers: 0.
         form = show_now(page, "elsewhere", submit=False)
@@ -223,15 +223,15 @@ def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(pag
         for player_id in players:
             report_readiness(registry, player_id)
         drive_poll(page)
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
         recovery = form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)
         expect(recovery).to_have_attribute(
-            "href", f"#/wall/frames/{INVALID_FRAME}/commissioning")
+            "href", f"#/wall/frames/{INVALID_FRAME}/calibration")
         expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
         recovery.click()
         inspector = page.get_by_role("region", name=f"Frame {INVALID_FRAME} inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Commissioning", exact=True)).to_have_attribute(
+        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_have_attribute(
             "aria-selected", "true")
 
         # Ordinary route navigation away and back leaves Show now's values and
@@ -240,7 +240,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(pag
         visit(page, "#/now/show/review")
         form = show_form(page)
         expect(form.get_by_text(SCENE_ID, exact=True)).to_be_visible()
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs commissioning")
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
         show_advanced(form)
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
 
@@ -396,7 +396,7 @@ def test_a_scene_cards_show_now_opens_the_flow_on_that_scene(page, registry):
         connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         scenes.get_by_role("button", name=f"Show Scene {SCENE_ID} now", exact=True).click()
-        expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
         assert current_hash(page) == "#/now/show/scene"
         expect(show_form(page).get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
 
@@ -423,7 +423,7 @@ def test_run_cards_and_the_why_disclosures(page, registry):
             "article", name="Scene evening", exact=True)
         expect(card).to_contain_text("Running")
         expect(card).to_contain_text("priority 5")
-        expect(card).to_contain_text("activated directly")
+        expect(card).to_contain_text("started directly (Show now or the API)")
         expect(card.get_by_role("button", name=re.compile(r"^Finish run "))).to_be_enabled()
         expect(card.get_by_role("button", name=re.compile(r"^Cancel run "))).to_be_visible()
         runs.get_by_text("Recently ended (1)", exact=True).click()
@@ -537,7 +537,7 @@ def _show_scene_card(page, scene_id):
     go(page, "scenes")
     page.get_by_role("region", name="Scenes", exact=True).get_by_role(
         "button", name=f"Show Scene {scene_id} now", exact=True).click()
-    expect(page.get_by_role("heading", level=1, name="Now showing", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
 
 
 def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
@@ -602,7 +602,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
         form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(UNKNOWN)
         now_link = page.get_by_role("navigation", name="Sections", exact=True).get_by_role(
-            "link", name="Now showing", exact=True)
+            "link", name="Now", exact=True)
         expect(now_link).to_have_accessible_description("")
 
         _show_scene_card(page, "elsewhere")

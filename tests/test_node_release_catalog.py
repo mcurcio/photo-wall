@@ -131,3 +131,103 @@ def test_actual_producer_manifest_roundtrips_through_origin_catalog(registry,tmp
     assert observed.os_image.sha256!=manifest.base.content_key
     catalog=NodeReleaseCatalog(NodeSessions(registry.db,registry.clock,NodeControlConfig('node-test')),origin)
     assert asyncio.run(catalog.publish(sha256(raw).hexdigest(),uuid4(),False,'operator:producer-output'))['published']
+
+
+# --- The release read (console DDD Part E G1, R18).
+
+
+class _Recording:
+    """The registry's Database, recording every statement each transaction runs, in order."""
+
+    def __init__(self, db):
+        self.db, self.statements = db, []
+
+    def transaction(self):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def recorded():
+            with self.db.transaction() as conn:
+                outer = self
+
+                class Conn:
+                    def execute(self, sql, *args):
+                        outer.statements.append(sql)
+                        return conn.execute(sql, *args)
+                yield Conn()
+        return recorded()
+
+
+def _read(registry, db=None):
+    sessions = NodeSessions(db or registry.db, registry.clock, NodeControlConfig('node-test'))
+    return NodeReleaseCatalog(sessions, origin=object()).list()
+
+
+def test_release_read_is_one_repeatable_read_read_only_snapshot(registry):
+    from test_node_boot import cold_setup
+    cold_setup(registry)
+    recording = _Recording(registry.db)
+    read = _read(registry, recording)
+    # One transaction: the snapshot is fixed before its first data query, and it writes nothing.
+    assert recording.statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    assert all(sql.lstrip().upper().startswith("SELECT") for sql in recording.statements[1:])
+    assert len(recording.statements) == 4
+    assert read['read_at'] == registry.clock.utc()
+
+
+def test_with_no_policy_row_the_selection_is_revision_zero_and_nothing_is_listed(registry):
+    _seed(registry)
+    read = _read(registry)
+    assert read['selection'] == {'revision': 0, 'deployment_id': None, 'changed_at': None}
+    assert read['deployments'] == [] and read['releases'] == []
+
+
+def test_the_selected_deployment_is_listed_even_when_older_than_the_newest_fifty(registry):
+    from test_node_boot import cold_setup
+
+    from central.fleet.node_boot import encode_node_deployment
+    _, _, selected = cold_setup(registry)
+    changed_at = registry.clock.utc()
+    older = replace(selected, deployment_id=uuid4())
+    newer = [replace(selected, deployment_id=uuid4()) for _ in range(50)]
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO node_deployments VALUES(%s,%s,%s)",
+                     (older.deployment_id, encode_node_deployment(older), changed_at - 10))
+        for offset, deployment in enumerate(newer, start=1):
+            conn.execute("INSERT INTO node_deployments VALUES(%s,%s,%s)",
+                         (deployment.deployment_id, encode_node_deployment(deployment), changed_at + offset))
+    read = _read(registry)
+    listed = [row['deployment_id'] for row in read['deployments']]
+    # The 50 newest, newest first, then the selected one; the older unselected one is not listed.
+    assert listed == [str(d.deployment_id) for d in reversed(newer)] + [str(selected.deployment_id)]
+    assert str(older.deployment_id) not in listed
+    assert read['selection'] == {'revision': 1, 'deployment_id': str(selected.deployment_id),
+                                 'changed_at': changed_at}
+    row = read['deployments'][-1]
+    assert row == {'deployment_id': str(selected.deployment_id), 'published_at': changed_at,
+                   'base_tag': selected.base.tag,
+                   'app_environment_sha256': selected.app_environment.environment_sha256}
+
+
+def test_releases_and_deployments_serve_their_base_tag_and_app(registry):
+    from test_node_boot import cold_setup
+    _, _, deployment = cold_setup(registry, app=False)
+    read = _read(registry)
+    [release] = read['releases']
+    assert release['base_tag'] == deployment.base.tag
+    assert release['app_environment_sha256'] is None
+    assert release['verified_at'] == 1000
+    assert release['download_bytes'] == 256 + 4 * 32 + deployment.manager_primary.size_bytes + 16
+    assert read['deployments'][0]['app_environment_sha256'] is None
+
+
+def test_a_release_with_an_app_serves_its_app_environment(registry):
+    _seed(registry)
+    origin, release, _ = publication()
+    discover(registry, origin)
+    [row] = _read(registry)['releases']
+    assert row['manifest_sha256'] == sha256(encode_node_release(release)).hexdigest()
+    assert (row['tag'], row['base_tag']) == ('v9.0.0', 'v9.0.0')
+    assert row['app_environment_sha256'] == release.app_environment.environment_sha256
+    assert row['download_bytes'] == sum(asset.size_bytes for asset in release.artifacts)
+    assert row['verified_at'] is None

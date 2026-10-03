@@ -1,6 +1,7 @@
 """Procrastinate media task execution with private generated configuration."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from media_queue import RecordingMediaQueue
 from test_media_store import ORIGINAL, RECIPE, VARIANT, grant, queued, ready, row
 
 from central.catalog import CatalogSnapshot
+from central.db import ProcessTransactionClock
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore
@@ -22,6 +24,7 @@ from media.models import (
     MediaError,
     OriginalAsset,
     RefreshResult,
+    SourcePreview,
     SourcePreviewQuery,
     SourcePreviewResult,
     SourceSpec,
@@ -158,7 +161,7 @@ class FakeSource:
         self.preview_queries.append(query)
         if self.preview_fault:
             raise self.preview_fault
-        return SourcePreviewResult(count=2, image_count=1, video_count=1)
+        return SourcePreview(result=SourcePreviewResult(count=2, image_count=1, video_count=1))
 
     async def download_original(self, asset, destination):
         self.downloads += 1
@@ -217,7 +220,7 @@ class FakePreparer:
 def worker_storage(registry, tmp_path):
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000,
-        max_video_bytes=2000), queue=RecordingMediaQueue())
+        max_video_bytes=2000), queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     repository.set_recipe(RECIPE)
     return MediaStore(repository, tmp_path / "media")
 
@@ -663,8 +666,8 @@ def test_worker_evaluates_unsaved_source_preview_without_refresh_side_effects(wo
     assert source.preview_queries == [query]
     assert source.refreshes == 0 and source.downloads == 0
     assert worker_storage.repository.source_preview(receipt.request_id) == {
-        "request_id": receipt.request_id, "status": "complete",
-        "count": 2, "image_count": 1, "video_count": 1,
+        "request_id": receipt.request_id, "status": "complete", "count": 2, "image_count": 1,
+        "video_count": 1, "shown": [], "limited": False, "observed_at": 1000.0, "read_at": 1000.0,
     }
     with worker_storage.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM media_sources").fetchone()["n"] == 0
@@ -682,6 +685,7 @@ def test_worker_records_unknown_connection_as_bounded_preview_failure(worker_sto
     assert source.preview_queries == []
     assert worker_storage.repository.source_preview(receipt.request_id) == {
         "request_id": receipt.request_id, "status": "failed", "error": "connection_unknown",
+        "read_at": 1000.0,
     }
 
 
@@ -709,8 +713,8 @@ def test_procrastinate_worker_completes_deferred_source_preview(worker_storage):
     asyncio.run(exercise())
     assert source.preview_queries == [query]
     assert worker_storage.repository.source_preview(receipt.request_id) == {
-        "request_id": receipt.request_id, "status": "complete",
-        "count": 2, "image_count": 1, "video_count": 1,
+        "request_id": receipt.request_id, "status": "complete", "count": 2, "image_count": 1,
+        "video_count": 1, "shown": [], "limited": False, "observed_at": 1000.0, "read_at": 1000.0,
     }
     with worker_storage.db.transaction() as conn:
         job = conn.execute(
@@ -721,3 +725,63 @@ def test_procrastinate_worker_completes_deferred_source_preview(worker_storage):
         source_count = conn.execute("SELECT count(*) AS n FROM media_sources").fetchone()["n"]
     assert job == {"status": "succeeded"}
     assert source_count == 0
+
+
+def test_tracer_a_tagged_photo_draft_is_previewed_through_the_library_and_served_without_its_identity(
+        worker_storage):
+    """Pass 5's tracer (console DDD §45): POST a one-tag photos-only draft; the worker's photo
+    walk sends `tagIds`; the GET serves one member and its times, and nothing that names the
+    library's copy of the photo."""
+    import httpx
+    from fastapi.testclient import TestClient
+    from test_immich import OWNER, Upstream
+    from test_immich import asset as library_asset
+
+    from central.app import create_app
+    from media.immich import ImmichClient
+
+    tag = str(UUID(int=4242))
+    tagged, untagged = library_asset(31), library_asset(32)
+    upstream = Upstream([tagged, untagged])
+    upstream.search = lambda request, body: httpx.Response(200, json=page_of(
+        [row for row in upstream.rows if row["type"] == body["type"]
+         and (body.get("tagIds") != [tag] or row is tagged)]))
+    repository = worker_storage.repository
+    repository.worker_status(None, ("fixture",))
+    config = ConnectionConfig(**{**configuration(), "owner_id": OWNER})
+    instance = MediaWorker(repository, worker_storage, {"fixture": config}, preparer=FakePreparer(),
+                           client_factory=lambda connection: ImmichClient(
+                               connection, transport=httpx.MockTransport(upstream.handle)))
+    app = create_app(worker_storage.db, worker_storage.clock, "a" * 32, media_queue=repository.queue)
+    headers = {"Authorization": "Bearer " + "a" * 32}
+    with TestClient(app) as client:
+        receipt = client.post("/v1/operator/source-previews", headers=headers, json={
+            "connection_ref": "fixture", "media_types": ["image"], "tags": [tag]}).json()
+
+        async def exercise():
+            try:
+                await instance.preview_source(receipt["request_id"])
+            finally:
+                await close(instance)
+        asyncio.run(exercise())
+        worker_storage.clock.advance(3)
+        response = client.get(f"/v1/operator/source-previews/{receipt['request_id']}", headers=headers)
+
+    assert [body.get("tagIds") for body in upstream.searches] == [[tag]]
+    answer = response.json()
+    assert (answer["status"], answer["count"], answer["image_count"], answer["video_count"]) == (
+        "complete", 1, 1, 0)
+    assert answer["limited"] is False
+    assert answer["read_at"] - answer["observed_at"] == 3
+    (member,) = answer["shown"]
+    assert set(member) == {"asset_id", "kind", "captured_at", "width", "height", "duration_seconds"}
+    assert (member["kind"], member["width"], member["height"]) == ("image", 3200, 2400)
+    raw = response.text  # the raw JSON: no library photo id, checksum, owner id, URL or key
+    for private in (tagged["id"], tagged["checksum"], base64.b64decode(tagged["checksum"]).hex(),
+                    OWNER, SECRET, "immich", "http", "api_key", "upstream", "checksum"):
+        assert private not in raw
+
+
+def page_of(rows):
+    return {"albums": {"total": 0, "count": 0, "items": [], "facets": []},
+            "assets": {"items": rows, "count": len(rows), "total": len(rows), "nextPage": None, "facets": []}}

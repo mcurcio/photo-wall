@@ -31,19 +31,19 @@ CHECKS = {
     "test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login": (
         "authentication_rejection", "authentication_success", "authentication_recovery",
     ),
-    "test_pending_player_appears_in_the_pending_rail": ("two_players_three_outputs",),
-    "test_retiring_a_pending_player_moves_it_to_retired_and_drops_its_output": (
+    "test_an_enrolled_player_appears_on_the_players_list": ("two_players_three_outputs",),
+    "test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output": (
         "equipment_replacement_retirement",
     ),
     "test_drag_create_posts_frame_with_scaled_placement": ("frame_creation_binding",),
-    # Commissioning / calibration lease + conflict handling.
+    # Calibration: live calibration lease + conflict handling.
     "test_manual_revert_clears_preview_and_returns_draft_to_committed": (
         "calibration_preview_revert_commit",
     ),
     "test_calibration_stale_commit_conflicts_on_revision": ("stale_calibration_conflict",),
     "test_calibration_overtaken_detected_by_inventory_poll": ("inventory_refresh_recovery",),
     "test_calibration_lease_expiry_reverts_to_committed_no_auto_renew": ("preview_expiry",),
-    "test_commissioning_provenance_frame_facts_vs_display_at_player_start": (
+    "test_calibration_provenance_frame_profile_vs_panel_at_enrollment": (
         "fresh_server_persistence",
     ),
     # Content walkthrough: sources, scenes, programs, runs (showrunner).

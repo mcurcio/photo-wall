@@ -1,63 +1,68 @@
 import React, { useEffect, useRef } from "react";
 
 import { BindingFacet } from "./BindingFacet.jsx";
-import { Commissioning } from "./Commissioning.jsx";
+import { CalibrationFacet } from "./CalibrationFacet.jsx";
 import { frameHealth } from "./health.js";
-import { NowShowingFacet } from "./NowShowingFacet.jsx";
+import { HostChip } from "./HostChip.jsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
+import { StatusFacet } from "./StatusFacet.jsx";
 
 /**
  * Frame Inspector shell (Bead 3, read-only) — shared primitive #6.
  *
- * A tabbed, read-only view of the selected Frame with three facets:
- * **Commissioning | Binding | Now-showing** (design §5 J3/J4). `facet` selects
- * the visible tab and defaults to "commissioning"; `onFacet(next)` is called
+ * A tabbed view of the selected Frame with three facets:
+ * **Status | Binding | Calibration** (console DDD §61). `facet` selects
+ * the visible tab and defaults to "status"; `onFacet(next)` is called
  * when the operator switches tabs (the open facet lives in the route,
  * `#/wall/frames/<id>/<facet>`, owned by WallPage.jsx). The facets are composed here as declarative JSX CHILDREN —
  * each is an ordinary component taking `({snapshot, frameId})` — rather than
  * registered through any imperative API.
  *
- * The Commissioning tab hosts the read-only Commissioning facet (Bead 4):
- * committed geometry + SDR gain, Frame facts, the Display as detected at the
- * last Player start, the bound Player/Output, and the capability-gated hardware
- * areas rendered "not yet available".
+ * The Status tab is the Frame's daily face: which Run is on top in Central's Runtime (the
+ * `planned` fact) and why (StatusFacet.jsx). The Calibration tab hosts the Calibration facet: committed calibration, the draft
+ * editor, live calibration and the Frame profile. The Binding tab holds the bound
+ * Player and Output and the Panel at the Player app's last enrollment.
  *
  * Above the tabs, a heading names the frame and a health header states its
  * health from the one classifier (health.js) — the same label its plan tile
  * shows. When a visit from outside the plan (the attention strip, the Needs
- * attention page, the Equipment roster) issues a new `focusRequest`, the
+ * attention page, a Player page) issues a new `focusRequest`, the
  * heading takes focus, and the Inspector scrolls into view only if it is off
  * screen; plain selection passes no request and never moves focus. A request
  * issued before its frame is shown (the route changes a moment later) waits
  * for that frame's heading. A request is consumed once — `onFocusDone` clears it — so remounting the Inspector
  * (Wall → another section → Wall) never moves focus again.
  *
- * @typedef {"commissioning"|"binding"|"nowshowing"} Facet
+ * @typedef {import("./routes.js").Facet} Facet
  * With no frame selected (`frameId` null) it renders its empty state, "Select
  * a frame", so the Inspector column keeps its place in the layout.
  *
- * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet.
+ * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet. `hosts` (the
+ * shell's fleet host read) feeds the Status facet's host chip (HostChip.jsx), handed to
+ * StatusFacet.jsx as an element, so the facet imports no fleet host module (R4).
  *
  * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string|null, facet: Facet,
+ *          hosts?: import("./fleetHosts.js").FleetHosts|null,
  *          onFacet: (facet: Facet) => void, focusRequest?: number|null,
  *          onFocusDone?: () => void}} props
  */
 const FACETS = [
-  { key: "commissioning", label: "Commissioning" },
+  { key: "status", label: "Status" },
   { key: "binding", label: "Binding" },
-  { key: "nowshowing", label: "Now-showing" },
+  { key: "calibration", label: "Calibration" },
 ];
 
 export function Inspector({
   snapshot,
   bootFacts = null,
+  hosts = null,
   frameId,
   facet,
   onFacet,
   focusRequest = null,
   onFocusDone = () => {},
 }) {
-  const active = facet ?? "commissioning";
+  const active = facet ?? "status";
   const sectionRef = useRef(/** @type {HTMLElement|null} */ (null));
   const headingRef = useRef(/** @type {HTMLHeadingElement|null} */ (null));
 
@@ -123,8 +128,8 @@ export function Inspector({
         role="tabpanel"
         aria-label={`${activeLabel} facet`}
       >
-        {active === "commissioning" && (
-          <Commissioning key={frameId} snapshot={snapshot} frameId={frameId} />
+        {active === "calibration" && (
+          <CalibrationFacet key={frameId} snapshot={snapshot} frameId={frameId} />
         )}
         {active === "binding" && (
           <BindingFacet
@@ -135,8 +140,12 @@ export function Inspector({
             onFacet={onFacet}
           />
         )}
-        {active === "nowshowing" && (
-          <NowShowingFacet snapshot={snapshot} frameId={frameId} />
+        {active === "status" && (
+          <StatusFacet
+            snapshot={snapshot}
+            frameId={frameId}
+            hostChip={<HostChip snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
+          />
         )}
       </div>
     </section>

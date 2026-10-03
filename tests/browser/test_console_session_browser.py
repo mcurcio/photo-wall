@@ -5,7 +5,7 @@ the token: every operator fetch carries the console marker and the browser's Htt
 no request carries a bearer. Cookies ignore the port, so two servers on 127.0.0.1 share one
 cookie jar: that is how a rotated token and "another address" are exercised for real.
 
-Signed in, the console lands on Now showing (a frame exists), whose frame-health badge is the
+Signed in, the console lands on the Wall (console DDD §48), whose plan tile for the frame is the
 proof that the inventory rendered. A session that ends while signed in shows the sign-in screen
 as an overlay over the kept, hidden console (flow design §6 (a)).
 """
@@ -14,7 +14,7 @@ import os
 import re
 
 import pytest
-from console_tasks import go
+from console_tasks import open_player
 from operator_harness import answer_first, operator_server, sign_in, submit_sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
@@ -39,9 +39,8 @@ def _seed(registry):
 
 
 def _frame(page):
-    """The frame's health badge on Now showing: visible only while signed in and shown."""
-    return page.get_by_role("group", name="Frame health", exact=True).get_by_label(
-        re.compile(rf"^Frame {FRAME}: "))
+    """The frame's plan tile status on the Wall: visible only while signed in and shown."""
+    return page.get_by_role("group", name=f"Frame {FRAME} status", exact=True)
 
 
 def _sign_in_button(page):
@@ -230,19 +229,20 @@ def test_the_console_marks_every_operator_fetch_and_never_sends_a_bearer(page, r
 
 
 def test_a_write_from_another_address_explains_the_origin_refusal(page, registry):
-    identity, _, _ = enroll(registry, count=1)
+    identity, _, request = enroll(registry, count=1)
     player_id = identity["player_id"]
+    name = f"Player {request.device_id}"
     _seed(registry)
     with operator_server(registry.db, registry.clock) as first, \
             operator_server(registry.db, registry.clock) as second:
         sign_in(page, first)
         expect(_frame(page)).to_be_visible()
         # The same host on another port: the cookie is sent, so reads work...
-        page.goto(second + "/console#/equipment")
-        pending = page.get_by_role("group", name="Pending players", exact=True)
-        expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        page.goto(second + f"/console#/players/{request.device_id}")
+        player = page.locator("main > section:not([hidden])")
+        expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
         # ...but a write is refused for its Origin, and the console says what to do.
-        pending.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
+        player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
         with page.expect_response(re.compile(r".*/retire$")) as refused:
@@ -253,10 +253,8 @@ def test_a_write_from_another_address_explains_the_origin_refusal(page, registry
             exact=False)).to_be_visible()
         # Signing in at this address binds it, and the same write then succeeds.
         sign_in(page, second)
-        go(page, "equipment")
-        expect(pending.get_by_role("button", name=player_id, exact=True)).to_be_visible()
-        pending.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
+        open_player(page, name)
+        player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
         dialog.get_by_role("button", name="Confirm retire", exact=True).click()
-        retired = page.get_by_role("group", name="Retired players", exact=True)
-        expect(retired.get_by_role("button", name=player_id, exact=True)).to_be_visible()
+        expect(player).to_contain_text("Standing: Retired")

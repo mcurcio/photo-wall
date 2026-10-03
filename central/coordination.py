@@ -15,10 +15,10 @@ from dataclasses import dataclass
 from psycopg.types.json import Jsonb
 from pydantic import Field
 
-from central.db import Database
+from central.db import Database, DatabaseTransactionClock
 from central.equipment_drain import fenced_players_in
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
-from central.installation_models import PlayerReports
+from central.installation_models import OutputInterruption, PlayerReports
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.media_ports import CoordinationMedia, MediaPin
@@ -101,7 +101,7 @@ class Coordinator:
         self.db, self.clock = db, clock
         self.limits = limits or CoordinationLimits()
         self.runtime = RuntimeStore(db, clock)
-        self.media: CoordinationMedia = media or MediaRepository(db, clock)
+        self.media: CoordinationMedia = media or MediaRepository(db, clock, times=DatabaseTransactionClock())
         self.installation = installation or PostgresInstallationRepository(clock)
         self.outcomes = outcomes or ExecutionOutcomeRouter(
             handle_runtime_outcome,
@@ -273,7 +273,7 @@ class Coordinator:
         return result
 
     def _catalog(self, conn, runtime):
-        return self.media.catalog_in(conn, self.clock.utc(), runtime.planning_source_refs())
+        return self.media.catalog_in(conn, runtime.planning_source_refs())
 
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {
@@ -670,6 +670,26 @@ class Coordinator:
         ).fetchall()
         reports = {row["player_id"]: row["received_at"] for row in rows}
         return PlayerReports(read_at=max((read_at, *reports.values())), reports=reports)
+
+    @staticmethod
+    def output_interruptions_in(conn) -> tuple[OutputInterruption, ...]:
+        """Unresolved Output losses that fence a current Binding, from a caller-owned transaction.
+
+        A loss is keyed by (player, authority epoch, Output, Frame, binding generation) and fences
+        only on that exact key (`_commit_due`). A row from an earlier epoch, an earlier binding
+        generation or another Frame on the same Output is therefore not served: a reader can
+        never attach it to whatever Frame is bound there now. Read-only; takes no lock."""
+        rows = conn.execute(
+            "SELECT l.frame_id,l.player_id,l.output_id,l.binding_generation,"
+            "pr.owner AS cause_layer,l.interrupted_at FROM node_output_losses l "
+            "JOIN players p ON p.id=l.player_id AND p.authority_epoch=l.authority_epoch "
+            "JOIN bindings b ON b.frame_id=l.frame_id AND b.player_id=l.player_id "
+            "AND b.output_id=l.output_id "
+            "JOIN frames f ON f.id=l.frame_id AND f.generation=l.binding_generation "
+            "JOIN node_producers pr ON pr.producer_id=l.cause_producer_id "
+            "WHERE l.resolved_at IS NULL ORDER BY l.frame_id"
+        ).fetchall()
+        return tuple(OutputInterruption.model_validate(dict(row)) for row in rows)
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
         now = self.clock.utc()
