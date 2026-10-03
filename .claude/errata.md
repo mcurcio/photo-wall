@@ -3519,3 +3519,44 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   through MemAvailable. Recorded so T6 docs do not describe the old refusal.
 
 - E-T1-2 ruling (orchestrator, 2026-10-03): keep app MemoryMax=2G for the tracer; the app memory line and single-sourcing photowallapp.slice belong to the Shape C gate.
+
+## 2026-10-03 · 4 GB tracer T4 (implementer) · design-4gb-node.md §4.3 T4
+- E-T4-1 · Wording numbers: the page's "needs 3.5 GB of memory, the box has 1.9 GB" assumes binary GiB. The console has
+  one byte wording, `health.js gigabytes()` (decimal, shared with App Manager's storage refusal), so the 4 GB class's
+  3584 MiB reads "3.8 GB" and T5's 2 GiB MemTotal reads "2.1 GB". Kept DRY; T6 docs (DDD §62 rows) should quote decimal values.
+- E-T4-2 · Case: boot items are host-facts `reported` facts (receipt `first`, `facts.first_received_at`), worded
+  "Host Management reported boot preparation … · first received 1 min ago", so their values are lower-cased mid-sentence
+  ("boot preparation refused at storage: …", "base unit failed on this boot: …"), as the kernel/base facts are. Incidents
+  read "pi-07 (Frame x) — boot preparation failed at prepare (os:ENOSPC)", matching "— throttled now". `out_of_memory` is a
+  `latest` metric and keeps "Out-of-memory kills on this boot: app 2 · base 1".
+- E-T4-3 · Wordings the page leaves open, implemented: "no base unit failed on this boot" (no band); plural "base units
+  failed on this boot: a · b and N more"; overflow with no shown name "… N not named"; "boot preparation failed at X"
+  without "(fault)" when the fault is absent; "No out-of-memory kills on this boot" when every `oom_kill:` row is 0 (no band;
+  only non-zero slices are listed, most kills first). The OOM notice is a fixed band (any kill > 0), not a Central threshold,
+  following the App Manager storage refusal precedent (`reported` kind with its own band).
+- E-T4-4 · `failed_units_more` cannot be filtered: when more than 4 units fail, a stage unit sorted past the fourth name
+  is counted in "and N more", so a stopped stage can also raise `base_units`. Only reachable with ≥ 5 failed units.
+- E-T4-5 · Baseline: the 29 console JS failures T2 reported (fleet_commands, releases, stage, planned, qualification) are
+  environmental: the shell's default `node` is v16.20.2, which lacks global `fetch`/`Response`. With node v22.23.2 first on
+  PATH all 52 pass on this tree; not a code fault, no origin/main comparison needed.
+
+## 2026-10-03 · 4 GB tracer T3 (implementer) · design-4gb-node.md §4.3 T3
+- E-T3-1 · Brief vs page: the T3 brief asked `failed_units()` to exclude the three stage units "per the page". The page
+  does not: T4 `base_units` is "`facts.boot.failed_units` **minus** the three stage units" (the console subtracts), and §6
+  rows "Prepare killed before its exit write" / "Record write fails" rely on `failed_units` still naming the stage unit.
+  Implemented per the page: stage units are INCLUDED in `boot.failed_units`; T4 subtracts them (E-T4-4 is the known
+  overflow consequence). If exclusion at the node is wanted, the §6 guarantees need another carrier.
+- E-T3-2 · `read_boot_report`'s "None only if both are unreadable" vs `failed_units() -> ((), 0) on error`: the page's
+  unit reader cannot signal "unreadable". Implemented: `units()` raising (any Exception) is unreadable; with no readable
+  stage file either, the report is None. With the real sampler a box with no records reports `BootReportV2((), (), 0)`.
+- E-T3-3 · §4.4 says `boot_stage` imports `contracts.node_host_facts` and `appliance.node.capacity` only. It also imports
+  `contracts.node_protocol.token`, `contracts.strict_json.loads_object` and `uplink.files.write_atomically` (stdlib-only,
+  already in the bootstrap closure; reused rather than a second atomic writer). HostCore's closure now carries
+  `uplink.files`; no forbidden module (test binds it).
+- E-T3-4 · `memcg_present` is emitted as 0 when `cgroup.controllers` is unreadable (reuses
+  `capacity.memory_controller_present`, which maps OSError to False), rather than omitted; the store is refused on the
+  same reading, so 0 is the consistent answer.
+- E-T3-5 · The storage unit has no file-system sandboxing (no ProtectSystem), so only handoff and prepare gain
+  `ReadWritePaths=/run/photo-wall-boot-stage`; HostCore reads it under ProtectSystem=strict (read-only is enough).
+
+- E-T3-1 ruling (orchestrator, 2026-10-03): follow the page. failed_units includes stage units; the console subtracts them. residual: with 5+ failed units a stage unit can sort past the cap into "and N more" (E-T4-4), so one cause can raise two incidents. Fix later by reserving the cap for non-stage units or carrying a stage-units count.

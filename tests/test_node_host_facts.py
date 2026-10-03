@@ -297,7 +297,7 @@ def _runner(monkeypatch, clock, facts, answers):
     runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
     runner.store = _Store()
     runner.sampler = SimpleNamespace(sample=lambda: (("uptime", 1, "seconds"),), throttling=lambda: (),
-                                     supervision=lambda: (), facts=lambda: dict(facts))
+                                     supervision=lambda: (), memory_rows=lambda: (), facts=lambda: dict(facts))
     runner.delivery = SimpleNamespace(flush=lambda *args, **kwargs: 0)
     sequence = iter(range(1, 10_000))
     runner.journal = SimpleNamespace(next_sequence=lambda: next(sequence))

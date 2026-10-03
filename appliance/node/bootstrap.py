@@ -8,6 +8,7 @@ import shutil
 from dataclasses import asdict
 from pathlib import Path
 
+from appliance.node.boot_stage import run_stage
 from appliance.node.capacity import STORE, admit_cold, memory_values
 from appliance.node.clock import boot_id
 from appliance.node.environment import verify_root
@@ -32,17 +33,18 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     central, offer = read_node_handoff(root / HANDOFF)
     if offer.kernel_boot_id != boot_id():
         raise ValueError("node_boot_handoff_stale")
-    marker = _marker(root / "usr/lib/photo-wall-node-base/abi.json", {"base_abi"})
+    # Host-only configuration is written as soon as the offer is this boot's, before the base
+    # marker and ABI checks, so Host Management runs and reports their failures (boot stage
+    # records). The base tag is the node's own record of the base this boot runs: the offer
+    # whose base the initramfs verified and mounted (Host Management reports it in its facts).
     directory = root / "run/photo-wall-node"
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
-    if marker["base_abi"] != offer.base.base_abi:
-        raise ValueError("node_measured_base_abi_mismatch")
-    # Host-only configuration is available even when graphics packaging is broken.
-    # The base tag is the node's own record of the base this boot runs: the offer whose base the
-    # initramfs verified and mounted (Host Management reports it in its facts record).
     host = {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id),
             "base_tag": offer.base.tag}
     write_atomically(directory / "host.json", json.dumps(host).encode(), mode=0o600)
+    marker = _marker(root / "usr/lib/photo-wall-node-base/abi.json", {"base_abi"})
+    if marker["base_abi"] != offer.base.base_abi:
+        raise ValueError("node_measured_base_abi_mismatch")
     graphics = _marker(root / "usr/lib/photo-wall-display/abi.json", {"graphics_abi", "plugin_abi"})
     abi = {**marker, **graphics}
     if any(getattr(offer.base, name) != value for name, value in abi.items()):
@@ -113,12 +115,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("handoff", "prepare", "storage"))
     args = parser.parse_args()
-    if args.mode == "storage":
-        mount_storage()
-    elif args.mode == "handoff":
-        materialize_handoff()
-    else:
-        prepare_roots()
+    # Each mode is one base boot stage and records its own state (boot_stage.py).
+    actions = {"storage": mount_storage, "handoff": materialize_handoff, "prepare": prepare_roots}
+    run_stage(args.mode, actions[args.mode])
 
 
 if __name__ == "__main__":
