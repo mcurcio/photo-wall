@@ -56,11 +56,14 @@ def test_one_publisher_contains_separate_exact_node_and_legacy_trees(tmp_path):
     legacy, node, output = inputs(tmp_path)
     result = verify(output, revision=REVISION)
     manifest = parse_node_release((output / NODE_RELEASE_MANIFEST).read_bytes())
-    assert "photowall.node=" not in (legacy / "boot/cmdline.txt").read_text()
+    legacy_words = (legacy / "boot/cmdline.txt").read_text().split()
+    assert "photowall.node=v2" not in legacy_words
+    # The general template owns the memory controller enable; the cohort inherits it, appends
+    # only its own flag, and so carries each exactly once.
+    assert legacy_words.count("cgroup_enable=memory") == 1
     words = (node / "boot/cmdline.txt").read_text().split()
     assert words.count("photowall.node=v2") == words.count("cgroup_enable=memory") == 1
-    # The firmware prefixes the DTB's `cgroup_disable=memory`; the appended enable must follow it.
-    assert words[-2:] == ["photowall.node=v2", "cgroup_enable=memory"]
+    assert words == [*legacy_words, "photowall.node=v2"]
     assert set(x.filename for x in manifest.artifacts) <= set(x.name for x in result.assets)
     assert manifest.base.content_key == next(x.sha256 for x in manifest.artifacts if x.role == "base")
 

@@ -39,7 +39,7 @@ node lane. Legacy V1 paths and their limitations remain separate.
 | Finding | Evidence |
 |---|---|
 | No production code opens the effect gate: `RolloutEffectGate.open` has callers only in tests and fixtures. The deployment controller is an external dependency ([runbook](runbook.md#optional-read-only-kubernetes-node-verifier)). Reboot and Stage are therefore never admitted on a real Central today | `central/fleet/rollout_gate.py`; `tests/test_fleet_rollout_gate.py`, `tests/test_node_lifecycle.py` |
-| The release default command line lacks `photowall.node=v2`, so node path is opt-in per Pi through iac, contrary to the V2 posture (follow-up item 1b) | `scripts/build_netboot_bundle.sh:289` |
+| The release default command line lacks `photowall.node=v2`, so node path is opt-in per Pi through iac, contrary to the V2 posture (follow-up item 1b) | `scripts/build_netboot_bundle.sh:297` |
 | Publish verifies every asset inside one HTTP request, repeats the download on every retry, and races concurrent publishes on unreserved scratch space; a proxy timeout may abort it (a client disconnect does not, probe above). An asynchronous publish (record intent, verify in the worker, serve progress) would remove the class | `node_release_catalog.py:57-66` |
 | `publish_release` re-maps every `ValueError`, including `NodeControlError` with its own 409/503, to 422: only the code is meaningful | `node_routes.py:187-190` |
 | The App Effect Broker reports none of its local stage refusals, so Central cannot tell "not fetched" from "refused" from "slow". A `rejected` response with a reason would make a Central fence on unsettled stages possible | `appliance/node/online_broker.py:56-93` |
@@ -54,7 +54,7 @@ node lane. Legacy V1 paths and their limitations remain separate.
 | # | What | Where | Consumers after the V2-only console |
 |---|---|---|---|
 | 1 | Make node control the default composition (needs an installation audience in config) | `compose.yaml`, Dockerfile default command, `scripts/demo_wall.py`, software e2e | the local stack, CI e2e |
-| 1b | Make node path the default boot: the release command line carries `photowall.node=v2`, and iac stops needing per-Pi `cmdline_extra` | `scripts/build_netboot_bundle.sh:289`; iac `players.yaml` | every Pi not opted in today |
+| 1b | Make node path the default boot: the release command line carries `photowall.node=v2`, and iac stops needing per-Pi `cmdline_extra` | `scripts/build_netboot_bundle.sh:297`; iac `players.yaml` | every Pi not opted in today |
 | 2 | V1 fleet operator routes: `GET /v1/operator/fleet`, `PUT …/app-policy`, `PUT`/`DELETE …/devices/{id}/app-override`, `PUT …/base-baseline`, `POST`/`DELETE …/maintenance-requests` | `central/fleet/routes.py:101-136` | `scripts/test_netboot_e2e.py` (GET), `tests/test_fleet_database.py` (38 service call sites), `tests/test_fleet_maintenance_requests.py`, `tests/test_operator_scope.py` |
 | 3 | V1 device boot paths: `POST /v1/netboot/offers` and its artifact routes; `/v1/netboot/base`, `/v1/netboot/manifest`; the initramfs V1 branch; then G5 and the console's deprecated-path line | `fleet/routes.py:58-89`; `content_routes.py:118`, `:157`; `appliance/netboot_init.py:124-125`, `:672-688`; G5 in `node_observations.py`; `bootFacts.js` | Pis without `photowall.node=v2`; netboot e2e tests |
 | 4 | T0 serial check-ins | `fleet/routes.py` check-in routes (`/v2/appliance/check-ins` and its V1 twin) | appliance check-in clients |

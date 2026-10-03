@@ -988,7 +988,7 @@ jobs:
           printf '%s' "$cmd" | grep -q 'photowall.central=@@PHOTOWALL_CENTRAL@@' \
             || violation "cmdline.txt missing photowall.central=@@PHOTOWALL_CENTRAL@@"
           for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' \
-                     'watchdog.stop_on_reboot=0' 'hung_task_panic=1'; do
+                     'watchdog.stop_on_reboot=0' 'hung_task_panic=1' 'cgroup_enable=memory'; do
             printf '%s' "$cmd" | grep -q -- "$tok" \
               || violation "cmdline.txt missing static token $tok"
           done
