@@ -1,5 +1,5 @@
 """The host-health classifier's pure parts (console DDD §62-§63, bead T1): hostHealth.js
-`classifyHost` and `hostIncidents` with fleetHosts.js `hostRow`, run under Node as
+`classifyHost`, `hostIncidents`, `hostRow` and `playersTable` (G2), run under Node as
 tests/test_console_players.py runs the fleet model. Bands and the silence limit come only from
 the served numbers; the browser half is tests/browser/test_host_health_browser.py."""
 
@@ -273,7 +273,7 @@ FACTS_SCRIPT = r"""
 const { hostFactItems } = await import(process.argv[1]);
 const { factText, receiptText } = await import(process.argv[2]);
 const FACTS = { first_received_at: 1000 - 3 * 86400, kernel_release: "6.6.51+rpt-rpi-v8",
-  interface: "eth0", link_state: "up", address: "192.168.1.40" };
+  interface: "eth0", link_state: "up", address: "192.168.1.40", base_tag: "2026.10.01" };
 const LIMITED = { read_at: 1000, thresholds: { host_silent_after_seconds: 60, metrics: [] } };
 const row = (fields) => ({ device_id: "device-a", host: null, previous_boot_received_at: null,
   intake_full: false, boot: { base_tag: "2026.10.01" }, facts: FACTS, ...fields });
@@ -289,6 +289,9 @@ console.log(JSON.stringify({
   noInterface: view(row({ facts: { ...FACTS, interface: null } })),
   noBoot: view(row({ boot: null })),
   noTag: view(row({ boot: { base_tag: null } })),
+  differ: view(row({ facts: { ...FACTS, base_tag: "2026.09.30" } })),
+  noReportedBase: view(row({ facts: { ...FACTS, base_tag: null } })),
+  differNoOffer: view(row({ boot: { base_tag: null }, facts: { ...FACTS, base_tag: "2026.09.30" } })),
   notRead: view(null),
   reporting: view(row({ host: { received_at: 990, metrics: [], fault_code: null } }), LIMITED),
   silent: view(row({ host: { received_at: 1000 - 3 * 3600, metrics: [], fault_code: null } }), LIMITED),
@@ -305,33 +308,105 @@ def test_host_facts_and_the_base_are_worded_once_per_record():
                             capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    base = ["base", "Software", "claimed", "Base 2026.10.01 (claimed at boot by this boot's node session, unverified)"]
+    base = ["base", "Software", "claimed",
+            "Central's offer: base 2026.10.01 (claimed at boot by this boot's node session, unverified)"]
+    reported = ["base_reported", "Software", "reported", "Host Management reported base 2026.10.01"]
     assert out["full"] == {"receipt": ["reported", "first received 3 d ago"], "items": [
         ["link", "Network", "reported", "Host Management reported eth0 up"],
         ["address", "Network", "reported", "Host Management reported address 192.168.1.40"],
-        ["kernel", "Software", "reported", "Host Management reported kernel 6.6.51+rpt-rpi-v8"], base]}
+        ["kernel", "Software", "reported", "Host Management reported kernel 6.6.51+rpt-rpi-v8"],
+        reported, base]}
     assert out["noFacts"] == {"receipt": ["unknown", "Unknown: no host facts received on this boot"],
                               "items": [base]}
     assert [item[3] for item in out["absent"]["items"]] == [
         "Host Management reported eth0",
         "Unknown: Host Management could not read the link state of eth0",
         "Unknown: Host Management could not read the address",
-        "Unknown: Host Management could not read the kernel release", base[3]]
+        "Unknown: Host Management could not read the kernel release", reported[3], base[3]]
     assert out["noInterface"]["items"][0][3] == (
         "Unknown: Host Management could not read the default-route interface")
     assert out["noBoot"]["items"][-1][3] == "Unknown: no current node boot admission"
     assert out["noTag"]["items"][-1][3] == "Unknown: this boot's offer names no base tag"
     assert out["notRead"] == {"receipt": ["unknown", "Unknown: not read"],
                               "items": [["base", "Software", "unknown", "Unknown: not read"]]}
+    # The node's report and Central's offer sit side by side; differing tags add one derived
+    # fact naming both, with no band. A missing side never derives a mismatch.
+    assert out["differ"]["items"][-3:] == [
+        ["base_reported", "Software", "reported", "Host Management reported base 2026.09.30"], base,
+        ["base_mismatch", "Software", "derived", "Base differs: Host Management reported 2026.09.30, "
+         "Central's offer 2026.10.01 (Central's inference: the reported tag and the offered tag differ)"]]
+    assert out["noReportedBase"]["items"][-2:] == [
+        ["base_reported", "Software", "unknown", "Unknown: Host Management could not read the base tag"], base]
+    assert [item[0] for item in out["differNoOffer"]["items"]][-2:] == ["base_reported", "base"]
     # One gate words the values and the facts: a box Central cannot hear never reads its link
     # in the present tense (§62 Silent row, §66).
     assert out["reporting"] == out["full"]
     last = ["Host Management reported eth0 up at last report",
             "Host Management reported address 192.168.1.40 at last report",
-            "Host Management reported kernel 6.6.51+rpt-rpi-v8 at last report", base[3]]
+            "Host Management reported kernel 6.6.51+rpt-rpi-v8 at last report",
+            "Host Management reported base 2026.10.01 at last report", base[3]]
     for state in ("silent", "refused"):
         assert [item[3] for item in out[state]["items"]] == last, state
         assert out[state]["receipt"] == ["reported", "first received 3 d ago"], state
+
+
+TABLE_SCRIPT = r"""
+const { playersTable } = await import(process.argv[1]);
+const { factText } = await import(process.argv[2]);
+const THRESHOLDS = { host_silent_after_seconds: 60,
+  metrics: [{ name: "soc_temperature", unit: "celsius", notice_at: 75, alarm_at: 80 }] };
+const temp = (value) => ({ name: "soc_temperature", value, unit: "celsius", source: "host_sampler" });
+const host = (id, receivedAt, value) => ({ device_id: id, previous_boot_received_at: null,
+  intake_full: false, host: { received_at: receivedAt, fault_code: null, metrics: [temp(value)] } });
+const box = (id, standing) => ({ deviceId: id, name: `Player ${id}`, standing, frames: [] });
+const hosts = { failed: false, error: null, read: { read_at: 1000, thresholds: THRESHOLDS, devices: [
+  host("a-ok", 999, 50), host("b-hot", 999, 81), host("c-spare-silent", 100, 50),
+  host("d-spare-warm", 999, 76), host("z-silent", 100, 50)] } };
+const rows = [box("a-ok", "bound"), box("r-retired", "retired"), box("c-spare-silent", "unbound"),
+  box("b-hot", "bound"), box("d-spare-warm", "not-enrolled"), box("z-silent", "bound")];
+const view = (list) => list.map((e) => [e.row.deviceId, e.group, e.tier,
+  e.health === null ? null : e.health.items.filter((i) => i.band === "alarm" || i.band === "notice")
+    .map((i) => i.name),
+  e.health === null ? null : e.health.items.find((i) => i.name === "host").fact.kind,
+  e.health === null ? null : e.health.items.some((i) => i.band !== null)]);
+const words = (list) => Object.fromEntries(list.filter((e) => e.group === "spare").map((e) =>
+  [e.row.deviceId, [...e.health.items.map((i) => factText(i.fact)), ...e.facts.items.map((i) => factText(i.fact))]]));
+console.log(JSON.stringify({ judged: view(playersTable(rows, hosts)), skipped: view(playersTable(rows, null)),
+  spareWords: words(playersTable(rows, hosts)) }));
+"""
+
+
+def test_the_players_table_tiers_only_bound_players_and_puts_spares_then_retired_last():
+    _require_node()
+    result = subprocess.run(["node", "--input-type=module", "-e", TABLE_SCRIPT, str(SRC / "hostHealth.js"),
+                             str(SRC / "facts.js")],
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    # Bound rows worst first (alarm before ok); spares unbanded and untiered below them, though
+    # one is silent (its silence reads as a plain receipt age) and one warm; retired last and
+    # not judged at all (G2: a spare is never alarmed; a retired box is never "Unknown: not read").
+    assert out["judged"] == [
+        ["b-hot", "bound", "alarm", ["soc_temperature"], "reported", True],
+        ["z-silent", "bound", "alarm", ["host"], "derived", True],
+        ["a-ok", "bound", "ok", [], "reported", True],
+        ["c-spare-silent", "spare", None, [], "reported", False],
+        ["d-spare-warm", "spare", None, [], "reported", False],
+        ["r-retired", "retired", None, None, None, None]]
+    assert [entry[:3] for entry in out["skipped"]] == [
+        ["a-ok", "bound", None], ["b-hot", "bound", None], ["z-silent", "bound", None],
+        ["c-spare-silent", "spare", None], ["d-spare-warm", "spare", None],
+        ["r-retired", "retired", None]]
+    # The words, not the class: no threshold judgement of Central's reaches a spare's text.
+    spare = out["spareWords"]
+    assert set(spare) == {"c-spare-silent", "d-spare-warm"}
+    for device, texts in spare.items():
+        text = " | ".join(texts)
+        for judgement in ("hot", "warm", "silent", "at last report", "Central's threshold",
+                          "Central's limit", "Central's inference"):
+            assert judgement not in text, (device, judgement, text)
+    assert "Host Management last reported 15 min ago" in spare["c-spare-silent"][0]
+    assert "76 °C" in " ".join(spare["d-spare-warm"])
 
 
 def test_each_host_incident_kind_comes_from_its_own_row_for_bound_players_only():

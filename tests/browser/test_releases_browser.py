@@ -82,9 +82,17 @@ def _two_deployments(registry):
 
 
 def _read_once(page, run_ms=30000):
-    """Run the page clock one release-read interval and wait for that read's answer."""
+    """Run the page clock one release-read interval and return only once that read is settled.
+
+    The response event fires on status and headers, before the page has parsed the body, so
+    the answer arriving is not the page having taken it in. Like drive_poll, wait for the
+    Release read status to stop being busy: busy clears only after the read is committed, so
+    a send after this returns judges that read (what Select judges).
+    """
+    status = page.get_by_role("status", name="Release read", exact=True)
     with page.expect_response(lambda response: RELEASE_READ in response.url):
         page.clock.run_for(run_ms)
+    expect(status).not_to_have_attribute("aria-busy", "true")
 
 
 def _deployment(page, deployment_id):
@@ -172,6 +180,9 @@ def test_a_dialog_frozen_before_another_pages_selection_sends_no_put(page, regis
 
 
 def test_centrals_409_reads_changed(page, registry):
+    """A send judges the newest SETTLED read; when the page has not seen (or not yet settled)
+    a read showing another page's selection, the send goes out and Central's expected_revision
+    409 is the fence: one PUT, then CHANGED. The client rule only saves a request it can see."""
     service, selected, other = _two_deployments(registry)
     with operator_server(registry.db, registry.clock) as origin:
         puts = _writes(page, "PUT", "/boot-policy")

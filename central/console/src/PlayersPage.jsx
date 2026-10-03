@@ -4,14 +4,11 @@ import { FactLine } from "./FactLine.jsx";
 import { fact } from "./facts.js";
 import { BOOT_FACTS_UNAVAILABLE } from "./health.js";
 import { HostFactsReceipt, HostItem } from "./HostHealthSection.jsx";
-import { judgeHost } from "./hostHealth.js";
-import { playersByDevice } from "./players.js";
+import { judgeHost, playersTable } from "./hostHealth.js";
+import { playersByDevice, RETIRED_NOT_READ } from "./players.js";
 import { formatRoute, isPlainClick } from "./routes.js";
 
 const NO_PLAYERS = "No Players yet. Power on one Pi on this network; it appears here.";
-
-// Worst first (console DDD §61): a row's classifyHost tier, then its name.
-const TIER_ORDER = Object.freeze({ alarm: 0, notice: 1, unknown: 2, ok: 3 });
 
 // The host columns (§61), each naming the classifyHost items (`metrics`) and host facts
 // items (`facts`) it shows, in order. Network ends with the facts record's one receipt line.
@@ -22,7 +19,7 @@ const HOST_COLUMNS = Object.freeze([
   { title: "CPU", metrics: ["cpu_busy"], facts: [] },
   { title: "Storage", metrics: ["runtime_available", "preparation"], facts: [] },
   { title: "Network", metrics: ["link_speed"], facts: ["link", "link_state", "address"], receipt: true },
-  { title: "Software", metrics: [], facts: ["kernel", "base"] },
+  { title: "Software", metrics: [], facts: ["kernel", "base_reported", "base", "base_mismatch"] },
 ].map(Object.freeze));
 
 /** One host column's cell for a box: its items, as the one classifier words them. */
@@ -103,8 +100,9 @@ function NotDrivingAFrame({ rows, hosts }) {
 
 /**
  * The Players list (`#/players`; console DDD §52, §61): ONE table, one row per box, keyed by
- * its device identity (players.js `playersByDevice`), worst first by hostHealth.js
- * `classifyHost` tier, then by name. It scrolls sideways at phone width; there is no second
+ * its device identity (players.js `playersByDevice`), ordered and judged by hostHealth.js
+ * `playersTable`: Bound Players worst first by their `classifyHost` tier, then spares unbanded
+ * (G2: never alarmed), then retired boxes, each stating RETIRED_NOT_READ. It scrolls sideways at phone width; there is no second
  * rendering and no counts line (the strip counts incidents). The list sends no node read of
  * its own: the host columns come from the shell's one fleet host read (`hosts`,
  * fleetHosts.js) and are not shown while that read is skipped (node control not on).
@@ -116,11 +114,7 @@ function NotDrivingAFrame({ rows, hosts }) {
  */
 export function PlayersPage({ snapshot, bootFacts, wall, hosts = null }) {
   const rows = playersByDevice(snapshot, bootFacts);
-  const judged = rows.map((row) => {
-    const host = hosts === null ? null : judgeHost(hosts, row.deviceId);
-    return { row, health: host?.health ?? null, facts: host?.facts ?? null };
-  }).sort((a, b) => (TIER_ORDER[a.health?.severity ?? "ok"] - TIER_ORDER[b.health?.severity ?? "ok"])
-    || (a.row.name < b.row.name ? -1 : a.row.name > b.row.name ? 1 : 0));
+  const judged = playersTable(rows, hosts);
   return (
     <>
       <section className="roster" role="region" aria-label="Players list">
@@ -144,16 +138,20 @@ export function PlayersPage({ snapshot, bootFacts, wall, hosts = null }) {
                 </tr>
               </thead>
               <tbody>
-                {judged.map(({ row, health, facts }) => (
-                  <tr key={row.deviceId} className={`players__row players__row--${health?.severity ?? "none"}`}>
+                {judged.map(({ row, group, tier, health, facts }) => (
+                  <tr key={row.deviceId} className={`players__row players__row--${tier ?? "none"}`}>
                     <th scope="row">{playerLink(row)}</th>
                     <td className="players__cell">
                       <FactLine label="Standing" fact={fact({ kind: "set", value: row.standingLabel })} />
                       <FrameChips frames={row.frames} wall={wall} />
                     </td>
-                    {hosts !== null && HOST_COLUMNS.map((column) => (
+                    {hosts !== null && (group === "retired" ? (
+                      <td className="players__cell" colSpan={HOST_COLUMNS.length}>
+                        <p className="player__read-time">{RETIRED_NOT_READ}</p>
+                      </td>
+                    ) : HOST_COLUMNS.map((column) => (
                       <HostCell key={column.title} column={column} health={health} facts={facts} />
-                    ))}
+                    )))}
                   </tr>
                 ))}
               </tbody>

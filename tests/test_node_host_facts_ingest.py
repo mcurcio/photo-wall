@@ -19,7 +19,7 @@ from central.fleet.node_sessions import HOST_FACTS_DAILY_CAP, NodeControlConfig,
 from contracts.node_host_facts import HostFactsV2, encode_host_facts
 
 VALUES = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
-          "address": "192.168.1.40"}
+          "address": "192.168.1.40", "base_tag": BASE_TAG}
 
 
 def _facts(producer, sequence, **fields):
@@ -79,8 +79,9 @@ def test_every_ingest_case(registry):
     [row] = _row(registry)
     assert (row["sequence"], row["first_received_at"], row["received_at"]) == (9, changed, changed)
     assert json.loads(bytes(row["payload"]))["link_state"] == "down"
-    # Only the three recorded posts claimed intake.
-    assert _intake(registry) == 3
+    # Only the two posts with new values claimed intake: a same-values resend at a higher
+    # sequence (a Host Management restart) rewrites the row without using the day's quota.
+    assert _intake(registry) == 2
 
 
 def test_a_producer_not_the_sessions_is_refused(registry):
@@ -104,8 +105,10 @@ def test_the_host_facts_intake_cap(registry):
     with pytest.raises(NodeControlError, match="node_intake_capacity") as refused:
         _send(host, _facts(producer, 2, address="192.168.1.41"))
     assert refused.value.status == 429
-    # A duplicate claims nothing, so it still answers at the cap.
+    # A duplicate claims nothing, so it still answers at the cap; so does a same-values resend
+    # at a higher sequence (a restart loop cannot spend the quota a real change needs).
     assert _send(host, _facts(producer, 1))["disposition"] == "duplicate"
+    assert _send(host, _facts(producer, 3))["disposition"] == "recorded"
 
 
 def test_the_route_records_and_answers_422_for_each_malformed_body(registry):
@@ -116,7 +119,7 @@ def test_the_route_records_and_answers_422_for_each_malformed_body(registry):
                "X-Node-Session": str(host.claim.session_id)}
     bad = [{"kernel_release": "6.6 51"}, {"kernel_release": "6" * 65}, {"link_state": "UP"},
            {"address": "192.168.01.40"}, {"interface": "eth\x070"}, {"interface": "eth‮0"},
-           {"base": "v1"}]
+           {"base": "v1"}, {"base_tag": "v 1"}]
     app = create_app(registry.db, registry.clock, ADMIN, node_control=NodeControlConfig("node-test"))
     with TestClient(app) as client:
         for change in bad:

@@ -48,8 +48,10 @@ from contracts.node_lifecycle import parse_app_effect_event, parse_stage_command
 from contracts.player_control import ControlAppliedReceipt
 from contracts.time import SystemClock
 
-# The outage begins once Central has served the target artifact, its last contribution to a
-# switch, and lasts at least OUTAGE_SECONDS and until the probe has watched the node converge
+# The outage begins once the App Effect Broker has acknowledged the stage (its accepted
+# response is recorded) AND Central has served the target artifact to the App Manager — its
+# last contribution to a switch. The two come from independent pollers (app-commands and
+# app-desired), so neither alone proves the other. It lasts at least OUTAGE_SECONDS and until the probe has watched the node converge
 # (POST /fixture/outage-release), never longer than OUTAGE_CAP_SECONDS.
 OUTAGE_SECONDS = 35
 OUTAGE_CAP_SECONDS = 300
@@ -188,10 +190,10 @@ def _central_fixture(
     gate, verifier = _gate(registry, _certificate(expires_in=300))
     generation = gate.open(expected_revision=0).generation
     operations = {}
-    # The outage phase drops every node exchange once the target artifact is in flight: the
-    # switch must converge locally and report afterwards.
+    # The outage phase drops every node exchange once the broker has acknowledged the stage AND
+    # the target artifact is in flight: the switch must converge locally and report afterwards.
     dropped = {"outage": 0}
-    outage = {"started": None, "released": False, "last_drop": None}
+    outage = {"started": None, "released": False, "last_drop": None, "accepted": False, "artifact": False}
     state_lock = threading.Lock()
     boot_requests = {}  # kernel boot id -> the PXE boot request of that boot
 
@@ -228,11 +230,24 @@ def _central_fixture(
             outage["last_drop"] = clock.utc()
             return JSONResponse({"fixture": "central_unreachable"}, status_code=503)
         response = await call_next(request)
-        if (entry and outage["started"] is None and path.startswith("/v2/node/app-attempts/")
-                and path.endswith("/artifacts/target")):
-            # The stage is accepted and its target is streaming: nothing else needs Central.
-            outage["started"] = clock.utc()
+        if entry and outage["started"] is None and response.status_code == 200:
+            if request.method == "POST" and path == "/v2/node/app-responses":
+                outage["accepted"] = outage["accepted"] or broker_accepted(entry["operation_id"])
+            elif path.startswith("/v2/node/app-attempts/") and path.endswith("/artifacts/target"):
+                outage["artifact"] = True
+            if outage["accepted"] and outage["artifact"]:
+                # The broker holds the stage and its target is streaming: nothing else needs Central.
+                outage["started"] = clock.utc()
         return response
+
+    def broker_accepted(operation_id):
+        """Whether Central has recorded the broker's response to this stage's command."""
+        with registry.db.transaction() as conn:
+            return conn.execute(
+                "SELECT 1 FROM node_app_responses r JOIN node_app_operations o USING (command_id) "
+                "WHERE o.operation_id=%s",
+                (operation_id,),
+            ).fetchone() is not None
 
     @app.post("/fixture/outage-release")
     def outage_release(request: Request):

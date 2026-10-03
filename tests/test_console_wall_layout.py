@@ -19,29 +19,17 @@ from pathlib import Path
 import pytest
 
 from tests.test_console_flow import _require_node
-from tests.test_console_routes_r4 import _imports
+from tests.test_console_routes_r4 import WRITE_MODULES, scan_closure
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 
-# The console's write modules: the operator write primitive and every module that wraps the
-# Plan's and tray's writes (framesApi writes, the delete confirmation, refresh-after-write).
-WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.js",
-                 "equipmentApi.js"}
 # The daily face's select-only modules, and G1's list model and component.
 READ_ONLY = ["Plan.jsx", "UnplacedTray.jsx", "unfinished.js", "WallUnfinished.jsx"]
 
 
 def _closure(path, root=SRC.parent):
     """Every console module `path` reaches by imports (the R4 scan, which fails closed)."""
-    seen, stack = set(), [path.resolve()]
-    while stack:
-        module = stack.pop()
-        if module in seen:
-            continue
-        seen.add(module)
-        if module.suffix in {".js", ".jsx"}:
-            stack.extend(_imports(module, root) - seen)
-    return {module.name for module in seen}
+    return scan_closure(path, root)
 
 
 @pytest.mark.parametrize("name", READ_ONLY)

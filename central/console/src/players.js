@@ -23,6 +23,13 @@ import { formatRoute } from "./routes.js";
  *            frames: Array<{frameId: string, outputId: string}>}} PlayerRow
  */
 
+/**
+ * What stands in for a retired box's node and host values (console DDD §10): a plain
+ * statement, not a `fact()` (the `unknown` kind would read "Unknown: …"). Central reads no
+ * node or host report of a retired box (G12 omits it), so nothing is judged.
+ */
+export const RETIRED_NOT_READ = "Not read: Player retired";
+
 // A name's handle is this many trailing characters of the serial (as health.js handles).
 const HANDLE_LENGTH = 6;
 

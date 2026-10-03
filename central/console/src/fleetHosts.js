@@ -11,7 +11,9 @@ import { usePolledRead } from "./polledRead.js";
  * `nodeReadsAllowed`). It serves each active box's current-boot Host
  * Management sample, the previous boot's receipt, whether Central's observation intake for the
  * box is full today, Central's read time and Central's numbers-only thresholds. hostHealth.js
- * `classifyHost` is the one judge of it.
+ * `classifyHost` is the one judge of it, and hostHealth.js `hostRow` finds one box in it
+ * (a pure lookup kept out of this module, which reaches the write primitive, so the
+ * classifier and the attention list import no write module: G1).
  *
  * Like the other node reads it goes through `apiWrite(path, {method: "GET"})`, so a failure
  * never touches the session. A failed read KEEPS the last read and names its error beside it;
@@ -37,16 +39,4 @@ export function useFleetHosts({ skip = false } = {}) {
   }, []);
   const { value, refresh } = usePolledRead(load, { cadenceMs: CADENCE_MS, skip, initial: NOT_READ });
   return useMemo(() => ({ ...value, refresh }), [value, refresh]);
-}
-
-/**
- * One box's entry in a fleet host read, or null when the read does not list it (not read, or
- * a box Central omits: retired or revoked).
- *
- * @param {object|null} read the served G12 document
- * @param {string} deviceId
- * @returns {object|null}
- */
-export function hostRow(read, deviceId) {
-  return (read?.devices ?? []).find((device) => device?.device_id === deviceId) ?? null;
 }

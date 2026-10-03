@@ -190,8 +190,9 @@ def test_throttling_bands_cpu_unbanded_and_unknowns(page, registry):
         expect(throttling).to_have_class(re.compile(r"\bplayers__item--alarm\b"))
         expect(throttling).to_contain_text("Throttling: Throttled now · Under-voltage now (Central's "
                                            "inference: the firmware flag is set, Central's threshold)")
+        # The same words on a spare carry no band: a spare is never alarmed (G2).
         occurred = _line(page, spare_name, "Throttling")
-        expect(occurred).to_have_class(re.compile(r"\bplayers__item--notice\b"))
+        expect(occurred).to_have_class(re.compile(r"\bplayers__item--none\b"))
         expect(occurred).to_contain_text("None now · under-voltage occurred recently (the firmware's sticky flag)")
         expect(_line(page, bound_name, "CPU")).to_have_class(re.compile(r"\bplayers__item--none\b"))
         expect(_line(page, bound_name, "CPU")).to_contain_text("CPU: Host Management last reported 4 s ago · 23 % busy")
@@ -212,7 +213,7 @@ def test_throttling_bands_cpu_unbanded_and_unknowns(page, registry):
 def test_host_facts_and_the_base_render_under_one_record_receipt(page, registry):
     (bound, bound_name), (spare, spare_name) = _players(registry)
     facts = {"first_received_at": 1000.0 - 3 * 86400, "kernel_release": "6.6.51+rpt-rpi-v8",
-             "interface": "eth0", "link_state": "up", "address": "192.168.1.40"}
+             "interface": "eth0", "link_state": "up", "address": "192.168.1.40", "base_tag": "2026.10.01"}
     _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS, "devices": [
         {**_row(bound, 996.0, 50), "boot": {"base_tag": "2026.10.01"}, "facts": facts},
         {**_row(spare, 996.0, 50), "boot": None, "facts": None}]})
@@ -223,8 +224,10 @@ def test_host_facts_and_the_base_render_under_one_record_receipt(page, registry)
         expect(card).to_contain_text("Network: Host Management reported eth0 up")
         expect(card).to_contain_text("Network: Host Management reported address 192.168.1.40")
         expect(card).to_contain_text("Software: Host Management reported kernel 6.6.51+rpt-rpi-v8")
-        expect(card).to_contain_text(
-            "Software: Base 2026.10.01 (claimed at boot by this boot's node session, unverified)")
+        expect(card).to_contain_text("Software: Host Management reported base 2026.10.01")
+        expect(card).to_contain_text("Software: Central's offer: base 2026.10.01 "
+                                     "(claimed at boot by this boot's node session, unverified)")
+        expect(card).not_to_contain_text("Base differs")
         # The record's receipt is worded once, not on each fact.
         expect(card.get_by_text(re.compile("first received"))).to_have_count(1)
         spare_card = _card(page, spare_name)
@@ -250,7 +253,9 @@ def _table_names(page):
 
 
 def test_rows_run_worst_first_alarm_notice_unknown_ok(page, registry):
-    (ok, ok_name), (unknown, unknown_name), (notice, notice_name), (alarm, alarm_name) = _enrolled(registry, 4)
+    # Bound Players: only they are tiered (G2).
+    (_, ok, ok_name), (_, unknown, unknown_name), (_, notice, notice_name), (_, alarm, alarm_name) = (
+        _frames_with_players(registry, ["f-ok", "f-unknown", "f-notice", "f-alarm"]))
     # `unknown` is absent from the read: "Unknown: not read".
     _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS, "devices": [
         _row(ok, 999.0, 50), _row(notice, 999.0, 76), _row(alarm, 999.0, 81)]})
@@ -262,6 +267,61 @@ def test_rows_run_worst_first_alarm_notice_unknown_ok(page, registry):
         # One rendering: no card list beside the table, and no counts line.
         expect(page.get_by_role("list", name="Players", exact=True)).to_have_count(0)
         expect(page.get_by_role("table")).to_have_count(1)
+
+
+def test_spares_are_never_alarms_and_retired_boxes_sort_below_healthy_players(page, registry):
+    # G2: a silent Unbound spare and a box seen at boot sit below every Bound row with no tier
+    # and no band (the spare's silence reads as a plain receipt age); a retired box comes last, stating
+    # it is not read, never "Unknown: not read" in every column.
+    ((_, bound, bound_name),) = _frames_with_players(registry, [FRAME])
+    ((spare, spare_name),) = _enrolled(registry, 1)
+    retired_identity, _, _ = enroll(registry, count=1)
+    retired_name = player_name(registry, retired_identity["player_id"])
+    registry.retire(retired_identity["player_id"])
+    _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS,
+                 "devices": [_row(bound, 999.0, 50), _row(spare, 100.0, 95)]})
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "players")
+        expect(_card(page, retired_name)).to_contain_text("Not read: Player retired")
+        assert _table_names(page) == [bound_name, spare_name, retired_name]
+        spare_row = _card(page, spare_name)
+        expect(spare_row).to_have_class(re.compile(r"\bplayers__row--none\b"))
+        # Its silence reads as a plain receipt age; none of Central's threshold judgements
+        # reaches its words (the words, not only the class).
+        expect(spare_row).to_contain_text("last reported 15 min ago")
+        expect(spare_row).to_contain_text("95 °C")
+        for judgement in ("silent", "hot", "at last report", "Central's"):
+            expect(spare_row).not_to_contain_text(judgement)
+        expect(spare_row.locator(".players__item--alarm, .players__item--notice")).to_have_count(0)
+        retired_row = _card(page, retired_name)
+        expect(retired_row).to_have_class(re.compile(r"\bplayers__row--none\b"))
+        expect(retired_row).not_to_contain_text("Unknown: not read")
+        expect(_card(page, bound_name)).to_have_class(re.compile(r"\bplayers__row--ok\b"))
+        go(page, "attention")
+        expect(visible_page(page)).not_to_contain_text(spare_name)
+
+
+def test_player_health_shows_both_bases_and_names_a_mismatch(page, registry):
+    (bound, bound_name), _ = _players(registry)
+    facts = {"first_received_at": 1000.0 - 60, "kernel_release": "6.6.51+rpt-rpi-v8",
+             "interface": "eth0", "link_state": "up", "address": "192.168.1.40", "base_tag": "2026.09.30"}
+    _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS, "devices": [
+        {**_row(bound, 996.0, 50), "boot": {"base_tag": "2026.10.01"}, "facts": facts}]})
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        open_player(page, bound_name)
+        software = page.get_by_role("region", name="Health", exact=True).get_by_role(
+            "group", name="Software", exact=True)
+        expect(software).to_contain_text("Software: Host Management reported base 2026.09.30")
+        expect(software).to_contain_text("Software: Central's offer: base 2026.10.01 "
+                                         "(claimed at boot by this boot's node session, unverified)")
+        expect(software).to_contain_text(
+            "Software: Base differs: Host Management reported 2026.09.30, Central's offer 2026.10.01 "
+            "(Central's inference: the reported tag and the offered tag differ)")
+        # A derived fact, not an alarm: no band and no incident.
+        expect(software.locator(".players__item--alarm")).to_have_count(0)
+        go(page, "attention")
+        expect(visible_page(page)).not_to_contain_text("Base differs")
 
 
 def test_a_spare_is_listed_under_not_driving_a_frame_with_its_hint(page, registry):
@@ -303,7 +363,7 @@ def test_the_player_page_opens_on_health_and_holds_the_raw_lines_only_there(page
         expect(health.get_by_role("group", name="Network", exact=True)).to_contain_text(
             "Network: Host Management reported eth0 up")
         expect(health.get_by_role("group", name="Software", exact=True)).to_contain_text(
-            "Software: Base 2026.10.01 (claimed at boot by this boot's node session, unverified)")
+            "Software: Central's offer: base 2026.10.01 (claimed at boot by this boot's node session, unverified)")
         expect(health.get_by_text(re.compile("first received"))).to_have_count(1)
         raw = health.get_by_role("list", name="Every reported metric", exact=True)
         expect(raw).to_be_hidden()

@@ -66,8 +66,9 @@ export const PUBLISH_TIMEOUT_MS = 30 * 60 * 1000;
  * The release read, while the Releases page is open.
  *
  * @param {{skip?: boolean}} [options] `skip` while node control is not known to be on
- * @returns {ReleaseRead & {refresh: () => Promise<void>, latest: () => ReleaseRead,
- *           startedReads: () => number}}
+ * @returns {ReleaseRead & {busy: boolean, refresh: () => Promise<void>, latest: () => ReleaseRead,
+ *           startedReads: () => number}} `busy`: a read is in flight; it clears only once that
+ *   read is settled, so `latest()` already returns it
  */
 export function useReleaseRead({ skip = false } = {}) {
   const started = useRef(0);
@@ -77,9 +78,9 @@ export function useReleaseRead({ skip = false } = {}) {
     if (result?.ok) return { read: result.data, readAt: result.data?.read_at ?? null, error: null, seq };
     return { ...current, error: readError(result), seq };
   }, []);
-  const { value, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, skip, initial: NOT_READ });
+  const { value, busy, refresh, latest } = usePolledRead(load, { cadenceMs: CADENCE_MS, skip, initial: NOT_READ });
   const startedReads = useCallback(() => started.current, []);
-  return useMemo(() => ({ ...value, refresh, latest, startedReads }), [value, refresh, latest, startedReads]);
+  return useMemo(() => ({ ...value, busy, refresh, latest, startedReads }), [value, busy, refresh, latest, startedReads]);
 }
 
 /**

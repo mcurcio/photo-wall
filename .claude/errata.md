@@ -2937,3 +2937,98 @@ Dispositions of the open fix-cycle-2 items, folded into `docs/operator-console-d
    recently"). The orchestrator must confirm with the owner that the batch-4 gate covered the base change.
 4. Doc status line 3 said Part H "awaits the owner's batch-4 gate (Q14)"; corrected to approved and built.
 Source: architect course-correction after batch-4 fix cycle 2.
+
+## 2026-10-02 — console DDD batch 4: fix cycle 3 (residuals + owner base decision)
+
+## FX3-1 · G1 was unenforced and false for Needs attention — FIXED
+`hostHealth.js` imported `hostRow` from `fleetHosts.js` (the polling hook, which imports `apiWrite.js`), so
+AttentionList/AttentionStrip/hostHealth/HostChip reached the write primitive; no test covered the attention modules.
+Fix (built): `hostRow` moved into `hostHealth.js`; `tests/test_console_routes_r4.py` gains G1 tests over the bundler
+graph (`G1_LIST_MODULES` reach no `WRITE_MODULES`, no route table, shell module or `*Page.jsx`), a positive control,
+and a copy-mutation self-test. `WRITE_MODULES` and the scan closure now live in the R4 suite;
+`test_console_wall_layout.py` imports them. Mutation-probed on the real tree: re-adding the fleetHosts import fails
+4 G1 cases with `{'apiWrite.js'}`.
+
+## FX3-2 · Coalescing compared Central receipt clocks across replicas — FIXED (supersedes FX2-3 for coalescing)
+`_coalesced_in` now compares the incoming `sampled_boottime_ms` with the stored sample's (host: the newest by
+sequence; App Manager: the recent rows with the same key), 0 <= diff < interval*1000. One producer = one boot =
+one kernel boot clock, so a clock is compared only with itself. Cost: a node that misreports its boot clock defeats
+coalescing for its own producer only; the cap and `intake_full` still bound it. FX2-3 / R-clock still cover
+receipts, G12 `read_at`, host silence and the status read's ages. DB tests: a stepped Central clock and two replicas
+skewed +/-40 s; a receipt-clock mutant fails 3 of them. Doc §60/§64/§66/§69 updated.
+
+## FX3-3 · Players table alarmed on spares and sorted retired boxes above healthy ones — FIXED
+New pure model `hostHealth.js` `playersTable(rows, hosts)`: Bound rows judged and tiered worst first; spares
+(Unbound, Not enrolled) unbanded (items `band: null`, no tier) below them; retired rows unjudged and last, rendering
+`RETIRED_NOT_READ` (moved to `players.js`, shared with PlayerPage). Decision to flag: Player › Health for a spare
+still shows bands (it is that box's own page); only the fleet table drops them. Model + browser tests, mutation-probed.
+
+## FX3-4 · Facts intake could be spent by restart loops — PARTLY FIXED
+`record_facts` claims `host_facts` intake only when values change (same-values resend at a higher sequence rewrites
+the row for free). §64's cap claim corrected. DEFERRED: serving `facts_intake_full` in G12 and wording it in
+`hostFactItems` (only a burst of real changes can now reach the cap).
+
+## FX3-5 · Owner decision: the node reports its own base — BUILT; spec finding
+`HostFactsV2.base_tag` (token<=128, nullable, in `values()`), bootstrap writes `base_tag` into `host.json` from the
+verified handoff offer, `host_runner` requires it in its config and reports it, G12 serves `facts.base_tag`, the
+console shows "Host Management reported base X" beside "Central's offer: base Y (claimed …)" plus a derived
+"Base differs: …" fact (no band, no incident). FINDING: the base image carries no build-time version (squashfs is
+content-addressed; tags are assigned at release), so the node's only self-record is the handoff offer tag its
+initramfs verified against the mounted bytes; a mismatch means a different offer than the admission Central holds,
+not different bytes. Stated as a cost in §52. Wire: HostFactsV2's exact key set gained `base_tag`; safe only because
+batch 4 is not on main (no deployed node sends host facts yet). FX2-4 closed.
+
+## FX3-CC · Architect course-correction after fix cycle 3 — DOCS ONLY
+Doc drift fixed in place (no code change): Part G status, Part H's inherited list and the top status still called
+the base a `claimed`-only tag pending owner confirmation; G13's field list omitted `base_tag`; §60's jitter bullet
+still reasoned about receipts (now: node-side poll latency between the tick's `sampled_boottime_ms` stamp and the
+monotonic due check can coalesce one post, gap ≤ ~30 s; the first post after a new session is coalesced when within
+one interval of the last stored sample); §61's Software example showed one base; §62's at-last-report / no-facts rows
+did not say which base lines change; §66 limited coalescing's guarantee to one replica; the fleet map named `_record`
+for the window; the runbook's Players ordering, Software column and no-facts row were stale, and it gains a
+"Base differs" row. FX3-3 (bands on a spare's own Health page) is recorded in §61 and put to the owner in §69.
+
+
+## FX4-1 · Releases browser race: "response arrived" was read as "page took in the read" — FIXED (test bug)
+CI 37085580521 / 37066151357 failed `test_a_dialog_frozen_before_another_pages_selection_sends_no_put` (`puts == []`):
+Playwright's response event fires on headers, before `apiWrite`'s `response.json()`, so Select judged the previous read
+and Central's expected_revision 409 fenced it (CHANGED passed). Fix: `usePolledRead` returns `busy`, set when a flight
+starts and cleared in the same synchronous step that commits the flight's last value (after the ref), so
+`busy === false` in the DOM implies `latest()` returns that read; `useReleaseRead` passes it through; ReleasesPage's
+read line is `role=status name="Release read"` with `aria-busy`; `_read_once` waits for aria-busy to clear (drive_poll
+pattern). Send rule unchanged; `test_centrals_409_reads_changed` documents the 409 as the fence for an unsettled read.
+Mutation-probed with a held body: without the wait one PUT is sent; with it `_read_once` blocks until released, then
+zero PUTs. Not done: the other `usePolledRead` pages (nodeRead, nodeControl, fleetHosts, qualification) get `busy`
+from the hook but render no aria-busy yet; Update the wall's read line is not a status region.
+
+## FX4-2 · "Base differs" cannot mean a different offer — DOCS CORRECTED (supersedes FX3-5's claim)
+FX3-5, §52 and the runbook said a mismatch means "a boot from a different offer than the admission Central holds".
+The code cannot produce that: Host Management claims with the handoff's `offer_id` (host_runner.py:186), every claim of
+a boot must present the admission's `offer_id` (node_sessions.py:168 `node_boot_adoption_mismatch`), and G12 joins the
+facts of the current admission's producer to that same offer's stored payload (node_observations `_FLEET_HOSTS_SQL`).
+Both tags are copies of ONE offer (node: handoff copy; Central: stored payload), so they differ only on a defect (the
+node reports a tag its handoff does not hold, or Central stored a payload other than the one it served). §52, §69 and
+the runbook row now say so; the runbook action is "report it as a bug". No code change.
+
+## FX4-3 · Spares were unbanded only in CSS; the words still carried Central's judgement — FIXED
+`playersTable` read a spare through `judgeHost` then stripped bands, so its words kept "· hot", "silent · …", "at last
+report" and "Central's threshold/limit". Now `describeSpare` reads the box with Central's thresholds withheld, then
+unbands what remains (Unknown, App Manager's refusal). Cost: a long-silent spare's values read with their receipt age,
+not "at last report". Model test asserts the words (no hot/warm/silent/at last report/Central's …), mutation-probed;
+browser test likewise. Player › Health for a spare still bands (FX3-3, owner question §69, unchanged).
+
+## FX4-4 · PID1 outage scenario: outage trigger raced the broker — FIXED (test bug)
+`central_outage_after_accept` started the outage on the App Manager's target-artifact request, which says nothing about
+the App Effect Broker (independent app-commands poll). On 7758772 the manager won; the broker never accepted, no
+online.json, no switch. The fixture now starts the outage only when BOTH Central recorded the broker's response to this
+stage's command (a `node_app_responses` row joined to the operation, checked on a 200 POST /v2/node/app-responses) AND
+the target artifact was served. Diagnostics: `prepared.json` captured; absent online.json recorded as
+`broker_never_accepted.txt`. Not run locally (needs the node components + fixture image build); CI node-pid1 matrix is
+the gate, outage needs reruns to show the race gone.
+
+## FX4-5 · Minors — FIXED
+G1: the Needs attention page moved from neutralRoutes.jsx into `AttentionPage.jsx`, now a G1 list module (its reach,
+minus itself, holds no page or write; the classifier-mutation test covers it). G12: stored host facts are read through
+`stored_fact_values` (contracts/node_host_facts.py), tolerant per field (missing/refused fact -> None), so one
+older-shape row cannot fail the fleet read or the same-values comparison; ingest stays strict. Unit-tested; no DB test
+of an old row through G12 itself.

@@ -1,5 +1,6 @@
 """Host-health tracer, Central side (console DDD §60, §63-§64, bead T1), on real PostgreSQL:
-observation coalescing on Central's own receipt clock, the derived daily cap, and G12
+observation coalescing on the producer's own boot clock (never a Central receipt clock, so a
+stepped or skewed Central replica changes nothing), the derived daily cap, and G12
 (`GET /v1/operator/node/hosts`): the current boot's sample only, the previous boot's receipt,
 `intake_full`, the numbers-only thresholds, its access rules and its lock-free snapshot."""
 import math
@@ -46,12 +47,17 @@ class Host:
         self.observations = NodeObservations(sessions)
         self.sequence = 0
 
-    def post(self, temperature=50.0):
+    def post(self, temperature=50.0, *, boottime_ms=None, observations=None):
+        """One post. The node's boot clock follows the test clock's monotonic reading (in ms)
+        unless `boottime_ms` says otherwise; `observations` posts through another Central
+        replica."""
         self.sequence += 1
-        sample = HostObservationV2(self.grant.producer, self.sequence, 1000 * self.sequence,
+        if boottime_ms is None:
+            boottime_ms = int(self.registry.clock.monotonic() * 1000)
+        sample = HostObservationV2(self.grant.producer, self.sequence, boottime_ms,
                                    (HostMetricV2("soc_temperature", temperature, "celsius"),))
-        return self.observations.record(self.claim.session_id, self.claim.credential,
-                                        encode_host_observation(sample))
+        return (observations or self.observations).record(
+            self.claim.session_id, self.claim.credential, encode_host_observation(sample))
 
 
 def _rig(registry, *, session_seconds=3600):
@@ -108,26 +114,65 @@ def test_a_post_inside_the_interval_is_coalesced_and_one_after_it_stores(registr
     assert _stored(registry) == 2 and _intake(registry) == 2
 
 
-def test_a_backward_clock_step_stores(registry):
+def test_central_clock_steps_neither_coalesce_nor_store_a_post(registry):
+    # Coalescing reads the producer's boot clock only. Central's wall clock stepping back 30 s
+    # with the node's clock a whole interval on stores; stepping forward ten minutes (inside
+    # the session) with the node's clock 1 s on coalesces. A receipt-clock judgement gets both backwards.
     boots, sessions = _rig(registry)
     host = Host(registry, sessions, boots)
     registry.clock.advance(60)
-    host.post()
-    # Central's wall clock steps back 30 s (still after the session was issued): the newest
-    # receipt is now 29 s in Central's future, a negative difference, so the post stores.
-    registry.clock.advance(1)
+    assert host.post()["disposition"] == "recorded"
+    registry.clock.advance(INTERVAL)
     registry.clock.step_utc(-30)
     assert host.post()["disposition"] == "recorded"
+    registry.clock.advance(1)
+    registry.clock.step_utc(600)
+    assert host.post()["disposition"] == "coalesced"
     assert _stored(registry) == 2
+
+
+def test_a_skewed_replica_judges_coalescing_by_the_producers_boot_clock(registry):
+    # Two Central replicas whose clocks disagree by 40 s, one in each direction, share the
+    # database. Whichever replica ingests, a post 2 s after the stored one on the node's clock
+    # is coalesced and one an interval after it stores.
+    from contracts.time import ManualClock
+    boots, sessions = _rig(registry)
+    host = Host(registry, sessions, boots)
+    registry.clock.advance(120)
+    assert host.post()["disposition"] == "recorded"
+
+    def replica(skew):
+        clock = ManualClock(wall=registry.clock.utc() + skew, mono=registry.clock.monotonic())
+        return NodeObservations(NodeSessions(registry.db, clock, NODE)), clock
+
+    for skew in (40, -40):
+        other, clock = replica(skew)
+        registry.clock.advance(2)
+        clock.advance(2)
+        answer = host.post(observations=other)
+        assert answer["disposition"] == "coalesced", skew
+        registry.clock.advance(INTERVAL)
+        clock.advance(INTERVAL)
+        assert host.post(observations=other)["disposition"] == "recorded", skew
+    assert _stored(registry) == 3
+
+
+def test_a_sample_older_than_the_stored_one_on_the_boot_clock_stores(registry):
+    boots, sessions = _rig(registry)
+    host = Host(registry, sessions, boots)
+    assert host.post(boottime_ms=50_000)["disposition"] == "recorded"
+    # A higher sequence carrying an earlier boot-clock reading: a negative difference stores.
+    assert host.post(boottime_ms=49_000)["disposition"] == "recorded"
+    assert host.post(boottime_ms=49_000 + INTERVAL * 1000 - 1)["disposition"] == "coalesced"
 
 
 def test_the_same_sequence_is_still_a_duplicate_before_coalescing(registry):
     boots, sessions = _rig(registry)
     host = Host(registry, sessions, boots)
-    first = host.post()
+    first = host.post(boottime_ms=5000)
     host.sequence -= 1
     registry.clock.advance(1)
-    again = host.post()
+    again = host.post(boottime_ms=5000)
     assert again["disposition"] == "duplicate" and again["received_at"] == first["received_at"]
 
 

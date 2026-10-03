@@ -1,8 +1,9 @@
 """Host Management's short text facts (console DDD §63, G13); stdlib and contracts only.
 
 One record per boot, reported on change: what Host Management reads on the box. Never device
-identity (an address is not identity, R12) and never the boot's base, which is Central's own
-offer and served as a claim.
+identity (an address is not identity, R12). `base_tag` is the base this boot runs as the node
+itself records it (the boot handoff its initramfs wrote after verifying the mounted base), so
+it is a host report shown beside Central's offered tag, never in its place.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ MAX_HOST_FACTS_BYTES: Final[int] = 2048
 LINK_STATES: Final[frozenset[str]] = frozenset(
     {"up", "down", "dormant", "lowerlayerdown", "notpresent", "testing", "unknown"})
 _FIELDS: Final[tuple[str, ...]] = ("producer", "sequence", "sampled_boottime_ms", "kernel_release",
-                                   "interface", "link_state", "address")
+                                   "interface", "link_state", "address", "base_tag")
 
 
 def _kernel_release(value: str) -> None:
@@ -48,9 +49,15 @@ def _address(value: str) -> None:
         raise ValueError("invalid_host_fact_address")
 
 
-# Each optional text fact's rule; the node's reader applies the same rules per field.
+def _base_tag(value: str) -> None:
+    # A release tag, as the boot offer's base names it (contracts/node_boot.py NodeBaseRefV2).
+    token(value, 128)
+
+
+# Each optional text fact's rule, in the record's value order; the node's reader applies the
+# same rules per field.
 FACT_RULES: Final = {"kernel_release": _kernel_release, "interface": _interface,
-                     "link_state": _link_state, "address": _address}
+                     "link_state": _link_state, "address": _address, "base_tag": _base_tag}
 
 
 def valid_fact(name: str, value: object) -> bool:
@@ -72,6 +79,7 @@ class HostFactsV2:
     interface: str | None
     link_state: str | None
     address: str | None
+    base_tag: str | None
 
     def __post_init__(self) -> None:
         if type(self.producer) is not NodeProducerV2 or self.producer.owner != "host_core":
@@ -84,8 +92,8 @@ class HostFactsV2:
                 rule(value)
 
     def values(self) -> tuple:
-        """The four facts alone: what "a value changed" compares."""
-        return self.kernel_release, self.interface, self.link_state, self.address
+        """The facts alone, in `FACT_RULES` order: what "a value changed" compares."""
+        return tuple(getattr(self, name) for name in FACT_RULES)
 
 
 def encode_host_facts(value: HostFactsV2) -> bytes:
@@ -110,3 +118,15 @@ def parse_host_facts(raw: bytes) -> HostFactsV2:
                            *(value[name] for name in _FIELDS[1:]))
     except (TypeError, KeyError, AttributeError) as exc:
         raise ValueError("invalid_host_facts") from exc
+
+
+def stored_fact_values(raw: bytes) -> dict[str, str | None]:
+    """The text facts of a STORED record, read tolerantly (Central's read side only).
+
+    A row written in an older shape (before a fact existed) or holding a fact today's rule
+    refuses serves that fact as None (not read), so one old row cannot fail a read that covers
+    every box (G12). Ingest stays strict: `parse_host_facts` is what a post must pass. Keys in
+    `FACT_RULES` order, matching `HostFactsV2.values()`.
+    """
+    value = loads_object(raw, max_bytes=MAX_HOST_FACTS_BYTES) or {}
+    return {name: value.get(name) if valid_fact(name, value.get(name)) else None for name in FACT_RULES}

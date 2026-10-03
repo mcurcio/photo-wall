@@ -16,7 +16,7 @@ from central.fleet.node_sessions import (
 )
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_commands import parse_session_grant, producer_document
-from contracts.node_host_facts import encode_host_facts, parse_host_facts
+from contracts.node_host_facts import encode_host_facts, parse_host_facts, stored_fact_values
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
     encode_host_observation,
@@ -40,7 +40,7 @@ _DEPRECATED_BOOT_SQL = (
 
 
 # A producer's newest host sample, by sequence through the primary key (never ORDER BY
-# received_at over the table): coalescing and G12 both read it this way.
+# received_at over the table): coalescing (its payload's boot clock) and G12 both read it.
 _NEWEST_HOST_SQL = ("SELECT payload,received_at FROM node_host_observations WHERE producer_id={p} "
                     "ORDER BY sequence DESC LIMIT 1")
 
@@ -135,7 +135,13 @@ class NodeObservations:
                     raise NodeControlError("node_observation_identity_conflict")
                 return {"stored": True, "disposition": "duplicate",
                         "received_at": prior["received_at"], "authority_granted": False}
-            claim_intake_in(conn, facts.producer.device_id, "host_facts", now)
+            # Only a new value claims intake: a same-values resend at a higher sequence (every
+            # Host Management process start, so a crash loop) rewrites the row without using
+            # the day's quota, so restarts cannot outrun the derived cap.
+            same = (prior is not None
+                    and tuple(stored_fact_values(bytes(prior["payload"])).values()) == facts.values())
+            if not same:
+                claim_intake_in(conn, facts.producer.device_id, "host_facts", now)
             if prior is None:
                 conn.execute("INSERT INTO node_host_facts(producer_id,sequence,payload,"
                              "first_received_at,received_at) VALUES(%s,%s,%s,%s,%s)",
@@ -143,7 +149,6 @@ class NodeObservations:
             else:
                 # The payload is rewritten either way, so a resend at the new sequence is a
                 # duplicate; first_received_at moves only when a value changed.
-                same = parse_host_facts(bytes(prior["payload"])).values() == facts.values()
                 conn.execute("UPDATE node_host_facts SET sequence=%s,payload=%s,received_at=%s,"
                              "first_received_at=CASE WHEN %s THEN first_received_at ELSE %s END "
                              "WHERE producer_id=%s",
@@ -168,7 +173,7 @@ class NodeObservations:
                     raise NodeControlError("node_observation_identity_conflict")
                 return {"stored": True, "disposition": "duplicate",
                         "received_at": prior["received_at"], "authority_granted": False}
-            if self._coalesced_in(conn, table, principal.producer_id, observation, now):
+            if self._coalesced_in(conn, table, principal.producer_id, observation):
                 return {"stored": False, "disposition": "coalesced", "received_at": now,
                         "authority_granted": False}
             claim_intake_in(conn, observation.producer.device_id,
@@ -181,23 +186,33 @@ class NodeObservations:
                     "received_at": now, "authority_granted": False}
 
     @staticmethod
-    def _coalesced_in(conn, table, producer_id, observation, now) -> bool:
-        """Whether this post stores nothing (§60, §64), judged on Central's own receipt clock;
-        a negative difference (a backward clock step) stores. Host Management: one stored
+    def _coalesced_in(conn, table, producer_id, observation) -> bool:
+        """Whether this post stores nothing (§60, §64), judged on the producer's OWN boot clock:
+        the post's `sampled_boottime_ms` against a stored sample's, both read by one kernel of
+        one boot (a producer is one boot), so a clock is compared only with itself and no
+        Central receipt clock, of this replica or another, enters the judgement. A negative
+        difference (a sample older than the stored one) stores. Host Management: one stored
         sample per producer per interval. App Manager: one per producer per (state, operation,
         fault) per interval, so an alternating stream (`preparing`/`refused` every poll) stores
         each state at most once an interval and never reaches the derived cap. The cost: a
         state that returns within one interval of its last stored sample is not stored again
         until that interval passes, so the newest stored state can lag by up to one interval
-        plus the node's next resend."""
-        window = HOST_OBSERVATION_INTERVAL_SECONDS
+        plus the node's next resend. A node that misreports its boot clock defeats coalescing
+        for its own producer only; the derived cap still bounds its intake."""
+        window_ms = HOST_OBSERVATION_INTERVAL_SECONDS * 1000
+
+        def within(stored) -> bool:
+            return 0 <= observation.sampled_boottime_ms - stored.sampled_boottime_ms < window_ms
+
         if table == "node_host_observations":
             newest = conn.execute(_NEWEST_HOST_SQL.format(p="%s"), (producer_id,)).fetchone()
-            return newest is not None and 0 <= now - newest["received_at"] < window
+            return newest is not None and within(parse_host_observation(bytes(newest["payload"])))
         key = _preparation_key(observation)
-        return any(0 <= now - row["received_at"] < window
-                   and _preparation_key(parse_manager_preparation(bytes(row["payload"]))) == key
-                   for row in conn.execute(_RECENT_PREPARATION_SQL, (producer_id,)).fetchall())
+        for row in conn.execute(_RECENT_PREPARATION_SQL, (producer_id,)).fetchall():
+            stored = parse_manager_preparation(bytes(row["payload"]))
+            if _preparation_key(stored) == key and within(stored):
+                return True
+        return False
 
     def fleet_hosts(self) -> dict:
         """G12: every active box's current-boot host and App Manager samples, read under one
@@ -234,10 +249,11 @@ class NodeObservations:
                         else parse_node_boot_offer(bytes(payload)).base.tag}
             facts = None
             if row["facts_payload"] is not None:
-                stored = parse_host_facts(bytes(row["facts_payload"]))
+                # Tolerant: an older-shape row serves its missing facts as None, never fails
+                # the read. `base_tag` is the node's own record of its base: a host report,
+                # served beside `boot.base_tag` (Central's offer), never merged with it.
                 facts = {"first_received_at": row["facts_first_received_at"],
-                         "kernel_release": stored.kernel_release, "interface": stored.interface,
-                         "link_state": stored.link_state, "address": stored.address}
+                         **stored_fact_values(bytes(row["facts_payload"]))}
             devices.append({"device_id": row["device_id"], "host": host,
                             "previous_boot_received_at": row["previous_received_at"] if host is None else None,
                             "intake_full": (row["intake_used"] or 0) >= OBSERVATION_DAILY_CAP,

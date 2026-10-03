@@ -14,14 +14,15 @@ import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js"
 import { AppOperationsSection, RebootSection } from "./PlayerCommands.jsx";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
 import { StageApp } from "./StageApp.jsx";
-import { enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice } from "./players.js";
+import {
+  enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice, RETIRED_NOT_READ,
+} from "./players.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { formatRoute, isPlainClick, routeIdName } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 import { useMutate } from "./useMutate.js";
 
 const NO_FRAMES = "No unbound frames. Draw one on the plan first.";
-const RETIRED_NOT_READ = "Not read: Player retired";
 
 
 /** A link to a Frame's home on the Wall (it opens the facet showing its cause). */

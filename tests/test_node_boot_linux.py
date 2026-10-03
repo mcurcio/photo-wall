@@ -103,6 +103,8 @@ def test_host_config_survives_missing_graphics_handoff(tmp_path, monkeypatch):
         bootstrap.materialize_handoff(root=tmp_path)
     host = json.loads((tmp_path / "run/photo-wall-node/host.json").read_bytes())
     assert host["offer_id"] == str(selected.offer_id)
+    # The node's own record of the base it booted, reported in its host facts record.
+    assert host["base_tag"] == selected.base.tag
     assert not (tmp_path / "run/photo-wall-node/cold.json").exists()
 
 

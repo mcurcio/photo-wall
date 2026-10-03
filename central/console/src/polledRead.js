@@ -12,25 +12,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * judges what arrived even before React re-renders. `skip` reads nothing and keeps the
  * value it has.
  *
+ * `busy` is true while a read is in flight and clears only after its value is committed
+ * (ref and render): it is set false in the same synchronous step as the last value, so a
+ * page that renders `busy === false` already answers `latest()` with that read. A page
+ * shows it as `aria-busy`, the settled signal a test waits on. A skipped read is never busy.
+ *
  * @template T
  * @param {(previous: T) => Promise<T>} load a stable callback (useCallback)
  * @param {{cadenceMs: number, skip?: boolean, initial: T}} options
- * @returns {{value: T, refresh: () => Promise<void>, latest: () => T}}
+ * @returns {{value: T, busy: boolean, refresh: () => Promise<void>, latest: () => T}}
  */
 export function usePolledRead(load, { cadenceMs, skip = false, initial }) {
   const [value, setValue] = useState(initial);
+  const [busy, setBusy] = useState(false);
   const newest = useRef(initial);
   const inFlight = useRef(false);
   const again = useRef(false);
   const alive = useRef(true);
 
-  const readOnce = useCallback(async () => {
-    const next = await load(newest.current);
-    if (!alive.current) return;
-    // The ref is the one source of truth; state follows it for rendering.
-    newest.current = next;
-    setValue(next);
-  }, [load]);
   const latest = useCallback(() => newest.current, []);
 
   const refresh = useCallback(async () => {
@@ -39,15 +38,28 @@ export function usePolledRead(load, { cadenceMs, skip = false, initial }) {
       return;
     }
     inFlight.current = true;
+    setBusy(true);
+    let settled = false;
     try {
       do {
         again.current = false;
-        await readOnce();
+        const next = await load(newest.current);
+        if (!alive.current) return;
+        // The ref is the one source of truth; state follows it for rendering.
+        newest.current = next;
+        setValue(next);
+        if (!again.current) {
+          // The last read of this flight: busy clears in the same synchronous step that
+          // committed its value, so one render shows both.
+          setBusy(false);
+          settled = true;
+        }
       } while (again.current && alive.current);
     } finally {
       inFlight.current = false;
+      if (!settled) setBusy(false);
     }
-  }, [readOnce]);
+  }, [load]);
 
   useEffect(() => {
     alive.current = true;
@@ -65,7 +77,7 @@ export function usePolledRead(load, { cadenceMs, skip = false, initial }) {
     };
   }, [refresh, cadenceMs, skip]);
 
-  return { value, refresh: skip ? noRefresh : refresh, latest };
+  return { value, busy: skip ? false : busy, refresh: skip ? noRefresh : refresh, latest };
 }
 
 const noRefresh = async () => {};

@@ -362,6 +362,16 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
                     state_dir = work / "owner-state"
                     state_dir.mkdir(exist_ok=True)
                     (state_dir / (state_name + ".json")).write_text(state.stdout)
+                elif state_name == "online":
+                    # No online record: the broker never accepted a stage, so none could switch.
+                    (work / "broker_never_accepted.txt").write_text(
+                        "/run/photo-wall-app-broker/online.json absent\n"
+                    )
+            prepared = container.exec(
+                "cat", "/run/photo-wall-node-storage/preparation/prepared.json", timeout=10
+            )
+            if prepared.returncode == 0:
+                (work / "prepared.json").write_text(prepared.stdout)
             result = container.exec("journalctl", "--no-pager", timeout=30)
             (work / "journal.log").write_text(result.stdout + result.stderr)
         except Exception as error:

@@ -17,6 +17,7 @@ from contracts.node_host_facts import (
     HostFactsV2,
     encode_host_facts,
     parse_host_facts,
+    stored_fact_values,
 )
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2
@@ -30,7 +31,7 @@ def _producer(owner="host_core"):
 
 def _facts(**fields):
     values = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
-              "address": "192.168.1.40", **fields}
+              "address": "192.168.1.40", "base_tag": "2026.10.01", **fields}
     return HostFactsV2(_producer(), 3, 1234, **values)
 
 
@@ -45,12 +46,27 @@ def test_round_trip_with_a_plus_in_the_kernel_release_and_nulls():
     raw = encode_host_facts(value)
     assert parse_host_facts(raw) == value
     document = json.loads(raw)
-    assert document["schema"] == 2 and document["kind"] == "host_facts" and "base" not in document
+    assert document["schema"] == 2 and document["kind"] == "host_facts"
+    assert document["base_tag"] == "2026.10.01" and "base" not in document
     assert raw == json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     assert len(raw) <= MAX_HOST_FACTS_BYTES
-    empty = _facts(kernel_release=None, interface=None, link_state=None, address=None)
+    empty = _facts(kernel_release=None, interface=None, link_state=None, address=None, base_tag=None)
     assert parse_host_facts(encode_host_facts(empty)) == empty
     assert LINK_STATES == {"up", "down", "dormant", "lowerlayerdown", "notpresent", "testing", "unknown"}
+
+
+def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_none():
+    # Central's read side: one old row must not fail the fleet read (G12); ingest stays strict.
+    old = _document()
+    del old["base_tag"]
+    raw = json.dumps(old).encode()
+    with pytest.raises(ValueError):
+        parse_host_facts(raw)
+    assert stored_fact_values(raw) == {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
+                                       "link_state": "up", "address": "192.168.1.40", "base_tag": None}
+    assert stored_fact_values(json.dumps(_document(link_state="UP")).encode())["link_state"] is None
+    assert tuple(stored_fact_values(encode_host_facts(_facts())).values()) == _facts().values()
+    assert set(stored_fact_values(b"not json").values()) == {None}
 
 
 REFUSED = {
@@ -63,6 +79,8 @@ REFUSED = {
     "an interface with a bidi character": {"interface": "eth‮0"},
     "a 16-character interface": {"interface": "e" * 16},
     "an extra key": {"base": "2026.10.01"},
+    "a base tag with a space": {"base_tag": "2026 10 01"},
+    "a 129-character base tag": {"base_tag": "2" * 129},
     "a missing key": None,
     "another kind": {"kind": "host_observation"},
     "a sequence of 0": {"sequence": 0},
@@ -219,12 +237,25 @@ def test_facts_are_sent_once_per_process_start_and_unchanged_facts_send_nothing(
     runner, sent = _runner(monkeypatch, clock, facts, {})
     _run(runner, clock, 200)
     assert len(sent) == 1 and sent[0][0] == 100.0
-    assert parse_host_facts(sent[0][1]).values() == tuple(VALUES.values())
+    assert parse_host_facts(sent[0][1]).values() == (*VALUES.values(), None)
     # A process start (a new runner) sends again; Central answers duplicate or keeps
     # first_received_at.
     again, resent = _runner(monkeypatch, clock, facts, {})
     _run(again, clock, 210)
     assert len(resent) == 1
+
+
+@pytest.mark.parametrize(("configured", "reported"), [("2026.10.01", "2026.10.01"), ("bad tag", None),
+                                                     (None, None)])
+def test_the_runner_reports_its_configured_base_tag_and_nulls_one_the_contract_refuses(
+        monkeypatch, configured, reported):
+    # The node's own record of its base (host.json's base_tag, from the boot handoff) rides in
+    # the facts record; a value the contract refuses becomes null, never a broken record.
+    clock, facts = [100.0], dict(VALUES)
+    runner, sent = _runner(monkeypatch, clock, facts, {})
+    runner.base_tag = configured
+    _run(runner, clock, 110)
+    assert len(sent) == 1 and parse_host_facts(sent[0][1]).base_tag == reported
 
 
 def test_a_change_sends_a_new_document_and_a_flapping_link_at_most_once_per_interval(monkeypatch):

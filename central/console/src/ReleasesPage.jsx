@@ -33,13 +33,20 @@ const GATE_GOVERNS = "Reboot and Stage app are refused while it is closed. Centr
 
 /** "Release read as of <time>", whether its last refresh failed, or why it has no answer. */
 function ReadLine({ releases }) {
+  // role=status with aria-busy while a read is in flight: busy clears only once the read is
+  // settled (what Select judges), matching the snapshot status in the shell.
+  const status = { role: "status", "aria-label": "Release read", "aria-busy": releases.busy ? "true" : undefined };
   if (releases.read === null) {
     return releases.error === null
-      ? <p className="player__read-time">Release read: not read yet</p>
-      : <FactLine label="Release read" fact={fact({ kind: "unknown", why: `Central did not answer (${releases.error.code})` })} />;
+      ? <p className="player__read-time" {...status}>Release read: not read yet</p>
+      : (
+        <div className="player__read-time" {...status}>
+          <FactLine label="Release read" fact={fact({ kind: "unknown", why: `Central did not answer (${releases.error.code})` })} />
+        </div>
+      );
   }
   return (
-    <p className="player__read-time">
+    <p className="player__read-time" {...status}>
       {typeof releases.readAt === "number" ? `Release read as of ${clock(releases.readAt)}` : "Release read time not served"}
       {releases.error !== null && ", refresh failed"}
     </p>

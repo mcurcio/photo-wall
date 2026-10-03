@@ -10,6 +10,11 @@ module names the display's calibration route, and the shell's own modules reach 
 through `wallRoutes.jsx`. The browser half (tests/browser/test_console_shell_browser.py)
 visits every sample path.
 
+G1 (console DDD §49) by the same graph: the worklists (Needs attention, the Wall's To finish
+list), the one host classifier they read and the Status host chip import models, never a page
+module (a route table, the shell or a `*Page.jsx`) and never a write module (`WRITE_MODULES`),
+followed transitively. A worklist only links; the write lives in the home it links to.
+
 THE MODULE GRAPH is the bundler's: esbuild (shipped with Vite in the console's
 node_modules) bundles the entry points with a metafile, whose `inputs` list every module and
 what each one imports. It is cross-checked against an import scan of each module, and any
@@ -67,6 +72,17 @@ SHARED_WITH_SHOW = {
     "sceneTargets.js",  # pure stored Scene contribution and target reads
     "useMutate.js",  # refresh after a write
 }
+# The console's write modules: the operator write primitive and every module that wraps a
+# write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
+# Every write path reaches `apiWrite.js`, so a closure that holds none of these holds no write.
+WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.js",
+                 "equipmentApi.js"}
+# G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
+# Wall's To finish list and model, the one host classifier they read, and the Status host chip.
+G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "WallUnfinished.jsx",
+                   "unfinished.js", "hostHealth.js", "HostChip.jsx"]
+# The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
+SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
 # players.js is not listed: since T1 the shell's own attention strip reaches it (host incidents
 # name each Bound Player, hostHealth.js), so it is one of the shell's own modules.
 
@@ -293,6 +309,28 @@ def reachable(graph, entry, *, stop=frozenset()):
     return {module.name for module in seen}
 
 
+def scan_closure(path, root=CONSOLE):
+    """The names of every console module `path` reaches by the import scan (`_imports`, which
+    fails closed), followed transitively, `path` included. For a copy of the sources that the
+    bundler is not run over (the mutation probes)."""
+    seen, stack = set(), [path.resolve()]
+    while stack:
+        module = stack.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        if module.suffix in {".js", ".jsx"}:
+            stack.extend(_imports(module, root) - seen)
+    return {module.name for module in seen}
+
+
+def g1_forbidden(names):
+    """Of module `names`, those a G1 list module must never reach: page and write modules."""
+    return {name for name in names
+            if name in WRITE_MODULES or name in SHELL_PAGES or name in TABLES.values()
+            or name.endswith("Page.jsx")}
+
+
 @pytest.fixture(scope="module")
 def graph(tmp_path_factory):
     """The console's module graph from its entry point and route tables."""
@@ -463,6 +501,43 @@ def test_the_wall_routes_do_reach_display_controls(graph):
     assert DISPLAY_CONTROLS <= _wall_only(graph)
     assert any(CALIBRATION_ROUTE in module.read_text() for module in graph
                if module.name in _wall_only(graph))
+
+
+# --- G1.
+
+
+@pytest.mark.parametrize("name", G1_LIST_MODULES)
+def test_g1_list_modules_reach_no_page_and_no_write_module(graph, name):
+    modules = reachable(graph, name)
+    assert name in modules and len(modules) > 1  # the walk reached past the module itself
+    # The Needs attention page is itself a page; what it reaches must not be one.
+    reached = modules - {name}
+    assert not g1_forbidden(reached), sorted(g1_forbidden(reached))
+
+
+def test_g1_list_modules_are_in_the_graph_and_the_homes_do_reach_writes(graph):
+    # Positive controls: every listed module is one the console builds (a renamed file cannot
+    # drop out of the check silently), and the homes the lists link to own the writes.
+    names = {module.name for module in graph}
+    assert set(G1_LIST_MODULES) <= names
+    assert "apiWrite.js" in reachable(graph, "PlayerPage.jsx")
+    assert "framesApi.js" in reachable(graph, "LayoutEditor.jsx")
+
+
+def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
+    # A mutation of the guarded files, in a copy: the classifier importing its lookup from the
+    # polling hook again (as batch 4 first did) puts the write primitive in the closure of
+    # Needs attention, and the check names it.
+    src = tmp_path / "src"
+    src.mkdir()
+    for module in SRC.iterdir():
+        if module.is_file():
+            (src / module.name).write_bytes(module.read_bytes())
+    assert not g1_forbidden(scan_closure(src / "AttentionList.jsx", tmp_path))
+    classifier = src / "hostHealth.js"
+    classifier.write_text('import { useFleetHosts } from "./fleetHosts.js";\n' + classifier.read_text())
+    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js", "HostChip.jsx"):
+        assert "apiWrite.js" in g1_forbidden(scan_closure(src / name, tmp_path)), name
 
 
 @pytest.mark.parametrize("table", sorted(TABLES))

@@ -38,14 +38,17 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     if marker["base_abi"] != offer.base.base_abi:
         raise ValueError("node_measured_base_abi_mismatch")
     # Host-only configuration is available even when graphics packaging is broken.
-    write_atomically(directory / "host.json", json.dumps({"central": central,
-        "serial": offer.serial, "offer_id": str(offer.offer_id)}).encode(), mode=0o600)
+    # The base tag is the node's own record of the base this boot runs: the offer whose base the
+    # initramfs verified and mounted (Host Management reports it in its facts record).
+    host = {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id),
+            "base_tag": offer.base.tag}
+    write_atomically(directory / "host.json", json.dumps(host).encode(), mode=0o600)
     graphics = _marker(root / "usr/lib/photo-wall-display/abi.json", {"graphics_abi", "plugin_abi"})
     abi = {**marker, **graphics}
     if any(getattr(offer.base, name) != value for name, value in abi.items()):
         raise ValueError("node_measured_graphics_abi_mismatch")
     configs = {
-        "host": {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id)},
+        "host": host,
         "broker": {"central": central, "serial": offer.serial},
         "display": {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id)},
         "manager-client": {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id), **abi},

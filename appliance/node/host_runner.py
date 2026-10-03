@@ -22,7 +22,7 @@ from appliance.node.recovery_linux import RecoveryObserver, RecoveryServer
 from appliance.node.session import REFUSED, NodeSession
 from appliance.node.storage import BootStore
 from contracts.node_commands import parse_reboot_request
-from contracts.node_host_facts import HostFactsV2, encode_host_facts
+from contracts.node_host_facts import FACT_RULES, HostFactsV2, encode_host_facts, valid_fact
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
     HostMetricV2,
@@ -50,10 +50,16 @@ class HostRunner:
     _facts: HostFactsV2 | None = None
     _facts_state: str = "pending"
     _facts_off_at: float | None = None
+    # The base this boot runs, as the node records it: the tag of the boot offer whose base the
+    # initramfs verified and mounted, carried into host.json by bootstrap.py from the boot
+    # handoff. Reported in the facts record (`base_tag`) beside Central's offer, never as it.
+    base_tag: str | None = None
 
     def __init__(self, store: BootStore, transport: NodeHTTP, *, serial: str,
-                 offer_id: UUID, kernel_boot_id: UUID, monotonic=time.monotonic):
+                 offer_id: UUID, kernel_boot_id: UUID, monotonic=time.monotonic,
+                 base_tag: str | None = None):
         self.store, self.transport = store, transport
+        self.base_tag = base_tag
         self.monotonic = monotonic
         self.journal = FileRebootJournal(store)
         self.delivery = RebootDelivery(store)
@@ -120,11 +126,11 @@ class HostRunner:
             if self.monotonic() - self._facts_off_at < self.FACTS_ROUTE_RETRY_SECONDS:
                 return
             self._facts_state = "pending"
-        values = self.sampler.facts()
+        values = {**self.sampler.facts(),
+                  "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None}
         current = self._facts
         if (current is None or current.producer != self.core.producer
-                or current.values() != tuple(values[name] for name in
-                                             ("kernel_release", "interface", "link_state", "address"))):
+                or current.values() != tuple(values[name] for name in FACT_RULES)):
             self._facts = HostFactsV2(self.core.producer, self.journal.next_sequence(), now_ms, **values)
             self._facts_state = "pending"
         if self._facts_state != "pending":
@@ -173,13 +179,14 @@ def main() -> None:
     if args.config.is_symlink() or info.st_uid != 0 or info.st_mode & 0o077:
         raise ValueError("host_configuration_ownership")
     value = loads_object(args.config.read_bytes(), max_bytes=8192)
-    if value is None or set(value) != {"central", "serial", "offer_id"}:
+    if value is None or set(value) != {"central", "serial", "offer_id", "base_tag"}:
         raise ValueError("host_configuration_invalid")
     kernel_boot_id = boot_id()
     store = BootStore(args.state, boot_id=kernel_boot_id,
                       policy={"owner": "host_core", "offer_id": value["offer_id"], "serial": value["serial"]})
     runner = HostRunner(store, NodeHTTP(value["central"], timeout=0.5), serial=value["serial"],
-                        offer_id=UUID(value["offer_id"]), kernel_boot_id=kernel_boot_id)
+                        offer_id=UUID(value["offer_id"]), kernel_boot_id=kernel_boot_id,
+                        base_tag=value["base_tag"])
     recovery = runner.recovery
     server = RecoveryServer(recovery)
     last_tick = 0.0

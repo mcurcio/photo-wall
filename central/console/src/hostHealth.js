@@ -1,5 +1,4 @@
 import { fact, factText, LAYER_NAMES } from "./facts.js";
-import { hostRow } from "./fleetHosts.js";
 import { formatAge, gigabytes } from "./health.js";
 import { playersByDevice } from "./players.js";
 import { formatRoute } from "./routes.js";
@@ -39,6 +38,21 @@ import { formatRoute } from "./routes.js";
  */
 
 const HOST = LAYER_NAMES.host_core;
+
+/**
+ * One box's entry in a fleet host read, or null when the read does not list it (not read, or
+ * a box Central omits: retired or revoked). Pure, and here rather than in fleetHosts.js (the
+ * polling hook, which reaches the write primitive), so the classifier's import closure holds
+ * models only (G1, enforced by tests/test_console_routes_r4.py).
+ *
+ * @param {object|null} read the served G12 document
+ * @param {string} deviceId
+ * @returns {object|null}
+ */
+export function hostRow(read, deviceId) {
+  return (read?.devices ?? []).find((device) => device?.device_id === deviceId) ?? null;
+}
+
 
 /** The firmware's throttle flags (§63) a Throttling item reads: its words when set. */
 const FLAG = (when, word) => Object.freeze({ when, word });
@@ -283,7 +297,12 @@ const BASE_SOURCE = "this boot's node session";
  * record's one line ("Host facts first received 3 d ago" through facts.js `receiptText`, or
  * why there is none), and each item's `reported` fact carries that same first receipt, so it
  * renders without its own (`FactLine receipt={false}`): "Host Management reported eth0 up".
- * The base is a `claimed` fact from the current admission's boot offer, never a host report.
+ *
+ * The base has two sources, never merged (owner decision 2026-10-02): `base_reported` is Host
+ * Management's report of the base this boot runs (the facts record's `base_tag`, `reported`),
+ * and `base` is Central's offer, the tag of the boot offer the current admission claimed
+ * (`claimed`, labelled "Central's offer"). When both name a tag and the tags differ,
+ * `base_mismatch` is a `derived` fact naming both; it carries no band (no alarm is defined).
  * Both come only from the current boot: G12 serves no other boot's facts.
  * The facts take the classifier's state, so one gate words a box's values and its facts: on
  * `silent` and `refused` each fact reads "… at last report", as its metrics do (§62, §66), and
@@ -309,12 +328,14 @@ function factItems(row, read, absent, health) {
     const unknown = fact({ kind: "unknown", why: absent });
     return Object.freeze({ receipt: unknown, items: Object.freeze([entry("base", "Software", unknown)]) });
   }
+  const known = (value) => typeof value === "string" && value !== "";
   const boot = row.boot ?? null;
+  const offered = known(boot?.base_tag) ? boot.base_tag : null;
   const base = entry("base", "Software", boot === null
     ? fact({ kind: "unknown", why: "no current node boot admission" })
-    : typeof boot.base_tag !== "string" || boot.base_tag === ""
+    : offered === null
       ? fact({ kind: "unknown", why: "this boot's offer names no base tag" })
-      : fact({ kind: "claimed", value: `Base ${boot.base_tag}`, source: BASE_SOURCE }));
+      : fact({ kind: "claimed", value: `Central's offer: base ${offered}`, source: BASE_SOURCE }));
   const facts = row.facts ?? null;
   if (facts === null) {
     return Object.freeze({ receipt: fact({ kind: "unknown", why: "no host facts received on this boot" }),
@@ -325,7 +346,6 @@ function factItems(row, read, absent, health) {
     value: lastReport ? `${value} at last report` : value,
     receivedAt: facts.first_received_at, readAt, field: "facts.first_received_at" });
   const couldNot = (what) => fact({ kind: "unknown", why: `${HOST} could not read the ${what}` });
-  const known = (value) => typeof value === "string" && value !== "";
   const items = [];
   if (!known(facts.interface)) {
     items.push(entry("link", "Network", couldNot("default-route interface")));
@@ -339,7 +359,15 @@ function factItems(row, read, absent, health) {
     known(facts.address) ? reported(`address ${facts.address}`) : couldNot("address")));
   items.push(entry("kernel", "Software",
     known(facts.kernel_release) ? reported(`kernel ${facts.kernel_release}`) : couldNot("kernel release")));
+  const reportedBase = known(facts.base_tag) ? facts.base_tag : null;
+  items.push(entry("base_reported", "Software",
+    reportedBase === null ? couldNot("base tag") : reported(`base ${reportedBase}`)));
   items.push(base);
+  if (reportedBase !== null && offered !== null && reportedBase !== offered) {
+    items.push(entry("base_mismatch", "Software", fact({ kind: "derived",
+      value: `Base differs: ${HOST} reported ${reportedBase}, Central's offer ${offered}`,
+      basis: "the reported tag and the offered tag differ" })));
+  }
   const receipt = fact({ kind: "reported", source: HOST, receipt: "first", value: FACTS_LABEL,
     receivedAt: facts.first_received_at, readAt, field: "facts.first_received_at" });
   return Object.freeze({ receipt, items: Object.freeze(items) });
@@ -362,6 +390,66 @@ export function judgeHost(hosts, deviceId) {
   const absent = hosts.read == null && hosts.failed ? READ_FAILED : NOT_READ;
   const health = classify(row, hosts.read, absent);
   return Object.freeze({ row, health, facts: factItems(row, hosts.read, absent, health) });
+}
+
+// The Players table's groups and the Bound rows' tiers, in order (console DDD §52, §61, G2).
+const GROUP_ORDER = Object.freeze({ bound: 0, spare: 1, retired: 2 });
+const TIER_ORDER = Object.freeze({ alarm: 0, notice: 1, unknown: 2, ok: 3 });
+
+/**
+ * A spare's box (G2): read with Central's thresholds withheld, so no threshold judgement can
+ * reach its words (no "· hot", no "silent", no "at last report", no "Central's threshold" or
+ * "Central's limit" basis), then with every remaining band taken off. Its values read as
+ * plain `reported` facts with their receipt age; a silent spare's silence is that age.
+ */
+function describeSpare(hosts, deviceId) {
+  const read = hosts.read == null ? hosts.read : { ...hosts.read, thresholds: null };
+  return unbanded(judgeHost({ ...hosts, read }, deviceId));
+}
+
+/** A box with every band taken off: its words unchanged, judged as nothing. */
+function unbanded(judgedBox) {
+  const items = (list) => Object.freeze(list.map((entry) => Object.freeze({ ...entry, band: null })));
+  return Object.freeze({
+    health: Object.freeze({ ...judgedBox.health, items: items(judgedBox.health.items), worst: null,
+      severity: null }),
+    facts: judgedBox.facts,
+  });
+}
+
+/**
+ * The Players table's rows, in order (console DDD §52, §61, rule G2): the ONE place a box's
+ * standing decides whether its host values are judged.
+ *   bound    a Bound Player: judged (`judgeHost`), tiered by its severity, worst first, then
+ *            by name. Only these rows are tiered, so "worst first" names a box in trouble.
+ *   spare    an Unbound Player or a box seen at boot and never enrolled: its values read with
+ *            Central's thresholds withheld (`describeSpare`), so no band, no tier and no
+ *            threshold words (a spare is never alarmed, G2; its silence reads as a plain
+ *            receipt age, §52), by name, below every Bound row.
+ *   retired  a retired Player: not judged at all (Central reads none of its reports, and G12
+ *            omits it), so no health and no facts; the page states RETIRED_NOT_READ. Last.
+ * With `hosts` null (the fleet host read skipped) nothing is judged and only the groups order.
+ *
+ * @param {import("./players.js").PlayerRow[]} rows `playersByDevice(snapshot, bootFacts)`
+ * @param {import("./fleetHosts.js").FleetHostsRead|null} hosts
+ * @returns {Array<{row: import("./players.js").PlayerRow, group: "bound"|"spare"|"retired",
+ *            tier: HostSeverity|null, health: HostHealth|null,
+ *            facts: ReturnType<typeof hostFactItems>|null}>}
+ */
+export function playersTable(rows, hosts) {
+  const byName = (a, b) => (a.row.name < b.row.name ? -1 : a.row.name > b.row.name ? 1 : 0);
+  return rows.map((row) => {
+    const group = row.standing === "retired" ? "retired" : row.standing === "bound" ? "bound" : "spare";
+    if (group === "retired" || hosts === null) {
+      return Object.freeze({ row, group, tier: null, health: null, facts: null });
+    }
+    if (group === "spare") return Object.freeze({ row, group, tier: null, ...describeSpare(hosts, row.deviceId) });
+    const judgedBox = judgeHost(hosts, row.deviceId);
+    return Object.freeze({ row, group, tier: judgedBox.health.severity, health: judgedBox.health,
+      facts: judgedBox.facts });
+  }).sort((a, b) => (GROUP_ORDER[a.group] - GROUP_ORDER[b.group])
+    || (a.tier === null || b.tier === null ? 0 : TIER_ORDER[a.tier] - TIER_ORDER[b.tier])
+    || byName(a, b));
 }
 
 /** "Frame lobby-left", "Frames a, b". */
