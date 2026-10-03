@@ -1,4 +1,9 @@
-"""Disposable PID1 cold/service composition. Hardware enumeration is explicitly synthetic."""
+"""Disposable PID1 cold/service composition. Hardware enumeration is explicitly synthetic.
+
+Argument `refused` (the node-pid1 `refused` scenario): the storage stage alone reads a fake
+/proc/meminfo below the smallest memory class, and the base units start as one PID1
+transaction, so the units' own Requires= decide what runs after the refusal.
+"""
 
 import json
 import shutil
@@ -69,7 +74,43 @@ if config.get("stop_diagnostics"):
     diagnostic.write_text(
         "[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-stop-diagnostic.py\n"
     )
+scenario = sys.argv[1] if len(sys.argv) > 1 else None
+if scenario == "refused":
+    # A 2 GiB board, seen by the storage stage only. BindReadOnlyPaths gives the unit its own
+    # mount namespace, so this fake is only valid while nothing it mounts must reach the host:
+    # here the stage refuses before it mounts.
+    Path("/var/lib/node-fixture-meminfo").write_text(
+        "MemTotal:        2097152 kB\nMemFree:         1048576 kB\nMemAvailable:    1572864 kB\n"
+    )
+    d = Path("/etc/systemd/system/photo-wall-node-storage.service.d")
+    (d / "fixture-memory-class.conf").write_text(
+        "[Service]\nBindReadOnlyPaths=/var/lib/node-fixture-meminfo:/proc/meminfo\n"
+    )
+elif scenario is not None:
+    raise SystemExit("unknown fixture scenario: " + scenario)
 subprocess.run(["systemctl", "daemon-reload"], check=True)
+if scenario == "refused":
+    # Handoff runs independently of storage and writes host.json, which Host Management needs.
+    subprocess.run(["systemctl", "start", "photo-wall-node-handoff.service"], check=True)
+    # One transaction, as photo-wall-node.target pulls them in: storage refuses, so prepare
+    # (Requires= storage) and the broker and manager supervisor (Requires= prepare) fail as
+    # dependencies without running; Host Management (After= handoff only) runs and reports.
+    started = subprocess.run(
+        [
+            "systemctl",
+            "start",
+            "photo-wall-node-storage.service",
+            "photo-wall-node-prepare.service",
+            "photo-wall-host-core.service",
+            "photo-wall-app-broker.service",
+            "photo-wall-manager-supervisor.service",
+        ],
+        timeout=120,
+    )
+    if started.returncode == 0:
+        raise AssertionError("refused storage did not fail the base transaction")
+    print("REFUSED BASE TRANSACTION FAILED", started.returncode, flush=True)
+    raise SystemExit(0)
 subprocess.run(
     ["systemctl", "start", "photo-wall-node-handoff.service", "photo-wall-node-storage.service"],
     check=True,

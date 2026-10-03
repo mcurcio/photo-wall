@@ -2,9 +2,12 @@
 
 Each scenario boots the actual sealed node in a privileged arm64 systemd container against a
 real HTTP Central on its own database: success (ordered stop-before-start, natural completion),
-failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage) and
+failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
-commandable). Hardware is synthetic (sysfs Virtual-1, headless Weston); no DRM/HDMI/PXE claim.
+commandable) and refused (a board below the smallest memory class: storage refuses, nothing
+after it runs, and Host Management reports the refusal with its numbers). Hardware is synthetic
+(sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
+DRM/HDMI/PXE claim.
 
 Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a scripts/build_node_pid1_fixture.py output. Without
 it these tests skip, unless PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 (the node-pid1 CI job), where
@@ -39,7 +42,7 @@ from scripts.player_start_probe import (
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_NODE_PID1"
-SCENARIOS = ("success", "failure", "outage", "reboot")
+SCENARIOS = ("success", "failure", "outage", "reboot", "refused")
 
 MASKS = (
     *HOST_ACTING_UNITS,
@@ -53,6 +56,10 @@ MASKS = (
 )
 # Bound over the kernel's boot_id inside the container before systemd starts as PID 1.
 FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
+# The refused scenario's fake board (tests/node_pid1_central_inner.py): MemTotal 2097152 kB,
+# below the smallest memory class, pi5-4gb's 3584 MiB (appliance/node/capacity.py CLASSES).
+REFUSED_TOTAL_BYTES = 2097152 * 1024
+SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
 
 
 @pytest.fixture
@@ -157,8 +164,8 @@ class Node:
             )
         return result.stdout
 
-    def cold(self, fixture, components_dir, previous=None):
-        """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
+    def boot(self, fixture, components_dir, scenario=None):
+        """Boot PID1, bind the exact packages and run the inner composition (with `scenario`)."""
         run, work, container = self.run, self.work, self.container
         subprocess.run(self.argv, check=True, capture_output=True)
         assert container.wait_booted() in BOOTED
@@ -210,7 +217,17 @@ class Node:
                 Path(__file__).with_name("node_pid1_stop_diagnostic.py"),
                 "/usr/lib/photo-wall-stop-diagnostic.py",
             )
-        run("/usr/bin/python3", "/var/lib/node_resume_pid1_inner.py", timeout=1200)
+        run(
+            "/usr/bin/python3",
+            "/var/lib/node_resume_pid1_inner.py",
+            *(() if scenario is None else (scenario,)),
+            timeout=1200,
+        )
+
+    def cold(self, fixture, components_dir, previous=None):
+        """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
+        run, work = self.run, self.work
+        self.boot(fixture, components_dir)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             status = status_of(fixture, work)
@@ -339,6 +356,8 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
                 "photo-wall-node-player.service",
                 "photo-wall-node-manager.service",
                 "photo-wall-node-prepare.service",
+                "photo-wall-node-storage.service",
+                "photo-wall-app-broker.service",
                 "-p",
                 "Id,ActiveState,SubState,Result,ExecMainStatus,MainPID,RootDirectory,User,Group",
                 timeout=30,
@@ -502,7 +521,7 @@ def stage_and_complete(fixture, node, phase, reference):
     return status
 
 
-@pytest.mark.parametrize("phase", [name for name in SCENARIOS if name != "reboot"])
+@pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
     # outage: a successful switch while Central drops every node exchange after accept.
@@ -601,3 +620,70 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             second.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def unit_properties(node, unit):
+    names = "ActiveState,Result,ExecMainStartTimestampMonotonic"
+    shown = node.run("systemctl", "show", unit, "-p", names)
+    return dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
+
+
+def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
+    """A board below the smallest memory class: the storage stage refuses with its numbers.
+
+    Prepare (Requires= storage) never runs, so neither do the broker or the manager supervisor
+    (Requires= prepare). Handoff runs independently and writes host.json, so Host Management
+    runs and Central receives the refusal in the host facts `boot` report.
+    """
+    phase = "refused"
+    components_dir, _, image = node_pid1_inputs
+    work = tmp_path
+    with central_fixture(registry, components_dir, {}, work / "central", node_host) as fixture:
+        node = Node(image, work, phase)
+        try:
+            node.boot(fixture, components_dir, scenario=phase)
+            storage = unit_properties(node, "photo-wall-node-storage.service")
+            assert storage["ActiveState"] == "failed" and storage["Result"] == "exit-code", storage
+            for unit in (
+                "photo-wall-node-prepare.service",
+                "photo-wall-app-broker.service",
+                "photo-wall-manager-supervisor.service",
+            ):
+                properties = unit_properties(node, unit)
+                # Never started: no main process was ever forked for it this boot.
+                assert properties["ActiveState"] == "inactive", (unit, properties)
+                assert properties["ExecMainStartTimestampMonotonic"] == "0", (unit, properties)
+            assert unit_properties(node, "photo-wall-host-core.service")["ActiveState"] == "active"
+            records = node.run(
+                "/usr/bin/python3",
+                "-c",
+                "import json,pathlib;print(json.dumps({p.stem:json.loads(p.read_text()) for p in "
+                "sorted(pathlib.Path('/run/photo-wall-boot-stage').glob('*.json'))}))",
+            )
+            (work / "boot-stage-records.json").write_text(records)
+            assert sorted(json.loads(records)) == ["handoff", "storage"], records
+            refused = {
+                "stage": "storage",
+                "state": "refused",
+                "fault": "node_memory_class",
+                "required_bytes": SMALLEST_CLASS_BYTES,
+                "room_bytes": REFUSED_TOTAL_BYTES,
+            }
+            deadline = time.monotonic() + 90
+            while True:
+                host = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/host")
+                (work / "host-latest.json").write_text(json.dumps(host, sort_keys=True))
+                boot = (host["facts"] or {}).get("boot") or {}
+                if refused in boot.get("stages", []) and host["metrics"]:
+                    break
+                assert time.monotonic() < deadline, "refusal never reached Central: " + str(work)
+                time.sleep(1)
+            assert [stage["stage"] for stage in boot["stages"]] == ["handoff", "storage"], boot
+            assert boot["stages"][0]["state"] == "done", boot
+            assert "photo-wall-node-storage.service" in boot["failed_units"], boot
+            names = {name: value for name, value in host["metrics"]}
+            assert names.get("memcg_present") == 1, host
+            assert any(name.startswith("memory_peak:") for name in names), host
+            print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
+        finally:
+            node.capture_and_remove(fixture, sys.exc_info()[1])
