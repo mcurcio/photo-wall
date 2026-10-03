@@ -10,8 +10,8 @@ from appliance.node.capacity import (
     EMERGENCY_HEADROOM,
     OVERHEAD,
     STORE,
+    device_class,
     memory_values,
-    storage_budget,
 )
 from appliance.node.clock import boot_id
 from appliance.node.environment import stage_archive, verify_root
@@ -47,7 +47,7 @@ def main() -> None:
         total, available = memory_values()
         disk = shutil.disk_usage(STORE)
         incremental = reference.size_bytes + OVERHEAD
-        if disk.used + incremental > storage_budget(total, available) or incremental > min(disk.free, available - EMERGENCY_HEADROOM):
+        if disk.used + incremental > device_class(total).store_bytes or incremental > min(disk.free, available - EMERGENCY_HEADROOM):
             raise ValueError("root_import_capacity")
         archive = STORE / "preparation/downloads" / (reference.environment_sha256 + ".tar")
         stage_archive(archive, roots, reference, **abi)

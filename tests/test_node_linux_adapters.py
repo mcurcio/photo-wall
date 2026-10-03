@@ -274,8 +274,10 @@ def test_diskless_budget_deduplicates_exact_roots_and_refuses_small_memory(tmp_p
     reference = replace(reference, size_bytes=GIB)
     assert cold_peak([reference, reference]) == 2 * GIB + OVERHEAD
     assert admit_cold([reference, reference], total=8 * GIB, available=7 * GIB, free=4 * GIB) == 2 * GIB + OVERHEAD
-    with pytest.raises(ValueError, match="memory_envelope"):
-        admit_cold([reference], total=4 * GIB, available=3 * GIB, free=4 * GIB)
+    # A 4 GB board is a class of its own (store 2560 MiB); below it, the class refuses.
+    assert admit_cold([reference], total=4 * GIB, available=3 * GIB, free=4 * GIB) == 2 * GIB + OVERHEAD
+    with pytest.raises(ValueError, match="node_memory_class"):
+        admit_cold([reference], total=3 * GIB, available=3 * GIB, free=4 * GIB)
     with pytest.raises(ValueError, match="capacity"):
         admit_cold([reference], total=8 * GIB, available=7 * GIB, free=2 * GIB)
 

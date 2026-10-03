@@ -26,6 +26,15 @@ COMPONENTS_SCHEMA = 3
 # The one record of which commit a component set was built or restored for, written beside it
 # after the build or the restore (scripts/node_component_inputs.py `stamp`), never cached.
 STAMP = "revision.json"
+# The node cohort's cmdline.txt tokens, each exactly once. The Pi firmware prefixes the DTB's
+# bootargs, which carry `cgroup_disable=memory`; the later `cgroup_enable=memory` wins, so the
+# memory controller (and every slice's MemoryMax=) is live on hardware.
+NODE_CMDLINE_TOKENS = ("photowall.node=v2", "cgroup_enable=memory")
+
+
+def _cmdline_selected(text: str) -> bool:
+    words = text.split()
+    return all(words.count(token) == 1 for token in NODE_CMDLINE_TOKENS)
 
 
 def write_stamp(components: Path, *, revision: str, inputs_sha256: str) -> None:
@@ -57,7 +66,7 @@ def cohort_bundle(source: Path, output: Path) -> None:
     if "\n" in line or any(word.startswith("photowall.node=") for word in line.split()):
         raise ValueError("node_bundle_already_selected")
     shutil.copytree(source, output)
-    (output / "boot/cmdline.txt").write_text(line + " photowall.node=v2\n")
+    (output / "boot/cmdline.txt").write_text(" ".join((line, *NODE_CMDLINE_TOKENS)) + "\n")
     (output / "SHA256SUMS").write_text("".join(
         f"{checked_file(p, 8 * 1024**3)['sha256']}  ./{p.relative_to(output).as_posix()}\n"
         for p in sorted(output.rglob("*")) if p.is_file() and p.name != "SHA256SUMS"))
@@ -70,7 +79,7 @@ def append(components: Path, bundle: Path, destination: Path, *, revision: str,
     provenance = json.loads((components / "build-provenance.json").read_bytes())
     stamp = json.loads((components / STAMP).read_bytes()) if (components / STAMP).is_file() else {}
     _check_components(metadata, provenance, stamp, revision)
-    if (bundle / "boot/cmdline.txt").read_text().split().count("photowall.node=v2") != 1:
+    if not _cmdline_selected((bundle / "boot/cmdline.txt").read_text()):
         raise ValueError("node_bundle_flag_missing")
     records = []
     with tempfile.TemporaryDirectory(prefix="node-release-") as temporary:
@@ -138,7 +147,7 @@ def verify(directory: Path, revision: str) -> NodeReleaseV2:
                     raise ValueError("node_release_squashfs_mismatch")
             elif member.name == BASE_ROOT + "/boot/cmdline.txt":
                 stream = archive.extractfile(member)
-                if stream is None or member.size > 4096 or stream.read().decode().split().count("photowall.node=v2") != 1:
+                if stream is None or member.size > 4096 or not _cmdline_selected(stream.read().decode()):
                     raise ValueError("node_release_cohort_invalid")
     return manifest
 

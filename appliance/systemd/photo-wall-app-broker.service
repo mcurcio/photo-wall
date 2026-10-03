@@ -5,6 +5,11 @@ ConditionPathExists=/run/photo-wall-node/cold.json
 After=photo-wall-display.service photo-wall-host-core.service
 
 After=photo-wall-node-handoff.service photo-wall-node-prepare.service
+Requires=photo-wall-node-prepare.service
+# A crash loop leaves the unit failed and reported, never a reboot: recovery is
+# operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
+StartLimitIntervalSec=10min
+StartLimitBurst=10
 
 [Service]
 ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-app-broker
@@ -16,6 +21,7 @@ RuntimeDirectoryPreserve=yes
 User=root
 UMask=0077
 Slice=photowallbase.slice
+OOMScoreAdjust=-500
 MemoryMax=192M
 MemorySwapMax=0
 TasksMax=24
