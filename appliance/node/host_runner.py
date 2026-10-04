@@ -51,9 +51,10 @@ class HostRunner:
     # The host facts sender (console DDD §64), in memory only: `_facts` is the document last
     # built (None before the first post) and `_facts_state` one of "pending", "stored",
     # "dropped" or "off". A process start therefore sends once. "off" (a Central replica
-    # without the route, 404) lasts FACTS_ROUTE_RETRY_SECONDS on this process's monotonic
-    # clock (`_facts_off_at`), then the document is pending again, so a rolling deploy or a
-    # rollback does not silence facts for the rest of the boot.
+    # without the route, 404, or an older Central that cannot parse a newer document, 422) lasts
+    # FACTS_ROUTE_RETRY_SECONDS on this process's monotonic clock (`_facts_off_at`), then the
+    # document is pending again, so a rolling deploy, a rollback or a node released before its
+    # Central does not silence facts for the rest of the boot.
     FACTS_ROUTE_RETRY_SECONDS = 3600
     _facts: HostFactsV2 | None = None
     _facts_state: str = "pending"
@@ -64,6 +65,9 @@ class HostRunner:
     base_tag: str | None = None
     # The base boot stages' records (boot_stage.py), folded into the facts record's `boot`.
     boot_stage_directory: Path = BOOT_STAGE_DIRECTORY
+    # PID1's failed units as last read by this process (errata E-T3-2): a failed read reuses
+    # the last successful one; None until one succeeds, so "not read" never reads "none failed".
+    _failed_units: tuple | None = None
 
     def __init__(self, store: BootStore, transport: NodeHTTP, *, serial: str,
                  offer_id: UUID, kernel_boot_id: UUID, monotonic=time.monotonic,
@@ -131,15 +135,15 @@ class HostRunner:
         sequence) is built on the first post and whenever a value or the producer changed;
         otherwise a pending document is resent unchanged: after no answer, a 5xx, a 429 or a
         refused session (401/403). A refusal of the document itself (another 4xx) drops it
-        until a value changes; a 404 turns facts off for FACTS_ROUTE_RETRY_SECONDS."""
+        until a value changes; a 404 (no route) or a 422 (an older Central's stricter parse)
+        turns facts off for FACTS_ROUTE_RETRY_SECONDS."""
         if self._facts_state == "off":
             if self.monotonic() - self._facts_off_at < self.FACTS_ROUTE_RETRY_SECONDS:
                 return
             self._facts_state = "pending"
         values = {**self.sampler.facts(),
                   "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None}
-        boot = read_boot_report(directory=self.boot_stage_directory,
-                                units=lambda: self.sampler.failed_units())
+        boot = read_boot_report(directory=self.boot_stage_directory, units=self._read_failed_units)
         # Compared as the whole JSON-ready document (`boot` included), the same comparison
         # Central makes; the candidate's sequence is spent only when something changed.
         candidate = HostFactsV2(self.core.producer, 1, now_ms, **values, boot=boot)
@@ -156,14 +160,21 @@ class HostRunner:
             return  # no answer: the same document at the next post
         if status == 200:  # recorded, duplicate or stale
             self._facts_state = "stored"
-        elif status == 404:
+        elif status in (404, 422):
             self._facts_state, self._facts_off_at = "off", self.monotonic()
         elif status in REFUSED or status == 429:
             # A refused session (401/403) is temporary: the next ensure() enrolls a new one
             # under the same producer, and that tick's post resends this document.
             return
         elif 400 <= status < 500:
-            self._facts_state = "dropped"  # Central refused this document (409, 422, ...)
+            self._facts_state = "dropped"  # Central refused this document (409, ...)
+
+    def _read_failed_units(self) -> tuple | None:
+        try:
+            self._failed_units = self.sampler.failed_units()
+        except (OSError, ValueError):
+            pass  # unreadable now: the last successful reading, or None (not read)
+        return self._failed_units
 
     def _observation_due(self) -> bool:
         if self._posted is None or self._posted[0] != self.core.session_id:

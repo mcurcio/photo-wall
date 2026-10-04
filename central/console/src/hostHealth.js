@@ -67,17 +67,15 @@ const THROTTLE_FLAGS = Object.freeze({
   soft_temperature_limit_occurred: FLAG("occurred", "soft temperature limit"),
 });
 
-// The base boot stages in boot order (contracts/node_host_facts.py BOOT_STAGES), the unit that
-// runs each (appliance/systemd), the most failed units a boot report names
-// (MAX_BOOT_FAILED_UNITS) and the most `oom_kill:` rows a sample carries (its METRIC_FAMILIES
-// max_rows): bound to the contracts by tests/test_console_host_health.py.
+// The base boot stages in boot order (contracts/node_host_facts.py BOOT_STAGES) and the unit
+// that runs each (appliance/systemd): bound to the contracts by tests/test_console_host_health.py.
+// No row cap is applied here: every reported failed unit and every non-zero kill is shown.
 export const BOOT_STAGES = Object.freeze(["handoff", "storage", "prepare"]);
 export const STAGE_UNITS = Object.freeze(Object.fromEntries(BOOT_STAGES.map((stage) =>
   [stage, `photo-wall-node-${stage}.service`])));
-export const MAX_UNITS = 4;
-export const MAX_OOM_ROWS = 3;
 const STOPPED = Object.freeze(new Set(["refused", "failed"]));
 const OOM_PREFIX = "oom_kill:";
+const MEMCG = "memcg_present";
 
 /** The boot report of the host facts record (G12 `facts.boot`), or null when not reported. */
 function bootReport(facts) {
@@ -90,20 +88,23 @@ function bootReport(facts) {
  * the stage wrote none). A stage stops when its record says refused or failed, or when PID1
  * lists its own unit failed while its record is `running` or absent: the process was killed
  * before its exit write (an out-of-memory victim, TimeoutStartSec's SIGTERM) or the write
- * failed (4 GB node design §6). Both boot items read this one rule.
+ * failed (docs/node-4gb-memory-design.md §6). Both boot items read this one rule. When the
+ * failed units were not read (`failed_units` null, errata E-T3-2) only the records decide: a
+ * `running` record stays running, neither stopped nor cleared.
  */
 function stoppedStages(boot) {
   const stages = Array.isArray(boot.stages) ? boot.stages : [];
-  const units = new Set(Array.isArray(boot.failed_units) ? boot.failed_units : []);
+  const units = Array.isArray(boot.failed_units) ? new Set(boot.failed_units) : null;
   return BOOT_STAGES.flatMap((name) => {
     const record = stages.find((stage) => stage?.stage === name);
-    const unitFailed = units.has(STAGE_UNITS[name]) && (record === undefined || record.state === "running");
+    const unitFailed = units !== null && units.has(STAGE_UNITS[name])
+      && (record === undefined || record.state === "running");
     return STOPPED.has(record?.state) || unitFailed ? [{ stage: name, record }] : [];
   });
 }
 
 /**
- * Boot preparation (4 GB node design §4.3, T4, §6): the first stage in boot order that stopped,
+ * Boot preparation (docs/node-4gb-memory-design.md §4.3 T4, §6): the first stage in boot order that stopped,
  * because the cause precedes its effects; else the first running; else done once `prepare` is
  * done; else not started. A stop is an alarm.
  */
@@ -137,25 +138,24 @@ function readBootPreparation(boot) {
 /**
  * Base units: PID1's failed photo-wall units, less the unit of each stage boot preparation
  * reads as stopped (its stop is that item's incident, so one cause raises one). A stage unit
- * whose stage did not stop stays listed. Any is an alarm.
+ * whose stage did not stop stays listed. Any is an alarm. Units Host Management could not read
+ * (`failed_units` null) read Unknown with no band: never "no base unit failed".
  */
 function readBaseUnits(boot) {
+  if (!Array.isArray(boot.failed_units)) return { why: "failed units not read", band: null };
   const repeated = new Set(stoppedStages(boot).map(({ stage }) => STAGE_UNITS[stage]));
-  const names = (Array.isArray(boot.failed_units) ? boot.failed_units : [])
-    .filter((name) => typeof name === "string" && !repeated.has(name));
+  const names = boot.failed_units.filter((name) => typeof name === "string" && !repeated.has(name));
   const more = isNumber(boot.failed_units_more) && boot.failed_units_more > 0 ? boot.failed_units_more : 0;
   if (names.length === 0 && more === 0) return { band: null, text: "no base unit failed on this boot" };
-  const shown = names.slice(0, MAX_UNITS);
-  const extra = more + names.length - shown.length;
-  const listed = shown.length === 0 ? `${extra} not named`
-    : `${shown.join(" · ")}${extra > 0 ? ` and ${extra} more` : ""}`;
+  const listed = names.length === 0 ? `${more} not named`
+    : `${names.join(" · ")}${more > 0 ? ` and ${more} more` : ""}`;
   return { band: "alarm",
-    text: `base ${shown.length + extra === 1 ? "unit" : "units"} failed on this boot: ${listed}` };
+    text: `base ${names.length + more === 1 ? "unit" : "units"} failed on this boot: ${listed}` };
 }
 
 /** Out-of-memory kills per slice (`oom_kill:<slice>`), most first; any kill is a notice. */
 function readOutOfMemory(rows) {
-  const kills = rows.slice(0, MAX_OOM_ROWS).map((row) => [row.name.slice(OOM_PREFIX.length), row.value])
+  const kills = rows.map((row) => [row.name.slice(OOM_PREFIX.length), row.value])
     .filter(([, value]) => value > 0)
     .sort(([a, x], [b, y]) => (y - x) || (a < b ? -1 : a > b ? 1 : 0));
   return kills.length === 0 ? { band: null, text: "No out-of-memory kills on this boot" }
@@ -164,13 +164,27 @@ function readOutOfMemory(rows) {
 }
 
 /**
+ * Memory limits: the kernel's memory controller (`memcg_present`). Without it no slice's
+ * MemoryMax= is enforced; the base still mounts its store (report-only, errata E-FX2-1), so
+ * the absence is a notice (a warning, never an alarm or an incident).
+ */
+function readMemoryLimits([row]) {
+  return row.value >= 1 ? { band: null, text: "memory controller on: memory limits enforced" }
+    : { band: "notice", text: "memory controller absent: memory limits not enforced" };
+}
+
+/** Whether a metric name belongs to a family key: exact, or `<prefix><suffix>` for a prefix. */
+const inFamily = (name, family) => (family.endsWith(":")
+  ? name.startsWith(family) && name.length > family.length : name === family);
+
+/**
  * The cataloged host items. A metric item reads the metric families its `families` name (an
  * exact name, or a prefix ending in ":" that covers every `<prefix><suffix>` row): its label,
  * group, the unit Central's thresholds must name for a band to apply, its symbol and band
  * words (an item with no `bands`, like CPU, is never banded), and `format(value)`. The
  * Throttling item reads every name in its `flags`, each banded by its own served threshold,
  * and words them with `describe(rows)`. An item with `judge` bands itself: from the metric
- * rows of its prefix family (`judge(rows)`), or, with `boot: true` and no families, from the
+ * rows of its families (`judge(rows)`), or, with `boot: true` and no families, from the
  * host facts record's boot report (`judge(boot)`), carrying that record's receipt.
  *
  * `families` is the item-to-family map: with NOT_SHOWN it covers every family of
@@ -206,6 +220,9 @@ export const HOST_CATALOG = Object.freeze({
   out_of_memory: Object.freeze({
     label: "Out of memory", group: "Storage", families: [OOM_PREFIX], judge: readOutOfMemory,
   }),
+  memory_limits: Object.freeze({
+    label: "Memory limits", group: "Storage", families: [MEMCG], judge: readMemoryLimits,
+  }),
   link_speed: Object.freeze({
     label: "Link speed", group: "Network", unit: "megabits_per_second", families: ["link_speed"],
     format: (value) => `${value} Mb/s`,
@@ -224,7 +241,7 @@ export const HOST_CATALOG = Object.freeze({
  * metric" and in G12. `metrics_dropped` is appended by `valid_metrics` alone.
  */
 export const NOT_SHOWN = Object.freeze([
-  "uptime", "load_1m", "memory_total", "memory_available", "memcg_present", "cma_total", "cma_free",
+  "uptime", "load_1m", "memory_total", "memory_available", "cma_total", "cma_free",
   "memory_peak:", "manager_summary_known", "manager_running", "manager_attempts",
   "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
   "local_recovery_active", "local_recovery_reboot", "metrics_dropped",
@@ -275,10 +292,10 @@ function allUnknown(state, why) {
 function readRows(name, host) {
   const entry = HOST_CATALOG[name];
   if (entry.judge !== undefined) {
-    // A prefix family: every `<prefix><suffix>` row, each name once, at least one.
-    const [prefix] = entry.families;
+    // Every row of its families (an exact name, or each `<prefix><suffix>`), each name once,
+    // at least one.
     const rows = (host.metrics ?? []).filter((metric) => typeof metric?.name === "string"
-      && metric.name.startsWith(prefix) && metric.name.length > prefix.length && isNumber(metric.value));
+      && entry.families.some((family) => inFamily(metric.name, family)) && isNumber(metric.value));
     if (new Set(rows.map((metric) => metric.name)).size !== rows.length) return { why: "two values reported" };
     if (rows.length === 0) return { why: "not reported" };
     return { rows, ...entry.judge(rows) };
@@ -321,7 +338,9 @@ function reportedMetric(name, host, facts, readAt, thresholds) {
   const entry = HOST_CATALOG[name];
   const read = readItem(name, host, facts);
   if (read.why !== undefined) {
-    return item(name, { fact: fact({ kind: "unknown", why: read.why }), band: "unknown" });
+    // A judge may word its own Unknown with no band (`band: null`); otherwise Unknown is banded.
+    return item(name, { fact: fact({ kind: "unknown", why: read.why }),
+      band: read.band === null ? null : "unknown" });
   }
   const reported = (band) => item(name, { band, fact: fact({ kind: "reported", source: HOST,
     value: read.text, readAt, ...read.receipt }) });

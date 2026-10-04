@@ -334,11 +334,15 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
         # Only the browser's default (opening a background tab) is suppressed: waiting for
         # that tab's "page" event is flaky on slow runners. A window bubble-phase listener
         # runs after React's root-container listener, so the app still handles the real
-        # modified click; the counter proves the click reached the window.
+        # modified click; the counter proves the click reached the window, and
+        # `__appPrevented` (read before this listener's own preventDefault) proves the app left
+        # the browser's new-tab default alone.
         page.evaluate(
             """() => {
                 window.__newTabClicks = 0;
+                window.__appPrevented = null;
                 window.addEventListener("click", (event) => {
+                    window.__appPrevented = event.defaultPrevented;
                     event.preventDefault();
                     window.__newTabClicks += 1;
                 }, { once: true });
@@ -347,6 +351,7 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
         drawer.get_by_role("link", name="Scenes", exact=True).click(
             modifiers=[new_tab_modifier])
         assert page.evaluate("window.__newTabClicks") == 1
+        assert page.evaluate("window.__appPrevented") is False
         assert len(page.context.pages) == 1
         # This tab did not follow the link: still on the Wall, the drawer still open.
         assert current_hash(page) == "#/wall"

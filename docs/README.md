@@ -8,6 +8,8 @@ The operator-reported v0.13.0 Kubernetes gaps and claimable follow-up work are i
 
 The [domain-driven operator console design](operator-console-ddd.md) gives each domain aggregate one home in the console, ranks the console's domain gaps and plans its incremental passes, Player fleet first. It refines the [console UX design](operator-console-ux-design.md); pass 1 is approved.
 
+The [4 GB node memory design](node-4gb-memory-design.md) makes a 4 GB Raspberry Pi 5 a supported Player: memory classes, the memory controller, boot-stage reporting to Central and the console, and the image-format roots recorded for a later gate.
+
 ## Reading order and ownership
 
 | Document | Owns | Read it to |

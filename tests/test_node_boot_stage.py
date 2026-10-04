@@ -1,4 +1,4 @@
-"""Base boot stage records and HostCore's boot report (design 4 GB node §4.3 T3), node side:
+"""Base boot stage records and HostCore's boot report (docs/node-4gb-memory-design.md §4.3 T3), node side:
 `fault_token`, best-effort `run_stage`, `read_boot_report`, the bootstrap stage wiring, the
 sampler's `failed_units` and `memory_rows`, the facts sender comparing whole documents, and
 the HostCore closure. No database, no PID1."""
@@ -168,15 +168,38 @@ def test_an_invalid_record_is_omitted(tmp_path, content):
 
 
 def test_unreadable_units_keep_the_records_and_none_only_when_both_are_unreadable(tmp_path):
+    # Errata E-T3-2: units that were not read are None in the report ("not read"), never the
+    # empty list that means "nothing failed".
     def broken():
         raise RuntimeError("no systemctl")
 
     assert read_boot_report(directory=tmp_path / "missing", units=broken) is None
+    assert read_boot_report(directory=tmp_path / "missing", units=lambda: None) is None
     assert read_boot_report(directory=tmp_path, units=lambda: (("bad name",), 0)) is None
     assert read_boot_report(directory=tmp_path, units=lambda: ((), 0)) == BootReportV2((), (), 0)
     _stage_file(tmp_path, "storage", state="running")
-    assert read_boot_report(directory=tmp_path, units=broken) == BootReportV2(
-        (BootStageV2("storage", "running", None, None, None),), (), 0)
+    running = (BootStageV2("storage", "running", None, None, None),)
+    for units in (broken, lambda: None):
+        assert read_boot_report(directory=tmp_path, units=units) == BootReportV2(running, None, None)
+
+
+def test_a_record_that_is_not_a_bounded_regular_file_is_not_readable(tmp_path):
+    # A symlink is never followed, a FIFO never blocks the reader, and an oversized file is
+    # never read past MAX_STAGE_BYTES + 1.
+    target = tmp_path / "elsewhere.json"
+    target.write_text(json.dumps({"stage": "handoff", "state": "done", "fault": None,
+                                  "required_bytes": None, "room_bytes": None}))
+    (tmp_path / "handoff.json").symlink_to(target)
+    os.mkfifo(tmp_path / "storage.json")
+    padded = {"stage": "prepare", "state": "done", "fault": None, "required_bytes": None,
+              "room_bytes": None}
+    raw = json.dumps(padded).encode()
+    (tmp_path / "prepare.json").write_bytes(raw + b" " * (boot_stage.MAX_STAGE_BYTES + 1 - len(raw)))
+    assert read_boot_report(directory=tmp_path, units=lambda: ((), 0)) == BootReportV2((), (), 0)
+    # The same prepare record within the bound is read: the size, not the content, refused it.
+    (tmp_path / "prepare.json").write_bytes(raw + b" " * (boot_stage.MAX_STAGE_BYTES - len(raw)))
+    assert read_boot_report(directory=tmp_path, units=lambda: ((), 0)) == BootReportV2(
+        (BootStageV2("prepare", "done", None, None, None),), (), 0)
 
 
 # Bootstrap wiring.
@@ -285,19 +308,51 @@ def test_failed_units_cap_at_four_and_count_the_rest_and_refused_names(monkeypat
 
 @pytest.mark.parametrize("error", [subprocess.TimeoutExpired("systemctl", 0.25), OSError("missing"),
                                    subprocess.CalledProcessError(1, "systemctl")], ids=str)
-def test_failed_units_on_error_is_empty(monkeypatch, error):
+def test_failed_units_on_error_raises_never_reads_as_none_failed(monkeypatch, error):
+    # Errata E-T3-2: an unreadable list is not "nothing failed" (host_linux.py: a value that
+    # cannot be read is never sent as zero).
     _systemctl(monkeypatch, error=error)
-    assert LinuxHostSampler().failed_units() == ((), 0)
+    with pytest.raises(ValueError, match="^failed_units_unreadable$"):
+        LinuxHostSampler().failed_units()
 
 
-def test_failed_units_over_4096_bytes_is_empty(monkeypatch):
+def test_failed_units_over_4096_bytes_raises(monkeypatch):
     _systemctl(monkeypatch, _line("photo-wall-a.service") * 100)
-    assert LinuxHostSampler().failed_units() == ((), 0)
+    with pytest.raises(ValueError, match="^failed_units_unreadable$"):
+        LinuxHostSampler().failed_units()
+
+
+def test_the_runner_reuses_the_last_failed_units_read_and_sends_none_before_any(tmp_path, monkeypatch):
+    from tests.test_node_host_facts import INTERVAL, VALUES, _run, _runner
+    clock = [100.0]
+    runner, sent = _runner(monkeypatch, clock, dict(VALUES), {})
+    runner.boot_stage_directory = tmp_path
+    run_stage("prepare", lambda: None, directory=tmp_path)
+    readings = [ValueError("failed_units_unreadable")]
+
+    def failed_units():
+        if isinstance(readings[0], Exception):
+            raise readings[0]
+        return readings[0]
+
+    runner.sampler.failed_units = failed_units
+    _run(runner, clock, 100 + INTERVAL)
+    # Never read on this process: None, not the empty list.
+    assert parse_host_facts(sent[-1][1]).boot.failed_units is None
+    readings[0] = (("photo-wall-app-broker.service",), 0)
+    _run(runner, clock, clock[0] + 2 * INTERVAL)
+    assert parse_host_facts(sent[-1][1]).boot.failed_units == ("photo-wall-app-broker.service",)
+    # A slow systemctl reuses the last reading: the failed unit is not cleared, nothing is resent.
+    count = len(sent)
+    readings[0] = ValueError("failed_units_unreadable")
+    _run(runner, clock, clock[0] + 3 * INTERVAL)
+    assert len(sent) == count
 
 
 # memory_rows.
 SLICES = {"hostcore": "photowallhostcore", "base": "photowallbase", "preparation": "photowallpreparation",
           "app": "photowallapp"}
+DISPLAY = "photowallbase.slice/photo-wall-display.service"
 
 
 def _memory(tmp_path, controllers="cpu io memory pids\n", cma=True):
@@ -312,6 +367,9 @@ def _memory(tmp_path, controllers="cpu io memory pids\n", cma=True):
         (cgroup / f"{directory}.slice").mkdir()
         (cgroup / f"{directory}.slice/memory.peak").write_text(f"{1000 + index}\n")
         (cgroup / f"{directory}.slice/memory.events").write_text(f"low 0\nhigh 0\nmax 0\noom 1\noom_kill {index}\n")
+    (cgroup / DISPLAY).mkdir()
+    (cgroup / DISPLAY / "memory.peak").write_text("1004\n")
+    (cgroup / DISPLAY / "memory.events").write_text("oom_kill 9\n")  # no row: the base slice counts it
     return LinuxHostSampler(proc, tmp_path, sys_root), cgroup
 
 
@@ -323,7 +381,15 @@ def test_memory_rows_with_the_controller(tmp_path):
         ("memory_peak:hostcore", 1000, "bytes", "cgroup"),
         ("memory_peak:base", 1001, "bytes", "cgroup"), ("oom_kill:base", 1, "count", "cgroup"),
         ("memory_peak:preparation", 1002, "bytes", "cgroup"), ("oom_kill:preparation", 2, "count", "cgroup"),
-        ("memory_peak:app", 1003, "bytes", "cgroup"), ("oom_kill:app", 3, "count", "cgroup"))
+        ("memory_peak:app", 1003, "bytes", "cgroup"), ("oom_kill:app", 3, "count", "cgroup"),
+        ("memory_peak:display", 1004, "bytes", "cgroup"))
+
+
+def test_the_display_peak_is_read_from_the_display_units_own_slice():
+    # Weston's cgroup is <Slice=>/<unit> (photo-wall-display.service), so a slice move is caught.
+    from test_netboot_liveness import _parse_unit
+    unit = _parse_unit((REPO / "appliance/systemd/photo-wall-display.service").read_text())
+    assert DISPLAY == f"{unit['Service']['Slice'][-1]}/photo-wall-display.service"
 
 
 @pytest.mark.parametrize("controllers", ["cpu io pids\n", None])
@@ -337,6 +403,7 @@ def test_memory_rows_without_the_controller_omit_the_peaks(tmp_path, controllers
 def test_memory_rows_omit_each_unreadable_or_malformed_file(tmp_path):
     sampler, cgroup = _memory(tmp_path)
     (cgroup / "photowallapp.slice/memory.peak").unlink()
+    (cgroup / DISPLAY / "memory.peak").write_text("")
     (cgroup / "photowallbase.slice/memory.events").write_text("oom 1\n")
     (cgroup / "photowallpreparation.slice/memory.peak").write_text("max\n")
     (tmp_path / "proc/meminfo").unlink()

@@ -34,6 +34,9 @@ Restart=always
 RestartSec=2
 Slice=photowallbase.slice
 OOMScoreAdjust=-500
+# A memory-cgroup OOM kill of one child (the diagnostic client) must not stop Weston and spend
+# its start limit; Weston itself being killed still ends the unit.
+OOMPolicy=continue
 MemoryMax=256M
 TasksMax=64
 NoNewPrivileges=yes

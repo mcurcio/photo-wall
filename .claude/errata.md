@@ -3608,3 +3608,28 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-FX1-3 · `kernel_release` narrowed from printable ASCII to `[A-Za-z0-9._+~-]{1,64}` (the `uname -r` alphabet): `"` and
   `\` JSON-escape to 2 bytes and 64 of them overflowed MAX_HOST_FACTS_BYTES (HostRunner swallowed the ValueError, so
   facts went silently absent). `HostFactsV2.values()` deleted; `fact_values_document` is the one "what changed".
+
+## 2026-10-03 · 4 GB tracer fix cycle 2 (implementer) · docs/node-4gb-memory-design.md §4.3 T1, T3, T4, §6, §8a
+- E-FX2-1 ruling (orchestrator, 2026-10-03; overrides the design's fail-closed `memory_controller_absent` and gate
+  answer Q2(a)): an absent memory controller is REPORT-ONLY. `cgroup_enable=memory` comes from the separately staged
+  TFTP boot tree, not from Central's offer, and Select is fleet-wide (docs/runbook.md, Releases), so a V2 Pi on an
+  older tree that reboots after Select would be refused at storage and go dark. `mount_storage` logs the absence and
+  mounts; HostCore's `memcg_present` 0 is the report; the console's `memory_limits` item reads "memory controller
+  absent: memory limits not enforced" (notice band, no incident). The device class (`node_memory_class`) stays
+  fail-closed. Cost: a Player on an old tree runs with every cap unenforced until its tree is restaged.
+- E-T3-2 ruling (orchestrator, 2026-10-03; supersedes the E-T3-2 implementation note): "failed units unreadable" is
+  representable end to end. `BootReportV2.failed_units`/`failed_units_more` are both None when never read;
+  `failed_units()` raises `ValueError("failed_units_unreadable")`; `HostRunner` reuses its last successful reading for
+  the process (None until one succeeds); the console reads "Unknown: failed units not read" (no band) and
+  `stoppedStages` uses only the records when the list is null (a `running` record stays running, no alarm, no clear).
+  A slow systemctl no longer clears the E-FX1-1 killed-stage alarm.
+- E-FX2-2 · Smaller fold-ins: a 422 facts answer (an older Central's strict parse) is retried on the 404 timer
+  (`FACTS_ROUTE_RETRY_SECONDS`), other 4xx still drop; stage records are read through a bounded regular-file reader
+  (O_NOFOLLOW|O_NONBLOCK, fstat, ≤ MAX_STAGE_BYTES+1); `photo-wall-display.service` gains `OOMPolicy=continue`;
+  `memory_peak:display` (photowallbase.slice/photo-wall-display.service) raises the `memory_peak:` family to 5 rows
+  (36 of MAX_HOST_METRICS 64, now the one constant HostObservationV2 enforces); hostHealth.js no longer slices failed
+  units or `oom_kill:` rows (MAX_UNITS/MAX_OOM_ROWS removed), so no cap hides a kill. The design doc moved into the
+  repo as docs/node-4gb-memory-design.md with these rulings folded in.
+- E-FX2-3 · Console band vocabulary: the brief's "WARNING band" is the console's existing `notice` band (warm; the
+  catalog has no `warning`), which raises no incident, as Out of memory's does. The "failed units not read" Unknown
+  carries band null (no band), unlike the generic "Unknown: not reported", whose band stays `unknown`.

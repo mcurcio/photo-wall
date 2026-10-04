@@ -1,4 +1,5 @@
 """Base-only bounded tmpfs mount adapter; never imported by AppManager."""
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -12,6 +13,8 @@ from appliance.node.capacity import (
     memory_total,
 )
 
+LOG = logging.getLogger(__name__)
+
 
 def require_mounted_size(store: Path, store_bytes: int) -> None:
     """The mounted store is non-empty and no larger than the device class's store."""
@@ -21,9 +24,12 @@ def require_mounted_size(store: Path, store_bytes: int) -> None:
 
 
 def mount_storage(*, controllers: Path = CONTROLLERS, meminfo: Path = MEMINFO) -> None:
-    # Without the memory controller no slice cap is enforced, so the store is refused.
+    # Without the memory controller no slice cap is enforced, but the store still mounts: the
+    # controller comes from the separately staged boot tree's cmdline, and Select is fleet-wide,
+    # so refusing here would darken a Player whose tree predates cgroup_enable=memory. HostCore
+    # reports the absence (`memcg_present` 0) and the console warns (errata E-FX2-1).
     if not memory_controller_present(controllers):
-        raise ValueError("memory_controller_absent")
+        LOG.warning("memory controller absent: memory limits not enforced")
     store_bytes = device_class(memory_total(meminfo)).store_bytes
     STORE.mkdir(mode=0o755, exist_ok=True)
     if STORE.is_symlink() or STORE.stat().st_uid != 0 or STORE.stat().st_mode & 0o022:

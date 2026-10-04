@@ -1,5 +1,5 @@
 """4 GB tracer T1: the device memory class chosen at construction, refusals with numbers, the
-memory controller required before the store mounts, one source per memory cap, and the base
+memory controller reported (never required) before the store mounts, one source per memory cap, and the base
 units' dependency, start-limit and OOM-score hygiene. No database, no systemd."""
 from __future__ import annotations
 
@@ -124,19 +124,57 @@ def test_preparation_room_is_bounded_by_the_class_store():
 
 # --- the store mount ----------------------------------------------------------------------
 
-def test_storage_refuses_an_absent_memory_controller_before_reading_memory(tmp_path):
-    (tmp_path / "controllers").write_text("cpu io pids\n")
-    for controllers in (tmp_path / "controllers", tmp_path / "absent"):
-        with pytest.raises(ValueError, match="^memory_controller_absent$"):
-            storage_mount.mount_storage(controllers=controllers, meminfo=tmp_path / "no-meminfo")
+class _RootOwned(type(Path())):
+    """A real directory that reads as root-owned and not group/other-writable."""
+
+    def stat(self, *, follow_symlinks=True):
+        real = super().stat(follow_symlinks=follow_symlinks)
+        return SimpleNamespace(st_uid=0, st_mode=real.st_mode & ~0o022)
+
+
+def _mount_fixture(monkeypatch, tmp_path):
+    """mount_storage against a temporary store: the mount, its mountinfo row, the size check
+    and chown are recorded, never run."""
+    store = _RootOwned(tmp_path / "store")
+    calls = {"mount": [], "sized": []}
+    monkeypatch.setattr(storage_mount, "STORE", store)
+    monkeypatch.setattr(storage_mount.os.path, "ismount", lambda path: False)
+    monkeypatch.setattr(storage_mount.os, "chown", lambda *args: None)
+    monkeypatch.setattr(storage_mount.subprocess, "run", lambda args, **kwargs: calls["mount"].append(args))
+    monkeypatch.setattr(storage_mount, "require_mounted_size",
+                        lambda path, size: calls["sized"].append((path, size)))
+    mountinfo = SimpleNamespace(read_text=lambda: f"36 25 0:32 / {store} rw,nosuid - tmpfs photo-wall-node rw\n")
+    monkeypatch.setattr(storage_mount, "Path", lambda value: mountinfo)
+    return store, calls
+
+
+@pytest.mark.parametrize("controllers", ["cpu memory\n", "cpu io pids\n", None])
+def test_storage_mounts_the_class_store_and_checks_its_size_with_or_without_memcg(
+        monkeypatch, tmp_path, controllers, caplog):
+    # Report-only (errata E-FX2-1): an absent memory controller never refuses the store; it is
+    # logged here, and HostCore reports it as memcg_present 0.
+    path = tmp_path / "controllers"
+    if controllers is not None:
+        path.write_text(controllers)
+    store, calls = _mount_fixture(monkeypatch, tmp_path)
+    storage_mount.mount_storage(controllers=path, meminfo=_meminfo(tmp_path, 4045 * 1024))
+    [mount] = calls["mount"]
+    assert mount[:3] == ["/usr/bin/mount", "-t", "tmpfs"] and mount[-1] == str(store)
+    assert f"size={2560 * MIB}" in mount[mount.index("-o") + 1].split(",")
+    assert calls["sized"] == [(store, 2560 * MIB)]
+    assert {child.name for child in store.iterdir()} == {"app-roots", "manager-roots", "downloads", "preparation"}
+    absent = "memory controller absent: memory limits not enforced" in caplog.text
+    assert absent == (controllers is None or "memory" not in controllers.split())
 
 
 def test_storage_refuses_a_board_below_the_smallest_class_before_mounting(tmp_path, monkeypatch):
-    (tmp_path / "controllers").write_text("cpu memory\n")
+    # The device class stays fail-closed, with or without the memory controller.
     monkeypatch.setattr(storage_mount.subprocess, "run", lambda *a, **k: pytest.fail("mounted"))
-    with pytest.raises(StorageShort, match="^node_memory_class$") as refused:
-        storage_mount.mount_storage(controllers=tmp_path / "controllers", meminfo=_meminfo(tmp_path, 2097152))
-    assert (refused.value.required, refused.value.room) == (3584 * MIB, 2 * GIB)
+    for controllers in ("cpu memory\n", "cpu io\n"):
+        (tmp_path / "controllers").write_text(controllers)
+        with pytest.raises(StorageShort, match="^node_memory_class$") as refused:
+            storage_mount.mount_storage(controllers=tmp_path / "controllers", meminfo=_meminfo(tmp_path, 2097152))
+        assert (refused.value.required, refused.value.room) == (3584 * MIB, 2 * GIB)
 
 
 @pytest.mark.parametrize("blocks,admitted", [(0, False), (640, True), (639, True), (641, False)])
@@ -208,6 +246,12 @@ def test_a_base_service_crash_loop_fails_the_unit_without_a_reboot(name):
     assert unit["Unit"].get("StartLimitBurst") == ["10"]
     assert "StartLimitAction" not in unit["Unit"] and "StartLimitAction" not in unit["Service"]
     assert unit["Service"].get("OOMScoreAdjust") == ["-500"]
+
+
+def test_an_oom_kill_inside_the_display_unit_does_not_stop_weston():
+    # The diagnostic client runs in Weston's cgroup: its memcg OOM kill must not stop the unit
+    # (systemd's default OOMPolicy=stop) and spend the start limit.
+    assert _unit("photo-wall-display.service")["Service"].get("OOMPolicy") == ["continue"]
 
 
 def test_host_core_is_the_last_global_oom_victim():

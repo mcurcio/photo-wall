@@ -74,7 +74,7 @@ def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_no
     assert set(stored_fact_values(b"not json").values()) == {None}
 
 
-# The boot stage report (design 4 GB node §4.3 T2).
+# The boot stage report (docs/node-4gb-memory-design.md §4.3 T2).
 
 REFUSED_STORAGE = BootStageV2("storage", "refused", "node_memory_class", 3758096384, 2147483648)
 BOOT = BootReportV2((BootStageV2("handoff", "done", None, None, None), REFUSED_STORAGE),
@@ -141,6 +141,9 @@ DONE = {name: BootStageV2(name, "done", None, None, None) for name in ("handoff"
     ((), ("u" * 97,), 0),  # a 97-character name
     ((), ("photo-wall-x@1 .service",), 0),  # a name the token rule refuses
     ((), (), -1),
+    ((), None, 0),  # "not read" units with a count
+    ((), (), None),  # a list with no count
+    ((), [], 0),  # not a tuple
 ])
 def test_a_malformed_boot_report_is_refused(report):
     with pytest.raises(ValueError, match="invalid_boot_report"):
@@ -155,6 +158,18 @@ def test_ingest_refuses_a_malformed_boot_document(boot):
         parse_host_facts(json.dumps(_document(boot=boot)).encode())
     with pytest.raises(ValueError, match="invalid_host_facts"):
         HostFactsV2(_producer(), 3, 1234, None, None, None, None, None, boot={"stages": []})
+
+
+def test_units_not_read_round_trip_as_null_never_as_none_failed():
+    # Errata E-T3-2: a failed-units list that was never read is null on the wire, distinct from
+    # an empty list ("nothing failed"), and stored and posted documents compare equal.
+    unread = _facts(boot=BootReportV2(BOOT.stages, None, None))
+    raw = encode_host_facts(unread)
+    assert json.loads(raw)["boot"]["failed_units"] is None
+    assert json.loads(raw)["boot"]["failed_units_more"] is None
+    assert parse_host_facts(raw) == unread
+    assert stored_fact_values(raw) == fact_values_document(unread)
+    assert fact_values_document(unread) != fact_values_document(_facts(boot=BootReportV2(BOOT.stages, (), 0)))
 
 
 def test_stored_values_equal_the_posted_document_with_and_without_boot():
@@ -401,9 +416,12 @@ def test_a_failed_send_repeats_the_same_document_at_the_next_post(monkeypatch, f
     assert len(sent) == count  # stored: nothing more until a value changes
 
 
-def test_404_stops_sending_for_the_retry_period_even_when_values_change(monkeypatch):
+@pytest.mark.parametrize("off", [404, 422])
+def test_404_or_422_stops_sending_for_the_retry_period_even_when_values_change(monkeypatch, off):
+    # 404: a replica without the route; 422: an older Central whose strict parse refuses a newer
+    # node's document (skew). Both retry on the same timer instead of dropping for the boot.
     clock, facts = [100.0], dict(VALUES)
-    answers = {"/v2/node/host-facts": 404}
+    answers = {"/v2/node/host-facts": off}
     runner, sent = _runner(monkeypatch, clock, facts, answers)
     _run(runner, clock, 140)
     facts["link_state"] = "down"
@@ -442,7 +460,7 @@ def test_a_refused_session_resends_the_same_document_once_re_enrolled(monkeypatc
 
 def test_another_4xx_drops_until_the_next_value_change(monkeypatch):
     clock, facts = [100.0], dict(VALUES)
-    answers = {"/v2/node/host-facts": 422}
+    answers = {"/v2/node/host-facts": 409}
     runner, sent = _runner(monkeypatch, clock, facts, answers)
     _run(runner, clock, 160)
     assert len(sent) == 1

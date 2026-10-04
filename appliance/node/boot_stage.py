@@ -1,4 +1,5 @@
-"""Base boot stage records (design 4 GB node §4.2 rule 2, §4.3 T3): stdlib, contracts, capacity.
+"""Base boot stage records (docs/node-4gb-memory-design.md §4.2 rule 2, §4.3 T3): stdlib,
+contracts, capacity.
 
 Each base stage (`handoff`, `storage`, `prepare`) owns one file in DIRECTORY: `running` at
 entry, then `done`, `refused` (a `StorageShort`, with its numbers) or `failed` (with a fault
@@ -12,6 +13,8 @@ from __future__ import annotations
 import errno
 import json
 import logging
+import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 
@@ -91,28 +94,56 @@ def run_stage(stage: str, action: Callable[[], None], *, directory: Path = DIREC
     record("done")
 
 
-def _read_stage(path: Path, stage: str) -> BootStageV2 | None:
+def _read_bounded(path: Path) -> bytes | None:
+    """At most MAX_STAGE_BYTES + 1 bytes of a regular file, never following a symlink nor
+    blocking on a FIFO; None for anything else or any error."""
     try:
-        value = loads_object(path.read_bytes(), max_bytes=MAX_STAGE_BYTES)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        chunks, remaining = [], MAX_STAGE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _read_stage(path: Path, stage: str) -> BootStageV2 | None:
+    raw = _read_bounded(path)
+    if raw is None:
+        return None
+    try:
+        value = loads_object(raw, max_bytes=MAX_STAGE_BYTES)
         if value is None or set(value) != _FIELDS or value["stage"] != stage:
             return None
         return BootStageV2(**value)
-    except (OSError, ValueError, TypeError):
+    except (ValueError, TypeError):
         return None
 
 
 def read_boot_report(*, directory: Path = DIRECTORY,
-                     units: Callable[[], tuple[tuple[str, ...], int]]) -> BootReportV2 | None:
+                     units: Callable[[], tuple[tuple[str, ...], int] | None]) -> BootReportV2 | None:
     """The stage records present (a missing or invalid file is omitted) and `units()`'s failed
-    photo-wall units with their overflow count. None only when no stage record is readable and
-    `units()` fails; never raises."""
+    photo-wall units with their overflow count, or None for both when `units()` returns None or
+    fails (not read, never "nothing failed"). None only when no stage record is readable and
+    the units are not read; never raises."""
     stages = tuple(record for record in (_read_stage(directory / (stage + ".json"), stage)
                                          for stage in BOOT_STAGES) if record is not None)
     try:
-        names, more = units()
-        failed = BootReportV2((), tuple(names), more)
+        read = units()
+        failed = None if read is None else BootReportV2((), tuple(read[0]), read[1])
     except Exception:  # a broken reader is "not read", never a broken record
         failed = None
     if failed is None:
-        return BootReportV2(stages, (), 0) if stages else None
+        return BootReportV2(stages, None, None) if stages else None
     return BootReportV2(stages, failed.failed_units, failed.failed_units_more)

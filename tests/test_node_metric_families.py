@@ -1,4 +1,4 @@
-"""HostCore's declared metric families and `valid_metrics` (design 4 GB node §4.3 T2): what one
+"""HostCore's declared metric families and `valid_metrics` (docs/node-4gb-memory-design.md §4.3 T2): what one
 observation may carry, checked in the contract so a node can never post an observation Central
 refuses. No database."""
 from uuid import uuid4
@@ -24,9 +24,10 @@ def _dropped(metrics):
 
 
 def test_the_declared_families_fit_one_observation():
-    assert sum(family.max_rows for family in METRIC_FAMILIES) == 35 <= MAX_HOST_METRICS
+    assert sum(family.max_rows for family in METRIC_FAMILIES) == 36 <= MAX_HOST_METRICS
     keys = {family.key: family.max_rows for family in METRIC_FAMILIES}
-    assert (keys["memory_peak:"], keys["oom_kill:"], keys["metrics_dropped"]) == (4, 3, 1)
+    # memory_peak: hostcore, base, preparation, app and display (Weston's own service).
+    assert (keys["memory_peak:"], keys["oom_kill:"], keys["metrics_dropped"]) == (5, 3, 1)
     # The retired per-unit rows are undeclared; the manager summary rows stay.
     assert "broker_failed" not in keys and "manager_summary_known" in keys
 
@@ -51,7 +52,7 @@ def test_valid_rows_pass_in_order_and_a_zero_drop_count_is_appended():
 
 
 def test_a_repeat_name_and_source_keeps_the_first_row():
-    # memory_peak: has room for four rows, so only the dedupe can drop the repeat.
+    # memory_peak: has room for five rows, so only the dedupe can drop the repeat.
     rows = (("memory_peak:app", 1, "bytes", "cgroup"), ("memory_peak:app", 2, "bytes", "cgroup"),
             ("memory_peak:app", 3, "bytes", "other"), ("uptime", 4, "seconds"))
     kept, dropped = _dropped(valid_metrics(rows))
@@ -93,3 +94,11 @@ def test_any_input_yields_an_observation_central_accepts():
     producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "host_core", uuid4())
     observation = HostObservationV2(producer, 1, 0, metrics)
     assert len(observation.metrics) == sum(family.max_rows for family in METRIC_FAMILIES)
+
+
+def test_an_observation_carries_at_most_max_host_metrics_rows():
+    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "host_core", uuid4())
+    rows = tuple(HostMetricV2(f"m{index}", index, "count") for index in range(MAX_HOST_METRICS + 1))
+    HostObservationV2(producer, 1, 0, rows[:MAX_HOST_METRICS])
+    with pytest.raises(ValueError, match="invalid_host_metrics"):
+        HostObservationV2(producer, 1, 0, rows)

@@ -5,10 +5,11 @@ identity (an address is not identity, R12). `base_tag` is the base this boot run
 itself records it (the boot handoff its initramfs wrote after verifying the mounted base), so
 it is a host report shown beside Central's offered tag, never in its place.
 
-`boot` is the base boot stages' state (design 4 GB node §4.1, shape F): each stage's last
-record (`running`, `done`, `refused` with the numbers that refused it, or `failed`) and the
-`photo-wall-*` units PID1 lists as failed. Categorical state rides here, reported on change;
-numbers stay metrics (contracts/node_observation.py).
+`boot` is the base boot stages' state (docs/node-4gb-memory-design.md §4.1, shape F): each
+stage's last record (`running`, `done`, `refused` with the numbers that refused it, or `failed`)
+and the `photo-wall-*` units PID1 lists as failed (None when never read on this boot).
+Categorical state rides here, reported on change; numbers stay metrics
+(contracts/node_observation.py).
 """
 from __future__ import annotations
 
@@ -119,20 +120,26 @@ class BootStageV2:
 class BootReportV2:
     """The stage records present (unique, in `BOOT_STAGES` order) and PID1's failed
     `photo-wall-*` units: full names, sorted, at most four; the rest (and any name the token
-    rule refuses, so a name is never stripped into a collision) counted in `failed_units_more`."""
+    rule refuses, so a name is never stripped into a collision) counted in `failed_units_more`.
+    `failed_units` and `failed_units_more` are both None when the units were never read on this
+    boot: "not read", never sent as "nothing failed" (errata E-T3-2)."""
     stages: tuple[BootStageV2, ...]
-    failed_units: tuple[str, ...]
-    failed_units_more: int
+    failed_units: tuple[str, ...] | None
+    failed_units_more: int | None
 
     def __post_init__(self) -> None:
         try:
-            if (type(self.stages) is not tuple or type(self.failed_units) is not tuple
+            if (type(self.stages) is not tuple
                     or any(type(stage) is not BootStageV2 for stage in self.stages)):
                 raise ValueError
             order = [BOOT_STAGES.index(stage.stage) for stage in self.stages]
             if order != sorted(set(order)):
                 raise ValueError
-            if len(self.failed_units) > MAX_BOOT_FAILED_UNITS:
+            if self.failed_units is None or self.failed_units_more is None:
+                if self.failed_units is not None or self.failed_units_more is not None:
+                    raise ValueError
+                return
+            if type(self.failed_units) is not tuple or len(self.failed_units) > MAX_BOOT_FAILED_UNITS:
                 raise ValueError
             for unit in self.failed_units:
                 token(unit, 96)
@@ -148,18 +155,21 @@ def boot_document(value: BootReportV2) -> dict:
     return {"stages": [{"stage": stage.stage, "state": stage.state, "fault": stage.fault,
                         "required_bytes": stage.required_bytes, "room_bytes": stage.room_bytes}
                        for stage in value.stages],
-            "failed_units": list(value.failed_units), "failed_units_more": value.failed_units_more}
+            "failed_units": None if value.failed_units is None else list(value.failed_units),
+            "failed_units_more": value.failed_units_more}
 
 
 def boot_from_document(value: object) -> BootReportV2:
     """Strict: exactly `boot_document`'s shape."""
     if (not isinstance(value, dict) or set(value) != _BOOT_FIELDS
-            or type(value["stages"]) is not list or type(value["failed_units"]) is not list
+            or type(value["stages"]) is not list
+            or (value["failed_units"] is not None and type(value["failed_units"]) is not list)
             or any(not isinstance(stage, dict) or set(stage) != _STAGE_FIELDS
                    for stage in value["stages"])):
         raise ValueError("invalid_boot_report")
+    units = None if value["failed_units"] is None else tuple(value["failed_units"])
     return BootReportV2(tuple(BootStageV2(**stage) for stage in value["stages"]),
-                        tuple(value["failed_units"]), value["failed_units_more"])
+                        units, value["failed_units_more"])
 
 
 @dataclass(frozen=True, slots=True)

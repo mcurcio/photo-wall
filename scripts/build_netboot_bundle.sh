@@ -289,8 +289,8 @@ done
 # cgroup_enable=memory (contracts/release.py CMDLINE_MEMORY_CONTROLLER), on
 # every Pi: the Pi 5 device tree's bootargs, which the firmware puts before
 # this file, carry cgroup_disable=memory (raspberrypi/linux#6980); the later
-# cgroup_enable=memory wins. Without it no MemoryMax= is enforced and the node
-# base's storage step refuses (memory_controller_absent). This template is the
+# cgroup_enable=memory wins. Without it no MemoryMax= is enforced; the node
+# base still mounts its store and reports memcg_present 0. This template is the
 # token's one source: the release seal refuses a cmdline without it, or with
 # it twice (scripts/package_release_artifacts.py _check_cmdline).
 cat > "$boot_dir/cmdline.txt" <<'EOF'
