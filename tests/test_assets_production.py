@@ -249,3 +249,14 @@ def test_a_recut_is_a_new_key_and_is_produced(world):
         OTHER)
     assert world.final(recut) == OTHER
     assert world.reads.asset(OS_KEY).produced == facts(GOOD)
+
+
+def test_a_full_cache_disk_is_the_named_transient_cache_disk_full(world):
+    import errno
+    world.reference(OS_KEY)
+    with pytest.raises(TransientFailure) as raised:
+        world.produce(OS_JOB, Writer(OSError(errno.ENOSPC, "No space left on device")))
+    assert raised.value.reason == "cache_disk_full"
+    assert world.temps(AssetKind.OS_IMAGE) == []  # nothing half-written is left behind
+    with pytest.raises(PermissionError):  # any other local error stays as it is
+        world.produce(OS_JOB, Writer(PermissionError(errno.EACCES, "denied")))

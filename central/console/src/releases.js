@@ -1,36 +1,35 @@
 import { useCallback, useMemo, useRef } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { answerUnknown, RESEND_LABEL, UNKNOWN_MESSAGE } from "./sendOutcome.js";
+import { answerUnknown, UNKNOWN_MESSAGE } from "./sendOutcome.js";
 import { fact, words } from "./facts.js";
-import { auditRef, frozen } from "./frozenRequest.js";
+import { frozen } from "./frozenRequest.js";
 import { gigabytes } from "./health.js";
 import { readError } from "./nodeRead.js";
 import { usePolledRead } from "./polledRead.js";
 
 /**
- * Fleet › Releases (console DDD Part E §25-§28, beads NR1 and NR2): the fleet-wide release
- * aggregates — the release catalog, the deployments published from it and the one boot
- * selection — as pure functions from Central's release read to facts, offers and the requests
- * the console sends.
+ * Fleet › Releases (console DDD Part E §25-§28, beads NR1, NR2, B7): the fleet-wide release
+ * aggregates — the releases Central observed, the deployment each valid one became, whether
+ * Central has downloaded it, and the one boot selection — as pure functions from Central's
+ * release read to facts, offers and the requests the console sends.
  *
  * THE READ (`useReleaseRead`): `GET /v1/operator/node/releases`, one read-only snapshot on
  * Central (G1: selection, deployments, releases), through the shared polled read every 30 s
  * while visible, when the tab becomes visible, and after every write this page sends. A failed
  * read keeps the last answer and names its error beside it.
  *
- * ONE SEND RULE PER VERB (R13). `sendSelection` and `sendPublish` judge their rule on
- * `releases.latest()` — the newest settled read at the moment of sending, never the read the
- * dialog opened on — refuse without a request when it fails, and are the ONLY console callers
- * of their routes (a source-scan test holds it); `sendCatalogCheck` likewise for "Check GitHub
- * releases now", judged on this page's held check. Each verb has its own code table (§26); any
- * refusal code not in it reads "Central refused: <code>" and is refused: nothing is re-sent
- * automatically.
+ * CENTRAL INGESTS, THE CONSOLE NEVER PUBLISHES. The release sync turns every valid release into
+ * its deployment by itself and downloads the newest stable ones in the background; a release
+ * row carries its own `deployment_id` (null while the tag has no good manifest), its `problem`
+ * and its readiness, derived by Central on read. The console derives no id and sends no publish.
  *
- * DEPLOYMENT IDENTITY (§28). A console publish's deployment id is DERIVED from the release's
- * content (`deploymentIdFor`: its manifest digest laid out as a UUIDv8, one bit for "with
- * app"), so a retry or a second page cannot make twin deployments, and "Published from" is
- * shown only when a listed deployment has that id AND the release's base and app.
+ * ONE SEND RULE PER VERB (R13). `sendSelection` judges its rule on `releases.latest()` — the
+ * newest settled read at the moment of sending, never the read the dialog opened on — refuses
+ * without a request when it fails, and is the ONLY console caller of its route (a source-scan
+ * test holds it); `sendCatalogCheck` likewise for "Check GitHub releases now", judged on this
+ * page's held check. Each verb has its own code table (§26); any refusal code not in it reads
+ * "Central refused: <code>" and is refused: nothing is re-sent automatically.
  *
  * @typedef {{read: object|null, readAt: number|null,
  *            error: import("./nodeRead.js").NodeReadError|null, seq: number}} ReleaseRead
@@ -38,18 +37,18 @@ import { usePolledRead } from "./polledRead.js";
  *   an answer" is the first whose `seq` exceeds `startedReads()` taken at that answer.
  * @typedef {{deployment_id: string, published_at: number, base_tag: string,
  *            app_environment_sha256: string|null}} Deployment
- * @typedef {{manifest_sha256: string, tag: string, revision: string, discovered_at: number,
- *            verified_at: number|null, base_tag: string, app_environment_sha256: string|null,
- *            download_bytes: number}} Release
+ * @typedef {"ready"|"downloading"|"not_downloaded"|"failed"} Readiness
+ * @typedef {{tag: string, stable: boolean, problem: string|null, manifest_sha256: string|null,
+ *            deployment_id: string|null, revision: string|null, discovered_at: number|null,
+ *            base_tag: string|null, app_environment_sha256: string|null, in_window: boolean,
+ *            readiness: Readiness|null, readiness_reason: string|null,
+ *            missing_bytes: number|null}} Release
+ *   one observed tag. `deployment_id` null: Rejected (`problem` says why). With a deployment,
+ *   `problem` is a newer upload of the tag that Central refused. `readiness` null: this
+ *   Central did not serve it (no cache mounted), never guessed
  * @typedef {{outcome: "done"|"already"|"changed"|"refused"|"unknown", message: string, code?: string|null}} Outcome
  *   `code`: Central's served error code (null on success, a lost answer or a refusal before any
  *   request), so a caller that branches on a refusal keys on it, never on the words (§26)
- * @typedef {import("./sendOutcome.js").HeldState} HeldState
- *   a publish this page holds: sent and unanswered; answered published, not listed yet; or
- *   its answer lost (Central may still be verifying)
- * @typedef {import("./sendOutcome.js").HeldRequests} HeldPublishes
- *   the publishes one page holds by deployment id (sendOutcome.js `useHeldRequests`); `frozen`
- *   is the request this page sent for the id, so a re-send sends that body
  * @typedef {{get: () => boolean, set: (held: boolean) => void}} HeldCheck
  *   whether this page holds an unanswered "Check GitHub releases now"
  */
@@ -57,9 +56,6 @@ import { usePolledRead } from "./polledRead.js";
 const PATH = "/v1/operator/node/releases";
 const CADENCE_MS = 30000;
 const NOT_READ = Object.freeze({ read: null, readAt: null, error: null, seq: 0 });
-
-/** A publish downloads and hash-checks every release asset inside its request (§28). */
-export const PUBLISH_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
  * The release read, while the Releases page is open.
@@ -84,27 +80,6 @@ export function useReleaseRead({ skip = false } = {}) {
 
 // --- Identity and contents.
 
-/**
- * The deployment id this console publishes a release under: the first 128 bits of its
- * manifest digest with the UUID version set to 8 and the RFC 4122 variant, and the variant
- * nibble's next bit set for "with app". Pure, and no hashing in the browser, so it works on a
- * plain-http console.
- *
- * @param {string} manifestSha256 64 lowercase hex digits
- * @param {boolean} withApp
- * @returns {string}
- */
-export function deploymentIdFor(manifestSha256, withApp) {
-  if (typeof manifestSha256 !== "string" || !/^[0-9a-f]{64}$/.test(manifestSha256)) {
-    throw new Error(`not a manifest digest: ${String(manifestSha256)}`);
-  }
-  const hex = manifestSha256.slice(0, 32).split("");
-  hex[12] = "8";
-  hex[16] = (0x8 | (withApp ? 0x2 : 0) | (parseInt(hex[16], 16) & 0x1)).toString(16);
-  const h = hex.join("");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
-}
-
 /** "7c41…": a deployment id's handle. */
 export const deploymentHandle = (id) => `${String(id).slice(0, 4)}…`;
 /** "9f8e7d…": an app environment digest's handle. */
@@ -116,21 +91,36 @@ function contents(record) {
   return `Base ${record.base_tag} · ${app}`;
 }
 
-/** Whether a listed deployment carries exactly what publishing `release` (with or without its app) makes. */
-function sameContents(deployment, release, withApp) {
-  return deployment.base_tag === release.base_tag
-    && deployment.app_environment_sha256 === (withApp ? release.app_environment_sha256 : null);
+/**
+ * What the read says a deployment id carries: its Deployments row, else the release row that
+ * became it. A release row names its own deployment, so a release beyond the capped
+ * Deployments list can still be put on the wall.
+ *
+ * @param {object|null} read
+ * @param {string|null} deploymentId
+ * @returns {{deployment_id: string, base_tag: string, app_environment_sha256: string|null}|null}
+ */
+export function deploymentRecord(read, deploymentId) {
+  if (deploymentId == null) return null;
+  return (read?.deployments ?? []).find((row) => row.deployment_id === deploymentId)
+    ?? (read?.releases ?? []).find((row) => row.deployment_id === deploymentId) ?? null;
 }
 
-/** The deployment this console's publish of `release` made, when it is listed with matching contents. */
-function publishedAs(read, release) {
-  for (const withApp of [true, false]) {
-    if (withApp && release.app_environment_sha256 == null) continue;
-    const id = deploymentIdFor(release.manifest_sha256, withApp);
-    const listed = (read?.deployments ?? []).find((row) => row.deployment_id === id);
-    if (listed !== undefined && sameContents(listed, release, withApp)) return listed;
-  }
-  return null;
+/** The release row that became `deploymentId`, or null (a deployment published by hand). */
+export function releaseOf(read, deploymentId) {
+  if (deploymentId == null) return null;
+  return (read?.releases ?? []).find((row) => row.deployment_id === deploymentId) ?? null;
+}
+
+/**
+ * The release "Update the wall…" opens by default: the newest stable release that became a
+ * deployment (the read lists releases newest first), or null.
+ *
+ * @param {object|null} read
+ * @returns {Release|null}
+ */
+export function newestStable(read) {
+  return (read?.releases ?? []).find((row) => row.stable && row.deployment_id != null) ?? null;
 }
 
 /** "1.2 GB", or "less than 0.1 GB". */
@@ -138,54 +128,136 @@ export function downloadSize(bytes) {
   return Number(bytes) < 1e8 ? "less than 0.1 GB" : `${gigabytes(bytes)} GB`;
 }
 
+// --- Readiness (derived by Central on read; a selection is not "on the wall").
+
+/**
+ * One release row's state in one phrase: Rejected (no deployment), else its readiness; null
+ * when Central did not serve the readiness.
+ *
+ * @param {Release} row
+ * @returns {string|null}
+ */
+export function readinessWords(row) {
+  if (row.deployment_id == null) return `Rejected: ${words(row.problem)}`;
+  if (row.readiness === "ready") return "Ready";
+  if (row.readiness === "downloading") return `Downloading · ${downloadSize(row.missing_bytes)} left`;
+  if (row.readiness === "not_downloaded") return "Not downloaded";
+  if (row.readiness === "failed") return `Failed: ${words(row.readiness_reason)}`;
+  return null;
+}
+
+/** A release row's readiness as a fact: Central's own record of its cache, or unknown. */
+function readinessFact(row) {
+  const value = readinessWords(row);
+  return value === null ? fact({ kind: "unknown", why: "Central did not serve whether it is downloaded" })
+    : fact({ kind: "set", value });
+}
+
+/**
+ * The readiness line every confirmation that selects a release carries: what a Player that
+ * boots it meets now.
+ *
+ * @param {Release} row
+ * @returns {string}
+ */
+export function readinessLine(row) {
+  const tag = row.tag;
+  if (row.readiness === "ready") return `Ready: Central has every file of ${tag}.`;
+  if (row.readiness === "downloading") {
+    return `Downloading: Central still has ${downloadSize(row.missing_bytes)} of ${tag} to download; a Player that `
+      + "boots it before then waits for the download.";
+  }
+  if (row.readiness === "not_downloaded") {
+    return `Not downloaded: a Player that boots ${tag} waits while Central downloads it.`;
+  }
+  if (row.readiness === "failed") {
+    return `Failed: Central could not download ${tag} (${words(row.readiness_reason)}); a Player that boots it waits `
+      + "while Central tries again.";
+  }
+  return `Central did not serve whether ${tag} is downloaded.`;
+}
+
 // --- The read model.
 
 /**
  * @typedef {{deploymentId: string, deployment: import("./facts.js").Fact, contents: string,
- *            from: import("./facts.js").Fact|null, selected: boolean}} DeploymentRow
+ *            from: import("./facts.js").Fact|null, selected: boolean, previous: boolean}} DeploymentRow
  * @typedef {{release: Release, catalog: import("./facts.js").Fact,
- *            verified: import("./facts.js").Fact|null, contents: import("./facts.js").Fact,
+ *            contents: import("./facts.js").Fact|null, readiness: import("./facts.js").Fact,
+ *            newerRejected: string|null, prerelease: boolean, label: string|null,
  *            deploymentId: string|null}} ReleaseRow
+ *   `label`: "Selected for every boot" or "Previous selection" (a commitment, never "on the wall")
  */
+
+/**
+ * The boot selection in one fact. With no selection ever made, what Central will do by itself
+ * (first run, §6.4): select the newest stable release once it is downloaded, or why it cannot.
+ */
+function selectionFact(read) {
+  const selection = read.selection;
+  if (selection?.deployment_id != null) {
+    return fact({ kind: "set", receivedAt: selection.changed_at, readAt: read.read_at,
+      value: `Selected for every boot from now on: deployment ${deploymentHandle(selection.deployment_id)} (revision ${selection.revision})` });
+  }
+  const auto = selection?.auto ?? null;
+  if (auto == null) return fact({ kind: "set", value: "No boot selection · Central refuses every boot" });
+  if (auto.readiness === "failed") {
+    return fact({ kind: "set", value: "No boot selection · Central refuses every boot. Central cannot select "
+      + `${auto.tag} by itself: Failed: ${words(auto.readiness_reason)} · choose a release` });
+  }
+  if (auto.readiness === "ready") {
+    return fact({ kind: "set", value: `No selection yet · Central selects ${auto.tag} at its next release check` });
+  }
+  return fact({ kind: "set", value: `No selection yet · Central selects ${auto.tag} when its download finishes `
+    + `(${downloadSize(auto.missing_bytes)} left)` });
+}
 
 /**
  * Every line of Releases as a fact (§26), from one read.
  *
  * @param {object} read the release read
- * @returns {{selection: import("./facts.js").Fact, deployments: DeploymentRow[], releases: ReleaseRow[]}}
+ * @returns {{selection: import("./facts.js").Fact, previous: import("./facts.js").Fact|null,
+ *            deployments: DeploymentRow[], releases: ReleaseRow[]}}
  */
 export function releaseHome(read) {
   const readAt = read.read_at;
   const selection = read.selection;
+  const selected = selection?.deployment_id ?? null;
+  const previous = selection?.previous_deployment_id ?? null;
   const releases = read.releases ?? [];
   const deployments = read.deployments ?? [];
+  const previousRelease = releaseOf(read, previous);
   return {
-    selection: selection?.deployment_id == null
-      ? fact({ kind: "set", value: "No boot selection · Central refuses every boot" })
-      : fact({ kind: "set", receivedAt: selection.changed_at, readAt,
-        value: `Selected for every boot from now on: deployment ${deploymentHandle(selection.deployment_id)} (revision ${selection.revision})` }),
+    selection: selectionFact(read),
+    previous: previous === null ? null : fact({ kind: "set", value: `Previous selection: deployment `
+      + `${deploymentHandle(previous)}${previousRelease === null ? "" : ` (release ${previousRelease.tag})`}` }),
     deployments: deployments.map((row) => {
-      const source = releases.find((release) => publishedAs(read, release)?.deployment_id === row.deployment_id);
+      const source = releaseOf(read, row.deployment_id);
       return {
         deploymentId: row.deployment_id,
         deployment: fact({ kind: "set", receivedAt: row.published_at, readAt,
-          value: `Deployment ${deploymentHandle(row.deployment_id)} published` }),
+          value: `Deployment ${deploymentHandle(row.deployment_id)} recorded` }),
         contents: contents(row),
-        from: source === undefined ? null : fact({ kind: "derived",
-          value: `Published from release ${source.tag}`,
-          basis: "the deployment id is the one this console derives from that release, and its contents match" }),
-        selected: selection?.deployment_id === row.deployment_id,
+        from: source === null ? null : fact({ kind: "set", value: `From release ${source.tag}` }),
+        selected: selected === row.deployment_id,
+        previous: previous === row.deployment_id,
       };
     }),
     releases: releases.map((release) => ({
       release,
-      catalog: fact({ kind: "reported", receipt: "first", source: "GitHub releases", receivedAt: release.discovered_at,
-        readAt, field: "the catalog's discovery time",
-        value: `release ${release.tag} (rev ${String(release.revision).slice(0, 7)})` }),
-      verified: release.verified_at == null ? null
-        : fact({ kind: "set", value: "Bytes verified by Central at publish", receivedAt: release.verified_at, readAt }),
-      contents: fact({ kind: "set", value: contents(release) }),
-      deploymentId: publishedAs(read, release)?.deployment_id ?? null,
+      catalog: release.deployment_id == null ? fact({ kind: "set", value: `release ${release.tag}` })
+        : fact({ kind: "reported", receipt: "first", source: "GitHub releases", receivedAt: release.discovered_at,
+          readAt, field: "the catalog's discovery time",
+          value: `release ${release.tag} (rev ${String(release.revision).slice(0, 7)})` }),
+      contents: release.deployment_id == null ? null : fact({ kind: "set", value: contents(release) }),
+      readiness: readinessFact(release),
+      newerRejected: release.deployment_id != null && release.problem != null
+        ? `Newer upload rejected: ${words(release.problem)}` : null,
+      prerelease: release.stable === false,
+      label: release.deployment_id == null ? null
+        : release.deployment_id === selected ? "Selected for every boot"
+        : release.deployment_id === previous ? "Previous selection" : null,
+      deploymentId: release.deployment_id,
     })),
   };
 }
@@ -194,7 +266,6 @@ export function releaseHome(read) {
 
 /** Select's own refusal and Central's 409 for it are the same outcome (§27). */
 export const SELECTION_CHANGED = "The boot selection changed meanwhile; review it";
-const IDENTITY_CONFLICT = "A different deployment already uses this release's id (published by hand)";
 
 const UNREADABLE_REQUEST = "Central could not read this request";
 const refused = (message) => ({ outcome: "refused", message });
@@ -204,35 +275,6 @@ const SELECT_CODES = Object.freeze({
   node_boot_policy_conflict: { outcome: "changed", message: SELECTION_CHANGED },
   node_deployment_unknown: refused("Central has no such deployment"),
   invalid_node_boot_selection: refused(UNREADABLE_REQUEST),
-});
-
-// The GitHub origin's failure reasons, which Central's publish serves as codes
-// (central/origins/github.py; node_routes.py `publish_release`): unavailable is transient (the
-// download may succeed if sent again), rejected is terminal.
-const ORIGIN_UNAVAILABLE = ["origin_unreachable", "origin_error", "rate_limited", "manifest_unavailable",
-  "download_truncated", "download_corrupt"];
-const ORIGIN_REJECTED = ["download_not_found", "download_encoding", "download_too_large", "download_rejected",
-  "list_invalid", "node_release_invalid"];
-const PROVENANCE = refused("Central cannot match this release's bytes to its catalog");
-
-const PUBLISH_CODES = Object.freeze({
-  node_release_unknown: refused("Central no longer lists this release"),
-  node_release_app_unconfigured: refused("This release has no app"),
-  node_release_app_selection_invalid: refused(UNREADABLE_REQUEST),
-  node_release_publication_invalid: refused(UNREADABLE_REQUEST),
-  node_release_locator_mismatch: refused("This release's asset locations disagree with its manifest"),
-  node_release_verification_storage_unavailable: refused(
-    "Central lacks scratch space to verify this release (another publish may be running)"),
-  node_base_release_provenance_unavailable: PROVENANCE,
-  node_environment_release_provenance_unavailable: PROVENANCE,
-  node_base_manager_pins_immutable: refused(
-    "This base already has different App Manager pins; this release can never be published"),
-  node_deployment_identity_conflict: refused(IDENTITY_CONFLICT),
-  node_environment_identity_conflict: refused("Central already describes this app environment differently"),
-  ...Object.fromEntries(ORIGIN_UNAVAILABLE.map((code) => [code,
-    { outcome: "unknown", message: "GitHub releases did not answer; send again" }])),
-  ...Object.fromEntries(ORIGIN_REJECTED.map((code) => [code,
-    refused(`GitHub releases refused the download: ${words(code)}`)])),
 });
 
 // "Check GitHub releases now" words no code: any refusal takes the default.
@@ -272,7 +314,8 @@ export function releaseResult(result, done, codes) {
 // --- Select (R13, R17).
 
 /**
- * What a deployment row offers now: Select, "Selected", or nothing (with why).
+ * What a deployment offers now: Select, "Selected", or nothing (with why). The deployment is
+ * listed when the read's Deployments or a release row names it (`deploymentRecord`).
  *
  * @param {object|null} read
  * @param {string} deploymentId
@@ -283,7 +326,7 @@ export function selectionOffer(read, deploymentId) {
   if (!Number.isInteger(read.selection?.revision)) {
     return { offer: "blocked", reason: "Central did not serve the boot selection's revision" };
   }
-  if (!(read.deployments ?? []).some((row) => row.deployment_id === deploymentId)) {
+  if (deploymentRecord(read, deploymentId) === null) {
     return { offer: "blocked", reason: "Central no longer lists this deployment" };
   }
   return read.selection.deployment_id === deploymentId ? { offer: "selected" } : { offer: "select" };
@@ -301,7 +344,7 @@ export function selectionOffer(read, deploymentId) {
 export function selectionRequest(read, deploymentId) {
   const offer = selectionOffer(read, deploymentId);
   if (offer.offer !== "select") return { refused: offer.offer === "selected" ? "already selected" : offer.reason };
-  const row = read.deployments.find((entry) => entry.deployment_id === deploymentId);
+  const row = deploymentRecord(read, deploymentId);
   return frozen({
     body: { deployment_id: deploymentId, expected_revision: read.selection.revision },
     contents: contents(row),
@@ -373,152 +416,6 @@ export function selectionSettled(request, read) {
       && selection?.deployment_id === request.body.deployment_id
     ? { outcome: "done", message: `Selected for every boot from now on at revision ${selection.revision}.` }
     : { outcome: "changed", message: `${SELECTION_CHANGED}.` };
-}
-
-// --- Publish (§27, §28).
-
-/**
- * What a release offers now for one app choice: Publish; "Published" (its derived deployment
- * is listed with matching contents); this page's own request held; or nothing (with why).
- *
- * @param {object|null} read
- * @param {Release} release
- * @param {boolean} withApp
- * @param {HeldPublishes} held
- * @returns {{offer: "publish", deploymentId: string} | {offer: "published", deploymentId: string}
- *         | {offer: HeldState, deploymentId: string} | {offer: "blocked", reason: string}}
- */
-export function publishOffer(read, release, withApp, held) {
-  if (withApp && release.app_environment_sha256 == null) return { offer: "blocked", reason: "This release has no app" };
-  const deploymentId = deploymentIdFor(release.manifest_sha256, withApp);
-  const listed = (read?.deployments ?? []).find((row) => row.deployment_id === deploymentId);
-  if (listed !== undefined) {
-    return sameContents(listed, release, withApp) ? { offer: "published", deploymentId }
-      : { offer: "blocked", reason: IDENTITY_CONFLICT };
-  }
-  const mine = held.get(deploymentId);
-  if (mine !== null) return { offer: mine, deploymentId };
-  if (read == null) return { offer: "blocked", reason: "the release read has not answered" };
-  if (!(read.releases ?? []).some((row) => row.manifest_sha256 === release.manifest_sha256)) {
-    return { offer: "blocked", reason: "Central no longer lists this release" };
-  }
-  return { offer: "publish", deploymentId };
-}
-
-/**
- * Freeze a publish when its dialog opens: the body sent, the download it starts and the
- * permanence it fixes.
- *
- * @param {object|null} read
- * @param {Release} release
- * @param {boolean} withApp
- * @param {HeldPublishes} held
- * @returns {{release: Release, withApp: boolean,
- *            body: {deployment_id: string, select_app: boolean, operator_audit_ref: string},
- *            size: string, permanence: string} | {refused: string}}
- */
-export function publishRequest(read, release, withApp, held) {
-  const offer = publishOffer(read, release, withApp, held);
-  if (offer.offer !== "publish") return { refused: offer.offer === "blocked" ? offer.reason : "already sent from this page" };
-  if (typeof read.read_at !== "number") return { refused: "Central's read time is not served" };
-  return frozen({
-    release: { ...release },
-    withApp,
-    body: { deployment_id: offer.deploymentId, select_app: withApp, operator_audit_ref: auditRef(read.read_at) },
-    size: downloadSize(release.download_bytes),
-    permanence: `Permanent: Central cannot remove a deployment. If no deployment on base ${release.base_tag} exists `
-      + "yet, this also fixes that base's App Manager pins, and a later release with different App Manager pins "
-      + "on the same base can never be published.",
-  });
-}
-
-/** What a page says while it holds a publish (`HeldState`). */
-export const PUBLISH_HELD_WORDS = Object.freeze({
-  in_flight: "Publishing: Central is downloading and verifying this release",
-  recorded: "Published; the next read lists its deployment",
-  unknown: "Outcome unknown: Central may still be verifying; the next read that lists its deployment settles it",
-});
-
-/**
- * What the re-send (RESEND_LABEL) says before it re-sends a publish whose answer was lost (§27): the same
- * body, and the whole download again.
- *
- * @param {object} request the frozen publish this page holds
- * @returns {string}
- */
-export const sendAgainWords = (request) => "Sends the identical request again. Central downloads and verifies "
-  + `${request.size} from GitHub releases again, even if its first download is still running.`;
-
-/**
- * The Publish confirmation (§26, §27), first send or its re-send (RESEND_LABEL): its words and its run, the
- * one home both Releases and Update the wall render, so the verb's words cannot drift between
- * its pages. `lines` are the body's paragraphs; a page may add its own detail below them.
- *
- * @param {object} request `publishRequest`'s frozen request, or, with `again`, `held.frozen(id)`
- * @param {boolean} again
- * @param {{releases: object, held: HeldPublishes}} hooks
- * @returns {{title: string, lines: string[], confirmLabel: string, progress: string,
- *            run: () => Promise<{state: Outcome["outcome"], message: string}>}}
- */
-export function publishConfirmation(request, again, { releases, held }) {
-  const { release, withApp } = request;
-  const choice = withApp ? "with its app" : "without its app";
-  return {
-    title: again ? `Send the publish of release ${release.tag} ${choice} again?` : `Publish release ${release.tag} ${choice}?`,
-    lines: [
-      `Base ${release.base_tag} · ${withApp ? `app ${release.app_environment_sha256}` : "no app"}`,
-      again ? sendAgainWords(request) : `Central downloads and verifies ${request.size} from GitHub releases before it answers.`,
-      request.permanence,
-    ],
-    confirmLabel: again ? RESEND_LABEL : "Publish",
-    progress: `Central is downloading and verifying ${request.size} from GitHub releases. Keep this page open.`,
-    run: async () => {
-      const outcome = await sendPublish(request, releases, held, { again });
-      void releases.refresh();
-      return { state: outcome.outcome, message: outcome.message };
-    },
-  };
-}
-
-/**
- * THE one send path for a publish: judge the frozen request on `releases.latest()` and this
- * page's held requests, mark it held in the same step (so nothing on this page can send it
- * again while it is held), then POST with the long budget. The held state follows the answer:
- * recorded until a read lists the deployment, unknown when the answer was lost, released when
- * Central refused. `again` is the explicit re-send (RESEND_LABEL) of a publish held unknown: it sends
- * only the very request this page holds for the id (`held.frozen`), never a new body.
- *
- * @param {object} request `publishRequest`'s frozen request, or, with `again`, `held.frozen(id)`
- * @param {{latest: () => ReleaseRead}} releases the `useReleaseRead` hook
- * @param {HeldPublishes} held this page's held publishes
- * @param {{again?: boolean}} [options]
- * @returns {Promise<Outcome>}
- */
-export async function sendPublish(request, releases, held, { again = false } = {}) {
-  const read = releases.latest().read;
-  const offer = publishOffer(read, request.release, request.withApp, held);
-  const id = request.body.deployment_id;
-  if (offer.offer === "published") return { outcome: "already", message: `Already published as deployment ${deploymentHandle(id)}.` };
-  if (offer.offer === "blocked") return { outcome: "changed", message: `${offer.reason}.` };
-  const resend = again && offer.offer === "unknown" && held.frozen(id) === request;
-  if (resend && !(read?.releases ?? []).some((row) => row.manifest_sha256 === request.release.manifest_sha256)) {
-    return { outcome: "changed", message: "Central no longer lists this release." };
-  }
-  if (offer.offer !== "publish" && !resend) {
-    return { outcome: "changed", message: "This page already sent this publish; the next read settles it." };
-  }
-  held.set(id, "in_flight", request);
-  let result;
-  try {
-    result = await apiWrite(`/v1/operator/node/releases/${request.release.manifest_sha256}/deployments`,
-      { method: "POST", body: request.body, timeoutMs: PUBLISH_TIMEOUT_MS });
-  } catch {
-    result = null;
-  }
-  const outcome = releaseResult(result, () => `Published as deployment ${deploymentHandle(id)}.`, PUBLISH_CODES);
-  held.set(id, outcome.outcome === "done" || outcome.outcome === "already" ? "recorded"
-    : outcome.outcome === "unknown" ? "unknown" : null, request);
-  return outcome;
 }
 
 // --- Check GitHub releases now (§25, §28).

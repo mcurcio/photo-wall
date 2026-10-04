@@ -6,10 +6,7 @@ import { clock, fact } from "./facts.js";
 import { effectGateFact, NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import {
   deploymentHandle,
-  publishOffer,
-  PUBLISH_HELD_WORDS,
-  publishConfirmation,
-  publishRequest,
+  newestStable,
   releaseHome,
   selectionConfirmation,
   selectionOffer,
@@ -19,7 +16,6 @@ import {
   sendSelection,
   useReleaseRead,
 } from "./releases.js";
-import { useHeldRequests } from "./sendOutcome.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 
@@ -54,12 +50,20 @@ function ReadLine({ releases }) {
 }
 
 function SelectionSection({ read }) {
-  return <FactLine label="Boot selection" fact={releaseHome(read).selection} />;
+  const home = releaseHome(read);
+  return (
+    <>
+      <FactLine label="Boot selection" fact={home.selection} />
+      {home.previous !== null && <FactLine label="Previous" fact={home.previous} />}
+    </>
+  );
 }
 
 function DeploymentsSection({ read, onSelect }) {
   const rows = releaseHome(read).deployments;
-  if (rows.length === 0) return <p className="roster__empty">No deployments. Publish a release below.</p>;
+  if (rows.length === 0) {
+    return <p className="roster__empty">No deployments. Central records one for each valid release it observes.</p>;
+  }
   return (
     <ul className="player__commands" aria-label="Deployments">
       {rows.map((row) => {
@@ -69,6 +73,7 @@ function DeploymentsSection({ read, onSelect }) {
             <FactLine label="Deployment" fact={row.deployment} suffix={row.contents} />
             {row.from !== null && <FactLine label="Release" fact={row.from} />}
             {offer.offer === "selected" && <p className="player__state">Selected</p>}
+            {row.previous && <p className="player__state">Previous selection</p>}
             {offer.offer === "select" && (
               <button type="button" onClick={(event) => onSelect(event, row.deploymentId)}>
                 Select for every boot…
@@ -81,39 +86,14 @@ function DeploymentsSection({ read, onSelect }) {
   );
 }
 
-/** "with its app" / "without its app": one publish choice's words. */
-const choiceWords = (withApp) => (withApp ? "with its app" : "without its app");
-
 /**
- * One publish choice of a release row (§25): its button, or what the page holds, or why not.
- * A release with an app offers both choices, each under its own derived deployment id; one
- * without offers only "without its app".
+ * The releases Central observed (§25, §6.5): one row per tag, newest first, each with one
+ * readiness fact and one verb, "Put vX on the wall…", which opens Update the wall for it
+ * (§25a: the one confirmation lives there). On the selected row it reads "Continue putting vX
+ * on the wall…": the rolling reboot is tab-driven (R8), so a paused rollout of a release that
+ * is not the newest stable resumes from here. A Rejected release has none.
  */
-function PublishChoice({ read, release, withApp, held, onPublish, onSendAgain }) {
-  const offer = publishOffer(read, release, withApp, held);
-  const choice = choiceWords(withApp);
-  // With both choices on the row, every line names its choice.
-  const prefix = release.app_environment_sha256 == null ? "" : `${withApp ? "With" : "Without"} its app: `;
-  if (offer.offer === "publish") {
-    return <button type="button" onClick={(event) => onPublish(event, release, withApp)}>{`Publish ${choice}…`}</button>;
-  }
-  if (offer.offer === "published") {
-    return <p className="player__state">{`${prefix}Published as deployment ${deploymentHandle(offer.deploymentId)}`}</p>;
-  }
-  if (offer.offer === "blocked") return <p className="roster__note">{`${prefix}Publish unavailable: ${offer.reason}.`}</p>;
-  return (
-    <>
-      <p className="player__state" role="status">{`${prefix}${PUBLISH_HELD_WORDS[offer.offer]}`}</p>
-      {offer.offer === "unknown" && (
-        <button type="button" onClick={(event) => onSendAgain(event, offer.deploymentId)}>
-          {`Send publish ${choice} again…`}
-        </button>
-      )}
-    </>
-  );
-}
-
-function CatalogSection({ read, held, checking, onCheck, onPublish, onSendAgain }) {
+function CatalogSection({ read, checking, onCheck }) {
   const rows = releaseHome(read).releases;
   return (
     <>
@@ -124,21 +104,21 @@ function CatalogSection({ read, held, checking, onCheck, onPublish, onSendAgain 
         <ul className="player__commands" aria-label="Release catalog">
           {rows.map((row) => {
             const { release } = row;
-            const choices = release.app_environment_sha256 == null ? [false] : [true, false];
             return (
-              <li key={release.manifest_sha256} className="player__command" aria-label={`Release ${release.tag}`}>
+              <li key={release.tag} className="player__command" aria-label={`Release ${release.tag}`}>
                 <FactLine label="Release" fact={row.catalog} />
-                <FactLine label="Contents" fact={row.contents} />
-                {row.verified !== null && (
-                  <FactLine label="Verification" fact={row.verified} suffix="not proof a Player holds them" />
+                {row.prerelease && <p className="roster__note">Pre-release: listed, not downloaded ahead</p>}
+                {row.contents !== null && <FactLine label="Contents" fact={row.contents} />}
+                <FactLine label="Download" fact={row.readiness} suffix="not proof a Player holds it" />
+                {row.newerRejected !== null && <p className="roster__note">{row.newerRejected}</p>}
+                {row.label !== null && <p className="player__state">{row.label}</p>}
+                {row.deploymentId !== null && (
+                  <a href={formatRoute({ section: "releases", flow: "update", id: release.tag })}>
+                    {row.label === "Selected for every boot"
+                      ? `Continue putting ${release.tag} on the wall…`
+                      : `Put ${release.tag} on the wall…`}
+                  </a>
                 )}
-                <a href={formatRoute({ section: "releases", flow: "update", id: release.tag })}>
-                  Update the wall with this…
-                </a>
-                {choices.map((withApp) => (
-                  <PublishChoice key={String(withApp)} read={read} release={release} withApp={withApp} held={held}
-                    onPublish={onPublish} onSendAgain={onSendAgain} />
-                ))}
               </li>
             );
           })}
@@ -160,13 +140,11 @@ function EffectGateSection({ gate }) {
 
 /**
  * The release sections (§25): one read feeds them all (releases.js `useReleaseRead`), and the
- * Select and Publish dialogs send through their one send functions, judged on the newest read.
+ * Select dialog sends through its one send function, judged on the newest read.
  */
 function ReleaseRecords() {
   const control = useNodeControlValue();
   const releases = useReleaseRead({ skip: !nodeReadsAllowed(control) });
-  // The publishes this page holds (releases.js `HeldPublishes`).
-  const held = useHeldRequests();
   // This page's unanswered "Check GitHub releases now" (releases.js `HeldCheck`): the same shape.
   const checkRef = useRef(false);
   const [checking, setChecking] = useState(false);
@@ -220,41 +198,6 @@ function ReleaseRecords() {
     });
   };
 
-  // The Publish dialog, first send or its re-send (RESEND_LABEL) (§27): one body, frozen once, shown and sent.
-  const openPublish = (event, request, again) => {
-    const { lines, ...dialog } = publishConfirmation(request, again, { releases, held });
-    open(event, {
-      ...dialog,
-      key: `publish-${again ? "again-" : ""}${request.body.deployment_id}`,
-      body: (
-        <>
-          {lines.map((line) => <p key={line}>{line}</p>)}
-          <details>
-            <summary>Request</summary>
-            <ul>
-              <li>{`Deployment ${request.body.deployment_id}`}</li>
-              <li>{`Audit reference ${request.body.operator_audit_ref}`}</li>
-            </ul>
-          </details>
-        </>
-      ),
-    });
-  };
-
-  const onPublish = (event, release, withApp) => {
-    const request = publishRequest(releases.read, release, withApp, held);
-    if ("refused" in request) {
-      setStatus(`Publish unavailable: ${request.refused}.`);
-      return;
-    }
-    openPublish(event, request, false);
-  };
-
-  const onSendAgain = (event, deploymentId) => {
-    const request = held.frozen(deploymentId);
-    if (request !== null) openPublish(event, request, true);
-  };
-
   const onCheck = async () => {
     const outcome = await sendCatalogCheck(heldCheck);
     void releases.refresh();
@@ -262,12 +205,13 @@ function ReleaseRecords() {
   };
 
   const { read, readAt } = releases;
+  const newest = newestStable(read);
   return (
     <>
       <ReadLine releases={releases} />
-      {read !== null && (read.releases ?? []).length > 0 && (
+      {newest !== null && (
         <p>
-          <a className="releases__update" href={formatRoute({ section: "releases", flow: "update", id: read.releases[0].tag })}>
+          <a className="releases__update" href={formatRoute({ section: "releases", flow: "update", id: newest.tag })}>
             Update the wall…
           </a>
         </p>
@@ -282,8 +226,7 @@ function ReleaseRecords() {
             <DeploymentsSection read={read} onSelect={onSelect} />
           </SectionBoundary>
           <SectionBoundary title="Release catalog" resetKey={readAt}>
-            <CatalogSection read={read} held={held} checking={checking} onCheck={onCheck}
-              onPublish={onPublish} onSendAgain={onSendAgain} />
+            <CatalogSection read={read} checking={checking} onCheck={onCheck} />
           </SectionBoundary>
         </>
       )}
@@ -295,9 +238,10 @@ function ReleaseRecords() {
 }
 
 /**
- * Fleet › Releases (console DDD Part E §25, beads NR1 and NR2): the release catalog →
- * deployments → boot selection, and the effect gate: the fleet-wide aggregates' home. While node control is off it shows the one "not
- * shown" line and reads nothing (nodeControl.js `NodeRecords`).
+ * Fleet › Releases (console DDD Part E §25, beads NR1, NR2 and B7): the releases Central
+ * observed and downloads by itself → their deployments → the boot selection, and the effect
+ * gate: the fleet-wide aggregates' home. While node control is off it shows the one "not shown"
+ * line and reads nothing (nodeControl.js `NodeRecords`).
  */
 export function ReleasesPage() {
   return (

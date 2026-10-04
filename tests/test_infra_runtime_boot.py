@@ -308,17 +308,17 @@ def test_body_raises_recorded_failure_only_for_failed_outcomes(monkeypatch):
     runtime = make()
     results = iter(["ok", None, "transient", "terminal"])
 
-    async def execute(job, attempt):
+    async def execute(job, attempt, *, priority=None):
         return next(results)
 
     monkeypatch.setattr(runtime._executor, "execute", execute)
 
     async def scenario():
-        await runtime._body(SyncReleases(), 0)
-        await runtime._body(SyncReleases(), 0)
+        await runtime._body(SyncReleases(), 0, None)
+        await runtime._body(SyncReleases(), 0, None)
         for status in ("transient", "terminal"):
             with pytest.raises(RecordedFailure, match=status):
-                await runtime._body(SyncReleases(), 0)
+                await runtime._body(SyncReleases(), 0, None)
 
     asyncio.run(scenario())
 
@@ -327,22 +327,24 @@ def test_redelivery_defers_the_next_attempt_at_the_window_end(monkeypatch):
     runtime = make()
     calls = []
 
-    async def defer_async(app, job, *, attempt, schedule_at=None):
-        calls.append((app, job, attempt, schedule_at))
+    async def defer_async(app, job, *, attempt, schedule_at=None, priority=None):
+        calls.append((app, job, attempt, schedule_at, priority))
         return True
 
     monkeypatch.setattr(runtime_module, "defer_async", defer_async)
     asyncio.run(runtime._redeliver(Redelivery(SyncReleases(), 2, 1_800_000_000.5)))
-    assert calls == [(runtime._app, SyncReleases(), 2,
-                      datetime.fromtimestamp(1_800_000_000.5, UTC))]
+    asyncio.run(runtime._redeliver(Redelivery(SyncReleases(), 3, 1_800_000_000.5, -60)))
+    at = datetime.fromtimestamp(1_800_000_000.5, UTC)
+    assert calls == [(runtime._app, SyncReleases(), 2, at, None),
+                     (runtime._app, SyncReleases(), 3, at, -60)]  # the override is kept
 
 
 def test_the_task_body_is_wired_to_the_executor(monkeypatch):
     runtime = make()
     seen = []
 
-    async def execute(job, attempt):
-        seen.append((job, attempt))
+    async def execute(job, attempt, *, priority=None):
+        seen.append((job, attempt, priority))
         return "ok"
 
     monkeypatch.setattr(runtime._executor, "execute", execute)
@@ -353,7 +355,7 @@ def test_the_task_body_is_wired_to_the_executor(monkeypatch):
             task_name = name
 
     asyncio.run(runtime._app.tasks[name](Context(), timestamp=1))
-    assert seen == [(SyncReleases(), 0)]
+    assert seen == [(SyncReleases(), 0, None)]
 
 
 # -- the worker-side retry effect (PostgreSQL) ----------------------------------------------------

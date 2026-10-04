@@ -3,7 +3,7 @@ import { useMemo, useRef, useState } from "react";
 /**
  * The one home of a sent write's outcome pattern (design rule 3: done / already / changed /
  * refused / unknown), shared by the equipment writes (equipmentApi.js), Reboot
- * (fleetCommands.js), Stage (stage.js), Publish and its sibling verbs (releases.js) and the
+ * (fleetCommands.js), Stage (stage.js), Select and its sibling verbs (releases.js) and the
  * Show side's writes. Each verb keeps its own code table; what they share lives here: when an
  * answer leaves the outcome unknown, the held-request store, and the words for "unknown",
  * "changed" and re-sending a frozen request.
@@ -22,7 +22,7 @@ export const RESEND_LABEL = "Send the same request again";
  * Whether Central's answer leaves the outcome unknown: no answer at all (a throw, `null`), or
  * a 5xx that is not one of the verb's own refusals (a gateway, a lost answer). Which 5xx codes
  * are the owner's own refusals is the verb's to say (`centralRefusal`): none for the
- * equipment writes, the `node_`/`rollout_` codes for Reboot, any served code for Publish.
+ * equipment writes, the `node_`/`rollout_` codes for Reboot, any served code for the release verbs.
  *
  * @param {{ok: boolean, status: number, error?: string|null}|null|undefined} result
  * @param {(code: string|null|undefined) => boolean} [centralRefusal]

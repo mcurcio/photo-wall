@@ -27,7 +27,7 @@ from typing import Any, Final
 import procrastinate
 from procrastinate.jobs import Status
 
-from central.infra.job_queue import build_app, decode, defer_async, task_name
+from central.infra.job_queue import build_app, decode, defer_async, delivery_priority, task_name
 from central.infra.outcomes import JobOutcomes
 from central.kernel.handling import TransientFailure
 from central.kernel.job_types import CATALOG, PurgeFinishedJobs, RescueStalledJobs
@@ -45,6 +45,7 @@ class StalledJob:
     id: int
     job: Job[Any]
     attempt: int
+    priority: int | None = None  # the copy's priority override, kept by its new copy (PB10)
 
 
 class QueueAdmin:
@@ -80,15 +81,17 @@ class QueueAdmin:
                 continue
             try:
                 job, attempt = decode(row.task_name, row.task_kwargs)
+                priority = delivery_priority(row.task_kwargs)
             except (KeyError, ValueError) as error:  # a row our code cannot have written
                 logger.error("stalled job %s is undecodable: %s", row.id, error)
                 continue
-            found.append(StalledJob(row.id, job, attempt))
+            found.append(StalledJob(row.id, job, attempt, priority))
         return found
 
     async def republish(self, stalled: StalledJob) -> None:
         """A new copy at the SAME attempt: a dead worker is not the job's failure."""
-        await defer_async(await self._opened(), stalled.job, attempt=stalled.attempt)
+        await defer_async(await self._opened(), stalled.job, attempt=stalled.attempt,
+                          priority=stalled.priority)
 
     async def close(self, stalled: StalledJob) -> None:
         """End the stalled row `failed`; an asset fetch's row frees its lock for the new copy."""

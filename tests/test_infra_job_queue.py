@@ -16,7 +16,7 @@ from fakes.transactions import FakeTransaction
 from hypothesis import given
 from hypothesis import strategies as st
 from procrastinate.exceptions import AlreadyEnqueued, TaskNotFound
-from runtime_fakes import catalog_instances
+from runtime_fakes import apply_procrastinate_schema, catalog_instances
 
 from central.infra.job_queue import (
     ATTEMPT_KWARG,
@@ -25,6 +25,7 @@ from central.infra.job_queue import (
     decode,
     defer,
     defer_async,
+    delivery_priority,
     job_kwargs,
     periodic_cron,
     task_name,
@@ -170,20 +171,30 @@ def test_build_app_refuses_duplicates():
 def test_task_decodes_and_runs_the_body():
     seen = []
 
-    async def body(job, attempt):
-        seen.append((job, attempt))
+    async def body(job, attempt, priority):
+        seen.append((job, attempt, priority))
 
     app = build_app(connector(), (FetchOsImage, SyncReleases), body)
     job = FetchOsImage(tarball_sha256="2" * 64)
 
     async def run():
         for name, kwargs in ((task_name(FetchOsImage), job_kwargs(job, attempt=2)),
+                             (task_name(FetchOsImage), job_kwargs(job, attempt=1, priority=-60)),
                              (task_name(SyncReleases), {"timestamp": 5})):
             context = SimpleNamespace(job=SimpleNamespace(task_name=name))
             await app.tasks[name](context, **kwargs)
 
     asyncio.run(run())
-    assert seen == [(job, 2), (SyncReleases(), 0)]
+    # A priority override rides in the kwargs, so every redelivery and rescue keeps it (PB10).
+    assert seen == [(job, 2, None), (job, 1, -60), (SyncReleases(), 0, None)]
+
+
+def test_a_priority_override_is_validated_and_never_a_job_field():
+    job = FetchOsImage(tarball_sha256="2" * 64)
+    assert decode(task_name(FetchOsImage), job_kwargs(job, attempt=0, priority=-60)) == (job, 0)
+    assert delivery_priority(job_kwargs(job, attempt=0)) is None
+    with pytest.raises(ValueError, match="invalid_priority"):
+        job_kwargs(job, attempt=0, priority=101)
 
 
 def test_publish_only_task_refuses_to_run():
@@ -354,3 +365,39 @@ def test_outcome_notify_is_sent_only_on_commit(registry):
             outcomes.record(tx, job, status="ok", reason=None, retry_not_before=None, now=1.0)
         payloads = [n.payload for n in listener.notifies(timeout=2, stop_after=1)]
     assert payloads == [job_keys(job).lock]
+
+
+# -- priority override (PB10) ---------------------------------------------------------------------
+
+
+def test_a_thumbnail_is_picked_before_a_queued_background_download(registry):
+    """procrastinate picks `priority DESC, id ASC`: a window-only download published at
+    BACKGROUND_PRIORITY waits behind a thumbnail published after it, and a wanted fetch
+    published last still goes first."""
+    from central.infra.asset_records import PgAssetRecords
+    from central.infra.publisher import ProcrastinatePublisher
+    from central.kernel.job_types import BACKGROUND_PRIORITY, FetchLibraryThumbnail
+    from contracts.time import ManualClock
+    apply_procrastinate_schema(registry.db.dsn)
+    transactions = PgTransactions(registry.db)
+    publisher = ProcrastinatePublisher(registry.db.dsn, transactions=transactions,
+                                       outcomes=JobOutcomes(), assets=PgAssetRecords(ManualClock(0)),
+                                       clock=ManualClock(1000.0), feed=None)
+    background = FetchOsImage(tarball_sha256="1" * 64)
+    thumbnail = FetchLibraryThumbnail(asset_id="asset-" + "a" * 64)
+    wanted = FetchOsImage(tarball_sha256="2" * 64)
+    with transactions.begin() as tx:
+        publisher.publish(background, within=tx, priority=BACKGROUND_PRIORITY)
+        publisher.publish(thumbnail, within=tx)
+        publisher.publish(wanted, within=tx)
+    with pytest.raises(ValueError, match="invalid_priority"), transactions.begin() as tx:
+        publisher.publish(background, within=tx, priority=-101)
+    with registry.db.transaction() as conn:
+        rows = conn.execute("SELECT task_name, priority, args FROM procrastinate_jobs "
+                            "WHERE status='todo' ORDER BY priority DESC, id ASC").fetchall()
+    assert [decode(row["task_name"], row["args"])[0] for row in rows] == [
+        wanted, thumbnail, background]
+    assert [row["priority"] for row in rows] == [0, -50, BACKGROUND_PRIORITY]
+    # The override rides with the row, so a redelivery or a rescue re-defers at it.
+    assert [delivery_priority(row["args"]) for row in rows] == [None, None, BACKGROUND_PRIORITY]
+

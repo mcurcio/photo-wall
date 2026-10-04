@@ -49,6 +49,7 @@ class Redelivery:
     job: Job[Any]
     attempt: int
     not_before: float  # epoch seconds
+    priority: int | None = None  # the delivery's priority override, kept (PB10)
 
 
 class OutcomeWriter(Protocol):
@@ -99,7 +100,8 @@ class JobExecutor:
     def queues(self) -> frozenset[QueueName]:
         return self._queues
 
-    async def execute(self, job: Job[Any], attempt: int) -> OutcomeStatus | None:
+    async def execute(self, job: Job[Any], attempt: int, *,
+                      priority: int | None = None) -> OutcomeStatus | None:
         """The committed outcome's status, or None for an early copy deferred without running."""
         handler = self._handlers.get(type(job))
         if handler is None:
@@ -111,7 +113,7 @@ class JobExecutor:
                 and stored.retry_not_before is not None
                 and self._clock.utc() < stored.retry_not_before
                 - EARLY_COPY_TOLERANCE.total_seconds()):
-            await self._redeliver(Redelivery(job, attempt, stored.retry_not_before))
+            await self._redeliver(Redelivery(job, attempt, stored.retry_not_before, priority))
             return None
 
         try:
@@ -122,11 +124,12 @@ class JobExecutor:
             await self._record(job, "terminal", failure.reason, None)
             return "terminal"
         except TransientFailure as failure:
-            return await self._transient(job, attempt, failure.reason, failure.retry_after)
+            return await self._transient(job, attempt, failure.reason, failure.retry_after,
+                                         priority)
         except Exception:
             logger.exception("handler bug: %s raised an unclassified exception",
                              type(job).job_name)
-            return await self._transient(job, attempt, UNCLASSIFIED_ERROR, None)
+            return await self._transient(job, attempt, UNCLASSIFIED_ERROR, None, priority)
 
         try:
             await asyncio.to_thread(self._record_ok, job, result, self._clock.utc())
@@ -138,7 +141,8 @@ class JobExecutor:
         return "ok"
 
     async def _transient(self, job: Job[Any], attempt: int, reason: str,
-                         retry_after: timedelta | None) -> OutcomeStatus:
+                         retry_after: timedelta | None,
+                         priority: int | None = None) -> OutcomeStatus:
         retry = type(job).delivery.retry
         floor = retry_after if retry_after is not None else timedelta(0)
         now = self._clock.utc()
@@ -146,7 +150,7 @@ class JobExecutor:
             delay = min(max(retry[attempt], floor), MAX_RETRY_DELAY)
             not_before = now + delay.total_seconds()
             await self._record(job, "transient", reason, not_before, now=now)
-            await self._redeliver(Redelivery(job, attempt + 1, not_before))
+            await self._redeliver(Redelivery(job, attempt + 1, not_before, priority))
         else:
             not_before = now + min(floor, MAX_RETRY_DELAY).total_seconds()
             await self._record(job, "transient", reason, not_before, now=now)

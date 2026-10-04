@@ -178,8 +178,8 @@ catalog guarded by Immich's per-asset `updatedAt` (rule 2), a variant pointing a
 | 029 | `app_releases.upstream_changed_at`, `upstream_asset_id` (both NULL or both set); `app_release_poll.etag_stored_at`; clear the ETag so the first sync stamps every row | Code revert |
 
 *Costs:* old `base-<tag>.squashfs` files double OS-image disk until deleted (the runbook's upgrade
-procedure deletes them). Each re-cut then leaves about 1 GiB and an unreferenced asset row until
-`MaintainCache` exists. This reverses the programme plan's "orphan sweep before content keys", and
+procedure deletes them). Each re-cut then left about 1 GiB until `MaintainCache` (now built, §10) removes the
+file once nothing desires it; its unreferenced asset row stays. This reverses the programme plan's "orphan sweep before content keys", and
 no slice removed unreferenced rows: C3 now must.
 
 ## 9. Decisions
@@ -196,7 +196,10 @@ There are no open questions. **Assumptions made on your behalf** (say so if any 
 
 ## 10. Deliberately out of scope
 
-**Deferred:** `MaintainCache`, including unreferenced rows; a bound on a paused transaction's
+**Deferred:** removing unreferenced asset rows (`MaintainCache` is built: an eager keep-set
+sweep of release files, desired = the window of 3 + selected + previous + live offers + V1 roots,
+`SERVE_GRACE` and `TEMP_GRACE` of 1 h, at most 50 unlinks per run, `previews/` and `media/`
+excluded; [`central/assets/maintenance.py`](../central/assets/maintenance.py)); a bound on a paused transaction's
 locks; the worker's stop reason; media's rules. **Non-goals:** exactly-once runs; stopping
 duplicate work; any ordering of jobs.
 

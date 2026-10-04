@@ -35,8 +35,10 @@ def environment(digest="d", name="photo-wall-player"):
                               "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1", "plugin-v1")
 
 
-def seed_verified_publication(registry, deployment):
-    """Explicit verified-publication fixture; real HTTP verification has separate tests."""
+def seed_catalog_publication(registry, deployment):
+    """An observed release providing `deployment`'s base and environments (the hand route's
+    provenance), written straight into `node_release_catalog`; the sync's ingest has its own
+    tests."""
     from contracts.node_release import NodeReleaseAssetV2, NodeReleaseV2, encode_node_release
     roles = [("manager-primary", deployment.manager_primary), ("manager-fallback", deployment.manager_fallback),
              ("app", deployment.app_environment)]
@@ -60,8 +62,6 @@ def seed_verified_publication(registry, deployment):
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,1000) ON CONFLICT DO NOTHING",
                      (identity, deployment.base.tag, revision, raw, Jsonb(sources)))
-        conn.execute("INSERT INTO node_release_verifications VALUES(%s,1000,'test:verified-publication',%s) ON CONFLICT DO NOTHING",
-                     (identity, Jsonb({"fixture": True})))
 
 
 def cold_setup(registry, *, app=True):
@@ -77,7 +77,7 @@ def cold_setup(registry, *, app=True):
         BASE_ABI, "graphics-v1", "plugin-v1"), selected, manager, None,
         {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs})
     service = NodeBootService(sessions)
-    seed_verified_publication(registry, deployment)
+    seed_catalog_publication(registry, deployment)
     service.publish(deployment)
     service.select(deployment.deployment_id, 0)
     return service, sessions, deployment
@@ -207,38 +207,72 @@ def test_sealed_environment_worker_and_exact_reader_hold_inode_lease(registry, t
         os.close(opened.fd)
 
 
-def test_selected_deployment_environments_are_desired_and_unselected_are_not(registry):
+def _desired(registry):
     from central.content_catalog.catalog import ReleaseCatalog
     from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
     from central.infra.transactions import PgTransactions
-    from central.kernel.job_types import FetchOsImage, FetchSealedEnvironment
-    service, _, selected = cold_setup(registry)
-    other_app = environment("4")
-    unselected = replace(selected, deployment_id=uuid4(), app_environment=other_app,
-        environment_sources={**{ref: url for ref, url in selected.environment_sources.items()
-                                if ref != selected.app_environment.environment_sha256},
-                             other_app.environment_sha256: "https://example.invalid/other"})
-    seed_verified_publication(registry, unselected)
-    service.publish(unselected)
     catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(), stored=None,
                              transactions=PgTransactions(registry.db), publisher=None,
                              clock=registry.clock)
+    with PgTransactions(registry.db).begin() as tx:
+        return catalog.desired_in(tx)
 
-    def desired():
-        with PgTransactions(registry.db).begin() as tx:
-            return catalog.desired_in(tx)
 
-    def env(ref):
-        return FetchSealedEnvironment(sha256=ref.environment_sha256)
+def _other(selected, digest):
+    app = environment(digest)
+    return replace(selected, deployment_id=uuid4(), app_environment=app,
+        environment_sources={**{ref: url for ref, url in selected.environment_sources.items()
+                                if ref != selected.app_environment.environment_sha256},
+                             app.environment_sha256: "https://example.invalid/" + digest})
 
-    jobs = desired()
-    assert {env(selected.app_environment), env(selected.manager_primary),
+
+def _env(ref):
+    from central.kernel.job_types import FetchSealedEnvironment
+    return FetchSealedEnvironment(sha256=ref.environment_sha256)
+
+
+def test_selected_and_previous_deployments_are_desired_and_older_ones_are_not(registry):
+    from central.kernel.job_types import FetchOsImage
+    service, _, first = cold_setup(registry)
+    second, third = _other(first, "4"), _other(first, "5")
+    for deployment in (second, third):
+        seed_catalog_publication(registry, deployment)
+        service.publish(deployment)
+    jobs = _desired(registry)
+    assert {_env(first.app_environment), _env(first.manager_primary),
             FetchOsImage(tarball_sha256=BASE_TARBALL_SHA)} <= jobs
-    assert env(other_app) not in jobs
-    service.select(unselected.deployment_id, 1)
-    jobs = desired()
-    assert env(other_app) in jobs and env(selected.manager_primary) in jobs
-    assert env(selected.app_environment) not in jobs
+    assert _env(second.app_environment) not in jobs  # published, never selected: not wanted
+    service.select(second.deployment_id, 1)
+    jobs = _desired(registry)
+    # The previous selection stays desired (R2): Undo needs no download.
+    assert {_env(second.app_environment), _env(first.app_environment)} <= jobs
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT previous_deployment_id FROM node_boot_policy").fetchone()[
+            "previous_deployment_id"] == first.deployment_id
+    service.select(second.deployment_id, 2)  # re-selecting the same keeps the previous
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT previous_deployment_id FROM node_boot_policy").fetchone()[
+            "previous_deployment_id"] == first.deployment_id
+    service.select(third.deployment_id, 3)
+    jobs = _desired(registry)
+    assert {_env(third.app_environment), _env(second.app_environment)} <= jobs
+    assert _env(first.app_environment) not in jobs  # neither selected nor previous any more
+
+
+def test_a_live_offer_keeps_its_deployment_desired_after_two_selections(registry):
+    service, _, first = cold_setup(registry)
+    second, third = _other(first, "4"), _other(first, "5")
+    for deployment in (second, third):
+        seed_catalog_publication(registry, deployment)
+        service.publish(deployment)
+    offer = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))  # a Pi mid-prepare on X
+    assert offer.app_environment == first.app_environment
+    service.select(second.deployment_id, 1)
+    service.select(third.deployment_id, 2)
+    # Neither selected nor previous, but the live offer (< 1 h old) still roots X's files.
+    assert _env(first.app_environment) in _desired(registry)
+    registry.clock.advance(3601)
+    assert _env(first.app_environment) not in _desired(registry)
 
 
 class SelectingPublisher:
@@ -247,7 +281,7 @@ class SelectingPublisher:
     def __init__(self, *, fail=False):
         self.published, self.fail = [], fail
 
-    def publish(self, job, *, within, retry_terminal=False):
+    def publish(self, job, *, within, retry_terminal=False, priority=None):
         from central.infra.transactions import pg_connection
         if self.fail:
             raise RuntimeError("queue down")
@@ -260,7 +294,7 @@ def test_selecting_a_deployment_warms_the_cache_in_the_same_transaction(registry
     from central.kernel.job_types import Prefetch
     service, sessions, selected = cold_setup(registry)
     other = replace(selected, deployment_id=uuid4())
-    seed_verified_publication(registry, other)
+    seed_catalog_publication(registry, other)
     service.publish(other)
     publisher = SelectingPublisher()
     boots = NodeBootService(sessions, publisher=publisher)

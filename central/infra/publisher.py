@@ -30,7 +30,7 @@ from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes, OutcomeRow
 from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.job_types import CATALOG
-from central.kernel.jobs import Job, R, asset_key, job_keys
+from central.kernel.jobs import Job, R, asset_key, job_keys, require_priority
 from central.kernel.ports import AssetRecords
 from central.kernel.publishing import (
     ASSET_NOT_RECORDED,
@@ -61,9 +61,11 @@ class ProcrastinatePublisher:
         self._clock = clock
         self._feed = feed
 
-    def publish(self, job: Job[R], *, within: Transaction,
-                retry_terminal: bool = False) -> JobHandle[R]:
+    def publish(self, job: Job[R], *, within: Transaction, retry_terminal: bool = False,
+                priority: int | None = None) -> JobHandle[R]:
         keys = job_keys(job)  # PB1: TypeError for an unregistered job type
+        if priority is not None:
+            require_priority(priority)  # PB10
         if type(job) not in self._job_types:
             raise TypeError(f"{type(job).__name__} is not published by this publisher")
         if within.state != "open":
@@ -79,15 +81,19 @@ class ProcrastinatePublisher:
             if latest is not None and latest.status == "terminal" and not retry_terminal:
                 return SettledHandle(Failed(True, latest.reason or "", None))  # PB3
             since = latest.seq if latest is not None else 0  # PB4: since first, then defer
-            defer(self._app, job, attempt=0, connection=connection)
+            defer(self._app, job, attempt=0, connection=connection, priority=priority)
         return _OutcomeHandle(self, job, keys.lock, since, within)
 
-    async def publish_now(self, job: Job[R], *, retry_terminal: bool = False) -> JobHandle[R]:
+    async def publish_now(self, job: Job[R], *, retry_terminal: bool = False,
+                          priority: int | None = None) -> JobHandle[R]:
         job_keys(job)  # PB1, before any transaction
+        if priority is not None:
+            require_priority(priority)  # PB10
 
         def publish_committed() -> JobHandle[R]:
             with self._transactions.begin() as tx:  # PB8: committed before returning
-                return self.publish(job, within=tx, retry_terminal=retry_terminal)
+                return self.publish(job, within=tx, retry_terminal=retry_terminal,
+                                    priority=priority)
 
         return await asyncio.to_thread(publish_committed)
 

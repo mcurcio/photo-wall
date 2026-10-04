@@ -107,8 +107,8 @@ the dangling window because `unlink` is non-transactional).
 
 **Superseded by the Central MVP.** The sweep, the floor and the cap below went with `base_cache`.
 OS images are now `os-images/base-<tarball sha256>.squashfs`, named by the sha256 of the
-release's base tarball, and nothing removes an orphaned file or an unreferenced asset row until
-`MaintainCache` is built ([runbook](runbook.md#base-image-auto-mirror-0012)). The rest of this
+release's base tarball. `MaintainCache` removes an orphaned file: an eager keep-set sweep, hourly, with no byte budget: it removes every release file under `os-images/` and `apps/` whose key is not desired (the window of the 3 newest stable node releases, the selected and the previous deployment, every live boot offer's content, and the V1 roots: pins, known-goods, served tags, policy tags and fleet reservations), sparing a file whose mtime or `last_served_at` is within `SERVE_GRACE` (1 h) and a temp file not idle past `TEMP_GRACE` (1 h), at most 50 unlinks per run; `previews/` and `media/` are never touched ([`central/assets/maintenance.py`](../central/assets/maintenance.py)). An
+unreferenced asset row stays ([runbook](runbook.md#base-image-auto-mirror-0012)). The rest of this
 section records Slice 1 as it landed.
 
 The poll-tail **orphan sweep** (`central/netboot_base.py`, modeled on media

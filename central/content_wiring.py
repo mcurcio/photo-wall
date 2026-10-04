@@ -30,6 +30,7 @@ from central.assets.handlers import (
 )
 from central.assets.layout import CacheLayout
 from central.assets.library import LibraryThumbnails
+from central.assets.maintenance import MaintainCacheHandler
 from central.assets.production import AssetProduction
 from central.assets.reader import AssetReader, WaiterSlots
 from central.assets.store import CacheStore
@@ -39,15 +40,17 @@ from central.db import Database
 from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
 from central.infra.queue_ops import PurgeFinishedJobsHandler, QueueAdmin, RescueStalledJobsHandler
+from central.infra.retention import PgCacheRetention
 from central.infra.runtime import JobRuntime
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.jobs import QueueName
-from central.kernel.ports import ThumbnailOrigin
+from central.kernel.ports import AssetReadiness, ThumbnailOrigin
 from central.kernel.publishing import Publisher
 from central.origins.github import GitHubReleaseOrigin
 from contracts.time import Clock
@@ -75,6 +78,7 @@ class ContentServices:
     thumbnails: LibraryThumbnails | None = None
     thumbnail_reader: AssetReader | None = None  # its own slots and short wait (§40)
     publisher: Publisher | None = None  # jobs published inside another writer's transaction
+    readiness: AssetReadiness | None = None  # the one "is it in the cache now" (release read)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +89,7 @@ class _Core:
     publisher: ProcrastinatePublisher
     catalog: ReleaseCatalog
     store: CacheStore
+    stored: DiskStoredAssets
     feed: OutcomeFeed | None
 
 
@@ -97,10 +102,11 @@ def _core(db: Database, clock: Clock, *, cache_root: Path, feed_wanted: bool) ->
     publisher = ProcrastinatePublisher(db.dsn, transactions=transactions, outcomes=outcomes,
                                        assets=assets, clock=clock, feed=feed)
     store = CacheStore(CacheLayout(cache_root))
+    stored = DiskStoredAssets(records=assets, store=store)
     catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
-                             stored=DiskStoredAssets(records=assets, store=store),
-                             transactions=transactions, publisher=publisher, clock=clock)
-    return _Core(transactions, assets, outcomes, publisher, catalog, store, feed)
+                             stored=stored, transactions=transactions, publisher=publisher,
+                             clock=clock)
+    return _Core(transactions, assets, outcomes, publisher, catalog, store, stored, feed)
 
 
 def _thumbnails(core: _Core, servable: Callable[[str], bool]) -> LibraryThumbnails:
@@ -129,7 +135,8 @@ def build_content_services(db: Database, clock: Clock, *, cache_root: Path,
         wait_timeout=THUMBNAIL_WAIT)
     return ContentServices(catalog=core.catalog, reader=reader, probe=PodProbe(db.healthy),
                            feed=core.feed, thumbnails=_thumbnails(core, servable_thumbnail),
-                           thumbnail_reader=thumbnail_reader, publisher=core.publisher)
+                           thumbnail_reader=thumbnail_reader, publisher=core.publisher,
+                           readiness=core.stored)
 
 
 def build_library_thumbnails(db: Database, clock: Clock, *, cache_root: Path) -> LibraryThumbnails:
@@ -164,6 +171,7 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
         SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(), devices=PgDeviceRecords(),
                             assets=core.assets, transactions=core.transactions,
                             publisher=core.publisher, catalog=core.catalog, clock=clock,
+                            node_releases=PgNodeReleaseRecords(clock), readiness=core.stored,
                             include_prereleases=origin.include_prereleases),
         FetchOsImageHandler(production=production, origin=origin, store=core.store),
         FetchPackageHandler(production=production, origin=origin),
@@ -171,8 +179,10 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
         FetchPlayerPayloadHandler(production=production, origin=origin,
                                   expected_abi=payload_expected_abi),
         FetchLibraryThumbnailHandler(production=production, origin=thumbnails),
-        PrefetchHandler(catalog=core.catalog, records=core.assets, store=core.store,
+        PrefetchHandler(catalog=core.catalog, readiness=core.stored,
                         transactions=core.transactions, publisher=core.publisher),
+        MaintainCacheHandler(retention=PgCacheRetention(core.catalog), records=core.assets,
+                             store=core.store, transactions=core.transactions, clock=clock),
         RescueStalledJobsHandler(admin),
         PurgeFinishedJobsHandler(admin, transactions=core.transactions, outcomes=core.outcomes,
                                  clock=clock),

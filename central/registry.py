@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
-from central.fleet.locks import lock_fleet_assets_in
+from central.infra.asset_roots import lock_fleet_assets_in
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,

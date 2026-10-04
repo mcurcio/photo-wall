@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Protocol, TypeAlias, get_args
+from typing import Final, Literal, Protocol, TypeAlias, get_args
 
 from central.kernel.assets import Asset, AssetKey, AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import (
@@ -69,10 +70,98 @@ class Unknown:
 Resolution: TypeAlias = Candidates | Unknown
 
 
+@dataclass(frozen=True, slots=True)
+class DesiredTiers:
+    """The desired set split by download urgency. `wanted` is fetched at each job type's own
+    priority; `background` (disjoint from `wanted`, newest release first) only because its release
+    is in the window of newest stable node releases, at `BACKGROUND_PRIORITY`. Their union is
+    `desired_assets()`: the cleaner keeps both."""
+
+    wanted: frozenset[AssetJob]
+    background: tuple[AssetJob, ...]
+
+    def __post_init__(self) -> None:
+        if len(set(self.background)) != len(self.background) or set(self.background) & self.wanted:
+            raise ValueError("invalid_desired_tiers")
+
+
 class ContentCatalog(Protocol):
     async def resolve(self, request: ContentRequest) -> Resolution: ...
 
     async def desired_assets(self) -> frozenset[AssetJob]: ...
+
+    async def desired_tiers(self) -> DesiredTiers: ...
+
+
+class StoredAssets(Protocol):
+    def present(self, tx: Transaction, job: AssetJob) -> bool:
+        """The asset has produced facts and its file is on disk now (a snapshot: the cache is
+        ephemeral, so a caller must still survive the file going away)."""
+        ...
+
+
+class OutcomeView(Protocol):
+    """The latest outcome of one lock key, as `job_outcomes` stores it."""
+
+    @property
+    def status(self) -> str: ...  # "ok" | "transient" | "terminal"
+
+    @property
+    def reason(self) -> str | None: ...
+
+
+class LatestOutcomes(Protocol):
+    def get(self, tx: Transaction, lock_key: str) -> OutcomeView | None: ...
+
+
+ReadinessState: TypeAlias = Literal["ready", "downloading", "not_downloaded", "failed"]
+# A fetch that found the cache disk full (ENOSPC): transient, and shown as a failure, because
+# nothing but freed space (the cleaner, or the operator) makes the next attempt succeed.
+CACHE_DISK_FULL: Final = "cache_disk_full"
+
+
+@dataclass(frozen=True, slots=True)
+class Readiness:
+    """Whether a set of assets (one node deployment's) is in the cache NOW. Derived on read and
+    never stored: a cleaned or purged file returns it to `downloading` / `not_downloaded`.
+
+    `missing_bytes` sums the final sizes of the absent files (0 when ready)."""
+
+    state: ReadinessState
+    reason: str | None  # set iff state == "failed"
+    missing_bytes: int
+
+    def __post_init__(self) -> None:
+        if (self.state == "failed") != (self.reason is not None):
+            raise ValueError("invalid_readiness_reason")
+        if type(self.missing_bytes) is not int or self.missing_bytes < 0 or (
+                self.state == "ready" and self.missing_bytes):
+            raise ValueError("invalid_missing_bytes")
+
+
+class AssetReadiness(StoredAssets, Protocol):
+    """The one readiness check: Prefetch's "missing", the release read and first-run selection
+    all ask it, so they cannot disagree about what "downloaded" means."""
+
+    def missing(self, tx: Transaction, job: AssetJob) -> bool:
+        """The asset is recorded but its file is not present (what Prefetch fetches)."""
+        ...
+
+    def readiness(self, tx: Transaction, jobs: Collection[AssetJob], *,
+                  wanted: bool) -> Readiness:
+        """Facts plus file decide `ready` before any outcome is consulted (data first). Otherwise
+        a missing key whose latest outcome is terminal (or `cache_disk_full`) is `failed`; else
+        `downloading` when `wanted`, `not_downloaded` when not."""
+        ...
+
+
+class CacheRetention(Protocol):
+    def hold_desired(self, tx: Transaction) -> frozenset[AssetKey]:
+        """Take the asset-roots lock until `tx` ends, then return every desired key. Every
+        writer of a desired-set input (select, offer, ingest and observations, V1 release rows,
+        promotion, pins, served and known-good tags, fleet reservations) takes the same lock, so
+        no root can be added between this read and the caller's deletes in `tx`."""
+        ...
 
 
 class AssetRecords(Protocol):
@@ -176,11 +265,32 @@ class PublishedRelease:
     base_abi: str | None = None
     base_abi_squashfs_sha256: str | None = None
     node_publication: NodePublication | None = None
+    # Why the attached node manifest was refused (deterministic, this release only); never set
+    # with `node_publication`. Both None: the release attaches no node manifest.
+    node_problem: str | None = None
+    # The node manifest asset's own `(updated_at, id)`: the version of `node_publication` or of
+    # `node_problem`, guarded independently of the legacy manifest's `upstream_version`.
+    node_version: UpstreamVersion | None = None
+    # False only for a pre-release listed while legacy pre-releases are off: its node facts are
+    # observed, its legacy facts were not read, and no legacy row is written for it.
+    legacy: bool = True
 
     def __post_init__(self) -> None:
         release_version(self.tag)
         if type(self.is_prerelease) is not bool:
             raise ValueError("invalid_is_prerelease")
+        if self.node_problem is not None:
+            require_reason(self.node_problem)
+            if self.node_publication is not None:
+                raise ValueError("node_publication_with_problem")
+        if self.node_version is not None and not isinstance(self.node_version, UpstreamVersion):
+            raise ValueError("invalid_node_version")
+        if type(self.legacy) is not bool:
+            raise ValueError("invalid_legacy")
+        if not self.legacy and (self.os_image is not None or self.payload is not None
+                                or self.upstream_version is not None
+                                or (self.node_publication is None and self.node_problem is None)):
+            raise ValueError("invalid_unlisted_legacy")
         if self.package is None:
             if self.package_problem is None:
                 raise ValueError("missing_package_problem")

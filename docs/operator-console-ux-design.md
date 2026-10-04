@@ -65,13 +65,16 @@ sold.
 > Player page. There is **no V1 section** anywhere (no V1 boot offers, V1 fleet
 > policy, maintenance requests or V1 records). The fleet group is **Players,
 > Releases**: **Fleet › Releases** (`#/releases`) holds the boot selection,
-> deployments (Select), the release catalog (Publish, Check GitHub releases now) and
-> the effect gate; the Player page's App section gains **Stage app** (on bound or
+> deployments (Select), the release catalog (Central observes, ingests and
+> downloads each release by itself: one readiness fact and one verb, **Put vX on the
+> wall…**, per release; Check GitHub releases now) and the effect gate; the Player page's App section gains **Stage app** (on bound or
 > unbound Players; a bound switch follows the reboot rule) and **Qualified
 > fallback**. The guided **Update the wall** journey
-> (`#/releases/update/<tag>[/try/<player>][/skip/<player>…]`) walks Publish, an optional try on one
-> Frame, then Keep (Select, then one-at-a-time reboots) or Back out, through the same
-> send functions as the homes.
+> (`#/releases/update/<tag>[/try/<player>][/skip/<player>…]`) walks an optional try on one
+> Frame, then **Put vX on the wall** (one confirmation naming the reboot cost: Select,
+> then one-at-a-time reboots, the first waiting until Central has downloaded the
+> release) or Back out, through the same send functions as the homes (revised
+> 2026-10-04: there is no Publish).
 
 > **The Wall's daily face, Status and fleet host health (2026-10-02).** [Parts G and H of
 > the domain-driven console design](operator-console-ddd.md#61-screens) own these screens;
@@ -398,13 +401,16 @@ entries below that it changed say so; where the two differ, that glossary wins.
   `#/equipment` address opens the Players list.
 - **Releases / boot selection** — **Fleet › Releases** (`#/releases`) is the home of
   the fleet-wide release aggregates: the **boot selection** (the one deployment Central
-  offers every node-path boot from now on, with its revision), the deployments
-  (Publish creates them, permanently) and the release catalog GitHub releases reported,
+  offers every node-path boot from now on, with its revision, and the previous
+  one), the deployments (Central creates one from each valid release it observes,
+  permanently) and the release catalog GitHub releases reported, each release with
+  its download readiness (Ready, Downloading, Not downloaded, Failed) or Rejected,
   plus the effect gate's state and reason. Owned by
   [DDD Part E](operator-console-ddd.md#25-screens).
 - **Update the wall** — the guided journey over Releases and the Player page:
-  Publish, optionally try on one Frame (qualify, then Stage), look, then Keep (Select,
-  then reboot Players one at a time, each after the previous rejoined) or Back out.
+  optionally try on one Frame (qualify, then Stage), look, then Put vX on the wall
+  (one confirmation; Select, then reboot Players one at a time, each after the
+  previous rejoined) or Back out.
   Central stores no rollout; progress is re-derived from Central's reads
   ([DDD §25a](operator-console-ddd.md#25a-update-the-wall-guided-journey-nu1)).
 - **Output** — one HDMI port on a Player (≤2). The thing a Binding attaches to a

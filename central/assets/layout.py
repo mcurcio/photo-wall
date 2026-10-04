@@ -12,6 +12,7 @@ mistaken for an asset.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Final
 
@@ -50,3 +51,20 @@ class CacheLayout:
     def path(self, key: AssetKey) -> Path:
         prefix, suffix = _FILE_NAMES[key.kind]
         return self.directory(key.kind) / f"{prefix}{key.identity}{suffix}"
+
+    def key_of(self, kinds: Iterable[AssetKind], name: str) -> AssetKey | None:
+        """The key whose final file is called `name`, among `kinds` (which share one
+        directory); None for a temp file or any name no key of those kinds maps to."""
+        if name.startswith(TEMP_PREFIX):
+            return None
+        for kind in kinds:
+            prefix, suffix = _FILE_NAMES[kind]
+            if (name.startswith(prefix) and name.endswith(suffix)
+                    and len(name) > len(prefix) + len(suffix)):
+                try:
+                    key = AssetKey(kind, name[len(prefix):len(name) - len(suffix)])
+                except ValueError:
+                    continue
+                if self.path(key).name == name:
+                    return key
+        return None

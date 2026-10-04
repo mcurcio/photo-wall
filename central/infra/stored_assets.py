@@ -1,28 +1,19 @@
 """`DiskStoredAssets`: the catalog's `StoredAssets` over the Asset record and the cache disk.
 
-The record says what the file IS (produced facts); the disk alone says whether it is there
-(`CacheStore.present`, `lstat` only). The same test `PrefetchHandler` applies to find missing
-desired assets.
+The one predicate is `central.assets.readiness.CacheReadiness`; this adapter wires it to the
+`job_outcomes` repository, so the catalog, Prefetch and the release read share it.
 """
 
 from __future__ import annotations
 
+from central.assets.readiness import CacheReadiness
 from central.assets.store import CacheStore
-from central.kernel.job_types import AssetJob
-from central.kernel.jobs import asset_key
+from central.infra.outcomes import JobOutcomes
 from central.kernel.ports import AssetRecords
-from central.kernel.transactions import Transaction
 
 
-class DiskStoredAssets:
-    """Implements `StoredAssets`."""
+class DiskStoredAssets(CacheReadiness):
+    """Implements `StoredAssets` and `AssetReadiness` over PostgreSQL outcomes."""
 
     def __init__(self, *, records: AssetRecords, store: CacheStore) -> None:
-        self._records = records
-        self._store = store
-
-    def present(self, tx: Transaction, job: AssetJob) -> bool:
-        key = asset_key(job)
-        asset = self._records.get(tx, key)
-        return (asset is not None and asset.produced is not None
-                and self._store.present(key, asset.produced))
+        super().__init__(records=records, store=store, outcomes=JobOutcomes())

@@ -36,6 +36,7 @@ from central.db import Database
 from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import pg_connection
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, OriginLocator
@@ -125,7 +126,9 @@ class World:
         self.sync_handler = SyncReleasesHandler(
             origin=self.origin, releases=PgReleaseRecords(), devices=PgDeviceRecords(),
             assets=self.assets, transactions=self.transactions, publisher=self.publisher,
-            catalog=self.catalog, clock=self.clock)
+            catalog=self.catalog, clock=self.clock,
+            node_releases=PgNodeReleaseRecords(self.clock),
+            readiness=DiskStoredAssets(records=self.assets, store=self.store))
         self.fetch_handler = FetchOsImageHandler(
             production=AssetProduction(store=self.store, records=self.assets,
                                        transactions=self.transactions),

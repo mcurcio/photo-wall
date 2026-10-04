@@ -86,7 +86,7 @@ function StageDialog({ deviceId, name, opened, held, node, control, onSent, onCl
             <p>{releases.error ? `Deployments could not be read (${releases.error.code}).` : "Reading deployments…"}</p>
           ) : targets.length === 0 ? (
             <p>
-              {"No deployment carries an app. Publish a release with its app on "}
+              {"No deployment carries an app yet; Central records one for each valid release with an app. See "}
               <a href={RELEASES}>Releases</a>
               {"."}
             </p>

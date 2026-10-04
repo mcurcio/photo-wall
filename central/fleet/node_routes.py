@@ -27,7 +27,6 @@ from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.principal import PrincipalError
 from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError, ServingImageVerifier
-from central.kernel.handling import OriginRejected, OriginUnavailable
 from central.registry import Registry
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
@@ -77,7 +76,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     lifecycle = NodeLifecycle(sessions, effect_gate)
     links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
-    publications = NodeReleaseCatalog(sessions)
+    publications = NodeReleaseCatalog(sessions, readiness=content.readiness if content else None)
     trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock))
     display.trials = trials
     app.state.node_lifecycle = lifecycle
@@ -174,21 +173,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.get("/v1/operator/node/releases", dependencies=[Depends(admin)])
     async def node_releases():
         return await invoke(publications.list)
-
-    @app.post("/v1/operator/node/releases/{manifest_sha256}/deployments", dependencies=[Depends(admin)])
-    async def publish_release(manifest_sha256: str, request: Request):
-        value = loads_object(await body(request, 4096), max_bytes=4096)
-        if value is None or set(value) != {"deployment_id", "select_app", "operator_audit_ref"}:
-            raise NodeControlError("node_release_publication_invalid", 422)
-        try:
-            return await publications.publish(manifest_sha256, UUID(value["deployment_id"]),
-                                              value["select_app"], value["operator_audit_ref"])
-        except OriginUnavailable as exc:
-            raise NodeControlError(exc.reason, 503) from exc
-        except OriginRejected as exc:
-            raise NodeControlError(exc.reason, 422) from exc
-        except ValueError as exc:
-            raise NodeControlError(str(exc), 422) from exc
 
     @app.post("/v2/node/sessions")
     async def enroll(request: Request):

@@ -1,139 +1,47 @@
-"""Real origin HTTP codec/hash verification and durable explicit V2 publication."""
-import asyncio
-import json
+"""The node release read (console DDD Part E G1, R18; auto-ingest design §6.5).
+
+Releases are ingested by the real sync from a mock upstream (`test_node_release_ingest`); the read
+is `NodeReleaseCatalog.list` over the same database, with the one readiness check over the
+world's cache directory.
+"""
 from dataclasses import replace
-from hashlib import sha256
 from uuid import uuid4
 
-import httpx
 import pytest
-from test_fleet_attempts import BASE_ABI, BOOT_ID, SERIAL, _seed
-from test_node_boot import environment
+from content_db import facts_of, put_file
+from test_node_release_ingest import Upstream, make_sync_world, node_upload, read, sync
 
+from central.fleet.node_boot import NodeBootService
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
-from central.infra.catalog_records import PgReleaseRecords
-from central.infra.transactions import PgTransaction
-from central.kernel.handling import OriginUnavailable
-from central.origins.github import GitHubReleaseOrigin
-from contracts.node_boot import NodeBaseRefV2, NodeBootRequestV2
-from contracts.node_release import (
-    NODE_RELEASE_MANIFEST,
-    NodeReleaseAssetV2,
-    NodeReleaseV2,
-    encode_node_release,
-    parse_node_release,
-)
+from central.infra.node_releases import deployment_jobs
+from central.kernel.jobs import asset_key
 
 
 def publication():
-    bodies = {role: (role+'-exact-bytes').encode() for role in ('base','boot','node-base-deb',
-        'node-display-deb','manager-primary-deb','manager-primary','build-provenance','app','app-deb')}
-    artifacts = tuple(NodeReleaseAssetV2(role, role+'.bin', sha256(data).hexdigest(), len(data))
-                      for role, data in bodies.items())
-    refs = {a.role: a for a in artifacts}
-    app = replace(environment(), environment_sha256=refs['app'].sha256,size_bytes=refs['app'].size_bytes,
-                  deb_sha256=refs['app-deb'].sha256)
-    manager = replace(environment('2','photo-wall-node-manager'), environment_sha256=refs['manager-primary'].sha256,
-                      size_bytes=refs['manager-primary'].size_bytes,deb_sha256=refs['manager-primary-deb'].sha256)
-    release = NodeReleaseV2('a'*40,NodeBaseRefV2('v9.0.0',refs['base'].sha256,'7'*64,100,
-        BASE_ABI,'graphics-v1','plugin-v1'),app,manager,None,artifacts)
-    urls = {a.filename:bodies[a.role] for a in artifacts}
-    urls[NODE_RELEASE_MANIFEST] = encode_node_release(release)
-    entry = {'tag_name':release.base.tag,'draft':False,'prerelease':False,'assets':[
-        {'name':name,'browser_download_url':'https://assets.test/'+name,'id':index+1,
-         'updated_at':'2026-09-30T00:00:00Z'} for index,name in enumerate(urls)]}
-    def handle(request):
-        if request.url.path == '/repos/test/repo/releases':
-            return httpx.Response(200,json=[entry])
-        data = urls.get(request.url.path.lstrip('/'))
-        return httpx.Response(404 if data is None else 200,content=data or b'')
-    origin = GitHubReleaseOrigin('test/repo',transport=httpx.MockTransport(handle))
-    return origin, release, urls
+    """(origin, release, files) of one valid release with its app, on a mock upstream (the
+    browser tests' fixture)."""
+    upstream, upload = Upstream(), node_upload("v9.0.0")
+    upstream.put(upload)
+    return upstream.origin(), upload.release, upstream.files
 
 
 def discover(registry, origin):
-    result = asyncio.run(origin.list_releases(etag=None))
+    """What one release sync's node half does for `origin`'s first release: observe and ingest."""
+    import asyncio
+
+    from central.infra.node_releases import PgNodeReleaseRecords
+    from central.infra.transactions import PgTransaction
+    release = asyncio.run(origin.list_releases(etag=None)).releases[0]
     with registry.db.transaction() as conn:
-        PgReleaseRecords().claim(PgTransaction(conn), result.releases[0], now=registry.clock.utc())
-    return result.releases[0]
+        PgNodeReleaseRecords(registry.clock).ingest(PgTransaction(conn), release,
+                                                    now=registry.clock.utc())
+    return release
 
 
-def test_discovery_is_observation_then_verified_explicit_publication_and_selection(registry):
-    from central.fleet.node_boot import NodeBootService
-    _seed(registry)
-    origin, release, _ = publication()
-    observed = discover(registry,origin)
-    discover(registry,origin)
-    assert observed.os_image is None  # V2 bytes did not become legacy image metadata.
-    sessions = NodeSessions(registry.db,registry.clock,NodeControlConfig('node-test'))
-    catalog = NodeReleaseCatalog(sessions,origin)
-    identity = sha256(encode_node_release(release)).hexdigest()
-    assert catalog.list()['releases'][0]['verified_at'] is None
-    deployment_id = uuid4()
-    assert asyncio.run(catalog.publish(identity,deployment_id,True,'operator:release-test'))['published']
-    assert asyncio.run(catalog.publish(identity,deployment_id,True,'operator:release-test'))['duplicate']
-    boots = NodeBootService(sessions)
-    boots.select(deployment_id,0)
-    offer = boots.offer(NodeBootRequestV2(SERIAL,BOOT_ID,'b'*64))
-    assert offer.base == release.base and offer.manager_primary == release.manager_primary
-    assert offer.app_environment == release.app_environment
-    with registry.db.transaction() as conn:
-        assert conn.execute('SELECT count(*) n FROM node_release_catalog').fetchone()['n'] == 1
-        assert conn.execute('SELECT count(*) n FROM node_release_verifications').fetchone()['n'] == 1
-
-
-def test_corrupt_declared_artifact_cannot_publish(registry):
-    _seed(registry)
-    origin, release, urls = publication()
-    discover(registry,origin)
-    urls['node-display-deb.bin'] = b'wrong-bytes'
-    service = NodeReleaseCatalog(NodeSessions(registry.db,registry.clock,NodeControlConfig('node-test')),origin)
-    with pytest.raises(OriginUnavailable, match="download_corrupt"):
-        asyncio.run(service.publish(sha256(encode_node_release(release)).hexdigest(),uuid4(),True,'operator:test'))
-    with registry.db.transaction() as conn:
-        assert conn.execute('SELECT count(*) n FROM node_release_verifications').fetchone()['n'] == 0
-        assert conn.execute('SELECT count(*) n FROM node_deployments').fetchone()['n'] == 0
-
-
-def test_conflicting_same_release_revision_and_absent_asset_refuse(registry):
-    origin, release, urls = publication()
-    discover(registry,origin)
-    changed = replace(release,base=replace(release.base,squashfs_sha256='6'*64))
-    urls[NODE_RELEASE_MANIFEST] = encode_node_release(changed)
-    with pytest.raises(ValueError,match='identity_conflict'):
-        discover(registry,origin)
-    invalid = json.loads(encode_node_release(release))
-    invalid['artifacts'] = [a for a in invalid['artifacts'] if a['role'] != 'node-display-deb']
-    with pytest.raises(ValueError,match='artifacts_invalid'):
-        parse_node_release(json.dumps(invalid).encode())
-    with pytest.raises(ValueError,match='environment_asset_mismatch'):
-        replace(release,manager_primary=replace(release.manager_primary,architecture='amd64'))
-
-
-def test_actual_producer_manifest_roundtrips_through_origin_catalog(registry,tmp_path):
-    from test_node_release_artifacts import inputs
-    _seed(registry)
-    _, _, output = inputs(tmp_path)
-    raw = (output/NODE_RELEASE_MANIFEST).read_bytes()
-    manifest = parse_node_release(raw)
-    entry = {'tag_name':manifest.base.tag,'draft':False,'prerelease':False,'assets':[
-        {'name':path.name,'browser_download_url':'https://assets.test/'+path.name,'id':index+1,
-         'updated_at':'2026-09-30T00:00:00Z'} for index,path in enumerate(output.iterdir())]}
-    def handle(request):
-        if request.url.path=='/repos/test/repo/releases':
-            return httpx.Response(200,json=[entry])
-        path=output/request.url.path.lstrip('/')
-        return httpx.Response(200,content=path.read_bytes()) if path.is_file() else httpx.Response(404)
-    origin=GitHubReleaseOrigin('test/repo',transport=httpx.MockTransport(handle))
-    observed=discover(registry,origin)
-    assert observed.node_publication.manifest==raw
-    assert observed.os_image.sha256!=manifest.base.content_key
-    catalog=NodeReleaseCatalog(NodeSessions(registry.db,registry.clock,NodeControlConfig('node-test')),origin)
-    assert asyncio.run(catalog.publish(sha256(raw).hexdigest(),uuid4(),False,'operator:producer-output'))['published']
-
-
-# --- The release read (console DDD Part E G1, R18).
+@pytest.fixture
+def sync_world(registry, tmp_path):
+    return make_sync_world(registry, tmp_path)
 
 
 class _Recording:
@@ -158,31 +66,130 @@ class _Recording:
         return recorded()
 
 
-def _read(registry, db=None):
-    sessions = NodeSessions(db or registry.db, registry.clock, NodeControlConfig('node-test'))
-    return NodeReleaseCatalog(sessions, origin=object()).list()
+def _boots(registry):
+    return NodeBootService(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test")))
 
 
-def test_release_read_is_one_repeatable_read_read_only_snapshot(registry):
-    from test_node_boot import cold_setup
-    cold_setup(registry)
+def store_files(world, upload, *, missing=()):
+    """Put `upload`'s deployment files in the world's cache (produced facts plus file)."""
+    with world.db.transaction() as conn:
+        jobs = deployment_jobs(conn, [upload.deployment_id])[upload.deployment_id]
+    for job in jobs:
+        key = asset_key(job)
+        if key.identity in missing:
+            continue
+        data = ("bytes of " + key.identity).encode()
+        with world.reads.transactions.begin() as tx:
+            world.assets.record_produced(tx, key, facts_of(data))
+        put_file(world.store, key, data)
+    return jobs
+
+
+def test_release_read_is_one_repeatable_read_read_only_snapshot(registry, sync_world):
+    upstream = Upstream()
+    upstream.put(node_upload("v2.0.0"))
+    sync(sync_world(upstream))
     recording = _Recording(registry.db)
-    read = _read(registry, recording)
+    sessions = NodeSessions(recording, registry.clock, NodeControlConfig("node-test"))
+    result = NodeReleaseCatalog(sessions).list()
     # One transaction: the snapshot is fixed before its first data query, and it writes nothing.
     assert recording.statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
     assert all(sql.lstrip().upper().startswith("SELECT") for sql in recording.statements[1:])
-    assert len(recording.statements) == 4
-    assert read['read_at'] == registry.clock.utc()
+    assert result["read_at"] == registry.clock.utc()
 
 
 def test_with_no_policy_row_the_selection_is_revision_zero_and_nothing_is_listed(registry):
-    _seed(registry)
-    read = _read(registry)
-    assert read['selection'] == {'revision': 0, 'deployment_id': None, 'changed_at': None}
-    assert read['deployments'] == [] and read['releases'] == []
+    result = read(registry)
+    assert result["selection"] == {"revision": 0, "deployment_id": None,
+                                   "previous_deployment_id": None, "changed_at": None,
+                                   "auto": None}
+    assert result["deployments"] == [] and result["releases"] == []
 
 
-def test_the_selected_deployment_is_listed_even_when_older_than_the_newest_fifty(registry):
+def test_rows_are_semver_ordered_with_their_own_deployment_and_window(registry, sync_world):
+    upstream = Upstream()
+    uploads = [node_upload(tag) for tag in ("v2.0.0", "v2.10.0", "v2.2.0", "v2.3.0")]
+    for upload in uploads:
+        upstream.put(upload)
+    rc = node_upload("v2.11.0-rc.1")
+    upstream.put(rc, prerelease=True)
+    sync(sync_world(upstream))
+    rows = read(registry)["releases"]
+    assert [row["tag"] for row in rows] == ["v2.11.0-rc.1", "v2.10.0", "v2.3.0", "v2.2.0", "v2.0.0"]
+    by_tag = {row["tag"]: row for row in rows}
+    # The window is the newest 3 STABLE releases: never a pre-release.
+    assert [row["tag"] for row in rows if row["in_window"]] == ["v2.10.0", "v2.3.0", "v2.2.0"]
+    assert by_tag["v2.11.0-rc.1"]["stable"] is False and by_tag["v2.0.0"]["stable"] is True
+    for upload in uploads:
+        row = by_tag[upload.tag]
+        assert row["deployment_id"] == str(upload.deployment_id)
+        assert row["base_tag"] == upload.tag and row["manifest_sha256"] == upload.sha
+        assert row["app_environment_sha256"] == upload.release.app_environment.environment_sha256
+    assert "verified_at" not in rows[0]
+
+
+def test_readiness_is_derived_from_the_cache_for_each_row(registry, sync_world):
+    upstream = Upstream()
+    old, ready, partial = node_upload("v2.0.0"), node_upload("v2.1.0"), node_upload("v2.2.0")
+    for upload in (old, ready, partial):
+        upstream.put(upload)
+    extra = [node_upload(tag) for tag in ("v2.3.0", "v2.4.0")]  # push v2.0.0 out of the window
+    for upload in extra:
+        upstream.put(upload)
+    world = sync_world(upstream)
+    sync(world)
+    store_files(world, ready)
+    store_files(world, partial, missing={partial.release.manager_primary.environment_sha256})
+    by_tag = {row["tag"]: row for row in read(registry, world)["releases"]}
+    assert (by_tag["v2.1.0"]["readiness"], by_tag["v2.1.0"]["missing_bytes"]) == ("ready", 0)
+    # Wanted (in the window) with a file absent: downloading, with the absent file's size left.
+    assert by_tag["v2.2.0"]["readiness"] == "downloading"
+    assert by_tag["v2.2.0"]["missing_bytes"] == partial.release.manager_primary.size_bytes
+    # Not wanted (out of the window, never selected): not downloaded.
+    assert by_tag["v2.0.0"]["in_window"] is False
+    assert by_tag["v2.0.0"]["readiness"] == "not_downloaded"
+    assert by_tag["v2.0.0"]["missing_bytes"] > 0
+
+
+def test_a_terminal_fetch_or_a_full_disk_reads_failed_with_its_reason(registry, sync_world):
+    from central.infra.outcomes import JobOutcomes
+    upstream, upload = Upstream(), node_upload("v2.0.0")
+    upstream.put(upload)
+    world = sync_world(upstream)
+    sync(world)
+    jobs = store_files(world, upload, missing={upload.release.base.content_key})
+    base = next(job for job in jobs if asset_key(job).identity == upload.release.base.content_key)
+    with world.reads.transactions.begin() as tx:
+        JobOutcomes().record(tx, base, status="transient", reason="cache_disk_full",
+                             retry_not_before=world.clock.utc() + 60, now=world.clock.utc())
+    [row] = read(registry, world)["releases"]
+    assert (row["readiness"], row["readiness_reason"]) == ("failed", "cache_disk_full")
+    with world.reads.transactions.begin() as tx:
+        JobOutcomes().record(tx, base, status="terminal", reason="all_references_rejected",
+                             retry_not_before=None, now=world.clock.utc())
+    [row] = read(registry, world)["releases"]
+    assert (row["readiness"], row["readiness_reason"]) == ("failed", "all_references_rejected")
+    store_files(world, upload)  # data first: the file decides over any outcome
+    [row] = read(registry, world)["releases"]
+    assert (row["readiness"], row["readiness_reason"]) == ("ready", None)
+
+
+def test_the_selection_names_its_previous_deployment(registry, sync_world):
+    upstream, first, second = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
+    upstream.put(first)
+    upstream.put(second)
+    sync(sync_world(upstream))
+    boots = _boots(registry)
+    boots.select(first.deployment_id, 0)
+    boots.select(second.deployment_id, 1)
+    selection = read(registry)["selection"]
+    assert selection["deployment_id"] == str(second.deployment_id)
+    assert selection["previous_deployment_id"] == str(first.deployment_id)
+    assert selection["auto"] is None  # a selection exists: Central never selects by itself
+
+
+def test_the_selected_and_previous_deployments_are_listed_even_when_older_than_the_newest_fifty(
+        registry):
     from test_node_boot import cold_setup
 
     from central.fleet.node_boot import encode_node_deployment
@@ -196,38 +203,43 @@ def test_the_selected_deployment_is_listed_even_when_older_than_the_newest_fifty
         for offset, deployment in enumerate(newer, start=1):
             conn.execute("INSERT INTO node_deployments VALUES(%s,%s,%s)",
                          (deployment.deployment_id, encode_node_deployment(deployment), changed_at + offset))
-    read = _read(registry)
-    listed = [row['deployment_id'] for row in read['deployments']]
+    result = read(registry)
+    listed = [row["deployment_id"] for row in result["deployments"]]
     # The 50 newest, newest first, then the selected one; the older unselected one is not listed.
     assert listed == [str(d.deployment_id) for d in reversed(newer)] + [str(selected.deployment_id)]
     assert str(older.deployment_id) not in listed
-    assert read['selection'] == {'revision': 1, 'deployment_id': str(selected.deployment_id),
-                                 'changed_at': changed_at}
-    row = read['deployments'][-1]
-    assert row == {'deployment_id': str(selected.deployment_id), 'published_at': changed_at,
-                   'base_tag': selected.base.tag,
-                   'app_environment_sha256': selected.app_environment.environment_sha256}
+    assert result["selection"] == {"revision": 1, "deployment_id": str(selected.deployment_id),
+                                   "previous_deployment_id": None, "changed_at": changed_at,
+                                   "auto": None}
+    assert result["deployments"][-1] == {
+        "deployment_id": str(selected.deployment_id), "published_at": changed_at,
+        "base_tag": selected.base.tag,
+        "app_environment_sha256": selected.app_environment.environment_sha256}
 
 
-def test_releases_and_deployments_serve_their_base_tag_and_app(registry):
-    from test_node_boot import cold_setup
-    _, _, deployment = cold_setup(registry, app=False)
-    read = _read(registry)
-    [release] = read['releases']
-    assert release['base_tag'] == deployment.base.tag
-    assert release['app_environment_sha256'] is None
-    assert release['verified_at'] == 1000
-    assert release['download_bytes'] == 256 + 4 * 32 + deployment.manager_primary.size_bytes + 16
-    assert read['deployments'][0]['app_environment_sha256'] is None
+def test_actual_producer_manifest_roundtrips_through_the_sync(registry, sync_world, tmp_path):
+    import httpx
+    from test_node_release_artifacts import inputs
 
+    from central.origins.github import GitHubReleaseOrigin
+    from contracts.node_release import NODE_RELEASE_MANIFEST, parse_node_release
+    _, _, output = inputs(tmp_path)
+    raw = (output / NODE_RELEASE_MANIFEST).read_bytes()
+    manifest = parse_node_release(raw)
+    entry = {"tag_name": manifest.base.tag, "draft": False, "prerelease": False, "assets": [
+        {"name": path.name, "browser_download_url": "https://assets.test/" + path.name, "id": index + 1,
+         "updated_at": "2026-09-30T00:00:00Z"} for index, path in enumerate(output.iterdir())]}
 
-def test_a_release_with_an_app_serves_its_app_environment(registry):
-    _seed(registry)
-    origin, release, _ = publication()
-    discover(registry, origin)
-    [row] = _read(registry)['releases']
-    assert row['manifest_sha256'] == sha256(encode_node_release(release)).hexdigest()
-    assert (row['tag'], row['base_tag']) == ('v9.0.0', 'v9.0.0')
-    assert row['app_environment_sha256'] == release.app_environment.environment_sha256
-    assert row['download_bytes'] == sum(asset.size_bytes for asset in release.artifacts)
-    assert row['verified_at'] is None
+    def handle(request):
+        if request.url.path == "/repos/test/repo/releases":
+            return httpx.Response(200, json=[entry])
+        path = output / request.url.path.lstrip("/")
+        return httpx.Response(200, content=path.read_bytes()) if path.is_file() else httpx.Response(404)
+
+    upstream = Upstream()
+    world = sync_world(upstream)
+    world.handler._origin = GitHubReleaseOrigin("test/repo", transport=httpx.MockTransport(handle))
+    sync(world)
+    [row] = read(registry)["releases"]
+    assert row["tag"] == manifest.base.tag and row["problem"] is None
+    assert row["deployment_id"] is not None

@@ -1,8 +1,9 @@
 """Exact offer bytes over the existing read-through cache; no HTTP routes live here.
 
 An open descriptor leases the inode through response streaming even if a cache cleanup unlinks
-its path. The immutable offer's database root protects *future* opens only when a cache GC
-implementation consults `fleet_offer_artifact_roots`.
+its path. The cache cleaner (`central/assets/maintenance.py`) keeps every desired file, which
+includes every live offer's roots (`fleet_offer_artifact_roots`, and V2 offers younger than
+`OFFER_TTL_SECONDS`), so future opens of a live offer's files find them too.
 
 No request hashes bytes. The worker verified the digest when it filled the cache, the node
 verifies size and SHA-256 after its download, and the cache key fixes the content; so a serve

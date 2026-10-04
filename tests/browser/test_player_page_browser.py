@@ -41,7 +41,7 @@ from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
 from test_node_acceptance import Witnesses
-from test_node_boot import claim_for, cold_setup, environment, seed_verified_publication
+from test_node_boot import claim_for, cold_setup, environment, seed_catalog_publication
 from test_node_lifecycle import Rig
 from test_registry import enroll
 
@@ -1148,7 +1148,7 @@ def test_an_accepted_qualification_is_listed_and_a_following_stage_is_admitted_a
     selected = replace(base, deployment_id=uuid4(), app_environment=target, environment_sources={
         base.manager_primary.environment_sha256: base.environment_sources[base.manager_primary.environment_sha256],
         target.environment_sha256: "https://example.invalid/target"})
-    seed_verified_publication(registry, selected)
+    seed_catalog_publication(registry, selected)
     NodeBootService(witness.sessions).publish(selected)
     _open_gate(registry)
     with _gated_server(registry) as origin:

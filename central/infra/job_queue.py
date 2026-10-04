@@ -10,7 +10,8 @@ jobs §6). The key itself is still the `job_outcomes` key and the NOTIFY payload
 type is additionally registered with `app.periodic`, carrying the constant locks of its
 field-less job, so a tick and an on-demand publish merge (PB9).
 
-Task kwargs are the job's `model_dump(mode="json")` plus the attempt under `ATTEMPT_KWARG`.
+Task kwargs are the job's `model_dump(mode="json")` plus the attempt under `ATTEMPT_KWARG` (and a
+priority override under `PRIORITY_KWARG`, only when one was published).
 procrastinate passes kwargs through verbatim (worker.py:301), and pydantic forbids fields that
 start with `_`, so the attempt can never collide with a job field. A periodic tick adds a
 `timestamp` kwarg, which `decode` drops (the kernel reserves that field name).
@@ -25,13 +26,22 @@ from typing import Any, Final
 import procrastinate
 from procrastinate.exceptions import AlreadyEnqueued
 
-from central.kernel.jobs import PERIODIC_CADENCES, Job, job_keys, registered_job_type
+from central.kernel.jobs import (
+    PERIODIC_CADENCES,
+    Job,
+    job_keys,
+    registered_job_type,
+    require_priority,
+)
 
 TASK_PREFIX: Final = "photo_wall."
 ATTEMPT_KWARG: Final = "_attempt"
+# Set only on a copy published with a priority override (`Publisher.publish(priority=...)`), so
+# its redeliveries and its rescue keep that priority (PB10).
+PRIORITY_KWARG: Final = "_priority"
 _TIMESTAMP_KWARG: Final = "timestamp"  # added by procrastinate's periodic deferrer
 
-TaskBody = Callable[[Job[Any], int], Awaitable[None]]
+TaskBody = Callable[[Job[Any], int, int | None], Awaitable[None]]
 
 
 def task_name(job_type: type[Job[Any]]) -> str:
@@ -44,10 +54,19 @@ def _require_attempt(attempt: object) -> int:
     return attempt
 
 
-def job_kwargs(job: Job[Any], *, attempt: int) -> dict[str, Any]:
-    """The task kwargs of one delivery of `job`."""
+def job_kwargs(job: Job[Any], *, attempt: int, priority: int | None = None) -> dict[str, Any]:
+    """The task kwargs of one delivery of `job` (the priority only when overridden)."""
     job_keys(job)  # TypeError for an unregistered job type
-    return {**job.model_dump(mode="json"), ATTEMPT_KWARG: _require_attempt(attempt)}
+    kwargs = {**job.model_dump(mode="json"), ATTEMPT_KWARG: _require_attempt(attempt)}
+    if priority is not None:
+        kwargs[PRIORITY_KWARG] = require_priority(priority)
+    return kwargs
+
+
+def delivery_priority(kwargs: Mapping[str, Any]) -> int | None:
+    """The priority override a task row carries; None for the job type's own priority."""
+    priority = kwargs.get(PRIORITY_KWARG)
+    return None if priority is None else require_priority(priority)
 
 
 def decode(task_name: str, kwargs: Mapping[str, Any]) -> tuple[Job[Any], int]:
@@ -57,6 +76,7 @@ def decode(task_name: str, kwargs: Mapping[str, Any]) -> tuple[Job[Any], int]:
     job_type = registered_job_type(task_name[len(TASK_PREFIX):])
     fields = dict(kwargs)
     fields.pop(_TIMESTAMP_KWARG, None)
+    fields.pop(PRIORITY_KWARG, None)
     attempt = _require_attempt(fields.pop(ATTEMPT_KWARG, 0))
     return job_type.model_validate(fields), attempt
 
@@ -79,7 +99,7 @@ def periodic_cron(every: timedelta) -> str:
 
 
 def _publish_only(job_type: type[Job[Any]]) -> TaskBody:
-    async def refuse(job: Job[Any], attempt: int) -> None:
+    async def refuse(job: Job[Any], attempt: int, priority: int | None) -> None:
         raise RuntimeError(f"publish-only app cannot run {job_type.job_name}")
 
     return refuse
@@ -96,7 +116,7 @@ def _register(app: procrastinate.App, job_type: type[Job[Any]], body: TaskBody) 
 
     async def run(context: Any, **kwargs: Any) -> None:
         job, attempt = decode(context.job.task_name, kwargs)
-        await body(job, attempt)
+        await body(job, attempt, delivery_priority(kwargs))
 
     run.__name__ = run.__qualname__ = name
     task = app.task(name=name, queue=delivery.queue.value, priority=delivery.priority,
@@ -120,24 +140,26 @@ def build_app(connector: procrastinate.BaseConnector, job_types: Sequence[type[J
 
 
 def _deferrer(app: procrastinate.App, job: Job[Any], *, connection: Any,
-              schedule_at: datetime | None) -> Any:
+              schedule_at: datetime | None, priority: int | None) -> Any:
     # allow_unknown=False: a type this app was not built with must never land on the
     # procrastinate "default" queue.
+    options: dict[str, Any] = {} if priority is None else {"priority": priority}
     return app.configure_task(task_name(type(job)), allow_unknown=False, lock=_lock(job),
                               queueing_lock=job_keys(job).queueing_lock, connection=connection,
-                              schedule_at=schedule_at)
+                              schedule_at=schedule_at, **options)
 
 
 def defer(app: procrastinate.App, job: Job[Any], *, attempt: int, connection: Any,
-          schedule_at: datetime | None = None) -> bool:
+          schedule_at: datetime | None = None, priority: int | None = None) -> bool:
     """Insert one delivery through the caller's connection; True inserted, False merged.
 
     The insert runs in a SAVEPOINT (`connection.transaction()`, the `media_queue.py` pattern) and
     `AlreadyEnqueued` is caught OUTSIDE it, so a merge rolls back only the savepoint and never
     aborts the caller's transaction.
     """
-    kwargs = job_kwargs(job, attempt=attempt)
-    deferrer = _deferrer(app, job, connection=connection, schedule_at=schedule_at)
+    kwargs = job_kwargs(job, attempt=attempt, priority=priority)
+    deferrer = _deferrer(app, job, connection=connection, schedule_at=schedule_at,
+                         priority=priority)
     try:
         with connection.transaction():
             deferrer.defer(**kwargs)
@@ -147,10 +169,10 @@ def defer(app: procrastinate.App, job: Job[Any], *, attempt: int, connection: An
 
 
 async def defer_async(app: procrastinate.App, job: Job[Any], *, attempt: int,
-                      schedule_at: datetime | None = None) -> bool:
+                      schedule_at: datetime | None = None, priority: int | None = None) -> bool:
     """Insert one delivery through the app's own (opened) async pool; True inserted, False merged."""
-    kwargs = job_kwargs(job, attempt=attempt)
-    deferrer = _deferrer(app, job, connection=None, schedule_at=schedule_at)
+    kwargs = job_kwargs(job, attempt=attempt, priority=priority)
+    deferrer = _deferrer(app, job, connection=None, schedule_at=schedule_at, priority=priority)
     try:
         await deferrer.defer_async(**kwargs)
     except AlreadyEnqueued:

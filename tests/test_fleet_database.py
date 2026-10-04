@@ -28,7 +28,6 @@ from central.fleet.fallback import (
     AcceptedFallbackService,
     retire_device_fallback_references,
 )
-from central.fleet.locks import FLEET_ASSET_LOCK
 from central.fleet.models import (
     Artifact,
     BaselineWrite,
@@ -40,6 +39,7 @@ from central.fleet.models import (
 from central.fleet.routes import mount_fleet_routes
 from central.fleet.service import OFFER_TTL_SECONDS, FleetService
 from central.infra.asset_records import PgAssetRecords
+from central.infra.asset_roots import FLEET_ASSET_LOCK
 from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind, AssetReady
@@ -202,22 +202,15 @@ def test_offer_freezes_exact_pair_provenance_and_expiry(registry) -> None:
                       "sha256": APP_SHA, "size": 123},
                      {"kind": "base", "content_key": TARBALL_SHA,
                       "sha256": BASE_SHA, "size": len(BASE_BYTES)}]
-    evicted = []
-    assert not service.evict_if_unretained(
-        kind="base", content_key=TARBALL_SHA, evict=lambda: evicted.append("base"))
-    assert evicted == []
     registry.clock.advance(OFFER_TTL_SECONDS)
     with pytest.raises(FleetError, match="boot_offer_expired"):
         service.create_offer(_request(1, "a"))
     with pytest.raises(FleetError, match="boot_offer_expired"):
         service.offer_asset(UUID(first["offer_id"]), "base")
-    assert service.evict_if_unretained(
-        kind="base", content_key=TARBALL_SHA, evict=lambda: evicted.append("base"))
-    assert evicted == ["base"]
 
 
 def test_current_generation_accepted_base_remains_desired_after_offer_expiry(registry) -> None:
-    """The desired-assets view must honor the same conservative root as cache GC."""
+    """The desired-assets view is the cache cleaner's keep-set (`MaintainCache`)."""
     _seed_release(registry)
     fleet = FleetService(registry.db, registry.clock)
     fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
@@ -244,10 +237,6 @@ def test_current_generation_accepted_base_remains_desired_after_offer_expiry(reg
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert accepted_key in desired.base_tarballs
-    assert not fleet.evict_if_unretained(
-        kind="base", content_key=accepted_key,
-        evict=lambda: pytest.fail("accepted base evicted"),
-    )
 
 
 def test_check_in_sequence_and_delayed_boot_remain_observational(registry) -> None:
@@ -443,8 +432,6 @@ def test_accepted_fallback_retains_exact_locator_after_offer_expiry(registry) ->
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA in desired.player_payloads
-    assert not fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
-                                        evict=lambda: pytest.fail("retained fallback evicted"))
 
 
 def test_new_fallback_root_refuses_offer_expired_during_fleet_lock_wait(
@@ -513,10 +500,6 @@ def test_retired_device_keeps_fallback_history_but_releases_bytes(registry) -> N
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA not in desired.player_payloads
-    evicted = []
-    assert fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
-                                    evict=lambda: evicted.append(APP_SHA))
-    assert evicted == [APP_SHA]
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM asset_references WHERE owner=%s",
                             (f"fleet-fallback:{device_id}:1",)).fetchone()["n"] == 0
@@ -732,19 +715,12 @@ def test_accepted_fallback_rotation_refuses_unfinished_attempt(registry) -> None
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA in desired.player_payloads  # The active attempt's own root remains.
-    assert not FleetService(registry.db, registry.clock).evict_if_unretained(
-        kind="app", content_key=APP_SHA,
-        evict=lambda: pytest.fail("active attempt bytes evicted"))
     with registry.db.transaction() as conn:
         conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s WHERE attempt_id=%s",
                      (registry.clock.utc(), attempt_id))
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA not in desired.player_payloads
-    evicted = []
-    assert FleetService(registry.db, registry.clock).evict_if_unretained(
-        kind="app", content_key=APP_SHA, evict=lambda: evicted.append(APP_SHA))
-    assert evicted == [APP_SHA]
 
 
 def test_issued_attempt_retains_exact_bytes_across_revocation_until_release(registry) -> None:
@@ -776,19 +752,12 @@ def test_issued_attempt_retains_exact_bytes_across_revocation_until_release(regi
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA in desired.player_payloads
-    assert not fleet.evict_if_unretained(
-        kind="app", content_key=APP_SHA,
-        evict=lambda: pytest.fail("unresolved issued attempt evicted"))
     with registry.db.transaction() as conn:
         conn.execute("UPDATE fleet_app_attempts SET root_released_at=%s "
                      "WHERE attempt_id=%s", (registry.clock.utc(), attempt_id))
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA not in desired.player_payloads
-    evicted = []
-    assert fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
-                                    evict=lambda: evicted.append(APP_SHA))
-    assert evicted == [APP_SHA]
 
 
 def test_repeated_exact_byte_reads_consume_a_separate_quota(registry) -> None:

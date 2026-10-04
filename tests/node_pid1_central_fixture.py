@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
-from test_node_boot import seed_verified_publication
+from test_node_boot import seed_catalog_publication
 
 from central.app import create_app
 from central.assets.layout import CacheLayout
@@ -178,7 +178,7 @@ def _central_fixture(
                 for r in [manager, ref]
             },
         )
-        seed_verified_publication(
+        seed_catalog_publication(
             registry, selected
         )  # Explicit synthetic release-provenance fixture.
         boots.publish(selected)

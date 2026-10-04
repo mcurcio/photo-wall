@@ -12,8 +12,8 @@ from dataclasses import dataclass
 
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
-from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.models import T0_AUDIENCE, FleetError, OfferAsset
+from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 from contracts.time import Clock
 

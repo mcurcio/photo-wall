@@ -18,6 +18,12 @@ _FETCH_RETRY = (timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5)
 # (procrastinate picks `priority DESC, id ASC`). Pick order only: a tile already running still
 # holds a FETCH slot for up to the client's `metadata_seconds`.
 _THUMBNAIL_PRIORITY = -50
+# A node release file Central downloads only because its release is in the window (the newest
+# stable releases), not because anything selected, offered or requested it: picked after every
+# queued thumbnail, so a background download never delays a preview tile or a wanted file. A
+# per-publish override (`Publisher.publish(priority=...)`), not a job type's: the same key is
+# wanted at the type's priority when something selects it.
+BACKGROUND_PRIORITY: Final = -60
 
 
 class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IMAGE,
@@ -66,6 +72,11 @@ class Prefetch(Job[None], name="assets.prefetch",
     pass
 
 
+class MaintainCache(Job[None], name="assets.maintain_cache",
+                    delivery=Delivery(queue=QueueName.UPKEEP, every=timedelta(hours=1))):
+    """Remove cached release files nothing wants (`central/assets/maintenance.py`)."""
+
+
 class RescueStalledJobs(Job[None], name="queue.rescue_stalled",
                         delivery=Delivery(queue=QueueName.UPKEEP, every=timedelta(minutes=1))):
     pass
@@ -80,4 +91,4 @@ AssetJob: TypeAlias = (FetchOsImage | FetchPackage | FetchPlayerPayload | FetchS
                        | FetchLibraryThumbnail)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
     FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment, FetchLibraryThumbnail,
-    SyncReleases, Prefetch, RescueStalledJobs, PurgeFinishedJobs)
+    SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs)

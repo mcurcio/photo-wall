@@ -69,7 +69,7 @@ def test_a_preview_tile_is_picked_after_every_other_fetch_job():
     app = build_app(InMemoryConnector(), CATALOG, None)
 
     def deferred(job):
-        return _deferrer(app, job, connection=None, schedule_at=None).job.priority
+        return _deferrer(app, job, connection=None, schedule_at=None, priority=None).job.priority
     assert deferred(FetchLibraryThumbnail(asset_id="asset-" + "a" * 64)) < deferred(
         FetchOsImage(tarball_sha256="b" * 64))
 

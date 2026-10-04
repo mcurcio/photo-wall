@@ -38,6 +38,7 @@ from central.kernel.job_types import (
 from central.kernel.ports import (
     Candidates,
     ContentRequest,
+    DesiredTiers,
     NetbootBaseRequest,
     PackageRequest,
     Resolution,
@@ -219,15 +220,26 @@ class ReleaseCatalog:
     async def desired_assets(self) -> frozenset[AssetJob]:
         return await self._in_tx(self.desired_in)
 
+    async def desired_tiers(self) -> DesiredTiers:
+        return await self._in_tx(self.desired_tiers_in)
+
     def desired_in(self, tx: Transaction) -> frozenset[AssetJob]:
-        """The desired set, read inside the caller's transaction (the sync tail uses it).
+        """The desired set (`desired_tiers_in`, both tiers), read inside the caller's
+        transaction: the sync tail, the release read and the cache cleaner keep exactly this."""
+        tiers = self.desired_tiers_in(tx)
+        return tiers.wanted | frozenset(tiers.background)
+
+    def desired_tiers_in(self, tx: Transaction) -> DesiredTiers:
+        """The desired set split by urgency, read inside the caller's transaction.
 
         OS images and `.deb`s for active devices' pins, known-goods and last-served tags (what
         they run now; only those served within `SERVED_TAG_WINDOW`) and `frontier or bootstrap`;
         the `.deb` of the promoted and the last-good tag. Tags without the locator are skipped, and so is a frozen (divergent) tag's `.deb`
         once its file is gone: upstream serves other bytes for it, so fetching it can only fail.
-        Plus the exact fleet roots (`ReleaseRecords.fleet_desired_assets`), including the selected
-        V2 node deployment's base and sealed environments.
+        Plus the exact fleet roots (`ReleaseRecords.fleet_desired_assets`), including the wanted
+        V2 node deployments' bases and sealed environments. Everything is `wanted` except the
+        files only the window of newest stable node releases names: those are `background`,
+        newest release first.
         """
         named = self._devices.named_tags(tx, served_since=self._served_since())
         by_tag = {row.tag: row for row in self._releases.all(tx)}
@@ -258,7 +270,8 @@ class ReleaseCatalog:
         jobs.update(FetchPackage(sha256=digest) for digest in fleet.player_debs)
         jobs.update(FetchPlayerPayload(sha256=digest) for digest in fleet.player_payloads)
         jobs.update(FetchSealedEnvironment(sha256=digest) for digest in fleet.sealed_environments)
-        return frozenset(jobs)
+        background = tuple(job for job in fleet.window if job not in jobs)
+        return DesiredTiers(frozenset(jobs), background)
 
     def _obtainable(self, tx: Transaction, row: ReleaseRow | None) -> DevicePackage | None:
         """The row's `.deb`, unless the tag is frozen and its file is gone (unobtainable)."""
@@ -476,7 +489,8 @@ class ReleaseCatalog:
         historical `.deb`. An unknown sha costs one indexed lookup.
 
         The on-disk answer is a snapshot: a file removed between here and the reader's open is
-        still fetched once. No cache cleanup ships in the MVP, so today nothing removes one.
+        still fetched once. The cache cleaner (`MaintainCache`) removes only files `desired_in`
+        does not name, past a grace, so a desired `.deb` it resolves here is never removed.
         A frozen (divergent) tag never makes its `.deb` desired here (see `desired_in`).
         """
         rows = [row for row in self._releases.shipping(tx, request.sha256)

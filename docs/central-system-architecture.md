@@ -133,7 +133,7 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
 | `SyncMediaSource(source)` | `SyncMediaSources`; operator source change | `source` | Catalog | Media catalog + `media-variant` Asset rows, then publishes `Prefetch` | no |
 | `Prefetch` | Tick; after sync, pin, promote, plan change | (none) | Assets & cache | Nothing except the fetch job of each desired asset missing from disk | yes + on change |
-| `MaintainCache` | Tick | (none) | Assets & cache | Removes files: least recently used *non-desired* files while over budget (never a desired file; if desired files alone exceed the budget, it stays over budget and raises a fleet-health warning), then orphans and stale temp files older than the grace period. | yes |
+| `MaintainCache` | Tick | (none) | Assets & cache | Removes release files nothing wants: an eager keep-set sweep, not budget-gated. Desired = the window of the 3 newest stable node releases + the selected + the previous deployment + every live boot offer's content + the V1 roots (`desired_in`, read under the asset-roots lock). Spares a file whose mtime or `last_served_at` is within `SERVE_GRACE` (1 h), and a temp file not idle past `TEMP_GRACE` (1 h); at most 50 unlinks per run. Only `os-images/` and `apps/`: never `previews/` or `media/`. Rows, references and produced facts stay. | yes |
 | `RescueStalledJobs` | Tick | (none) | Queue ops (infra) | Re-publishes jobs whose worker's heartbeat stopped, then closes their rows | yes |
 | `PurgeFinishedJobs` | Tick | (none) | Queue ops (infra) | Deletes old finished job rows (procrastinate's `delete_old_jobs`) | yes |
 
@@ -281,9 +281,10 @@ the bullet:** `.deb`, media, `MaintainCache`, the fleet signal.
 1. **Media identity: decided** (the recommendation; the owner had no preference). Players request
    media by original + recipe (the recipe id includes the renderer build). The digest is a
    write-once integrity check (§10.2). The player URL changes (§8).
-2. **Over budget: decided.** `MaintainCache` evicts least recently used first and never a desired
-   file. If desired files alone exceed the budget, the cache goes over budget and raises a
-   fleet-health warning instead of fighting `Prefetch`.
+2. **Over budget: superseded** (auto-ingest design §6.3). `MaintainCache` has no budget: it is
+   an eager keep-set sweep that removes every non-desired release file past its grace and never a
+   desired one (see the `MaintainCache` row in §4). Desired files alone may still fill the disk;
+   nothing evicts them.
 3. **Terminal fetch failure: decided.** The job is not retried. The *next request* for the asset
    starts a new attempt, with no rate limit. `Prefetch` and ticks do not retry it (§10.2, cost
    in §7). `PurgeFinishedJobs` drops an outcome not written for 30 days, and ticks then retry it.

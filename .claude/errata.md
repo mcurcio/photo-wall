@@ -3642,3 +3642,32 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   pre-copies every archive into Central's cache, so the cold path (a ~974 MB sealed-environment fetch through the
   read-through wait, 503 + Retry-After, and the preparer's retries) is never exercised in CI. Needs a fill source the
   fixture's worker can reach for missed sealed-environment entries, and an arm64 privileged Docker leg.
+
+## 2026-10-04 · node release readiness fix cycle 2 (implementer) · release-readiness design §6.1 · central/kernel/ports.py, central/content_catalog/deployment.py
+- E-NRR-1 · Design drift, as built: §6.1 says `NodePublication` gains the node manifest asset's `UpstreamVersion`.
+  Built instead: `PublishedRelease.node_version: UpstreamVersion | None` (central/kernel/ports.py ~271-286), because
+  `node_problem` (a release whose node facts failed to read, with no `NodePublication`) also needs a version guard,
+  independent of the legacy manifest's `upstream_version`. Also added `PublishedRelease.legacy: bool = True`, False
+  only for a pre-release listed while legacy pre-releases are off (node facts observed, legacy facts unread, no legacy
+  row written; construction refuses legacy fields when False). `OFFER_TTL` is named `OFFER_TTL_SECONDS`
+  (central/content_catalog/deployment.py:28) to carry its unit. The design reads as built from this entry.
+- E-NRR-1 · APPLIED (2026-10-04, asset-roots lock review fixes): the auto-ingest design's §6.1 now names
+  `PublishedRelease.node_version` and `PublishedRelease.legacy` (central/kernel/ports.py ~267-292) instead of a
+  version on `NodePublication`, and §6.2 names `OFFER_TTL_SECONDS` (central/content_catalog/deployment.py:28); a
+  history line r3 records it. The entry above stays as written.
+
+## 2026-10-04 · asset-roots lock review fixes (implementer) · central/infra/{catalog_records,node_releases}.py, central/netboot_base.py
+- E-ARL-1 · The "every root writer takes the asset-roots lock" claim (CacheRetention, maintenance.py, design §6.3)
+  was false for the node observation upsert (`_observe`, so `record_problem`) and for every V1 desired-set writer
+  (`PgReleaseRecords.claim/apply/set_promoted/set_last_good`, `PgDeviceRecords.set_pin/record_served`,
+  `netboot_base.record_base_health`). Each now takes the lock first (catalog records through `_root_write`).
+  tests/test_asset_roots_lock.py proves each waits on the lock and makes a new records method declare its side.
+  Cost: netboot served/known-good writes, pins and each V1 sync transaction now queue behind a cleaner run (at most
+  50 unlinks).
+- E-ARL-2 · OPEN (lock order, not fixed): `SyncReleasesHandler._tail` locks device rows (`sweep_failed_boots`) and
+  then takes the asset-roots lock (`select_first`, pre-existing; now also `set_promoted` when auto-promote moves),
+  the reverse of retirement / `record_served` / `record_base_health` (lock, then device row). PostgreSQL detects
+  the cycle and aborts one transaction. Taking the lock at the tail's start fixes it but serializes operator
+  promotion and V1 claims with the whole tail, which makes the interleavings of
+  test_content_catalog_sync.py::test_an_operator_promotion_committed_during_the_sync_tail_is_never_overwritten and
+  test_release_versions.py::test_v5_* impossible (both fail/hang); needs an orchestrator decision.

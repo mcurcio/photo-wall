@@ -35,6 +35,7 @@ from central.content_catalog.ports import Promotion
 from central.content_catalog.sync import SyncReleasesHandler
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.handling import OriginUnavailable, handler_job_type
@@ -110,6 +111,7 @@ class World:
     db: object
     catalog: ReleaseCatalog  # the handler's: the operator route runs through the same one
     clock: ManualClock
+    stored: DiskStoredAssets
 
     def another_handler(self, origin: ReleaseOrigin) -> SyncReleasesHandler:
         """A second sync (another worker) over the same database, publisher and clock, with its
@@ -118,7 +120,8 @@ class World:
                                    devices=PgDeviceRecords(), assets=self.assets,
                                    transactions=RecordingTransactions(self.db),
                                    publisher=self.publisher, catalog=self.catalog,
-                                   clock=self.clock)
+                                   clock=self.clock, node_releases=PgNodeReleaseRecords(self.clock),
+                                   readiness=self.stored)
 
     def updated_at(self) -> dict[str, float]:
         with self.db.transaction() as conn:
@@ -146,16 +149,20 @@ def make_world(registry, tmp_path):
             store_deb(seeding, assets, store, locator.sha256, locator.size)
         transactions = RecordingTransactions(registry.db)
         publisher = RecordingPublisher(clock)
+        stored = DiskStoredAssets(records=assets, store=store)
         catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
-                                 stored=DiskStoredAssets(records=assets, store=store),
-                                 transactions=transactions, publisher=publisher, clock=clock)
+                                 stored=stored, transactions=transactions, publisher=publisher,
+                                 clock=clock)
         origin = origin or RecordingOrigin(origin_listing, honour_etag=honour_etag)
         handler = SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
                                       devices=PgDeviceRecords(), assets=assets,
                                       transactions=transactions, publisher=publisher,
-                                      catalog=catalog, clock=clock, **handler_options)
+                                      catalog=catalog, clock=clock,
+                                      node_releases=PgNodeReleaseRecords(clock),
+                                      readiness=stored, **handler_options)
         return World(handler, origin, assets, transactions, publisher, store,
-                     Reads(RecordingTransactions(registry.db)), registry.db, catalog, clock)
+                     Reads(RecordingTransactions(registry.db)), registry.db, catalog, clock,
+                     stored)
 
     return build
 
