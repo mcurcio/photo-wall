@@ -5,9 +5,11 @@ Job types are imported at runtime, never under `TYPE_CHECKING`: `handler_job_typ
 
 One sync is: read the ETag and list releases, sending the ETag only if it was stored less than
 `ETAG_MAX_AGE` ago (an origin failure propagates; the runtime records it); unless unchanged, one
-transaction per release, then store the ETag; then a tail transaction (the stale-`pending` boot
-sweep, auto-promote, a fetch for every changed desired key, and `Prefetch`). Withdrawal of tags
-gone upstream is not in the MVP.
+transaction per release, then store the ETag; then the stale-`pending` boot sweep in a
+transaction of its own (an idempotent write per device; it holds device rows, so no other lock
+is ever taken after them); then a tail transaction (auto-promote, the first-run auto-select, a
+fetch for every changed desired key, and `Prefetch`). Withdrawal of tags gone upstream is not in
+the MVP.
 
 Jobs may run in any order (docs/central-idempotent-jobs.md rule 2, §6): each release transaction
 applies one observation only if its upstream version (the manifest asset's `(updated_at, id)`)
@@ -29,6 +31,23 @@ cleared).
 
 Automatic promotion holds a transaction-scoped advisory lock from its first read to its write, so
 the last writer read every row committed before it.
+
+**Node releases** (auto-ingest design §6.1): a release that attaches a node manifest gets a
+second transaction of its own after the legacy one. It writes the release catalog row, the
+deployment (`NodeReleaseRecords.ingest`, deployment id derived from the manifest digest) and the
+tag's observation, under the same not-older guard. A refusal of that release (a malformed
+manifest the origin already turned into `node_problem`, or an identity / pin / environment
+conflict the ingest raises) rolls that transaction back and records the problem on the tag in
+another: one release's failure is that release's state, and the tick, the ETag and every other
+release proceed. A deployment that cannot be built from a manifest the origin accepted (a bug,
+or data the code did not foresee) is refused by the ingest itself as `node_release_invalid`,
+classified where that data error starts. Every other exception stops the tick before the ETag
+is stored: the origin's own failures (listing, transport) and the database's (lost connection,
+deadlock, timeout), which say nothing about the release. Ingest never selects. The tail's first-run auto-select is the only automatic
+selection: with no selection ever made, it selects the newest stable release that has not
+failed, once that release is ready (`first_run_candidate`, which the release read shows too),
+through the one select writer with expected revision 0, so it can only create the selection,
+never move it.
 """
 
 from __future__ import annotations
@@ -38,9 +57,16 @@ import logging
 from datetime import timedelta
 from typing import Final
 
-from central.content_catalog.boot_policy import newest
+from central.content_catalog.boot_policy import first_run_choice, newest
 from central.content_catalog.catalog import ReleaseCatalog, in_transaction
-from central.content_catalog.ports import DeviceRecords, ReleaseRecords, ReleaseRow
+from central.content_catalog.ports import (
+    DeviceRecords,
+    NodeReleaseRecords,
+    NodeReleaseRefused,
+    ReleaseRecords,
+    ReleaseRow,
+    StableDeployment,
+)
 from central.kernel.assets import AssetKey, AssetReference, OriginLocator
 from central.kernel.job_types import (
     FetchOsImage,
@@ -50,7 +76,13 @@ from central.kernel.job_types import (
     SyncReleases,
 )
 from central.kernel.jobs import asset_key, job_keys
-from central.kernel.ports import AssetRecords, PublishedRelease, ReleaseOrigin
+from central.kernel.ports import (
+    AssetReadiness,
+    AssetRecords,
+    PublishedRelease,
+    Readiness,
+    ReleaseOrigin,
+)
 from central.kernel.publishing import Publisher
 from central.kernel.transactions import Transaction, Transactions
 from contracts.time import Clock
@@ -61,15 +93,30 @@ LOG = logging.getLogger("central.content_catalog.sync")
 ETAG_MAX_AGE: Final = timedelta(hours=1)
 
 
+def first_run_candidate(tx: Transaction, node: NodeReleaseRecords, readiness: AssetReadiness
+                        ) -> tuple[StableDeployment, Readiness] | None:
+    """The release a wall that never had a selection gets (R4) and its readiness: the newest
+    stable release with a deployment that has not failed (`first_run_choice`); None once any
+    selection exists or with no candidate. The ONE definition: the sync tail selects it once it
+    is ready, and the release read shows it."""
+    if node.selection_exists(tx):
+        return None
+    return first_run_choice((row, readiness.readiness(tx, row.jobs, wanted=True))
+                            for row in node.stable_deployments(tx))
+
+
 class SyncReleasesHandler:
     """Implements `Handler[SyncReleases, None]`."""
 
     def __init__(self, *, origin: ReleaseOrigin, releases: ReleaseRecords, devices: DeviceRecords,
                  assets: AssetRecords, transactions: Transactions, publisher: Publisher,
-                 catalog: ReleaseCatalog, clock: Clock,
+                 catalog: ReleaseCatalog, clock: Clock, node_releases: NodeReleaseRecords,
+                 readiness: AssetReadiness,
                  pending_health_timeout: timedelta = timedelta(minutes=15),
                  include_prereleases: bool = False) -> None:
         self._origin = origin
+        self._node = node_releases
+        self._readiness = readiness
         self._releases = releases
         self._devices = devices
         self._assets = assets
@@ -89,11 +136,41 @@ class SyncReleasesHandler:
         changed: set[AssetKey] = set()
         if not listing.unchanged:
             for release in listing.releases:
-                changed |= await in_transaction(
-                    transactions, lambda tx, r=release: self._record(tx, r))
+                if release.legacy:
+                    changed |= await in_transaction(
+                        transactions, lambda tx, r=release: self._record(tx, r))
+                await self._record_node(release)
             await in_transaction(transactions, lambda tx: self._releases.store_etag(
                 tx, listing.etag, now=self._clock.utc()))
+        await in_transaction(transactions, self._sweep_failed_boots)
         await in_transaction(transactions, lambda tx: self._tail(tx, changed))
+
+    def _sweep_failed_boots(self, tx: Transaction) -> None:
+        served_before = self._clock.utc() - self._pending_health_timeout.total_seconds()
+        self._devices.sweep_failed_boots(tx, served_before=served_before)
+
+    async def _record_node(self, release: PublishedRelease) -> None:
+        """The release's node half: ingest it, or record why it is refused (module docstring)."""
+        problem = release.node_problem
+        if release.node_publication is None and problem is None:
+            return  # no node manifest attached
+        now = self._clock.utc()
+        if release.node_publication is not None:
+            try:
+                if not await in_transaction(self._transactions, lambda tx: self._node.ingest(
+                        tx, release, now=now)):
+                    LOG.info("node release %s: an older observation was refused", release.tag)
+                return
+            except NodeReleaseRefused as refused:  # the release's own data; nothing else
+                if refused.__cause__ is not None:
+                    LOG.warning("node release %s: its deployment could not be built",
+                                release.tag, exc_info=refused.__cause__)
+                problem = refused.reason
+        assert problem is not None
+        LOG.warning("node release %s refused: %s", release.tag, problem)
+        if not await in_transaction(self._transactions, lambda tx: self._node.record_problem(
+                tx, release, problem, now=now)):
+            LOG.info("node release %s: an older refusal was not recorded", release.tag)
 
     def _record(self, tx: Transaction, release: PublishedRelease) -> set[AssetKey]:
         """Apply one observation and its references; return the keys whose reference changed.
@@ -185,14 +262,30 @@ class SyncReleasesHandler:
         return old
 
     def _tail(self, tx: Transaction, changed: set[AssetKey]) -> None:
-        served_before = self._clock.utc() - self._pending_health_timeout.total_seconds()
-        self._devices.sweep_failed_boots(tx, served_before=served_before)
         self._auto_promote(tx)
+        self._auto_select(tx)
         if changed:
             fetches = [job for job in self._catalog.desired_in(tx) if asset_key(job) in changed]
             for fetch in sorted(fetches, key=lambda job: job_keys(job).lock):
                 self._publisher.publish(fetch, within=tx, retry_terminal=True)
         self._publisher.publish(Prefetch(), within=tx)
+
+    def _auto_select(self, tx: Transaction) -> None:
+        """First run only (R4): with no node boot selection ever made, select the newest stable
+        release that has not failed once it is ready. Never moves a selection (R6)."""
+        choice = first_run_candidate(tx, self._node, self._readiness)
+        if choice is None:
+            return
+        row, readiness = choice
+        if readiness.state != "ready":
+            LOG.info("no node boot selection yet: %s is %s", row.tag, readiness.state)
+            return
+        if self._node.select_first(tx, row.deployment_id, now=self._clock.utc()):
+            LOG.warning("no node boot selection existed: selected %s (%s), the newest ready "
+                        "stable release; later upgrades are the operator's", row.tag,
+                        row.deployment_id)
+        else:
+            LOG.info("first-run selection of %s yielded to a selection made meanwhile", row.tag)
 
     def _auto_promote(self, tx: Transaction) -> None:
         """Auto-promote the newest release while nothing is promoted or the promotion is the

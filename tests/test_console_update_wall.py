@@ -1,6 +1,7 @@
-"""Update the wall, its pure parts (console DDD Part E §25a, bead NU1): updateWall.js
-(`journeyStep` over every row of the step table, `keepPlan`'s order, `keepRow` over every row of
-the Keep table, `nextReboot`'s one-in-flight rule, `keepPause`), run under Node as
+"""Update the wall, its pure parts (console DDD Part E §25a, beads NU1 and B8): updateWall.js
+(`journeyStep` over every row of the step table, the one Put-on-the-wall confirmation in both
+gate forms and its download wait, `keepPlan`'s order, `keepRow` over every row of the Keep table,
+`nextReboot`'s one-in-flight rule, `keepPause`), run under Node as
 tests/test_console_stage.py runs stage.js, and the static rule that the journey's modules name no
 route (every write goes through its verb's one send function). Without Node it skips on a
 developer machine, but FAILS where the checks are meant to run in full. The browser half is in
@@ -20,24 +21,29 @@ NEW_APP = "22" * 32
 
 SCRIPT = r"""
 const uw = await import(process.argv[1]);
-const { deploymentIdFor } = await import(new URL("./releases.js", process.argv[1]).href);
 const [OLD_APP, NEW_APP] = [process.argv[2], process.argv[3]];
 const out = {};
 
 const MANIFEST = "ab".repeat(32);
 const NOAPP_MANIFEST = "cd".repeat(32);
 const BASE_MANIFEST = "ef".repeat(32);
-const TARGET = deploymentIdFor(MANIFEST, true);
-const release = (manifest, tag, base, app) => ({ manifest_sha256: manifest, tag, revision: "a".repeat(40),
-  discovered_at: 900, verified_at: null, base_tag: base, app_environment_sha256: app, download_bytes: 5 });
-const releases = [release(MANIFEST, "v2.0.0", "v1.0.0", NEW_APP), release(NOAPP_MANIFEST, "v2.1.0", "v1.0.0", null),
-  release(BASE_MANIFEST, "v3.0.0", "v3.0.0", NEW_APP)];
+const TARGET = "abababab-abab-8bab-abab-abababababab";
+const release = (manifest, tag, base, app, extra = {}) => ({ manifest_sha256: manifest, tag, revision: "a".repeat(40),
+  discovered_at: 900, base_tag: base, app_environment_sha256: app, stable: true, problem: null,
+  deployment_id: `${manifest.slice(0, 8)}-0000-8000-8000-000000000000`, in_window: true, readiness: "ready",
+  readiness_reason: null, missing_bytes: 0, ...extra });
+const releases = [release(MANIFEST, "v2.0.0", "v1.0.0", NEW_APP, { deployment_id: TARGET }),
+  release(NOAPP_MANIFEST, "v2.1.0", "v1.0.0", null), release(BASE_MANIFEST, "v3.0.0", "v3.0.0", NEW_APP)];
+// A tag whose every upload was refused: no deployment.
+const REJECTED = release("ff".repeat(32), "v4.0.0", null, null, { manifest_sha256: null, deployment_id: null,
+  problem: "node_release_invalid", readiness: null, missing_bytes: null });
 const old = { deployment_id: "d0000000-0000-8000-8000-000000000000", published_at: 800, base_tag: "v1.0.0",
   app_environment_sha256: OLD_APP };
 const target = { deployment_id: TARGET, published_at: 850, base_tag: "v1.0.0", app_environment_sha256: NEW_APP };
-const readOf = ({ listed = true, selected = old.deployment_id, extra = [] } = {}) => ({ read_at: 1000,
-  selection: { deployment_id: selected, revision: 4, changed_at: 900 }, releases,
-  deployments: [old, ...(listed ? [target] : []), ...extra] });
+// The target's deployment is beyond the capped Deployments list unless `listed`: its own row names it.
+const readOf = ({ listed = true, selected = old.deployment_id, extra = [], rows = releases } = {}) => ({ read_at: 1000,
+  selection: { deployment_id: selected, revision: 4, changed_at: 900, previous_deployment_id: null },
+  releases: [...rows, REJECTED], deployments: [old, ...(listed ? [target] : []), ...extra] });
 const qual = (linked, accepted = []) => ({ linked_app: linked === null ? null : { environment_sha256: linked, admitted_at: 1 },
   acceptances: accepted.map((sha) => ({ environment_sha256: sha, base_content_key: "k", base_tag: "v1.0.0", accepted_at: 2 })) });
 const ops = (operations, linked = OLD_APP, accepted = [OLD_APP]) => ({ read_at: 1000, operations, qualification: qual(linked, accepted) });
@@ -54,8 +60,10 @@ const r = (releasesRead, tried = null, rows = null, tag) => ({ releases: release
 out.steps = {
   reading: step(r(null), null),
   noRelease: step({ ...r(readOf()), tag: "v9.9.9" }, null),
-  getIt: step(r(readOf({ listed: false })), null),
+  rejected: step({ ...r(readOf()), tag: "v4.0.0" }, null),
   choose: step(r(readOf()), null),
+  // Beyond the capped Deployments list: the release row's own deployment is enough.
+  chooseUnlisted: step(r(readOf({ listed: false })), null),
   // Tried, no stored acceptance for the linked app: qualify first.
   qualifyingNoAcceptance: step(r(readOf(), { operations: ops([], OLD_APP, []) }), "p-1"),
   qualifyingSampling: step(r(readOf(), { operations: ops([]) }), "p-1", held({ sampling: true })),
@@ -96,6 +104,20 @@ out.withdrawn = {
 };
 out.target = targetOf("v2.0.0");
 
+// --- Put vX on the wall: ONE confirmation, in its two gate forms, with the readiness line.
+const request = { contents: "Base v1.0.0 · app 222222…", noApp: false, body: { deployment_id: TARGET, expected_revision: 4 } };
+const downloading = targetOf("v2.0.0", readOf({ rows: [release(MANIFEST, "v2.0.0", "v1.0.0", NEW_APP,
+  { deployment_id: TARGET, readiness: "downloading", missing_bytes: 1500000000 })] }));
+out.put = {
+  closed: uw.putConfirmation(request, targetOf("v2.0.0"), false),
+  open: uw.putConfirmation(request, targetOf("v2.0.0"), true),
+  openDownloading: uw.putConfirmation(request, downloading, true),
+  wait: [uw.downloadWait(targetOf("v2.0.0")), uw.downloadWait(downloading),
+    uw.downloadWait({ release: { tag: "v2.0.0", readiness: "failed", readiness_reason: "cache_disk_full" } }),
+    uw.downloadWait({ release: { tag: "v2.0.0", readiness: null } })],
+  rejectedTarget: targetOf("v4.0.0"),
+};
+
 // --- keepPlan: known, not retired Players; the tried one first, then by name.
 const player = (id, serial, extra = {}) => ({ id, device_id: `dev-${id}`, registered_at: 1, retired_at: null,
   last_seen: 990, last_report_at: 995, authority_epoch: 1, ...extra });
@@ -132,12 +154,20 @@ const sent = (atMs = 0, epoch = 0) => ({ request: { body: { command_id: "cmd-1" 
 // v2.0.0's app is carried by no other release on another base, so it identifies v2.0.0; in the
 // full catalog v3.0.0 pairs the same app with base v3.0.0, a base-only release of it.
 const IDENTIFIED_READ = { ...readOf(), releases: releases.slice(0, 2) };
+// A pre-release pairing the same app with another base is not a release any Player runs.
+const PRE = release(BASE_MANIFEST, "v3.0.0-rc.1", "v3.0.0", NEW_APP, { stable: false });
+const PRE_READ = { ...readOf(), releases: [...releases.slice(0, 2), PRE],
+  deployments: [old, target, { deployment_id: PRE.deployment_id, published_at: 870, base_tag: "v3.0.0",
+    app_environment_sha256: NEW_APP }] };
+// ...unless it is the previous selection: a Player not rebooted since may still run it.
+const PRE_PREVIOUS = { ...PRE_READ, selection: { ...PRE_READ.selection, previous_deployment_id: PRE.deployment_id } };
 const T = targetOf("v2.0.0", IDENTIFIED_READ);
 const SHARED = targetOf("v2.0.0");
 const BASE_ONLY = targetOf("v3.0.0");
 const NOAPP = targetOf("v2.1.0");
 out.identifies = { identified: T.appIdentifies, sharedApp: SHARED.appIdentifies, baseOnly: BASE_ONLY.appIdentifies,
-  noApp: NOAPP.appIdentifies, pure: uw.appIdentifiesTarget(IDENTIFIED_READ, T) };
+  noApp: NOAPP.appIdentifies, pure: uw.appIdentifiesTarget(IDENTIFIED_READ, T),
+  prerelease: uw.appIdentifiesTarget(PRE_READ, T), prereleasePrevious: uw.appIdentifiesTarget(PRE_PREVIOUS, T) };
 const keepValue = (input) => uw.keepRow({ node: node(), snapshot: snapshotOf(), playerId: "p-a", target: T, gate: open,
   sent: null, waitedMs: 0, skipped: false, ...input });
 const keep = (input) => {
@@ -320,7 +350,8 @@ def _run():
 def test_every_row_of_the_step_table_derives_from_the_reads():
     steps = _run()["steps"]
     assert steps == {
-        "reading": "reading", "noRelease": "no_release", "getIt": "get_it", "choose": "choose",
+        "reading": "reading", "noRelease": "no_release", "rejected": "rejected", "choose": "choose",
+        "chooseUnlisted": "choose",
         "qualifyingNoAcceptance": "qualifying", "qualifyingSampling": "qualifying",
         "qualifyingAfterRefusal": "qualifying", "stagingAccepted": "staging", "stagingQualifiedHere": "staging",
         "stagingHeldInProgress": "staging", "stagingOtherSwitching": "staging", "lookingHeld": "looking",
@@ -328,18 +359,48 @@ def test_every_row_of_the_step_table_derives_from_the_reads():
         "backingOut": "backing_out", "backedOutInterrupted": "done:backed_out", "backedOutEnded": "done:backed_out",
         "pausedOnOpen": "paused", "keeping": "keeping", "doneKept": "done:kept", "selectionLost": "choose",
     }
-    assert len(steps) == 22
+    assert len(steps) == 23
 
 
 def test_try_is_withdrawn_for_a_base_change_or_no_app_as_a_hint():
     out = _run()
     assert out["withdrawn"] == {
         "sameBase": None,
-        "baseChanges": "This release changes the base, so it cannot be tried live; Keep reboots each Player onto it",
-        "noApp": "This release has no app, so there is nothing to try live; Keep reboots each Player onto it",
+        "baseChanges": ("This release changes the base, so it cannot be tried live; putting it on the wall "
+                        "reboots each Player onto it"),
+        "noApp": ("This release has no app, so there is nothing to try live; putting it on the wall reboots each "
+                  "Player onto it"),
     }
-    assert out["target"]["withApp"] is True and out["target"]["listed"] is True
+    assert out["target"]["withApp"] is True and out["target"]["deploymentId"] == "abababab-abab-8bab-abab-abababababab"
     assert out["target"]["app"] == NEW_APP
+
+
+SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players Central "
+         "has not seen. Central cannot list which Players will boot. A Pi whose kernel command line lacks "
+         "photowall.node=v2 is misconfigured and is not offered it.")
+
+
+def test_put_on_the_wall_is_one_confirmation_naming_the_reboot_cost_in_both_gate_forms():
+    put = _run()["put"]
+    assert put["closed"] == {
+        "title": "Put release v2.0.0 on the wall?",
+        "lines": ["Base v1.0.0 · app 222222…", SCOPE, "Selects v2.0.0 for every boot.",
+                  "No Player is rebooted; each gets it at its next boot."],
+        "after": ["Ready: Central has every file of v2.0.0."],
+        "confirmLabel": "Select for every boot",
+    }
+    assert put["open"]["lines"][-1] == "These are the Players this console knows; this page reboots them in this order:"
+    assert put["open"]["after"] == [
+        "Then this page reboots these Players one at a time, each after the previous one rejoins. Each Frame a "
+        "Player drives is blank while it reboots. Keep this tab open: hiding or closing it pauses the rollout.",
+        "Ready: Central has every file of v2.0.0."]
+    assert put["open"]["confirmLabel"] == "Put it on the wall and reboot"
+    assert put["openDownloading"]["after"][1:] == [
+        "Downloading: Central still has 1.5 GB of v2.0.0 to download; a Player that boots it before then waits "
+        "for the download.", "The first reboot waits until Central has downloaded it."]
+    assert put["wait"] == [None, "Waiting for Central to download v2.0.0: 1.5 GB left",
+                           "Waiting: Central could not download v2.0.0 (cache disk full)", None]
+    assert put["rejectedTarget"]["deploymentId"] is None
 
 
 def test_the_keep_plan_puts_the_tried_player_first_then_the_rest_by_name_and_skips_retired():
@@ -389,7 +450,7 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
 def test_the_linked_app_counts_only_when_it_identifies_the_target():
     out = _run()
     assert out["identifies"] == {"identified": True, "sharedApp": False, "baseOnly": False, "noApp": False,
-                                 "pure": True}
+                                 "pure": True, "prerelease": True, "prereleasePrevious": False}
 
 
 def test_a_base_only_release_reboots_every_player_in_the_same_session_and_is_not_done():
@@ -451,7 +512,7 @@ def test_the_journey_modules_name_no_route():
     # Positive control: the pattern does find the verbs' own routes in their homes.
     assert _ROUTE.search((SRC / "fleetCommands.js").read_text()) is not None
     page = (SRC / "UpdateWallPage.jsx").read_text()
-    for send in ("publishConfirmation(", "sendStage(", "sendSelection(", "sendReboot("):
+    for send in ("sendStage(", "sendSelection(", "sendReboot("):
         assert send in page, send
     assert "<QualifiedFallback" in page  # sendBegin and the sampler, through their one component
 

@@ -26,6 +26,7 @@ from central.content_catalog.sync import SyncReleasesHandler
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
@@ -137,14 +138,15 @@ def _sync(db: Database, cache: Path) -> None:
     assets = PgAssetRecords(clock)
     transactions = PgTransactions(db)
     publisher = RecordingPublisher(clock)
+    stored = DiskStoredAssets(records=assets, store=CacheStore(CacheLayout(cache)))
     catalog = ReleaseCatalog(
-        releases=PgReleaseRecords(), devices=PgDeviceRecords(),
-        stored=DiskStoredAssets(records=assets, store=CacheStore(CacheLayout(cache))),
+        releases=PgReleaseRecords(), devices=PgDeviceRecords(), stored=stored,
         transactions=transactions, publisher=publisher, clock=clock)
     handler = SyncReleasesHandler(
         origin=FakeReleaseOrigin(ReleaseListing((), None, unchanged=True), {}),
         releases=PgReleaseRecords(), devices=PgDeviceRecords(), assets=assets,
-        transactions=transactions, publisher=publisher, catalog=catalog, clock=clock)
+        transactions=transactions, publisher=publisher, catalog=catalog, clock=clock,
+        node_releases=PgNodeReleaseRecords(clock), readiness=stored)
     asyncio.run(handler.handle(SyncReleases()))
 
 

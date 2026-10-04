@@ -9,14 +9,14 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from central.content_routes import ClientDisconnected, _stream, until_disconnect
+from central.content_routes import ClientDisconnected, stream_opened, until_disconnect
 from central.content_wiring import ContentServices
 from central.coordination import Coordinator
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
-from central.fleet.node_boot import NodeBootService, parse_node_deployment
+from central.fleet.node_boot import NodeBootService
 from central.fleet.node_calibration import NodeCalibration
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_display import NodeDisplay
@@ -27,7 +27,6 @@ from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.principal import PrincipalError
 from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError, ServingImageVerifier
-from central.kernel.handling import OriginRejected, OriginUnavailable
 from central.registry import Registry
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
@@ -70,14 +69,14 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
-    boots = NodeBootService(sessions)
+    boots = NodeBootService(sessions, publisher=content.publisher if content else None)
     bytes_reader = OfferByteReader(content.reader if content else None)
     effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
     commands = NodeCommands(sessions, effect_gate)
     lifecycle = NodeLifecycle(sessions, effect_gate)
     links = NodeAppLinks(sessions)
     acceptance = NodeAcceptance(sessions)
-    publications = NodeReleaseCatalog(sessions)
+    publications = NodeReleaseCatalog(sessions, readiness=content.readiness if content else None)
     trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock))
     display.trials = trials
     app.state.node_lifecycle = lifecycle
@@ -143,19 +142,10 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ClientDisconnected:
             return Response(status_code=499)
         try:
-            return _stream(opened, "application/octet-stream")
+            return stream_opened(opened, "application/octet-stream")
         except BaseException:
             os.close(opened.fd)
             raise
-
-    @app.post("/v1/operator/node/deployments", dependencies=[Depends(admin)])
-    async def publish_deployment(request: Request):
-        raw = await body(request, MAX_NODE_BOOT_BYTES)
-        try:
-            publication = parse_node_deployment(raw)
-        except ValueError as exc:
-            raise NodeControlError("invalid_node_deployment", 422) from exc
-        return await invoke(boots.publish, publication)
 
     @app.put("/v1/operator/node/boot-policy", dependencies=[Depends(admin)])
     async def select_deployment(request: Request):
@@ -174,21 +164,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     @app.get("/v1/operator/node/releases", dependencies=[Depends(admin)])
     async def node_releases():
         return await invoke(publications.list)
-
-    @app.post("/v1/operator/node/releases/{manifest_sha256}/deployments", dependencies=[Depends(admin)])
-    async def publish_release(manifest_sha256: str, request: Request):
-        value = loads_object(await body(request, 4096), max_bytes=4096)
-        if value is None or set(value) != {"deployment_id", "select_app", "operator_audit_ref"}:
-            raise NodeControlError("node_release_publication_invalid", 422)
-        try:
-            return await publications.publish(manifest_sha256, UUID(value["deployment_id"]),
-                                              value["select_app"], value["operator_audit_ref"])
-        except OriginUnavailable as exc:
-            raise NodeControlError(exc.reason, 503) from exc
-        except OriginRejected as exc:
-            raise NodeControlError(exc.reason, 422) from exc
-        except ValueError as exc:
-            raise NodeControlError(str(exc), 422) from exc
 
     @app.post("/v2/node/sessions")
     async def enroll(request: Request):
@@ -250,7 +225,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ClientDisconnected:
             return Response(status_code=499)
         try:
-            return _stream(opened, "application/octet-stream")
+            return stream_opened(opened, "application/octet-stream")
         except BaseException:
             os.close(opened.fd)
             raise

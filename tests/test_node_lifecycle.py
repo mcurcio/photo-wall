@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 from test_coordination import report
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate
-from test_node_boot import claim_for, environment, seed_verified_publication
+from test_node_boot import claim_for, environment, publish_deployment
 from test_node_runtime_reconciliation import rig
 from test_registry import enroll
 
@@ -61,8 +61,7 @@ class Rig:
                        deployment.environment_sources[deployment.manager_primary.environment_sha256],
                        target.environment_sha256: 'https://example.invalid/' + digest}
             selected = replace(deployment, deployment_id=uuid4(), app_environment=target, environment_sources=sources)
-            seed_verified_publication(registry, selected)
-            NodeBootService(sessions).publish(selected)
+            publish_deployment(registry.db, selected, registry.clock)
             self.deployments.append(selected)
         if unbound:
             registry.unbind('node-f0', expected_generation=1)

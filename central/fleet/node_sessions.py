@@ -17,8 +17,8 @@ from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
 from central.db import Database
-from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.principal import SessionAdmission, _clock_sample
+from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_commands import (
     NodeSessionClaim,

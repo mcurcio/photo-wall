@@ -66,6 +66,11 @@ class Prefetch(Job[None], name="assets.prefetch",
     pass
 
 
+class MaintainCache(Job[None], name="assets.maintain_cache",
+                    delivery=Delivery(queue=QueueName.UPKEEP, every=timedelta(hours=1))):
+    """Remove cached release files nothing wants (`central/assets/maintenance.py`)."""
+
+
 class RescueStalledJobs(Job[None], name="queue.rescue_stalled",
                         delivery=Delivery(queue=QueueName.UPKEEP, every=timedelta(minutes=1))):
     pass
@@ -80,4 +85,4 @@ AssetJob: TypeAlias = (FetchOsImage | FetchPackage | FetchPlayerPayload | FetchS
                        | FetchLibraryThumbnail)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
     FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment, FetchLibraryThumbnail,
-    SyncReleases, Prefetch, RescueStalledJobs, PurgeFinishedJobs)
+    SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs)

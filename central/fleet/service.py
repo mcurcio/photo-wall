@@ -6,13 +6,11 @@ facts in an offer; it never treats a mutable release tag or an HTTP 200 as deliv
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
 from central.db import Database
-from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.maintenance_requests import MaintenanceRequestStore
 from central.fleet.management_status import management_status_in
 from central.fleet.models import (
@@ -35,6 +33,7 @@ from central.fleet.policy import (
     effective_app,
     fallback_classification,
 )
+from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 from contracts.player_payload import MAX_ARCHIVE_BYTES
 from contracts.release import MAX_ROOTFS_BYTES
@@ -331,7 +330,7 @@ class FleetService:
         assert device_id is not None
         now = self.clock.utc()
         # This quota commits even when a duplicate offer returns early or a later
-        # policy/byte preflight fails. Idempotency must not make hashing free.
+        # policy/byte preflight fails. Idempotency must not make preflight free.
         with self.db.transaction() as quota_conn:
             self._claim_quota(quota_conn, device_id=device_id, kind="offer", now=now)
             lock_fleet_assets_in(quota_conn)
@@ -464,58 +463,6 @@ class FleetService:
                              else "app_unavailable", 503)
         return OfferAsset(kind, row["app_tag"], row["app_sha256"], row["app_sha256"],
                           row["app_size"], row["app_format"])
-
-    def evict_if_unretained(self, *, kind: str, content_key: str,
-                            evict: Callable[[], None]) -> bool:
-        """Future cache-GC seam: hold the offer lock through the actual unlink.
-
-        All future acceptance/attempt root writers must share this lock. Open response FDs
-        lease their inodes independently. No periodic cache cleaner ships today.
-        """
-        if kind not in ("base", "app") or len(content_key) != 64 or any(
-            char not in "0123456789abcdef" for char in content_key
-        ):
-            raise ValueError("invalid_asset_identity")
-        now = self.clock.utc()
-        with self.db.transaction() as conn:
-            lock_fleet_assets_in(conn)
-            root = conn.execute(
-                "SELECT 1 FROM fleet_offer_artifact_roots WHERE kind=%s AND content_key=%s "
-                "AND retain_until>%s LIMIT 1", (kind, content_key, now),
-            ).fetchone()
-            if root:
-                return False
-            accepted = conn.execute(
-                "SELECT 1 FROM fleet_generation_acceptances AS accepted "
-                "JOIN devices AS device ON device.device_id=accepted.device_id "
-                "JOIN fleet_device_lifecycle AS lifecycle "
-                "ON lifecycle.device_id=accepted.device_id "
-                "WHERE accepted.kind=%s AND accepted.content_key=%s "
-                "AND accepted.device_generation=lifecycle.generation "
-                "AND device.retired_at IS NULL AND lifecycle.revoked_at IS NULL "
-                "AND (%s='base' OR EXISTS ("
-                "SELECT 1 FROM asset_references AS ref WHERE ref.kind='player-payload' "
-                "AND ref.identity=accepted.content_key "
-                "AND ref.owner=accepted.fallback_owner)) LIMIT 1",
-                (kind, content_key, kind),
-            ).fetchone()
-            if accepted:
-                return False
-            if kind == "app":
-                attempt = conn.execute(
-                    "SELECT 1 FROM fleet_artifact_retention_attempts AS attempt "
-                    "JOIN asset_references AS ref ON ref.kind='player-payload' "
-                    "AND ref.owner='fleet-attempt:' || attempt.attempt_id::text "
-                    "AND ref.identity=%s AND ref.locator_sha256=ref.identity "
-                    "AND ref.expected_sha256=ref.identity "
-                    "AND ref.locator_size=ref.expected_size "
-                    "WHERE (attempt.target_sha256=%s OR attempt.fallback_sha256=%s) "
-                    "LIMIT 1", (content_key, content_key, content_key),
-                ).fetchone()
-                if attempt:
-                    return False
-            evict()
-            return True
 
     def record_check_in(self, request: CheckIn | CheckInV2) -> dict:
         serial = sanitize_serial(request.serial)

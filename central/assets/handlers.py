@@ -26,9 +26,15 @@ from central.kernel.job_types import (
     FetchSealedEnvironment,
     Prefetch,
 )
-from central.kernel.jobs import asset_key, job_keys
-from central.kernel.ports import AssetRecords, ContentCatalog, ReleaseOrigin, ThumbnailOrigin
-from central.kernel.publishing import Publisher
+from central.kernel.jobs import job_keys
+from central.kernel.ports import (
+    AssetReadiness,
+    ContentCatalog,
+    DesiredTiers,
+    ReleaseOrigin,
+    ThumbnailOrigin,
+)
+from central.kernel.publishing import Publisher, started
 from central.kernel.transactions import Transactions
 from contracts.node_boot import MAX_ENVIRONMENT_BYTES
 from contracts.player_payload import MAX_ARCHIVE_BYTES, PayloadError, verify_archive
@@ -140,34 +146,41 @@ class FetchLibraryThumbnailHandler:
 
 
 class PrefetchHandler:
-    """Publish the fetch job of every desired asset that is recorded but not on disk.
+    """Publish the fetch job of every `wanted` desired asset that is recorded but not on disk,
+    then START at most ONE missing `background` asset (files only the window of newest stable
+    node releases names; newest release first), all at each job type's own priority. One
+    background download per tick keeps the window from flooding the shared FETCH queue ahead of
+    previews and wanted files; the next tick starts the next one.
 
-    It never waits for those jobs and never sets `retry_terminal`: a terminal outcome stays
-    terminal until a request or an operator asks again.
+    The background walk stops at the first publish that `started` a job: a file whose latest
+    outcome is terminal (PB3) or still in backoff (PB2) inserts nothing, so it never holds the
+    tick's one slot and the rest of the window is still pre-downloaded.
+
+    "Missing" is the one readiness predicate (`AssetReadiness.missing`). It never waits for those
+    jobs and never sets `retry_terminal`: a terminal outcome stays terminal until a request or an
+    operator asks again.
     """
 
-    def __init__(self, *, catalog: ContentCatalog, records: AssetRecords, store: CacheStore,
+    def __init__(self, *, catalog: ContentCatalog, readiness: AssetReadiness,
                  transactions: Transactions, publisher: Publisher) -> None:
         self._catalog = catalog
-        self._records = records
-        self._store = store
+        self._readiness = readiness
         self._transactions = transactions
         self._publisher = publisher
 
     async def handle(self, job: Prefetch) -> None:
-        desired = await self._catalog.desired_assets()
-        missing = await asyncio.to_thread(self._missing, desired)
-        for fetch in missing:
+        tiers = await self._catalog.desired_tiers()
+        wanted, background = await asyncio.to_thread(self._missing, tiers)
+        for fetch in wanted:
             await self._publisher.publish_now(fetch)
+        for fetch in background:
+            if started(await self._publisher.publish_now(fetch)):
+                break
 
-    def _missing(self, desired: frozenset[AssetJob]) -> list[AssetJob]:
-        missing: list[AssetJob] = []
+    def _missing(self, tiers: DesiredTiers) -> tuple[list[AssetJob], list[AssetJob]]:
         with self._transactions.begin() as tx:
-            for fetch in sorted(desired, key=lambda candidate: job_keys(candidate).lock):
-                key = asset_key(fetch)
-                asset = self._records.get(tx, key)
-                if asset is None:
-                    continue
-                if asset.produced is None or not self._store.present(key, asset.produced):
-                    missing.append(fetch)
-        return missing
+            wanted = [fetch for fetch in sorted(tiers.wanted, key=lambda job: job_keys(job).lock)
+                      if self._readiness.missing(tx, fetch)]
+            background = [fetch for fetch in tiers.background
+                          if self._readiness.missing(tx, fetch)]
+        return wanted, background

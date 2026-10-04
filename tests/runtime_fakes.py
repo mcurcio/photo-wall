@@ -19,6 +19,7 @@ from central.kernel.job_types import (
     FetchPackage,
     FetchPlayerPayload,
     FetchSealedEnvironment,
+    MaintainCache,
     Prefetch,
     PurgeFinishedJobs,
     RescueStalledJobs,
@@ -64,6 +65,11 @@ class PrefetchStub:
         return None
 
 
+class MaintainCacheStub:
+    async def handle(self, job: MaintainCache) -> None:
+        return None
+
+
 class RescueStub:
     async def handle(self, job: RescueStalledJobs) -> None:
         return None
@@ -77,7 +83,7 @@ class PurgeStub:
 def catalog_stubs() -> list[Any]:
     return [FetchOsImageStub(), FetchPackageStub(), FetchPlayerPayloadStub(),
             FetchSealedEnvironmentStub(), FetchLibraryThumbnailStub(), SyncReleasesStub(),
-            PrefetchStub(), RescueStub(), PurgeStub()]
+            PrefetchStub(), MaintainCacheStub(), RescueStub(), PurgeStub()]
 
 
 def catalog_instances() -> list[Job]:

@@ -16,7 +16,6 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
-from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.node_observations import _FLEET_HOSTS_SQL, NodeObservations
 from central.fleet.node_sessions import (
     OBSERVATION_DAILY_CAP,
@@ -24,6 +23,7 @@ from central.fleet.node_sessions import (
     NodeControlError,
     NodeSessions,
 )
+from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,

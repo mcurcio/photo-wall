@@ -54,7 +54,7 @@ export const REQUIREMENT = "Qualification needs this Player bound and showing on
 /** Its costs (R16): the page samples, and each sample takes Central's fleet lock. */
 export const SAMPLING_COST = "While qualifying, this page asks Central for a sample every 2 s and must stay open "
   + "and visible for at least 30 s; closing it ends this attempt (Central keeps its records). Each sample briefly "
-  + "holds Central's fleet lock, so boots, Publish and Select wait for it.";
+  + "holds Central's fleet lock, so boots and Select wait for it.";
 
 const NOT_BOUND = "qualification needs this Player bound to a Frame";
 const UNLINKED = "the Player app has not linked its current process on this boot";

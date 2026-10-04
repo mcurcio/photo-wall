@@ -30,6 +30,7 @@ import httpx
 from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
 from central.kernel.ports import (
+    NODE_RELEASE_INVALID,
     NodePublication,
     PlayerPayload,
     PublishedRelease,
@@ -70,6 +71,11 @@ PER_PAGE: Final = 100
 MAX_PAGES: Final = 20  # PER_PAGE * MAX_PAGES = up to 2000 releases scanned per listing
 MAX_RELEASES_PAGE_BYTES: Final = 8 * 1024 * 1024
 MAX_REDIRECTS: Final = 5
+# A node release's own deterministic problems (`PublishedRelease.node_problem`; also
+# `NODE_RELEASE_INVALID`, shared with the release sync).
+NODE_RELEASE_TAG_MISMATCH: Final = "node_release_tag_mismatch"
+NODE_MANIFEST_MISSING: Final = "node_manifest_missing"
+NODE_ARTIFACT_MISSING: Final = "node_artifact_missing"
 
 _REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _CONTENT_LENGTH = re.compile(r"[0-9]{1,20}")
@@ -214,44 +220,78 @@ class GitHubReleaseOrigin:
         return False, page_etag, data
 
     async def _resolve(self, client: httpx.AsyncClient, entry: object) -> PublishedRelease | None:
+        """One listed release, or None (a draft, a non-semver tag, or a pre-release with neither
+        legacy pre-releases enabled nor a node manifest).
+
+        A node release is observed whether or not it is a pre-release: the node path lists
+        pre-releases (the console labels them) and never downloads them in the background. With
+        `include_prereleases` off a pre-release's legacy manifest is not read (`legacy=False`),
+        so V1 rows and V1 auto-promotion are unchanged."""
         if not isinstance(entry, dict) or entry.get("draft") is True:
             return None
         is_prerelease = bool(entry.get("prerelease"))
-        if is_prerelease and not self.include_prereleases:
-            return None
         tag = entry.get("tag_name")
         try:
             release_version(tag)  # type: ignore[arg-type]
         except ValueError:
             return None  # non-semver tag: skipped, no record
         assets = _asset_urls(entry.get("assets"))
+        legacy = self.include_prereleases or not is_prerelease
+        if not legacy and NODE_RELEASE_MANIFEST not in assets:
+            return None
+        node, node_problem, node_version = await self._node_manifest(client, assets, tag)
+        if not legacy:
+            return PublishedRelease(tag=tag, is_prerelease=True, package=None,
+                                    package_problem="legacy_prerelease_unlisted", os_image=None,
+                                    upstream_version=None, node_publication=node,
+                                    node_problem=node_problem, node_version=node_version,
+                                    legacy=False)
         manifest = await self._manifest(client, assets)
-        node = await self._node_manifest(client, assets, tag)
         return PublishedRelease(tag=tag, is_prerelease=is_prerelease, package=manifest.package,
                                 package_problem=manifest.package_problem,
                                 os_image=manifest.os_image,
                                 upstream_version=manifest.upstream_version,
                                 payload=manifest.payload, base_abi=manifest.base_abi,
-                                base_abi_squashfs_sha256=manifest.base_abi_squashfs_sha256, node_publication=node)
+                                base_abi_squashfs_sha256=manifest.base_abi_squashfs_sha256,
+                                node_publication=node, node_problem=node_problem,
+                                node_version=node_version)
 
-    async def _node_manifest(self, client, assets, tag):
+    async def _node_manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset],
+                             tag: str) -> tuple[NodePublication | None, str | None,
+                                                UpstreamVersion | None]:
+        """(publication, problem, version) of the attached node manifest; all None when none is
+        attached. A deterministic refusal is this release's `problem`, never an exception: one
+        malformed manifest must not stop discovery of every other release. A transport failure
+        (`OriginUnavailable`) still aborts the listing, as for the legacy manifest.
+
+        An attached malformed node manifest never falls back to similarly named legacy assets."""
         manifest = assets.get(NODE_RELEASE_MANIFEST)
         if manifest is None:
-            return None
+            return None, None, None
         try:
             body = await self._fetch_manifest(client, manifest.url, maximum=MAX_NODE_RELEASE_BYTES)
-            if body is None:
-                raise ValueError("node_manifest_missing")
+        except (_BodyTooLarge, _BodyEncoded):
+            return None, NODE_RELEASE_INVALID, manifest.version
+        if body is None:  # listed, but gone upstream (404/410)
+            return None, NODE_MANIFEST_MISSING, manifest.version
+        try:
             release = parse_node_release(body)
-            if release.base.tag != tag:
-                raise ValueError("node_release_tag_mismatch")
+        except ValueError:
+            return None, NODE_RELEASE_INVALID, manifest.version
+        if release.base.tag != tag:
+            return None, NODE_RELEASE_TAG_MISMATCH, manifest.version
+        try:
             locators = tuple((a.role, OriginLocator(assets[a.filename].url, a.sha256, a.size_bytes))
                              for a in release.artifacts)
-            return NodePublication(encode_node_release(release), locators)
-        except (ValueError, KeyError, _BodyTooLarge, _BodyEncoded):
-            # An attached malformed V2 manifest never falls back to similarly
-            # named legacy assets; reject the observation and retain prior rows.
-            raise OriginRejected("node_release_invalid") from None
+        except KeyError:  # a declared artifact is not attached (yet)
+            return None, NODE_ARTIFACT_MISSING, manifest.version
+        except ValueError:
+            return None, NODE_RELEASE_INVALID, manifest.version
+        try:
+            publication = NodePublication(encode_node_release(release), locators)
+        except ValueError:
+            return None, NODE_RELEASE_INVALID, manifest.version
+        return publication, None, manifest.version
 
     async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset]) -> _Manifest:
         manifest_asset = assets.get(MANIFEST_V2) or assets.get(MANIFEST)

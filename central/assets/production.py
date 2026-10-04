@@ -16,6 +16,7 @@ bytes may differ after a purge, and replace the recorded facts.
 from __future__ import annotations
 
 import asyncio
+import errno
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TypeAlias
@@ -31,7 +32,7 @@ from central.kernel.handling import (
 )
 from central.kernel.job_types import AssetJob
 from central.kernel.jobs import asset_key
-from central.kernel.ports import THUMBNAIL_UNKNOWN, AssetRecords
+from central.kernel.ports import CACHE_DISK_FULL, THUMBNAIL_UNKNOWN, AssetRecords
 from central.kernel.publishing import ASSET_NOT_RECORDED
 from central.kernel.transactions import Transactions
 
@@ -106,6 +107,16 @@ class AssetProduction:
             # Unverifiable (an os-image with no produced facts) or wrong: re-produce.
             await asyncio.to_thread(self._store.discard, final)
 
+        try:
+            return await self._produce(key, asset, write)
+        except OSError as error:
+            if error.errno == errno.ENOSPC:
+                # Transient and named: the cleaner (or the operator) frees space, and the
+                # release read shows the reason instead of an unclassified error.
+                raise TransientFailure(CACHE_DISK_FULL) from None
+            raise
+
+    async def _produce(self, key: AssetKey, asset: Asset, write: WriteFn) -> AssetReady:
         temp = await asyncio.to_thread(self._store.temp_path, key)
         installed = False
         try:

@@ -26,6 +26,7 @@ from central.infra.job_queue import decode
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes, OutcomeStatus
 from central.infra.publisher import ProcrastinatePublisher
+from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
 from central.kernel.job_types import FetchPackage, Prefetch
@@ -83,8 +84,9 @@ class World:
             dsn, transactions=self.transactions, outcomes=self.outcomes, assets=self.records,
             clock=self.clock, feed=None)
         self.prefetch = PrefetchHandler(
-            catalog=StaticContentCatalog({}, desired=frozenset({JOB})), records=self.records,
-            store=self.store, transactions=self.transactions, publisher=self.prefetch_publisher)
+            catalog=StaticContentCatalog({}, desired=frozenset({JOB})),
+            readiness=DiskStoredAssets(records=self.records, store=self.store),
+            transactions=self.transactions, publisher=self.prefetch_publisher)
         with self.transactions.begin() as tx:
             self.records.reference(tx, KEY, AssetReference(TAG, LOCATOR, len(DEB), SHA))
 

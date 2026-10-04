@@ -1,20 +1,21 @@
-import { fact } from "./facts.js";
+import { fact, words } from "./facts.js";
 import { rebootCommandState, rebootOffer, rebootTarget } from "./fleetCommands.js";
 import { frameHealth, outputStates } from "./health.js";
 import { playersByDevice } from "./players.js";
 import { readinessRecoveryForFrame } from "./readinessRecovery.js";
-import { appHandle, deploymentIdFor, publishOffer } from "./releases.js";
+import { appHandle, downloadSize, readinessLine, selectionConfirmation } from "./releases.js";
 import { STAGE_REFUSAL } from "./stage.js";
 
 /**
- * Update the wall (console DDD Part E §25a, bead NU1): the guided journey "put this release on
- * the wall, safely, and be able to back out", as pure functions from Central's reads and the
- * operator's choices to the step shown, the Keep plan and each Player's row.
+ * Update the wall (console DDD Part E §25a, beads NU1 and B8): the guided journey "put this
+ * release on the wall, safely, and be able to back out", as pure functions from Central's reads
+ * and the operator's choices to the step shown, the one Put-on-the-wall confirmation, the Keep
+ * plan and each Player's row. Central ingests and downloads every release by itself, so there
+ * is no "get it" step: a release row already names its deployment and its readiness.
  *
  * NO CENTRAL STATE, NO VERB. The journey is a client of the verbs' homes: every write goes
- * through its verb's one send function (`sendPublish`, `sendBegin` with the sampler,
- * `sendStage`, `sendSelection`, `sendReboot`), each judging its own rule on its hook's newest
- * read. This module and the page name no route (a source-scan test holds it). Its one rule of
+ * through its verb's one send function (`sendBegin` with the sampler, `sendStage`,
+ * `sendSelection`, `sendReboot`), each judging its own rule on its hook's newest read. This module and the page name no route (a source-scan test holds it). Its one rule of
  * its own is `nextReboot`: one reboot in flight, the previous Player Rejoined or Skipped.
  *
  * PROGRESS IS DERIVED. The URL holds only the operator's choices (target release, tried
@@ -38,10 +39,11 @@ import { STAGE_REFUSAL } from "./stage.js";
  * different base (a base-only release), cannot be recognised by its app. Every wait is the
  * page's own monotonic time.
  *
- * @typedef {"reading"|"no_release"|"get_it"|"choose"|"qualifying"|"staging"|"looking"
+ * @typedef {"reading"|"no_release"|"rejected"|"choose"|"qualifying"|"staging"|"looking"
  *           |"backing_out"|"keeping"|"paused"|"done"} StepName
- * @typedef {{release: import("./releases.js").Release, withApp: boolean, deploymentId: string,
- *            listed: boolean, app: string|null, appIdentifies: boolean}} Target
+ * @typedef {{release: import("./releases.js").Release, withApp: boolean, deploymentId: string|null,
+ *            app: string|null, appIdentifies: boolean}} Target
+ *   `deploymentId`: the release row's own (null: Rejected, `release.problem` says why);
  *   `appIdentifies`: `appIdentifiesTarget` on the read the target came from
  * @typedef {{step: StepName, target?: Target, stage?: object|null,
  *            how?: "kept"|"backed_out"}} Step
@@ -67,13 +69,12 @@ import { STAGE_REFUSAL } from "./stage.js";
 export const KEEP_WAIT_MS = 10 * 60 * 1000;
 
 /** Try is withdrawn when the target changes the base (§25a); a hint only, Central judges at send. */
-export const TRY_BASE_CHANGES = "This release changes the base, so it cannot be tried live; Keep reboots each "
-  + "Player onto it";
+export const TRY_BASE_CHANGES = "This release changes the base, so it cannot be tried live; putting it on the "
+  + "wall reboots each Player onto it";
 /** A release with no app has nothing to stage (Central refuses a stage without an app). */
-export const TRY_NO_APP = "This release has no app, so there is nothing to try live; Keep reboots each Player "
-  + "onto it";
+export const TRY_NO_APP = "This release has no app, so there is nothing to try live; putting it on "
+  + "the wall reboots each Player onto it";
 
-const NONE_HELD = Object.freeze({ get: () => null });
 const LOOKING = new Set(["target_running", "fallback_running", "effect_unknown"]);
 const IN_PROGRESS = new Set(["staged", "switching"]);
 const ENDED = new Set(["interrupted_by_reboot", "ended_by_later_boot"]);
@@ -85,10 +86,13 @@ const LIVE = new Set(["ok", "needs-calibration"]);
 const SETTLED = new Set(["rejoined", "skipped", "not_in_rollout"]);
 
 /**
- * Whether the target's app identifies the target (§25a Keep table): it has an app, and no listed
- * deployment and no catalog release pairs that app environment with a different base. Only then
+ * Whether the target's app identifies the target (§25a Keep table): it has an app, and no
+ * deployment a Player may run pairs that app environment with a different base. Only then
  * does a Player's linked app say which release it booted; a base-only release (new base, same
- * app) cannot be recognised that way. Pure, on the release read, so a reload derives the same.
+ * app) cannot be recognised that way. Central ingests every listed release, pre-releases
+ * included, so only rows a Player may run count: a stable release, a deployment published by
+ * hand (no release row), and whatever is selected or was previously selected. Pure, on the
+ * release read, so a reload derives the same.
  *
  * @param {object|null} read the release read
  * @param {{app: string|null, release: {base_tag: string}}} target
@@ -96,14 +100,19 @@ const SETTLED = new Set(["rejoined", "skipped", "not_in_rollout"]);
  */
 export function appIdentifiesTarget(read, target) {
   if (target.app === null) return false;
-  const rows = [...(read?.deployments ?? []), ...(read?.releases ?? [])];
+  const releases = read?.releases ?? [];
+  const chosen = new Set([read?.selection?.deployment_id, read?.selection?.previous_deployment_id]
+    .filter((id) => id != null));
+  const prerelease = new Set(releases.filter((row) => row.stable === false && row.deployment_id != null)
+    .map((row) => row.deployment_id));
+  const runnable = (row) => chosen.has(row.deployment_id) || !prerelease.has(row.deployment_id);
+  const rows = [...(read?.deployments ?? []), ...releases.filter((row) => row.deployment_id != null)].filter(runnable);
   return !rows.some((row) => row.app_environment_sha256 === target.app && row.base_tag !== target.release.base_tag);
 }
 
 /**
- * The release the journey puts on the wall, and the deployment this console publishes it as
- * (with its app when it has one), from the release read; null when the catalog does not list
- * the tag. The catalog is newest first, so a re-tagged release resolves to its newest row.
+ * The release the journey puts on the wall and the deployment Central made of it (the row's
+ * own `deployment_id`), from the release read; null when Central lists no such tag.
  *
  * @param {object|null} read the release read
  * @param {string} tag
@@ -112,15 +121,62 @@ export function appIdentifiesTarget(read, target) {
 export function journeyTarget(read, tag) {
   const release = (read?.releases ?? []).find((row) => row.tag === tag);
   if (release === undefined) return null;
-  const withApp = release.app_environment_sha256 != null;
   const app = release.app_environment_sha256 ?? null;
   return Object.freeze({
-    release, withApp,
-    deploymentId: deploymentIdFor(release.manifest_sha256, withApp),
-    listed: publishOffer(read, release, withApp, NONE_HELD).offer === "published",
+    release,
+    withApp: app !== null,
+    deploymentId: release.deployment_id ?? null,
     app,
-    appIdentifies: appIdentifiesTarget(read, { app, release }),
+    appIdentifies: release.deployment_id == null ? false : appIdentifiesTarget(read, { app, release }),
   });
+}
+
+/** What every boot meets while the gate is closed: Select alone, no reboot. */
+export const PUT_GATE_CLOSED = "No Player is rebooted; each gets it at its next boot.";
+/** The reboot plan's cost, said before anything is sent (gate open). */
+export const PUT_REBOOTS = "Then this page reboots these Players one at a time, each after the previous one "
+  + "rejoins. Each Frame a Player drives is blank while it reboots. Keep this tab open: hiding or closing it "
+  + "pauses the rollout.";
+
+/**
+ * Whether the first reboot must wait for Central's download (§6.5): the gate is open and
+ * Central serves the target as not Ready. Unserved readiness does not wait (Central's own
+ * read-through still serves a boot), and the confirmation says it was not served.
+ *
+ * @param {Target} target
+ * @returns {string|null} the waiting words, or null
+ */
+export function downloadWait(target) {
+  const { readiness, tag, missing_bytes: missing, readiness_reason: reason } = target.release;
+  if (readiness == null || readiness === "ready") return null;
+  if (readiness === "failed") return `Waiting: Central could not download ${tag} (${words(reason)})`;
+  return readiness === "downloading" ? `Waiting for Central to download ${tag}: ${downloadSize(missing)} left`
+    : `Waiting for Central to download ${tag}`;
+}
+
+/**
+ * The ONE confirmation of "Put vX on the wall" (§6.5, R7), in its two forms. Gate closed:
+ * Select's own words (R17), "selects vX for every boot", that no Player is rebooted, and the
+ * readiness line. Gate open: Select's words, the Players the page will reboot (the page renders
+ * the frozen plan between `lines` and `after`), the reboot cost, and the readiness line.
+ *
+ * @param {{contents: string, noApp: boolean}} request `selectionRequest`'s frozen request
+ * @param {Target} target
+ * @param {boolean} canReboot the shell's gate is open
+ * @returns {{title: string, lines: string[], after: string[], confirmLabel: string}}
+ */
+export function putConfirmation(request, target, canReboot) {
+  const tag = target.release.tag;
+  const wait = canReboot ? downloadWait(target) : null;
+  return {
+    title: `Put release ${tag} on the wall?`,
+    lines: [...selectionConfirmation(request), `Selects ${tag} for every boot.`,
+      ...(canReboot ? ["These are the Players this console knows; this page reboots them in this order:"]
+        : [PUT_GATE_CLOSED])],
+    after: [...(canReboot ? [PUT_REBOOTS] : []), readinessLine(target.release),
+      ...(wait === null ? [] : ["The first reboot waits until Central has downloaded it."])],
+    confirmLabel: canReboot ? "Put it on the wall and reboot" : "Select for every boot",
+  };
 }
 
 /**
@@ -197,7 +253,7 @@ export function journeyStep(reads, choices, held) {
   if (read == null) return { step: "reading" };
   const target = journeyTarget(read, choices.tag);
   if (target === null) return { step: "no_release" };
-  if (!target.listed) return { step: "get_it", target };
+  if (target.deploymentId === null) return { step: "rejected", target };
   if (read.selection?.deployment_id === target.deploymentId) {
     // No rows yet (the snapshot is unread): no completion is claimed from no reads.
     const rows = reads.rows;
@@ -225,7 +281,7 @@ export function journeyStep(reads, choices, held) {
 }
 
 /**
- * The Players Keep reboots, in order (§25a): the Players this console knows (not retired,
+ * The Players a Put on the wall reboots, in order (§25a): the Players this console knows (not retired,
  * enrolled with a device), the tried Player first (it is proven on this hardware), the
  * others by name.
  *

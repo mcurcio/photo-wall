@@ -3633,3 +3633,71 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-FX2-3 · Console band vocabulary: the brief's "WARNING band" is the console's existing `notice` band (warm; the
   catalog has no `warning`), which raises no incident, as Out of memory's does. The "failed units not read" Unknown
   carries band null (no band), unlike the generic "Unknown: not reported", whose band stays `unknown`.
+
+## 2026-10-03 · prepare-status-bound adversarial review fixes (implementer) · appliance/node/preparer.py, uplink/fetch.py
+- E-PSB-1 · DEFERRED (minor): `BootStageV2` carries no last fault and no attempt count, so while the preparer retries
+  transient failures inside its window the prepare stage reads `running` for up to 900 s (TimeoutStartSec) with no
+  reason shown. Needs a contract addition (last fault token + attempts) written by the retry loop, and a console read.
+- E-PSB-2 · DEFERRED (CI gap): no cold-cache node-pid1 scenario. tests/node_pid1_central_fixture.py (~115-125)
+  pre-copies every archive into Central's cache, so the cold path (a ~974 MB sealed-environment fetch through the
+  read-through wait, 503 + Retry-After, and the preparer's retries) is never exercised in CI. Needs a fill source the
+  fixture's worker can reach for missed sealed-environment entries, and an arm64 privileged Docker leg.
+
+## 2026-10-04 · node release readiness fix cycle 2 (implementer) · release-readiness design §6.1 · central/kernel/ports.py, central/content_catalog/deployment.py
+- E-NRR-1 · Design drift, as built: §6.1 says `NodePublication` gains the node manifest asset's `UpstreamVersion`.
+  Built instead: `PublishedRelease.node_version: UpstreamVersion | None` (central/kernel/ports.py ~271-286), because
+  `node_problem` (a release whose node facts failed to read, with no `NodePublication`) also needs a version guard,
+  independent of the legacy manifest's `upstream_version`. Also added `PublishedRelease.legacy: bool = True`, False
+  only for a pre-release listed while legacy pre-releases are off (node facts observed, legacy facts unread, no legacy
+  row written; construction refuses legacy fields when False). `OFFER_TTL` is named `OFFER_TTL_SECONDS`
+  (central/content_catalog/deployment.py:28) to carry its unit. The design reads as built from this entry.
+- E-NRR-1 · APPLIED (2026-10-04, asset-roots lock review fixes): the auto-ingest design's §6.1 now names
+  `PublishedRelease.node_version` and `PublishedRelease.legacy` (central/kernel/ports.py ~267-292) instead of a
+  version on `NodePublication`, and §6.2 names `OFFER_TTL_SECONDS` (central/content_catalog/deployment.py:28); a
+  history line r3 records it. The entry above stays as written.
+
+## 2026-10-04 · asset-roots lock review fixes (implementer) · central/infra/{catalog_records,node_releases}.py, central/netboot_base.py
+- E-ARL-1 · The "every root writer takes the asset-roots lock" claim (CacheRetention, maintenance.py, design §6.3)
+  was false for the node observation upsert (`_observe`, so `record_problem`) and for every V1 desired-set writer
+  (`PgReleaseRecords.claim/apply/set_promoted/set_last_good`, `PgDeviceRecords.set_pin/record_served`,
+  `netboot_base.record_base_health`). Each now takes the lock first (catalog records through `_root_write`).
+  tests/test_asset_roots_lock.py proves each waits on the lock and makes a new records method declare its side.
+  Cost: netboot served/known-good writes, pins and each V1 sync transaction now queue behind a cleaner run (at most
+  50 unlinks).
+- E-ARL-2 · OPEN (lock order, not fixed): `SyncReleasesHandler._tail` locks device rows (`sweep_failed_boots`) and
+  then takes the asset-roots lock (`select_first`, pre-existing; now also `set_promoted` when auto-promote moves),
+  the reverse of retirement / `record_served` / `record_base_health` (lock, then device row). PostgreSQL detects
+  the cycle and aborts one transaction. Taking the lock at the tail's start fixes it but serializes operator
+  promotion and V1 claims with the whole tail, which makes the interleavings of
+  test_content_catalog_sync.py::test_an_operator_promotion_committed_during_the_sync_tail_is_never_overwritten and
+  test_release_versions.py::test_v5_* impossible (both fail/hang); needs an orchestrator decision.
+
+## 2026-10-04 · auto-ingest review fix list (implementer) · central/{assets/maintenance,infra/node_releases,content_catalog/sync}.py, migration 065
+- E-ARL-1 · RESOLVED (superseded): the asset-roots lock is no longer a cleaner guarantee, so no desired-set writer
+  needs it. Removed from `_root_write` (deleted) and its callers in central/infra/catalog_records.py, `_observe` and
+  `ingest` in central/infra/node_releases.py, `netboot_base.record_base_health` (restored to main) and the cleaner;
+  `CacheRetention`, `PgCacheRetention` (central/infra/retention.py) and tests/test_asset_roots_lock.py deleted. The
+  cleaner is mark and sweep: it re-reads `desired_assets()` immediately before each unlink, and re-stats the file
+  (a fetch that landed after the pick has a fresh mtime). Residual window: a root committed between that re-read
+  and the unlink costs one read-through re-download (files install by `os.replace`, serve from an open fd).
+- E-ARL-2 · RESOLVED: `SyncReleasesHandler` runs `sweep_failed_boots` in its own transaction before the tail, so
+  no transaction holds device rows while taking another lock; and the tail's writers (`set_promoted`,
+  `select_first`) no longer take the asset-roots lock at all.
+- E-ARL-3 · Deviation from "keep main's 16 lock call sites": main's `NodeBootService.select` lock (moved to
+  `select_deployment`) is removed. The first-run CAS is now `INSERT ... ON CONFLICT DO NOTHING` (expected revision
+  0) or `SELECT ... FOR UPDATE` (any other revision) on the policy row itself; with the advisory lock kept, the
+  required mutation probe (drop ON CONFLICT) could not fail, because the lock alone serializes. Main's other 15
+  sites stay (main's `evict_if_unretained` site was already deleted by this PR's B4).
+- E-ARL-4 · Deviation from "delete DesiredTiers": kept, priority wording removed. Prefetch must tell window-only
+  keys from wanted ones to start at most one window-only fetch per tick; `DesiredTiers` is that split. Deleted:
+  `BACKGROUND_PRIORITY`, `require_priority`, `PRIORITY_KWARG`/`delivery_priority`, every `priority` kwarg (Publisher
+  protocol, publisher, job_queue, queue_ops, executor, runtime, fakes): those files equal main again.
+- E-NRO-1 · Migration 065 backfills `node_release_observations` per tag from the newest catalogued manifest whose
+  derived deployment the console already published (version NULL, prerelease flag from `app_releases` else the
+  tag's semver). A catalogued manifest with no published deployment is not backfilled: an observation's manifest
+  must have a deployment (an empty job set reads as Ready, and auto-select would then refuse an unknown deployment);
+  the first sync's full listing ingests it. `previous_deployment_id` is not backfilled: 054 keeps no selection
+  history and offers record content, not deployment ids.
+- E-CLK-1 · `last_served_at` is now stamped by the database (`touch_served(tx, key)`, `clock_timestamp()`) and
+  compared by it (`AssetRecords.served_within`); file mtimes are compared only with the run's marker file
+  (`CLOCK_MARKER` in the cache root). The cleaner takes no clock.

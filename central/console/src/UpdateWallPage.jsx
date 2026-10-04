@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { useConfirm } from "./ConfirmAction.jsx";
 import { FactLine } from "./FactLine.jsx";
-import { fact } from "./facts.js";
+import { fact, words } from "./facts.js";
 import {
   appOperationState,
   heldReboot,
@@ -19,17 +19,14 @@ import { playerPageHref } from "./players.js";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
 import {
   deploymentHandle,
-  PUBLISH_HELD_WORDS,
-  publishConfirmation,
-  publishOffer,
-  publishRequest,
   releaseHome,
+  releaseOf,
   selectionConfirmation,
   selectionRequest,
+  selectionSettled,
   sendSelection,
   useReleaseRead,
 } from "./releases.js";
-import { useHeldRequests } from "./sendOutcome.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
 import { BoundRule } from "./StageApp.jsx";
@@ -43,6 +40,7 @@ import {
   useHeldStage,
 } from "./stage.js";
 import {
+  downloadWait,
   freezeRollout,
   journeyStep,
   journeyTarget,
@@ -52,6 +50,8 @@ import {
   keepRow,
   nextReboot,
   playerEpoch,
+  PUT_GATE_CLOSED,
+  putConfirmation,
   rolloutMembers,
   rowSettled,
   stageFollowUp,
@@ -67,22 +67,24 @@ const NOT_READ = Object.freeze({ read: null, operations: null, readAt: null, err
 
 /** The steps in the order the operator meets them (§25a); Try is optional. */
 const STEP_LABELS = Object.freeze([
-  ["get_it", "Get it"], ["choose", "Choose"], ["qualifying", "Qualify (if needed)"], ["staging", "Try on one Frame"],
-  ["looking", "Look"], ["keeping", "Keep"], ["done", "Done"],
+  ["choose", "Choose"], ["qualifying", "Qualify (if needed)"], ["staging", "Try on one Frame"],
+  ["looking", "Look"], ["keeping", "Put on the wall"], ["done", "Done"],
 ]);
 // Back out branches from Look; only journeyStep's done (the boot ended or interrupted the stage) is Done.
 const STEP_OF = Object.freeze({ paused: "keeping", backing_out: "looking" });
 
 const pausedWords = (deploymentId) => "Paused means this page sends no more reboots. Select is fleet-wide: any "
   + `Player that restarts for any reason, a power cut included, is offered deployment ${deploymentHandle(deploymentId)} at that boot.`;
-// The Keep dialog shows only KNOWN_PLAYERS: `selectionConfirmation` beside it carries the fleet-wide claim. Choose and
-// Paused, which do not render it, carry the full `keepScope`.
+// The Put confirmation carries `selectionConfirmation`'s fleet-wide claim; Choose and Paused, which do not render it,
+// carry the full `keepScope`.
 const KNOWN_PLAYERS = "These are the Players this console knows.";
 const keepScope = (deploymentId) => `${KNOWN_PLAYERS} Select is fleet-wide: any other Pi `
   + `that boots by node path is offered deployment ${deploymentHandle(deploymentId)} at its next boot.`;
 const GATE_CLOSED_KEEP = "Each Player is offered it at its next boot; this page cannot reboot them while the gate is closed.";
+const PUT_UNKNOWN = "Outcome unknown: Central did not answer. The next read of the boot selection decides; rebooting "
+  + "starts only if it shows this release selected.";
 const HIDDEN = "the tab was hidden; this page sends no reboots while it is not shown";
-const KEEP_THEN = "Then, when you press Start rebooting, this page reboots these Players one at a time, each after the "
+const KEEP_THEN = "When you confirm, this page reboots these Players one at a time, each after the "
   + "previous one rejoins:";
 const FALLBACK_LOOK = "The new app did not start; the Player fell back on its own. Back out is recommended.";
 const COUNT_FACT = fact({ kind: "derived", value: "each Rejoined row is this page's judgement",
@@ -100,41 +102,6 @@ function Steps({ step }) {
         <li key={key} aria-current={key === current ? "step" : undefined}>{label}</li>
       ))}
     </ol>
-  );
-}
-
-/** Get it (§25a): the release, and Publish through its one send function. */
-function GetIt({ read, target, held, releases, open }) {
-  const { release, withApp } = target;
-  const offer = publishOffer(read, release, withApp, held);
-  const choice = withApp ? "with its app" : "without its app";
-  // The verb's own confirmation (releases.js `publishConfirmation`): its words and its send.
-  const publish = (event, again) => {
-    const request = again ? held.frozen(offer.deploymentId) : publishRequest(read, release, withApp, held);
-    if (request === null || "refused" in request) return;
-    const { lines, ...dialog } = publishConfirmation(request, again, { releases, held });
-    open(event, {
-      ...dialog,
-      key: `journey-publish-${again ? "again-" : ""}${request.body.deployment_id}`,
-      body: <>{lines.map((line) => <p key={line}>{line}</p>)}</>,
-    });
-  };
-  const row = releaseHome(read).releases.find((entry) => entry.release.manifest_sha256 === release.manifest_sha256);
-  return (
-    <>
-      <FactLine label="Release" fact={row.catalog} />
-      <FactLine label="Contents" fact={row.contents} />
-      {offer.offer === "publish" && (
-        <button type="button" onClick={(event) => publish(event, false)}>{`Publish ${choice}…`}</button>
-      )}
-      {offer.offer === "blocked" && <p className="roster__note">{`Publish unavailable: ${offer.reason}.`}</p>}
-      {Object.hasOwn(PUBLISH_HELD_WORDS, offer.offer) && (
-        <p className="player__state" role="status">{PUBLISH_HELD_WORDS[offer.offer]}</p>
-      )}
-      {offer.offer === "unknown" && (
-        <button type="button" onClick={(event) => publish(event, true)}>Send publish again…</button>
-      )}
-    </>
   );
 }
 
@@ -191,12 +158,11 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const control = useNodeControlValue();
   const allowed = nodeReadsAllowed(control);
   const releases = useReleaseRead({ skip: !allowed });
-  const heldPublishes = useHeldRequests();
   const heldStage = useHeldStage();
   const { open, confirmation } = useConfirm(null);
   const read = releases.read;
   const target = read == null ? null : journeyTarget(read, tag);
-  const selected = target !== null && target.listed && read.selection?.deployment_id === target.deploymentId;
+  const selected = target !== null && target.deploymentId !== null && read.selection?.deployment_id === target.deploymentId;
   const plan = keepPlan(snapshot, bootFacts, tried);
   const triedEntry = tried == null ? null : plan.find((entry) => entry.playerId === tried && entry.frames.length > 0) ?? null;
   const triedNode = useNodeDevice(triedEntry?.deviceId ?? "none", { skip: !allowed || triedEntry === null || selected });
@@ -231,10 +197,10 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const sendingRef = useRef(false);
   const hooksRef = useRef(new Map());
   const [probeReads, setProbeReads] = useState(/** @type {Record<string, object>} */ ({}));
-  const previousSelection = useRef(/** @type {string|null} */ (null));
-  // Keep's Select landed on this page and no reboot has been started yet: Paused offers Start.
-  const selectedHere = useRef(false);
-  const [started, setStarted] = useState(false);
+  // A Put whose Select answer was lost (gate open): the first read started after it settles
+  // whether rolling starts (only on that read showing the target selected, §6.5).
+  const [pendingPut, setPendingPut] = useState(
+    /** @type {{request: object, named: ReadonlyArray<import("./updateWall.js").PlanEntry>, after: number}|null} */ (null));
   const register = useCallback((playerId, node) => hooksRef.current.set(playerId, node), []);
   const onRead = useCallback((playerId, value) => setProbeReads((previous) => ({ ...previous, [playerId]: value })), []);
 
@@ -292,6 +258,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     }
   };
 
+  const waiting = target === null || target.deploymentId === null ? null : downloadWait(target);
   const rowsKey = rows === null ? "" : rows.map((entry) => `${entry.playerId}:${entry.state}:${entry.pause ?? ""}`).join("|");
   useEffect(() => {
     if (step.step !== "keeping" || rows === null) return;
@@ -304,14 +271,15 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       stop(`${members.find(({ entry }) => entry.playerId === why.playerId)?.entry.name ?? "A Player"}: ${why.reason}`, why);
       return;
     }
+    // The first reboot waits for Central's download (§6.5); the rows stay Waiting meanwhile.
+    if (waiting !== null) return;
     const next = nextReboot(rows);
     if (next === null || sendingRef.current || sentRef.current.has(next)) return;
     void rebootNext(next);
     // The rows are compared by their key: a read that changes no row sends nothing new.
-  }, [step.step, rowsKey]);
+  }, [step.step, rowsKey, waiting]);
 
   const start = () => {
-    setStarted(true);
     setPause(null);
     rollingSince.current = performance.now();
     setRolling(true);
@@ -359,41 +327,87 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     skipped: skipped.has(playerId) ? [...skipped].filter((id) => id !== playerId) : [...skipped, playerId],
   }), { replace: true });
 
-  // Keep (§25a): Select through its one send function; rolling starts when it lands.
-  const onKeep = (event) => {
+  // A lost Put answer settles on the first read started after it: rolling starts only when
+  // that read shows the target selected at the next revision; anything else forgets it.
+  useEffect(() => {
+    if (pendingPut === null || releases.seq <= pendingPut.after || releases.read === null) return;
+    if (selectionSettled(pendingPut.request, releases.read).outcome === "done") {
+      setFrozen(pendingPut.named);
+      frozenRef.current = pendingPut.named;
+      start();
+    }
+    setPendingPut(null);
+  }, [pendingPut, releases.seq, releases.read]);
+
+  // Put vX on the wall (§6.5, R7): ONE confirmation naming the reboot cost, then Select through
+  // its one send function. With the gate open, rolling starts on a done or already Select
+  // outcome, holds on unknown until the next read settles it, and never starts on changed or
+  // refused. With it closed, Select alone.
+  const onPut = (event) => {
     const request = selectionRequest(read, target.deploymentId);
     if ("refused" in request) {
-      say(`Keep unavailable: ${request.refused}.`);
+      say(`Put on the wall unavailable: ${request.refused}.`);
       return;
     }
     const canReboot = gateOpen(control.gate);
     // The rollout this confirmation names, frozen as named: a Player that appears later is
     // never rebooted.
     const named = freezeRollout(plan, skipped);
+    const dialog = putConfirmation(request, target, canReboot);
     open(event, {
-      key: `journey-keep-${target.deploymentId}-${request.body.expected_revision}`,
-      title: `Keep release ${tag} on the wall?`,
+      key: `journey-put-${target.deploymentId}-${request.body.expected_revision}-${canReboot}`,
+      title: dialog.title,
+      body: (
+        <>
+          {dialog.lines.map((line) => <p key={line}>{line}</p>)}
+          {canReboot && <PlanNames plan={plan} skipped={skipped} />}
+          {dialog.after.map((line) => <p key={line}>{line}</p>)}
+        </>
+      ),
+      confirmLabel: dialog.confirmLabel,
+      run: async () => {
+        setPendingPut(null);
+        const outcome = await sendSelection(request, releases);
+        if (canReboot && (outcome.outcome === "done" || outcome.outcome === "already")) {
+          setFrozen(named);
+          frozenRef.current = named;
+          start();
+        } else if (canReboot && outcome.outcome === "unknown") {
+          setPendingPut({ request, named, after: releases.startedReads() });
+        }
+        void releases.refresh();
+        return { state: outcome.outcome, message: outcome.outcome === "unknown" && canReboot ? PUT_UNKNOWN : outcome.message };
+      },
+    });
+  };
+
+  // Undo (§6.5): select the previous selection's deployment directly, by id, Select alone.
+  // When that deployment came from a release, its own Update the wall offers the reboots.
+  const onUndo = (event) => {
+    const previous = read.selection?.previous_deployment_id ?? null;
+    const request = selectionRequest(read, previous);
+    if ("refused" in request) {
+      say(`Undo unavailable: ${request.refused}.`);
+      return;
+    }
+    const source = releaseOf(read, previous);
+    const name = source === null ? `deployment ${deploymentHandle(previous)}` : `release ${source.tag}`;
+    open(event, {
+      key: `journey-undo-${previous}-${request.body.expected_revision}`,
+      title: `Put ${name} back for every boot?`,
       body: (
         <>
           {selectionConfirmation(request).map((line) => <p key={line}>{line}</p>)}
-          <p>{KNOWN_PLAYERS}</p>
-          <p>{canReboot ? KEEP_THEN : GATE_CLOSED_KEEP}</p>
-          {canReboot && <PlanNames plan={plan} skipped={skipped} />}
+          <p>{PUT_GATE_CLOSED}</p>
         </>
       ),
       confirmLabel: "Select for every boot",
       run: async () => {
-        // Select alone: no reboot is sent until the operator, shown the plan, presses Start.
-        previousSelection.current = releases.latest().read?.selection?.deployment_id ?? null;
         const outcome = await sendSelection(request, releases);
-        if (outcome.outcome === "done" || outcome.outcome === "already") {
-          selectedHere.current = true;
-          if (canReboot) {
-            setFrozen(named);
-            frozenRef.current = named;
-          }
-        }
         void releases.refresh();
+        if (source !== null && (outcome.outcome === "done" || outcome.outcome === "already")) {
+          navigate({ section: "releases", flow: "update", id: source.tag });
+        }
         return { state: outcome.outcome, message: outcome.message };
       },
     });
@@ -477,10 +491,8 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   );
   const triedName = triedEntry?.name ?? "";
 
-  const keepButton = target?.listed && !selected && (
-    <button type="button" onClick={onKeep}>
-      {gateOpen(gate) ? "Keep: put it on every Player…" : "Keep: select it for every boot…"}
-    </button>
+  const putButton = target?.deploymentId != null && !selected && (
+    <button type="button" onClick={onPut}>{`Put ${tag} on the wall…`}</button>
   );
 
   return (
@@ -491,10 +503,9 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       {step.step === "no_release" && (
         <p className="page__empty">{`Central's release catalog does not list release ${tag}. `}<a href={RELEASES}>Releases</a></p>
       )}
-      {step.step === "get_it" && (
-        <SectionBoundary title="Get it" resetKey={releases.readAt}>
-          <GetIt read={read} target={step.target} held={heldPublishes} releases={releases} open={open} />
-        </SectionBoundary>
+      {step.step === "rejected" && (
+        <p className="page__empty">{`Central cannot put release ${tag} on the wall: Rejected: `
+          + `${words(step.target.release.problem)}. `}<a href={RELEASES}>Releases</a></p>
       )}
       {step.step === "choose" && (
         <SectionBoundary title="Choose" resetKey={releases.readAt}>
@@ -520,10 +531,11 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
               </ul>
             );
           })()}
-          <h3 className="player__layer-title">Keep</h3>
+          <h3 className="player__layer-title">Put it on the wall</h3>
+          <FactLine label="Download" fact={releaseHome(read).releases.find((row) => row.release.tag === tag).readiness} />
           <p className="roster__note">{keepScope(step.target.deploymentId)}</p>
           <PlanChoice plan={plan} skipped={skipped} onToggle={toggleSkip} />
-          {keepButton}
+          {putButton}
           {!gateOpen(gate) && <p className="roster__note">{GATE_CLOSED_KEEP}</p>}
         </SectionBoundary>
       )}
@@ -580,7 +592,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           <FramesNow snapshot={snapshot} frames={triedEntry.frames} />
           <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
           {step.stage.state === "fallback_running" && <p className="roster__note" role="alert">{FALLBACK_LOOK}</p>}
-          {keepButton}
+          {putButton}
           <button type="button" onClick={onBackOut} disabled={backOutInFlight}>{backOut !== null ? "Send the same back-out reboot again" : `Back out: reboot ${triedName}`}</button>
           <p className="roster__note">{`Back out reboots ${triedName}; its next boot is offered the boot selection. Nothing is selected.`}</p>
         </SectionBoundary>
@@ -602,7 +614,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
         </SectionBoundary>
       )}
       {(step.step === "keeping" || step.step === "paused") && (
-        <SectionBoundary title="Keep" resetKey={null}>
+        <SectionBoundary title="Put on the wall" resetKey={null}>
           <FactLine label="Boot selection" fact={releaseHome(read).selection} />
           <p className="roster__note">{keepScope(step.target.deploymentId)}</p>
           {step.step === "paused" && (
@@ -611,10 +623,9 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
               <FactLine label="On the selection" fact={COUNT_FACT} />
               {pause !== null && <p className="roster__note">{`Why: ${pause.reason}.`}</p>}
               <p className="roster__note">{pausedWords(step.target.deploymentId)}</p>
+              {pendingPut !== null && <p className="roster__note" role="status">{PUT_UNKNOWN}</p>}
               {gateOpen(gate) ? (
-                <button type="button" onClick={(event) => resume(event)}>
-                  {selectedHere.current && !started ? "Start rebooting" : "Resume"}
-                </button>
+                <button type="button" onClick={(event) => resume(event)} disabled={pendingPut !== null}>Resume</button>
               )
                 : <><p className="roster__note">{GATE_CLOSED_KEEP}</p>{gateLine}</>}
             </>
@@ -622,6 +633,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           {step.step === "keeping" && (
             <>
               <p className="player__state" role="status">{`Rebooting one at a time · ${keepCount(rows)}`}</p>
+              {waiting !== null && <p className="roster__note">{waiting}</p>}
               <FactLine label="On the selection" fact={COUNT_FACT} />
               <button type="button" onClick={() => stop("you stopped it")}>Stop</button>
             </>
@@ -641,13 +653,13 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
               <p className="player__state">{`Done · ${keepCount(rows)}`}</p>
               <FactLine label="On the selection" fact={COUNT_FACT} />
               <KeepRows members={members} rows={rows} snapshot={snapshot} pause={null} sent={sentRef.current} />
-              {(() => {
-                const previous = releaseHome(read).releases.find((entry) => entry.deploymentId !== null
-                  && entry.deploymentId === previousSelection.current);
-                return previous === undefined ? null : (
-                  <a href={formatRoute({ section: "releases", flow: "update", id: previous.release.tag })}>
-                    {`Undo: update the wall back to release ${previous.release.tag}`}
-                  </a>
+              {read.selection?.previous_deployment_id != null && (() => {
+                const source = releaseOf(read, read.selection.previous_deployment_id);
+                return (
+                  <button type="button" onClick={onUndo}>
+                    {`Undo: put ${source === null ? `deployment ${deploymentHandle(read.selection.previous_deployment_id)}`
+                      : `release ${source.tag}`} back…`}
+                  </button>
                 );
               })()}
             </>
@@ -671,7 +683,7 @@ function PlanNames({ plan, skipped }) {
   const left = plan.filter((entry) => skipped.has(entry.playerId));
   return (
     <>
-      <ol aria-label="Players Keep reboots">{kept.map((entry) => <li key={entry.playerId}>{planLine(entry)}</li>)}</ol>
+      <ol aria-label="Players this page reboots">{kept.map((entry) => <li key={entry.playerId}>{planLine(entry)}</li>)}</ol>
       {left.length > 0 && <p>{`Skipped: ${left.map((entry) => entry.name).join(", ")}.`}</p>}
     </>
   );
@@ -681,7 +693,7 @@ function PlanNames({ plan, skipped }) {
 function PlanChoice({ plan, skipped, onToggle }) {
   if (plan.length === 0) return <p className="roster__note">This console knows no Player to reboot.</p>;
   return (
-    <ol className="player__commands" aria-label="Players Keep reboots, in order">
+    <ol className="player__commands" aria-label="Players this page reboots, in order">
       {plan.map((entry) => {
         const out = skipped.has(entry.playerId);
         return (

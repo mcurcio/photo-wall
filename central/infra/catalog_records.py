@@ -11,11 +11,8 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from dataclasses import asdict, fields
-from hashlib import sha256
+from dataclasses import fields
 from typing import Any, Final
-
-from psycopg.types.json import Jsonb
 
 from central.content_catalog.ports import (
     DeviceRow,
@@ -28,12 +25,15 @@ from central.content_catalog.ports import (
     ReleaseRow,
     StoredEtag,
 )
+from central.infra.node_releases import deployment_jobs, wanted_deployments
 from central.infra.transactions import pg_connection
-from central.kernel.assets import OriginLocator
+from central.infra.upstream_guard import not_older
+from central.kernel.assets import AssetKind, OriginLocator
+from central.kernel.job_types import AssetJob
+from central.kernel.jobs import asset_key
 from central.kernel.ports import PlayerPayload, PublishedRelease
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version
-from contracts.node_release import parse_node_release
 
 _RELEASE_COLUMNS = (
     "tag, is_prerelease, asset_url, asset_sha256, asset_size, "
@@ -209,6 +209,20 @@ class PgReleaseRecords:
             "WHERE ref.locator_sha256=ref.identity AND ref.expected_sha256=ref.identity "
             "AND ref.locator_size=ref.expected_size"
         ).fetchall()
+        # The wanted V2 node deployments (`wanted_deployments`): the selected and the previous
+        # one are fetched first; the window's (the newest stable releases) in the background,
+        # newest release first.
+        wanted = wanted_deployments(conn)
+        jobs = deployment_jobs(conn, wanted.deployments)
+        node: set[AssetJob] = set()
+        for deployment in (wanted.selected, wanted.previous):
+            if deployment is not None:
+                node.update(jobs.get(deployment, ()))
+        window: list[AssetJob] = []
+        for _, deployment in wanted.window:
+            for job in sorted(jobs.get(deployment, ()), key=lambda job: str(asset_key(job))):
+                if job not in window:
+                    window.append(job)
         debs = {row["digest"] for row in policy if row["format"] == "player-deb"}
         payloads = {row["digest"] for row in policy
                     if row["format"] == "pw-player-data-v1"}
@@ -222,8 +236,12 @@ class PgReleaseRecords:
                 debs.add(row["digest"])
         payloads.update(row["digest"] for row in fallbacks)
         payloads.update(row["digest"] for row in attempts)
+        base_keys.update(asset_key(job).identity for job in node
+                         if asset_key(job).kind == AssetKind.OS_IMAGE)
+        environments = {asset_key(job).identity for job in node
+                        if asset_key(job).kind == AssetKind.SEALED_ENVIRONMENT}
         return FleetDesiredAssets(frozenset(base_keys), frozenset(debs),
-                                  frozenset(payloads))
+                                  frozenset(payloads), frozenset(environments), tuple(window))
 
     def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:
         rows = pg_connection(tx).execute(
@@ -286,17 +304,6 @@ class PgReleaseRecords:
         # 2. Otherwise lock the row. Under READ COMMITTED this statement sees the winner's
         #    committed row, so the previous row is never read before the lock is held.
         conn = pg_connection(tx)
-        if release.node_publication is not None:
-            publication = release.node_publication
-            manifest = parse_node_release(publication.manifest)
-            identity = sha256(publication.manifest).hexdigest()
-            conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,%s) "
-                         "ON CONFLICT DO NOTHING", (identity, release.tag, manifest.revision, publication.manifest,
-                         Jsonb({role: asdict(locator) for role, locator in publication.assets}), now))
-            prior = conn.execute("SELECT manifest_sha256 FROM node_release_catalog WHERE tag=%s AND revision=%s",
-                                 (release.tag, manifest.revision)).fetchone()
-            if prior is None or prior["manifest_sha256"] != identity:
-                raise ValueError("node_release_identity_conflict")
         version = release_version(release.tag)
         changed_at, asset_id = _upstream(release)
         mirror_state = "discovered" if release.package is not None else "undeployable"
@@ -326,9 +333,8 @@ class PgReleaseRecords:
 
     def apply(self, tx: Transaction, release: PublishedRelease, *, divergent: bool,
               now: float) -> bool:
-        # The guard is the WHERE: a stored NULL version takes any observation; a stored version
-        # takes only a set one that is not older, compared as the row value (changed_at, id).
-        # The SET's right-hand `mirror_state` is the row's value before this write.
+        # The guard is the WHERE (`not_older`, shared with the node observations). The SET's
+        # right-hand `mirror_state` is the row's value before this write.
         version = release_version(release.tag)
         changed_at, asset_id = _upstream(release)
         asset_url, asset_sha256, asset_size = _facts(release.package)
@@ -355,10 +361,7 @@ class PgReleaseRecords:
             "mirror_error=CASE WHEN %(divergent)s THEN 'asset_changed' "
             "WHEN mirror_state='divergent' THEN NULL ELSE mirror_error END,"
             "updated_at=%(now)s "
-            "WHERE tag=%(tag)s AND (upstream_changed_at IS NULL OR "
-            "(%(changed_at)s::double precision IS NOT NULL AND "
-            "(upstream_changed_at, upstream_asset_id) "
-            "<= (%(changed_at)s::double precision, %(asset_id)s::bigint))) "
+            f"WHERE tag=%(tag)s AND {not_older('app_releases')} "
             "RETURNING tag",
             {"tag": release.tag, "major": version.major, "minor": version.minor,
              "patch": version.patch, "prerelease": version.prerelease,

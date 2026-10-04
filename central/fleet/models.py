@@ -28,9 +28,9 @@ class OfferAsset:
 
 
 class FleetError(Exception):
-    def __init__(self, code: str, status: int = 409) -> None:
+    def __init__(self, code: str, status: int = 409, *, retry_after: int | None = None) -> None:
         super().__init__(code)
-        self.code, self.status = code, status
+        self.code, self.status, self.retry_after = code, status, retry_after
 
 
 class WireModel(BaseModel):

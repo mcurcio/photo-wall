@@ -12,8 +12,8 @@ from dataclasses import dataclass
 
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
-from central.fleet.locks import lock_fleet_assets_in
 from central.fleet.models import T0_AUDIENCE, FleetError, OfferAsset
+from central.infra.asset_roots import lock_fleet_assets_in
 from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 from contracts.time import Clock
 
@@ -166,7 +166,7 @@ class AcceptedFallbackService:
 
     async def preflight_app(self, *, device_id: str, sha256: str, base_abi: str,
                             bytes_reader: OfferByteReader) -> ReservedFallback:
-        """Return only after this pod opens and hashes the reserved exact payload."""
+        """Return only after this pod opens the reserved exact payload and checks its facts."""
         fallback = await asyncio.to_thread(self.reserve_app, device_id=device_id,
                                            sha256=sha256, base_abi=base_abi)
         await bytes_reader.preflight((fallback.asset,))

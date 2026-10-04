@@ -314,17 +314,18 @@ def test_touch_is_throttled_per_key(world_at):
     candidates = Candidates((NEW,), pinned=True)
     key = asset_key(NEW)
     served(asyncio.run(world.reader.read(candidates)))
-    assert world.reads.asset(key).last_served_at == 1000.0
+    first = world.reads.asset(key).last_served_at  # the database's clock (`touch_served`)
+    assert first is not None
     world.clock.advance(60)
     served(asyncio.run(world.reader.read(candidates)))
-    assert world.reads.asset(key).last_served_at == 1000.0  # within 5 minutes
+    assert world.reads.asset(key).last_served_at == first  # within 5 minutes: no write
     world.clock.advance(300)
     served(asyncio.run(world.reader.read(candidates)))
-    assert world.reads.asset(key).last_served_at == 1360.0
+    assert world.reads.asset(key).last_served_at > first
 
 
 class FailingTouch(PgAssetRecords):
-    def touch_served(self, tx, key, at):
+    def touch_served(self, tx, key):
         raise RuntimeError("db down")
 
 

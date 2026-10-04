@@ -29,6 +29,7 @@ from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
 from central.infra.asset_records import PgAssetRecords
+from central.infra.stored_assets import DiskStoredAssets
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.handling import (
     OriginRejected,
@@ -285,8 +286,9 @@ def test_handlers_declare_their_job_types():
     assert handler_job_type(FetchPackageHandler(production=production, origin=origin)) \
         is FetchPackage
     prefetch = PrefetchHandler(catalog=StaticContentCatalog({}),
-                               records=PgAssetRecords(ManualClock(0.0)),
-                               store=store, transactions=FakeTransactions(),
+                               readiness=DiskStoredAssets(records=PgAssetRecords(ManualClock(0.0)),
+                                                          store=store),
+                               transactions=FakeTransactions(),
                                publisher=RecordingPublisher(ManualClock(0.0)))
     assert handler_job_type(prefetch) is Prefetch
 
@@ -316,7 +318,8 @@ def test_prefetch_publishes_only_recorded_assets_missing_from_disk(world_at):
     publisher = RecordingPublisher(ManualClock(1000.0))
     catalog = StaticContentCatalog(
         {}, desired=frozenset({present, absent_file, never_produced, unrecorded}))
-    handler = PrefetchHandler(catalog=catalog, records=world.records, store=world.store,
+    handler = PrefetchHandler(catalog=catalog,
+                              readiness=DiskStoredAssets(records=world.records, store=world.store),
                               transactions=world.transactions, publisher=publisher)
     assert asyncio.run(handler.handle(Prefetch())) is None
     assert {call.job for call in publisher.calls} == {absent_file, never_produced}

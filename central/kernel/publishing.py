@@ -86,6 +86,12 @@ class SettledHandle(Generic[R]):
         return self._outcome
 
 
+def started(handle: JobHandle[object]) -> bool:
+    """Whether a publish inserted a job or merged into a pending copy (PB4). PB2 and PB3 insert
+    nothing and are the only `SettledHandle`s a Publisher returns."""
+    return not isinstance(handle, SettledHandle)
+
+
 class Publisher(Protocol):
     def publish(self, job: Job[R], *, within: Transaction,
                 retry_terminal: bool = False) -> JobHandle[R]: ...

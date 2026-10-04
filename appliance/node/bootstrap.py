@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shutil
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -17,6 +18,14 @@ from appliance.node.storage_mount import mount_storage
 from appliance.node_boot_handoff import HANDOFF, read_node_handoff
 from contracts.strict_json import loads_object
 from uplink.files import write_atomically
+
+# The prepare stage's download window (every attempt and retry of every artifact ends inside
+# it): photo-wall-node-prepare.service's TimeoutStartSec=1200 less STAGING_MARGIN_SECONDS for
+# extracting and verifying the last archive downloaded (a test binds the unit to both).
+STAGING_MARGIN_SECONDS = 300
+DOWNLOAD_WINDOW_SECONDS = 900
+COLD_STAGING = ".cold-staging"
+_ROOT_POOLS = ("manager-roots", "app-roots")
 
 
 def _marker(path: Path, keys: set[str]) -> dict:
@@ -68,9 +77,28 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     return central, offer, abi
 
 
+def _owned_staging(staging: Path) -> None:
+    status = staging.lstat()
+    if staging.is_symlink() or status.st_uid != os.geteuid() or status.st_mode & 0o077:
+        raise ValueError("node_cold_staging_ownership")
+
+
+def _clear_cold_staging(node_store: Path) -> None:
+    """Remove a killed earlier run's staging (its `.partial` downloads, `.stage-*` extractions,
+    archives and unpublished roots) before admission counts the store. Only this stage writes
+    COLD_STAGING, and the stages after it require it, so nothing else is using it."""
+    for pool in _ROOT_POOLS:
+        staging = node_store / pool / COLD_STAGING
+        if staging.is_symlink() or staging.exists():
+            _owned_staging(staging)
+            shutil.rmtree(staging)
+
+
 def prepare_roots(*, root: Path = Path("/")) -> None:
+    window_ends = time.monotonic() + DOWNLOAD_WINDOW_SECONDS
     central, offer, abi = materialize_handoff(root=root)
     node_store = root / str(STORE).lstrip("/")
+    _clear_cold_staging(node_store)
     selected = (("manager-primary", offer.manager_primary, "manager-roots"),
                 ("manager-fallback", offer.manager_fallback, "manager-roots"),
                 ("app", offer.app_environment, "app-roots"))
@@ -89,14 +117,14 @@ def prepare_roots(*, root: Path = Path("/")) -> None:
         # under its destination so immutable publication is one atomic rename.
         roots = node_store / destination
         roots.mkdir(mode=0o755, exist_ok=True)
-        staging = roots / ".cold-staging"
+        staging = roots / COLD_STAGING
         staging.mkdir(mode=0o700, exist_ok=True)
-        status = staging.lstat()
-        if staging.is_symlink() or status.st_uid != os.geteuid() or status.st_mode & 0o077:
-            raise ValueError("node_cold_staging_ownership")
+        _owned_staging(staging)
         directory = staging / kind
         url = central.rstrip("/") + f"/v2/node/boot-offers/{offer.offer_id}/artifacts/{kind}"
-        preparer = DownloadPreparer(directory, url=url, **abi)
+        # Transient download failures retry in-process inside the window; the stage record
+        # stays `running` meanwhile (one oneshot, no systemd Restart=).
+        preparer = DownloadPreparer(directory, url=url, retry_until=window_ends, **abi)
         preparer.prepare(environment)
         target = roots / environment.environment_sha256
         verified = directory / "verified" / environment.environment_sha256

@@ -26,8 +26,11 @@ from uplink.fetch import (
     READ_TIMEOUT,
     STATUS_TIMEOUT,
     DirectFetch,
+    Refused,
     central_error_code,
     refusal,
+    retry_after_seconds,
+    stream,
 )
 from uplink.origin import Origin
 from uplink.transport import HOP_TIMEOUT, HttpTransport
@@ -205,6 +208,42 @@ def test_directfetch_refusal_is_the_shared_mapping():
     error = refused(FakeReply(503, body=body))
     url = Origin.parse_root(ORIGIN).url("/v1/netboot/base")
     assert error.console() == refusal(url, 503, location=None, body=body).console()
+
+
+@pytest.mark.parametrize(("value", "seconds"), [
+    ("5", 5), (" 30 ", 30), ("0", 0), ("999999999", 999_999_999),
+    (None, None), ("", None), ("\u00b2", None), ("\u0665", None), ("9" * 10, None),
+    ("9" * 5000, None), ("-1", None), ("1.5", None), ("Wed, 21 Oct 2026 07:28:00 GMT", None),
+])
+def test_retry_after_is_one_to_nine_ascii_digits_else_absent(value, seconds):
+    assert retry_after_seconds(value) == seconds
+
+
+@pytest.mark.parametrize(("reply", "status", "retry_after", "code"), [
+    (FakeReply(503, body=b'{"error":"app_timeout"}', headers={"Retry-After": "5"}),
+     503, 5, "app_timeout"),
+    (FakeReply(503, body=b'{"error":"content_unavailable"}'), 503, None, "content_unavailable"),
+    (FakeReply(502, body=b"<html>bad gateway</html>", headers={"Retry-After": "\u00b2"}),
+     502, None, None),
+    (FakeReply(301, location="https://elsewhere.example/", headers={"Retry-After": "2"}),
+     301, 2, None),
+])
+def test_a_refusal_carries_status_retry_after_and_central_code(reply, status, retry_after, code):
+    error = refused(reply)
+    assert isinstance(error, Refused)
+    assert (error.status, error.retry_after, error.central_error) == (status, retry_after, code)
+
+
+def test_stream_takes_a_deadline_beyond_the_directfetch_ceiling():
+    clock = Clock(100.0)
+    transport = FakeTransport({BASE: ok()})
+    url = Origin.parse_root(ORIGIN).url("/v1/netboot/base")
+    deadline = clock.now + MAX_FETCH_SECONDS + 200
+    blocks = stream(transport, url, 10_000, block=64, deadline=deadline, monotonic=clock)
+    first = next(blocks)
+    clock.now += MAX_FETCH_SECONDS + 100  # past DirectFetch's ceiling, inside this deadline
+    assert first + b"".join(blocks) == BODY
+    assert transport.sent[0][0] == BASE
 
 
 @pytest.mark.parametrize(("reply", "maximum", "reason"), [

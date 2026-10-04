@@ -133,7 +133,7 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | `SyncMediaSources` | Tick | (none) | Catalog | Nothing except one `SyncMediaSource(source)` per enabled source (cron fan-out) | yes |
 | `SyncMediaSource(source)` | `SyncMediaSources`; operator source change | `source` | Catalog | Media catalog + `media-variant` Asset rows, then publishes `Prefetch` | no |
 | `Prefetch` | Tick; after sync, pin, promote, plan change | (none) | Assets & cache | Nothing except the fetch job of each desired asset missing from disk | yes + on change |
-| `MaintainCache` | Tick | (none) | Assets & cache | Removes files: least recently used *non-desired* files while over budget (never a desired file; if desired files alone exceed the budget, it stays over budget and raises a fleet-health warning), then orphans and stale temp files older than the grace period. | yes |
+| `MaintainCache` | Tick | (none) | Assets & cache | Removes release files nothing wants: an eager keep-set sweep, not budget-gated. Desired = the window of the 3 newest stable node releases + the selected + the previous deployment + the V1 roots (`desired_in`), read once to pick candidates and again immediately before each unlink (mark and sweep, no lock: a root committed in the remaining instant costs one read-through re-download). Spares a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file (both the cache filesystem's clock) or whose `last_served_at` is within 1 h of the database's clock (the clock that wrote it), and a temp file not idle past `TEMP_GRACE` (1 h); at most 50 unlinks per run. Only `os-images/` and `apps/`: never `previews/` or `media/`. Rows, references and produced facts stay. | yes |
 | `RescueStalledJobs` | Tick | (none) | Queue ops (infra) | Re-publishes jobs whose worker's heartbeat stopped, then closes their rows | yes |
 | `PurgeFinishedJobs` | Tick | (none) | Queue ops (infra) | Deletes old finished job rows (procrastinate's `delete_old_jobs`) | yes |
 
@@ -147,7 +147,7 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | **Asset** (one table, every kind) | `(kind, identity)`: `(os-image, tarball sha256)`, `(player-deb, sha256)`, `(media-variant, original+recipe)` | What *should* exist and what it *is*: **references** (one per owning tag or media source: its origin locator and expected size/digest); **produced facts** (the job's result: digest, size, and for media type/dimensions/duration), which are write-once and never cleared; `last_served_at`. A row and its facts outlive their last reference (nothing removes them before `MaintainCache`), but a key with no reference is not an asset: nothing serves or fetches it. **The file path is computed from the key.** | `Sync*` adds and retires references. The job runtime writes produced facts. HTTP writes only `last_served_at`. |
 | **Job outcome** (one table, every job type) | `(job type, subject)` | The latest written *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". Last write wins, so a late run's note may replace a newer one: readers decide from the data (facts plus file) first. | The job runtime only, with NOTIFY in the same transaction |
 | **Job** | procrastinate job row | **All** pending, running and retrying state. It is stored nowhere else. | procrastinate |
-| **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices (a last served tag only within 30 days of its serve); media that active plans reference | nobody (computed) |
+| **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices (a last served tag only within 30 days of its serve); exact fleet roots, including the bases and sealed environments of the newest 3 stable node releases, the selected and the previous V2 node deployment (so `Prefetch` warms them before a node boots: every missing selected or previous file, and at most one window-only file per tick; serving never depends on it); media that active plans reference | nobody (computed) |
 
 Each record's identity and write rule, and why any order of job runs converges on it, are in
 [idempotent jobs](central-idempotent-jobs.md) §4.
@@ -281,9 +281,10 @@ the bullet:** `.deb`, media, `MaintainCache`, the fleet signal.
 1. **Media identity: decided** (the recommendation; the owner had no preference). Players request
    media by original + recipe (the recipe id includes the renderer build). The digest is a
    write-once integrity check (§10.2). The player URL changes (§8).
-2. **Over budget: decided.** `MaintainCache` evicts least recently used first and never a desired
-   file. If desired files alone exceed the budget, the cache goes over budget and raises a
-   fleet-health warning instead of fighting `Prefetch`.
+2. **Over budget: superseded** (auto-ingest design §6.3). `MaintainCache` has no budget: it is
+   an eager keep-set sweep that removes every non-desired release file past its grace and never a
+   desired one (see the `MaintainCache` row in §4). Desired files alone may still fill the disk;
+   nothing evicts them.
 3. **Terminal fetch failure: decided.** The job is not retried. The *next request* for the asset
    starts a new attempt, with no rate limit. `Prefetch` and ticks do not retry it (§10.2, cost
    in §7). `PurgeFinishedJobs` drops an outcome not written for 30 days, and ticks then retry it.
@@ -500,7 +501,7 @@ nothing.
 | `Publisher`, `JobHandle`, `Transactions` (opaque `Transaction`), `Handler` | §10.2, §10.3 |
 | `ContentCatalog` | `async resolve(request) -> Resolution`; `desired_assets() -> frozenset[AssetJob]` |
 | `PlanMediaReferences` (playback implements it) | `referenced() -> frozenset[PrepareMedia]` |
-| `AssetRecords` (Catalog declares through it) | `get(tx, key)` (None when no reference is left); `reference(tx, key, AssetReference)`; `retire(tx, key, owner)` (the row and its facts stay); `record_produced(tx, key, facts)` (write-once); `lock_produced(tx, key) -> AssetReady \| None` (`FOR SHARE`, serializes with `record_produced`); `touch_served(tx, key, at)` |
+| `AssetRecords` (Catalog declares through it) | `get(tx, key)` (None when no reference is left); `reference(tx, key, AssetReference)`; `retire(tx, key, owner)` (the row and its facts stay); `record_produced(tx, key, facts)` (write-once); `lock_produced(tx, key) -> AssetReady \| None` (`FOR SHARE`, serializes with `record_produced`); `touch_served(tx, key)` (sets `last_served_at` on the store's own clock, never the caller's); `served_within(tx, key, seconds) -> bool` (compared on that same clock) |
 | `ReleaseRecords` (Catalog) | `claim(tx, release, *, now) -> ReleaseRow \| None` (insert if absent, else lock and return the previous row); `apply(tx, release, *, divergent, now) -> bool` (refuses an older upstream version); `lock_auto_promotion(tx)`; `promotion`, `set_promoted(tx, tag, *, by)`; `load_etag(tx) -> StoredEtag \| None`, `store_etag(tx, etag, *, now)`. No `upsert` or `mark_divergent`: a release is written only through `claim` and `apply` |
 | `ReleaseOrigin` / `MediaOrigin` | `async list_releases(etag)` / `async list_source(spec)`; `async download(loc, into, *, max_bytes)` |
 

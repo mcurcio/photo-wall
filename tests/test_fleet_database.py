@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from central.assets.handlers import FetchPlayerPayloadHandler
 from central.assets.layout import CacheLayout
 from central.assets.production import AssetProduction
-from central.assets.reader import Opened
+from central.assets.reader import Opened, Unavailable
 from central.assets.store import CacheStore
 from central.fleet import fallback as fallback_module
 from central.fleet.bytes import OfferByteReader
@@ -28,7 +28,6 @@ from central.fleet.fallback import (
     AcceptedFallbackService,
     retire_device_fallback_references,
 )
-from central.fleet.locks import FLEET_ASSET_LOCK
 from central.fleet.models import (
     Artifact,
     BaselineWrite,
@@ -40,10 +39,12 @@ from central.fleet.models import (
 from central.fleet.routes import mount_fleet_routes
 from central.fleet.service import OFFER_TTL_SECONDS, FleetService
 from central.infra.asset_records import PgAssetRecords
+from central.infra.asset_roots import FLEET_ASSET_LOCK
 from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransactions
-from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.assets import AssetKey, AssetKind, AssetReady
 from central.kernel.job_types import FetchPlayerPayload
+from central.kernel.jobs import asset_key
 from central.netboot_base import record_base_health
 from contracts.models import BaseHealth
 
@@ -201,22 +202,15 @@ def test_offer_freezes_exact_pair_provenance_and_expiry(registry) -> None:
                       "sha256": APP_SHA, "size": 123},
                      {"kind": "base", "content_key": TARBALL_SHA,
                       "sha256": BASE_SHA, "size": len(BASE_BYTES)}]
-    evicted = []
-    assert not service.evict_if_unretained(
-        kind="base", content_key=TARBALL_SHA, evict=lambda: evicted.append("base"))
-    assert evicted == []
     registry.clock.advance(OFFER_TTL_SECONDS)
     with pytest.raises(FleetError, match="boot_offer_expired"):
         service.create_offer(_request(1, "a"))
     with pytest.raises(FleetError, match="boot_offer_expired"):
         service.offer_asset(UUID(first["offer_id"]), "base")
-    assert service.evict_if_unretained(
-        kind="base", content_key=TARBALL_SHA, evict=lambda: evicted.append("base"))
-    assert evicted == ["base"]
 
 
 def test_current_generation_accepted_base_remains_desired_after_offer_expiry(registry) -> None:
-    """The desired-assets view must honor the same conservative root as cache GC."""
+    """The desired-assets view is the cache cleaner's keep-set (`MaintainCache`)."""
     _seed_release(registry)
     fleet = FleetService(registry.db, registry.clock)
     fleet.set_base_baseline(BaselineWrite(expected_revision=0, tag=TAG))
@@ -243,10 +237,6 @@ def test_current_generation_accepted_base_remains_desired_after_offer_expiry(reg
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert accepted_key in desired.base_tarballs
-    assert not fleet.evict_if_unretained(
-        kind="base", content_key=accepted_key,
-        evict=lambda: pytest.fail("accepted base evicted"),
-    )
 
 
 def test_check_in_sequence_and_delayed_boot_remain_observational(registry) -> None:
@@ -442,8 +432,6 @@ def test_accepted_fallback_retains_exact_locator_after_offer_expiry(registry) ->
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA in desired.player_payloads
-    assert not fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
-                                        evict=lambda: pytest.fail("retained fallback evicted"))
 
 
 def test_new_fallback_root_refuses_offer_expired_during_fleet_lock_wait(
@@ -512,10 +500,6 @@ def test_retired_device_keeps_fallback_history_but_releases_bytes(registry) -> N
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA not in desired.player_payloads
-    evicted = []
-    assert fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
-                                    evict=lambda: evicted.append(APP_SHA))
-    assert evicted == [APP_SHA]
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM asset_references WHERE owner=%s",
                             (f"fleet-fallback:{device_id}:1",)).fetchone()["n"] == 0
@@ -595,7 +579,7 @@ def test_retired_device_override_is_history_not_a_prefetch_root(registry) -> Non
     assert APP_SHA not in desired.player_payloads
 
 
-def test_accepted_fallback_preflight_hashes_local_bytes(registry, tmp_path,
+def test_accepted_fallback_preflight_checks_local_facts(registry, tmp_path,
                                                         monkeypatch) -> None:
     _seed_release(registry)
     blob = b"verified fallback bytes"
@@ -613,21 +597,30 @@ def test_accepted_fallback_preflight_hashes_local_bytes(registry, tmp_path,
         device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
                                  (SERIAL,)).fetchone()["device_id"]
     _accept_app(registry, device_id, digest, len(blob), "qualified:53")
-    path = tmp_path / "fallback.tar.gz"
+    local = CacheStore(CacheLayout(tmp_path / "local-cache"))
+    facts = AssetReady(size=len(blob), sha256=digest)  # recorded facts
+    path = local.layout.path(AssetKey(AssetKind.PLAYER_PAYLOAD, digest))
+    path.parent.mkdir(parents=True)
     path.write_bytes(blob)
 
     class LocalReader:
+        """Opens through the real CacheStore, as AssetReader does; a file it refuses is a miss."""
+
         async def read(self, candidates):
-            fd = os.open(path, os.O_RDONLY)
-            return Opened(candidates.jobs[0], fd, len(blob), "f" * 64)
+            job = candidates.jobs[0]
+            assert asset_key(job) == AssetKey(AssetKind.PLAYER_PAYLOAD, digest)
+            file = local.open(asset_key(job), facts)
+            if file is None:
+                return Unavailable("absent_after_ready", 5)
+            return Opened(job, file.fd, file.size, digest)
 
     retention = AcceptedFallbackService(registry.db, registry.clock)
     bytes_reader = OfferByteReader(LocalReader())
     assert asyncio.run(retention.preflight_app(
         device_id=device_id, sha256=digest, base_abi=BASE_ABI,
         bytes_reader=bytes_reader)).sha256 == digest
-    path.write_bytes(b"wrong fallback bytes")
-    with pytest.raises(FleetError, match="offer_artifact_mismatch"):
+    path.write_bytes(b"wrong fallback bytes")  # not the recorded size: the store never opens it
+    with pytest.raises(FleetError, match="absent_after_ready"):
         asyncio.run(retention.preflight_app(device_id=device_id, sha256=digest,
                                            base_abi=BASE_ABI, bytes_reader=bytes_reader))
 
@@ -722,19 +715,12 @@ def test_accepted_fallback_rotation_refuses_unfinished_attempt(registry) -> None
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA in desired.player_payloads  # The active attempt's own root remains.
-    assert not FleetService(registry.db, registry.clock).evict_if_unretained(
-        kind="app", content_key=APP_SHA,
-        evict=lambda: pytest.fail("active attempt bytes evicted"))
     with registry.db.transaction() as conn:
         conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s WHERE attempt_id=%s",
                      (registry.clock.utc(), attempt_id))
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA not in desired.player_payloads
-    evicted = []
-    assert FleetService(registry.db, registry.clock).evict_if_unretained(
-        kind="app", content_key=APP_SHA, evict=lambda: evicted.append(APP_SHA))
-    assert evicted == [APP_SHA]
 
 
 def test_issued_attempt_retains_exact_bytes_across_revocation_until_release(registry) -> None:
@@ -766,19 +752,12 @@ def test_issued_attempt_retains_exact_bytes_across_revocation_until_release(regi
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA in desired.player_payloads
-    assert not fleet.evict_if_unretained(
-        kind="app", content_key=APP_SHA,
-        evict=lambda: pytest.fail("unresolved issued attempt evicted"))
     with registry.db.transaction() as conn:
         conn.execute("UPDATE fleet_app_attempts SET root_released_at=%s "
                      "WHERE attempt_id=%s", (registry.clock.utc(), attempt_id))
     with PgTransactions(registry.db).begin() as tx:
         desired = PgReleaseRecords().fleet_desired_assets(tx, now=registry.clock.utc())
     assert APP_SHA not in desired.player_payloads
-    evicted = []
-    assert fleet.evict_if_unretained(kind="app", content_key=APP_SHA,
-                                    evict=lambda: evicted.append(APP_SHA))
-    assert evicted == [APP_SHA]
 
 
 def test_repeated_exact_byte_reads_consume_a_separate_quota(registry) -> None:
@@ -835,7 +814,7 @@ def test_mounted_offer_route_uses_migrated_selection_and_exact_open(registry, tm
         async def read(self, candidates):
             jobs.append(candidates.jobs[0])
             return Opened(candidates.jobs[0], os.open(path, os.O_RDONLY), len(BASE_BYTES),
-                          "0" * 64)
+                          hashlib.sha256(BASE_BYTES).hexdigest())  # recorded facts
 
     app = FastAPI()
     mount_fleet_routes(app, db=registry.db, clock=registry.clock, admin=lambda: None,

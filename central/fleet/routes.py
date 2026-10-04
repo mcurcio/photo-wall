@@ -1,7 +1,8 @@
 """Fleet HTTP seam. Serial-only boot traffic is observational; operator writes use admin auth.
 
-The composition root supplies the existing content reader. Each response reopens and verifies
-the frozen digest on this serving pod; an open descriptor leases the bytes through streaming.
+The composition root supplies the existing content reader. Each response reopens the frozen
+artifact on this serving pod and checks its recorded facts (`OfferByteReader`), never rehashing
+it; an open descriptor leases the bytes through streaming.
 """
 
 from __future__ import annotations
@@ -14,7 +15,13 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from central.content_routes import DEB_MEDIA_TYPE, ClientDisconnected, _stream, until_disconnect
+from central.content_routes import (
+    DEB_MEDIA_TYPE,
+    ClientDisconnected,
+    error_response,
+    stream_opened,
+    until_disconnect,
+)
 from central.content_wiring import ContentServices
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
@@ -35,8 +42,8 @@ from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 from contracts.time import Clock
 
 
-def _retry_after(clock: Clock) -> str:
-    return str(max(1, 86400 - int(clock.utc()) % 86400))
+def _retry_after(clock: Clock) -> int:
+    return max(1, 86400 - int(clock.utc()) % 86400)
 
 
 def mount_fleet_routes(app: FastAPI, *, db: Database, clock: Clock,
@@ -52,8 +59,8 @@ def mount_fleet_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.exception_handler(FleetError)
     async def fleet_error(_request: Request, exc: FleetError) -> JSONResponse:
-        headers = {"Retry-After": _retry_after(clock)} if exc.status == 429 else None
-        return JSONResponse({"error": exc.code}, status_code=exc.status, headers=headers)
+        retry_after = _retry_after(clock) if exc.status == 429 else exc.retry_after
+        return error_response(exc.code, exc.status, retry_after=retry_after)
 
     @app.post("/v1/netboot/offers")
     async def create_offer(request: Request, body: OfferRequest) -> Response:
@@ -77,7 +84,7 @@ def mount_fleet_routes(app: FastAPI, *, db: Database, clock: Clock,
         try:
             media_type = ("application/gzip" if asset.format == PAYLOAD_FORMAT else
                           DEB_MEDIA_TYPE if kind == "app" else "application/octet-stream")
-            return _stream(opened, media_type)
+            return stream_opened(opened, media_type)
         except BaseException:
             os.close(opened.fd)
             raise
