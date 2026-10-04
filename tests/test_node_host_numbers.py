@@ -17,8 +17,8 @@ from appliance.node.capacity import (
     OVERHEAD,
     StorageShort,
     admit_preparation,
+    device_class,
     preparation_room,
-    storage_budget,
 )
 from appliance.node.host_linux import LinuxHostSampler
 from appliance.node.manager_desired import DesiredPreparation
@@ -29,6 +29,7 @@ from contracts.node_observation import (
     HostMetricV2,
     HostObservationV2,
     encode_host_observation,
+    valid_metrics,
 )
 from contracts.node_preparation import parse_manager_preparation
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
@@ -126,34 +127,44 @@ def test_each_name_is_emitted_once_and_the_largest_sample_fits_the_contract(tmp_
     host = sampler.sample() + sampler.throttling()
     names = [row[0] for row in host]
     assert len(names) == len(set(names)) == 16
-    # The largest sample: every host row, all five units' supervision rows, the full base
-    # supervisor summary and both recovery rows (39), with the longest names and values.
-    monkeypatch.setattr("appliance.node.host_linux.subprocess.run", lambda *a, **k: SimpleNamespace(
-        stdout="LoadState=loaded\nActiveState=active\n"))
+    # The largest sample: every host row, the full base supervisor summary, every memory row
+    # (memcg, CMA, four peaks, three OOM counts) and both recovery rows (34), with the longest
+    # names and values, plus the appended drop count, all kept by `valid_metrics`.
     monkeypatch.setattr("appliance.node.host_linux.read_supervisor_status", lambda *a, **k: {
         "running": True, "attempts": 3, "fault": None, "sampled_boottime_ms": 1})
     monkeypatch.setattr("appliance.node.host_linux.boot_id", lambda: uuid4())
-    rows = host + sampler.supervision() + (
+    (proc / "meminfo").write_text("MemTotal: 1000 kB\nMemAvailable: 500 kB\nCmaTotal: 524288 kB\n"
+                                  "CmaFree: 1024 kB\n")
+    cgroup = sys_root / "fs/cgroup"
+    cgroup.mkdir(parents=True)
+    (cgroup / "cgroup.controllers").write_text("cpuset cpu io memory pids\n")
+    for name in ("photowallhostcore", "photowallbase", "photowallpreparation", "photowallapp"):
+        (cgroup / f"{name}.slice").mkdir()
+        (cgroup / f"{name}.slice/memory.peak").write_text("123456789\n")
+        (cgroup / f"{name}.slice/memory.events").write_text("low 0\nhigh 0\nmax 4\noom 2\noom_kill 2\n")
+    rows = host + sampler.supervision() + sampler.memory_rows() + (
         ("local_recovery_active", 1, "count", "base_recovery"),
         ("local_recovery_reboot", 1, "count", "base_recovery"))
-    assert len(rows) == 39
+    assert len(rows) == 34
     producer = NodeProducerV2("s" * 64, "device-" + "a" * 64, 2**31, uuid4(), "host_core", uuid4())
-    metrics = tuple(HostMetricV2(name, 1.0e15 + 0.123456789, unit, *source)
-                    for name, _, unit, *source in rows)
+    metrics = valid_metrics((name, 1.0e15 + 0.123456789, unit, *source) for name, _, unit, *source in rows)
+    assert len(metrics) == 35 and metrics[-1] == HostMetricV2("metrics_dropped", 0, "count", "host_core")
     raw = encode_host_observation(HostObservationV2(producer, 2**62, 2**62, metrics,
                                                     fault_code="local_recovery_" + "x" * 49))
     assert len(raw) <= MAX_OBSERVATION_BYTES and len(metrics) <= 64
 
 
 def _old_admit(size, *, total, available, free, used):
-    """The decision before N1 (capacity.py at batch 3), kept as the reference."""
+    """The decision before N1 (capacity.py at batch 3), kept as the reference; the store cap is
+    the device class's since the 4 GB tracer (T1)."""
     incremental = 2 * size + OVERHEAD
-    return not (used + incremental > storage_budget(total, available)
+    return not (used + incremental > device_class(total).store_bytes
                 or incremental > min(free, available - EMERGENCY_HEADROOM))
 
 
 @pytest.mark.parametrize("size", [128, 200 * MIB, 984207360, GIB, 2 * GIB])
-@pytest.mark.parametrize("total,available", [(8 * GIB, 600 * MIB), (8 * GIB, 2 * GIB),
+@pytest.mark.parametrize("total,available", [(4045 * MIB, 600 * MIB), (4045 * MIB, 3 * GIB),
+                                             (8 * GIB, 600 * MIB), (8 * GIB, 2 * GIB),
                                              (8 * GIB, 3 * GIB), (8 * GIB, 7 * GIB), (16 * GIB, 12 * GIB)])
 @pytest.mark.parametrize("free,used", [(4 * GIB, 0), (4 * GIB - 1261 * MIB, 1261 * MIB),
                                        (GIB, 3 * GIB), (100 * MIB, 0), (8 * GIB, 5 * GIB)])

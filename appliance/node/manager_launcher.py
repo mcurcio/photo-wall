@@ -61,7 +61,7 @@ class SystemdManagerLauncher:
             "Slice=photowallpreparation.slice", "ProtectSystem=strict", "ProtectHome=yes",
             "PrivateDevices=yes", "PrivateTmp=yes", "NoNewPrivileges=yes", "CapabilityBoundingSet=",
             "ProtectControlGroups=yes", "ProtectKernelTunables=yes", "ProtectKernelModules=yes",
-            "RestrictSUIDSGID=yes", "RestrictNamespaces=yes", "MemoryMax=4G", "MemorySwapMax=0",
+            "RestrictSUIDSGID=yes", "RestrictNamespaces=yes", "MemorySwapMax=0", "OOMScoreAdjust=300",
             "TasksMax=32", "CPUQuota=25%", "IOWeight=10", "Restart=no", "KillMode=control-group",
             "TemporaryFileSystem=/run:rw,nosuid,nodev,size=32M /tmp:rw,nosuid,nodev,size=64M",
             "BindPaths=/run/photo-wall-node-storage/preparation:/run/photo-wall-preparation",

@@ -17,6 +17,7 @@ RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 UMask=0077
 Slice=photowallhostcore.slice
+OOMScoreAdjust=-900
 CPUWeight=1000
 MemoryMin=32M
 MemoryMax=96M

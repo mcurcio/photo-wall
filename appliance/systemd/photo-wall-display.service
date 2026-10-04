@@ -5,6 +5,10 @@ ConditionPathExists=/usr/lib/photo-wall-display/photo-wall-shell.so
 After=systemd-user-sessions.service systemd-logind.service
 Wants=systemd-logind.service
 Conflicts=photo-wall-weston.service getty@tty1.service
+# A crash loop leaves the unit failed and reported, never a reboot: recovery is
+# operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
+StartLimitIntervalSec=10min
+StartLimitBurst=10
 
 [Service]
 User=pw-display
@@ -29,6 +33,7 @@ ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston -
 Restart=always
 RestartSec=2
 Slice=photowallbase.slice
+OOMScoreAdjust=-500
 MemoryMax=256M
 TasksMax=64
 NoNewPrivileges=yes

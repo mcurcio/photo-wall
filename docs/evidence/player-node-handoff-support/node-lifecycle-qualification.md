@@ -5,7 +5,7 @@ actual sealed Player and manager, production base units and effect driver, real 
 owners and a disposable test database. Each scenario boots a fresh privileged arm64 container
 with systemd as PID 1, masks host and reboot actions, and removes only its own containers,
 database and archive copies. The [node-pid1 workflow](../../../.github/workflows/node-pid1.yml)
-runs the four scenarios as a parallel matrix whenever the release plan finds a node package,
+runs the five scenarios as a parallel matrix whenever the release plan finds a node package,
 a file the harness imports (Central's Python included) or the scenarios' own paths changed; the
 pipeline gate requires it. Every leg boots the one component set and fixture the run's
 [node-components workflow](../../../.github/workflows/node-components.yml) built.
@@ -46,8 +46,8 @@ PHOTO_WALL_NODE_PID1_FIXTURE="$WORK/fixture" PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1
   --basetemp "$WORK/run" tests/test_node_pid1.py
 ```
 
-`SCENARIO` is `success`, `failure`, `outage` or `reboot`. Put `$WORK` on a volume with about
-10 GB free. Collection alone does not execute privileged Docker work.
+`SCENARIO` is `success`, `failure`, `outage`, `reboot` or `refused`. Put `$WORK` on a volume
+with about 10 GB free. Collection alone does not execute privileged Docker work.
 
 ## Scenarios, evidence and limits
 
@@ -63,6 +63,14 @@ PHOTO_WALL_NODE_PID1_FIXTURE="$WORK/fixture" PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1
   kernel `boot_id` for the same device and database, enrolls without operator action. A's
   admission is superseded with no live session, A's actual broker credential is refused
   `node_session_superseded` on a real node route, and a stage then completes on B.
+- **refused**: a drop-in binds a 2 GiB `/proc/meminfo` (read-only) into the storage unit
+  alone, below the smallest memory class. Handoff runs, then storage, prepare, Host Management,
+  the broker and the manager supervisor start as one PID1 transaction. Storage must fail;
+  prepare, the broker and the manager supervisor must never start (their `Requires=`); Central
+  must receive the host facts `boot` report with storage `refused`, fault `node_memory_class`,
+  required 3584 MiB and room the fake total, and an observation with `memcg_present` 1 and a
+  `memory_peak:` row. The fake is valid for this leg only: the bind gives the unit its own
+  mount namespace, so a store it mounted would not reach the host. No app is linked or staged.
 
 Every completed scenario also requires the reported terminal effect to name the exact current
 process, epochs and environment, no refused effect report, and no pending control delivery

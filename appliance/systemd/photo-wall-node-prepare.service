@@ -2,7 +2,7 @@
 Description=Prepare frozen exact V2 app and manager environments
 ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/etc/photo-wall/node-boot.json
-Requires=photo-wall-node-storage.service
+Requires=photo-wall-node-storage.service photo-wall-node-handoff.service
 After=photo-wall-node-handoff.service photo-wall-node-storage.service network-online.target
 Before=photo-wall-app-broker.service photo-wall-manager-supervisor.service
 
@@ -16,7 +16,7 @@ Slice=photowallpreparation.slice
 TimeoutStartSec=1200
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/run/photo-wall-node /run/photo-wall-node-storage/app-roots /run/photo-wall-node-storage/manager-roots /etc/photo-wall
+ReadWritePaths=/run/photo-wall-node /run/photo-wall-boot-stage /run/photo-wall-node-storage/app-roots /run/photo-wall-node-storage/manager-roots /etc/photo-wall
 PrivateDevices=yes
 NoNewPrivileges=yes
 CapabilityBoundingSet=

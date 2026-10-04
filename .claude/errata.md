@@ -3506,3 +3506,105 @@ due refresh (:245) also checks in, so a preparation backlog delaying maintenance
 docs/module-media-worker.md one-media-clock paragraph now states the window and cadence and links the runbook.
 HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` scan after moving base-image.yml
 :482/:490/:907 to entry points). Not blocking this PR.
+
+## 2026-10-03 · 4 GB tracer T1 (implementer) · design-4gb-node.md §4.3 T1
+- E-T1-1 · `admit_cold` second refusal: the page writes `StorageShort(incremental, min(free, available − EMERGENCY))`;
+  that room is negative when MemAvailable < 512 MiB, which a non-negative `room_bytes` (T2 `BootStageV2`) cannot carry.
+  Implemented: decision on the unclamped value (unchanged behaviour), reported room `max(0, …)`, as `preparation_room` does.
+- E-T1-2 · Rule 3 ("per-unit duplicates are deleted") vs the page: the app transient still carries `MemoryMax=2G`
+  (`appliance/node/process_linux.py` `app_unit_properties`) beside `photowallapp.slice` `MemoryMax=2G`; the page names
+  only the two `MemoryMax=4G` lines, so the 2G duplicate was kept. Needs a ruling (delete it + bind slice to a constant, or keep).
+- E-T1-3 · The storage stage no longer refuses on MemAvailable ≤ 512 MiB (the old `storage_budget`
+  `node_storage_memory_envelope`); the page's order (memcg, class, mount, size) omits it. Cold admission still refuses
+  through MemAvailable. Recorded so T6 docs do not describe the old refusal.
+
+- E-T1-2 ruling (orchestrator, 2026-10-03): keep app MemoryMax=2G for the tracer; the app memory line and single-sourcing photowallapp.slice belong to the Shape C gate.
+
+## 2026-10-03 · 4 GB tracer T4 (implementer) · design-4gb-node.md §4.3 T4
+- E-T4-1 · Wording numbers: the page's "needs 3.5 GB of memory, the box has 1.9 GB" assumes binary GiB. The console has
+  one byte wording, `health.js gigabytes()` (decimal, shared with App Manager's storage refusal), so the 4 GB class's
+  3584 MiB reads "3.8 GB" and T5's 2 GiB MemTotal reads "2.1 GB". Kept DRY; T6 docs (DDD §62 rows) should quote decimal values.
+- E-T4-2 · Case: boot items are host-facts `reported` facts (receipt `first`, `facts.first_received_at`), worded
+  "Host Management reported boot preparation … · first received 1 min ago", so their values are lower-cased mid-sentence
+  ("boot preparation refused at storage: …", "base unit failed on this boot: …"), as the kernel/base facts are. Incidents
+  read "pi-07 (Frame x) — boot preparation failed at prepare (os:ENOSPC)", matching "— throttled now". `out_of_memory` is a
+  `latest` metric and keeps "Out-of-memory kills on this boot: app 2 · base 1".
+- E-T4-3 · Wordings the page leaves open, implemented: "no base unit failed on this boot" (no band); plural "base units
+  failed on this boot: a · b and N more"; overflow with no shown name "… N not named"; "boot preparation failed at X"
+  without "(fault)" when the fault is absent; "No out-of-memory kills on this boot" when every `oom_kill:` row is 0 (no band;
+  only non-zero slices are listed, most kills first). The OOM notice is a fixed band (any kill > 0), not a Central threshold,
+  following the App Manager storage refusal precedent (`reported` kind with its own band).
+- E-T4-4 · `failed_units_more` cannot be filtered: when more than 4 units fail, a stage unit sorted past the fourth name
+  is counted in "and N more", so a stopped stage can also raise `base_units`. Only reachable with ≥ 5 failed units.
+- E-T4-5 · Baseline: the 29 console JS failures T2 reported (fleet_commands, releases, stage, planned, qualification) are
+  environmental: the shell's default `node` is v16.20.2, which lacks global `fetch`/`Response`. With node v22.23.2 first on
+  PATH all 52 pass on this tree; not a code fault, no origin/main comparison needed.
+
+## 2026-10-03 · 4 GB tracer T3 (implementer) · design-4gb-node.md §4.3 T3
+- E-T3-1 · Brief vs page: the T3 brief asked `failed_units()` to exclude the three stage units "per the page". The page
+  does not: T4 `base_units` is "`facts.boot.failed_units` **minus** the three stage units" (the console subtracts), and §6
+  rows "Prepare killed before its exit write" / "Record write fails" rely on `failed_units` still naming the stage unit.
+  Implemented per the page: stage units are INCLUDED in `boot.failed_units`; T4 subtracts them (E-T4-4 is the known
+  overflow consequence). If exclusion at the node is wanted, the §6 guarantees need another carrier.
+- E-T3-2 · `read_boot_report`'s "None only if both are unreadable" vs `failed_units() -> ((), 0) on error`: the page's
+  unit reader cannot signal "unreadable". Implemented: `units()` raising (any Exception) is unreadable; with no readable
+  stage file either, the report is None. With the real sampler a box with no records reports `BootReportV2((), (), 0)`.
+- E-T3-3 · §4.4 says `boot_stage` imports `contracts.node_host_facts` and `appliance.node.capacity` only. It also imports
+  `contracts.node_protocol.token`, `contracts.strict_json.loads_object` and `uplink.files.write_atomically` (stdlib-only,
+  already in the bootstrap closure; reused rather than a second atomic writer). HostCore's closure now carries
+  `uplink.files`; no forbidden module (test binds it).
+- E-T3-4 · `memcg_present` is emitted as 0 when `cgroup.controllers` is unreadable (reuses
+  `capacity.memory_controller_present`, which maps OSError to False), rather than omitted; the store is refused on the
+  same reading, so 0 is the consistent answer.
+- E-T3-5 · The storage unit has no file-system sandboxing (no ProtectSystem), so only handoff and prepare gain
+  `ReadWritePaths=/run/photo-wall-boot-stage`; HostCore reads it under ProtectSystem=strict (read-only is enough).
+
+- E-T3-1 ruling (orchestrator, 2026-10-03): follow the page. failed_units includes stage units; the console subtracts them. residual: with 5+ failed units a stage unit can sort past the cap into "and N more" (E-T4-4), so one cause can raise two incidents. Fix later by reserving the cap for non-stage units or carrying a stage-units count.
+
+## 2026-10-03 · 4 GB tracer T6 (implementer, docs) · design-4gb-node.md §4.3 T6
+- E-T6-1 · Only the node release's cohort tree carries `cgroup_enable=memory` (`scripts/node_release_artifacts.py`
+  `NODE_CMDLINE_TOKENS`). The general bundle's `cmdline.txt` template (`scripts/build_netboot_bundle.sh:288`) carries
+  neither it nor `photowall.node=v2`, and the runbook still tells operators to add `photowall.node=v2` per Pi through
+  iac `cmdline_extra`. A Pi opted in that way boots with the memory controller off, and its storage step now fails
+  `memory_controller_absent`. The runbook (Node control, step 2) now says to add both tokens; whether iac's
+  `players.yaml` stages the cohort tree or the general one with `cmdline_extra` was not checked (outside this repo) and
+  should be before the tracer deploys.
+- E-T6-2 · `docs/requirements.md` numbers no requirements, so R6 is a prose subsection, "Supported Player hardware",
+  under Installation model › Player provisioning; README's "8 GiB" hardware line now links to it.
+- E-T6-3 · The root import's refusal (`appliance/node/root_import.py:50-51`) stays `ValueError("root_import_capacity")`
+  with no numbers, unlike admission's `StorageShort`; the domain model says so rather than claiming every refusal
+  carries numbers.
+
+## 2026-10-03 · 4 GB tracer T5 (implementer, node-pid1 refused leg) · design-4gb-node.md §4.3 T5
+- E-T5-1 · The page names the drop-in only; it does not say how the leg starts the units. The existing inner script
+  starts storage and prepare with `check=True`, which a refusal aborts. The refused leg starts handoff alone, then
+  storage, prepare, host-core, broker and manager-supervisor as one `systemctl start` (the units' own Requires=/After=
+  decide). The display units are left out (not on the refusal path); `photo-wall-node.target` itself is not started.
+- E-T5-2 · Central is read through a new fixture route `/fixture/host` (newest `node_host_facts` row via
+  `stored_fact_values`, newest observation's metric rows); `/fixture/status` is unchanged for the other legs.
+- E-T5-3 · Not a spec error, an observation for the console/T6: in a real boot HostCore and storage race, so the first
+  facts post can carry `storage running`; the refusal then arrives with the next observation-cadence post (≤ 15 s).
+- E-T5-4 · memcg in the container: with `--cgroupns=private --privileged`, Docker Desktop (linuxkit 7.0.14) shows
+  `cpuset cpu io memory hugetlb pids rdma` in the container's `cgroup.controllers`, and the `success` leg passes locally
+  with T1 (storage mounts, class pi5-8gb). The ubuntu-24.04-arm runner was not observed directly; CI is the gate.
+
+- E-T6-1 resolved by 2d264bb: the general cmdline template owns cgroup_enable=memory; the release seal enforces exactly once for both release types.
+
+## 2026-10-03 · 4 GB tracer coherence fix cycle 1 (implementer) · design-4gb-node.md §4.3 T4, §6
+- E-FX1-1 · Contradiction: §4.3 T4 says `boot_preparation` reads only `boot.stages` and `base_units` subtracts all three
+  stage units unconditionally; §6 relies on `failed_units` naming the stage unit when the step is killed before its
+  exit write (OOM victim, TimeoutStartSec SIGTERM) or its record write fails. Under T4 such a stop read "running" /
+  "not started" and the unit was subtracted, so nothing alarmed. Fix (§6 wins): `hostHealth.js` `stoppedStages()` is
+  the one rule both boot items read: a stage is stopped when its record is refused/failed, OR its own unit is in
+  `failed_units` while its record is `running` or absent ("boot preparation failed at <stage> (unit failed, no exit
+  record)", alarm). `base_units` subtracts a stage unit ONLY when that stage is stopped (all stopped stages, not just
+  the first shown, since later stops are effects of the first); a `done` stage's failed unit stays listed. T4's page
+  text is superseded by this entry; console DDD §62 and runbook rows updated.
+  Residual (unchanged, E-T4-4): a stage unit sorted past MAX_BOOT_FAILED_UNITS into `failed_units_more` is invisible to
+  the unit-failed rule and to the subtraction.
+- E-FX1-2 · Compatible interface additions made during T1-T5, recorded so the frozen pages stay the plan of record:
+  `mount_storage(*, controllers, meminfo)` (injected readers), `require_mounted_size`, `boot_document`,
+  `boot_from_document`, `check_metric_families`, `MAX_HOST_METRICS`.
+- E-FX1-3 · `kernel_release` narrowed from printable ASCII to `[A-Za-z0-9._+~-]{1,64}` (the `uname -r` alphabet): `"` and
+  `\` JSON-escape to 2 bytes and 64 of them overflowed MAX_HOST_FACTS_BYTES (HostRunner swallowed the ValueError, so
+  facts went silently absent). `HostFactsV2.values()` deleted; `fact_values_document` is the one "what changed".

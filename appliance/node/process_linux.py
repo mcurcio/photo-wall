@@ -67,7 +67,7 @@ def app_unit_properties(root: Path) -> tuple[str, ...]:
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictSUIDSGID=yes",
         "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-        "MemoryMax=2G", "MemorySwapMax=0", "TasksMax=128", "CPUQuota=200%",
+        "MemoryMax=2G", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
         "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
         "BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client /run/photo-wall-display/wayland-0:/run/photo-wall-wayland/wayland-0 /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",

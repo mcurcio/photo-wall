@@ -78,6 +78,7 @@ from contracts.release import (
     BOOTSTRAPPER_DEB,
     CHECKSUMS,
     CMDLINE,
+    CMDLINE_MEMORY_CONTROLLER,
     CMDLINE_PLACEHOLDER,
     FILES,
     IMAGES,
@@ -540,13 +541,15 @@ def _check_base_tarball(path: Path, *, require_abi: bool = False
 
 def _check_cmdline(data: bytes | None, name: str) -> None:
     """`data` is the cmdline template contracts/release.py declares: one line (a trailing newline
-    allowed), not a comment, holding CMDLINE_PLACEHOLDER exactly once."""
+    allowed), not a comment, holding CMDLINE_PLACEHOLDER and the word CMDLINE_MEMORY_CONTROLLER
+    exactly once each."""
     try:
         line = (data or b"").decode("utf-8").removesuffix("\n")
     except UnicodeError:
         line = ""
     if (len(data or b"") > MAX_CMDLINE_BYTES or "\n" in line or "\r" in line
-            or line.lstrip().startswith("#") or line.count(CMDLINE_PLACEHOLDER) != 1):
+            or line.lstrip().startswith("#") or line.count(CMDLINE_PLACEHOLDER) != 1
+            or line.split().count(CMDLINE_MEMORY_CONTROLLER) != 1):
         raise PackagingError(f"boot_tarball_cmdline_invalid:{name}")
 
 

@@ -285,8 +285,16 @@ done
 # `missing_kernel_liveness()` (appliance/bootstrap.py) names any that a
 # running kernel does not show, so a template regression here is loud, not
 # silent.
+#
+# cgroup_enable=memory (contracts/release.py CMDLINE_MEMORY_CONTROLLER), on
+# every Pi: the Pi 5 device tree's bootargs, which the firmware puts before
+# this file, carry cgroup_disable=memory (raspberrypi/linux#6980); the later
+# cgroup_enable=memory wins. Without it no MemoryMax= is enforced and the node
+# base's storage step refuses (memory_controller_absent). This template is the
+# token's one source: the release seal refuses a cmdline without it, or with
+# it twice (scripts/package_release_artifacts.py _check_cmdline).
 cat > "$boot_dir/cmdline.txt" <<'EOF'
-console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 photowall.central=@@PHOTOWALL_CENTRAL@@
+console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 cgroup_enable=memory photowall.central=@@PHOTOWALL_CENTRAL@@
 EOF
 
 # Corruption-only SHA256SUMS over every staged artifact (incl. the squashfs).

@@ -44,7 +44,9 @@ from central.registry import Registry
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import NodeBaseRefV2, NodeBootRequestV2, encode_node_boot_offer
+from contracts.node_host_facts import stored_fact_values
 from contracts.node_lifecycle import parse_app_effect_event, parse_stage_command
+from contracts.node_observation import parse_host_observation
 from contracts.player_control import ControlAppliedReceipt
 from contracts.time import SystemClock
 
@@ -515,6 +517,26 @@ def _central_fixture(
                 "protocol_refusals": dict(protocol_refusals),
                 "fixture_qualification": True,
             }
+
+    @app.get("/fixture/host")
+    def host(request: Request):
+        """The device's newest stored host facts, as Central serves them (stored_fact_values),
+        and the metric rows of its newest host observation."""
+        authenticate(request)
+        joined = ("JOIN node_producers p USING(producer_id) "
+                  "JOIN node_boot_admissions b USING(admission_id) WHERE b.device_id=%s "
+                  "ORDER BY t.received_at DESC LIMIT 1")
+        with registry.db.transaction() as conn:
+            facts = conn.execute("SELECT t.payload FROM node_host_facts t " + joined,
+                                 (DEVICE_ID,)).fetchone()
+            observed = conn.execute("SELECT t.payload FROM node_host_observations t " + joined,
+                                    (DEVICE_ID,)).fetchone()
+        metrics = (parse_host_observation(bytes(observed["payload"])).metrics
+                   if observed is not None else ())
+        return {
+            "facts": stored_fact_values(bytes(facts["payload"])) if facts is not None else None,
+            "metrics": [[metric.name, metric.value] for metric in metrics],
+        }
 
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)

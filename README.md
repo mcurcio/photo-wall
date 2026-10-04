@@ -93,7 +93,7 @@ Most of this lives outside this repo — your LAN, your Pi hardware, and a DHCP/
 
 ### What you provide
 
-- **Hardware:** Raspberry Pi 5 (8 GiB, active cooling). Pi 5 H.264 decode is in software — measure your real video capacity, don't assume it. ([platform notes](docs/module-appliance-platform.md))
+- **Hardware:** Raspberry Pi 5 with 4 GB of memory or more, and active cooling; a smaller board is refused at boot ([supported hardware](docs/requirements.md#supported-player-hardware)). Pi 5 H.264 decode is in software — measure your real video capacity, don't assume it. ([platform notes](docs/module-appliance-platform.md))
 - **A trusted LAN** central and the Pi both reach. The model trusts that LAN: Central is named on the netboot command line (mDNS only without it; see [decision 0014](docs/decisions/0014-reaching-central-from-every-boot-stage.md)), transport is HTTP or HTTPS, identity is the Pi's serial. **No signing keys anywhere** — the only integrity check is a corruption sha256.
 - **Central reachable from that LAN,** advertising `_photowall._tcp` by default. If you serve central on a port other than `8000`, also set `PHOTO_WALL_HTTP_PORT` so the advertisement points at the real port. Set `PHOTO_WALL_MDNS_ADVERTISE=false` to disable advertising for a deployment that configures every player's origin explicitly instead.
 - **A DHCP/TFTP boot server** on that LAN to netboot the base bundle (kernel + initrd over TFTP, base image over HTTP). [PXE service setup](docs/module-pxe-service.md) owns the tree layout and DHCP/tftpd configuration.

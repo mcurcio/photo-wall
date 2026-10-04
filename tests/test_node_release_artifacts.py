@@ -56,8 +56,14 @@ def test_one_publisher_contains_separate_exact_node_and_legacy_trees(tmp_path):
     legacy, node, output = inputs(tmp_path)
     result = verify(output, revision=REVISION)
     manifest = parse_node_release((output / NODE_RELEASE_MANIFEST).read_bytes())
-    assert "photowall.node=" not in (legacy / "boot/cmdline.txt").read_text()
-    assert (node / "boot/cmdline.txt").read_text().split().count("photowall.node=v2") == 1
+    legacy_words = (legacy / "boot/cmdline.txt").read_text().split()
+    assert "photowall.node=v2" not in legacy_words
+    # The general template owns the memory controller enable; the cohort inherits it, appends
+    # only its own flag, and so carries each exactly once.
+    assert legacy_words.count("cgroup_enable=memory") == 1
+    words = (node / "boot/cmdline.txt").read_text().split()
+    assert words.count("photowall.node=v2") == words.count("cgroup_enable=memory") == 1
+    assert words == [*legacy_words, "photowall.node=v2"]
     assert set(x.filename for x in manifest.artifacts) <= set(x.name for x in result.assets)
     assert manifest.base.content_key == next(x.sha256 for x in manifest.artifacts if x.role == "base")
 
@@ -85,6 +91,17 @@ def test_cohort_bundle_refuses_symlink_input(tmp_path):
     (legacy / "boot/unsafe").symlink_to("/etc/passwd")
     with pytest.raises(ValueError, match="node_bundle_link"):
         cohort_bundle(legacy, tmp_path / "node")
+
+
+@pytest.mark.parametrize("line", ["console=tty1 photowall.node=v2",
+                                  "console=tty1 photowall.node=v2 cgroup_enable=memory cgroup_enable=memory"])
+def test_a_node_bundle_without_exactly_one_memory_controller_enable_is_refused(tmp_path, line):
+    legacy, node, _ = inputs(tmp_path)
+    (node / "boot/cmdline.txt").write_text(line + "\n")
+    with pytest.raises((PackagingError, ValueError), match="node_bundle_flag_missing"):
+        package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), tmp_path / "again",
+                revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
+                node_components=tmp_path / "components", node_bundle=node, release_tag="v2.0.0")
 
 
 def _restamp(tmp_path, **stamp):

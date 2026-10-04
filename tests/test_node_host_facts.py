@@ -14,10 +14,14 @@ from contracts.node_commands import producer_document
 from contracts.node_host_facts import (
     LINK_STATES,
     MAX_HOST_FACTS_BYTES,
+    BootReportV2,
+    BootStageV2,
     HostFactsV2,
     encode_host_facts,
+    fact_values_document,
     parse_host_facts,
     stored_fact_values,
+    valid_fact,
 )
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2
@@ -63,15 +67,115 @@ def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_no
     with pytest.raises(ValueError):
         parse_host_facts(raw)
     assert stored_fact_values(raw) == {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
-                                       "link_state": "up", "address": "192.168.1.40", "base_tag": None}
+                                       "link_state": "up", "address": "192.168.1.40", "base_tag": None,
+                                       "boot": None}
     assert stored_fact_values(json.dumps(_document(link_state="UP")).encode())["link_state"] is None
-    assert tuple(stored_fact_values(encode_host_facts(_facts())).values()) == _facts().values()
+    assert stored_fact_values(encode_host_facts(_facts())) == fact_values_document(_facts())
     assert set(stored_fact_values(b"not json").values()) == {None}
+
+
+# The boot stage report (design 4 GB node §4.3 T2).
+
+REFUSED_STORAGE = BootStageV2("storage", "refused", "node_memory_class", 3758096384, 2147483648)
+BOOT = BootReportV2((BootStageV2("handoff", "done", None, None, None), REFUSED_STORAGE),
+                    ("photo-wall-node-storage.service",), 0)
+
+
+def test_a_boot_report_round_trips_and_a_document_without_boot_encodes_as_before():
+    value = _facts(boot=BOOT)
+    raw = encode_host_facts(value)
+    assert parse_host_facts(raw) == value
+    assert json.loads(raw)["boot"] == {
+        "stages": [{"stage": "handoff", "state": "done", "fault": None, "required_bytes": None,
+                    "room_bytes": None},
+                   {"stage": "storage", "state": "refused", "fault": "node_memory_class",
+                    "required_bytes": 3758096384, "room_bytes": 2147483648}],
+        "failed_units": ["photo-wall-node-storage.service"], "failed_units_more": 0}
+    # An older node's document (no `boot` key) still validates, and boot=None omits the key.
+    assert "boot" not in json.loads(encode_host_facts(_facts()))
+    assert parse_host_facts(encode_host_facts(_facts())).boot is None
+    assert fact_values_document(value) != fact_values_document(_facts())
+
+
+def test_the_worst_case_boot_report_fits_the_facts_record():
+    stages = tuple(BootStageV2(stage, "refused", "f" * 64, 2**63 - 1, 2**63 - 1)
+                   for stage in ("handoff", "storage", "prepare"))
+    units = tuple(sorted(f"photo-wall-{index}" + "u" * 76 + ".service" for index in range(4)))
+    assert all(len(unit) == 96 for unit in units)
+    producer = NodeProducerV2("s" * 256, "device-" + "a" * 64, 2**63 - 1, uuid4(), "host_core", uuid4())
+    # The kernel release's worst case is its longest-encoding allowed character, 64 times.
+    kernel = max((chr(code) for code in range(128) if valid_fact("kernel_release", chr(code))),
+                 key=lambda character: len(json.dumps(character)))
+    worst = HostFactsV2(producer, 2**63 - 1, 2**63 - 1, kernel * 64, "e" * 15, "lowerlayerdown",
+                        "255.255.255.255", "t" * 128, BootReportV2(stages, units, 2**63 - 1))
+    assert len(encode_host_facts(worst)) <= MAX_HOST_FACTS_BYTES
+
+
+@pytest.mark.parametrize("stage", [
+    ("boot", "done", None, None, None),  # unknown stage
+    ("storage", "stopped", None, None, None),  # unknown state
+    ("storage", "failed", None, None, None),  # failed without a fault
+    ("storage", "failed", "f" * 65, None, None),  # fault past 64
+    ("storage", "failed", "os:ENOSPC", 1, 2),  # numbers on a failure
+    ("storage", "refused", "node_memory_class", None, 2),  # refusal without required
+    ("storage", "refused", "node_memory_class", 1, -1),  # negative room
+    ("storage", "refused", "node_memory_class", True, 1),  # bool is not a count
+    ("storage", "running", "node_memory_class", None, None),  # fault on a running stage
+    ("prepare", "done", None, 0, None),  # numbers on done
+])
+def test_a_malformed_boot_stage_is_refused(stage):
+    with pytest.raises(ValueError, match="invalid_boot_stage"):
+        BootStageV2(*stage)
+
+
+DONE = {name: BootStageV2(name, "done", None, None, None) for name in ("handoff", "storage", "prepare")}
+
+
+@pytest.mark.parametrize("report", [
+    ((DONE["storage"], DONE["handoff"]), (), 0),  # out of order
+    ((DONE["handoff"], DONE["handoff"]), (), 0),  # repeated
+    ([DONE["handoff"]], (), 0),  # not a tuple
+    ((), ("b.service", "a.service"), 0),  # unsorted
+    ((), ("a.service", "a.service"), 0),  # repeated unit
+    ((), tuple(f"u{index}.service" for index in range(5)), 0),  # more than four
+    ((), ("u" * 97,), 0),  # a 97-character name
+    ((), ("photo-wall-x@1 .service",), 0),  # a name the token rule refuses
+    ((), (), -1),
+])
+def test_a_malformed_boot_report_is_refused(report):
+    with pytest.raises(ValueError, match="invalid_boot_report"):
+        BootReportV2(*report)
+
+
+@pytest.mark.parametrize("boot", [None, [], {"stages": [], "failed_units": []},
+                                  {"stages": [{"stage": "storage"}], "failed_units": [],
+                                   "failed_units_more": 0}])
+def test_ingest_refuses_a_malformed_boot_document(boot):
+    with pytest.raises(ValueError, match="invalid_boot"):
+        parse_host_facts(json.dumps(_document(boot=boot)).encode())
+    with pytest.raises(ValueError, match="invalid_host_facts"):
+        HostFactsV2(_producer(), 3, 1234, None, None, None, None, None, boot={"stages": []})
+
+
+def test_stored_values_equal_the_posted_document_with_and_without_boot():
+    # Central's "values unchanged" compares these two (central/fleet/node_observations.py).
+    for value in (_facts(), _facts(boot=BOOT)):
+        assert stored_fact_values(encode_host_facts(value)) == fact_values_document(value)
+    # A row stored before `boot` existed equals a post that read none, and differs from one
+    # that did; an invalid stored `boot` reads as None and never fails the read.
+    old = json.dumps(_document()).encode()
+    assert stored_fact_values(old) == fact_values_document(_facts())
+    assert stored_fact_values(old) != fact_values_document(_facts(boot=BOOT))
+    assert stored_fact_values(json.dumps(_document(boot={"stages": 1})).encode())["boot"] is None
+    assert fact_values_document(_facts(boot=BOOT)) != fact_values_document(
+        _facts(boot=BootReportV2(BOOT.stages, (), 0)))
 
 
 REFUSED = {
     "a space in the kernel release": {"kernel_release": "6.6 51"},
     "a 65-character kernel release": {"kernel_release": "6" * 65},
+    "a quote in the kernel release": {"kernel_release": '6.6"51'},
+    "a backslash in the kernel release": {"kernel_release": "6.6\\51"},
     "an unknown link state": {"link_state": "UP"},
     "a non-canonical address": {"address": "192.168.001.040"},
     "an IPv6 address": {"address": "::1"},
@@ -199,7 +303,7 @@ def _runner(monkeypatch, clock, facts, answers):
     runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
     runner.store = _Store()
     runner.sampler = SimpleNamespace(sample=lambda: (("uptime", 1, "seconds"),), throttling=lambda: (),
-                                     supervision=lambda: (), facts=lambda: dict(facts))
+                                     supervision=lambda: (), memory_rows=lambda: (), facts=lambda: dict(facts))
     runner.delivery = SimpleNamespace(flush=lambda *args, **kwargs: 0)
     sequence = iter(range(1, 10_000))
     runner.journal = SimpleNamespace(next_sequence=lambda: next(sequence))
@@ -237,7 +341,7 @@ def test_facts_are_sent_once_per_process_start_and_unchanged_facts_send_nothing(
     runner, sent = _runner(monkeypatch, clock, facts, {})
     _run(runner, clock, 200)
     assert len(sent) == 1 and sent[0][0] == 100.0
-    assert parse_host_facts(sent[0][1]).values() == (*VALUES.values(), None)
+    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "boot": None}
     # A process start (a new runner) sends again; Central answers duplicate or keeps
     # first_received_at.
     again, resent = _runner(monkeypatch, clock, facts, {})

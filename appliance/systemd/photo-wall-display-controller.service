@@ -5,6 +5,10 @@ ConditionPathExists=/run/photo-wall-node/display.json
 After=photo-wall-display.service
 
 After=photo-wall-node-handoff.service
+# A crash loop leaves the unit failed and reported, never a reboot: recovery is
+# operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
+StartLimitIntervalSec=10min
+StartLimitBurst=10
 
 [Service]
 User=pw-display
@@ -14,6 +18,7 @@ ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-display-controller --config
 Restart=always
 RestartSec=2
 Slice=photowallbase.slice
+OOMScoreAdjust=-500
 MemoryMax=96M
 TasksMax=16
 NoNewPrivileges=yes
