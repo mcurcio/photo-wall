@@ -55,7 +55,7 @@ Published-wire tests skip unless `PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR` names a 
 | Product behaviour, terminology | [requirements](docs/requirements.md) |
 | Components, boundaries | [architecture](docs/architecture.md); content serving: [Central system architecture](docs/central-system-architecture.md) |
 | Runtime, Planner, execution | [execution contract](docs/execution-contract.md) |
-| Player node lifecycle | [Player node domain model](docs/player-node-domain-model.md), [fleet implementation map](docs/player-fleet-implementation-map.md), [display host](docs/display-host-backend.md) |
+| Player node lifecycle | [node architecture as built](docs/player-architecture.md), [Player node domain model](docs/player-node-domain-model.md), [fleet implementation map](docs/player-fleet-implementation-map.md), [display host](docs/display-host-backend.md) |
 | Operator console | [UX design](docs/operator-console-ux-design.md) |
 | Launch, deploy, recovery | [runbook](docs/runbook.md#local-launch) |
 | A consequential choice | [design decisions](docs/design-decisions.md), [decision records](docs/decisions/) |
