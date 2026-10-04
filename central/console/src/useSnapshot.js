@@ -8,7 +8,7 @@ import React, {
   useState,
 } from "react";
 
-import { apiWrite } from "./apiWrite.js";
+import { apiWrite, TIMEOUT_MS } from "./apiWrite.js";
 import { CONSOLE_HEADER, onOriginRefused, writeCount } from "./session.js";
 
 /**
@@ -29,7 +29,7 @@ async function fetchJson(path) {
       ...CONSOLE_HEADER,
       "Content-Type": "application/json",
     },
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!response.ok) {
     // Carry the HTTP status so a missing or ended session (401) can be told

@@ -7,10 +7,12 @@ they outlive the flat page and are imported by the `/console` browser tests.
 """
 
 import itertools
+import re
 import socket
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import uvicorn
 from playwright.sync_api import expect
@@ -153,9 +155,121 @@ def assert_fits_width(page, where):
 def pause_page_clock(page, at):
     """Install Playwright's fake clock at `at` (Unix seconds) and pause it, before navigation:
     the console's timers (the 5 s poll, the age ticker, the lease countdown) then fire only
-    when the test runs the clock (page.clock.run_for)."""
+    when the test runs the clock (page.clock.run_for, or `advance_clock` past one step)."""
     page.clock.install(time=at)
     page.clock.pause_at(at + 1)
+
+
+def _console_fetch_timeout_ms():
+    source = Path(__file__).resolve().parents[2] / "central" / "console" / "src" / "apiWrite.js"
+    match = re.search(r"^export const TIMEOUT_MS = (\d+);$", source.read_text(), re.MULTILINE)
+    assert match, f"{source}: no `export const TIMEOUT_MS = <ms>;` to bound the page clock by"
+    return int(match.group(1))
+
+
+# The console's fetch abort budget (apiWrite.js TIMEOUT_MS; the Plane A read shares it).
+CONSOLE_FETCH_TIMEOUT_MS = _console_fetch_timeout_ms()
+# How far `advance_clock` runs the page clock between settles: one poll interval.
+CLOCK_STEP_MS = 5000
+assert CLOCK_STEP_MS < CONSOLE_FETCH_TIMEOUT_MS
+# How long (real time) a settle waits for the page's reads before it fails.
+_SETTLE_TIMEOUT_S = 15.0
+_TRACKERS = {}
+
+
+class _ClockGuard:
+    """The page clock of one browser context, guarded; see `advance_clock` for the rule.
+
+    Wraps the context's Clock (every page of the context shares it, so `page.clock` is this
+    clock) so that a single `run_for`/`fast_forward` of CONSOLE_FETCH_TIMEOUT_MS or more
+    fails the test, and tracks the context's fetch/XHR requests awaiting their answer so
+    that `advance_clock` can settle between steps. A request is answered at its response:
+    the page's fetch has resolved, and a body the page never reads (a refused Plane A read)
+    stays open until its abort without the page waiting on it. Requests a RequestGate holds
+    on purpose are not waited for.
+    """
+
+    def __init__(self, context):
+        self.in_flight = []
+        self.held = []
+        clock = context.clock
+        self.run_for = clock.run_for
+        self.fast_forward = clock.fast_forward
+        clock.run_for = self._guarded(self.run_for, "run_for")
+        clock.fast_forward = self._guarded(self.fast_forward, "fast_forward")
+        context.on("request", self._started)
+        context.on("response", lambda response: self._ended(response.request))
+        context.on("requestfailed", self._ended)
+
+    @staticmethod
+    def _guarded(method, name):
+        def guarded(ticks):
+            assert isinstance(ticks, int | float), f"page.clock.{name}: pass milliseconds, not {ticks!r}"
+            assert ticks < CONSOLE_FETCH_TIMEOUT_MS, (
+                f"page.clock.{name}({ticks}) jumps the page clock past the console's "
+                f"{CONSOLE_FETCH_TIMEOUT_MS} ms fetch abort (apiWrite.js TIMEOUT_MS) in one step, "
+                "aborting any read in flight; use operator_harness.advance_clock")
+            method(ticks)
+        return guarded
+
+    def _started(self, request):
+        if request.resource_type in ("fetch", "xhr"):
+            self.in_flight.append(request)
+
+    def _ended(self, request):
+        if request in self.in_flight:
+            self.in_flight.remove(request)
+        if request in self.held:
+            self.held.remove(request)
+
+    def settle(self, page):
+        """Wait (real time) until every fetch the page sent, other than a held one, is answered."""
+        deadline = time.monotonic() + _SETTLE_TIMEOUT_S
+        while busy := [request.url for request in self.in_flight if request not in self.held]:
+            assert time.monotonic() < deadline, f"reads unanswered after {_SETTLE_TIMEOUT_S} s: {busy}"
+            page.wait_for_timeout(20)
+
+
+@contextmanager
+def guard_page_clock(context):
+    """Guard `context`'s page clock for the test (conftest's autouse fixture)."""
+    _TRACKERS[context] = _ClockGuard(context)
+    try:
+        yield
+    finally:
+        _TRACKERS.pop(context, None)
+
+
+def advance_clock(page, ms, *, jump=False):
+    """Advance the paused page clock by `ms`, never aborting a read the page has in flight.
+
+    THE RULE. Playwright's page clock also fakes `AbortSignal.timeout`, and every console
+    fetch carries one of CONSOLE_FETCH_TIMEOUT_MS (apiWrite.js TIMEOUT_MS, read from the
+    source). A real network read does not answer while the clock runs, so one jump of that
+    much or more aborts whatever read is in flight, or one the jump's own timers start, and
+    the page shows a failed read the test never staged. So the page clock never runs that
+    far in one step while a read may be in flight: the guarded clock fails any single
+    `run_for`/`fast_forward` of CONSOLE_FETCH_TIMEOUT_MS or more, and longer spans come
+    through here, in steps of CLOCK_STEP_MS with a settle (every fetch in flight answered;
+    real time) before and after each step. A read a step starts is then younger than one
+    step when the next settle waits for it.
+
+    `jump` moves the clock with `fast_forward` instead (due timers fire at most once, at
+    the end) after a settle, for spans where the steps between do not matter (ten minutes
+    without a Player rejoining).
+    """
+    guard = _TRACKERS[page.context]
+    guard.settle(page)
+    if jump:
+        guard.fast_forward(ms)
+        guard.settle(page)
+        return
+    remaining = ms
+    while remaining > 0:
+        step = min(remaining, CLOCK_STEP_MS)
+        page.clock.run_for(step)
+        guard.settle(page)
+        remaining -= step
 
 
 class RequestGate:
@@ -173,6 +287,9 @@ class RequestGate:
         self.seen += 1
         if self.holding:
             self.held.append(route)
+            guard = _TRACKERS.get(self.page.context)
+            if guard is not None:
+                guard.held.append(route.request)  # held on purpose: advance_clock does not wait for it
         else:
             route.continue_()
 

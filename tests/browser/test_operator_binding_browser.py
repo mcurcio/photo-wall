@@ -25,6 +25,7 @@ import pytest
 from console_tasks import connect, go, open_frame, open_player, player_name, visible_page
 from operator_harness import (
     RequestGate,
+    advance_clock,
     assert_fits_width,
     drive_poll,
     operator_server,
@@ -734,7 +735,7 @@ def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
         page.route(NETBOOT, lambda route: route.fulfill(
             status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
         with page.expect_response(NETBOOT):
-            page.clock.run_for(35000)
+            advance_clock(page, 35000)
         expect(inspector.get_by_text("Boot records unavailable", exact=False)).to_be_visible()
         # The last known serial is kept.
         expect(_serial_option(inspector)).to_be_visible()

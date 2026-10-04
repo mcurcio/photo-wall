@@ -33,6 +33,7 @@ a Program" on the Schedule page, then Scene → When → Review. `schedule_progr
 `start_schedule`, `schedule_continue` and `schedule_form` are its parts.
 """
 
+import re
 from collections.abc import Mapping
 from urllib.parse import quote
 
@@ -104,6 +105,25 @@ def visible_page(page):
     negative text check is scoped through this: `main`'s one page without `hidden`.
     """
     return page.locator("main > section:not([hidden])")
+
+
+def await_flow_finished(page, section, said):
+    """Return once a flow whose write Central accepted has FINISHED: the location is the
+    section's own entry (`#/<section>`) and the section shows `said`, the write's confirmation
+    (its text or pattern, or a Locator for it).
+
+    A submit helper returns this way, never on the write's response alone. The response
+    arrives before the flow ends: the flow first waits for its Plane A refresh (useFlowWrite,
+    useMutate), then `finish` returns to the section with an asynchronous `history.back()`
+    (useFlowInstance `toSection`). A test acting on the response alone reads the snapshot from
+    before the write (a Delete dialog that lists no dependent Program), or clicks a section
+    link that the pending back then takes it away from. Every flow's success ends this way,
+    so every submit helper waits here.
+    """
+    expect(page).to_have_url(re.compile(rf"#/{section}$"))
+    if isinstance(said, str | re.Pattern):
+        said = visible_page(page).get_by_text(said)
+    expect(said).to_be_visible()
 
 
 def player_name(registry, player_id, serial=None):
@@ -185,8 +205,8 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     as the Scene name on Review, so it must be an id the name rule keeps as is (lowercase
     words joined by hyphens), unless the test is about the name rule.
 
-    With `submit`, saves, waits for the saved Scene's card and returns the save's PUT
-    response. Without it, returns the flow's form on Review, filled and unsaved.
+    With `submit`, saves, waits until the flow has finished (`await_flow_finished`) and the
+    saved Scene's card is listed, and returns the save's PUT response. Without it, returns the flow's form on Review, filled and unsaved.
     """
     picks = frames if isinstance(frames, Mapping) else None
     form = start_scene(page, hand_picked=picks is not None)
@@ -213,6 +233,7 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
         lambda r: r.url.endswith(route) and r.request.method == "PUT"
     ) as info:
         form.get_by_role("button", name="Save Scene", exact=True).click()
+    await_flow_finished(page, "scenes", f"Saved Scene {scene_id}.")
     # Listed before anything can use it (proves the refresh after the save landed).
     expect(page.get_by_role("region", name="Scenes", exact=True).get_by_label(
         f"Scene {scene_id}", exact=True)).to_be_visible()
@@ -276,8 +297,8 @@ def add_source(page, source_ref, connection, *, media_type=None, submit=True):
     the Source flow: [Library] → Tags (none) → Narrow → Name → Review, then Save Source.
 
     `media_type` picks "Media type" ("image", "video"); None keeps the flow's default.
-    With `submit`, saves, waits (on success) for the saved Source's card and returns the PUT
-    response; without it, returns the flow's form on Review, filled and unsaved.
+    With `submit`, saves, waits (on success) until the flow has finished
+    (`await_flow_finished`) and the saved Source's card is listed, and returns the PUT response; without it, returns the flow's form on Review, filled and unsaved.
     """
     form = start_source(page)
     if source_step(page) == "Library":
@@ -299,6 +320,7 @@ def add_source(page, source_ref, connection, *, media_type=None, submit=True):
     ) as info:
         form.get_by_role("button", name="Save Source", exact=True).click()
     if info.value.ok:
+        await_flow_finished(page, "sources", re.compile(r"^Saved Source .+\.$"))
         # The flow ended on the cards, which list it (the refresh after the save landed).
         expect(page.get_by_role("region", name="Sources", exact=True).get_by_role(
             "article", name=source_ref, exact=True)).to_be_visible()
@@ -343,7 +365,8 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
     default, 0).
 
     With `submit`, sends it ("Schedule Program", or "Add separate windows" for more than
-    one window) and returns the first Program PUT response; without it, returns the flow's
+    one window), waits (on success) until the flow has finished (`await_flow_finished`; every
+    window stored) and returns the first Program PUT response; without it, returns the flow's
     form on Review, filled and unsent.
     """
     form = start_schedule(page)
@@ -367,6 +390,9 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
         lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
     ) as info:
         form.get_by_role("button", name=action, exact=True).click()
+    if info.value.ok:
+        said = f"Scheduled Program {program}." if windows in (None, 1) else f"Created {windows} separate Programs."
+        await_flow_finished(page, "schedule", said)
     return info.value
 
 
@@ -407,7 +433,9 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
     the Scene's frames, or 0). `repeat` is the label of the "if it is already running"
     choice; its default ("Leave it running") is left as it is. Central answers
     synchronously with an Admission ({status, reason}); the console mints the activation
-    id, so the operator never types one. Without `submit`, returns the form on Review.
+    id, so the operator never types one. With `submit`, an accepted activation (2xx) returns
+    once the flow has finished (`await_flow_finished`) and shows its "Activation outcome".
+    Without `submit`, returns the form on Review.
     """
     form = start_show_now(page, scene_id)
     form.get_by_role("button", name="Continue", exact=True).click()
@@ -424,6 +452,9 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
         lambda r: r.url.endswith("/v1/operator/activations") and r.request.method == "POST"
     ) as info:
         form.get_by_role("button", name="Activate now", exact=True).click()
+    if info.value.ok:
+        await_flow_finished(page, "now", page.get_by_role("region", name="Runs", exact=True).get_by_label(
+            "Activation outcome", exact=True))
     return info.value
 
 

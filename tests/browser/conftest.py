@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from operator_harness import guard_page_clock
 from test_registry import enroll
 
 # The Bead 17 cutover retired the legacy flat-page tests (test_operator_browser.py,
@@ -101,6 +102,14 @@ def installation(registry):
     first, _, _ = enroll(registry, count=2)
     second, _, _ = enroll(registry, count=1)
     return registry, first["player_id"], second["player_id"]
+
+
+@pytest.fixture(autouse=True)
+def page_clock_guard(context):
+    """Every test's page clock refuses a jump past the console's fetch abort in one step
+    (operator_harness.advance_clock has the rule)."""
+    with guard_page_clock(context):
+        yield
 
 
 @pytest.fixture(autouse=True)

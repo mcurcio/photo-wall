@@ -22,7 +22,7 @@ from itertools import count
 
 import pytest
 from console_tasks import connect, visit
-from operator_harness import operator_server, report_readiness
+from operator_harness import advance_clock, operator_server, report_readiness
 from playwright.sync_api import expect
 from test_node_boot import cold_setup
 from test_registry import enroll
@@ -225,8 +225,7 @@ def _rolling(page):
 def _settle(page, ms=5000, times=1):
     """Run the paused page clock (the 5 s active-row read) and let the answers land."""
     for _ in range(times):
-        page.clock.run_for(ms)
-        page.wait_for_timeout(250)
+        advance_clock(page, ms)
 
 
 def _start(registry, monkeypatch):
@@ -332,7 +331,7 @@ def test_ten_minutes_without_rejoining_pauses_with_zero_further_posts(page, regi
         _rolling(page)
         _settle(page)
         assert len(fleet.reboots) == 1
-        page.clock.fast_forward(10 * 60 * 1000)
+        advance_clock(page, 10 * 60 * 1000, jump=True)
         _settle(page)
         keep = _section(page, "Put on the wall")
         expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
@@ -583,7 +582,7 @@ def test_the_first_reboot_waits_for_centrals_download_then_rolls(page, registry,
         _settle(page, times=4)
         assert fleet.reboots == []
         fleet.readiness = {"readiness": "ready", "readiness_reason": None, "missing_bytes": 0}
-        page.clock.run_for(30_000)  # the next release read
+        advance_clock(page, 30_000)  # the next release read
         _settle(page, times=2)
         assert len(fleet.reboots) == 1
 
@@ -627,7 +626,7 @@ def test_a_refused_put_starts_no_rolling(page, registry, monkeypatch):
         with registry.db.transaction() as conn:
             [deployment] = [row["deployment_id"] for row in conn.execute("SELECT deployment_id FROM node_deployments")]
         NodeBootService(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))).select(deployment, 0)
-        page.clock.run_for(30_000)  # the next release read
+        advance_clock(page, 30_000)  # the next release read
         keep = _section(page, "Put on the wall")
         expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
         _settle(page, times=4)

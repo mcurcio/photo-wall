@@ -37,6 +37,7 @@ from console_tasks import (
 from operator_harness import (
     SNAPSHOT,
     RequestGate,
+    advance_clock,
     drive_poll,
     operator_server,
     report_readiness,
@@ -554,7 +555,7 @@ def test_a_session_ending_mid_draft_overlays_sign_in_and_keeps_the_draft(page, r
         seen = []
         page.on("request", lambda request: seen.append(request.url)
                 if request.url.endswith("/v1/operator/snapshot") else None)
-        page.clock.run_for(20000)
+        advance_clock(page, 20000)
         page.wait_for_timeout(200)
         assert seen == []
 

@@ -1,8 +1,10 @@
 import { CONSOLE_HEADER, noteOriginRefused, noteWrite, ORIGIN_REFUSALS } from "./session.js";
 
 // Every operator write shares one timeout budget (design §3): a write that does
-// not resolve inside this window is aborted rather than left hanging.
-const TIMEOUT_MS = 15000;
+// not resolve inside this window is aborted rather than left hanging. The Plane A
+// read (useSnapshot.js) shares it too, and the browser tests read it from here to
+// bound how far they may run a paused page clock in one step.
+export const TIMEOUT_MS = 15000;
 
 /**
  * Low-level operator-write helper (bead R-apiwrite). Every operator mutation —

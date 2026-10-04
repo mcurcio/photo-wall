@@ -18,6 +18,7 @@ from console_tasks import connect, go, open_frame
 from operator_harness import (
     SNAPSHOT,
     RequestGate,
+    advance_clock,
     assert_fits_width,
     operator_server,
     report_readiness,
@@ -231,7 +232,7 @@ def test_a_hidden_tab_does_not_poll_and_refreshes_on_return(page, registry):
         expect(_tile(page)).to_be_visible()
         gate = RequestGate(page, SNAPSHOT)
         _set_visibility(page, "hidden")
-        page.clock.run_for(30000)
+        advance_clock(page, 30000)
         _settle(page)
         assert gate.seen == 0, "a hidden tab polled the snapshot"
         _set_visibility(page, "visible")

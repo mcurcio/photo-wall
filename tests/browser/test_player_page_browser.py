@@ -36,7 +36,13 @@ from uuid import UUID, uuid4
 
 import pytest
 from console_tasks import connect, current_hash, go, open_player
-from operator_harness import answer_first, drive_poll, operator_server, report_readiness
+from operator_harness import (
+    advance_clock,
+    answer_first,
+    drive_poll,
+    operator_server,
+    report_readiness,
+)
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
@@ -1083,7 +1089,7 @@ def test_begin_names_the_linked_app_and_samples_every_two_seconds_only_while_vis
             page.clock.run_for(2000)
             samples.wait_for(expected)
         _set_visibility(page, "hidden")
-        page.clock.run_for(20_000)
+        advance_clock(page, 20_000)
         page.wait_for_timeout(300)
         assert samples.sent == 4, "a hidden tab sampled"
         _set_visibility(page, "visible")
@@ -1108,7 +1114,7 @@ def test_a_terminal_or_unlisted_sample_answer_stops_sampling_with_zero_further_p
         section = _begin(page, fixture.proof.challenge.environment_sha256)
         samples.wait_for(1)
         expect(section.get_by_role("status", name="Qualification progress")).to_have_text(f"{words} {STEADY}")
-        page.clock.run_for(30_000)
+        advance_clock(page, 30_000)
         _set_visibility(page, "hidden")
         _set_visibility(page, "visible")
         page.wait_for_timeout(300)
@@ -1131,7 +1137,7 @@ def test_two_minutes_of_waiting_answers_stop_sampling_with_zero_further_posts(pa
             samples.wait_for(expected)
         expect(progress).to_have_text("Stopped: no progress for 2 minutes. Last answer: Waiting for new reports "
                                       "from the Player app and Display Host.")
-        page.clock.run_for(30_000)
+        advance_clock(page, 30_000)
         page.wait_for_timeout(300)
         assert samples.sent == 61
 
