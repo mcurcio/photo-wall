@@ -197,8 +197,9 @@ There are no open questions. **Assumptions made on your behalf** (say so if any 
 ## 10. Deliberately out of scope
 
 **Deferred:** removing unreferenced asset rows (`MaintainCache` is built: an eager keep-set
-sweep of release files, desired = the window of 3 + selected + previous + live offers + V1 roots,
-`SERVE_GRACE` and `TEMP_GRACE` of 1 h, at most 50 unlinks per run, `previews/` and `media/`
+sweep of release files, desired = the window of 3 + selected + previous + V1 roots, re-checked
+before each unlink with no lock (mark and sweep), `SERVE_GRACE` and `TEMP_GRACE` of 1 h, each age
+compared on one clock only (cache filesystem or database), at most 50 unlinks per run, `previews/` and `media/`
 excluded; [`central/assets/maintenance.py`](../central/assets/maintenance.py)); a bound on a paused transaction's
 locks; the worker's stop reason; media's rules. **Non-goals:** exactly-once runs; stopping
 duplicate work; any ordering of jobs.

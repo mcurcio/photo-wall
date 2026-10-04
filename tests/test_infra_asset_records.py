@@ -161,11 +161,20 @@ def test_a_thumbnail_admits_only_the_reserved_reference(repo, stray):
     assert repo.reference(key, THUMBNAIL_REFERENCE) is True
 
 
-def test_touch_served_sets_last_served_at(repo):
-    repo.touch_served(KEY, 5.0)  # absent -> no-op
+def test_touch_served_stamps_the_database_clock_and_only_it_is_compared(repo):
+    repo.touch_served(KEY)  # absent -> no-op
+    assert repo.served_within(KEY, 3600.0) is False
     repo.reference(KEY, ref("v1.0.0"))
-    repo.touch_served(KEY, 1234.5)
-    assert repo.get(KEY).last_served_at == 1234.5
+    assert repo.get(KEY).last_served_at is None and repo.served_within(KEY, 3600.0) is False
+    repo.touch_served(KEY)
+    with repo.database.transaction() as conn:
+        now = conn.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS t").fetchone()["t"]
+    served = repo.get(KEY).last_served_at
+    assert 0 <= float(now) - served < 60  # the database's clock, not the caller's ManualClock
+    assert repo.served_within(KEY, 3600.0) is True
+    with repo.database.transaction() as conn:
+        conn.execute("UPDATE assets SET last_served_at=last_served_at-7200")
+    assert repo.served_within(KEY, 3600.0) is False
 
 
 # -- the 021 backfill -----------------------------------------------------------------------------

@@ -151,15 +151,15 @@ def test_close_finishes_the_row_failed_and_republish_keeps_the_attempt(monkeypat
     admin = admin_with(monkeypatch, manager)
     deferred = []
 
-    async def defer_async(app, job, *, attempt, schedule_at=None, priority=None):
-        deferred.append((job, attempt, schedule_at, priority))
+    async def defer_async(app, job, *, attempt, schedule_at=None):
+        deferred.append((job, attempt, schedule_at))
         return True
 
     monkeypatch.setattr(queue_ops, "defer_async", defer_async)
-    stalled = StalledJob(11, FetchOsImage(tarball_sha256="1" * 64), 2, -60)
+    stalled = StalledJob(11, FetchOsImage(tarball_sha256="1" * 64), 2)
     asyncio.run(admin.republish(stalled))
     asyncio.run(admin.close(stalled))
-    assert deferred == [(stalled.job, 2, None, -60)]  # a rescue keeps the priority (PB10)
+    assert deferred == [(stalled.job, 2, None)]
     assert manager.calls == [("finish", {"job_id": 11, "status": Status.FAILED,
                                          "delete_job": False})]
 

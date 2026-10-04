@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
-from test_node_boot import seed_catalog_publication
+from test_node_boot import publish_deployment
 
 from central.app import create_app
 from central.assets.layout import CacheLayout
@@ -178,10 +178,7 @@ def _central_fixture(
                 for r in [manager, ref]
             },
         )
-        seed_catalog_publication(
-            registry, selected
-        )  # Explicit synthetic release-provenance fixture.
-        boots.publish(selected)
+        publish_deployment(registry.db, selected, sessions.clock)
         deployments[phase] = selected
     boots.select(deployments["cold"].deployment_id, 0)
     for digest, path in archives.items():

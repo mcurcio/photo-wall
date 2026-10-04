@@ -214,10 +214,10 @@ class AssetReader:
             return
         self._touched[key] = now
         try:
-            await asyncio.to_thread(self._touch_record, key, now)
+            await asyncio.to_thread(self._touch_record, key)
         except Exception:
             LOG.warning("last_served_at touch failed for %s", key, exc_info=True)
 
-    def _touch_record(self, key: AssetKey, at: float) -> None:
+    def _touch_record(self, key: AssetKey) -> None:
         with self._transactions.begin() as tx:
-            self._records.touch_served(tx, key, at)
+            self._records.touch_served(tx, key)

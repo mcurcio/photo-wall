@@ -190,9 +190,9 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
     import json
 
     from test_fleet_rollout_gate import _gate
-    from test_node_boot import environment, seed_catalog_publication
+    from test_node_boot import environment, publish_deployment
 
-    from central.fleet.node_boot import NodeBootService, parse_node_deployment
+    from central.fleet.node_boot import parse_node_deployment
     from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
     from contracts.node_lifecycle import parse_stage_command
     witness=Witnesses(registry)
@@ -205,8 +205,7 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
     selected=replace(deployment,deployment_id=uuid4(),app_environment=target,environment_sources={
         deployment.manager_primary.environment_sha256:deployment.environment_sources[deployment.manager_primary.environment_sha256],
         target.environment_sha256:'https://example.invalid/target'})
-    seed_catalog_publication(registry,selected)
-    NodeBootService(witness.sessions).publish(selected)
+    publish_deployment(registry.db,selected,registry.clock)
     registry.unbind('node-f0',expected_generation=1)
     registry.unbind('node-f1',expected_generation=1)
     gate,_=_gate(registry)

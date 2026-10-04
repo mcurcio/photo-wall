@@ -197,16 +197,15 @@ class JobRuntime:
         for task in self._loops:
             task.cancel()
 
-    async def _body(self, job: Job[Any], attempt: int, priority: int | None) -> None:
-        status = await self._executor.execute(job, attempt, priority=priority)
+    async def _body(self, job: Job[Any], attempt: int) -> None:
+        status = await self._executor.execute(job, attempt)
         if status in ("transient", "terminal"):
             raise RecordedFailure(status)
 
     async def _redeliver(self, redelivery: Redelivery) -> None:
         inserted = await defer_async(self._app, redelivery.job, attempt=redelivery.attempt,
                                      schedule_at=datetime.fromtimestamp(redelivery.not_before,
-                                                                        UTC),
-                                     priority=redelivery.priority)
+                                                                        UTC))
         if not inserted:
             # Merged into the key's pending copy, which may carry attempt 0 (a request published
             # while this delivery ran): carry the backoff forward instead of resetting it.

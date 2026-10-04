@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from central.infra.asset_roots import lock_fleet_assets_in
-
 if TYPE_CHECKING:  # avoid a hard import cycle at module load; only for type hints
     from contracts.models import BaseHealth
 
@@ -42,11 +40,7 @@ def record_base_health(conn, device_id: str, report: "BaseHealth", *, clock) -> 
     monotonic per authority epoch (known-good only advances); `healthy` is true;
     and `running_tag` equals the tag Central recorded as last-served (not a live
     re-resolve -- that would drop a genuine report after a frontier move, S1).
-    On success also clears `failed_tag` if it equals `running_tag`.
-
-    `known_good_tag` is a desired-set input: the asset-roots lock comes first (before the
-    device row lock), as for every root writer (`central/infra/asset_roots.py`)."""
-    lock_fleet_assets_in(conn)
+    On success also clears `failed_tag` if it equals `running_tag`."""
     device = conn.execute(
         "SELECT device_id FROM devices WHERE device_id=%s FOR UPDATE", (device_id,)
     ).fetchone()

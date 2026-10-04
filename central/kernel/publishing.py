@@ -23,9 +23,6 @@ conformance suite):
   nothing to serve, and a later reference can re-create the record.
 - PB8 `publish_now` uses its own transaction and commits it before returning.
 - PB9 Periodic job types may be published on demand; they merge into the pending tick.
-- PB10 `priority` (None: the job type's `Delivery.priority`) overrides the pick priority of the
-  copy this publish inserts, and of every redelivery of that copy. A publish that merges into a
-  pending copy leaves that copy's priority as it is. An invalid priority is `ValueError`.
 """
 
 from __future__ import annotations
@@ -89,9 +86,14 @@ class SettledHandle(Generic[R]):
         return self._outcome
 
 
-class Publisher(Protocol):
-    def publish(self, job: Job[R], *, within: Transaction, retry_terminal: bool = False,
-                priority: int | None = None) -> JobHandle[R]: ...
+def started(handle: JobHandle[object]) -> bool:
+    """Whether a publish inserted a job or merged into a pending copy (PB4). PB2 and PB3 insert
+    nothing and are the only `SettledHandle`s a Publisher returns."""
+    return not isinstance(handle, SettledHandle)
 
-    async def publish_now(self, job: Job[R], *, retry_terminal: bool = False,
-                          priority: int | None = None) -> JobHandle[R]: ...
+
+class Publisher(Protocol):
+    def publish(self, job: Job[R], *, within: Transaction,
+                retry_terminal: bool = False) -> JobHandle[R]: ...
+
+    async def publish_now(self, job: Job[R], *, retry_terminal: bool = False) -> JobHandle[R]: ...

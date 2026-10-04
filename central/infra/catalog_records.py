@@ -6,11 +6,6 @@
 `central/app_release_service.py`, `central/installation_repository.py` and
 `central/netboot_base.py`. Each method runs in the caller's transaction; a fake transaction is a
 `TypeError` (`pg_connection`).
-
-Every method that writes a desired-set input (`ReleaseCatalog.desired_tiers_in`: release rows,
-the promoted and last-good tags, a device's pinned and served tags) gets its connection from
-`_root_write`, which takes the asset-roots lock first (`central/infra/asset_roots.py`), so the
-cache cleaner never reads the desired set between that write and its commit.
 """
 
 from __future__ import annotations
@@ -30,7 +25,6 @@ from central.content_catalog.ports import (
     ReleaseRow,
     StoredEtag,
 )
-from central.infra.asset_roots import lock_asset_roots
 from central.infra.node_releases import deployment_jobs, wanted_deployments
 from central.infra.transactions import pg_connection
 from central.infra.upstream_guard import not_older
@@ -69,13 +63,6 @@ _NAMING_ROLES = (
 )
 if {role for role, _, _ in _NAMING_ROLES} != {field.name for field in fields(NamedTags)}:
     raise ImportError("_NAMING_ROLES must name exactly the NamedTags fields")
-
-
-def _root_write(tx: Transaction) -> Any:
-    """The connection of a write to a desired-set input, holding the asset-roots lock: taken
-    before the write's row locks (the order every root writer uses), held to the end of `tx`."""
-    lock_asset_roots(tx)
-    return pg_connection(tx)
 
 
 def _locator(url: str | None, sha256: str | None, size: int | None) -> OriginLocator | None:
@@ -223,11 +210,11 @@ class PgReleaseRecords:
             "AND ref.locator_size=ref.expected_size"
         ).fetchall()
         # The wanted V2 node deployments (`wanted_deployments`): the selected and the previous
-        # one and every live boot offer's content are fetched first; the window's (the newest
-        # stable releases) in the background, newest release first.
-        wanted = wanted_deployments(conn, now=now)
+        # one are fetched first; the window's (the newest stable releases) in the background,
+        # newest release first.
+        wanted = wanted_deployments(conn)
         jobs = deployment_jobs(conn, wanted.deployments)
-        node = set(wanted.offer_jobs)
+        node: set[AssetJob] = set()
         for deployment in (wanted.selected, wanted.previous):
             if deployment is not None:
                 node.update(jobs.get(deployment, ()))
@@ -316,7 +303,7 @@ class PgReleaseRecords:
         #    for the winner to commit, then inserts nothing.
         # 2. Otherwise lock the row. Under READ COMMITTED this statement sees the winner's
         #    committed row, so the previous row is never read before the lock is held.
-        conn = _root_write(tx)
+        conn = pg_connection(tx)
         version = release_version(release.tag)
         changed_at, asset_id = _upstream(release)
         mirror_state = "discovered" if release.package is not None else "undeployable"
@@ -355,7 +342,7 @@ class PgReleaseRecords:
         payload_url, payload_sha256, payload_size, payload_format, payload_base_abi, \
             payload_source_manifest = _payload_facts(release.payload)
         base_abi, base_abi_squashfs_sha256, base_abi_source_manifest = _base_abi_facts(release)
-        return _root_write(tx).execute(
+        return pg_connection(tx).execute(
             "UPDATE app_releases SET major=%(major)s,minor=%(minor)s,patch=%(patch)s,"
             "prerelease=%(prerelease)s,is_prerelease=%(is_prerelease)s,"
             "asset_url=%(asset_url)s,asset_sha256=%(asset_sha256)s,asset_size=%(asset_size)s,"
@@ -409,7 +396,7 @@ class PgReleaseRecords:
         #    commits before this statement returns, and this one then does nothing).
         # 2. Otherwise lock the row, read what it holds now (the exact outgoing promotion), and
         #    UPDATE it only for an operator, or over the sync's own promotion.
-        conn = _root_write(tx)
+        conn = pg_connection(tx)
         if conn.execute(
             "INSERT INTO app_release_policy(singleton, promoted_tag, promoted_by) "
             "VALUES(TRUE,%s,%s) ON CONFLICT(singleton) DO NOTHING",
@@ -433,7 +420,7 @@ class PgReleaseRecords:
         return None if row is None else row["last_good_tag"]
 
     def set_last_good(self, tx: Transaction, tag: str) -> None:
-        _root_write(tx).execute(
+        pg_connection(tx).execute(
             "UPDATE app_release_policy SET last_good_tag=%s WHERE singleton", (tag,)
         )
 
@@ -533,14 +520,14 @@ class PgDeviceRecords:
         )
 
     def record_served(self, tx: Transaction, device_id: str, tag: str, *, now: float) -> None:
-        _root_write(tx).execute(
+        pg_connection(tx).execute(
             "UPDATE devices SET last_served_tag=%s, boot_outcome='pending', last_served_at=%s "
             "WHERE device_id=%s",
             (tag, now, device_id),
         )
 
     def set_pin(self, tx: Transaction, device_id: str, tag: str | None) -> bool:
-        return _root_write(tx).execute(
+        return pg_connection(tx).execute(
             "UPDATE devices SET attached_tag=%s WHERE device_id=%s", (tag, device_id)
         ).rowcount == 1
 

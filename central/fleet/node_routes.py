@@ -16,7 +16,7 @@ from central.db import Database
 from central.fleet.bytes import OfferByteReader
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
-from central.fleet.node_boot import NodeBootService, parse_node_deployment
+from central.fleet.node_boot import NodeBootService
 from central.fleet.node_calibration import NodeCalibration
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_display import NodeDisplay
@@ -146,15 +146,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except BaseException:
             os.close(opened.fd)
             raise
-
-    @app.post("/v1/operator/node/deployments", dependencies=[Depends(admin)])
-    async def publish_deployment(request: Request):
-        raw = await body(request, MAX_NODE_BOOT_BYTES)
-        try:
-            publication = parse_node_deployment(raw)
-        except ValueError as exc:
-            raise NodeControlError("invalid_node_deployment", 422) from exc
-        return await invoke(boots.publish, publication)
 
     @app.put("/v1/operator/node/boot-policy", dependencies=[Depends(admin)])
     async def select_deployment(request: Request):

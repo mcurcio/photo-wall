@@ -56,10 +56,9 @@ class CallRecordingPublisher(ProcrastinatePublisher):
         super().__init__(dsn, **options)
         self.calls: list[Call] = []
 
-    def publish(self, job, *, within, retry_terminal=False, priority=None):
+    def publish(self, job, *, within, retry_terminal=False):
         self.calls.append(Call(job, retry_terminal))
-        return super().publish(job, within=within, retry_terminal=retry_terminal,
-                               priority=priority)
+        return super().publish(job, within=within, retry_terminal=retry_terminal)
 
 
 class World:

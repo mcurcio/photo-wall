@@ -30,6 +30,7 @@ import httpx
 from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
 from central.kernel.ports import (
+    NODE_RELEASE_INVALID,
     NodePublication,
     PlayerPayload,
     PublishedRelease,
@@ -70,8 +71,8 @@ PER_PAGE: Final = 100
 MAX_PAGES: Final = 20  # PER_PAGE * MAX_PAGES = up to 2000 releases scanned per listing
 MAX_RELEASES_PAGE_BYTES: Final = 8 * 1024 * 1024
 MAX_REDIRECTS: Final = 5
-# A node release's own deterministic problems (`PublishedRelease.node_problem`).
-NODE_RELEASE_INVALID: Final = "node_release_invalid"
+# A node release's own deterministic problems (`PublishedRelease.node_problem`; also
+# `NODE_RELEASE_INVALID`, shared with the release sync).
 NODE_RELEASE_TAG_MISMATCH: Final = "node_release_tag_mismatch"
 NODE_MANIFEST_MISSING: Final = "node_manifest_missing"
 NODE_ARTIFACT_MISSING: Final = "node_artifact_missing"

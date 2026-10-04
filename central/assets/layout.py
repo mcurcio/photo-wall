@@ -45,6 +45,10 @@ class CacheLayout:
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
 
+    @property
+    def root(self) -> Path:
+        return self._root
+
     def directory(self, kind: AssetKind) -> Path:
         return self._root / _DIRECTORIES[kind]
 

@@ -219,8 +219,8 @@ def test_first_sync_records_releases_references_promotes_and_fetches_desired_cha
     assert w.reads.owners(deb_key(deb(T2))) == [T2]
     # Auto-promote: nothing promoted -> the newest full release with a .deb (not the rc).
     assert w.reads.promoted() == T1
-    # Load etag, one per release, store etag, tail: each its own committed transaction.
-    assert [tx.state for tx in w.transactions.begun] == ["committed"] * 5
+    # Load etag, one per release, store etag, boot sweep, tail: each its own committed transaction.
+    assert [tx.state for tx in w.transactions.begun] == ["committed"] * 6
     tail = w.transactions.begun[-1]
     # Changed AND desired (bootstrap T1 + its .deb); the rc's .deb changed but is not desired.
     assert w.publisher.calls == [
@@ -235,7 +235,7 @@ def test_unchanged_listing_writes_no_release_but_still_runs_the_tail(world):
               promoted=T1, etag="e1", bound=True)
     sync(w)
     assert w.updated_at() == {T1: 1000.0} and w.reads.etag() == "e1"  # the seed's write only
-    assert len(w.transactions.begun) == 2  # load etag + tail
+    assert len(w.transactions.begun) == 3  # load etag + boot sweep + tail
     assert w.publisher.calls == [PublishedCall(Prefetch(), False, w.transactions.begun[-1])]
 
 

@@ -72,10 +72,10 @@ Resolution: TypeAlias = Candidates | Unknown
 
 @dataclass(frozen=True, slots=True)
 class DesiredTiers:
-    """The desired set split by download urgency. `wanted` is fetched at each job type's own
-    priority; `background` (disjoint from `wanted`, newest release first) only because its release
-    is in the window of newest stable node releases, at `BACKGROUND_PRIORITY`. Their union is
-    `desired_assets()`: the cleaner keeps both."""
+    """The desired set split by download urgency. Prefetch fetches every missing `wanted` job;
+    `background` (disjoint from `wanted`, newest release first) is desired only because its
+    release is in the window of newest stable node releases, so Prefetch starts at most one of
+    those per tick. Their union is `desired_assets()`: the cleaner keeps both."""
 
     wanted: frozenset[AssetJob]
     background: tuple[AssetJob, ...]
@@ -155,15 +155,6 @@ class AssetReadiness(StoredAssets, Protocol):
         ...
 
 
-class CacheRetention(Protocol):
-    def hold_desired(self, tx: Transaction) -> frozenset[AssetKey]:
-        """Take the asset-roots lock until `tx` ends, then return every desired key. Every
-        writer of a desired-set input (select, offer, ingest and observations, V1 release rows,
-        promotion, pins, served and known-good tags, fleet reservations) takes the same lock, so
-        no root can be added between this read and the caller's deletes in `tx`."""
-        ...
-
-
 class AssetRecords(Protocol):
     def get(self, tx: Transaction, key: AssetKey) -> Asset | None: ...
 
@@ -180,8 +171,13 @@ class AssetRecords(Protocol):
         ProducedFactsConflict. A kind not `keyed_by_content` takes the new facts. Absent -> no-op."""
         ...
 
-    def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:
-        """Set last_served_at; absent -> no-op."""
+    def touch_served(self, tx: Transaction, key: AssetKey) -> None:
+        """Set last_served_at to the store's own clock (never the caller's); absent -> no-op."""
+        ...
+
+    def served_within(self, tx: Transaction, key: AssetKey, seconds: float) -> bool:
+        """Whether last_served_at is within `seconds` of the store's own clock now: the clock
+        that wrote it, so no two machines' clocks are ever compared."""
         ...
 
     def lock_produced(self, tx: Transaction, key: AssetKey) -> AssetReady | None:
@@ -248,6 +244,11 @@ class NodePublication:
             _complete_locator(locator)
             if (locator.sha256, locator.size) != (asset.sha256, asset.size_bytes):
                 raise ValueError("node_publication_asset_mismatch")
+
+
+# A node release whose manifest (or the deployment built from it) is invalid: the origin's
+# `node_problem`, and the release sync's for a deployment it could not build.
+NODE_RELEASE_INVALID: Final = "node_release_invalid"
 
 
 @dataclass(frozen=True, slots=True)

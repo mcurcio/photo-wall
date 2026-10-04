@@ -1,9 +1,10 @@
 """Exact offer bytes over the existing read-through cache; no HTTP routes live here.
 
 An open descriptor leases the inode through response streaming even if a cache cleanup unlinks
-its path. The cache cleaner (`central/assets/maintenance.py`) keeps every desired file, which
-includes every live offer's roots (`fleet_offer_artifact_roots`, and V2 offers younger than
-`OFFER_TTL_SECONDS`), so future opens of a live offer's files find them too.
+its path. The cache cleaner (`central/assets/maintenance.py`) keeps every desired file (the V1
+offer roots in `fleet_offer_artifact_roots`, the selected and previous node deployment and the
+window) and spares any file served within the last hour; a V2 offer's file removed after that
+is restored by read-through on its next open.
 
 No request hashes bytes. The worker verified the digest when it filled the cache, the node
 verifies size and SHA-256 after its download, and the cache key fixes the content; so a serve

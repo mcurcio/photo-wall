@@ -3,29 +3,31 @@ per-tag observations and the wanted deployments (auto-ingest design §6).
 
 Tables: `node_release_catalog` (058, immutable), `node_release_observations` (065),
 `node_deployments` / `node_deployment_assets` / `node_base_managers` / `node_environment_catalog`
-/ `node_boot_policy` / `node_boot_offers` (054, 065).
+/ `node_boot_policy` (054, 065).
 
-* **Deployment writer** (`write_deployment`): used by the release sync's ingest and by the hand
-  route `POST /v1/operator/node/deployments`. Takes the asset-roots lock; an existing id with the
-  same canonical bytes is a `duplicate`, with other bytes a refusal.
+* **Deployment writer** (`write_deployment`): used by the release sync's ingest. An existing id
+  with the same canonical bytes is a `duplicate`, with other bytes a refusal.
 * **Select writer** (`select_deployment`): used by the operator's `PUT boot-policy` and by the
-  first-run auto-select (expected revision 0, so it can only create the row). Records the
-  previous deployment when the selection changes to a different one.
-* **Observations** (`_observe`, from `ingest` and `record_problem`): take the asset-roots lock
-  too; a tag's stable flag and manifest decide whether it is in the window.
+  first-run auto-select (expected revision 0, so it can only create the row). A compare-and-set
+  on the policy row's own lock: expected revision 0 inserts the row (`ON CONFLICT DO NOTHING`,
+  so two creators serialize on its key and the loser sees a conflict); any other revision locks
+  the row. Records the previous deployment when the selection changes to a different one.
+* **Observations** (`_observe`, from `ingest` and `record_problem`): a tag's stable flag and
+  manifest decide whether it is in the window.
 * **Wanted deployments** (`wanted_deployments`): the window (newest 3 stable tags with a
-  deployment), the selected and previous deployments, and the content of every V2 boot offer
-  younger than `OFFER_TTL_SECONDS`. The ONE definition of "wanted"; `fleet_desired_assets`
-  turns it into keys.
+  deployment), the selected and the previous deployment. The ONE definition of "wanted";
+  `fleet_desired_assets` turns it into keys.
 
-Every writer raises `NodeReleaseRefused` before its first write (or the caller's transaction
-rolls back), never a bare database error, for a release's own conflicts.
+No writer here takes a lock for the cache cleaner: the cleaner re-reads the desired set right
+before each unlink (mark and sweep, `central/assets/maintenance.py`), and a file removed anyway
+is restored by read-through. Every writer raises `NodeReleaseRefused` before its first write (or
+the caller's transaction rolls back), never a bare database error, for a release's own conflicts.
 """
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from typing import Any, Final
@@ -35,7 +37,6 @@ from psycopg.types.json import Jsonb
 
 from central.content_catalog.boot_policy import newest_first, window
 from central.content_catalog.deployment import (
-    OFFER_TTL_SECONDS,
     NodeDeployment,
     deployment_for_release,
     deployment_id_for,
@@ -48,13 +49,10 @@ from central.infra.transactions import PgTransaction, pg_connection
 from central.infra.upstream_guard import not_older
 from central.kernel.assets import AssetKey, AssetKind, AssetReference, OriginLocator
 from central.kernel.job_types import AssetJob, FetchOsImage, FetchSealedEnvironment
-from central.kernel.ports import PublishedRelease
+from central.kernel.ports import NODE_RELEASE_INVALID, PublishedRelease
 from central.kernel.transactions import Transaction
-from contracts.node_boot import parse_node_boot_offer
-from contracts.node_release import parse_node_release
+from contracts.node_release import NodeReleaseV2, parse_node_release
 from contracts.time import Clock
-
-LOG = logging.getLogger("central.infra.node_releases")
 
 POLICY_CONFLICT: Final = "node_boot_policy_conflict"
 DEPLOYMENT_UNKNOWN: Final = "node_deployment_unknown"
@@ -63,6 +61,29 @@ IDENTITY_CONFLICT: Final = "node_release_identity_conflict"
 
 class _Older(Exception):
     """An observation older than the stored one: its savepoint rolls back, nothing is written."""
+
+
+@contextmanager
+def _release_data() -> Iterator[None]:
+    """Where a release's own data error starts: the pure parse / build / encode of its manifest.
+    A `ValueError`, `KeyError` or `TypeError` there is that release's `NODE_RELEASE_INVALID`;
+    a database error is never raised inside it, so it stays the sync's (the tick fails)."""
+    try:
+        yield
+    except (ValueError, KeyError, TypeError) as error:
+        raise NodeReleaseRefused(NODE_RELEASE_INVALID) from error
+
+
+def _built_deployment(identity: str, manifest: NodeReleaseV2,
+                      locators: Any) -> tuple[NodeDeployment, OriginLocator]:
+    """The release's deployment and its base source, encoded once so an unencodable deployment
+    is refused here, before any write (`write_deployment` encodes the same value again)."""
+    with _release_data():
+        base = locators["base"]
+        source = OriginLocator(base["url"], manifest.base.content_key, base["size"])
+        deployment = deployment_for_release(identity, manifest, locators)
+        encode_node_deployment(deployment)
+    return deployment, source
 
 
 def deployment_job(kind: str, identity: str) -> AssetJob:
@@ -74,14 +95,15 @@ def deployment_job(kind: str, identity: str) -> AssetJob:
     raise ValueError(f"not a node deployment asset kind: {kind!r}")
 
 
-def write_deployment(conn: Any, deployment: NodeDeployment,
-                     base_source: Callable[[], OriginLocator], *, clock: Clock) -> bool:
+def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginLocator, *,
+                     clock: Clock) -> bool:
     """Write one deployment and its asset references; True when it already existed (duplicate).
 
     Refuses (`NodeReleaseRefused`) an existing id with other bytes, a base whose manager pins
     differ from the ones it was first published with, and an environment digest already
     catalogued with another reference. `base_source` names where the base tarball is
-    downloaded; it is asked after those checks and may refuse too (`hand_provenance`)."""
+    downloaded. Holds the fleet asset lock (`lock_fleet_assets_in`, as publishing did before
+    the release sync wrote deployments)."""
     canonical = encode_node_deployment(deployment)
     lock_fleet_assets_in(conn)
     prior = conn.execute("SELECT document FROM node_deployments WHERE deployment_id=%s",
@@ -107,7 +129,6 @@ def write_deployment(conn: Any, deployment: NodeDeployment,
         if old and old["reference"] != asdict(item):
             raise NodeReleaseRefused("node_environment_identity_conflict")
         catalogued[item.environment_sha256] = old is not None
-    source = base_source()
     if not pins:
         conn.execute("INSERT INTO node_base_managers(base_content_key,document) VALUES(%s,%s)",
                      (base.content_key, Jsonb(manager_pins)))
@@ -115,7 +136,7 @@ def write_deployment(conn: Any, deployment: NodeDeployment,
                  (deployment.deployment_id, canonical, clock.utc()))
     owner = "node-deployment:" + deployment.deployment_id.hex
     references = [(AssetKey(AssetKind.OS_IMAGE, base.content_key),
-                   AssetReference(owner, source, base.size_bytes, base.squashfs_sha256))]
+                   AssetReference(owner, base_source, base.size_bytes, base.squashfs_sha256))]
     for item in environments:
         if not catalogued[item.environment_sha256]:
             conn.execute("INSERT INTO node_environment_catalog(environment_sha256,reference) VALUES(%s,%s)",
@@ -131,56 +152,34 @@ def write_deployment(conn: Any, deployment: NodeDeployment,
     return False
 
 
-def hand_provenance(conn: Any, deployment: NodeDeployment) -> OriginLocator:
-    """Where a hand-published deployment's base comes from: a catalogued release (any observed
-    `node_release_catalog` row) with the same base and managers, whose environments name the
-    same sources. Refused when no observed release provides them."""
-    base_source = None
-    environments = {}
-    for row in conn.execute("SELECT document,asset_locators FROM node_release_catalog").fetchall():
-        manifest = parse_node_release(bytes(row["document"]))
-        locators = row["asset_locators"]
-        if (manifest.base == deployment.base and manifest.manager_primary == deployment.manager_primary
-                and manifest.manager_fallback == deployment.manager_fallback):
-            base_source = OriginLocator(locators["base"]["url"], deployment.base.content_key,
-                                        locators["base"]["size"])
-        for role, ref in (("app", manifest.app_environment), ("manager-primary", manifest.manager_primary),
-                          ("manager-fallback", manifest.manager_fallback)):
-            if ref is not None:
-                environments[(ref.environment_sha256, locators[role]["url"])] = ref
-    if base_source is None:
-        raise NodeReleaseRefused("node_base_release_provenance_unavailable")
-    for ref in deployment.environments():
-        if environments.get((ref.environment_sha256,
-                             deployment.environment_sources[ref.environment_sha256])) != ref:
-            raise NodeReleaseRefused("node_environment_release_provenance_unavailable")
-    return base_source
-
-
 def select_deployment(conn: Any, deployment_id: UUID, expected_revision: int, *,
                       now: float) -> int:
-    """Compare-and-set the boot selection; the new revision. Holds the asset-roots lock and the
-    policy row's lock before the revision compare, so expected revision 0 can only create the
-    row. The outgoing deployment becomes `previous_deployment_id` when the selection changes to
-    a different deployment; re-selecting the same one keeps the previous."""
-    lock_fleet_assets_in(conn)
-    row = conn.execute("SELECT revision,deployment_id,previous_deployment_id FROM node_boot_policy "
-                       "WHERE singleton FOR UPDATE").fetchone()
-    current = row["revision"] if row else 0
-    if current != expected_revision:
-        raise NodeReleaseRefused(POLICY_CONFLICT)
+    """Compare-and-set the boot selection; the new revision. The outgoing deployment becomes
+    `previous_deployment_id` when the selection changes to a different deployment; re-selecting
+    the same one keeps the previous.
+
+    The policy row's own lock decides the race, no advisory lock (the `set_promoted` pattern,
+    `central/infra/catalog_records.py`): expected revision 0 can only create the row, so it
+    INSERTs with `ON CONFLICT DO NOTHING`. A concurrent creator waits on the uncommitted key and
+    then inserts nothing, which is a conflict. Any other revision locks the row and compares."""
     if not conn.execute("SELECT 1 FROM node_deployments WHERE deployment_id=%s", (deployment_id,)).fetchone():
         raise NodeReleaseRefused(DEPLOYMENT_UNKNOWN, "not_found")
-    previous = None
-    if row:
-        previous = (row["deployment_id"] if row["deployment_id"] != deployment_id
-                    else row["previous_deployment_id"])
-    conn.execute("INSERT INTO node_boot_policy(singleton,revision,deployment_id,changed_at,previous_deployment_id) "
-                 "VALUES(TRUE,%s,%s,%s,%s) ON CONFLICT(singleton) DO UPDATE SET revision=EXCLUDED.revision,"
-                 "deployment_id=EXCLUDED.deployment_id,changed_at=EXCLUDED.changed_at,"
-                 "previous_deployment_id=EXCLUDED.previous_deployment_id",
-                 (current + 1, deployment_id, now, previous))
-    return current + 1
+    if expected_revision == 0:
+        if conn.execute("INSERT INTO node_boot_policy(singleton,revision,deployment_id,changed_at) "
+                        "VALUES(TRUE,1,%s,%s) ON CONFLICT(singleton) DO NOTHING",
+                        (deployment_id, now)).rowcount != 1:
+            raise NodeReleaseRefused(POLICY_CONFLICT)
+        return 1
+    row = conn.execute("SELECT revision,deployment_id,previous_deployment_id FROM node_boot_policy "
+                       "WHERE singleton FOR UPDATE").fetchone()
+    if row is None or row["revision"] != expected_revision:
+        raise NodeReleaseRefused(POLICY_CONFLICT)
+    previous = (row["deployment_id"] if row["deployment_id"] != deployment_id
+                else row["previous_deployment_id"])
+    conn.execute("UPDATE node_boot_policy SET revision=%s,deployment_id=%s,changed_at=%s,"
+                 "previous_deployment_id=%s WHERE singleton",
+                 (expected_revision + 1, deployment_id, now, previous))
+    return expected_revision + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,7 +189,6 @@ class WantedDeployments:
     window: tuple[tuple[str, UUID], ...]  # (tag, deployment), newest release first
     selected: UUID | None
     previous: UUID | None
-    offer_jobs: frozenset[AssetJob]  # the base and environments of every live V2 offer
 
     @property
     def deployments(self) -> frozenset[UUID]:
@@ -218,27 +216,18 @@ def _deployment_ids(conn: Any, manifests: dict[str, str]) -> dict[str, UUID]:
     return {tag: deployment_id_for(sha, with_app[sha]) for tag, sha in manifests.items()}
 
 
-def wanted_deployments(conn: Any, *, now: float) -> WantedDeployments:
+def wanted_deployments(conn: Any) -> WantedDeployments:
+    """The window, the selected and the previous deployment. A Pi still preparing a deployment
+    that is neither (selected twice since its offer) is covered by `SERVE_GRACE` while it reads
+    and by read-through after: nothing else roots it."""
     policy = conn.execute("SELECT deployment_id, previous_deployment_id FROM node_boot_policy "
                           "WHERE singleton").fetchone()
     observed = _stable_observed(conn)
     tags = window(observed)
     ids = _deployment_ids(conn, {tag: observed[tag] for tag in tags})
-    offer_jobs: set[AssetJob] = set()
-    for row in conn.execute("SELECT offer_payload FROM node_boot_offers WHERE offer_payload IS NOT NULL "
-                            "AND created_at > %s", (now - OFFER_TTL_SECONDS,)).fetchall():
-        try:
-            offer = parse_node_boot_offer(bytes(row["offer_payload"]))
-        except ValueError:  # written by `NodeBootService.offer` through the same codec
-            LOG.warning("a stored node boot offer does not parse; its files are not kept")
-            continue
-        offer_jobs.add(FetchOsImage(tarball_sha256=offer.base.content_key))
-        offer_jobs.update(FetchSealedEnvironment(sha256=ref.environment_sha256) for ref in (
-            offer.app_environment, offer.manager_primary, offer.manager_fallback) if ref is not None)
     return WantedDeployments(tuple((tag, ids[tag]) for tag in tags),
                              policy["deployment_id"] if policy else None,
-                             policy["previous_deployment_id"] if policy else None,
-                             frozenset(offer_jobs))
+                             policy["previous_deployment_id"] if policy else None)
 
 
 def deployment_jobs(conn: Any, deployments) -> dict[UUID, frozenset[AssetJob]]:
@@ -265,9 +254,8 @@ _OBSERVE = ("INSERT INTO node_release_observations(tag,is_prerelease,manifest_sh
 
 def _observe(conn: Any, release: PublishedRelease, *, manifest: str | None, problem: str | None,
              now: float) -> bool:
-    """Upsert the tag's observation under the asset-roots lock: `is_prerelease` and
-    `manifest_sha256` decide window membership (`_stable_observed`)."""
-    lock_fleet_assets_in(conn)
+    """Upsert the tag's observation: `is_prerelease` and `manifest_sha256` decide window
+    membership (`_stable_observed`)."""
     version = release.node_version
     return conn.execute(_OBSERVE, {
         "tag": release.tag, "is_prerelease": release.is_prerelease, "manifest": manifest,
@@ -288,8 +276,8 @@ class PgNodeReleaseRecords:
         if publication is None:
             raise ValueError("no_node_publication")
         conn = pg_connection(tx)
-        lock_fleet_assets_in(conn)  # first: the writer below takes it too (lock order)
-        manifest = parse_node_release(publication.manifest)
+        with _release_data():
+            manifest = parse_node_release(publication.manifest)
         identity = sha256(publication.manifest).hexdigest()
         try:
             with conn.transaction():  # an older observation rolls back the catalog row too
@@ -302,11 +290,9 @@ class PgNodeReleaseRecords:
                     raise NodeReleaseRefused(IDENTITY_CONFLICT)
                 if not _observe(conn, release, manifest=identity, problem=None, now=now):
                     raise _Older
-                locators = prior["asset_locators"]
-                base = locators["base"]
-                source = OriginLocator(base["url"], manifest.base.content_key, base["size"])
-                write_deployment(conn, deployment_for_release(identity, manifest, locators),
-                                 lambda: source, clock=self._clock)
+                deployment, source = _built_deployment(identity, manifest,
+                                                       prior["asset_locators"])
+                write_deployment(conn, deployment, source, clock=self._clock)
         except _Older:
             return False
         return True

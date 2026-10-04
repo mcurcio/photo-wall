@@ -1,7 +1,8 @@
-"""Exact V2 boot publications, selection, and immutable nonce decisions.
+"""Exact V2 boot selection, offers, and immutable nonce decisions.
 
-The deployment writer and the select writer live in `central/infra/node_releases.py`, shared
-with the release sync (ingest, first-run selection); this service is their HTTP-facing half.
+Deployments are written only by the release sync's ingest; the select writer lives in
+`central/infra/node_releases.py`, shared with the sync's first-run selection, and this service
+is its HTTP-facing half.
 
 Fleet chooses references; the shared content worker owns acquired bytes. Manager
 roots are immutable properties of the selected base content, not a separate
@@ -26,7 +27,7 @@ from central.fleet.models import OfferAsset
 from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.fleet.service import FleetService
 from central.infra.asset_roots import lock_fleet_assets_in
-from central.infra.node_releases import hand_provenance, select_deployment, write_deployment
+from central.infra.node_releases import select_deployment
 from central.infra.transactions import PgTransaction
 from central.kernel.job_types import Prefetch
 from central.kernel.publishing import Publisher
@@ -40,32 +41,12 @@ from contracts.node_boot import (
 from contracts.node_protocol import counter, identifier
 
 
-def _refused(refused: NodeReleaseRefused) -> NodeControlError:
-    return NodeControlError(refused.reason, 404 if refused.kind == "not_found" else 409)
-
-
 class NodeBootService:
     """`publisher` warms the cache when a deployment is selected (a Prefetch in the selecting
     transaction, as catalog changes do); None where no content worker is wired."""
 
     def __init__(self, sessions: NodeSessions, *, publisher: Publisher | None = None):
         self.sessions, self.publisher = sessions, publisher
-
-    def publish(self, deployment: NodeDeployment) -> dict:
-        """The hand route (`POST /v1/operator/node/deployments`): a deployment written through
-        the one deployment writer, its base and environments provided by an observed release
-        (`node_release_catalog`). Releases themselves are ingested by the release sync."""
-        self.sessions.require_enabled()
-        try:
-            with self.sessions.db.transaction() as conn:
-                duplicate = write_deployment(conn, deployment,
-                                             lambda: hand_provenance(conn, deployment),
-                                             clock=self.sessions.clock)
-        except NodeReleaseRefused as refused:
-            raise _refused(refused) from None
-        if duplicate:
-            return {"published": True, "duplicate": True}
-        return {"published": True, "duplicate": False, "bytes_verified": False}
 
     def select(self, deployment_id: UUID, expected_revision: int) -> dict:
         self.sessions.require_enabled()
@@ -78,7 +59,8 @@ class NodeBootService:
                 if self.publisher is not None:
                     self.publisher.publish(Prefetch(), within=PgTransaction(conn))
         except NodeReleaseRefused as refused:
-            raise _refused(refused) from None
+            raise NodeControlError(refused.reason,
+                                   404 if refused.kind == "not_found" else 409) from None
         return {"revision": revision, "deployment_id": str(deployment_id)}
 
     def offer(self, request: NodeBootRequestV2) -> NodeBootOfferV2:

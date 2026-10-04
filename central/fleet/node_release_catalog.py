@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from central.content_catalog.boot_policy import first_run_choice, newest_first
+from central.content_catalog.boot_policy import newest_first
 from central.content_catalog.deployment import deployment_id_for, parse_node_deployment
-from central.infra.node_releases import deployment_jobs, wanted_deployments
+from central.content_catalog.sync import first_run_candidate
+from central.infra.node_releases import PgNodeReleaseRecords, deployment_jobs, wanted_deployments
 from central.infra.transactions import PgTransaction
 from central.kernel.ports import AssetReadiness, Readiness
 from contracts.node_release import parse_node_release
@@ -71,7 +72,7 @@ class NodeReleaseCatalog:
                 "LEFT JOIN node_release_catalog c USING(manifest_sha256)").fetchall()
             # Every observed tag is semver (the origin skips any other).
             observed = newest_first(observed, lambda row: row["tag"])[:MAX_RELEASES]
-            wanted = wanted_deployments(conn, now=read_at)
+            wanted = wanted_deployments(conn)
             window = {deployment for _, deployment in wanted.window}
             releases = [self._release_row(row) for row in observed]
             ids = [row["deployment_id"] for row in releases if row["deployment_id"] is not None]
@@ -87,14 +88,13 @@ class NodeReleaseCatalog:
                 row.update(_readiness(state))
                 row["deployment_id"] = None if deployment is None else str(deployment)
             auto = None
-            if policy is None:
-                choice = first_run_choice(
-                    (row, Readiness(row["readiness"], row["readiness_reason"], row["missing_bytes"]))
-                    for row in releases if row["stable"] and row["deployment_id"] is not None
-                    and row["readiness"] is not None)
+            if self.readiness is not None:  # the sync tail's own choice (`first_run_candidate`)
+                choice = first_run_candidate(tx, PgNodeReleaseRecords(self.sessions.clock),
+                                             self.readiness)
                 if choice is not None:
-                    auto = {key: choice[0][key] for key in (
-                        "tag", "deployment_id", "readiness", "readiness_reason", "missing_bytes")}
+                    candidate, readiness = choice
+                    auto = {"tag": candidate.tag, "deployment_id": candidate.deployment_id,
+                            **_readiness(readiness)}
         return {
             "read_at": read_at,
             "selection": {"revision": policy["revision"] if policy else 0,

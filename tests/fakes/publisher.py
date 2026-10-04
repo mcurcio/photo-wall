@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Literal
 
-from central.kernel.jobs import Job, R, asset_key, job_keys, require_priority
+from central.kernel.jobs import Job, R, asset_key, job_keys
 from central.kernel.ports import AssetRecords
 from central.kernel.publishing import (
     ASSET_NOT_RECORDED,
@@ -39,7 +39,6 @@ class PublishedCall:
     job: Job[Any]
     retry_terminal: bool
     within: Transaction | None  # None for publish_now
-    priority: int | None = None  # PB10: the override, None for the job type's own
 
 
 @dataclass(frozen=True)
@@ -84,22 +83,17 @@ class RecordingPublisher:
     def inserted(self) -> list[Job[Any]]:
         return [d.job for d in self._deferred if d.within.state != "rolled_back"]
 
-    def publish(self, job: Job[R], *, within: Transaction, retry_terminal: bool = False,
-                priority: int | None = None) -> JobHandle[R]:
+    def publish(self, job: Job[R], *, within: Transaction,
+                retry_terminal: bool = False) -> JobHandle[R]:
         job_keys(job)  # PB1: TypeError for an unregistered job type
-        if priority is not None:
-            require_priority(priority)  # PB10
         if within.state != "open":
             raise RuntimeError("transaction_not_open")
-        self.calls.append(PublishedCall(job, retry_terminal, within, priority))
+        self.calls.append(PublishedCall(job, retry_terminal, within))
         return self._publish(job, within, retry_terminal)
 
-    async def publish_now(self, job: Job[R], *, retry_terminal: bool = False,
-                          priority: int | None = None) -> JobHandle[R]:
+    async def publish_now(self, job: Job[R], *, retry_terminal: bool = False) -> JobHandle[R]:
         job_keys(job)  # PB1
-        if priority is not None:
-            require_priority(priority)  # PB10
-        self.calls.append(PublishedCall(job, retry_terminal, None, priority))
+        self.calls.append(PublishedCall(job, retry_terminal, None))
         tx = FakeTransaction()  # PB8: its own transaction, committed before returning
         handle = self._publish(job, tx, retry_terminal)
         tx.state = "committed"

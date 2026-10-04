@@ -18,7 +18,6 @@ from central.assets.store import CacheStore
 from central.kernel.assets import AssetReady, OriginLocator
 from central.kernel.handling import OriginRejected
 from central.kernel.job_types import (
-    BACKGROUND_PRIORITY,
     AssetJob,
     FetchLibraryThumbnail,
     FetchOsImage,
@@ -35,7 +34,7 @@ from central.kernel.ports import (
     ReleaseOrigin,
     ThumbnailOrigin,
 )
-from central.kernel.publishing import Publisher
+from central.kernel.publishing import Publisher, started
 from central.kernel.transactions import Transactions
 from contracts.node_boot import MAX_ENVIRONMENT_BYTES
 from contracts.player_payload import MAX_ARCHIVE_BYTES, PayloadError, verify_archive
@@ -147,10 +146,15 @@ class FetchLibraryThumbnailHandler:
 
 
 class PrefetchHandler:
-    """Publish the fetch job of every desired asset that is recorded but not on disk: the
-    `wanted` tier first at each job type's own priority, then the `background` tier (files only
-    the window of newest stable node releases names), newest release first, at
-    `BACKGROUND_PRIORITY`, below every thumbnail.
+    """Publish the fetch job of every `wanted` desired asset that is recorded but not on disk,
+    then START at most ONE missing `background` asset (files only the window of newest stable
+    node releases names; newest release first), all at each job type's own priority. One
+    background download per tick keeps the window from flooding the shared FETCH queue ahead of
+    previews and wanted files; the next tick starts the next one.
+
+    The background walk stops at the first publish that `started` a job: a file whose latest
+    outcome is terminal (PB3) or still in backoff (PB2) inserts nothing, so it never holds the
+    tick's one slot and the rest of the window is still pre-downloaded.
 
     "Missing" is the one readiness predicate (`AssetReadiness.missing`). It never waits for those
     jobs and never sets `retry_terminal`: a terminal outcome stays terminal until a request or an
@@ -170,7 +174,8 @@ class PrefetchHandler:
         for fetch in wanted:
             await self._publisher.publish_now(fetch)
         for fetch in background:
-            await self._publisher.publish_now(fetch, priority=BACKGROUND_PRIORITY)
+            if started(await self._publisher.publish_now(fetch)):
+                break
 
     def _missing(self, tiers: DesiredTiers) -> tuple[list[AssetJob], list[AssetJob]]:
         with self._transactions.begin() as tx:

@@ -123,8 +123,18 @@ class PgAssetRecords:
         ).fetchone()
         return None if row is None else _produced(row)
 
-    def touch_served(self, tx: Transaction, key: AssetKey, at: float) -> None:
+    # `last_served_at` is the database server's clock, written and compared by the database
+    # alone: a reader on one host and the cache cleaner on another never compare their clocks.
+    def touch_served(self, tx: Transaction, key: AssetKey) -> None:
         pg_connection(tx).execute(
-            "UPDATE assets SET last_served_at=%s WHERE kind=%s AND identity=%s",
-            (at, key.kind.value, key.identity),
+            "UPDATE assets SET last_served_at=EXTRACT(EPOCH FROM clock_timestamp()) "
+            "WHERE kind=%s AND identity=%s",
+            (key.kind.value, key.identity),
         )
+
+    def served_within(self, tx: Transaction, key: AssetKey, seconds: float) -> bool:
+        return pg_connection(tx).execute(
+            "SELECT 1 FROM assets WHERE kind=%s AND identity=%s "
+            "AND last_served_at >= EXTRACT(EPOCH FROM clock_timestamp()) - %s",
+            (key.kind.value, key.identity, seconds),
+        ).fetchone() is not None

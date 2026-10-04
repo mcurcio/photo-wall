@@ -30,7 +30,7 @@ from operator_harness import RequestGate, operator_server
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
-from test_node_boot import cold_setup
+from test_node_boot import cold_setup, publish_deployment
 from test_node_release_catalog import discover, publication
 
 from central.fleet.node_boot import NodeBootService
@@ -74,7 +74,7 @@ def _two_deployments(registry):
     """A selected deployment (revision 1) and a second one, not selected."""
     service, _, selected = cold_setup(registry)
     other = replace(selected, deployment_id=uuid4())
-    service.publish(other)
+    publish_deployment(registry.db, other, registry.clock)
     return service, selected, other
 
 

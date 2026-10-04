@@ -1,10 +1,8 @@
 """Frozen cold offers, superseding boot enrollment, and weak legacy adoption."""
-from dataclasses import asdict, replace
-from hashlib import sha256
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from psycopg.types.json import Jsonb
 from test_fleet_attempts import (
     BASE_ABI,
     BASE_SHA,
@@ -17,6 +15,7 @@ from test_fleet_attempts import (
 )
 from test_fleet_rollout_gate import _gate
 
+from central.content_catalog.ports import NodeReleaseRefused
 from central.fleet.node_boot import NodeBootService, NodeDeployment
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
@@ -35,33 +34,14 @@ def environment(digest="d", name="photo-wall-player"):
                               "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1", "plugin-v1")
 
 
-def seed_catalog_publication(registry, deployment):
-    """An observed release providing `deployment`'s base and environments (the hand route's
-    provenance), written straight into `node_release_catalog`; the sync's ingest has its own
-    tests."""
-    from contracts.node_release import NodeReleaseAssetV2, NodeReleaseV2, encode_node_release
-    roles = [("manager-primary", deployment.manager_primary), ("manager-fallback", deployment.manager_fallback),
-             ("app", deployment.app_environment)]
-    assets = [NodeReleaseAssetV2("base", "node-base.tar.gz", deployment.base.content_key, 256)]
-    sources = {"base": {"url": "https://example.invalid/base.tar", "sha256": deployment.base.content_key, "size": 256}}
-    for role in ("boot", "node-base-deb", "node-display-deb", "build-provenance"):
-        assets.append(NodeReleaseAssetV2(role, role+".bin", "8"*64, 32))
-    for role, ref in roles:
-        if ref is not None:
-            assets.extend([NodeReleaseAssetV2(role, role+".tar", ref.environment_sha256, ref.size_bytes),
-                           NodeReleaseAssetV2(role+"-deb", role+".deb", ref.deb_sha256, 16)])
-            sources[role] = {"url": deployment.environment_sources[ref.environment_sha256],
-                             "sha256": ref.environment_sha256, "size": ref.size_bytes}
-    for asset in assets:
-        sources.setdefault(asset.role, {"url": "https://example.invalid/"+asset.filename,
-                                        "sha256": asset.sha256, "size": asset.size_bytes})
-    revision = sha256(str(asdict(deployment)).encode()).hexdigest()[:40]
-    raw = encode_node_release(NodeReleaseV2(revision, deployment.base, deployment.app_environment,
-        deployment.manager_primary, deployment.manager_fallback, tuple(assets)))
-    identity = sha256(raw).hexdigest()
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,1000) ON CONFLICT DO NOTHING",
-                     (identity, deployment.base.tag, revision, raw, Jsonb(sources)))
+def publish_deployment(db, deployment, clock) -> bool:
+    """Write `deployment` through the one deployment writer (`write_deployment`, which the
+    release sync's ingest calls; the ingest has its own tests). True when it already existed."""
+    from central.infra.node_releases import write_deployment
+    from central.kernel.assets import OriginLocator
+    source = OriginLocator("https://example.invalid/base.tar", deployment.base.content_key, 256)
+    with db.transaction() as conn:
+        return write_deployment(conn, deployment, source, clock=clock)
 
 
 def cold_setup(registry, *, app=True):
@@ -77,8 +57,7 @@ def cold_setup(registry, *, app=True):
         BASE_ABI, "graphics-v1", "plugin-v1"), selected, manager, None,
         {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs})
     service = NodeBootService(sessions)
-    seed_catalog_publication(registry, deployment)
-    service.publish(deployment)
+    publish_deployment(registry.db, deployment, registry.clock)
     service.select(deployment.deployment_id, 0)
     return service, sessions, deployment
 
@@ -94,7 +73,7 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
     offer = service.offer(request)
     assert parse_node_boot_offer(encode_node_boot_offer(offer)) == offer
     assert offer.app_status == "unconfigured" and offer.manager_fallback is None
-    assert service.publish(deployment)["duplicate"]
+    assert publish_deployment(registry.db, deployment, registry.clock)  # a duplicate
     service.select(deployment.deployment_id, 1)
     assert service.offer(request) == offer
     assert service.asset(offer.offer_id, "base").sha256 == BASE_SHA
@@ -125,9 +104,9 @@ def test_manager_pins_and_environment_identity_are_immutable(registry):
     changed = environment("3", "photo-wall-node-manager")
     sources = {**deployment.environment_sources, changed.environment_sha256: "https://example.invalid/new"}
     del sources[deployment.manager_primary.environment_sha256]
-    with pytest.raises(NodeControlError, match="manager_pins_immutable"):
-        service.publish(replace(deployment, deployment_id=uuid4(), manager_primary=changed,
-                                environment_sources=sources))
+    with pytest.raises(NodeReleaseRefused, match="manager_pins_immutable"):
+        publish_deployment(registry.db, replace(deployment, deployment_id=uuid4(),
+                           manager_primary=changed, environment_sources=sources), registry.clock)
     with pytest.raises(ValueError, match="role_invalid"):
         replace(deployment, manager_primary=environment()).offer(offer_id=uuid4(), audience="a",
             request=NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64), device_id=DEVICE_ID,
@@ -236,8 +215,7 @@ def test_selected_and_previous_deployments_are_desired_and_older_ones_are_not(re
     service, _, first = cold_setup(registry)
     second, third = _other(first, "4"), _other(first, "5")
     for deployment in (second, third):
-        seed_catalog_publication(registry, deployment)
-        service.publish(deployment)
+        publish_deployment(registry.db, deployment, registry.clock)
     jobs = _desired(registry)
     assert {_env(first.app_environment), _env(first.manager_primary),
             FetchOsImage(tarball_sha256=BASE_TARBALL_SHA)} <= jobs
@@ -259,29 +237,13 @@ def test_selected_and_previous_deployments_are_desired_and_older_ones_are_not(re
     assert _env(first.app_environment) not in jobs  # neither selected nor previous any more
 
 
-def test_a_live_offer_keeps_its_deployment_desired_after_two_selections(registry):
-    service, _, first = cold_setup(registry)
-    second, third = _other(first, "4"), _other(first, "5")
-    for deployment in (second, third):
-        seed_catalog_publication(registry, deployment)
-        service.publish(deployment)
-    offer = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))  # a Pi mid-prepare on X
-    assert offer.app_environment == first.app_environment
-    service.select(second.deployment_id, 1)
-    service.select(third.deployment_id, 2)
-    # Neither selected nor previous, but the live offer (< 1 h old) still roots X's files.
-    assert _env(first.app_environment) in _desired(registry)
-    registry.clock.advance(3601)
-    assert _env(first.app_environment) not in _desired(registry)
-
-
 class SelectingPublisher:
     """Records each job with the selection its transaction sees; `fail` refuses the publish."""
 
     def __init__(self, *, fail=False):
         self.published, self.fail = [], fail
 
-    def publish(self, job, *, within, retry_terminal=False, priority=None):
+    def publish(self, job, *, within, retry_terminal=False):
         from central.infra.transactions import pg_connection
         if self.fail:
             raise RuntimeError("queue down")
@@ -294,8 +256,7 @@ def test_selecting_a_deployment_warms_the_cache_in_the_same_transaction(registry
     from central.kernel.job_types import Prefetch
     service, sessions, selected = cold_setup(registry)
     other = replace(selected, deployment_id=uuid4())
-    seed_catalog_publication(registry, other)
-    service.publish(other)
+    publish_deployment(registry.db, other, registry.clock)
     publisher = SelectingPublisher()
     boots = NodeBootService(sessions, publisher=publisher)
     # A conflicting selection writes nothing and warms nothing.

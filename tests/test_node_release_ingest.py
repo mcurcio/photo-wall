@@ -314,7 +314,7 @@ def test_a_later_valid_upload_clears_the_problem_and_moves_the_pointer(registry,
 
 
 def test_a_console_published_deployment_converges_as_a_duplicate(registry, sync_world):
-    from central.fleet.node_boot import NodeBootService
+    from test_node_boot import publish_deployment
     upstream, upload = Upstream(), node_upload("v2.0.0")
     upstream.put(upload)
     world = sync_world(upstream)
@@ -325,8 +325,8 @@ def test_a_console_published_deployment_converges_as_a_duplicate(registry, sync_
         conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,1000)",
                      (upload.sha, "v2.0.0", upload.release.revision, upload.manifest,
                       json.dumps(locators)))
-    NodeBootService(sessions_for(registry)).publish(
-        deployment_for_release(upload.sha, upload.release, locators))
+    publish_deployment(registry.db, deployment_for_release(upload.sha, upload.release, locators),
+                       registry.clock)
     sync(world)
     seen = observations(registry)["v2.0.0"]
     assert (seen["manifest_sha256"], seen["problem"]) == (upload.sha, None)
@@ -439,55 +439,109 @@ def test_an_existing_selection_is_never_moved(registry, sync_world):
 
 def test_auto_select_racing_an_operator_put_at_revision_zero_writes_exactly_one_selection(
         registry, sync_world):
+    """Two creators at expected revision 0, no advisory lock: the first holds the uncommitted
+    policy row; the operator's PUT and the sync's auto-select wait on its key and then insert
+    nothing (`ON CONFLICT DO NOTHING`), so each sees a conflict and exactly one row is written."""
     import threading
 
     from test_node_release_catalog import store_files
 
     from central.fleet.node_boot import NodeBootService
     from central.fleet.node_sessions import NodeControlError
-    from central.infra.asset_roots import FLEET_ASSET_LOCK
+    from central.infra.node_releases import select_deployment
     upstream, older, newest = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
     for upload in (older, newest):
         upstream.put(upload)
     world = sync_world(upstream)
     sync(world)
-    store_files(world, newest)
+    store_files(world, newest)  # the auto-select's candidate is ready
     outcomes: list = []
 
     def operator():
         try:
-            NodeBootService(sessions_for(registry)).select(older.deployment_id, 0)
+            NodeBootService(sessions_for(registry)).select(newest.deployment_id, 0)
             outcomes.append("operator")
         except NodeControlError as error:
             outcomes.append(error.code)
 
-    with registry.db.transaction() as blocker:  # both writers queue on the asset-roots lock
-        blocker.execute("SELECT pg_advisory_xact_lock(%s)", (FLEET_ASSET_LOCK,))
+    with registry.db.transaction() as first:
+        assert select_deployment(first, older.deployment_id, 0, now=1.0) == 1
         threads = [threading.Thread(target=operator), threading.Thread(target=lambda: sync(world))]
         for thread in threads:
             thread.start()
-        threading.Event().wait(0.3)
+        threading.Event().wait(0.5)
+        assert threads[0].is_alive()  # waiting on the uncommitted row's key, not refused yet
     for thread in threads:
         thread.join(30)
+    assert outcomes == ["node_boot_policy_conflict"]
     row = policy(registry)
-    assert row["revision"] == 1  # exactly one write
-    if outcomes == ["operator"]:
-        assert row["deployment_id"] == older.deployment_id  # auto-select yielded
-    else:
-        assert outcomes == ["node_boot_policy_conflict"]
-        assert row["deployment_id"] == newest.deployment_id
+    assert (row["revision"], row["deployment_id"]) == (1, older.deployment_id)  # one write
+
+
+def test_an_unforeseen_ingest_failure_is_that_release_problem_and_the_tick_continues(
+        registry, sync_world, monkeypatch):
+    """Any exception building one release's deployment (here a KeyError) marks only that tag
+    `node_release_invalid`; the release listed after it is ingested and the ETag is stored."""
+    import central.infra.node_releases as node_releases
+    upstream, good, bad = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
+    upstream.put(good)
+    upstream.put(bad)  # listed first (newest first)
+    world = sync_world(upstream)
+    real = node_releases.deployment_for_release
+
+    def broken(manifest_sha256, release, locators):
+        if release.base.tag == bad.tag:
+            raise KeyError("app")
+        return real(manifest_sha256, release, locators)
+
+    monkeypatch.setattr(node_releases, "deployment_for_release", broken)
+    sync(world)
+    assert world.reads.etag() == f'W/"{upstream.etag}"'
+    seen = observations(registry)
+    assert (seen["v2.1.0"]["problem"], seen["v2.1.0"]["manifest_sha256"]) == (
+        "node_release_invalid", None)
+    assert (seen["v2.0.0"]["problem"], seen["v2.0.0"]["manifest_sha256"]) == (None, good.sha)
+    assert count(registry, "node_deployments") == 1
+    assert count(registry, "node_release_catalog") == 1  # the failed release's tx rolled back
+
+
+def test_a_database_error_while_ingesting_fails_the_tick_and_blames_no_release(
+        registry, sync_world, monkeypatch):
+    """A database error says nothing about the release: the tick fails, no problem is recorded
+    on the tag, and the ETag is not stored, so the next tick ingests it again."""
+    import psycopg
+
+    import central.infra.node_releases as node_releases
+    upstream, release = Upstream(), node_upload("v2.0.0")
+    upstream.put(release)
+    world = sync_world(upstream)
+
+    def lost(*_args, **_kwargs):
+        raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    real = node_releases.write_deployment
+    monkeypatch.setattr(node_releases, "write_deployment", lost)
+    with pytest.raises(psycopg.OperationalError):
+        sync(world)
+    assert world.reads.etag() is None
+    assert observations(registry) == {}
+    assert count(registry, "node_deployments") == 0
+    monkeypatch.setattr(node_releases, "write_deployment", real)
+    sync(world)  # the next tick ingests the release
+    assert observations(registry)["v2.0.0"]["manifest_sha256"] == release.sha
 
 
 # -- B3: the window downloads in the background ----------------------------------------------------
 
 
-def test_prefetch_fetches_wanted_files_first_and_window_only_files_in_the_background(
+def test_prefetch_fetches_every_wanted_file_and_one_window_only_file_per_tick(
         registry, sync_world):
     from fakes.publisher import RecordingPublisher
+    from test_node_release_catalog import store_files
 
     from central.assets.handlers import PrefetchHandler
     from central.fleet.node_boot import NodeBootService
-    from central.kernel.job_types import BACKGROUND_PRIORITY, FetchOsImage, Prefetch
+    from central.kernel.job_types import FetchOsImage, Prefetch
     from contracts.time import ManualClock
     upstream = Upstream()
     uploads = [node_upload(tag) for tag in ("v2.0.0", "v2.1.0", "v2.2.0", "v2.3.0")]
@@ -496,15 +550,52 @@ def test_prefetch_fetches_wanted_files_first_and_window_only_files_in_the_backgr
     world = sync_world(upstream)
     sync(world)
     NodeBootService(sessions_for(registry)).select(uploads[0].deployment_id, 0)  # out of window
+
+    def tick() -> list[str]:
+        publisher = RecordingPublisher(ManualClock(0))
+        handler = PrefetchHandler(catalog=world.catalog, readiness=world.stored,
+                                  transactions=world.reads.transactions, publisher=publisher)
+        asyncio.run(handler.handle(Prefetch()))
+        return [call.job.tarball_sha256 for call in publisher.calls
+                if isinstance(call.job, FetchOsImage)]
+
+    def base(upload) -> str:
+        return upload.release.base.content_key
+
+    # Every missing file of the selection, then ONE window-only file: the newest release's.
+    assert tick() == [base(uploads[0]), base(uploads[3])]
+    store_files(world, uploads[0])
+    store_files(world, uploads[3])
+    assert tick() == [base(uploads[2])]  # the next tick starts the next window release
+
+
+def test_prefetch_skips_a_failed_window_file_and_starts_the_next(registry, sync_world):
+    """A window file whose latest outcome is terminal (PB3) or in backoff (PB2) publishes nothing,
+    so it never holds the tick's one background slot."""
+    from datetime import timedelta
+
+    from fakes.publisher import RecordingPublisher
+
+    from central.assets.handlers import PrefetchHandler
+    from central.fleet.node_boot import NodeBootService
+    from central.kernel.job_types import Prefetch
+    from central.kernel.publishing import Failed
+    from contracts.time import ManualClock
+    upstream = Upstream()
+    uploads = [node_upload(tag) for tag in ("v2.0.0", "v2.1.0", "v2.2.0", "v2.3.0")]
+    for upload in uploads:
+        upstream.put(upload)
+    world = sync_world(upstream)
+    sync(world)
+    NodeBootService(sessions_for(registry)).select(uploads[0].deployment_id, 0)
+
+    window = asyncio.run(world.catalog.desired_tiers()).background  # newest release first
     publisher = RecordingPublisher(ManualClock(0))
+    publisher.record_outcome(window[0], Failed(True, "player_payload_invalid", None))  # PB3
+    publisher.record_outcome(window[1], Failed(False, "origin_unavailable",
+                                               timedelta(minutes=5)))  # PB2
     handler = PrefetchHandler(catalog=world.catalog, readiness=world.stored,
                               transactions=world.reads.transactions, publisher=publisher)
-    asyncio.run(handler.handle(Prefetch()))
-    bases = [call.job.tarball_sha256 for call in publisher.calls if isinstance(call.job, FetchOsImage)]
-    # The selected release first at its type's priority, then the window, newest release first.
-    assert bases == [u.release.base.content_key for u in (uploads[0], uploads[3], uploads[2],
-                                                          uploads[1])]
-    priorities = {call.job: call.priority for call in publisher.calls}
-    assert priorities[FetchOsImage(tarball_sha256=uploads[0].release.base.content_key)] is None
-    assert all(priorities[FetchOsImage(tarball_sha256=u.release.base.content_key)]
-               == BACKGROUND_PRIORITY for u in uploads[1:])
+    for _ in range(2):  # every tick: the failed files insert nothing and are skipped
+        asyncio.run(handler.handle(Prefetch()))
+    assert [job for job in publisher.inserted if job in window] == [window[2]]

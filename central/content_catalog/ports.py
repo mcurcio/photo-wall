@@ -41,7 +41,7 @@ class ReleaseRow:
 @dataclass(frozen=True, slots=True)
 class FleetDesiredAssets:
     """Exact content keys named by current fleet policy, the selected and previous node
-    deployments, live V2 boot offers or unexpired V1 offers; plus `window`, the fetch jobs of the
+    deployments or unexpired V1 offers; plus `window`, the fetch jobs of the
     window's node deployments (the newest stable releases), newest release first, which are
     desired too but fetched in the background (a file may be in both)."""
 
@@ -53,7 +53,7 @@ class FleetDesiredAssets:
 
 
 class NodeReleaseRefused(Exception):
-    """A node release (or a hand-published deployment) refused before any write: the release's
+    """A node release (or a boot selection) refused before any write: the release's
     own problem (`reason`), never the sync's. `kind` maps to the HTTP status class."""
 
     def __init__(self, reason: str, kind: Literal["conflict", "not_found"] = "conflict") -> None:
@@ -79,7 +79,7 @@ class NodeReleaseRecords(Protocol):
     def ingest(self, tx: Transaction, release: PublishedRelease, *, now: float) -> bool:
         """Turn `release.node_publication` into its catalog row, deployment and asset references,
         and point the tag's observation at it, unless the observation is older than the stored
-        one (False: nothing written). Takes the asset-roots lock. Raises `NodeReleaseRefused`
+        one (False: nothing written). Raises `NodeReleaseRefused`
         for the release's own refusals (identity, pins, environment conflicts); the caller then
         rolls the transaction back and records the problem in another."""
         ...
@@ -163,8 +163,8 @@ class ReleaseRecords(Protocol):
 
     def fleet_desired_assets(self, tx: Transaction, *, now: float) -> FleetDesiredAssets:
         """Digest roots from explicit fleet selection, the wanted V2 node deployments
-        (`central/infra/node_releases.py` `wanted_deployments`: selected, previous, live boot
-        offers, and the window as `window`) and active schema-2 offers."""
+        (`central/infra/node_releases.py` `wanted_deployments`: selected, previous,
+        and the window as `window`) and active schema-2 offers."""
         ...
 
     def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:

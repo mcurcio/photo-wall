@@ -34,13 +34,6 @@ _MAX_RETRY_DELAY = timedelta(days=1)
 _MAX_PRIORITY = 100
 
 
-def require_priority(priority: object) -> int:
-    """A pick priority, -100..100 (procrastinate picks `priority DESC, id ASC`)."""
-    if type(priority) is not int or not -_MAX_PRIORITY <= priority <= _MAX_PRIORITY:
-        raise ValueError("invalid_priority")
-    return priority
-
-
 @dataclass(frozen=True, slots=True)
 class Delivery:
     queue: QueueName
@@ -56,7 +49,8 @@ class Delivery:
             for delay in self.retry
         ):
             raise ValueError("invalid_retry")
-        require_priority(self.priority)
+        if type(self.priority) is not int or not -_MAX_PRIORITY <= self.priority <= _MAX_PRIORITY:
+            raise ValueError("invalid_priority")
         if self.every is not None and self.every not in PERIODIC_CADENCES:
             raise ValueError("invalid_every")
 

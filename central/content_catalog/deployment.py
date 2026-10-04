@@ -23,8 +23,7 @@ from contracts.node_protocol import digest
 from contracts.node_release import NodeReleaseV2
 from contracts.strict_json import loads_object
 
-# How long a boot offer stays valid (its `expires_at`), and how long a live offer keeps its
-# deployment's files desired (the cleaner never removes what a Pi mid-prepare still needs).
+# How long a boot offer stays valid (its `expires_at`).
 OFFER_TTL_SECONDS: Final = 3600
 
 
