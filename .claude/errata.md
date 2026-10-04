@@ -3633,3 +3633,12 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-FX2-3 · Console band vocabulary: the brief's "WARNING band" is the console's existing `notice` band (warm; the
   catalog has no `warning`), which raises no incident, as Out of memory's does. The "failed units not read" Unknown
   carries band null (no band), unlike the generic "Unknown: not reported", whose band stays `unknown`.
+
+## 2026-10-03 · prepare-status-bound adversarial review fixes (implementer) · appliance/node/preparer.py, uplink/fetch.py
+- E-PSB-1 · DEFERRED (minor): `BootStageV2` carries no last fault and no attempt count, so while the preparer retries
+  transient failures inside its window the prepare stage reads `running` for up to 900 s (TimeoutStartSec) with no
+  reason shown. Needs a contract addition (last fault token + attempts) written by the retry loop, and a console read.
+- E-PSB-2 · DEFERRED (CI gap): no cold-cache node-pid1 scenario. tests/node_pid1_central_fixture.py (~115-125)
+  pre-copies every archive into Central's cache, so the cold path (a ~974 MB sealed-environment fetch through the
+  read-through wait, 503 + Retry-After, and the preparer's retries) is never exercised in CI. Needs a fill source the
+  fixture's worker can reach for missed sealed-environment entries, and an arm64 privileged Docker leg.

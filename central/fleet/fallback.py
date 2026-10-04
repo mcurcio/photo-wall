@@ -166,7 +166,7 @@ class AcceptedFallbackService:
 
     async def preflight_app(self, *, device_id: str, sha256: str, base_abi: str,
                             bytes_reader: OfferByteReader) -> ReservedFallback:
-        """Return only after this pod opens and hashes the reserved exact payload."""
+        """Return only after this pod opens the reserved exact payload and checks its facts."""
         fallback = await asyncio.to_thread(self.reserve_app, device_id=device_id,
                                            sha256=sha256, base_abi=base_abi)
         await bytes_reader.preflight((fallback.asset,))

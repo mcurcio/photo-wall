@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from central.content_routes import ClientDisconnected, _stream, until_disconnect
+from central.content_routes import ClientDisconnected, stream_opened, until_disconnect
 from central.content_wiring import ContentServices
 from central.coordination import Coordinator
 from central.db import Database
@@ -70,7 +70,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
-    boots = NodeBootService(sessions)
+    boots = NodeBootService(sessions, publisher=content.publisher if content else None)
     bytes_reader = OfferByteReader(content.reader if content else None)
     effect_gate = RolloutEffectGate(db, serving_verifier=serving_verifier)
     commands = NodeCommands(sessions, effect_gate)
@@ -143,7 +143,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ClientDisconnected:
             return Response(status_code=499)
         try:
-            return _stream(opened, "application/octet-stream")
+            return stream_opened(opened, "application/octet-stream")
         except BaseException:
             os.close(opened.fd)
             raise
@@ -250,7 +250,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ClientDisconnected:
             return Response(status_code=499)
         try:
-            return _stream(opened, "application/octet-stream")
+            return stream_opened(opened, "application/octet-stream")
         except BaseException:
             os.close(opened.fd)
             raise

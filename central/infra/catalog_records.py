@@ -29,7 +29,7 @@ from central.content_catalog.ports import (
     StoredEtag,
 )
 from central.infra.transactions import pg_connection
-from central.kernel.assets import OriginLocator
+from central.kernel.assets import AssetKind, OriginLocator
 from central.kernel.ports import PlayerPayload, PublishedRelease
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version
@@ -209,6 +209,14 @@ class PgReleaseRecords:
             "WHERE ref.locator_sha256=ref.identity AND ref.expected_sha256=ref.identity "
             "AND ref.locator_size=ref.expected_size"
         ).fetchall()
+        # The selected V2 deployment's base and environments: what the next booting node
+        # is offered. An unselected publication is referenced but not warmed.
+        deployment = conn.execute(
+            "SELECT assets.kind, assets.identity AS digest "
+            "FROM node_boot_policy AS policy "
+            "JOIN node_deployment_assets AS assets USING(deployment_id) "
+            "WHERE policy.singleton"
+        ).fetchall()
         debs = {row["digest"] for row in policy if row["format"] == "player-deb"}
         payloads = {row["digest"] for row in policy
                     if row["format"] == "pw-player-data-v1"}
@@ -222,8 +230,12 @@ class PgReleaseRecords:
                 debs.add(row["digest"])
         payloads.update(row["digest"] for row in fallbacks)
         payloads.update(row["digest"] for row in attempts)
+        base_keys.update(row["digest"] for row in deployment
+                         if row["kind"] == AssetKind.OS_IMAGE)
+        environments = {row["digest"] for row in deployment
+                        if row["kind"] == AssetKind.SEALED_ENVIRONMENT}
         return FleetDesiredAssets(frozenset(base_keys), frozenset(debs),
-                                  frozenset(payloads))
+                                  frozenset(payloads), frozenset(environments))
 
     def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:
         rows = pg_connection(tx).execute(

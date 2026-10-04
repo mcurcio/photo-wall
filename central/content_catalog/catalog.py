@@ -31,6 +31,7 @@ from central.kernel.job_types import (
     FetchOsImage,
     FetchPackage,
     FetchPlayerPayload,
+    FetchSealedEnvironment,
     Prefetch,
     SyncReleases,
 )
@@ -225,6 +226,8 @@ class ReleaseCatalog:
         they run now; only those served within `SERVED_TAG_WINDOW`) and `frontier or bootstrap`;
         the `.deb` of the promoted and the last-good tag. Tags without the locator are skipped, and so is a frozen (divergent) tag's `.deb`
         once its file is gone: upstream serves other bytes for it, so fetching it can only fail.
+        Plus the exact fleet roots (`ReleaseRecords.fleet_desired_assets`), including the selected
+        V2 node deployment's base and sealed environments.
         """
         named = self._devices.named_tags(tx, served_since=self._served_since())
         by_tag = {row.tag: row for row in self._releases.all(tx)}
@@ -254,6 +257,7 @@ class ReleaseCatalog:
         jobs.update(FetchOsImage(tarball_sha256=digest) for digest in fleet.base_tarballs)
         jobs.update(FetchPackage(sha256=digest) for digest in fleet.player_debs)
         jobs.update(FetchPlayerPayload(sha256=digest) for digest in fleet.player_payloads)
+        jobs.update(FetchSealedEnvironment(sha256=digest) for digest in fleet.sealed_environments)
         return frozenset(jobs)
 
     def _obtainable(self, tx: Transaction, row: ReleaseRow | None) -> DevicePackage | None:

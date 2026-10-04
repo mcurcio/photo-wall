@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from central.assets.handlers import FetchPlayerPayloadHandler
 from central.assets.layout import CacheLayout
 from central.assets.production import AssetProduction
-from central.assets.reader import Opened
+from central.assets.reader import Opened, Unavailable
 from central.assets.store import CacheStore
 from central.fleet import fallback as fallback_module
 from central.fleet.bytes import OfferByteReader
@@ -42,8 +42,9 @@ from central.fleet.service import OFFER_TTL_SECONDS, FleetService
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransactions
-from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.assets import AssetKey, AssetKind, AssetReady
 from central.kernel.job_types import FetchPlayerPayload
+from central.kernel.jobs import asset_key
 from central.netboot_base import record_base_health
 from contracts.models import BaseHealth
 
@@ -595,7 +596,7 @@ def test_retired_device_override_is_history_not_a_prefetch_root(registry) -> Non
     assert APP_SHA not in desired.player_payloads
 
 
-def test_accepted_fallback_preflight_hashes_local_bytes(registry, tmp_path,
+def test_accepted_fallback_preflight_checks_local_facts(registry, tmp_path,
                                                         monkeypatch) -> None:
     _seed_release(registry)
     blob = b"verified fallback bytes"
@@ -613,21 +614,30 @@ def test_accepted_fallback_preflight_hashes_local_bytes(registry, tmp_path,
         device_id = conn.execute("SELECT device_id FROM devices WHERE serial=%s",
                                  (SERIAL,)).fetchone()["device_id"]
     _accept_app(registry, device_id, digest, len(blob), "qualified:53")
-    path = tmp_path / "fallback.tar.gz"
+    local = CacheStore(CacheLayout(tmp_path / "local-cache"))
+    facts = AssetReady(size=len(blob), sha256=digest)  # recorded facts
+    path = local.layout.path(AssetKey(AssetKind.PLAYER_PAYLOAD, digest))
+    path.parent.mkdir(parents=True)
     path.write_bytes(blob)
 
     class LocalReader:
+        """Opens through the real CacheStore, as AssetReader does; a file it refuses is a miss."""
+
         async def read(self, candidates):
-            fd = os.open(path, os.O_RDONLY)
-            return Opened(candidates.jobs[0], fd, len(blob), "f" * 64)
+            job = candidates.jobs[0]
+            assert asset_key(job) == AssetKey(AssetKind.PLAYER_PAYLOAD, digest)
+            file = local.open(asset_key(job), facts)
+            if file is None:
+                return Unavailable("absent_after_ready", 5)
+            return Opened(job, file.fd, file.size, digest)
 
     retention = AcceptedFallbackService(registry.db, registry.clock)
     bytes_reader = OfferByteReader(LocalReader())
     assert asyncio.run(retention.preflight_app(
         device_id=device_id, sha256=digest, base_abi=BASE_ABI,
         bytes_reader=bytes_reader)).sha256 == digest
-    path.write_bytes(b"wrong fallback bytes")
-    with pytest.raises(FleetError, match="offer_artifact_mismatch"):
+    path.write_bytes(b"wrong fallback bytes")  # not the recorded size: the store never opens it
+    with pytest.raises(FleetError, match="absent_after_ready"):
         asyncio.run(retention.preflight_app(device_id=device_id, sha256=digest,
                                            base_abi=BASE_ABI, bytes_reader=bytes_reader))
 
@@ -835,7 +845,7 @@ def test_mounted_offer_route_uses_migrated_selection_and_exact_open(registry, tm
         async def read(self, candidates):
             jobs.append(candidates.jobs[0])
             return Opened(candidates.jobs[0], os.open(path, os.O_RDONLY), len(BASE_BYTES),
-                          "0" * 64)
+                          hashlib.sha256(BASE_BYTES).hexdigest())  # recorded facts
 
     app = FastAPI()
     mount_fleet_routes(app, db=registry.db, clock=registry.clock, admin=lambda: None,

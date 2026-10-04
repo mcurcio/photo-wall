@@ -37,11 +37,13 @@ class ReleaseRow:
 
 @dataclass(frozen=True, slots=True)
 class FleetDesiredAssets:
-    """Exact content keys named by current fleet policy or unexpired offers."""
+    """Exact content keys named by current fleet policy, the selected node deployment or
+    unexpired offers."""
 
     base_tarballs: frozenset[str] = frozenset()
     player_debs: frozenset[str] = frozenset()
     player_payloads: frozenset[str] = frozenset()
+    sealed_environments: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +104,8 @@ class ReleaseRecords(Protocol):
     def all(self, tx: Transaction) -> tuple[ReleaseRow, ...]: ...
 
     def fleet_desired_assets(self, tx: Transaction, *, now: float) -> FleetDesiredAssets:
-        """Digest roots from explicit fleet selection and active schema-2 offers."""
+        """Digest roots from explicit fleet selection, the selected V2 node deployment (what a
+        booting node is offered next) and active schema-2 offers."""
         ...
 
     def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:

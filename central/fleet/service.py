@@ -331,7 +331,7 @@ class FleetService:
         assert device_id is not None
         now = self.clock.utc()
         # This quota commits even when a duplicate offer returns early or a later
-        # policy/byte preflight fails. Idempotency must not make hashing free.
+        # policy/byte preflight fails. Idempotency must not make preflight free.
         with self.db.transaction() as quota_conn:
             self._claim_quota(quota_conn, device_id=device_id, kind="offer", now=now)
             lock_fleet_assets_in(quota_conn)

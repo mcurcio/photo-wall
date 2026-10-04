@@ -77,7 +77,7 @@ def _chunks(source: BinaryIO) -> Iterator[bytes]:
             yield chunk
 
 
-def _stream(opened: Opened, media_type: str) -> StreamingResponse:
+def stream_opened(opened: Opened, media_type: str) -> StreamingResponse:
     source = os.fdopen(opened.fd, "rb")  # owns the fd from here on, even if never iterated
     return StreamingResponse(
         _chunks(source),
@@ -91,13 +91,13 @@ def _stream(opened: Opened, media_type: str) -> StreamingResponse:
     )
 
 
-def _error(code: str, status: int, *, retry_after: int | None = None) -> JSONResponse:
+def error_response(code: str, status: int, *, retry_after: int | None = None) -> JSONResponse:
     headers = None if retry_after is None else {"Retry-After": str(retry_after)}
     return JSONResponse({"error": code}, status_code=status, headers=headers)
 
 
 def _unavailable(prefix: str, served: Unavailable) -> JSONResponse:
-    return _error(f"{prefix}_{served.reason}", 503, retry_after=served.retry_after_seconds)
+    return error_response(f"{prefix}_{served.reason}", 503, retry_after=served.retry_after_seconds)
 
 
 def _package(package: DevicePackage) -> dict[str, object]:
@@ -125,7 +125,7 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
         base = NetbootBaseRequest(header)
         resolution = await catalog.resolve(base)
         if isinstance(resolution, Unknown):
-            return _error("base_unknown", 404)  # decision 4, also an empty catalog
+            return error_response("base_unknown", 404)  # decision 4, also an empty catalog
         served = await read(request, resolution)
         if served is None:
             return Response(status_code=_CLIENT_GONE)
@@ -136,23 +136,23 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
         except BaseException:
             os.close(served.fd)
             raise
-        return _stream(served, "application/octet-stream")
+        return stream_opened(served, "application/octet-stream")
 
     @app.get("/v1/app/package/{sha256}.deb")
     async def app_package(request: Request, sha256: str) -> Response:
         try:
             package = PackageRequest(sha256)
         except ValueError:
-            return _error("app_package_not_found", 404)
+            return error_response("app_package_not_found", 404)
         resolution = await catalog.resolve(package)
         if isinstance(resolution, Unknown):
-            return _error("app_package_not_found", 404)
+            return error_response("app_package_not_found", 404)
         served = await read(request, resolution)
         if served is None:
             return Response(status_code=_CLIENT_GONE)
         if isinstance(served, Unavailable):
             return _unavailable("app", served)
-        return _stream(served, DEB_MEDIA_TYPE)
+        return stream_opened(served, DEB_MEDIA_TYPE)
 
     @app.get("/v1/netboot/manifest")
     async def netboot_manifest(request: Request) -> Response:
@@ -160,14 +160,14 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
         # that tag, which the enrolled player reports back as base-health `running_tag`.
         package = await catalog.device_package(request.headers.get(SERIAL_HEADER))
         if isinstance(package, ManifestRefusal):
-            return _error(package.code, 503)
+            return error_response(package.code, 503)
         return JSONResponse({**_package(package), "tag": package.tag})
 
     @app.get("/v1/app/manifest")
     async def app_manifest() -> Response:
         package = await catalog.promoted_package()
         if isinstance(package, ManifestRefusal):
-            return _error(package.code, 503)  # app_unconfigured keeps the appliance retrying
+            return error_response(package.code, 503)  # app_unconfigured keeps the appliance retrying
         return JSONResponse(_package(package))
 
     @app.get("/livez")

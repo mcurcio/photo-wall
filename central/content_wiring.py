@@ -48,6 +48,7 @@ from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.jobs import QueueName
 from central.kernel.ports import ThumbnailOrigin
+from central.kernel.publishing import Publisher
 from central.origins.github import GitHubReleaseOrigin
 from contracts.time import Clock
 
@@ -73,6 +74,7 @@ class ContentServices:
     feed: OutcomeFeed | None  # started and stopped by the app's lifespan
     thumbnails: LibraryThumbnails | None = None
     thumbnail_reader: AssetReader | None = None  # its own slots and short wait (§40)
+    publisher: Publisher | None = None  # jobs published inside another writer's transaction
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +129,7 @@ def build_content_services(db: Database, clock: Clock, *, cache_root: Path,
         wait_timeout=THUMBNAIL_WAIT)
     return ContentServices(catalog=core.catalog, reader=reader, probe=PodProbe(db.healthy),
                            feed=core.feed, thumbnails=_thumbnails(core, servable_thumbnail),
-                           thumbnail_reader=thumbnail_reader)
+                           thumbnail_reader=thumbnail_reader, publisher=core.publisher)
 
 
 def build_library_thumbnails(db: Database, clock: Clock, *, cache_root: Path) -> LibraryThumbnails:

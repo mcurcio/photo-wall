@@ -205,3 +205,76 @@ def test_sealed_environment_worker_and_exact_reader_hold_inode_lease(registry, t
         assert os.read(opened.fd, len(data)) == data
     finally:
         os.close(opened.fd)
+
+
+def test_selected_deployment_environments_are_desired_and_unselected_are_not(registry):
+    from central.content_catalog.catalog import ReleaseCatalog
+    from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+    from central.infra.transactions import PgTransactions
+    from central.kernel.job_types import FetchOsImage, FetchSealedEnvironment
+    service, _, selected = cold_setup(registry)
+    other_app = environment("4")
+    unselected = replace(selected, deployment_id=uuid4(), app_environment=other_app,
+        environment_sources={**{ref: url for ref, url in selected.environment_sources.items()
+                                if ref != selected.app_environment.environment_sha256},
+                             other_app.environment_sha256: "https://example.invalid/other"})
+    seed_verified_publication(registry, unselected)
+    service.publish(unselected)
+    catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(), stored=None,
+                             transactions=PgTransactions(registry.db), publisher=None,
+                             clock=registry.clock)
+
+    def desired():
+        with PgTransactions(registry.db).begin() as tx:
+            return catalog.desired_in(tx)
+
+    def env(ref):
+        return FetchSealedEnvironment(sha256=ref.environment_sha256)
+
+    jobs = desired()
+    assert {env(selected.app_environment), env(selected.manager_primary),
+            FetchOsImage(tarball_sha256=BASE_TARBALL_SHA)} <= jobs
+    assert env(other_app) not in jobs
+    service.select(unselected.deployment_id, 1)
+    jobs = desired()
+    assert env(other_app) in jobs and env(selected.manager_primary) in jobs
+    assert env(selected.app_environment) not in jobs
+
+
+class SelectingPublisher:
+    """Records each job with the selection its transaction sees; `fail` refuses the publish."""
+
+    def __init__(self, *, fail=False):
+        self.published, self.fail = [], fail
+
+    def publish(self, job, *, within, retry_terminal=False):
+        from central.infra.transactions import pg_connection
+        if self.fail:
+            raise RuntimeError("queue down")
+        row = pg_connection(within).execute(
+            "SELECT deployment_id FROM node_boot_policy WHERE singleton").fetchone()
+        self.published.append((job, row["deployment_id"]))
+
+
+def test_selecting_a_deployment_warms_the_cache_in_the_same_transaction(registry):
+    from central.kernel.job_types import Prefetch
+    service, sessions, selected = cold_setup(registry)
+    other = replace(selected, deployment_id=uuid4())
+    seed_verified_publication(registry, other)
+    service.publish(other)
+    publisher = SelectingPublisher()
+    boots = NodeBootService(sessions, publisher=publisher)
+    # A conflicting selection writes nothing and warms nothing.
+    with pytest.raises(NodeControlError, match="node_boot_policy_conflict"):
+        boots.select(other.deployment_id, 0)
+    assert publisher.published == []
+    boots.select(other.deployment_id, 1)
+    # Published inside the selecting transaction: it already sees the new selection.
+    assert publisher.published == [(Prefetch(), other.deployment_id)]
+    # A publish that fails rolls the selection back with it.
+    with pytest.raises(RuntimeError, match="queue down"):
+        NodeBootService(sessions, publisher=SelectingPublisher(fail=True)).select(
+            selected.deployment_id, 2)
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT revision, deployment_id FROM node_boot_policy").fetchone()
+    assert (row["revision"], row["deployment_id"]) == (2, other.deployment_id)

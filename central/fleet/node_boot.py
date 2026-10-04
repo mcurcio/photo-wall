@@ -20,6 +20,8 @@ from central.fleet.service import FleetService
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransaction
 from central.kernel.assets import AssetKey, AssetKind, AssetReference, OriginLocator
+from central.kernel.job_types import Prefetch
+from central.kernel.publishing import Publisher
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import (
     MAX_NODE_BOOT_BYTES,
@@ -90,8 +92,11 @@ def encode_node_deployment(value: NodeDeployment) -> bytes:
 
 
 class NodeBootService:
-    def __init__(self, sessions: NodeSessions):
-        self.sessions = sessions
+    """`publisher` warms the cache when a deployment is selected (a Prefetch in the selecting
+    transaction, as catalog changes do); None where no content worker is wired."""
+
+    def __init__(self, sessions: NodeSessions, *, publisher: Publisher | None = None):
+        self.sessions, self.publisher = sessions, publisher
 
     def publish(self, deployment: NodeDeployment) -> dict:
         self.sessions.require_enabled()
@@ -179,6 +184,8 @@ class NodeBootService:
                          "VALUES(TRUE,%s,%s,%s) ON CONFLICT(singleton) DO UPDATE SET revision=EXCLUDED.revision,"
                          "deployment_id=EXCLUDED.deployment_id,changed_at=EXCLUDED.changed_at",
                          (current + 1, deployment_id, self.sessions.clock.utc()))
+            if self.publisher is not None:
+                self.publisher.publish(Prefetch(), within=PgTransaction(conn))
             return {"revision": current + 1, "deployment_id": str(deployment_id)}
 
     def offer(self, request: NodeBootRequestV2) -> NodeBootOfferV2:
