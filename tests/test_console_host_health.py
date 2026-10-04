@@ -507,15 +507,15 @@ out.prepareRoom = pick(withBoot(boot([stage("handoff", "done"), stage("storage",
 out.failed = pick(withBoot(boot([...done.slice(0, 2), stage("prepare", "failed", "os:ENOSPC")])), "boot_preparation");
 // Out of boot order in the document, the earlier stage still wins: the cause precedes its effects.
 out.firstStopped = pick(withBoot(boot([stage("prepare", "failed", "os:ENOSPC"), stage("handoff", "done"),
-  stage("storage", "failed", "memory_controller_absent")])), "boot_preparation");
+  stage("storage", "failed", "node_storage_ownership")])), "boot_preparation");
 out.stopBeatsRunning = pick(withBoot(boot([stage("handoff", "running"),
-  stage("storage", "failed", "memory_controller_absent")])), "boot_preparation");
+  stage("storage", "failed", "node_storage_ownership")])), "boot_preparation");
 out.running = pick(withBoot(boot([...done.slice(0, 2), stage("prepare", "running")])), "boot_preparation");
 out.done = pick(withBoot(boot(done)), "boot_preparation");
 out.notStarted = pick(withBoot(boot([stage("handoff", "done")])), "boot_preparation");
 out.olderNode = pick(withBoot(null), "boot_preparation");
 out.noFacts = pick(row({ facts: null }), "base_units");
-out.silent = pick(withBoot(boot([stage("storage", "failed", "memory_controller_absent")]), [], 880),
+out.silent = pick(withBoot(boot([stage("storage", "failed", "node_storage_ownership")]), [], 880),
   "boot_preparation");
 const units = (list, more = 0, stages = done) => pick(withBoot(boot(stages, list, more)), "base_units");
 out.unitsNone = units([]);
@@ -533,11 +533,32 @@ out.killed = { prepare: pick(withBoot(killedPrepare), "boot_preparation"),
   prepareUnits: pick(withBoot(killedPrepare), "base_units"),
   storage: pick(withBoot(noRecords), "boot_preparation"), storageUnits: pick(withBoot(noRecords), "base_units") };
 out.unitsMore = units(["photo-wall-app-broker.service", "photo-wall-display.service"], 3);
+// Two stopped stages (a failed handoff record, and storage killed with no record): both their
+// units are left out, not only the first shown's; the broker's stays.
+const twoStopped = (extra) => boot([stage("handoff", "failed", "node_measured_base_abi_mismatch")],
+  ["photo-wall-node-handoff.service", "photo-wall-node-storage.service", ...extra]);
+out.twoStopped = { units: pick(withBoot(twoStopped([])), "base_units"),
+  broker: pick(withBoot(twoStopped(["photo-wall-app-broker.service"])), "base_units"),
+  preparation: pick(withBoot(twoStopped([])), "boot_preparation") };
+// Errata E-T3-2: units not read (null) are Unknown with no band, never "no base unit failed",
+// and a running record stays running: no alarm, no clear.
+const unread = (stages) => ({ stages, failed_units: null, failed_units_more: null });
+out.unread = { units: pick(withBoot(unread([...done.slice(0, 2), stage("prepare", "running")])), "base_units"),
+  running: pick(withBoot(unread([...done.slice(0, 2), stage("prepare", "running")])), "boot_preparation"),
+  refused: pick(withBoot(unread([stage("handoff", "done"), stage("storage", "refused", "node_memory_class",
+    3.5 * GiB, 1.9e9)])), "boot_preparation") };
 out.unitsUnnamed = units([], 2);
 out.oom = pick(row({}, [oom("base", 1), oom("app", 2), oom("preparation", 0)]), "out_of_memory");
 out.oomNone = pick(row({}, [oom("base", 0), oom("app", 0)]), "out_of_memory");
 out.oomAbsent = pick(row({}), "out_of_memory");
 out.oomTwice = pick(row({}, [oom("app", 1), oom("app", 2)]), "out_of_memory");
+// No row cap hides a kill: the fourth row's kills are shown.
+out.oomFourth = pick(row({}, [oom("base", 0), oom("preparation", 0), oom("app", 0), oom("hostcore", 5)]),
+  "out_of_memory");
+const memcg = (value) => ({ name: "memcg_present", value, unit: "boolean", source: "cgroup" });
+out.memcgAbsent = pick(row({}, [memcg(0)]), "memory_limits");
+out.memcgOn = pick(row({}, [memcg(1)]), "memory_limits");
+out.memcgUnreported = pick(row({}), "memory_limits");
 
 // One cause, one incident: a failed prepare stage whose unit failed too raises only the stage.
 const snapshot = { inventory: { read_at: 1000, frames: [{ id: "lobby-left", player_id: "p-a",
@@ -558,6 +579,8 @@ out.incidents = {
   noRecords: incidents(noRecords),
   broker: incidents(boot(done, ["photo-wall-app-broker.service"])),
   oomNotice: incidents(boot(done), [oom("app", 3)]),
+  memcgAbsent: incidents(boot(done), [{ name: "memcg_present", value: 0, unit: "boolean", source: "cgroup" }]),
+  unitsUnread: incidents({ stages: done, failed_units: null, failed_units_more: null }),
   olderNode: incidents(null),
 };
 // G2: a spare's stopped stage and failed unit are words only, never a band or a tier.
@@ -592,7 +615,7 @@ def test_boot_preparation_names_the_first_stopped_stage_in_boot_order():
                              "alarm"]
     # The cause precedes its effects: boot order, not document order, and a stop before a run.
     assert out["firstStopped"][1] == (f"{reported}boot preparation failed at storage "
-                                      f"(memory_controller_absent){receipt}")
+                                      f"(node_storage_ownership){receipt}")
     assert out["stopBeatsRunning"][1] == out["firstStopped"][1]
     assert out["running"] == [None, f"{reported}boot preparation running: prepare{receipt}", "ok"]
     assert out["done"] == [None, f"{reported}boot preparation done{receipt}", "ok"]
@@ -601,7 +624,7 @@ def test_boot_preparation_names_the_first_stopped_stage_in_boot_order():
     assert out["olderNode"] == ["unknown", "Unknown: not reported", "ok"]
     assert out["noFacts"] == ["unknown", "Unknown: not reported", "ok"]
     # A stage killed before its exit write, or whose record write failed, reads stopped by its
-    # failed unit (4 GB node design §6), and the unit is not repeated under base units.
+    # failed unit (docs/node-4gb-memory-design.md §6), and the unit is not repeated under base units.
     killed = out["killed"]
     assert killed["prepare"] == ["alarm", f"{reported}boot preparation failed at prepare (unit failed, "
                                  f"no exit record){receipt}", "alarm"]
@@ -611,7 +634,7 @@ def test_boot_preparation_names_the_first_stopped_stage_in_boot_order():
         None, f"{reported}no base unit failed on this boot{receipt}"]
     # Silent: the last report, unbanded; only the silence is judged.
     assert out["silent"][0] is None
-    assert out["silent"][1].endswith("(memory_controller_absent) at last report" + receipt)
+    assert out["silent"][1].endswith("(node_storage_ownership) at last report" + receipt)
 
 
 def test_base_units_leave_out_the_stage_units_and_out_of_memory_is_a_notice():
@@ -633,6 +656,31 @@ def test_base_units_leave_out_the_stage_units_and_out_of_memory_is_a_notice():
     assert out["oomNone"] == [None, f"{latest}No out-of-memory kills on this boot", "ok"]
     assert out["oomAbsent"] == ["unknown", "Unknown: not reported", "ok"]
     assert out["oomTwice"] == ["unknown", "Unknown: two values reported", "ok"]
+    assert out["oomFourth"] == ["notice", f"{latest}Out-of-memory kills on this boot: hostcore 5", "notice"]
+    two = out["twoStopped"]
+    assert two["units"] == [None, f"{reported}no base unit failed on this boot{receipt}", "alarm"]
+    assert two["broker"][:2] == ["alarm", f"{reported}base unit failed on this boot: "
+                                 f"photo-wall-app-broker.service{receipt}"]
+    assert two["preparation"][1] == (f"{reported}boot preparation failed at handoff "
+                                     f"(node_measured_base_abi_mismatch){receipt}")
+
+
+def test_failed_units_not_read_are_unknown_and_never_clear_or_stop_a_stage():
+    out = _run_boot()["unread"]
+    reported = "Host Management reported "
+    receipt = " · first received 1 min ago"
+    assert out["units"] == [None, "Unknown: failed units not read", "ok"]
+    assert out["running"] == [None, f"{reported}boot preparation running: prepare{receipt}", "ok"]
+    assert out["refused"][0] == "alarm"
+
+
+def test_an_absent_memory_controller_is_a_warning_never_an_alarm():
+    out = _run_boot()
+    latest = "Host Management last reported 4 s ago · "
+    assert out["memcgAbsent"] == ["notice", f"{latest}memory controller absent: memory limits not enforced",
+                                  "notice"]
+    assert out["memcgOn"] == [None, f"{latest}memory controller on: memory limits enforced", "ok"]
+    assert out["memcgUnreported"] == ["unknown", "Unknown: not reported", "ok"]
 
 
 def test_one_boot_cause_raises_one_incident_for_bound_players_and_a_spare_is_never_alarmed():
@@ -651,6 +699,8 @@ def test_one_boot_cause_raises_one_incident_for_bound_players_and_a_spare_is_nev
     assert incidents["broker"] == [["player:device-a:base_units",
                                     f"{who}base unit failed on this boot: photo-wall-app-broker.service"]]
     assert incidents["oomNotice"] == [] and incidents["olderNode"] == []
+    # A warning raises no incident; neither does units Host Management could not read.
+    assert incidents["memcgAbsent"] == [] and incidents["unitsUnread"] == []
     spare = out["spare"]
     assert spare["tier"] is None and set(spare["bands"]) == {None}
     assert [text.split(" · ")[0] for text in spare["words"]] == [
@@ -661,11 +711,9 @@ def test_one_boot_cause_raises_one_incident_for_bound_players_and_a_spare_is_nev
 
 
 FAMILIES_SCRIPT = r"""
-const { HOST_CATALOG, NOT_SHOWN, BOOT_STAGES, STAGE_UNITS, MAX_UNITS, MAX_OOM_ROWS } =
-  await import(process.argv[1]);
+const { HOST_CATALOG, NOT_SHOWN, BOOT_STAGES, STAGE_UNITS } = await import(process.argv[1]);
 console.log(JSON.stringify({ items: Object.fromEntries(Object.entries(HOST_CATALOG).map(([name, entry]) =>
-  [name, entry.families])), notShown: NOT_SHOWN,
-  boot: { stages: BOOT_STAGES, units: STAGE_UNITS, maxUnits: MAX_UNITS, maxOomRows: MAX_OOM_ROWS } }));
+  [name, entry.families])), notShown: NOT_SHOWN, boot: { stages: BOOT_STAGES, units: STAGE_UNITS } }));
 """
 
 
@@ -686,13 +734,13 @@ def test_every_metric_family_has_a_console_item_or_is_listed_not_shown():
     # The boot items read the host facts record, not a metric family.
     assert out["items"]["boot_preparation"] == [] and out["items"]["base_units"] == []
     assert out["items"]["out_of_memory"] == ["oom_kill:"]
+    assert out["items"]["memory_limits"] == ["memcg_present"]
 
 
 def test_the_boot_items_constants_are_the_contracts_and_the_unit_files():
-    """hostHealth.js's boot stages, stage unit names, failed-unit cap and out-of-memory row cap
-    equal contracts/node_host_facts.py, the oom_kill family's max_rows and appliance/systemd."""
-    from contracts.node_host_facts import BOOT_STAGES, MAX_BOOT_FAILED_UNITS
-    from contracts.node_observation import METRIC_FAMILIES
+    """hostHealth.js's boot stages and stage unit names equal contracts/node_host_facts.py and
+    appliance/systemd."""
+    from contracts.node_host_facts import BOOT_STAGES
 
     _require_node()
     result = subprocess.run(["node", "--input-type=module", "-e", FAMILIES_SCRIPT, str(SRC / "hostHealth.js")],
@@ -700,8 +748,6 @@ def test_the_boot_items_constants_are_the_contracts_and_the_unit_files():
     assert result.returncode == 0, result.stderr
     boot = json.loads(result.stdout)["boot"]
     assert tuple(boot["stages"]) == BOOT_STAGES
-    assert boot["maxUnits"] == MAX_BOOT_FAILED_UNITS
-    assert boot["maxOomRows"] == next(family.max_rows for family in METRIC_FAMILIES if family.key == "oom_kill:")
     assert list(boot["units"]) == list(BOOT_STAGES)
     systemd = Path(__file__).resolve().parents[1] / "appliance" / "systemd"
     assert set(boot["units"].values()) == {path.name for path in systemd.glob("photo-wall-node-*.service")}

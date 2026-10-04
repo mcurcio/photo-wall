@@ -47,7 +47,7 @@ class HostObservationV2:
             raise ValueError("host_observation_producer_invalid")
         counter(self.sequence, 1)
         counter(self.sampled_boottime_ms)
-        if (type(self.metrics) is not tuple or len(self.metrics) > 64
+        if (type(self.metrics) is not tuple or len(self.metrics) > MAX_HOST_METRICS
                 or any(type(metric) is not HostMetricV2 for metric in self.metrics)
                 or len({(m.name, m.source) for m in self.metrics}) != len(self.metrics)):
             raise ValueError("invalid_host_metrics")
@@ -76,7 +76,7 @@ METRIC_FAMILIES: Final[tuple[MetricFamily, ...]] = (
         "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
         "local_recovery_active", "local_recovery_reboot",
         "memcg_present", "cma_total", "cma_free")),
-    MetricFamily("memory_peak:", 4),  # hostcore, base, preparation, app
+    MetricFamily("memory_peak:", 5),  # hostcore, base, preparation, app, display (Weston)
     MetricFamily("oom_kill:", 3),  # base, preparation, app
     MetricFamily("metrics_dropped", 1),  # reserved: appended by valid_metrics only
 )

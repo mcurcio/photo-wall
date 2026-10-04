@@ -674,7 +674,10 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
                 host = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/host")
                 (work / "host-latest.json").write_text(json.dumps(host, sort_keys=True))
                 boot = (host["facts"] or {}).get("boot") or {}
-                if refused in boot.get("stages", []) and host["metrics"]:
+                # The unit fails after its record is written, and an unread list is null
+                # (errata E-T3-2), so wait for the list that names it.
+                if (refused in boot.get("stages", []) and host["metrics"]
+                        and "photo-wall-node-storage.service" in (boot.get("failed_units") or [])):
                     break
                 assert time.monotonic() < deadline, "refusal never reached Central: " + str(work)
                 time.sleep(1)

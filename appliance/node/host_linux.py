@@ -19,10 +19,12 @@ from contracts.node_protocol import token
 # set since boot or since another firmware reader last cleared them, so "occurred" not "since boot".
 _THROTTLE_FLAGS = (("under_voltage", 0), ("frequency_capped", 1), ("throttled", 2),
                    ("soft_temperature_limit", 3))
-# The slices HostCore measures (metric suffix, cgroup directory); HostCore's own slice has no
-# OOM-kill row (contracts/node_observation.py METRIC_FAMILIES: oom_kill: base, preparation, app).
+# The cgroups HostCore measures (metric suffix, cgroup directory); HostCore's own slice and the
+# display service have no OOM-kill row (contracts/node_observation.py METRIC_FAMILIES: oom_kill: base, preparation, app).
 _SLICES = (("hostcore", "photowallhostcore.slice"), ("base", "photowallbase.slice"),
-           ("preparation", "photowallpreparation.slice"), ("app", "photowallapp.slice"))
+           ("preparation", "photowallpreparation.slice"), ("app", "photowallapp.slice"),
+           # Weston's own service inside the base slice (photo-wall-display.service Slice=).
+           ("display", "photowallbase.slice/photo-wall-display.service"))
 _OOM_SLICES = ("base", "preparation", "app")
 
 
@@ -220,15 +222,17 @@ class LinuxHostSampler:
         full names, sorted and unique, at most MAX_BOOT_FAILED_UNITS, and the count of the rest
         (with any name the contract's token rule refuses, never stripped). The stage units are
         included: their own records may be missing (killed before the exit write, or a record
-        write failed); the console subtracts them (design 4 GB node §4.3 T4). ((), 0) on error."""
+        write failed); the console subtracts a stopped stage's unit (docs/node-4gb-memory-design.md
+        §4.3 T4, errata E-FX1-1). Raises ValueError("failed_units_unreadable") when the list
+        cannot be read: a value that cannot be read is never sent as "nothing failed"."""
         try:
             result = subprocess.run(["/usr/bin/systemctl", "list-units", "--state=failed", "--plain",
                                      "--no-legend", "photo-wall-*"], capture_output=True, text=True,
                                     check=True, timeout=0.25, env={"PATH": "/usr/bin", "LANG": "C"})
             if len(result.stdout) > 4096:
                 raise ValueError("failed_units_bound")
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return (), 0
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise ValueError("failed_units_unreadable") from error
         names = sorted({line.split()[0] for line in result.stdout.splitlines() if line.split()})
         valid = [name for name in names if name.startswith("photo-wall-") and _unit_name(name)]
         kept = tuple(valid[:MAX_BOOT_FAILED_UNITS])
