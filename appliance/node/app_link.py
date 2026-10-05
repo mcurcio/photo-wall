@@ -8,10 +8,12 @@ import secrets
 import socket
 import stat
 from pathlib import Path
+from typing import Protocol
 
 from appliance.central_session.session import NodeSession
 from appliance.clock import boottime_ms
 from appliance.node.lifecycle_storage import primitive
+from appliance.node.probe import AppRunKey
 from appliance.unix_credentials import receive_credential_packet
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
@@ -20,8 +22,10 @@ from contracts.node_app_link import (
     encode_node_app_link_challenge,
     parse_node_app_link,
     parse_node_app_link_begin,
+    parse_node_probe_open,
 )
 from contracts.node_commands import encode_session_grant, parse_session_grant
+from contracts.strict_json import loads_object
 
 
 def proof_directory(path: Path, *, owner_uid: int = 0) -> tuple[int, int]:
@@ -48,9 +52,13 @@ def remove_proof_socket(path: Path, *, owner_uid: int = 0) -> None:
     path.unlink()
 
 
+class ProbeChannels(Protocol):
+    def adopt(self, connection: socket.socket, run: AppRunKey) -> None: ...
+
+
 class BrokerLinkService:
-    def __init__(self, driver, session: NodeSession, path: Path):
-        self.driver, self.session, self.path = driver, session, path
+    def __init__(self, driver, session: NodeSession, path: Path, *, probes: ProbeChannels | None = None):
+        self.driver, self.session, self.path, self.probes = driver, session, path, probes
         self.directory_identity = proof_directory(path.parent)
         remove_proof_socket(path)
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -82,17 +90,42 @@ class BrokerLinkService:
             connection, _ = self.listener.accept()
         except TimeoutError:
             return
-        with connection:
+        handed_over = False
+        try:
             connection.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             connection.settimeout(2)
             try:
-                self.handle(connection)
+                # The Player speaks first; the first packet's kind selects the path.
+                first = receive_credential_packet(connection, maximum=MAX_NODE_LINK_BYTES)
+                if _kind(first[1]) == "probe_open":
+                    self.open_probe(connection, first)
+                    handed_over = True
+                else:
+                    self.handle(connection, first=first)
             except (OSError, ValueError, TypeError):
                 # Refusal does not expose configuration, bearer or exception details.
                 try:
                     connection.send(b'{"schema":2,"kind":"result","status":"refused"}')
                 except OSError:
                     pass
+        finally:
+            if not handed_over:
+                connection.close()
+
+    def open_probe(self, connection: socket.socket, first: tuple[tuple[int, int, int], bytes]) -> None:
+        """Admit a progress-probe channel: the app uid and the running app's own pid; no grant.
+
+        The channel carries no authority (probes and answers only), so it needs no Central
+        session; an admitted `probe_open` gets no reply packet.
+        """
+        (pid, uid, _), raw = first
+        if uid != 10004 or self.probes is None:
+            raise ValueError("node_link_peer")
+        parse_node_probe_open(raw)
+        running = self.driver.current()
+        if running is None or running.process.pid != pid:
+            raise ValueError("node_link_peer")
+        self.probes.adopt(connection, AppRunKey.of(running))
 
     def remember_grant(self):
         grant = self.session.grant
@@ -101,8 +134,8 @@ class BrokerLinkService:
             if self.session.store.read("local-proof-grant") != document:
                 self.session.store.write("local-proof-grant", document)
 
-    def handle(self, connection: socket.socket) -> None:
-        credentials, raw = receive_credential_packet(connection, maximum=MAX_NODE_LINK_BYTES)
+    def handle(self, connection: socket.socket, *, first=None) -> None:
+        credentials, raw = first or receive_credential_packet(connection, maximum=MAX_NODE_LINK_BYTES)
         pid, uid, _ = credentials
         if uid != 10004:
             raise ValueError("node_link_peer")
@@ -142,3 +175,8 @@ class BrokerLinkService:
         result = "recorded" if status == 200 else "refused"
         packet = json.dumps({"schema": 2, "kind": "result", "status": result}).encode()
         connection.send(packet)
+
+
+def _kind(raw: bytes) -> object:
+    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
+    return value.get("kind") if value is not None else None

@@ -54,6 +54,8 @@ def stage_tree(tree: Path, destination: Path) -> str:
         closure = closure_for(policy, repo=tree)
         if name == "host-core" and any(module.startswith(("appliance.node.manager", "appliance.node.broker", "appliance.node.process_linux", "appliance.node.environment", "appliance.node.lifecycle_storage")) for module in closure.modules):
             raise ValueError("host_import_boundary")
+        if name == "app-broker" and any(module.startswith("appliance.node.host") for module in closure.modules):
+            raise ValueError("app_import_boundary")
         stage_application(closure, policy, repo=tree, into=destination / ("usr/lib/photo-wall-" + name))
         digests.append(closure.digest)
     unit_dir = destination / "lib/systemd/system"
@@ -71,11 +73,14 @@ def stage_tree(tree: Path, destination: Path) -> str:
         (override / "node-cohort.conf").write_text("[Unit]\nConditionKernelCommandLine=!photowall.node=v2\n")
     users = destination / "usr/lib/sysusers.d"
     users.mkdir(parents=True)
-    (users / "photo-wall-node.conf").write_text('u pw-manager 10003 "Photo Wall manager" /nonexistent\nu pw-player 10004 "Photo Wall Player" /nonexistent\nu pw-display 10005 "Photo Wall display" /nonexistent\n')
+    (users / "photo-wall-node.conf").write_text('u pw-manager 10003 "Photo Wall manager" /nonexistent\nu pw-player 10004 "Photo Wall Player" /nonexistent\nu pw-display 10005 "Photo Wall display" /nonexistent\n'
+                                                  'u pw-health 10006 "Photo Wall health judge" /nonexistent\n'
+                                                  'g pw-node-feeds 10007\nm pw-health pw-node-feeds\n')
     temporary = destination / "usr/lib/tmpfiles.d"
     temporary.mkdir(parents=True)
     (temporary / "photo-wall-node.conf").write_text("d /run/photo-wall-node 0700 root root -\nd /run/photo-wall-app-proof 0755 root root -\n"
-                                                     "d /run/photo-wall-boot-stage 0755 root root -\n")
+                                                     "d /run/photo-wall-boot-stage 0755 root root -\n"
+                                                     "d /run/photo-wall-app-feed 0750 root pw-node-feeds -\n")
     # Include units, generated cohort policy and UID/tmpfiles contracts in identity.
     for path in sorted(destination.rglob("*")):
         if path.is_file() and not path.is_symlink():

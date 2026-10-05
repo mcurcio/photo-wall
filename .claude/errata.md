@@ -3923,3 +3923,39 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   no layer); and B11's page says "tint off → NULL buffer", which under this rule raises the fallback tint on a
   healthy wall — B11 must commit a mapped fully transparent buffer for tint off (NULL only on teardown), or its
   acceptance "no tint on a healthy wall" fails.
+
+## 2026-10-05 · player-health M1 B6 probe channel + probe thread + broker feed (implementer) · appliance/node/{probe,probe_channel,app_link,broker_runner}.py
+- E-B6-1 · Additive to the frozen signatures: `ProbeTiming(period_ms, miss_limit, startup_ms, kill_after_ms)` with
+  `SHIPPED_TIMING` from the four constants; `ProbeClock(run, started_ms, *, timing=SHIPPED_TIMING)` and
+  `ProbeThread(feed, *, clock=boottime_ms, timing=SHIPPED_TIMING)` (so the thread's real timer is unit-tested at
+  50 ms); `AppRunKey.of(running)` / `.document()`; `ProbeClock.last_rtt_ms` (`answered` stays `-> bool`; the rtt
+  feeds `probe_answered`); `ProbeThread.start()`, `close()`, `check()` (raises `probe_thread_stopped`; the main loop
+  calls it each turn, so a dead thread exits the broker → `Restart=on-failure`), `recovery_may_be_armed`
+  (stored, read by nobody until B8). `send_relink(run)` is built (B7 consumes it). B9: build the judge's
+  K-rule from these constants, not from `ProbeTiming` defaults by hand.
+- E-B6-2 · Miss rules as built (page left them open): a turn judges the interval since the previous turn or the
+  last accepted answer; a **miss** = a turn not late with no accepted answer in its interval (so the first turn
+  after an answer is never a miss, and a healthy run's counted time sits near T); counted unanswered time = sum
+  of non-late intervals since the last answer; `probe_unanswered` once misses ≥ k (every turn), `probe_kill_due`
+  once per unanswered episode at counted ≥ K (re-armed by an answer). **Stale** = not one of the last 8 nonces
+  sent since the last accepted answer (an accepted answer drops itself and every older nonce), so a late answer
+  to the previous nonce still counts. `started_ms` = when the probe thread first saw the run published (its
+  launch, or broker start for an app already running). Late = the turn ran > T/2 past its deadline.
+- E-B6-3 · Ordering the page did not state: `serve_one` (adopt) runs before the turn's `publish_run`, so a channel is
+  judged against publications **after** its adoption (a publication sequence number); otherwise a fresh channel
+  would be closed by the previous turn's publication (e.g. right after a broker restart). Probes go only to a
+  channel whose run equals the published run.
+- E-B6-4 · The broker feed is served on the main loop, as the page says (`FeedListener.serve`, ≤ 8 accepts per
+  turn, 50 ms read wait each). Probe *timing* is immune to main-loop blocking, but a reader's *view* of the facts
+  waits for the next turn (systemctl_show timeout 5 s, HTTP 0.5 s). Architect pass 2 / B9: consider serving the
+  feed from the probe thread's selector. **B10:** the display feed needs the same {0, 10006} SO_PEERCRED-allowlisted
+  SEQPACKET `events` listener; lift `FeedListener` (appliance/node/broker_runner.py) into the kernel
+  (`appliance/feed.py` or a sibling) instead of copying it — display_host may not import appliance.node.
+- E-B6-5 · Wire as built for the broker feed: reply `{"accepted": true, **answer_feed_read(...)}` or
+  `{"accepted": false, "reason": "feed_read_request"}` (the display ingress envelope); a peer outside {0, 10006}
+  is closed with no reply. The leg reads it like the display feed. For D1.
+- E-B6-6 · Cost: the main loop now calls `driver.current()` (two `systemctl show`) every turn even with no Central
+  session (page: one call per turn either way); before, only with a grant.
+- E-B6-7 · Test seams, not production branches: macOS has no CLOCK_BOOTTIME, SO_PASSCRED, SO_PEERCRED or AF_UNIX
+  SOCK_SEQPACKET, so unit tests inject a monotonic clock, `FeedListener(peer=..., kind=..., owner_uid=..., group=...)`
+  and patch `socket.SO_PASSCRED`; `peer_uid` itself is tested on Linux only (CI).

@@ -31,6 +31,8 @@ from pathlib import Path
 import pytest
 from node_pid1_central_fixture import assert_phase_completed, central_fixture
 
+from appliance.feed import FeedCursor
+from appliance.node.probe import PROBE_PERIOD_MS
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
 from scripts.player_start_probe import (
@@ -67,22 +69,33 @@ SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
 ADMIT_SECONDS = 120
 HEALTHY_SECONDS = 20
 LEASE_MS = 5000
-# Reads the display controller's bounded event feed (appliance/display_host/runner.py, op
-# `events`) as root over its root-only ingress socket, draining from argv[1] up to 64 pages.
-DISPLAY_FEED_SCRIPT = """import json,os,socket,struct,sys
-after=int(sys.argv[1]);events=[];page={}
+# Node feeds (appliance/feed.py): the display controller's root-only ingress socket (requests
+# carry SCM_CREDENTIALS) and the broker's probe feed (SO_PEERCRED allowlist {0, pw-health}).
+DISPLAY_FEED_SOCKET = "/run/photo-wall-display/ingress.sock"
+BROKER_FEED_SOCKET = "/run/photo-wall-app-feed/feed.sock"
+# Reads one node feed as root inside the node in the FeedCursor request shape: argv = socket,
+# credentials (1/0), after, publisher incarnation ('' = none). Drains up to 64 pages and
+# advances as FeedCursor.advance does (a new publisher incarnation restarts from 0); prints
+# the raw pages, which the host replays through a real FeedCursor.
+NODE_FEED_SCRIPT = """import json,os,socket,struct,sys
+path=sys.argv[1];credentials=sys.argv[2]=='1';after=int(sys.argv[3]);incarnation=sys.argv[4] or None
+pages=[]
 for _ in range(64):
  s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
  try:
-  s.settimeout(5);s.connect('/run/photo-wall-display/ingress.sock')
-  s.sendmsg([json.dumps({'op':'events','after':after}).encode()],[(socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('=iII',os.getpid(),os.getuid(),os.getgid()))])
+  s.settimeout(5);s.connect(path)
+  request=json.dumps({'op':'events','after':after,'incarnation':incarnation}).encode()
+  if credentials:s.sendmsg([request],[(socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('=iII',os.getpid(),os.getuid(),os.getgid()))])
+  else:s.send(request)
   page=json.loads(s.recv(65536))
  finally:s.close()
+ pages.append(page)
  if not page.get('accepted'):break
- events+=page['events']
- if page['events']:after=page['events'][-1]['sequence']
+ base=0 if incarnation is not None and page['publisher_incarnation']!=incarnation else after
+ for event in page['events']:base=event['sequence']
+ after,incarnation=base,page['publisher_incarnation']
  if len(page['events'])<8:break
-print(json.dumps({'after':after,'events':events,'accepted':bool(page.get('accepted')),'reason':page.get('reason'),'stream_gap':page.get('stream_gap'),'incarnation_id':page.get('incarnation_id')}))"""
+print(json.dumps(pages))"""
 
 
 @pytest.fixture
@@ -717,30 +730,47 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             node.capture_and_remove(fixture, sys.exc_info()[1])
 
 
-class DisplayFeed:
-    """The display controller's event feed, read as root inside the node; every event is kept
-    in display-feed.jsonl (evidence). A controller restart (new incarnation) rereads from 0."""
+class NodeFeed:
+    """One node feed, read as root inside the node with a real FeedCursor (gap-aware: a gap or a
+    new publisher incarnation is recorded as a `fixture_feed_gap` event and reading continues
+    from the returned page, never from 0). Every event is kept in `dump_name` (evidence)."""
 
-    def __init__(self, node):
-        self.node, self.after, self.incarnation, self.events = node, 0, None, []
+    def __init__(self, node, socket_path, *, credentials: bool, dump_name):
+        self.node, self.socket_path, self.credentials = node, socket_path, credentials
+        self.dump_name, self.cursor, self.events = dump_name, FeedCursor(), []
 
     def poll(self):
+        incarnation = "" if self.cursor.incarnation is None else str(self.cursor.incarnation)
         result = self.node.container.exec(
-            "/usr/bin/python3", "-c", DISPLAY_FEED_SCRIPT, str(self.after), timeout=30
+            "/usr/bin/python3", "-c", NODE_FEED_SCRIPT, self.socket_path,
+            "1" if self.credentials else "0", str(self.cursor.after), incarnation, timeout=30
         )
-        assert result.returncode == 0, "display feed unreadable: " + result.stderr[-2000:]
-        page = json.loads(result.stdout)
-        assert page["accepted"], page
-        if self.incarnation is not None and page["incarnation_id"] != self.incarnation:
-            self.incarnation, self.after = page["incarnation_id"], 0
-            self.events.append({"kind": "fixture_controller_restarted", "value": {}})
-            return self.poll()
-        self.incarnation, self.after = page["incarnation_id"], page["after"]
-        with (self.node.work / "display-feed.jsonl").open("a") as dump:
-            for event in page["events"]:
+        assert result.returncode == 0, (
+            f"node feed {self.socket_path} unreadable: " + result.stderr[-2000:]
+        )
+        taken = []
+        for page in json.loads(result.stdout):
+            assert page.get("accepted"), page
+            events, resnapshot = self.cursor.advance(page)
+            if resnapshot:
+                taken.append({"kind": "fixture_feed_gap",
+                              "value": {"publisher_incarnation": page["publisher_incarnation"],
+                                        "stream_gap": page["stream_gap"],
+                                        "dropped_total": page.get("dropped_total")}})
+            taken.extend({"sequence": event.sequence, "kind": event.kind, "value": event.value,
+                          "audience": event.audience} for event in events)
+        with (self.node.work / self.dump_name).open("a") as dump:
+            for event in taken:
                 dump.write(json.dumps(event, sort_keys=True) + "\n")
-        self.events.extend(page["events"])
-        return page["events"]
+        self.events.extend(taken)
+        return taken
+
+
+def run_key(current):
+    """The broker's AppRunKey document (appliance/node/probe.py) of Central's current link."""
+    process = current["process"]
+    return {"invocation_id": process["invocation_id"], "pid": process["pid"],
+            "start_ticks": process["start_ticks"], "app_epoch": current["app_epoch"]}
 
 
 def presentations(events, frame_id):
@@ -787,7 +817,8 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
     makes. Within ADMIT_SECONDS the shell hands the Output to the app (a
     DiagnosticRelease of the bound Frame on the display feed) and Central's latest decision is
     `already_admitted` for exactly that binding; then for HEALTHY_SECONDS the app keeps
-    presenting (no gap of a lease on the node's own clock) and nothing is invalidated.
+    presenting (no gap of a lease on the node's own clock) and nothing is invalidated, and the
+    broker feed shows the real Player answering progress probes for its run (no miss).
     """
     phase = "unresponsive"
     components_dir, _, image = node_pid1_inputs
@@ -800,13 +831,17 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
             assert (early.value.code, json.load(early.value)) == (
                 409, {"detail": "fixture_player_not_enrolled"}
             )
-            node.cold(fixture, components_dir)
+            current = node.cold(fixture, components_dir)
             bound = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/bind", {})
             (work / "bound.json").write_text(json.dumps(bound, sort_keys=True))
-            feed = DisplayFeed(node)
+            feed = NodeFeed(node, DISPLAY_FEED_SOCKET, credentials=True,
+                            dump_name="display-feed.jsonl")
+            probes = NodeFeed(node, BROKER_FEED_SOCKET, credentials=False,
+                              dump_name="broker-feed.jsonl")
             deadline = time.monotonic() + ADMIT_SECONDS
             while True:
                 feed.poll()
+                probes.poll()
                 display = display_of(fixture, work)
                 handed_off = any(
                     event["kind"] == "DiagnosticRelease"
@@ -824,12 +859,24 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                     )
                 time.sleep(1)
             print("ADMITTED", bound["frame_id"], "on", bound["output_id"], flush=True)
-            healthy_from = len(feed.events)
+            healthy_from, probes_from = len(feed.events), len(probes.events)
             end = time.monotonic() + HEALTHY_SECONDS
             while time.monotonic() < end:
                 time.sleep(1)
                 feed.poll()
+                probes.poll()
             window = feed.events[healthy_from:]
+            # The real Player answers the broker's probes from its control queue, every T.
+            run = run_key(current)
+            probe_window = probes.events[probes_from:]
+            answered = [event for event in probe_window
+                        if event["kind"] == "probe_answered" and event["value"]["run"] == run]
+            missed = [event for event in probe_window
+                      if event["kind"] in ("probe_unanswered", "probe_kill_due")]
+            assert len(answered) >= HEALTHY_SECONDS * 1000 // PROBE_PERIOD_MS // 2, (
+                f"{len(answered)} probe answers for {run} in {HEALTHY_SECONDS} s; evidence: {work}"
+            )
+            assert not missed, missed
             shown = presentations(window, bound["frame_id"])
             assert not invalidations(window), invalidations(window)
             assert len(shown) >= 2, f"no fresh app presentations; evidence: {work}"
@@ -847,6 +894,8 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                         "display": display,
                         "presentations": len(shown),
                         "max_gap_ms": max(gaps),
+                        "probe_answers": len(answered),
+                        "probe_rtt_ms_max": max(event["value"]["rtt_ms"] for event in answered),
                         "hardware": "synthetic sysfs Virtual-1 and actual headless Weston; "
                         "no physical DRM/HDMI claim",
                     },
