@@ -83,7 +83,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B2c lint contracts + ratchet | landed | 8e8facb | verified PASS; 11 contracts; errata E-B2c-1..3 (3 resolved) |
 | Architect pass 1 | open | | |
 | B3 guest contract + Player responder | landed | 1e1675f | verified PASS after 1 fix cycle (probe lane, E-B3-2a); correctness lens PASS on fix; D1 must update module-design-r8 :41/:128/:149 |
-| B4 shell health layer + fallback tint | open | | |
+| B4 shell health layer + fallback tint | landed | ffc11c4 | verified PASS; security lens PASS; fix cycle 1: tint keyed on mapped health layer (E-B4-6) — until B11 maps a transparent health surface a healthy handed-off wall shows the fallback tint (fail-closed, expected mid-M1); B11 must commit a mapped transparent buffer for tint-off |
 | B5 Python overlay client parity | landed | e2fbd33 | verified PASS; regression lens PASS; paint-failure hardening E-B5-8; errata E-B5-1..8; D1: docs still describe the C client |
 | B6 probe channel + probe thread + broker feed | open | | |
 | B7 app-link accepted locally + outbox + relink | open | | |
