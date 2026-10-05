@@ -46,14 +46,21 @@ def listener(tmp_path):
     served.close()
 
 
-def read(served, request):
+def read(served, request, *, refused=False):
     client = socket.socket(socket.AF_UNIX, served.listener.type)
     client.settimeout(2)
     try:
         client.connect(str(served.path))
         client.sendall(request)
         served.serve()
-        raw = client.recv(65536)
+        try:
+            raw = client.recv(65536)
+        except ConnectionResetError:
+            # A refused reader's connection is closed with its request unread; Linux AF_UNIX
+            # then reports ECONNRESET instead of EOF. Either way it received no byte.
+            if not refused:
+                raise
+            raw = b""
     finally:
         client.close()
     return json.loads(raw) if raw else None
@@ -86,7 +93,7 @@ def test_any_other_reader_gets_nothing(listener):
     feed.append("probe_answered", {"rtt_ms": 1})
     for uid in (10004, 10005, 10003, 65534):
         readers["uid"] = uid
-        assert read(served, b'{"op":"events","after":0}') is None
+        assert read(served, b'{"op":"events","after":0}', refused=True) is None
 
 
 def test_a_bad_request_is_refused_without_detail(listener):
