@@ -82,7 +82,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B2b feed primitive | landed | 3d6251c | verified PASS; errata E-B2b-1..4; fixture …/3d6251c…/fixture |
 | B2c lint contracts + ratchet | landed | 8e8facb | verified PASS; 11 contracts; errata E-B2c-1..3 (3 resolved) |
 | Architect pass 1 | open | | |
-| B3 guest contract + Player responder | open | | |
+| B3 guest contract + Player responder | landed | 1e1675f | verified PASS after 1 fix cycle (probe lane, E-B3-2a); correctness lens PASS on fix; D1 must update module-design-r8 :41/:128/:149 |
 | B4 shell health layer + fallback tint | open | | |
 | B5 Python overlay client parity | open | | |
 | B6 probe channel + probe thread + broker feed | open | | |
