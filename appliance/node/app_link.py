@@ -2,8 +2,8 @@
 
 The broker accepts a proof locally (no Central round trip) and holds the signed link in a
 one-slot outbox, the latest per app run; `deliver_app_link` delivers it to Central from
-the main loop until Central acknowledges, and asks the Player to relink when Central can
-never accept it.
+the main loop until Central acknowledges. When Central can never accept it, the slot owes
+that run's Player a relink until the Player proves again (`owed_relink`).
 """
 from __future__ import annotations
 
@@ -37,7 +37,9 @@ from contracts.node_app_link import (
 from contracts.node_commands import encode_session_grant, parse_session_grant
 from contracts.strict_json import loads_object
 
-# One slot: the latest accepted app link, `{"run", "player_id", "link"}`; `{}` when empty.
+# One slot, three states: the latest accepted app link `{"run", "player_id", "link"}`; an
+# owed relink `{"relink": run}` (Central refused the link; cleared by the Player's next
+# accepted proof, which replaces the slot, or by a run change); `{}` when empty.
 OUTBOX = "app-link-outbox"
 LOG = logging.getLogger(__name__)
 
@@ -70,10 +72,8 @@ class ProbeChannels(Protocol):
     def adopt(self, connection: socket.socket, run: AppRunKey) -> None: ...
 
 
-class Relinks(Protocol):
+class BrokerFeed(Protocol):
     feed: Feed
-
-    def send_relink(self, run: AppRunKey) -> None: ...
 
 
 class BrokerLinkService:
@@ -203,23 +203,25 @@ class BrokerLinkService:
         connection.send(encode_node_app_link_result("accepted"))
 
 
-def deliver_app_link(store, session: NodeSession, probes: Relinks, *, current: AppRunKey | None) -> None:
+def deliver_app_link(store, session: NodeSession, probes: BrokerFeed, *, current: AppRunKey | None) -> None:
     """Deliver the held app link to Central; called once per main-loop turn with a grant.
 
     200 clears the slot. A refusal Central repeats for this link (a permanent 4xx, or a link
     proved under a session other than the current one, which Central refuses as a scope
-    mismatch, central/fleet/node_app_links.py:47-49) clears it and asks that run's Player
-    to relink. Anything else (transport error, 408, 429, 5xx, 401/403) keeps it for the
-    next turn: the slot is never dropped on a transient failure. A slot whose run is no
-    longer current is cleared.
+    mismatch, central/fleet/node_app_links.py:47-49) turns it into an owed relink for that
+    run. Anything else (transport error, 408, 429, 5xx, 401/403) keeps it for the next
+    turn: the slot is never dropped on a transient failure. An owed relink is never
+    POSTed. A slot (link or owed relink) whose run is no longer current is cleared.
     """
     slot = store.read(OUTBOX)
     if not slot:
         return
-    run = slot["run"]
+    run = slot["run"] if "link" in slot else slot["relink"]
     if current is None or run != current.document():
         store.write(OUTBOX, {})
         return
+    if "link" not in slot:
+        return  # owed relink: the Player's next accepted proof replaces it
     grant = session.grant
     if grant is None:
         return
@@ -239,11 +241,20 @@ def deliver_app_link(store, session: NodeSession, probes: Relinks, *, current: A
         _refused(store, probes, current, status=status, reason="central_refused")
 
 
-def _refused(store, probes: Relinks, run: AppRunKey, *, status: int | None, reason: str) -> None:
-    store.write(OUTBOX, {})
+def owed_relink(store, current: AppRunKey | None) -> AppRunKey | None:
+    """The run whose Player the outbox owes a relink: `current` iff the slot names it."""
+    slot = store.read(OUTBOX)
+    if current is None or not slot or slot.get("relink") != current.document():
+        return None
+    return current
+
+
+def _refused(store, probes: BrokerFeed, run: AppRunKey, *, status: int | None, reason: str) -> None:
+    # Durable and level-triggered: the main loop restates it to the probe thread every turn
+    # (owed_relink -> ProbeThread.owe_relink), so a channel that is down now still gets it.
+    store.write(OUTBOX, {"relink": run.document()})
     probes.feed.append("app_link_refused", {"run": run.document(), "status": status, "reason": reason})
     LOG.warning("broker: app link not recordable (%s, %s); asking the Player to relink", reason, status)
-    probes.send_relink(run)
 
 
 def _kind(raw: bytes) -> object:

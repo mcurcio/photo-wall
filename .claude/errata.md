@@ -4034,3 +4034,17 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-AP2-5 · Budget estimate at pass 2: spent ≈ 5.7 M (5.0–6.5), remaining ≈ 3.7 M, projected ≈ 9.4 M of 9.5 M;
   stop rule added (stop before a bead whose projected completion exceeds 9.5 M; preferred stops after B8 or B10b).
   Applied to brief (§8 pass 2 block).
+
+## 2026-10-05 · player-health M1 B7b relink owed until re-proved (implementer) · appliance/node/{app_link,probe_channel,broker_runner}.py
+- E-B7b-1 · Additive helper, decided: `app_link.owed_relink(store, current: AppRunKey | None) -> AppRunKey | None`
+  (current iff the slot is `{"relink": current.document()}`); `BrokerLoop.turn` calls
+  `probes.owe_relink(owed_relink(store, run))` after `publish_run` on every `known` turn, so the slot's three states
+  stay known to app_link.py only. A slot read error that leaves the store unpoisoned is swallowed for that turn (the
+  turn's existing `store.failed` re-raise pattern); the level is then unchanged until the next turn.
+- E-B7b-2 · `app_link.Relinks` (Protocol with `send_relink`) became `BrokerFeed` (only `feed`); `deliver_app_link`
+  keeps its signature (E-B7-1). `ProbeThread.send_relink` is gone (no shim); the per-channel latch is
+  `_Channel.relinked`. The thread also drops an owed run that differs from a newly applied publication (as it does
+  `_kill_due`); the main loop's restatement is the source of truth either way.
+- E-B7b-3 · Test seam, not production: macOS reports ENOBUFS (not EAGAIN) on a full AF_UNIX datagram socketpair, so
+  the retry test wraps a real channel end whose first sends raise `BlockingIOError` (`Unwritable`,
+  tests/test_node_probe_channel.py) instead of filling a buffer. For D1: feed kind `relink_sent` {run} (audience node).

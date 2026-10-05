@@ -1,4 +1,5 @@
-"""Broker runner: probe publication each turn, the node feed socket, the broker closure."""
+"""Broker runner: probe publication and the owed relink each turn, the node feed socket, the
+broker closure."""
 import json
 import os
 import socket
@@ -14,11 +15,12 @@ from test_node_boot import environment
 from test_node_linux_adapters import store as boot_store
 
 from appliance.feed import Feed
-from appliance.node import broker_runner
+from appliance.node import app_link, broker_runner
 from appliance.node.broker import RunningApp
 from appliance.node.broker_runner import BrokerLoop, FeedListener
 from appliance.node.probe import AppRunKey, ProbeTiming
 from appliance.node.probe_channel import ProbeThread
+from contracts.node_app_link import parse_node_probe_channel_message
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 
 REPO = Path(__file__).resolve().parents[1]
@@ -154,11 +156,12 @@ class Driver:
         return self.running
 
 
-def loop_for(tmp_path, monkeypatch, *, granted=True):
+def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None, links=None):
     """A turn over fakes, a real BootStore and a real probe thread (no channel: misses)."""
     monkeypatch.setattr(broker_runner, "boottime_ms", monotonic_ms)  # CLOCK_BOOTTIME is Linux-only
-    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker", uuid4())
-    running = RunningApp(environment("a"), NodeProcessIdentity(396, 31751781, uuid4()), 1, uuid4())
+    producer = producer or NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker",
+                                          uuid4())
+    running = running or RunningApp(environment("a"), NodeProcessIdentity(396, 31751781, uuid4()), 1, uuid4())
     store = boot_store(tmp_path / f"broker-{granted}", producer.kernel_boot_id)
     feed = Feed(512)
     probes = ProbeThread(feed, clock=monotonic_ms, timing=FAST)
@@ -166,7 +169,7 @@ def loop_for(tmp_path, monkeypatch, *, granted=True):
     session, driver = Session(producer, granted=granted), Driver(running)
     online = SimpleNamespace(broker=SimpleNamespace(record={"phase": "running"}, service=lambda: None),
                              tick=lambda: None)
-    links = SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None)
+    links = links or SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None)
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,
                       session=session, driver=driver, links=links, probes=probes,
                       feeds=SimpleNamespace(serve=lambda: None))
@@ -222,6 +225,53 @@ def test_a_dead_probe_thread_stops_the_broker(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="probe_thread_stopped"):
             loop.turn()
     finally:
+        store.close()
+
+
+def test_a_relink_owed_before_a_broker_restart_reaches_the_next_channel(tmp_path, monkeypatch):
+    """Refusal, then the broker restarts before any probe channel opens (E-B7-3): the boot
+    store keeps the owed relink and the new broker's first known turn restates it."""
+    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker", uuid4())
+    running = RunningApp(environment("a"), NodeProcessIdentity(396, 31751781, uuid4()), 1, uuid4())
+    run = AppRunKey.of(running)
+    store = boot_store(tmp_path / "broker-True", producer.kernel_boot_id)
+    app_link._refused(store, SimpleNamespace(feed=Feed(8)), run, status=409, reason="central_refused")
+    store.close()  # the broker exits with no probe channel ever open: nothing was sent
+    pending = []
+    links = SimpleNamespace(remember_grant=lambda: None,
+                            serve_one=lambda: pending and loop.probes.adopt(*pending.pop()))
+    loop, feed, _, _, _, store = loop_for(tmp_path, monkeypatch, producer=producer, running=running,
+                                          links=links)
+    ours, theirs = (socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) if LINUX
+                    else socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM))
+    theirs.settimeout(2)
+    try:
+        turns(loop, 0.1)
+        pending.append((ours, run))  # the Player's responder reconnects to the new broker
+        turns(loop, 0.1)
+        first = parse_node_probe_channel_message(theirs.recv(9000))
+        assert type(first).__name__ == "NodeRelinkV2"
+        relinked = [e for e in feed.read(0, incarnation=None, limit=8).events if e.kind == "relink_sent"]
+        assert [e.value for e in relinked] == [{"run": run.document()}]
+    finally:
+        loop.probes.close()
+        theirs.close()
+        store.close()
+
+
+def test_a_turn_owes_nothing_when_the_slot_holds_no_relink(tmp_path, monkeypatch):
+    loop, _, _, _, running, store = loop_for(tmp_path, monkeypatch, granted=False)
+    owed = []
+    loop.probes.owe_relink = owed.append
+    try:
+        loop.turn()
+        store.write(app_link.OUTBOX, {"relink": AppRunKey.of(running).document()})
+        loop.turn()
+        store.write(app_link.OUTBOX, {"relink": AppRunKey(uuid4(), 1, 2, 3).document()})
+        loop.turn()
+        assert owed == [None, AppRunKey.of(running), None]
+    finally:
+        loop.probes.close()
         store.close()
 
 

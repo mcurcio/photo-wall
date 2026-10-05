@@ -215,18 +215,138 @@ def test_peer_eof_closes_the_channel(probes):
                  == ["open", "closed"])
 
 
-def test_relink_reaches_only_that_runs_channel(probes):
+def relinks(player):
+    return [m for m in player.received if type(m).__name__ == "NodeRelinkV2"]
+
+
+def test_relink_reaches_only_the_owed_runs_channel(probes):
     ours, theirs = message_pair()
     player = Player(theirs)
     try:
         probes.publish_run(RUN, False)
         probes.adopt(ours, RUN)
         assert until(lambda: facts(probes.feed, "probe_answered"))
-        probes.send_relink(OTHER)
-        probes.send_relink(RUN)
-        assert until(lambda: any(type(m).__name__ == "NodeRelinkV2" for m in player.received))
+        probes.owe_relink(OTHER)
+        time.sleep(0.15)
+        assert relinks(player) == []
+        probes.owe_relink(RUN)
+        assert until(lambda: relinks(player))
+        assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}]
+    finally:
+        player.stop()
+
+
+def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(probes):
+    """E-B7-3: the channel is down (broker restart, Player backoff) when the relink is owed."""
+    probes.publish_run(RUN, False)
+    probes.owe_relink(RUN)
+    time.sleep(0.15)  # several thread passes with nothing to send it on
+    ours, theirs = message_pair()
+    player = Player(theirs)
+    try:
+        probes.adopt(ours, RUN)
+        assert until(lambda: relinks(player))
+        assert type(player.received[0]).__name__ == "NodeRelinkV2"  # before the first probe
+        assert len(facts(probes.feed, "relink_sent")) == 1
+    finally:
+        player.stop()
+
+
+def test_a_relink_is_sent_once_per_channel_instance(probes):
+    probes.publish_run(RUN, False)
+    first_ours, first_theirs = message_pair()
+    first = Player(first_theirs)
+    try:
+        probes.adopt(first_ours, RUN)
+        for _ in range(15):  # the main loop restates the owed relink every turn
+            probes.owe_relink(RUN)
+            time.sleep(0.02)
+        assert until(lambda: facts(probes.feed, "probe_answered"))
+        assert len(relinks(first)) == 1
+    finally:
+        first.stop()
+    assert until(lambda: [e.value["state"] for e in facts(probes.feed, "probe_channel")]
+                 == ["open", "closed"])
+    second_ours, second_theirs = message_pair()
+    second = Player(second_theirs)
+    try:
+        probes.adopt(second_ours, RUN)  # the Player reconnected: a new channel instance
+        assert until(lambda: relinks(second))
+        for _ in range(10):
+            probes.owe_relink(RUN)
+            time.sleep(0.02)
+        assert len(relinks(second)) == 1 and len(facts(probes.feed, "relink_sent")) == 2
+    finally:
+        second.stop()
+
+
+def test_nothing_owed_sends_no_relink(probes):
+    probes.publish_run(RUN, False)
+    probes.owe_relink(RUN)
+    probes.owe_relink(None)  # the Player proved again: the slot holds its new link
+    ours, theirs = message_pair()
+    player = Player(theirs)
+    try:
+        probes.adopt(ours, RUN)
+        assert until(lambda: facts(probes.feed, "probe_answered"))
         time.sleep(0.1)
-        assert sum(type(m).__name__ == "NodeRelinkV2" for m in player.received) == 1
+        assert relinks(player) == [] and facts(probes.feed, "relink_sent") == []
+    finally:
+        player.stop()
+
+
+def test_a_run_change_drops_the_owed_relink(probes):
+    probes.publish_run(RUN, False)
+    probes.owe_relink(RUN)
+    probes.publish_run(OTHER, False)
+    ours, theirs = message_pair()
+    player = Player(theirs)
+    try:
+        assert until(lambda: facts(probes.feed, "probe_unanswered", run=OTHER))
+        probes.publish_run(RUN, False)  # the old run's key again: still nothing owed
+        probes.adopt(ours, RUN)
+        assert until(lambda: facts(probes.feed, "probe_answered"))
+        assert relinks(player) == []
+    finally:
+        player.stop()
+
+
+class Unwritable:
+    """A real channel end whose first `blocked` sends report EAGAIN (the Player not reading)."""
+
+    def __init__(self, connection, blocked):
+        self.connection, self.blocked, self.refused = connection, blocked, 0
+
+    def fileno(self):
+        return self.connection.fileno()
+
+    def setblocking(self, flag):
+        self.connection.setblocking(flag)
+
+    def recv(self, size):
+        return self.connection.recv(size)
+
+    def send(self, packet, flags=0):
+        if self.refused < self.blocked:
+            self.refused += 1
+            raise BlockingIOError()
+        return self.connection.send(packet, flags)
+
+    def close(self):
+        self.connection.close()
+
+
+def test_an_unsent_relink_is_retried_on_a_later_pass(probes):
+    ours, theirs = message_pair()
+    channel = Unwritable(ours, blocked=3)
+    player = Player(theirs)
+    try:
+        probes.publish_run(RUN, False)
+        probes.owe_relink(RUN)
+        probes.adopt(channel, RUN)
+        assert until(lambda: relinks(player))
+        assert channel.refused == 3 and len(relinks(player)) == 1
+        assert len(facts(probes.feed, "relink_sent")) == 1
     finally:
         player.stop()
 

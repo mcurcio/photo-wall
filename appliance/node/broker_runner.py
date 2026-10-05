@@ -17,7 +17,7 @@ from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
 from appliance.clock import boot_id, boottime_ms
 from appliance.feed import Feed, answer_feed_read
-from appliance.node.app_link import BrokerLinkService, deliver_app_link
+from appliance.node.app_link import BrokerLinkService, deliver_app_link, owed_relink
 from appliance.node.broker import AppEffectBroker, ColdStart
 from appliance.node.lifecycle_storage import FileEffectJournal, primitive, running_from
 from appliance.node.online_runner import OnlineRunner
@@ -173,6 +173,13 @@ class BrokerLoop:
         if known:
             # B8 supplies the recovery predicate; until then nothing consumes a kill.
             self.probes.publish_run(run, recovery_may_be_armed=False)
+            # The owed relink is restated every known turn, grant or not (delivery needs one);
+            # the boot store keeps it across a broker restart.
+            try:
+                self.probes.owe_relink(owed_relink(self.store, run))
+            except ValueError:
+                if self.store.failed:
+                    raise
         if known and granted:
             # Proofs are accepted locally; Central learns of them here, never inside a proof.
             try:
