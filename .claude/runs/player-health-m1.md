@@ -94,7 +94,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B9 catalogue + judge core | landed | c279b24 | fault catalogue, K-rule judge, health runner + sandboxed unit staged in node-base deb |
 | B10a kernel feed listener + display feed snapshot | landed | cc98853 | kernel FeedListener lifted to appliance/feed_socket.py; display feed (uids 0,10006) with outputs snapshot |
 | B10b judge display verdict + overlay op | landed | 96f681c | judge drains display feed, per-Output verdict + projection; overlay op for uid 10005 only |
-| B11 overlay health drawing | open | | |
+| B11 overlay health drawing | landed | c6953f6 | health layer mapped 1×1 transparent then full-Output tint + card per judge instruction; presented reports; stale after V; errata E-B11-1..6 |
 | B12 starve role; leg complete | open | | |
 | D1 docs | open | | |
 | Architect pass 3 / M1 coherence + milestone gate | open | | |
