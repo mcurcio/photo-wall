@@ -3,7 +3,8 @@
 `BrokerLinkService.handle` answers `accepted` with no Central round trip (and keeps the
 `local-app-control` write the recovery obligation reads); `deliver_app_link` delivers the
 latest link per app run from the main loop, keeps it on every transient failure, and turns
-it into an owed relink (`{"relink": run}`) when Central can never accept it.
+it into an owed relink (`{"relink": run, "episode": nonce}`, a fresh episode per refusal)
+when Central can never accept it.
 """
 import http.client
 import time
@@ -19,7 +20,7 @@ from appliance.node import app_link
 from appliance.node.app_link import OUTBOX, BrokerLinkService, deliver_app_link, owed_relink
 from appliance.node.broker import RunningApp
 from appliance.node.broker_runner import BrokerLoop
-from appliance.node.probe import AppRunKey
+from appliance.node.probe import AppRunKey, OwedRelink
 from contracts.node_app_link import (
     NodeAppLinkV2,
     encode_node_app_link,
@@ -60,6 +61,14 @@ class Blackhole(Session):
         self.requests.append((method, path, body))
         time.sleep(BLACKHOLE_SECONDS)
         raise TimeoutError()
+
+
+def owes(store, run):
+    """The slot owes `run` a relink: `{"relink": run, "episode": <32 hex>}`; the episode."""
+    slot = store.read(OUTBOX)
+    assert set(slot) == {"relink", "episode"} and slot["relink"] == run.document(), slot
+    assert len(slot["episode"]) == 32 and int(slot["episode"], 16) >= 0, slot
+    return slot["episode"]
 
 
 class Relinks:
@@ -199,8 +208,7 @@ def test_a_permanent_refusal_owes_that_run_a_relink(monkeypatch, node, status):
     prove(monkeypatch, node, running, session)
     deliver_app_link(node.store, session, relinks, current=AppRunKey.of(running))
     run = AppRunKey.of(running)
-    assert node.store.read(OUTBOX) == {"relink": run.document()}
-    assert owed_relink(node.store, run) == run
+    assert owed_relink(node.store, run) == OwedRelink(run, owes(node.store, run))
     assert [(e.kind, e.value) for e in relinks.feed.read(0, incarnation=None).events] == [
         ("app_link_refused", {"run": run.document(), "status": status, "reason": "central_refused"})]
 
@@ -214,7 +222,7 @@ def test_a_link_proved_under_another_session_relinks_without_posting(monkeypatch
     session.grant = NodeSessionGrant(node.producer, uuid4(), node.grant.offer_id, 500, "app_effect")
     deliver_app_link(node.store, session, relinks, current=AppRunKey.of(running))
     run = AppRunKey.of(running)
-    assert session.requests == [] and node.store.read(OUTBOX) == {"relink": run.document()}
+    assert session.requests == [] and owes(node.store, run)
     assert relinks.feed.read(0, incarnation=None).events[0].value == {
         "run": run.document(), "status": None, "reason": "session_changed"}
 
@@ -235,7 +243,7 @@ def owe(monkeypatch, node, running):
     session = Session(node.store, node.grant, [409])
     prove(monkeypatch, node, running, session)
     deliver_app_link(node.store, session, Relinks(), current=AppRunKey.of(running))
-    assert node.store.read(OUTBOX) == {"relink": AppRunKey.of(running).document()}
+    owes(node.store, AppRunKey.of(running))
     return session
 
 
@@ -243,11 +251,11 @@ def test_an_owed_relink_is_never_posted(monkeypatch, node):
     running = running_app()
     session = owe(monkeypatch, node, running)
     session.statuses = [200]
-    relinks = Relinks()
+    relinks, slot = Relinks(), node.store.read(OUTBOX)
     for _ in range(3):
         deliver_app_link(node.store, session, relinks, current=AppRunKey.of(running))
     assert len(session.requests) == 1  # the refused link's POST only
-    assert node.store.read(OUTBOX) == {"relink": AppRunKey.of(running).document()}
+    assert node.store.read(OUTBOX) == slot  # same run, same episode
     assert relinks.feed.read(0, incarnation=None).events == ()
 
 
@@ -269,6 +277,21 @@ def test_the_players_next_proof_settles_the_owed_relink(monkeypatch, node):
     prove(monkeypatch, node, running, session)  # the Player relinked: latest proof wins
     assert "link" in node.store.read(OUTBOX)
     assert owed_relink(node.store, AppRunKey.of(running)) is None
+
+
+def test_each_refusal_of_a_run_owes_a_new_relink_episode(monkeypatch, node):
+    """B7c: the Player relinked and Central refused its new link too: a new episode, so a
+    channel that already carried the first relink carries this one as well."""
+    running = running_app()
+    run = AppRunKey.of(running)
+    session = owe(monkeypatch, node, running)
+    first = owes(node.store, run)
+    session.statuses = [409]
+    prove(monkeypatch, node, running, session)  # the Player relinked
+    assert owed_relink(node.store, run) is None
+    deliver_app_link(node.store, session, Relinks(), current=run)
+    second = owes(node.store, run)
+    assert second != first and owed_relink(node.store, run) == OwedRelink(run, second)
 
 
 def test_no_grant_holds_the_slot(monkeypatch, node):
@@ -318,9 +341,10 @@ def test_every_known_turn_restates_the_owed_relink_with_or_without_a_grant(monke
     session = owe(monkeypatch, node, running)
     session.statuses = [200, 200]  # process evidence on each granted turn
     monkeypatch.setattr("appliance.node.broker_runner.boottime_ms", lambda: 1000)
+    owed = OwedRelink(AppRunKey.of(running), owes(node.store, AppRunKey.of(running)))
     for granted in (False, True):
         probes = loop_turn(node, running, session, granted=granted)
-        assert probes.owed == [AppRunKey.of(running)]
+        assert probes.owed == [owed]
     assert [path for _, path, _ in session.requests] == [
         "/v2/node/app-links", "/v2/node/evidence"]  # the owed relink itself is never POSTed
     prove(monkeypatch, node, running, session)

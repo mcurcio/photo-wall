@@ -77,6 +77,15 @@ class KillDue:
     unanswered_ms: int
 
 
+@dataclass(frozen=True, slots=True)
+class OwedRelink:
+    """The outbox owes `run`'s Player a relink; `episode` names the refusal that owed it, so
+    each new refusal of the same run is a new relink (once per channel instance per episode)."""
+
+    run: AppRunKey
+    episode: str
+
+
 def recovery_may_be_armed(record: dict | None, armed: dict | None,
                           acknowledged: dict | None) -> bool:
     """False only when every obligation that may be armed is the one `acknowledged` names.
@@ -175,6 +184,6 @@ class ProbeClock:
 
 __all__ = [
     "KILL_AFTER_MS", "MISS_LIMIT", "PROBE_PERIOD_MS", "RECOVERY_ACKNOWLEDGED", "RECOVERY_ARMED",
-    "SHIPPED_TIMING", "STARTUP_BUDGET_MS", "AppRunKey", "KillDue", "ProbeClock", "ProbeFact", "ProbeTiming",
-    "recovery_may_be_armed",
+    "SHIPPED_TIMING", "STARTUP_BUDGET_MS", "AppRunKey", "KillDue", "OwedRelink", "ProbeClock", "ProbeFact",
+    "ProbeTiming", "recovery_may_be_armed",
 ]

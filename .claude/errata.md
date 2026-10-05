@@ -4098,3 +4098,16 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   while an older one is uncontrolled. Cost: a stage stuck in `preparing` (roots unverified, capacity) withholds kills
   for as long as it stays there, even with nothing armed; the key alone would be exact there (decided literal, per
   the fix brief). For D1: boot-store key `recovery-armed` {operation_id}.
+
+## 2026-10-05 · player-health M1 B7c relink per owed episode (implementer) · appliance/node/{probe,probe_channel,app_link}.py
+- E-B7c-1 · Defect (B8 verifier, unresponsive leg: `app_link_refused` at seq 32/50/64 never followed by `relink_sent`),
+  fixed: B7b's `_Channel.relinked` was a bool, so a channel that carried one relink never carried another; a second
+  Central refusal of the same run on a long-lived probe channel was silently dropped (`owe_relink(run)` with an equal
+  run was not even a change). B7b's page said "sent at most once per channel" — that rule was the bug: the latch is
+  now **per owed episode**. The slot is `{"relink": run, "episode": <32 hex nonce>}`, a fresh nonce per `_refused`;
+  `owed_relink(store, current) -> OwedRelink(run, episode) | None` (new frozen `OwedRelink`, probe.py beside
+  `KillDue`); `ProbeThread.owe_relink(OwedRelink | None)`; `_Channel.relinked` holds the episode it carried, set only
+  on a successful send. B7b guarantees kept: once per channel per episode, durable across a broker restart, EAGAIN
+  retried, a new channel gets the current episode, a run change or a new proof clears it, never POSTed. A slot without
+  `episode` (pre-B7c store) reads as episode "". broker_runner.py unchanged. For D1: slot state
+  `{"relink": run, "episode"}` (item iv); `relink_sent` stays {run}.

@@ -12,7 +12,7 @@ from appliance.feed import Feed
 from appliance.node import app_link
 from appliance.node.app_link import BrokerLinkService
 from appliance.node.broker import RunningApp
-from appliance.node.probe import AppRunKey, ProbeTiming
+from appliance.node.probe import AppRunKey, OwedRelink, ProbeTiming
 from appliance.node.probe_channel import ProbeThread
 from contracts.node_app_link import (
     encode_node_app_link_result,
@@ -26,6 +26,7 @@ from contracts.node_protocol import NodeProcessIdentity
 FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=150, kill_after_ms=400)
 RUN = AppRunKey(uuid4(), 4242, 31751781, 1)
 OTHER = AppRunKey(uuid4(), 4343, 31751999, 2)
+OWED = OwedRelink(RUN, "a" * 32)  # one owed episode for RUN (one Central refusal)
 
 
 def monotonic_ms():
@@ -293,10 +294,10 @@ def test_relink_reaches_only_the_owed_runs_channel(probes):
         probes.publish_run(RUN, False)
         probes.adopt(ours, RUN)
         assert until(lambda: facts(probes.feed, "probe_answered"))
-        probes.owe_relink(OTHER)
+        probes.owe_relink(OwedRelink(OTHER, "a" * 32))
         time.sleep(0.15)
         assert relinks(player) == []
-        probes.owe_relink(RUN)
+        probes.owe_relink(OWED)
         assert until(lambda: relinks(player))
         assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}]
     finally:
@@ -306,7 +307,7 @@ def test_relink_reaches_only_the_owed_runs_channel(probes):
 def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(probes):
     """E-B7-3: the channel is down (broker restart, Player backoff) when the relink is owed."""
     probes.publish_run(RUN, False)
-    probes.owe_relink(RUN)
+    probes.owe_relink(OWED)
     time.sleep(0.15)  # several thread passes with nothing to send it on
     ours, theirs = message_pair()
     player = Player(theirs)
@@ -326,7 +327,7 @@ def test_a_relink_is_sent_once_per_channel_instance(probes):
     try:
         probes.adopt(first_ours, RUN)
         for _ in range(15):  # the main loop restates the owed relink every turn
-            probes.owe_relink(RUN)
+            probes.owe_relink(OWED)
             time.sleep(0.02)
         assert until(lambda: facts(probes.feed, "probe_answered"))
         assert len(relinks(first)) == 1
@@ -340,16 +341,40 @@ def test_a_relink_is_sent_once_per_channel_instance(probes):
         probes.adopt(second_ours, RUN)  # the Player reconnected: a new channel instance
         assert until(lambda: relinks(second))
         for _ in range(10):
-            probes.owe_relink(RUN)
+            probes.owe_relink(OWED)
             time.sleep(0.02)
         assert len(relinks(second)) == 1 and len(facts(probes.feed, "relink_sent")) == 2
     finally:
         second.stop()
 
 
+def test_each_owed_episode_reaches_a_long_lived_channel_once(probes):
+    """B7c: Central refuses the same run's link again after the Player relinked on this
+    channel; the new episode is sent on the same channel, once, and counted once."""
+    ours, theirs = message_pair()
+    player = Player(theirs)
+    try:
+        probes.publish_run(RUN, False)
+        probes.adopt(ours, RUN)
+        probes.owe_relink(OWED)
+        assert until(lambda: len(relinks(player)) == 1)
+        probes.owe_relink(None)  # the Player proved again: the slot holds its new link
+        for episode in ("b" * 32, "c" * 32):  # two later refusals of that link, each restated
+            for _ in range(5):
+                probes.owe_relink(OwedRelink(RUN, episode))
+                time.sleep(0.02)
+        assert until(lambda: len(relinks(player)) == 3)
+        time.sleep(0.15)  # restated every turn: still once per episode
+        assert len(relinks(player)) == 3
+        assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}] * 3
+        assert [e.value["state"] for e in facts(probes.feed, "probe_channel")] == ["open"]
+    finally:
+        player.stop()
+
+
 def test_nothing_owed_sends_no_relink(probes):
     probes.publish_run(RUN, False)
-    probes.owe_relink(RUN)
+    probes.owe_relink(OWED)
     probes.owe_relink(None)  # the Player proved again: the slot holds its new link
     ours, theirs = message_pair()
     player = Player(theirs)
@@ -364,7 +389,7 @@ def test_nothing_owed_sends_no_relink(probes):
 
 def test_a_run_change_drops_the_owed_relink(probes):
     probes.publish_run(RUN, False)
-    probes.owe_relink(RUN)
+    probes.owe_relink(OWED)
     probes.publish_run(OTHER, False)
     ours, theirs = message_pair()
     player = Player(theirs)
@@ -409,7 +434,7 @@ def test_an_unsent_relink_is_retried_on_a_later_pass(probes):
     player = Player(theirs)
     try:
         probes.publish_run(RUN, False)
-        probes.owe_relink(RUN)
+        probes.owe_relink(OWED)
         probes.adopt(channel, RUN)
         assert until(lambda: relinks(player))
         assert channel.refused == 3 and len(relinks(player)) == 1

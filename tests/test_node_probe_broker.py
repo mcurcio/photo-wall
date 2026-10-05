@@ -18,7 +18,7 @@ from appliance.feed import Feed
 from appliance.node import app_link, broker_runner
 from appliance.node.broker import RunningApp
 from appliance.node.broker_runner import BrokerLoop, FeedListener
-from appliance.node.probe import AppRunKey, ProbeTiming
+from appliance.node.probe import AppRunKey, OwedRelink, ProbeTiming
 from appliance.node.probe_channel import ProbeThread
 from contracts.node_app_link import parse_node_probe_channel_message
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
@@ -263,17 +263,65 @@ def test_a_relink_owed_before_a_broker_restart_reaches_the_next_channel(tmp_path
         store.close()
 
 
+def test_every_refusal_on_a_long_lived_channel_is_relinked(tmp_path, monkeypatch):
+    """B7c: one probe channel lives across two Central refusals of the same run's link (the
+    Player re-proved in between): each refusal sends its own relink on that channel."""
+    pending = []
+    links = SimpleNamespace(remember_grant=lambda: None,
+                            serve_one=lambda: pending and loop.probes.adopt(*pending.pop()))
+    loop, feed, _, _, running, store = loop_for(tmp_path, monkeypatch, granted=False, links=links)
+    run = AppRunKey.of(running)
+    ours, theirs = (socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) if LINUX
+                    else socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM))
+    theirs.settimeout(2)
+
+    def relinks_received():
+        kinds = []
+        theirs.setblocking(False)
+        try:
+            while True:
+                kinds.append(type(parse_node_probe_channel_message(theirs.recv(9000))).__name__)
+        except BlockingIOError:
+            pass
+        return kinds.count("NodeRelinkV2")
+
+    try:
+        pending.append((ours, run))
+        turns(loop, 0.1)
+        for refusal in range(2):
+            app_link._refused(store, SimpleNamespace(feed=feed), run, status=409, reason="central_refused")
+            turns(loop, 0.15)  # restated every turn
+            assert relinks_received() == 1, refusal
+            store.write(app_link.OUTBOX, {"run": run.document(), "player_id": "p", "link": "{}"})
+            turns(loop, 0.05)  # the Player re-proved: nothing owed until Central refuses again
+        events = feed.read(0, incarnation=None, limit=8)
+        kinds = []
+        after = 0
+        while events.events:
+            kinds += [(e.kind, e.value.get("state")) for e in events.events
+                      if e.kind in ("relink_sent", "probe_channel", "app_link_refused")]
+            after = events.events[-1].sequence
+            events = feed.read(after, incarnation=None, limit=8)
+        assert kinds == [("probe_channel", "open"),
+                         ("app_link_refused", None), ("relink_sent", None),
+                         ("app_link_refused", None), ("relink_sent", None)]
+    finally:
+        loop.probes.close()
+        theirs.close()
+        store.close()
+
+
 def test_a_turn_owes_nothing_when_the_slot_holds_no_relink(tmp_path, monkeypatch):
     loop, _, _, _, running, store = loop_for(tmp_path, monkeypatch, granted=False)
     owed = []
     loop.probes.owe_relink = owed.append
     try:
         loop.turn()
-        store.write(app_link.OUTBOX, {"relink": AppRunKey.of(running).document()})
+        store.write(app_link.OUTBOX, {"relink": AppRunKey.of(running).document(), "episode": "e1"})
         loop.turn()
-        store.write(app_link.OUTBOX, {"relink": AppRunKey(uuid4(), 1, 2, 3).document()})
+        store.write(app_link.OUTBOX, {"relink": AppRunKey(uuid4(), 1, 2, 3).document(), "episode": "e2"})
         loop.turn()
-        assert owed == [None, AppRunKey.of(running), None]
+        assert owed == [None, OwedRelink(AppRunKey.of(running), "e1"), None]
     finally:
         loop.probes.close()
         store.close()

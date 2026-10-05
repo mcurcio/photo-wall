@@ -22,7 +22,7 @@ from appliance.clock import boottime_ms
 from appliance.feed import Feed
 from appliance.node.lifecycle_storage import primitive
 from appliance.node.online_broker import refused_permanently
-from appliance.node.probe import AppRunKey
+from appliance.node.probe import AppRunKey, OwedRelink
 from appliance.unix_credentials import receive_credential_packet
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
@@ -38,7 +38,8 @@ from contracts.node_commands import encode_session_grant, parse_session_grant
 from contracts.strict_json import loads_object
 
 # One slot, three states: the latest accepted app link `{"run", "player_id", "link"}`; an
-# owed relink `{"relink": run}` (Central refused the link; cleared by the Player's next
+# owed relink `{"relink": run, "episode": nonce}` (Central refused the link; a fresh episode
+# per refusal, so a run refused again is relinked again; cleared by the Player's next
 # accepted proof, which replaces the slot, or by a run change); `{}` when empty.
 OUTBOX = "app-link-outbox"
 LOG = logging.getLogger(__name__)
@@ -241,18 +242,19 @@ def deliver_app_link(store, session: NodeSession, probes: BrokerFeed, *, current
         _refused(store, probes, current, status=status, reason="central_refused")
 
 
-def owed_relink(store, current: AppRunKey | None) -> AppRunKey | None:
-    """The run whose Player the outbox owes a relink: `current` iff the slot names it."""
+def owed_relink(store, current: AppRunKey | None) -> OwedRelink | None:
+    """The relink the outbox owes `current`'s Player, iff the slot names that run."""
     slot = store.read(OUTBOX)
     if current is None or not slot or slot.get("relink") != current.document():
         return None
-    return current
+    return OwedRelink(current, str(slot.get("episode", "")))
 
 
 def _refused(store, probes: BrokerFeed, run: AppRunKey, *, status: int | None, reason: str) -> None:
     # Durable and level-triggered: the main loop restates it to the probe thread every turn
     # (owed_relink -> ProbeThread.owe_relink), so a channel that is down now still gets it.
-    store.write(OUTBOX, {"relink": run.document()})
+    # A fresh episode per refusal: a channel that carried an earlier one carries this one too.
+    store.write(OUTBOX, {"relink": run.document(), "episode": secrets.token_hex(16)})
     probes.feed.append("app_link_refused", {"run": run.document(), "status": status, "reason": reason})
     LOG.warning("broker: app link not recordable (%s, %s); asking the Player to relink", reason, status)
 
