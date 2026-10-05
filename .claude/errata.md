@@ -4048,3 +4048,5 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-B7b-3 · Test seam, not production: macOS reports ENOBUFS (not EAGAIN) on a full AF_UNIX datagram socketpair, so
   the retry test wraps a real channel end whose first sends raise `BlockingIOError` (`Unwritable`,
   tests/test_node_probe_channel.py) instead of filling a buffer. For D1: feed kind `relink_sent` {run} (audience node).
+
+- E-ENV-1 (orchestrator, 2026-10-05, after B7b): running Linux tests in a container that bind-mounts the whole worktree lets the container's `uv sync --frozen` overwrite the host macOS `.venv` (pyvenv.cfg home → /usr/local/bin), breaking `.venv/bin/python` on the host. Rule for all remaining beads: never mount `.venv` into a container — mount the source read-only and create the venv inside the container (e.g. `-v $PWD:/src:ro` then copy to /work, or `UV_PROJECT_ENVIRONMENT=/tmp/venv`). The host venv was repaired with `uv sync --frozen`.
