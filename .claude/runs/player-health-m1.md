@@ -78,7 +78,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 |---|---|---|---|
 | B0 display harness | landed | b380b07 | verified PASS; errata E-B0-1..5 |
 | B1 fixture binds a Frame; `unresponsive` healthy | landed | c96c8bd | verified PASS; errata E-B1-1..3; fixture /Volumes/Dock/tmp/pw-node/aa40113…/fixture |
-| B2a kernel move | open | | |
+| B2a kernel move | landed | 294487a | verified PASS; errata E-B2a-1..4; fixture …/7c3dc1d…/fixture |
 | B2b feed primitive | open | | |
 | B2c lint contracts + ratchet | open | | |
 | Architect pass 1 | open | | |
