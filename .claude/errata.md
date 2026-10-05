@@ -3882,3 +3882,44 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   cleared buffer, then acks, as the C client did on a cairo error), a buffer counts only once committed, and
   `_release` frees counts before closing (BufferError logged). Tests in tests/test_display_overlay_render.py, each
   mutation-probed red.
+
+## 2026-10-05 · player-health M1 B4 shell health layer + fallback tint (implementer) · native/shell.c, native/photo-wall-frame-v1.xml, tests/native_display_smoke.py
+- E-B4-1 · Weston's curtain colour (`weston_curtain_params` → solid buffer → pixman solid fill) is **premultiplied**:
+  the page's RGBA (0.55, 0.35, 0.0, 0.5) passed raw rendered (157, 115, 34) over the probe app (super-luminous,
+  R 0.55 > A 0.5; probed). shell.c passes (0.55·0.5, 0.35·0.5, 0, 0.5), which renders the page's colour at alpha 0.5:
+  (87, 70, 34) over the app, asserted. The existing slate curtains (α 1.0 / 0.96) are unaffected in practice.
+- E-B4-2 · The test client is installed over the spawn path by tests/native_display_smoke.py (which already runs
+  `meson install` in the container), not by scripts/run_display_harness.py; run_display_harness.py is unchanged
+  (the CI job and local runs both go through the smoke, so one install site serves both).
+- E-B4-3 · Harness shape as built: the test client tints only the bottom-right quarter of its health surface, so
+  B0/B5's pixels (40, 40) and the Output centre keep their asserted colours; step (1) reads (560, 420) = app OVER
+  tint. Step (3) needs a **new kill while handed off with the app live** (the B0 kill is after app exit, where the
+  Output is not released, so no fallback is due); the B0 kill and its in-window bind are kept. Step (2): a one-shot
+  mode file (/tmp/pw-health-client-mode) makes the next spawn bind v2 and call `get_health_layer`; the refusal is
+  libwayland-server's own `since` check ("invalid method 3 (since 2 < 3)", read from Weston's log), not shell code.
+  Added beyond the page: tint above the slate, `health_layer_exists` on a second layer per Output (same mode file),
+  the respawned client's layer back above the app, and the layer restored after both refusals.
+- E-B4-4 · Mutation (b) (health layer below the app) turns the harness red first at the earlier
+  `health_layer_above_slate` step; with that step skipped in a scratch copy, step (1) itself is red
+  ((560, 420) = app colour). Mutation (k) → step (3) red; dropping `client != s->diagnostic_client` → the
+  post-handoff in-window foreign bind red.
+- E-B4-5 · For B11: the production client takes the layer with `manager.get_health_layer(surface, output_name)`
+  (pywayland drops the new_id arg); the arg is named `output` per the page although sibling requests say
+  `output_id`. The layer maps at the Output origin with the buffer's own size (no size check; masked to the Output),
+  so a viewporter-scaled 1×1 buffer works. The fallback tint is raised only while handed off: before handoff and
+  after an invalidation the shell's own slate curtain shows instead.
+- E-B4-6 · Fix cycle 1 (security review, fail-open): the fallback tint keyed on the private client's manager
+  bind, so a bound client with no mapped health surface showed nothing (before its first commit, with B5's client,
+  and after an Output reconnect, which unmaps the layer). `fallback_sync` now raises the tint while the Output is
+  handed off AND `o->health` is not a mapped surface; it re-syncs on handoff, invalidate, every health commit (map
+  or NULL-buffer unmap) and health destroy; bind/unbind no longer touch it (`fallback_all` removed). Output re-add
+  needs no call: the Output is not released until the next handoff, which syncs. Harness: test-client modes `bare`
+  (layer, no buffer) and `unmap` (map, then NULL buffer on presented) + marker file; steps
+  `fallback_tint_while_bound_client_maps_no_health_surface`, `fallback_tint_back_when_health_surface_unmapped`,
+  `fallback_tint_dropped_when_health_surface_mapped` (replaces `..._when_private_client_binds`); the harness drains
+  control events while it waits (an undrained queue made the shell drop the control peer). Mutations: bind-keyed
+  shell.c → step (a) red; no sync on NULL-buffer unmap → step (c) red. **Consequences for later beads:** until B11
+  maps a health layer, every handed-off Output on a real node shows the amber fallback tint (B5's client binds v2,
+  no layer); and B11's page says "tint off → NULL buffer", which under this rule raises the fallback tint on a
+  healthy wall — B11 must commit a mapped fully transparent buffer for tint off (NULL only on teardown), or its
+  acceptance "no tint on a healthy wall" fails.

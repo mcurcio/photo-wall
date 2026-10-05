@@ -12,6 +12,7 @@ import json
 import mmap
 import os
 import pathlib
+import shutil
 import signal
 import socket
 import subprocess
@@ -25,6 +26,12 @@ subprocess.run(
 )
 subprocess.run(["meson", "compile", "-C", "/tmp/native-build"], check=True)
 subprocess.run(["meson", "install", "-C", "/tmp/native-build"], check=True)
+# The private client the shell spawns becomes B5's overlay client plus a health layer per Output.
+SPAWNED = "/usr/lib/photo-wall-display/diagnostic-client"
+shutil.copyfile("/smoke/display_harness_health_client.py", SPAWNED)
+os.chmod(SPAWNED, 0o755)
+HEALTH_MODE = "/tmp/pw-health-client-mode"  # display_harness_health_client.py MODE_FILE
+HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
 xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
 subprocess.run(["wayland-scanner", "private-code", xml, "/tmp/xdg-shell.c"], check=True)
@@ -81,20 +88,37 @@ SLATE = (10, 15, 23)  # overlay/render.py slate background (0.04, 0.06, 0.09), o
 PROBE_APP = (0x22, 0x33, 0x44)  # native_display_probe.c fill 0xff223344
 
 
+def over(top, a, under):
+    """pixman OVER of one premultiplied 8-bit source (`top` rgb, alpha `a`) on an opaque pixel."""
+    def channel(colour, below):
+        t = below * (255 - a) + 0x80
+        return min(255, colour + ((t + (t >> 8)) >> 8))
+
+    return tuple(channel(c, u) for c, u in zip(top, under))
+
+
 def testing_slate(alpha=0.96):
     """The slate a starting candidate shows through: cairo's premultiplied ARGB32 for the slate at
     `alpha` (16-bit colour, then the top byte), over the probe app with pixman's OVER rounding."""
-    a = int(alpha * 65535 + 0.5) >> 8
-
-    def over(colour, under):
-        t = under * (255 - a) + 0x80
-        return min(255, (int(colour * alpha * 65535 + 0.5) >> 8) + ((t + (t >> 8)) >> 8))
-
-    return tuple(over(c, u) for c, u in zip((0.04, 0.06, 0.09), PROBE_APP))
+    top = tuple(int(c * alpha * 65535 + 0.5) >> 8 for c in (0.04, 0.06, 0.09))
+    return over(top, int(alpha * 65535 + 0.5) >> 8, PROBE_APP)
 
 
 TESTING_SLATE = testing_slate()  # (10, 16, 25); opaque would be SLATE, 2 off in blue
 assert abs(TESTING_SLATE[2] - SLATE[2]) >= 2, TESTING_SLATE
+# display_harness_health_client.py's tint (premultiplied 0x80 magenta, alpha 0x80) covers the
+# bottom-right quarter of its health surface; HEALTH is a pixel inside it.
+HEALTH = (560, 420)
+
+
+def health_over(under):
+    return over((0x80, 0x00, 0x80), 0x80, under)
+
+
+# shell.c fallback_sync's tint RGBA (0.55, 0.35, 0.0, 0.5) over the app: Weston's solid colour is
+# premultiplied and 16-bit (truncated), pixman takes the top byte.
+FALLBACK = over(tuple(int(c * 0.5 * 0xFFFF) >> 8 for c in (0.55, 0.35, 0.0)),
+                int(0.5 * 0xFFFF) >> 8, PROBE_APP)  # (87, 70, 34); unpremultiplied: (157, 115, 34)
 # DRM fourcc -> wl_shm format: only the two 32-bit formats differ (wl_shm keeps the rest).
 SHM_FORMAT = {0x34325258: 1, 0x34325241: 0}  # XRGB8888, ARGB8888
 root = pathlib.Path("/tmp/pw-display-smoke")
@@ -142,6 +166,18 @@ def read_until(predicate, limit=8):
         if predicate(e):
             return e
     raise AssertionError("event_timeout")
+
+
+def drain():
+    """Keep every event already queued (the shell drops a control peer whose queue fills)."""
+    s.setblocking(False)
+    try:
+        while True:
+            events.append(json.loads(s.recv(16384)))
+    except BlockingIOError:
+        pass
+    finally:
+        s.setblocking(True)
 
 
 def capture_pixel(x, y):
@@ -197,6 +233,64 @@ def assert_pixel(x, y, expected, tolerance=2):
     actual = capture_pixel(x, y)
     assert all(abs(a - e) <= tolerance for a, e in zip(actual, expected)), (x, y, actual, expected)
     return actual
+
+
+def await_pixel(x, y, expected, limit, tolerance=2):
+    """The first capture of (x, y) within `limit` s that matches; else the last one fails."""
+    end = time.monotonic() + limit
+    while True:
+        actual = capture_pixel(x, y)
+        if all(abs(a - e) <= tolerance for a, e in zip(actual, expected)):
+            return actual
+        assert time.monotonic() < end, (x, y, actual, expected)
+        time.sleep(0.05)
+
+
+def hold_pixel(x, y, expected, duration, tolerance=2):
+    """Every capture of (x, y) for `duration` s matches."""
+    end = time.monotonic() + duration
+    while True:
+        actual = assert_pixel(x, y, expected, tolerance)
+        if time.monotonic() >= end:
+            return actual
+        drain()
+        time.sleep(0.05)
+
+
+def await_marker(limit):
+    """The private client's one-shot marker (removed once read), within `limit` s."""
+    marker = pathlib.Path(HEALTH_MARKER)
+    end = time.monotonic() + limit
+    while not marker.exists():
+        assert time.monotonic() < end, "health client marker"
+        drain()
+        time.sleep(0.05)
+    text = marker.read_text()
+    marker.unlink()
+    return text
+
+
+def kill_private_client():
+    """SIGKILL the shell's private client (found by its cmdline); the kill's monotonic time once
+    it has exited. The shell respawns it 2 s after it is gone."""
+    children = pathlib.Path(f"/proc/{p.pid}/task/{p.pid}/children").read_text().split()
+    diag = next(
+        int(pid)
+        for pid in children
+        if b"diagnostic-client" in pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
+    )
+    os.kill(diag, signal.SIGKILL)
+    killed = time.monotonic()
+    while not exited(diag):
+        time.sleep(0.01)
+    return killed
+
+
+def await_log(text, limit):
+    end = time.monotonic() + limit
+    while text not in pathlib.Path("/tmp/pw-weston.log").read_text(errors="replace"):
+        assert time.monotonic() < end, ("weston_log", text)
+        time.sleep(0.1)
 
 
 # A foreign client binding the private manager through the generated bindings. libwayland logs
@@ -270,6 +364,7 @@ try:
     read_until(lambda e: e["event"] == "diagnostic_presented")
     print("PASS app_absent_private_diagnostic_presentation", flush=True)
     print("PASS slate_pixel_captured", assert_pixel(40, 40, SLATE), flush=True)
+    print("PASS health_layer_above_slate", await_pixel(*HEALTH, health_over(SLATE), 3), flush=True)
     (root / "wayland-0").chmod(0o666)
     neg = subprocess.run(
         ["/tmp/probe", "private"],
@@ -331,6 +426,8 @@ try:
     read_until(lambda e: e["event"] == "presented" and e["frame_tag"] == "authored-probe")
     print("PASS separate_handoff_ack_then_admitted_grant", flush=True)
     print("PASS handed_off_app_pixel_captured", assert_pixel(320, 240, PROBE_APP), flush=True)
+    print("PASS health_layer_above_live_app_after_handoff",
+          assert_pixel(*HEALTH, health_over(PROBE_APP)), flush=True)
     revision = {**identity, "config_revision": 2}
     revision_grant = str(uuid.uuid4())
     assert request(
@@ -406,6 +503,32 @@ try:
     assert not request("trial", candidate=json.dumps(delayed))["accepted"]
     read_until(lambda e: e["event"] == "presented" and e["frame_tag"] == "authored-probe")
     print("PASS expired_trial_tombstone_refuses_delayed_candidate", flush=True)
+    # Handed off, app live, private client gone: the shell's own fallback tint covers the Output.
+    pathlib.Path(HEALTH_MARKER).unlink(missing_ok=True)
+    pathlib.Path(HEALTH_MODE).write_text("bare")
+    killed = kill_private_client()
+    print("PASS fallback_tint_without_private_client",
+          await_pixel(320, 240, FALLBACK, 1.0 - (time.monotonic() - killed)), flush=True)
+    foreign_bind_refused()
+    assert time.monotonic() - killed < 1.8, "foreign bind missed the respawn window"
+    print("PASS foreign_bind_refused_without_private_client_after_handoff", flush=True)
+    # The respawned client binds the manager and takes its health layer but maps no buffer: the
+    # bind alone shows nothing, so the tint stays (the rule keys on a mapped health surface).
+    assert await_marker(6) == "bare"
+    print("PASS fallback_tint_while_bound_client_maps_no_health_surface",
+          hold_pixel(320, 240, FALLBACK, 0.5), flush=True)
+    # Mapped (and presented), then a NULL buffer unmaps it: the tint comes back.
+    pathlib.Path(HEALTH_MODE).write_text("unmap")
+    kill_private_client()
+    assert await_marker(6) == "presented"
+    print("PASS fallback_tint_back_when_health_surface_unmapped",
+          await_pixel(320, 240, FALLBACK, 3), flush=True)
+    drain()
+    kill_private_client()
+    print("PASS fallback_tint_dropped_when_health_surface_mapped",
+          await_pixel(320, 240, PROBE_APP, 5), flush=True)
+    print("PASS respawned_health_layer_above_live_app",
+          await_pixel(*HEALTH, health_over(PROBE_APP), 3), flush=True)
     removal = str(uuid.uuid4())
     assert request("withdraw", identity=revision, decision_id=removal)["accepted"]
     removed = next((e for e in events if e["event"] == "role_removed" and e["decision_id"] == removal), None)
@@ -426,23 +549,26 @@ try:
     read_until(lambda e: e["event"] == "invalidated")
     read_until(lambda e: e["event"] == "diagnostic_presented")
     print("PASS app_exit_private_diagnostic_restored", flush=True)
-    children = pathlib.Path(f"/proc/{p.pid}/task/{p.pid}/children").read_text().split()
-    diag = next(
-        int(pid)
-        for pid in children
-        if b"diagnostic-client" in pathlib.Path(f"/proc/{pid}/cmdline").read_bytes()
-    )
-    os.kill(diag, signal.SIGKILL)
-    killed = time.monotonic()
+    print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
+          flush=True)
+    killed = kill_private_client()
     # While no private client is bound (the shell respawns it 2 s after it is gone), the
     # client-identity check alone refuses a foreign bind: no held resource masks it here.
-    while not exited(diag):
-        time.sleep(0.01)
     foreign_bind_refused()
     assert time.monotonic() - killed < 1.8, "foreign bind missed the respawn window"
     print("PASS foreign_bind_refused_without_private_client", flush=True)
     read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
     print("PASS diagnostic_client_crash_recovers", flush=True)
+    # The next spawns misbehave once each (the client consumes the mode file at start).
+    pathlib.Path(HEALTH_MODE).write_text("v2")
+    kill_private_client()
+    await_log("(since 2 < 3)", 6)
+    print("PASS v2_private_client_cannot_get_health_layer", flush=True)
+    pathlib.Path(HEALTH_MODE).write_text("duplicate")
+    await_log("health_layer_exists", 6)
+    print("PASS second_health_layer_per_output_refused", flush=True)
+    print("PASS health_layer_restored_after_refusals",
+          await_pixel(*HEALTH, health_over(SLATE), 5), flush=True)
     print(json.dumps({"events": events}, sort_keys=True), flush=True)
 finally:
     print("RECENT_EVENTS", json.dumps(events[-12:]), flush=True)

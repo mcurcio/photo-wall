@@ -59,7 +59,7 @@
       <arg name="state" type="uint"/>
     </event>
   </interface>
-  <interface name="pw_diagnostic_manager_v1" version="2">
+  <interface name="pw_diagnostic_manager_v1" version="3">
     <description summary="Base-private diagnostic surfaces">
       Only the compositor-created private diagnostic client may bind this global.
       Output events name physical Output pixels. Serial is acknowledged before
@@ -88,5 +88,17 @@
       <arg name="primitives" type="string"/>
       <arg name="visible" type="uint"/>
     </event>
+    <request name="get_health_layer" since="3">
+      <description summary="Give a surface the Output's health layer role">
+        The health layer stacks above every other shell layer, app and slate
+        alike. A buffer maps the surface; a NULL buffer unmaps it. One per Output.
+      </description>
+      <arg name="id" type="new_id" interface="pw_health_layer_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="output" type="string"/>
+    </request>
+  </interface>
+  <interface name="pw_health_layer_v1" version="1">
+    <request name="destroy" type="destructor"/>
   </interface>
 </protocol>
