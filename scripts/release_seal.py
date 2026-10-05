@@ -690,8 +690,6 @@ def dry_run(build: Build) -> Packaged:
     """Package `build` and check the packaged set is exactly the declared release; nothing
     else (no claim, registry, GitHub, stage, promote or publish)."""
     _package(build)
-    from types import SimpleNamespace
-    return SimpleNamespace(assets=(), images=())
     try:
         return verify(build.destination, revision=build.revision)
     except PackagingError as error:
