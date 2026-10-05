@@ -22,7 +22,7 @@ from itertools import count
 
 import pytest
 from console_tasks import connect, visit
-from operator_harness import operator_server, report_readiness
+from operator_harness import operator_server, reload_after, report_readiness
 from playwright.sync_api import expect
 from test_node_boot import cold_setup
 from test_registry import enroll
@@ -300,8 +300,7 @@ def test_a_reload_mid_rollout_sends_nothing_until_resume_and_rederives_the_rows(
         _rolling(page)
         _settle(page)
         assert len(fleet.reboots) == 1
-        page.reload()
-        fleet.reboot(fleet.reboots[0])  # it comes back while the page is away
+        reload_after(page, lambda: fleet.reboot(fleet.reboots[0]))  # it comes back while the page is away
         keep = _section(page, "Put on the wall")
         expect(keep.get_by_role("status")).to_have_text("Paused · 1 of 3 Players on the selection", timeout=10_000)
         expect(keep).to_contain_text("Paused means this page sends no more reboots. Select is fleet-wide")
@@ -504,8 +503,7 @@ def test_a_player_skipped_before_a_reload_gets_zero_reboots_after_resume(page, r
         _rolling(page)
         _settle(page)
         assert len(fleet.reboots) == 1 and skipped_device not in fleet.reboots
-        page.reload()
-        fleet.reboot(fleet.reboots[0])
+        reload_after(page, lambda: fleet.reboot(fleet.reboots[0]))
         keep = _section(page, "Put on the wall")
         expect(keep.get_by_role("status")).to_have_text("Paused · 1 of 3 Players on the selection", timeout=10_000)
         rows = keep.get_by_role("list", name="Players to keep it on", exact=True).get_by_role("listitem")
