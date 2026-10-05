@@ -88,7 +88,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B6 probe channel + probe thread + broker feed | landed | e74b409 | verified PASS; leg: real Player answered all probes; Q1 fence intact; errata E-B6-1..7; B8 must confirm take_kill_due/publish_run ordering |
 | B7 app-link accepted locally + outbox + relink | landed | 7a57afb | verified PASS; security lens PASS; errata E-B7-1..6; open: E-B7-3 relink lost when probe channel down; leg shows 409 refusals before recorded |
 | Architect pass 2 | open | | |
-| B7b relink owed until re-proved (E-B7-3) | open | | added at pass 2 |
+| B7b relink owed until re-proved (E-B7-3) | landed | 32e3b1c | verified PASS; Linux container 113 passed; errata E-B7b-1..3, E-ENV-1 |
 | B8 kill after K (Q1 predicate) | open | | |
 | B9 catalogue + judge core | open | | |
 | B10a kernel feed listener + display feed snapshot | open | | split at pass 2 (E-AP2-4) |
