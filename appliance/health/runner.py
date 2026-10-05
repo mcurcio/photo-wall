@@ -69,7 +69,7 @@ OVERLAY_REFRESH_MS = INSTRUCTION_STALE_MS // 3  # every instruction re-pushed th
 MAX_OVERLAY_CLIENTS = 4  # a fifth connection replaces the oldest (a respawned client)
 MAX_REPORT = 512
 REPORTS_PER_WAKE = 16
-SEQPACKET = getattr(socket, "SOCK_SEQPACKET", socket.SOCK_STREAM)
+SEQPACKET = socket.SOCK_SEQPACKET
 
 
 def shipped_judge() -> HealthJudge:

@@ -25,7 +25,7 @@ FEED_READERS = frozenset({0, 10006})  # root, pw-health
 MAX_REQUEST = 4096
 READ_WAIT_SECONDS = 0.05
 READS_PER_TURN = 8
-SEQPACKET = getattr(socket, "SOCK_SEQPACKET", socket.SOCK_STREAM)
+SEQPACKET = socket.SOCK_SEQPACKET
 RESPONSE_BOUND = b'{"accepted":false,"reason":"response_bound"}'
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from support.packet_pair import packet_pair
 
 from appliance import feed_socket
 from appliance.display_host import runner as display_runner
@@ -463,9 +464,6 @@ def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
 
 # -- the overlay op ------------------------------------------------------------------------
 
-PAIR = socket.SOCK_SEQPACKET if LINUX else socket.SOCK_DGRAM  # packet boundaries kept
-
-
 def judged(outputs=None, *, clock=None):
     clock = clock or Clock()
     display = local_display_reader(Feed(8), outputs or [snapshot_output()])
@@ -490,7 +488,7 @@ def pairs():
     made = []
 
     def make():
-        ours, theirs = socket.socketpair(socket.AF_UNIX, PAIR)
+        ours, theirs = packet_pair()
         made.append(theirs)
         return ours, theirs
 

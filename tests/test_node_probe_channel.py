@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from support.packet_pair import packet_pair
 from test_node_boot import environment
 
 from appliance.feed import Feed
@@ -32,14 +33,6 @@ OWED = OwedRelink(RUN, "a" * 32)  # one owed episode for RUN (one Central refusa
 def monotonic_ms():
     """The node uses CLOCK_BOOTTIME (Linux only); any monotonic ms clock drives the thread."""
     return time.monotonic_ns() // 1_000_000
-
-
-def message_pair():
-    """A connected packet pair (SOCK_SEQPACKET on Linux, as the node; SOCK_DGRAM on macOS)."""
-    try:
-        return socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    except OSError:
-        return socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
 
 
 def facts(feed, kind=None, run=RUN):
@@ -106,7 +99,7 @@ def probes():
 
 
 def test_healthy_channel_is_answered_every_period(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.publish_run(RUN, False)
@@ -126,7 +119,7 @@ def test_healthy_channel_is_answered_every_period(probes):
 
 
 def test_stale_nonces_are_never_answers(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs, answer=lambda nonce: "f" * 64)  # a well-formed answer to no probe
     try:
         probes.publish_run(RUN, False)
@@ -163,7 +156,7 @@ def test_kill_due_is_a_level_while_unanswered_and_the_fact_an_edge(probes):
 
 
 def test_an_answer_ends_the_kill_due_level(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     probes.publish_run(RUN, False)
     assert until(lambda: probes.take_kill_due() is not None)
     player = Player(theirs)  # the app answers again
@@ -183,7 +176,7 @@ def test_an_answer_clears_a_kill_due_latch_set_before_it():
     or the main loop kills an app that recovered. Driven by hand: no thread, no race."""
     now = [0]
     probes = ProbeThread(Feed(512), clock=lambda: now[0], timing=FAST)
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     theirs.setblocking(False)
     try:
         probes.publish_run(RUN, False)
@@ -234,7 +227,7 @@ def test_a_late_thread_turn_is_not_counted():
 
 
 def test_channel_adopted_before_its_run_is_published_is_kept(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.adopt(ours, RUN)  # serve_one runs before this turn's publish
@@ -246,7 +239,7 @@ def test_channel_adopted_before_its_run_is_published_is_kept(probes):
 
 
 def test_a_channel_whose_run_is_not_published_is_closed(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.publish_run(RUN, False)
@@ -263,7 +256,7 @@ def test_a_channel_whose_run_is_not_published_is_closed(probes):
 
 
 def test_any_packet_but_an_answer_ends_the_channel(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     probes.publish_run(RUN, False)
     probes.adopt(ours, RUN)
     assert until(lambda: facts(probes.feed, "probe_channel"))
@@ -288,7 +281,7 @@ def relinks(player):
 
 
 def test_relink_reaches_only_the_owed_runs_channel(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.publish_run(RUN, False)
@@ -309,7 +302,7 @@ def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(p
     probes.publish_run(RUN, False)
     probes.owe_relink(OWED)
     time.sleep(0.15)  # several thread passes with nothing to send it on
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.adopt(ours, RUN)
@@ -322,7 +315,7 @@ def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(p
 
 def test_a_relink_is_sent_once_per_channel_instance(probes):
     probes.publish_run(RUN, False)
-    first_ours, first_theirs = message_pair()
+    first_ours, first_theirs = packet_pair()
     first = Player(first_theirs)
     try:
         probes.adopt(first_ours, RUN)
@@ -335,7 +328,7 @@ def test_a_relink_is_sent_once_per_channel_instance(probes):
         first.stop()
     assert until(lambda: [e.value["state"] for e in facts(probes.feed, "probe_channel")]
                  == ["open", "closed"])
-    second_ours, second_theirs = message_pair()
+    second_ours, second_theirs = packet_pair()
     second = Player(second_theirs)
     try:
         probes.adopt(second_ours, RUN)  # the Player reconnected: a new channel instance
@@ -351,7 +344,7 @@ def test_a_relink_is_sent_once_per_channel_instance(probes):
 def test_each_owed_episode_reaches_a_long_lived_channel_once(probes):
     """B7c: Central refuses the same run's link again after the Player relinked on this
     channel; the new episode is sent on the same channel, once, and counted once."""
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.publish_run(RUN, False)
@@ -376,7 +369,7 @@ def test_nothing_owed_sends_no_relink(probes):
     probes.publish_run(RUN, False)
     probes.owe_relink(OWED)
     probes.owe_relink(None)  # the Player proved again: the slot holds its new link
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         probes.adopt(ours, RUN)
@@ -391,7 +384,7 @@ def test_a_run_change_drops_the_owed_relink(probes):
     probes.publish_run(RUN, False)
     probes.owe_relink(OWED)
     probes.publish_run(OTHER, False)
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         assert until(lambda: facts(probes.feed, "probe_unanswered", run=OTHER))
@@ -429,7 +422,7 @@ class Unwritable:
 
 
 def test_an_unsent_relink_is_retried_on_a_later_pass(probes):
-    ours, theirs = message_pair()
+    ours, theirs = packet_pair()
     channel = Unwritable(ours, blocked=3)
     player = Player(theirs)
     try:

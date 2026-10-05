@@ -8,8 +8,10 @@ in the display harness (tests/native_display_smoke.py, the `production` block).
 from __future__ import annotations
 
 import socket
+import tempfile
 
 import pytest
+from support.packet_pair import LINUX, PACKET_TYPE, packet_pair
 
 from appliance.display_host.overlay import client, health, render
 from appliance.display_host.overlay.health import STALE_PAGE, HealthBoard, HealthOutput, HealthPage
@@ -385,12 +387,13 @@ class _Selector:
 
 
 def link_pair(peer_uid=10006):
-    """A JudgeLink over a datagram socketpair (SEQPACKET's boundaries; macOS has no AF_UNIX
-    SEQPACKET): (link, judge end, instructions taken, closes, selector)."""
+    """A JudgeLink over `packet_pair` (production's SOCK_SEQPACKET on Linux, so a judge's close is
+    a real EOF there; DGRAM on macOS, boundaries only): (link, judge ends, instructions taken,
+    closes, selector)."""
     taken, closes, ends = [], [], []
 
     def connector(path):
-        ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        ours, theirs = packet_pair()
         ends.append(theirs)
         return ours
     link = client.JudgeLink("/run/x.sock", on_instruction=lambda i, now: taken.append(i),
@@ -422,17 +425,49 @@ def test_a_peer_outside_root_and_pw_health_is_refused_and_retried_every_second()
     assert len(ends) == 2
 
 
-def test_an_unparseable_packet_or_eof_closes_the_link_and_forgets_the_connection():
+def closed_reason(caplog):
+    closed = [r.getMessage() for r in caplog.records if r.getMessage().startswith("judge link closed")]
+    return closed[-1] if closed else None
+
+
+def test_an_unparseable_packet_or_eof_closes_the_link_and_forgets_the_connection(caplog):
     link, ends, taken, closes, selector = link_pair()
     link.service(0)
     ends[0].send(b'{"output":"Virtual-1"}')
     selector.registered[link.connection]()
     assert link.connection is None and closes == [True] and not selector.registered
+    assert closed_reason(caplog) == "judge link closed (not an overlay instruction)"
     assert link.next_attempt_ms == 5000 + client.RECONNECT_MS
     link.service(5000 + client.RECONNECT_MS)
+    assert ends[1].recv(64) == b'{"op":"overlay"}'  # drained: the judge's close is a clean EOF
     ends[1].close()
     selector.registered[link.connection]()
-    assert link.connection is None and closes == [True, True]
+    assert link.connection is None and closes == [True, True] and not selector.registered
+    if LINUX:  # SEQPACKET EOF; a macOS DGRAM peer's close reads as a reset instead
+        assert closed_reason(caplog) == "judge link closed (closed by the judge)"
+
+
+def test_a_judge_that_closes_with_the_request_unread_resets_and_closes_the_link(caplog):
+    link, ends, taken, closes, selector = link_pair()
+    link.service(0)
+    ends[0].close()                                 # {"op":"overlay"} never read: ECONNRESET
+    selector.registered[link.connection]()
+    assert link.connection is None and closes == [True] and not selector.registered
+    reason = closed_reason(caplog)
+    assert reason.startswith("judge link closed (receive: ") and "reset" in reason.lower()
+
+
+@pytest.mark.skipif(not LINUX, reason="AF_UNIX SOCK_SEQPACKET is Linux-only")
+def test_the_packet_pair_is_the_socket_type_the_link_connects_with():
+    with (tempfile.TemporaryDirectory(dir="/tmp") as directory,  # AF_UNIX paths are short
+          socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener):
+        path = directory + "/health.sock"
+        listener.bind(path)
+        listener.listen(1)
+        connection = client.connect_seqpacket(path)
+        ours, theirs = packet_pair()
+        with connection, ours, theirs:
+            assert connection.type == ours.type == PACKET_TYPE == socket.SOCK_SEQPACKET
 
 
 def test_a_failed_send_closes_the_link():

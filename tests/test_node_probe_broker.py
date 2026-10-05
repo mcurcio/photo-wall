@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from support.packet_pair import packet_pair
 from test_node_boot import environment
 from test_node_linux_adapters import store as boot_store
 
@@ -233,8 +234,7 @@ def test_a_relink_owed_before_a_broker_restart_reaches_the_next_channel(tmp_path
                             serve_one=lambda: pending and loop.probes.adopt(*pending.pop()))
     loop, feed, _, _, _, store = loop_for(tmp_path, monkeypatch, producer=producer, running=running,
                                           links=links)
-    ours, theirs = (socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) if LINUX
-                    else socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM))
+    ours, theirs = packet_pair()
     theirs.settimeout(2)
     try:
         turns(loop, 0.1)
@@ -258,8 +258,7 @@ def test_every_refusal_on_a_long_lived_channel_is_relinked(tmp_path, monkeypatch
                             serve_one=lambda: pending and loop.probes.adopt(*pending.pop()))
     loop, feed, _, _, running, store = loop_for(tmp_path, monkeypatch, granted=False, links=links)
     run = AppRunKey.of(running)
-    ours, theirs = (socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET) if LINUX
-                    else socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM))
+    ours, theirs = packet_pair()
     theirs.settimeout(2)
 
     def relinks_received():
