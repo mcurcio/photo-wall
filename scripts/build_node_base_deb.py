@@ -32,10 +32,13 @@ POLICIES = {
                                 ("player", "central", "media", "gi"), MappingProxyType({})),
     "manager-supervisor": ClosurePolicy("manager-supervisor", ("appliance.node.manager_launcher",),
                                         ("player", "central", "media", "gi"), MappingProxyType({})),
+    "health-judge": ClosurePolicy("health-judge", ("appliance.health.runner",),
+                                  ("player", "central", "media", "gi"), MappingProxyType({})),
 }
 UNITS = ("photo-wall-node.target", "photo-wall-host-core.service", "photo-wall-app-broker.service",
          "photo-wall-manager-supervisor.service", "photowallbase.slice", "photowallhostcore.slice", "photowallapp.slice",
-         "photowallpreparation.slice", "photo-wall-node-handoff.service", "photo-wall-node-prepare.service", "photo-wall-node-storage.service", "photo-wall-display.service", "photo-wall-display-controller.service")
+         "photowallpreparation.slice", "photo-wall-node-handoff.service", "photo-wall-node-prepare.service", "photo-wall-node-storage.service", "photo-wall-display.service", "photo-wall-display-controller.service",
+         "photo-wall-health.service")
 
 
 def sources(tree: Path) -> set[str]:

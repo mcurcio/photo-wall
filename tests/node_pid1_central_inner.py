@@ -43,6 +43,7 @@ units = [
     "photo-wall-display-controller.service",
     "photo-wall-host-core.service",
     "photo-wall-app-broker.service",
+    "photo-wall-health.service",
     "photo-wall-manager-supervisor.service",
 ]
 for unit in units:
@@ -131,6 +132,7 @@ subprocess.run(
         "photo-wall-host-core.service",
         "photo-wall-manager-supervisor.service",
         "photo-wall-app-broker.service",
+        "photo-wall-health.service",
     ],
     check=True,
 )

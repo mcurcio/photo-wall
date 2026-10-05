@@ -1,0 +1,22 @@
+[Unit]
+Description=Photo Wall health judge (node facts to one verdict)
+ConditionKernelCommandLine=photowall.node=v2
+After=photo-wall-app-broker.service
+
+[Service]
+User=pw-health
+Group=pw-health
+# Reads the node feeds (sockets 0660 root:pw-node-feeds); nothing else.
+SupplementaryGroups=pw-node-feeds
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-health-judge
+Restart=always
+RestartSec=2
+RuntimeDirectory=photo-wall-health
+RuntimeDirectoryMode=0755
+Slice=photowallbase.slice
+MemoryMax=64M
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+PrivateDevices=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=

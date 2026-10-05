@@ -30,7 +30,7 @@ FROZEN_FORBIDDEN_CONTRACTS = {
         {"contracts.node_faults"},
     ),
     SESSION_CONTRACT: (
-        {"appliance.display_host", "appliance.node"},
+        {"appliance.display_host", "appliance.node", "appliance.health"},
         {"appliance.central_session"},
     ),
     "Shared node kernel knows no context": (
@@ -42,7 +42,7 @@ FROZEN_FORBIDDEN_CONTRACTS = {
 
 FROZEN_NODE_LAYERS = [
     "(appliance.authority)",
-    "(appliance.health)",
+    "appliance.health",
     "appliance.display_host | appliance.node",
 ]
 

@@ -97,6 +97,12 @@ for _ in range(64):
  after,incarnation=base,page['publisher_incarnation']
  if len(page['events'])<8:break
 print(json.dumps(pages))"""
+# The health judge's socket (appliance/health/runner.py): op `status`, admitted for uid 0 only.
+HEALTH_SOCKET = "/run/photo-wall-health/health.sock"
+HEALTH_STATUS_SCRIPT = """import socket,sys
+s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+s.settimeout(10);s.connect(sys.argv[1]);s.send(b'{"op":"status"}')
+print(s.recv(1<<20).decode())"""
 
 
 @pytest.fixture
@@ -395,6 +401,7 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
                 "photo-wall-node-prepare.service",
                 "photo-wall-node-storage.service",
                 "photo-wall-app-broker.service",
+                "photo-wall-health.service",
                 "-p",
                 "Id,ActiveState,SubState,Result,ExecMainStatus,MainPID,RootDirectory,User,Group",
                 timeout=30,
@@ -661,10 +668,13 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
             second.capture_and_remove(fixture, sys.exc_info()[1])
 
 
-def unit_properties(node, unit):
-    names = "ActiveState,Result,ExecMainStartTimestampMonotonic"
+def unit_properties_of(node, unit, names):
     shown = node.run("systemctl", "show", unit, "-p", names)
     return dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
+
+
+def unit_properties(node, unit):
+    return unit_properties_of(node, unit, "ActiveState,Result,ExecMainStartTimestampMonotonic")
 
 
 def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
@@ -767,6 +777,16 @@ class NodeFeed:
         return taken
 
 
+def health_status(node):
+    """The health judge's `status` answer, read as root inside the node."""
+    status = json.loads(node.run("/usr/bin/python3", "-c", HEALTH_STATUS_SCRIPT, HEALTH_SOCKET,
+                                 timeout=30))
+    with (node.work / "health-status.jsonl").open("a") as dump:
+        dump.write(json.dumps(status, sort_keys=True) + "\n")
+    assert status.get("accepted") is True, status
+    return status
+
+
 def run_key(current):
     """The broker's AppRunKey document (appliance/node/probe.py) of Central's current link."""
     process = current["process"]
@@ -837,7 +857,9 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
     DiagnosticRelease of the bound Frame on the display feed) and Central's latest decision is
     `already_admitted` for exactly that binding; then for HEALTHY_SECONDS the app keeps
     presenting (no gap of a lease on the node's own clock) and nothing is invalidated, and the
-    broker feed shows the real Player answering progress probes for its run (no miss).
+    broker feed shows the real Player answering progress probes for its run (no miss). The
+    health judge unit is active and restricted to AF_UNIX, reads that broker feed, and judges
+    the healthy run as having no condition.
     """
     phase = "unresponsive"
     components_dir, _, image = node_pid1_inputs
@@ -908,6 +930,18 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
             assert not unsettled_refusals(probes.events), (
                 f"{unsettled_refusals(probes.events)}; evidence: {work}"
             )
+            # The health judge (B9): active, AF_UNIX only, reading this broker feed, and judging
+            # the healthy run as having no condition (never raised over the whole run).
+            judge_unit = unit_properties_of(node, "photo-wall-health.service",
+                                            "ActiveState,RestrictAddressFamilies,User")
+            assert judge_unit == {"ActiveState": "active", "RestrictAddressFamilies": "AF_UNIX",
+                                  "User": "pw-health"}, judge_unit
+            status = health_status(node)
+            judged = status["feeds"]["broker"]
+            assert judged["reads"] > 0 and judged["after"] > 0, judged
+            assert judged["publisher_incarnation"] == str(probes.cursor.incarnation), judged
+            assert status["verdict"]["conditions"] == [], status["verdict"]
+            assert not [entry for entry in status["ring"] if entry["state"] == "raised"], status
             shown = presentations(window, bound["frame_id"])
             assert not invalidations(window), invalidations(window)
             assert len(shown) >= 2, f"no fresh app presentations; evidence: {work}"
@@ -926,6 +960,7 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                         "presentations": len(shown),
                         "max_gap_ms": max(gaps),
                         "probe_answers": len(answered),
+                        "health_verdict": status["verdict"],
                         "app_link_refusals": sum(event["kind"] == "app_link_refused"
                                                  for event in probes.events),
                         "probe_rtt_ms_max": max(event["value"]["rtt_ms"] for event in answered),

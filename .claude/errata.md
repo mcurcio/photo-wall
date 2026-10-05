@@ -4111,3 +4111,39 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   retried, a new channel gets the current episode, a run change or a new proof clears it, never POSTed. A slot without
   `episode` (pre-B7c store) reads as episode "". broker_runner.py unchanged. For D1: slot state
   `{"relink": run, "episode"}` (item iv); `relink_sent` stays {run}.
+
+## 2026-10-05 · player-health M1 B9 catalogue + judge core (implementer) · contracts/node_faults.py, appliance/health/{judge,runner}.py
+- E-B9-1 · Page gap, decided: "`app_killed` keeps the run's condition raised" also **raises** it at once when the
+  judge holds it pending or has not seen it (judge restarted, or a feed replay observes the whole starvation at one
+  instant), and pins it: answers from the killed run never start the clear hold. Without this a judge that missed
+  the window shows no card after the kill (B12 step 4 needs the instruction tint on after `app_killed`).
+- E-B9-2 · Page wording "gap → drop probe-derived state" read as: a pending condition is withdrawn, a running clear
+  hold restarts, the current run is relearned, but a **raised** condition stays raised until fresh answers hold for
+  the clear hold. Dropping a raised one would untint the wall on evidence the judge never saw and, after a kill
+  (no more facts for that run), lose the card for good. Cost: a run that recovered inside a gap stays tinted for one
+  extra hold. Tests: `test_a_feed_gap_withdraws_pending_and_restarts_a_running_hold_but_keeps_raised`.
+- E-B9-3 · One condition per code, carrying the run that holds it: a new run's unanswered facts move it (raised
+  stays raised; a pending one restarts its window), a new run's answers clear an old (killed) run's condition after
+  the hold (system-design tracer step 4, M3 restart). Transition states add `withdrawn` (pending that never raised)
+  to pending/raised/cleared; each ring entry carries `reason` and the verdict `sequence` it produced.
+- E-B9-4 · Additive surface: `HealthJudge.forget(now_ms)`, `.transitions()`, `.ring_dropped`, `.player`
+  (`(run, player_id)` from `app_link_accepted`, for B10b); construction refuses `judge_timing` (non-positive),
+  `fault_catalogue` (row not under its own code) and `fault_code_unknown` (no `app_unresponsive`), besides `k_rule`.
+  `runner.shipped_judge()` is the one K-rule build from `SHIPPED_TIMING` + `PULSE_DEADLINE_MS` + `FAULTS`. `status`
+  answers `{verdict, ring (age_ms on the judge clock), ring_dropped, catalogue (digest), feeds: {broker: {after,
+  publisher_incarnation, reads, gaps, failures, last_failure}}}`; the leg asserts the judge reads the same broker
+  incarnation it does, so "no condition" is not vacuous. For D1.
+- E-B9-5 · DRY debt for B10a: `appliance/health/runner.py` carries its own 4-line `peer_uid` because importing the
+  broker's would put `broker_runner` (and `appliance.central_session`) in the judge closure. B10a's kernel lift
+  (`appliance/feed_socket.py`) must replace this copy too — add `appliance/health/runner.py` to B10a's Files.
+- E-B9-6 · health.sock admission as built: a peer admitted to no operation is closed unread; the op is read first,
+  then admitted per uid (`OPERATIONS = {"status": {0}}`; B10b adds `overlay`); an admitted peer naming an op it is
+  not admitted to is closed with no reply; a malformed request or unknown op from an admitted peer gets
+  `{"accepted": false, "reason": "health_request"}`.
+- E-B9-7 · Cost: the broker answers its feed on its main loop (E-B6-4), so each judge read waits at most 1 s; a
+  longer broker turn ends that judge turn's drain (counted in `failures`) and the abandoned request is answered into a
+  closed socket. The single-threaded judge serves `status` between reads, so a status reply can wait ≤ 1 s. Observed in
+  the B9 `unresponsive` leg: 7 timed-out reads of 101 (`last_failure` TimeoutError), cursor caught up (after 40, no gap).
+- E-B9-8 · Local environment (as E-B5-6): with B9 uncommitted, tests/test_node_component_inputs.py errors (8) because
+  it builds HEAD's tree while scripts/build_node_base_deb.py names the uncommitted `appliance.health.runner`. On a
+  clean checkout of the same tree (dangling commit): 23 passed. Not code.
