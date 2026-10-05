@@ -4,8 +4,10 @@ Each scenario boots the actual sealed node in a privileged arm64 systemd contain
 real HTTP Central on its own database: success (ordered stop-before-start, natural completion),
 failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
-commandable) and refused (a board below the smallest memory class: storage refuses, nothing
-after it runs, and Host Management reports the refusal with its numbers). Hardware is synthetic
+commandable), refused (a board below the smallest memory class: storage refuses, nothing
+after it runs, and Host Management reports the refusal with its numbers) and unresponsive (a
+Frame bound to the real Player's Output is admitted and the app keeps presenting; the starved
+form arrives with the Player health tracer). Hardware is synthetic
 (sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
 DRM/HDMI/PXE claim.
 
@@ -42,7 +44,7 @@ from scripts.player_start_probe import (
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_NODE_PID1"
-SCENARIOS = ("success", "failure", "outage", "reboot", "refused")
+SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "unresponsive")
 
 MASKS = (
     *HOST_ACTING_UNITS,
@@ -60,6 +62,27 @@ FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
 # below the smallest memory class, pi5-4gb's 3584 MiB (appliance/node/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
 SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
+# The unresponsive scenario: bind-to-admission bound, then how long the admitted app must keep
+# presenting. A presentation gap of the shell's lease (shell.c LEASE_MS) invalidates the role.
+ADMIT_SECONDS = 120
+HEALTHY_SECONDS = 20
+LEASE_MS = 5000
+# Reads the display controller's bounded event feed (appliance/display_host/runner.py, op
+# `events`) as root over its root-only ingress socket, draining from argv[1] up to 64 pages.
+DISPLAY_FEED_SCRIPT = """import json,os,socket,struct,sys
+after=int(sys.argv[1]);events=[];page={}
+for _ in range(64):
+ s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+ try:
+  s.settimeout(5);s.connect('/run/photo-wall-display/ingress.sock')
+  s.sendmsg([json.dumps({'op':'events','after':after}).encode()],[(socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('=iII',os.getpid(),os.getuid(),os.getgid()))])
+  page=json.loads(s.recv(65536))
+ finally:s.close()
+ if not page.get('accepted'):break
+ events+=page['events']
+ if page['events']:after=page['events'][-1]['sequence']
+ if len(page['events'])<8:break
+print(json.dumps({'after':after,'events':events,'accepted':bool(page.get('accepted')),'reason':page.get('reason'),'stream_gap':page.get('stream_gap'),'incarnation_id':page.get('incarnation_id')}))"""
 
 
 @pytest.fixture
@@ -521,7 +544,9 @@ def stage_and_complete(fixture, node, phase, reference):
     return status
 
 
-@pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
+@pytest.mark.parametrize(
+    "phase", [name for name in SCENARIOS if name not in ("reboot", "refused", "unresponsive")]
+)
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
     # outage: a successful switch while Central drops every node exchange after accept.
@@ -687,6 +712,147 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             names = {name: value for name, value in host["metrics"]}
             assert names.get("memcg_present") == 1, host
             assert any(name.startswith("memory_peak:") for name in names), host
+            print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
+        finally:
+            node.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+class DisplayFeed:
+    """The display controller's event feed, read as root inside the node; every event is kept
+    in display-feed.jsonl (evidence). A controller restart (new incarnation) rereads from 0."""
+
+    def __init__(self, node):
+        self.node, self.after, self.incarnation, self.events = node, 0, None, []
+
+    def poll(self):
+        result = self.node.container.exec(
+            "/usr/bin/python3", "-c", DISPLAY_FEED_SCRIPT, str(self.after), timeout=30
+        )
+        assert result.returncode == 0, "display feed unreadable: " + result.stderr[-2000:]
+        page = json.loads(result.stdout)
+        assert page["accepted"], page
+        if self.incarnation is not None and page["incarnation_id"] != self.incarnation:
+            self.incarnation, self.after = page["incarnation_id"], 0
+            self.events.append({"kind": "fixture_controller_restarted", "value": {}})
+            return self.poll()
+        self.incarnation, self.after = page["incarnation_id"], page["after"]
+        with (self.node.work / "display-feed.jsonl").open("a") as dump:
+            for event in page["events"]:
+                dump.write(json.dumps(event, sort_keys=True) + "\n")
+        self.events.extend(page["events"])
+        return page["events"]
+
+
+def presentations(events, frame_id):
+    """Node-clock times of the app's compositor presentations of the bound Frame."""
+    return [
+        event["value"]["observed_monotonic_ms"]
+        for event in events
+        if event["kind"] == "CompositorPresentation"
+        and event["value"]["fact"]["frame_id"] == frame_id
+    ]
+
+
+def invalidations(events):
+    return [
+        event
+        for event in events
+        if event["kind"] == "SurfaceFact" and event["value"]["state"] == "invalidated"
+    ]
+
+
+def display_of(fixture, work):
+    display = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/display")
+    (work / "display-latest.json").write_text(json.dumps(display, sort_keys=True))
+    return display
+
+
+def admitted(display, bound):
+    """Central's latest decision for the Output is the one for the admitted bound surface."""
+    surface = display["admitted"]
+    return bool(
+        display["decision"]
+        and display["decision"]["reason"] == "already_admitted"
+        and surface
+        and (surface["frame_id"], surface["binding_generation"], surface["config_revision"])
+        == (bound["frame_id"], bound["binding_generation"], bound["configuration_revision"])
+    )
+
+
+def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path):
+    """Healthy form: a Frame bound to the real Player's Output is admitted, the app presents.
+
+    Before enrollment `/fixture/bind` refuses (409 fixture_player_not_enrolled). After the cold
+    link, the fixture binds a new Frame to Virtual-1 through the Registry calls the operator API
+    makes. Within ADMIT_SECONDS the shell hands the Output to the app (a
+    DiagnosticRelease of the bound Frame on the display feed) and Central's latest decision is
+    `already_admitted` for exactly that binding; then for HEALTHY_SECONDS the app keeps
+    presenting (no gap of a lease on the node's own clock) and nothing is invalidated.
+    """
+    phase = "unresponsive"
+    components_dir, _, image = node_pid1_inputs
+    work = tmp_path
+    with central_fixture(registry, components_dir, {}, work / "central", node_host) as fixture:
+        node = Node(image, work, phase)
+        try:
+            with pytest.raises(urllib.error.HTTPError) as early:
+                request(fixture["host_origin"], fixture["fixture_token"], "/fixture/bind", {})
+            assert (early.value.code, json.load(early.value)) == (
+                409, {"detail": "fixture_player_not_enrolled"}
+            )
+            node.cold(fixture, components_dir)
+            bound = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/bind", {})
+            (work / "bound.json").write_text(json.dumps(bound, sort_keys=True))
+            feed = DisplayFeed(node)
+            deadline = time.monotonic() + ADMIT_SECONDS
+            while True:
+                feed.poll()
+                display = display_of(fixture, work)
+                handed_off = any(
+                    event["kind"] == "DiagnosticRelease"
+                    and event["value"]["surface"]["frame_id"] == bound["frame_id"]
+                    for event in feed.events
+                )
+                if handed_off and admitted(display, bound):
+                    break
+                if time.monotonic() >= deadline:
+                    reason = (display["decision"] or {}).get("reason")
+                    raise AssertionError(
+                        f"Output {bound['output_id']} not admitted within {ADMIT_SECONDS} s; "
+                        f"last display decision reason: {reason}; handoff on the display feed: "
+                        f"{handed_off}; evidence: {work}"
+                    )
+                time.sleep(1)
+            print("ADMITTED", bound["frame_id"], "on", bound["output_id"], flush=True)
+            healthy_from = len(feed.events)
+            end = time.monotonic() + HEALTHY_SECONDS
+            while time.monotonic() < end:
+                time.sleep(1)
+                feed.poll()
+            window = feed.events[healthy_from:]
+            shown = presentations(window, bound["frame_id"])
+            assert not invalidations(window), invalidations(window)
+            assert len(shown) >= 2, f"no fresh app presentations; evidence: {work}"
+            gaps = [later - earlier for earlier, later in zip(shown, shown[1:])]
+            # Fresh across the whole window, on one clock: the node's own monotonic ms.
+            assert shown[-1] - shown[0] >= (HEALTHY_SECONDS - LEASE_MS / 1000) * 1000, shown
+            assert max(gaps) < LEASE_MS, gaps
+            display = display_of(fixture, work)
+            assert admitted(display, bound), display
+            (work / "result.json").write_text(
+                json.dumps(
+                    {
+                        "phase": phase,
+                        "bound": bound,
+                        "display": display,
+                        "presentations": len(shown),
+                        "max_gap_ms": max(gaps),
+                        "hardware": "synthetic sysfs Virtual-1 and actual headless Weston; "
+                        "no physical DRM/HDMI claim",
+                    },
+                    sort_keys=True,
+                )
+            )
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])

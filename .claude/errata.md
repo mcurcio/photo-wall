@@ -3718,3 +3718,21 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   --context=default buildx`"): G-harness (and G-leg's component build) need `PHOTO_WALL_NODE_BUILDER=desktop-linux`
   in the environment. CI (default context) needs nothing.
 - E-B0-5 · The two design files were already in `docs/design/player-health/` (f930a50); B0 copied nothing.
+
+## 2026-10-05 · player-health M1 B1 node-pid1 binds a Frame (implementer) · tests/test_node_pid1.py, tests/node_pid1_central_fixture.py
+- E-B1-1 · The brief's G-leg command does not run on this Mac as written: (a) `python3 scripts/debian_packages.py
+  epoch` is macOS Python 3.9 (`dataclass(slots=)` TypeError) — use `.venv/bin/python`; (b)
+  `scripts.build_node_components` refuses non-Linux (`run_dpkg_deb`: `dpkg_deb_requires_linux`); (c) `docker run
+  python@sha256:<BUILDER_IMAGE>` fails on Docker Desktop ("cannot overwrite digest"); (d) `daemon_image_build`
+  hard-codes `--builder default` (E-B0-4), which `PHOTO_WALL_NODE_BUILDER` does not reach. Local recipe (never
+  committed): `DOCKER_CONTEXT=default` for the whole chain, and the components step via
+  `PYTHONPATH=$PWD .venv/bin/python /Volumes/Dock/tmp/pw-node/build_components_macos.py <same args>`, a wrapper that
+  patches only `run_dpkg_deb` to run `dpkg-deb --build --root-owner-group` in `pw-local-dpkg:builder` (`FROM`
+  BUILDER_IMAGE, built locally with `docker build`). CI (ubuntu-24.04-arm) needs none of this.
+- E-B1-2 · `scripts/build_node_pid1_fixture.py` `build_image` tags the untagged native build image with an alias and
+  `docker rmi`s the alias in `finally`: that deletes the base image (its only reference), so a second fixture build
+  from the same components fails `docker image inspect`. Rebuild components and fixture together (warm: ~1.5 min).
+- E-B1-3 · No Scene needed: the bound real Player presents ~34 frames/s on Virtual-1 with no Scene (B1 page's
+  conditional Scene authoring not taken). Admission = Central's latest decision `retain`/`already_admitted` for the
+  exact bound (frame, binding generation, config revision); the `handoff`/`current_linked_app` decision is superseded
+  within a sample. The fixture adds a read-only `GET /fixture/display` for it (test code only, no Central change).

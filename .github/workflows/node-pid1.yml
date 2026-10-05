@@ -14,6 +14,9 @@ name: Player node real-PID1 lifecycle scenarios
 #   refused   a board below the smallest memory class (a 2 GiB meminfo bound into the storage
 #             unit alone): storage refuses, prepare, broker and manager supervisor never run,
 #             and Central receives the refusal with its numbers in the host facts boot report
+#   unresponsive  a Frame bound to the real Player's Output (/fixture/bind) is admitted: the
+#             shell hands the Output to the app, Central's latest decision is `already_admitted`,
+#             and the app keeps presenting for 20 s (the healthy form of the Player health leg)
 #
 # Each leg boots the components node-components.yml built ONCE for the run (the builder
 # base-image.yml's squashfs bakes, scripts/build_node_components.py) and the PID1 fixture it
@@ -87,7 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [success, failure, outage, reboot, refused]
+        scenario: [success, failure, outage, reboot, refused, unresponsive]
     env:
       REVISION: ${{ inputs.revision || github.sha }}
     steps:
