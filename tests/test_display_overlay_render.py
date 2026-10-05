@@ -32,9 +32,10 @@ YELLOW = (1.0, 1.0, 0.0, 1.0)
 
 def test_render_path_imports_neither_cairo_nor_pywayland():
     code = ("import sys\n"
-            "from appliance.display_host.overlay import render, client\n"
+            "from appliance.display_host.overlay import render, client, health\n"
             "render.render_slate('HDMI-A-1', 1920, 1080, 'starting_new', True)\n"
             "render.render_trial(640, 480, ((0, 0), (1, 0), (1, 1), (0, 1)))\n"
+            "render.render_health(640, 480, health.STALE_PAGE)\n"
             "assert not {'cairo', 'pywayland', '_cffi_backend'} & set(sys.modules), sys.modules\n")
     subprocess.run([sys.executable, "-c", code], check=True, cwd=Path(__file__).parents[1])
 

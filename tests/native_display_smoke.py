@@ -31,6 +31,13 @@ SPAWNED = "/usr/lib/photo-wall-display/diagnostic-client"
 shutil.copyfile("/smoke/display_harness_health_client.py", SPAWNED)
 os.chmod(SPAWNED, 0o755)
 HEALTH_MODE = "/tmp/pw-health-client-mode"  # display_harness_health_client.py MODE_FILE
+# The production client's health drawing (overlay/render.py card_rect) and its fake judge.
+sys.path.append("/current-source")
+from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
+from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
+from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
+from overlay.render import card_rect  # noqa: E402
+
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
 xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
@@ -97,11 +104,16 @@ def over(top, a, under):
     return tuple(channel(c, u) for c, u in zip(top, under))
 
 
+def cairo_over(rgb, alpha, under):
+    """A cairo ARGB32 paint of `rgb` at `alpha` (premultiplied, 16-bit colour, then the top byte)
+    over an opaque pixel, with pixman's OVER rounding."""
+    top = tuple(int(c * alpha * 65535 + 0.5) >> 8 for c in rgb)
+    return over(top, int(alpha * 65535 + 0.5) >> 8, under)
+
+
 def testing_slate(alpha=0.96):
-    """The slate a starting candidate shows through: cairo's premultiplied ARGB32 for the slate at
-    `alpha` (16-bit colour, then the top byte), over the probe app with pixman's OVER rounding."""
-    top = tuple(int(c * alpha * 65535 + 0.5) >> 8 for c in (0.04, 0.06, 0.09))
-    return over(top, int(alpha * 65535 + 0.5) >> 8, PROBE_APP)
+    """The slate a starting candidate shows through, over the probe app."""
+    return cairo_over((0.04, 0.06, 0.09), alpha, PROBE_APP)
 
 
 TESTING_SLATE = testing_slate()  # (10, 16, 25); opaque would be SLATE, 2 off in blue
@@ -119,6 +131,12 @@ def health_over(under):
 # premultiplied and 16-bit (truncated), pixman takes the top byte.
 FALLBACK = over(tuple(int(c * 0.5 * 0xFFFF) >> 8 for c in (0.55, 0.35, 0.0)),
                 int(0.5 * 0xFFFF) >> 8, PROBE_APP)  # (87, 70, 34); unpremultiplied: (157, 115, 34)
+# The production health page (overlay/render.py render_health): black at 0.45 over the app, and
+# its opaque card, slate-coloured.
+HEALTH_TINT = cairo_over((0.0, 0.0, 0.0), 0.45, PROBE_APP)
+CARD_X, CARD_Y, _, _ = card_rect(640, 480)
+CARD_PIXEL = (CARD_X + 2, CARD_Y + 2)
+CARD_LINES = ("Photos paused - the player stopped responding", "app_unresponsive")
 # DRM fourcc -> wl_shm format: only the two 32-bit formats differ (wl_shm keeps the rest).
 SHM_FORMAT = {0x34325258: 1, 0x34325241: 0}  # XRGB8888, ARGB8888
 root = pathlib.Path("/tmp/pw-display-smoke")
@@ -129,7 +147,9 @@ env = {
     "XDG_RUNTIME_DIR": str(root),
     "PHOTO_WALL_CONTROLLER_UID": "0",
     "WAYLAND_DISPLAY": "wayland-0",
+    "PHOTO_WALL_HEALTH_SOCKET": JUDGE_SOCKET,  # inherited by the private client
 }
+judge = JudgeFeeder()
 log = open("/tmp/pw-weston.log", "w")
 p = subprocess.Popen(
     [
@@ -235,14 +255,17 @@ def assert_pixel(x, y, expected, tolerance=2):
     return actual
 
 
-def await_pixel(x, y, expected, limit, tolerance=2):
-    """The first capture of (x, y) within `limit` s that matches; else the last one fails."""
+def await_pixel(x, y, expected, limit, tolerance=2, drained=False):
+    """The first capture of (x, y) within `limit` s that matches; else the last one fails.
+    `drained` keeps the control socket drained while it waits (long waits)."""
     end = time.monotonic() + limit
     while True:
         actual = capture_pixel(x, y)
         if all(abs(a - e) <= tolerance for a, e in zip(actual, expected)):
             return actual
         assert time.monotonic() < end, (x, y, actual, expected)
+        if drained:
+            drain()
         time.sleep(0.05)
 
 
@@ -529,6 +552,56 @@ try:
           await_pixel(320, 240, PROBE_APP, 5), flush=True)
     print("PASS respawned_health_layer_above_live_app",
           await_pixel(*HEALTH, health_over(PROBE_APP), 3), flush=True)
+    # The production client (B11): its own health layer and judge link, against the fake judge.
+    name = output["output_id"]
+    pathlib.Path(HEALTH_MODE).write_text("production")
+    opened = judge.opened
+    killed = kill_private_client()
+    await_pixel(320, 240, FALLBACK, 1.0 - (time.monotonic() - killed))
+    # (1) Mapped (transparent) before any instruction: no magenta, no amber, while the judge
+    # holds back; the shell respawns the client 2 s after it is gone.
+    await_pixel(320, 240, PROBE_APP, 5.0 - (time.monotonic() - killed), tolerance=0, drained=True)
+    hold_pixel(320, 240, PROBE_APP, 1.0, tolerance=0)
+    assert_pixel(*HEALTH, PROBE_APP, tolerance=0)
+    judge.await_client(opened + 1, 3, drain)
+    assert not judge.reports and not judge.refused, (judge.reports, judge.refused)
+    print("PASS production_health_layer_mapped_before_instruction", flush=True)
+    # (2) Tint on: the darkened Output and the card, above the still-live app, reported presented.
+    judge.send(name, 7, True, CARD_LINES)
+    judge.await_report(name, 7, 3, drain)
+    tinted = await_pixel(320, 240, HEALTH_TINT, 1)
+    print("PASS health_tint_and_card_above_live_app", tinted,
+          assert_pixel(*CARD_PIXEL, SLATE), flush=True)
+    # (3) Tint off: a mapped transparent buffer, so the app shows exactly (no amber fallback).
+    judge.send(name, 8, False, ("", ""))
+    judge.await_report(name, 8, 3, drain)
+    await_pixel(320, 240, PROBE_APP, 1, tolerance=0)
+    hold_pixel(320, 240, PROBE_APP, 0.5, tolerance=0)
+    print("PASS health_tint_off_restores_app", assert_pixel(*CARD_PIXEL, PROBE_APP, tolerance=0),
+          flush=True)
+    # (4) A new connection may count from 1 again (a restarted judge): taken, drawn, reported.
+    judge.drop()
+    judge.await_client(opened + 2, 4, drain)
+    judge.send(name, 1, True, CARD_LINES)
+    judge.await_report(name, 1, 3, drain)
+    print("PASS lower_serial_taken_after_reconnect", await_pixel(320, 240, HEALTH_TINT, 1),
+          flush=True)
+    # (5) Silence on an open link: the unavailable card after V, never reported.
+    judge.send(name, 2, False, ("", ""))
+    judge.await_report(name, 2, 3, drain)
+    await_pixel(320, 240, PROBE_APP, 1, tolerance=0)
+    silent_from, reported = time.monotonic(), len(judge.reports)
+    stale = await_pixel(320, 240, HEALTH_TINT, INSTRUCTION_STALE_MS / 1000 + 3, drained=True)
+    assert time.monotonic() - silent_from >= INSTRUCTION_STALE_MS / 1000 - 1.5, "stale too early"
+    assert_pixel(*CARD_PIXEL, SLATE)
+    time.sleep(0.5)
+    assert len(judge.reports) == reported and judge.opened == opened + 2, judge.reports
+    print("PASS stale_card_after_V", stale, flush=True)
+    # Back to the magenta test client for the steps that follow.
+    killed = kill_private_client()
+    print("PASS respawned_health_layer_above_live_app",
+          await_pixel(*HEALTH, health_over(PROBE_APP), 6.0 - (time.monotonic() - killed),
+                      drained=True), flush=True)
     removal = str(uuid.uuid4())
     assert request("withdraw", identity=revision, decision_id=removal)["accepted"]
     removed = next((e for e in events if e["event"] == "role_removed" and e["decision_id"] == removal), None)
@@ -582,5 +655,6 @@ finally:
         p.kill()
         p.wait()
     log.close()
+    judge.close()
     print("WESTON_EXIT", p.returncode, flush=True)
     print(pathlib.Path("/tmp/pw-weston.log").read_text(), flush=True)

@@ -14,6 +14,8 @@ Output. Each must end this client with a protocol error (logged by libwayland to
 Two modes leave the layer unmapped, writing MARKER_FILE once done: `bare` takes the layer and
 commits it without a buffer (marker `bare`); `unmap` maps the tint, then on that commit's
 presentation feedback commits a NULL buffer (marker: the feedback, `presented` or `discarded`).
+`production` runs the production client unchanged (`main()` with its own health hooks and judge
+link), so the smoke can drive the real health drawing against its fake judge.
 Same `sys.path` rule as the production launcher (`-I` implies `-P`).
 """
 import mmap
@@ -100,4 +102,6 @@ class HealthTint:
 
 if __name__ == "__main__":
     mode = read_mode()
+    if mode == "production":
+        sys.exit(main())
     sys.exit(main(hooks=(HealthTint(mode),), manager_version=2 if mode == "v2" else 3))

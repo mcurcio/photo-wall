@@ -869,7 +869,8 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
     broker feed shows the real Player answering progress probes for its run (no miss). The
     health judge unit is active and restricted to AF_UNIX, reads that broker feed, and judges
     the healthy run as having no condition; it also reads the display feed and lists the bound
-    Output with underlay live and its overlay instruction tint off. The display feed socket for
+    Output with underlay live and its overlay instruction tint off, which the overlay client
+    reports presented on the Output's health layer (the judge ring). The display feed socket for
     node readers is pw-display:pw-node-feeds 0660 and its `outputs` snapshot shows the bound
     Output connected with exactly the broker's run admitted.
     """
@@ -967,6 +968,14 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
             }, status["verdict"]
             cards = {entry["output"]: entry for entry in status["overlay"]["instructions"]}
             assert cards.get(bound["output_id"], {}).get("tint") is False, status["overlay"]
+            # The overlay client drew that tint-off instruction on the Output's health layer and
+            # reported it presented (B11): a presented commit carried a buffer, so the health
+            # surface is mapped and the shell's amber fallback tint is off on this healthy wall.
+            card_shown = [entry for entry in status["ring"] if entry["state"] == "presented"
+                     and entry["output"] == bound["output_id"]
+                     and entry["serial"] == cards[bound["output_id"]]["serial"]]
+            assert card_shown, (f"no presented tint-off serial for {bound['output_id']}: "
+                           f"{status['overlay']} {status['ring']}; evidence: {work}")
             # The display feed for node readers (B10a): pw-display:pw-node-feeds 0660, the group
             # from the controller's unit only (never a pw-display membership), and every read's
             # `outputs` snapshot shows the bound Output connected with the broker's run admitted.

@@ -39,7 +39,7 @@ custom_target('overlay-protocol', input: [core_xml, presentation_xml, xml], outp
   command: [python, '-m', 'pywayland.scanner', '-o', '@OUTPUT@', '-i', '@INPUT@'],
   install: true, install_dir: display_dir / 'overlay')
 install_data('overlay/__init__.py', 'overlay/instruction.py', 'overlay/render.py',
-  'overlay/paint.py', 'overlay/client.py', install_dir: display_dir / 'overlay')
+  'overlay/paint.py', 'overlay/health.py', 'overlay/client.py', install_dir: display_dir / 'overlay')
 install_data('overlay/diagnostic-client', install_dir: display_dir, install_mode: 'rwxr-xr-x')
 # This client artifact belongs in the sealed Player .deb, never in its host
 # import fallback path. The native build emits it for the app package builder.

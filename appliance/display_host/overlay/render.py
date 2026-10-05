@@ -1,7 +1,8 @@
 """What the overlay client draws, as a draw-list of plain ops. PURE: no cairo, no Wayland.
 
 `render_slate` is the base page the private client shows under a released Output (and, translucent,
-over a starting candidate: `testing`); `render_trial` is the live-calibration overlay. `paint.paint`
+over a starting candidate: `testing`); `render_trial` is the live-calibration overlay; `render_health`
+is a tint-on health page (the health layer, above everything, app included). `paint.paint`
 executes a draw-list with cairo; tests read the draw-list directly. Text, colours and geometry are
 the retired C client's (native/diagnostic-client.c), so the slate is pixel-identical.
 """
@@ -13,6 +14,10 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .health import HealthPage
 
 RGBA = tuple[float, float, float, float]
 Point = tuple[float, float]
@@ -33,6 +38,8 @@ REASON_TEXT: Mapping[str, str] = MappingProxyType({
 })
 REASON_DEFAULT = "Player output unavailable"
 MAX_PRIMITIVES = 512          # the trial event's primitives text, as the shell bounds it
+HEALTH_TINT_RGBA: RGBA = (0.0, 0.0, 0.0, 0.45)
+CARD_RGBA: RGBA = (*SLATE_RGB, 1.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +130,31 @@ def render_trial(width: int, height: int, points: tuple[Point, Point, Point, Poi
         Line(corners, TRIAL_RGBA, 3.0, closed=True),
         *marks,
         Text(24, 32, 20, "Live calibration - output-space overlay", TRIAL_RGBA),
+    )
+
+
+def card_rect(width: int, height: int) -> tuple[int, int, int, int]:
+    """The health card's (x, y, w, h) on a width x height Output: 60 % wide, centred, its bottom
+    5 % of the height above the Output's bottom edge, at least 48 px tall."""
+    w = round(0.6 * width)
+    h = max(48, round(0.15 * height))
+    return (width - w) // 2, height - h - round(0.05 * height), w, h
+
+
+def render_health(width: int, height: int, page: HealthPage) -> DrawList:
+    """A health page (overlay.health.HealthPage) at the Output's size. Tint on: the whole Output
+    darkened, then the opaque card with the page's two lines. Tint off: fully transparent (the
+    client commits it as a 1 x 1 buffer)."""
+    if not page.tint:
+        return (Paint((0.0, 0.0, 0.0, 0.0), source=True),)
+    x, y, w, h = card_rect(width, height)
+    pad = max(8, round(0.04 * w))
+    first, second = page.lines
+    return (
+        Paint(HEALTH_TINT_RGBA, source=True),
+        Rect(x, y, w, h, CARD_RGBA),
+        Text(x + pad, y + round(0.45 * h), max(12, round(0.26 * h)), first, TEXT_RGBA, "sans"),
+        Text(x + pad, y + round(0.8 * h), max(10, round(0.18 * h)), second, TEXT_RGBA, "sans"),
     )
 
 

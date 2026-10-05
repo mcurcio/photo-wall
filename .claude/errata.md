@@ -4284,3 +4284,31 @@ A post-landing re-review of B10a (cc98853) proved that a same-uid (pw-display, 1
   projected; 2.47 M with one fix cycle); pass 4 + milestone gate only if metered spend after D1 ≤ 1.9 M, else stop
   cleanly after D1 for the owner's next ceiling. Per-bead checks for this session: before B11, spent + 1.5 ≤ 2.5;
   before D1, spent + 0.22 ≤ 2.5; before pass 4, spent + 0.6 ≤ 2.5. A second fix cycle anywhere stops at that gate.
+
+## 2026-10-05 · player-health M1 B11 overlay client draws the health layer (implementer) · appliance/display_host/overlay/{client,render,health}.py
+- E-B11-1 · Page Files omit `appliance/display_host/meson.build`, but its `install_data` lists the overlay modules one by
+  one: without `'overlay/health.py'` the installed client fails `import overlay.health` on the node. Added (one
+  word; no new bindings). D1: none.
+- E-B11-2 · Page gap, decided: `reconnected()` also forgets the connection's instruction, not only what was drawn and
+  reported. Keeping it would repaint the old serial at once and report it to the next connection, i.e. to a restarted
+  judge whose counter restarted at 1 (E-B10b-4) and may project that same number for a different card: a false
+  `presented`. As built the screen keeps its last drawing until the first instruction on the new link (or V → stale
+  card), and `presented(serial)` reports only a serial drawn on the current connection (last 8), once.
+- E-B11-3 · Mutation "accept only a higher serial" must persist across reconnects to reach harness step (4): a
+  per-connection monotonic check is invisible there because of E-B11-2 (probed: harness green, unit red). The
+  cross-connection variant turns step (4) red (no report for serial 1) and the unit red.
+- E-B11-4 · Decided beyond the page: a **paint failure** of a tint-on page commits NULL (amber fallback,
+  fail-visible), like a size refusal; the slate's "commit a cleared buffer" rule (E-B5-8) would hide a fault. Tint
+  off is never painted (a zeroed memfd is transparent ARGB). A NULL commit is not repeated each pass (the page counts
+  as drawn).
+- E-B11-5 · Additive surface (for D1): health.py `HealthBoard` (per-Output states + instructions held for
+  unconfigured Outputs ≤ 16), `health_socket_path`, `JUDGE_UIDS`, `RECONNECT_MS`; client.py `size_admissible`,
+  `OverlayClient.allocate` (shared by slate and health), `JudgeLink`, `HealthLayer` (also a loop hook: `attach`,
+  `service`), `run` (the selectors loop), `late` count of commits not presented within D. Cost: client.py carries its
+  own 3-line `peer_uid` (SO_PEERCRED): the overlay package is installed as top-level `overlay` and may import only
+  itself, so it cannot reuse `appliance.feed_socket.peer_uid`.
+- E-B11-6 · Harness as built: the headless Output's name is `headless` (both the configure and the control socket's
+  `output_id`); step (1) first awaits the amber fallback after the kill so a capture taken before Weston drops the
+  dying magenta client cannot pass it; `await_pixel(drained=True)` keeps the control socket drained over the V wait;
+  `testing_slate` now composes a shared `cairo_over`. The slate-surface mutation turns step (2) red at the
+  presented report (the health surface is never committed), before its pixel check.
