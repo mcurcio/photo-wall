@@ -80,7 +80,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B1 fixture binds a Frame; `unresponsive` healthy | landed | c96c8bd | verified PASS; errata E-B1-1..3; fixture /Volumes/Dock/tmp/pw-node/aa40113…/fixture |
 | B2a kernel move | landed | 294487a | verified PASS; errata E-B2a-1..4; fixture …/7c3dc1d…/fixture |
 | B2b feed primitive | landed | 3d6251c | verified PASS; errata E-B2b-1..4; fixture …/3d6251c…/fixture |
-| B2c lint contracts + ratchet | open | | |
+| B2c lint contracts + ratchet | landed | 8e8facb | verified PASS; 11 contracts; errata E-B2c-1..3 (3 resolved) |
 | Architect pass 1 | open | | |
 | B3 guest contract + Player responder | open | | |
 | B4 shell health layer + fallback tint | open | | |
