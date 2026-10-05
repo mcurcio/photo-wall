@@ -89,8 +89,8 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B7 app-link accepted locally + outbox + relink | landed | 7a57afb | verified PASS; security lens PASS; errata E-B7-1..6; open: E-B7-3 relink lost when probe channel down; leg shows 409 refusals before recorded |
 | Architect pass 2 | open | | |
 | B7b relink owed until re-proved (E-B7-3) | landed | 32e3b1c | verified PASS; Linux container 113 passed; errata E-B7b-1..3, E-ENV-1 |
-| B8 kill after K (Q1 predicate) | open | | |
-| B7c relink per episode | implemented | | fix bead from B8 verifier (E-B7c-1): relink latch per owed episode, not per channel |
+| B8 kill after K (Q1 predicate) | landed | 2ae5522 | verified; leg completed by B7c |
+| B7c relink per episode | landed | 5cf47c5 | relink latch per owed episode (E-B7c-1); fix bead from B8 verifier, completes B8 leg |
 | B9 catalogue + judge core | open | | |
 | B10a kernel feed listener + display feed snapshot | open | | split at pass 2 (E-AP2-4) |
 | B10b judge display verdict + overlay op | open | | split at pass 2 (E-AP2-4) |
