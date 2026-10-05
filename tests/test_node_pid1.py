@@ -99,7 +99,8 @@ for _ in range(64):
  after,incarnation=base,page['publisher_incarnation']
  if len(page['events'])<8:break
 print(json.dumps(pages))"""
-# The health judge's socket (appliance/health/runner.py): op `status`, admitted for uid 0 only.
+# The health judge's socket (appliance/health/runner.py): op `status`, admitted for uid 0 only
+# (op `overlay` is pw-display's).
 HEALTH_SOCKET = "/run/photo-wall-health/health.sock"
 HEALTH_STATUS_SCRIPT = """import socket,sys
 s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
@@ -867,9 +868,10 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
     presenting (no gap of a lease on the node's own clock) and nothing is invalidated, and the
     broker feed shows the real Player answering progress probes for its run (no miss). The
     health judge unit is active and restricted to AF_UNIX, reads that broker feed, and judges
-    the healthy run as having no condition. The display feed socket for node readers is
-    pw-display:pw-node-feeds 0660 and its `outputs` snapshot shows the bound Output connected
-    with exactly the broker's run admitted.
+    the healthy run as having no condition; it also reads the display feed and lists the bound
+    Output with underlay live and its overlay instruction tint off. The display feed socket for
+    node readers is pw-display:pw-node-feeds 0660 and its `outputs` snapshot shows the bound
+    Output connected with exactly the broker's run admitted.
     """
     phase = "unresponsive"
     components_dir, _, image = node_pid1_inputs
@@ -955,6 +957,16 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
             assert judged["publisher_incarnation"] == str(probes.cursor.incarnation), judged
             assert status["verdict"]["conditions"] == [], status["verdict"]
             assert not [entry for entry in status["ring"] if entry["state"] == "raised"], status
+            # The judge also reads the display feed (B10b): the bound Output is connected, its
+            # underlay live (the admitted run is not unresponsive) and its instruction tint off.
+            display_judged = status["feeds"]["display"]
+            assert display_judged["reads"] > 0, display_judged
+            judged_outputs = {entry["output"]: entry for entry in status["verdict"]["outputs"]}
+            assert judged_outputs.get(bound["output_id"]) == {
+                "output": bound["output_id"], "underlay": "live", "codes": []
+            }, status["verdict"]
+            cards = {entry["output"]: entry for entry in status["overlay"]["instructions"]}
+            assert cards.get(bound["output_id"], {}).get("tint") is False, status["overlay"]
             # The display feed for node readers (B10a): pw-display:pw-node-feeds 0660, the group
             # from the controller's unit only (never a pw-display membership), and every read's
             # `outputs` snapshot shows the bound Output connected with the broker's run admitted.
@@ -989,6 +1001,7 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                         "max_gap_ms": max(gaps),
                         "probe_answers": len(answered),
                         "health_verdict": status["verdict"],
+                        "health_overlay": status["overlay"],
                         "display_snapshot": bound_output,
                         "app_link_refusals": sum(event["kind"] == "app_link_refused"
                                                  for event in probes.events),

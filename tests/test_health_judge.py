@@ -4,10 +4,22 @@ from uuid import uuid4
 
 import pytest
 
-from appliance.display_host.overlay.instruction import PULSE_DEADLINE_MS
+from appliance.display_host.overlay.instruction import (
+    MAX_TEXT,
+    PULSE_DEADLINE_MS,
+    OverlayInstruction,
+    PresentedReport,
+)
 from appliance.feed import FeedEvent
 from appliance.health import runner
-from appliance.health.judge import APP_UNRESPONSIVE, RING_CAPACITY, HealthJudge
+from appliance.health.judge import (
+    APP_UNRESPONSIVE,
+    MAX_OUTPUTS,
+    RING_CAPACITY,
+    HealthJudge,
+    OutputVerdict,
+    Presented,
+)
 from appliance.node.probe import SHIPPED_TIMING, AppRunKey
 from contracts import node_faults
 from contracts.node_faults import FAULTS, Fault, catalogue_digest
@@ -259,3 +271,170 @@ def test_the_judge_clock_never_runs_backwards():
     assert states(judge, 0) == [(APP_UNRESPONSIVE, "pending")]
     with pytest.raises(ValueError, match="^judge_clock$"):
         judge.verdict(1.5)
+
+
+# -- per Output: the display snapshot, underlay and the overlay projection -----------------
+
+LINE = FAULTS[APP_UNRESPONSIVE].household_line
+OFF = ("", "")
+
+
+def output(name="Virtual-1", run=RUN, *, connected=True, fault=None):
+    """One entry of Display's `outputs` snapshot (appliance/display_host/runner.py)."""
+    admitted = None if run is None else {**run, "frame_id": "frame-1"}
+    return {"output_id": name, "connected": connected, "admitted": admitted,
+            "diagnostic": "released" if run else "presented", "fault": fault}
+
+
+def underlays(judge, now):
+    return [(o.output, o.underlay, o.codes) for o in judge.verdict(now).outputs]
+
+
+def cards(judge, now):
+    return [(i.output, i.tint, i.lines) for i in judge.instructions(now)]
+
+
+def test_each_connected_output_of_the_snapshot_is_live_or_slate_while_healthy():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output(), output("HDMI-A-2", None),
+                           output("HDMI-A-3", NEXT_RUN, connected=False)], 0)
+    assert underlays(judge, 0) == [("HDMI-A-2", "slate", ()), ("Virtual-1", "live", ())]
+    assert cards(judge, 0) == [("HDMI-A-2", False, OFF), ("Virtual-1", False, OFF)]
+
+
+def test_the_underlay_is_taken_from_the_admission_never_from_the_fault():
+    judge = HealthJudge(**timing())  # E-B10a-7: an admitted Output still shows `app_absent`
+    judge.observe_outputs([output(fault="app_absent")], 0)
+    assert underlays(judge, 0) == [("Virtual-1", "live", ())]
+
+
+def test_the_admitted_unresponsive_run_is_held_and_every_output_shows_the_code():
+    judge = HealthJudge(**timing())
+    judge.observe(fact("app_link_accepted", player_id="player-1"), 0)
+    judge.observe_outputs([output(), output("HDMI-A-2", None), output("HDMI-A-3", NEXT_RUN)], 0)
+    judge.observe(unanswered(), 0)
+    assert underlays(judge, RAISE - 1) == [  # pending is not shown: still live
+        ("HDMI-A-2", "slate", ()), ("HDMI-A-3", "live", ()), ("Virtual-1", "live", ())]
+    raised = (APP_UNRESPONSIVE,)
+    assert underlays(judge, RAISE) == [("HDMI-A-2", "slate", raised),
+                                       ("HDMI-A-3", "live", raised),
+                                       ("Virtual-1", "held", raised)]
+    assert cards(judge, RAISE)[-1] == ("Virtual-1", True, (
+        LINE, "app_unresponsive · Player player-1 · Output Virtual-1"))
+    assert all(tint for _, tint, _ in cards(judge, RAISE))
+
+
+def test_after_the_kill_the_slate_keeps_the_card():
+    judge = raised_judge()
+    judge.observe_outputs([output()], RAISE)
+    judge.observe(fact("app_killed", reason="unresponsive", unanswered_ms=35000), 30000)
+    judge.observe_outputs([output(run=None, fault="surface_lease_or_process_lost")], 30001)
+    assert underlays(judge, 30001) == [("Virtual-1", "slate", (APP_UNRESPONSIVE,))]
+    assert cards(judge, 30001) == [("Virtual-1", True, (
+        LINE, "app_unresponsive · Output Virtual-1"))]  # no accepted link seen: no Player id
+
+
+def test_the_serial_bumps_on_every_change_of_an_outputs_card_and_only_then():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output(), output("HDMI-A-2", None)], 0)
+    healthy = judge.instructions(0)
+    assert judge.instructions(1) == healthy  # unchanged: same serials
+    assert len({i.serial for i in healthy}) == 2
+    judge.observe(unanswered(), 1)
+    judge.observe(unanswered(), 1 + RAISE)
+    tinted = judge.instructions(1 + RAISE)
+    assert len(tinted) == 2
+    assert all(new.tint and new.serial > max(i.serial for i in healthy) for new in tinted)
+    start = RAISE + 2001
+    for now in range(start, start + HOLD + 1, 2000):
+        judge.observe(answered(), now)
+    cleared = judge.instructions(start + HOLD)
+    assert [(i.tint, i.lines) for i in cleared] == [(False, OFF)] * 2
+    assert all(new.serial > max(i.serial for i in tinted) for new in cleared)
+    judge.observe(fact("app_link_accepted", player_id="player-2"), start + HOLD)
+    assert judge.instructions(start + HOLD + 1) == cleared  # lines unchanged while off
+
+
+def test_a_new_player_id_changes_the_card_and_its_serial():
+    judge = raised_judge()
+    judge.observe_outputs([output()], RAISE)
+    before = judge.instructions(RAISE)[0]
+    judge.observe(fact("app_link_accepted", player_id="player-9"), RAISE)
+    after = judge.instructions(RAISE)[0]
+    assert after.serial > before.serial and "Player player-9" in after.lines[1]
+
+
+def test_an_invalidation_refines_the_snapshot_until_the_next_one():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output(), output("HDMI-A-2")], 0)
+    invalidated = FeedEvent(9, "SurfaceFact", {"output": {"output_id": "Virtual-1"},
+                                               "state": "invalidated"}, "node")
+    judge.observe_display(invalidated, 1)
+    assert underlays(judge, 1) == [("HDMI-A-2", "live", ()), ("Virtual-1", "slate", ())]
+    for other in (FeedEvent(10, "CompositorPresentation", {"fact": {}}, "node"),
+                  FeedEvent(11, "SurfaceFact", {"output": {"output_id": "Virtual-1"},
+                                                "state": "presented_to_compositor"}, "node"),
+                  FeedEvent(12, "SurfaceFact", {"output": {"output_id": "DP-9"},
+                                                "state": "invalidated"}, "node")):
+        judge.observe_display(other, 2)
+    assert underlays(judge, 2) == [("HDMI-A-2", "live", ()), ("Virtual-1", "slate", ())]
+    judge.observe_outputs([output(), output("HDMI-A-2")], 3)
+    assert underlays(judge, 3) == [("HDMI-A-2", "live", ()), ("Virtual-1", "live", ())]
+
+
+def test_the_verdict_sequence_bumps_when_an_outputs_verdict_changes():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output()], 0)
+    assert judge.verdict(0).sequence == 1
+    judge.observe_outputs([output()], 1)  # same verdict
+    assert judge.verdict(1).sequence == 1
+    judge.observe_outputs([output(run=None)], 2)
+    assert judge.verdict(2).sequence == 2 and judge.transitions() == ()
+
+
+@pytest.mark.parametrize("snapshot", [
+    None, {}, "x", [1], [{"output_id": "", "connected": True, "admitted": None}],
+    [{"output_id": "V", "admitted": None}],
+    [{"output_id": "V", "connected": 1, "admitted": None}],
+    [{"output_id": "V", "connected": True, "admitted": {"pid": 1}}],
+    [{"output_id": "V", "connected": True, "admitted": {**RUN, "pid": "101"}}],
+    [{"output_id": "V", "connected": True, "admitted": None}] * 2,
+    [{"output_id": f"V{index}", "connected": True, "admitted": None}
+     for index in range(MAX_OUTPUTS + 1)],
+])
+def test_a_malformed_snapshot_is_refused_and_changes_nothing(snapshot):
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output()], 0)
+    with pytest.raises(ValueError, match="^display_snapshot$"):
+        judge.observe_outputs(snapshot, 1)
+    assert underlays(judge, 1) == [("Virtual-1", "live", ())]
+
+
+def test_an_output_name_the_health_layer_cannot_carry_is_not_projected():
+    judge = raised_judge()
+    long = "O" * (MAX_TEXT + 1)
+    judge.observe(fact("app_link_accepted", player_id="p" * 80), RAISE)
+    judge.observe_outputs([output(long), output("Virtual-1")], RAISE)
+    assert [o.output for o in judge.verdict(RAISE).outputs] == [long, "Virtual-1"]
+    [instruction] = judge.instructions(RAISE)
+    assert instruction.output == "Virtual-1" and len(instruction.lines[1]) == MAX_TEXT
+
+
+def test_a_presented_serial_is_kept_in_the_ring_once():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output()], 0)
+    [instruction] = judge.instructions(0)
+    assert judge.presented(PresentedReport("Virtual-1", instruction.serial), 5) is True
+    assert judge.presented(PresentedReport("Virtual-1", instruction.serial), 6) is False
+    assert judge.presented(PresentedReport("Virtual-1", instruction.serial + 1), 6) is False
+    assert judge.presented(PresentedReport("HDMI-A-2", instruction.serial), 6) is False
+    assert judge.transitions() == (Presented(judge.sequence, "Virtual-1", instruction.serial, 5),)
+
+
+def test_the_projection_is_displays_instruction_language():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output()], 0)
+    [instruction] = judge.instructions(0)
+    assert isinstance(instruction, OverlayInstruction) and instruction.serial >= 1
+    assert isinstance(judge.verdict(0).outputs[0], OutputVerdict)
+

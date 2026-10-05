@@ -4181,3 +4181,34 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   reuses inode numbers, so a closed listener whose path a successor already rebound unlinks the successor's socket
   (probed red in python:3.12-slim arm64; that test was dropped). Unreachable in production (one listener per path per
   process lifetime).
+
+## 2026-10-05 · player-health M1 B10b judge display verdict + overlay op (implementer) · appliance/health/{judge,runner}.py
+- E-B10b-1 · Page gap, decided: an Output's `codes` are every **raised** code, node-wide (M1 has one app driving every
+  Output), so every connected Output, including a slate or unbound one, gets the card; after the kill the slate keeps
+  it (B12 step 4). `held` = the admitted run equals the **raised** `app_unresponsive` run (a pending one stays `live`,
+  system design: "Live → Held: judge says unresponsive"). Underlay from `admitted` only (E-B10a-7).
+- E-B10b-2 · Decided: the verdict `sequence` also bumps when an Output's verdict changes (snapshot or refinement),
+  with no ring entry, so one sequence never names two different verdicts. Condition transitions are unchanged.
+- E-B10b-3 · Page wording "invalidations with reason and presentations from events": the display `SurfaceFact`
+  invalidation event carries no reason (weston.py `surface.fact("invalidated")`; the reason is the snapshot's
+  `fault`), and presentations are not a verdict input in M1. As built: an invalidated `SurfaceFact` drops that
+  Output's admission until the next snapshot; every other display event is ignored by the judge. Each page's snapshot
+  is applied **after** its events (it is current at the reply). A display feed gap or controller restart never calls
+  `judge.forget` (probe-derived state is the broker's; a display gap would otherwise withdraw a pending condition);
+  a malformed snapshot is a counted read failure (`display_snapshot`) and the cursor does not move.
+- E-B10b-4 · Overlay wire as built (for B11 and D1): the client sends one packet `{"op":"overlay"}` (uid 10005 only;
+  no ack); every later packet from the judge is one `encode_overlay_instruction`; the client sends one
+  `encode_presented_report` per packet. Pushed: every Output's instruction on connect, changed ones each 500 ms turn,
+  all every V/3 (5 s). A client that sends anything else, closes, or cannot take a packet at once (EAGAIN) is dropped
+  and must reconnect (it is re-pushed everything). At most 4 open clients; a fifth replaces the oldest. Serials come
+  from one judge-wide counter starting at 1 per judge process: **B11 must take any serial after a reconnect, not only a
+  higher one.** `presented` is kept once per (Output, serial) and only for a serial ≤ the Output's projected serial.
+- E-B10b-5 · Decided: line 2 omits ` · Player …` until an `app_link_accepted` is seen, and is cut to 96 chars; an
+  Output whose name exceeds 96 chars (OutputKey allows 128, OverlayInstruction 96) is in the verdict but not projected.
+- E-B10b-6 · `appliance/health/runner.py` names `DISPLAY_FEED_SOCKET` itself (the judge closure may not import the
+  display controller), pinned equal to `appliance.display_host.runner.FEED_SOCKET` by a test. No unit, sysusers or
+  tmpfiles change was needed (the judge unit already has `SupplementaryGroups=pw-node-feeds`).
+- E-B10b-7 · For D1, `status` as built adds `verdict.outputs` [{output, underlay, codes}], `overlay` {instructions:
+  [{output, serial, tint, lines}], clients}, ring entries {sequence, state: "presented", output, serial, age_ms}, and
+  `feeds.display`. Leg: Virtual-1 `live`, codes [], instruction serial 1 tint off; display reads 147, gaps 0, 1 failure
+  (FileNotFoundError before the controller bound its socket).

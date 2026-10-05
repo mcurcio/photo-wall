@@ -17,6 +17,17 @@ Every other feed kind (channel, link and relink facts, `kill_withheld`) is recor
 never a fault; `app_link_accepted` is kept for its `player_id`. A code outside the catalogue is
 refused (`ValueError`). Construction refuses timing under which the card could miss the kill:
 K > k·T + raise + D and K > S + raise + D (the K rule).
+
+Per Output (B10b): Display's `outputs` snapshot (every display feed read carries one) names the
+connected Outputs and each one's admitted app run; display events only refine it until the next
+snapshot (an invalidation drops that Output's admission). Each connected Output's underlay is
+`slate` (nothing admitted), `held` (the admitted run is the raised unresponsive run) or `live`;
+its codes are the raised codes (node-wide in M1: one app drives every Output). The underlay is
+taken from `admitted` only, never from the snapshot's `fault` (E-B10a-7). The projection to
+Display's `OverlayInstruction` per connected Output: tint on iff a display-affecting code is
+raised; line 1 the household line, line 2 `"{code} · Player {player_id} · Output {output}"`;
+the serial (one judge-wide counter) bumps whenever an Output's tint or lines change. A
+`PresentedReport` for a serial the judge projected is kept in the ring as `presented`.
 """
 
 from __future__ import annotations
@@ -26,6 +37,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from appliance.display_host.overlay.instruction import (
+    MAX_TEXT,
+    OverlayInstruction,
+    PresentedReport,
+)
 from appliance.feed import FeedEvent
 from contracts.node_faults import Fault
 
@@ -33,6 +49,7 @@ APP_UNRESPONSIVE = "app_unresponsive"
 RING_CAPACITY = 256
 _RUN_KEYS = {"invocation_id": str, "pid": int, "start_ticks": int, "app_epoch": int}
 _UNANSWERED = ("probe_unanswered", "probe_kill_due")
+MAX_OUTPUTS = 64  # a snapshot naming more Outputs is refused (Display ships 16)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,9 +61,34 @@ class Condition:
 
 
 @dataclass(frozen=True, slots=True)
+class OutputVerdict:
+    output: str  # OutputKey.output_id: the name the health layer is taken for
+    underlay: Literal["live", "held", "slate"]
+    codes: tuple[str, ...]  # raised codes this Output shows
+
+
+@dataclass(frozen=True, slots=True)
 class Verdict:
-    sequence: int  # bumps on every transition
+    sequence: int  # bumps on every transition and every change of an Output's verdict
     conditions: tuple[Condition, ...]
+    outputs: tuple[OutputVerdict, ...] = ()  # each connected Output of the latest snapshot
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayOutput:
+    """One Output of Display's `outputs` snapshot, as the judge keeps it."""
+
+    output: str
+    connected: bool
+    admitted: dict | None  # the admitted app run's AppRunKey document
+
+
+@dataclass(frozen=True, slots=True)
+class Presented:
+    sequence: int  # the verdict sequence in force when the report arrived
+    output: str
+    serial: int
+    at_ms: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +124,28 @@ def _positive(*values: object) -> bool:
     return all(type(value) is int and value > 0 for value in values)
 
 
+def display_outputs(snapshot: object) -> tuple[DisplayOutput, ...]:
+    """Display's `outputs` snapshot, checked: `ValueError("display_snapshot")` if malformed."""
+    if not isinstance(snapshot, list) or len(snapshot) > MAX_OUTPUTS:
+        raise ValueError("display_snapshot")
+    outputs: dict[str, DisplayOutput] = {}
+    for entry in snapshot:
+        if not isinstance(entry, dict):
+            raise ValueError("display_snapshot")
+        name, connected, admitted = (entry.get("output_id"), entry.get("connected"),
+                                     entry.get("admitted"))
+        if not (isinstance(name, str) and name and type(connected) is bool) or name in outputs:
+            raise ValueError("display_snapshot")
+        run = None
+        if admitted is not None:
+            run = _run({key: admitted.get(key) for key in _RUN_KEYS}
+                       if isinstance(admitted, dict) else None)
+            if run is None:
+                raise ValueError("display_snapshot")
+        outputs[name] = DisplayOutput(name, connected, run)
+    return tuple(outputs.values())
+
+
 class HealthJudge:
     def __init__(self, *, period_ms: int, miss_limit: int, startup_ms: int, kill_after_ms: int,
                  pulse_deadline_ms: int, catalogue: Mapping[str, Fault]):
@@ -100,7 +164,11 @@ class HealthJudge:
         self.sequence = 0
         self.player: tuple[dict, str] | None = None  # (run, player_id) from app_link_accepted
         self._open: dict[str, _Open] = {}
-        self._ring: deque[Transition] = deque(maxlen=RING_CAPACITY)
+        self._outputs: dict[str, DisplayOutput] = {}  # the latest snapshot, refined by events
+        self._projected: dict[str, OverlayInstruction] = {}  # last instruction per Output
+        self._serial = 0
+        self._presented: dict[str, int] = {}  # last serial recorded presented per Output
+        self._ring: deque[Transition | Presented] = deque(maxlen=RING_CAPACITY)
         self.ring_dropped = 0
         self._now = 0
 
@@ -127,6 +195,26 @@ class HealthJudge:
                 self.player = (run, value["player_id"])
         self._advance(now)
 
+    def observe_outputs(self, snapshot: object, now_ms: int) -> None:
+        """Display's `outputs` snapshot replaces the Output set (malformed: `display_snapshot`,
+        nothing changed). A gap in the display feed needs nothing more: every read has one."""
+        outputs = display_outputs(snapshot)
+        self._display(now_ms, lambda: {output.output: output for output in outputs})
+
+    def observe_display(self, event: FeedEvent, now_ms: int) -> None:
+        """A display event refines the snapshot until the next one: an invalidated surface drops
+        its Output's admission. Every other display event (presentations, diagnostics) is
+        evidence for the display feed's own readers, not a verdict input."""
+        value = event.value if isinstance(event.value, dict) else {}
+        output = value.get("output")
+        name = output.get("output_id") if isinstance(output, dict) else None
+        known = self._outputs.get(name) if isinstance(name, str) else None
+        if event.kind != "SurfaceFact" or value.get("state") != "invalidated" or known is None:
+            self._tick(now_ms)
+            return
+        self._display(now_ms, lambda: {**self._outputs,
+                                       name: DisplayOutput(name, known.connected, None)})
+
     def forget(self, now_ms: int) -> None:
         """The publisher's feed had a gap (or a new incarnation): drop what the missed facts
         may have changed. A raised condition stays raised until fresh answers clear it."""
@@ -146,10 +234,41 @@ class HealthJudge:
         return Verdict(self.sequence, tuple(
             Condition(code, dict(condition.run), "raised" if condition.raised else "pending",
                       now - condition.since_ms)
-            for code, condition in sorted(self._open.items())))
+            for code, condition in sorted(self._open.items())), self._output_verdicts())
 
-    def transitions(self) -> tuple[Transition, ...]:
-        """The bounded transition ring, oldest first (`ring_dropped` counts what fell off)."""
+    def instructions(self, now_ms: int) -> tuple[OverlayInstruction, ...]:
+        """Display's overlay instruction for each connected Output of the latest snapshot; an
+        Output keeps its serial while its tint and lines are unchanged."""
+        projected: dict[str, OverlayInstruction] = {}
+        for output in self.verdict(now_ms).outputs:
+            if len(output.output) > MAX_TEXT:
+                continue  # a name the health layer protocol cannot carry
+            tint, lines = self._card(output)
+            previous = self._projected.get(output.output)
+            if previous is None or (previous.tint, previous.lines) != (tint, lines):
+                self._serial += 1
+                previous = OverlayInstruction(output.output, self._serial, tint, lines)
+            projected[output.output] = previous
+        self._projected = projected
+        self._presented = {name: serial for name, serial in self._presented.items()
+                           if name in projected}
+        return tuple(projected.values())
+
+    def presented(self, report: PresentedReport, now_ms: int) -> bool:
+        """The overlay client presented `serial` on `output`: kept in the ring once, if the judge
+        projected that serial (or a later one) for that Output."""
+        now = self._tick(now_ms)
+        instruction = self._projected.get(report.output)
+        if (instruction is None or report.serial > instruction.serial
+                or self._presented.get(report.output, -1) >= report.serial):
+            return False
+        self._presented[report.output] = report.serial
+        self._append(Presented(self.sequence, report.output, report.serial, now))
+        return True
+
+    def transitions(self) -> tuple[Transition | Presented, ...]:
+        """The bounded ring (condition transitions and `presented` reports), oldest first;
+        `ring_dropped` counts what fell off."""
         return tuple(self._ring)
 
     # -- rules --------------------------------------------------------------------------
@@ -159,6 +278,40 @@ class HealthJudge:
             raise ValueError("judge_clock")
         self._now = max(self._now, now_ms)  # one clock, never read backwards
         return self._now
+
+    def _display(self, now_ms: int, outputs) -> None:
+        now = self._tick(now_ms)
+        self._advance(now)
+        before = self._output_verdicts()
+        self._outputs = outputs()
+        if self._output_verdicts() != before:
+            self.sequence += 1
+
+    def _output_verdicts(self) -> tuple[OutputVerdict, ...]:
+        raised = {code: condition for code, condition in sorted(self._open.items())
+                  if condition.raised}
+        unresponsive = raised.get(APP_UNRESPONSIVE)
+        verdicts = []
+        for output in sorted(self._outputs.values(), key=lambda output: output.output):
+            if not output.connected:
+                continue
+            if output.admitted is None:
+                underlay = "slate"
+            elif unresponsive is not None and output.admitted == unresponsive.run:
+                underlay = "held"
+            else:
+                underlay = "live"
+            verdicts.append(OutputVerdict(output.output, underlay, tuple(raised)))
+        return tuple(verdicts)
+
+    def _card(self, output: OutputVerdict) -> tuple[bool, tuple[str, str]]:
+        for code in output.codes:
+            fault = self._fault(code)
+            if fault.display_affecting:
+                player = "" if self.player is None else f" · Player {self.player[1]}"
+                return True, (fault.household_line,
+                              f"{code}{player} · Output {output.output}"[:MAX_TEXT])
+        return False, ("", "")
 
     def _unanswered(self, code: str, run: dict, now: int) -> None:
         condition = self._open.get(code)
@@ -215,9 +368,13 @@ class HealthJudge:
 
     def _record(self, code: str, run: dict, state: str, reason: str, now: int) -> None:
         self.sequence += 1
+        self._append(Transition(self.sequence, code, dict(run), state, reason, now))
+
+    def _append(self, entry: Transition | Presented) -> None:
         if len(self._ring) == self._ring.maxlen:
             self.ring_dropped += 1
-        self._ring.append(Transition(self.sequence, code, dict(run), state, reason, now))
+        self._ring.append(entry)
 
 
-__all__ = ["APP_UNRESPONSIVE", "RING_CAPACITY", "Condition", "HealthJudge", "Transition", "Verdict"]
+__all__ = ["APP_UNRESPONSIVE", "MAX_OUTPUTS", "RING_CAPACITY", "Condition", "DisplayOutput",
+           "HealthJudge", "OutputVerdict", "Presented", "Transition", "Verdict", "display_outputs"]
