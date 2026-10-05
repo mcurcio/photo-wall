@@ -84,7 +84,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | Architect pass 1 | open | | |
 | B3 guest contract + Player responder | landed | 1e1675f | verified PASS after 1 fix cycle (probe lane, E-B3-2a); correctness lens PASS on fix; D1 must update module-design-r8 :41/:128/:149 |
 | B4 shell health layer + fallback tint | open | | |
-| B5 Python overlay client parity | open | | |
+| B5 Python overlay client parity | landed | e2fbd33 | verified PASS; regression lens PASS; paint-failure hardening E-B5-8; errata E-B5-1..8; D1: docs still describe the C client |
 | B6 probe channel + probe thread + broker feed | open | | |
 | B7 app-link accepted locally + outbox + relink | open | | |
 | Architect pass 2 | open | | |
