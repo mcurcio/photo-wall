@@ -9,9 +9,9 @@ import subprocess
 import time
 from pathlib import Path
 
+from appliance.clock import boot_id, boottime_ms  # noqa: F401
 from appliance.node.base_status import STATUS, read_supervisor_status
 from appliance.node.capacity import memory_controller_present
-from appliance.node.clock import boot_id, boottime_ms  # noqa: F401
 from contracts.node_host_facts import MAX_BOOT_FAILED_UNITS, valid_fact
 from contracts.node_protocol import token
 

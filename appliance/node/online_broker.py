@@ -10,11 +10,11 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
+from appliance.central_session.session import REFUSED
+from appliance.clock import boottime_ms
 from appliance.node.broker import RunningApp
 from appliance.node.capacity import EMERGENCY_HEADROOM, memory_values
-from appliance.node.clock import boottime_ms
 from appliance.node.recovery import RESTORE_BUDGET_MS, STOP_BUDGET_MS, RecoveryObligation
-from appliance.node.session import REFUSED
 from appliance.node.stop_operation import (
     StopGuaranteeUnavailable,
     StopRequest,

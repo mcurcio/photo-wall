@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, "/usr/lib/photo-wall-node-bootstrap")
-from appliance.node.clock import boot_id, boottime_ms
+from appliance.clock import boot_id, boottime_ms
 from appliance.node_boot_handoff import write_node_handoff
 from contracts.node_boot import parse_node_boot_offer
 

@@ -5,9 +5,9 @@ import json
 from dataclasses import asdict
 from uuid import UUID
 
+from appliance.boot_store import BootStore
 from appliance.node.broker import ColdStart, EffectRecord, RunningApp
 from appliance.node.manager import ManagerRecoveryState
-from appliance.node.storage import BootStore
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
 

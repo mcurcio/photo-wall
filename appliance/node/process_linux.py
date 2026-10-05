@@ -7,11 +7,11 @@ import time
 from pathlib import Path
 from uuid import UUID
 
+from appliance.boot_store import BootStore
 from appliance.node.broker import RunningApp
 from appliance.node.environment import verify_root
 from appliance.node.lifecycle_storage import primitive, running_from
 from appliance.node.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
-from appliance.node.storage import BootStore
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity

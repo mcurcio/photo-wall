@@ -3736,3 +3736,20 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   conditional Scene authoring not taken). Admission = Central's latest decision `retain`/`already_admitted` for the
   exact bound (frame, binding generation, config revision); the `handoff`/`current_linked_app` decision is superseded
   within a sample. The fixture adds a read-only `GET /fixture/display` for it (test code only, no Central change).
+
+## 2026-10-05 · player-health M1 B2a shared kernel move (implementer) · appliance/{clock,boot_store}.py, appliance/central_session/
+- E-B2a-1 · "Docs that cite the old paths are D1's" conflicts with G-static: check_docs fails on one relative link,
+  docs/evidence/2026-09-30-node-stop-observation-proposal.md:27 `../../appliance/node/storage.py`. B2a repointed that
+  one link to `../../appliance/boot_store.py` (only edit outside the page's files). Plain-text (non-link) citations
+  of `appliance/node/{session,storage,clock,http}.py` in docs (e.g. docs/operator-console-ddd.md:1677, :2521) stay D1's.
+- E-B2a-2 · No change to scripts/build_node_base_deb.py `POLICIES`, scripts/build_node_manager_deb.py or
+  scripts/module_closure.py was needed: closures are import-derived, and no forbidden prefix names a moved module.
+  The moved modules now ship at `appliance/clock.py`, `appliance/boot_store.py`, `appliance/central_session/*` in
+  every node closure (base + manager), so the base and manager .deb contents change (leg required).
+- E-B2a-3 · Importer count matches the page: 18 files under appliance/ (incl. the moved session.py's own three
+  imports, and weston.py's function-local import) and 9 under tests/; nothing in scripts/ (no string references).
+  `appliance.node.host_linux` keeps its pre-existing `boot_id, boottime_ms` re-export (`# noqa: F401`, used by
+  host_runner) — it is not a shim of the moved module and was left unchanged.
+- E-B2a-4 · The implementer cannot commit, but G-leg builds from a commit: the leg was built from a dangling
+  commit object (temporary GIT_INDEX_FILE + `git commit-tree`, no ref, HEAD and index untouched) whose tree equals
+  the B2a working tree.

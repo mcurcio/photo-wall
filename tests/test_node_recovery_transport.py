@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from appliance.boot_store import BootStore
 from appliance.node.recovery import (
     RESTORE_BUDGET_MS,
     STOP_BUDGET_MS,
@@ -16,7 +17,6 @@ from appliance.node.recovery import (
     RecoverySupervisor,
 )
 from appliance.node.recovery_linux import RecoveryClient, RecoveryServer
-from appliance.node.storage import BootStore
 from contracts.node_protocol import NodeProcessIdentity
 
 

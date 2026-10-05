@@ -4,9 +4,9 @@ from uuid import uuid4
 
 import pytest
 
-import appliance.node.session as node_session
-from appliance.node.session import NodeSession
-from appliance.node.storage import BootStore
+import appliance.central_session.session as node_session
+from appliance.boot_store import BootStore
+from appliance.central_session.session import NodeSession
 from contracts.node_commands import (
     NodeSessionGrant,
     encode_session_grant,

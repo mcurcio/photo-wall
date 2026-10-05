@@ -5,8 +5,8 @@ import json
 from dataclasses import asdict
 from uuid import UUID
 
+from appliance.boot_store import BootStore
 from appliance.node.host import RebootRecord, RebootRequest
-from appliance.node.storage import BootStore
 from contracts.node_protocol import NodeProducerV2, encode_node_message, parse_node_message
 
 
