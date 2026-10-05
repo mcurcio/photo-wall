@@ -4212,3 +4212,52 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   [{output, serial, tint, lines}], clients}, ring entries {sequence, state: "presented", output, serial, age_ms}, and
   `feeds.display`. Leg: Virtual-1 `live`, codes [], instruction serial 1 tint off; display reads 147, gaps 0, 1 failure
   (FileNotFoundError before the controller bound its socket).
+
+## 2026-10-05 · player-health M1 architect pass 3 (after B10b) · .claude/runs/player-health-m1.md §8 (B11, B12, D1, pass 3 block)
+- E-AP3-1 · Drift check B7b–B10b vs module design r9 / system design r8: no frame-changing drift. lint-imports 11
+  kept at 4058f30; CI green through 172b3a5 (B10a), 4058f30 in progress. Doc-only drift routed to D1 items viii–xiv
+  (E-B7c-1, E-B8-1..3, E-B8-5, E-B8-7, E-B9-1..7, E-B10a-1..6, E-B10b-1..7). E-B10a-8 informational (unreachable
+  in production). E-B7b-1..3, E-B8-4, E-B8-6, E-B9-8 informational (as built, tests in place).
+- E-AP3-2 · Q1 fence observation (no stop): fence 1 names `_arm_recovery`; B8 fix cycle 1 (E-B8-7, per the
+  orchestrator's fix brief) added an additive boot-store write there AFTER `recovery.arm` returned and its receipt
+  check passed (online_broker.py ~:146-154); `recovery_linux.py` changed only its `boottime_ms` import path (B2a's
+  mandated kernel move). `arm` call, :98-108, :183-184, :211 and recovery.py unchanged (git diff origin/main..HEAD).
+  Arming behaviour unchanged; one new failure path (a store write failing after a successful arm raises, the same
+  class as every other store write in that flow). Disclose in the handoff.
+- E-AP3-3 · B11 re-cut. (a) Page gap: the B5 client loops in `display.dispatch(block=True)` (client.py), so it cannot
+  also serve the judge socket or stale timers; decided one single-threaded selectors loop over `display.get_fd()` +
+  the judge socket (pywayland 0.4.18 Display has get_fd/dispatch/flush/read only, no prepare_read pair; checked in the
+  sdist). (b) Page offered two drawing forms ("viewporter when bound, else full ARGB"); decided one: full-Output ARGB
+  for tint on, 1×1 transparent for off (E-B4-5: layer maps with the buffer's own size); viewporter + card subsurface
+  parked to M3 with the repaint pulse; cost stated in the page (8.3 MB/35 MB per tint-on buffer). Without this the
+  page also needed viewporter bindings in meson.build (not in its Files) and a card subsurface (one health surface
+  per Output, shell refuses a second). (c) Page gap: B4's composed test client calls `client.main(hooks=...)`; if the
+  production client always took a health layer, the test client's own layer would hit `health_layer_exists`. Decided
+  `main(hooks=None)` → production hooks; explicit hooks replace them; harness keeps magenta default and adds a
+  `production` mode block. (d) Pure `overlay/health.py` per-Output state for macOS unit tests (any serial, reconnect
+  forgets drawn/reported, stale after V, no report on discarded/stale). (e) Named mutation (c) moves from harness to
+  unit: the feeder cannot force a `discarded` deterministically. (f) Health commits never `ack` (shell.c:479-491). (g)
+  A size-cap refusal of a tint-on page commits NULL → shell amber fallback (fail-visible), never a transparent buffer
+  under a fault. (h) Socket path named in Display, pinned by test to appliance.health.runner.HEALTH_SOCKET; client
+  checks peer uid ∈ {0, 10006}.
+- E-AP3-4 · B12 corrections. (a) `systemctl kill` defaults to `--kill-whom=all`; use `--kill-whom=main` (UNIT =
+  photo-wall-node-player.service, process_linux.py:20). (b) Step 4's "invalidation `surface_lease_or_process_lost`"
+  is wrong as written: the SurfaceFact invalidation carries no reason (E-B10b-3); a SIGKILLed client usually yields
+  `surface_destroyed` (shell.c:661) before the lease/pidfd path (:964); assert the snapshot's `fault` ∈ both and
+  `admitted` null. (c) "Card over the live app" is proved by `underlay: held` (only possible before the kill, E-B10b-1)
+  + tint-on serial presented + no `app_killed` on a later broker read — not by time comparison; step 3 window 20 s →
+  30 s (judge lag E-B9-7, broker main-loop lag E-B6-4), still < K. (d) E-B8-5 made the leg refuse `app_killed` and
+  unsettled refusals over the whole feed; B12 must scope both to the healthy window. (e) Cost: the `starve` role adds
+  one sealed environment build to every fixture build; check node-pid1.yml timeout-minutes 20 (:69, :89). (f) New
+  mutation: wrapper ignores SIGUSR1 → step 3 red. Probe priorities verified: responder answers via
+  `GLib.idle_add` (player/service.py:359, default-idle 200), the 33 ms frame tick is priority default
+  (:1501), so a 150-priority spin starves only the answer.
+- E-AP3-5 · D1 items viii–xiv added (Q1 predicate/keys, relink per episode, kill feed kinds, judge as built, kernel
+  feed_socket, B11 drawing form, slice table as delivered); D1 size 2 h → 3 h. Final pass renumbered: pass 4 = M1
+  coherence.
+- E-AP3-6 · Budget at pass 3 (estimate; no metered figure available to the architect): spent ≈ 8.65 M (7.8–9.4) =
+  5.7 at pass 2 + B7b 0.3 + B8 (lens + fix cycle) 0.75 + B7c 0.25 + B9 0.35 + B10a (lens) 0.45 + B10b 0.3 +
+  orchestration 0.35 + pass 3 0.2. Remaining on the re-cut pages: B11 0.5, B12 0.65, D1 0.2, pass 4 + milestone gate
+  0.6 = 1.95 M. Projected ≈ 10.6 M > 9.5 M ceiling (low end 9.75 M). Pass-2 stop rule fires: STOP after B10b
+  (preferred stop point). Override only on a metered spend ≤ 7.55 M. Next session: B11 → B12 → D1 → pass 4 +
+  milestone gate; proposed ceiling 2.5 M (warning 2.0 M). Wall-clock ≈ 8.2 h / 26 h.
