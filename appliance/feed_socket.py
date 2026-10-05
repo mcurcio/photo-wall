@@ -29,12 +29,21 @@ SEQPACKET = getattr(socket, "SOCK_SEQPACKET", socket.SOCK_STREAM)
 RESPONSE_BOUND = b'{"accepted":false,"reason":"response_bound"}'
 
 
+def _peer_credentials(connection: socket.socket) -> tuple[int, int, int]:
+    size = struct.calcsize("=iII")
+    return struct.unpack("=iII", connection.getsockopt(
+        socket.SOL_SOCKET, getattr(socket, "SO_PEERCRED", 17), size))
+
+
 def peer_uid(connection: socket.socket) -> int:
     """The connecting process's uid as the kernel recorded it (SO_PEERCRED)."""
-    size = struct.calcsize("=iII")
-    _pid, uid, _gid = struct.unpack("=iII", connection.getsockopt(
-        socket.SOL_SOCKET, getattr(socket, "SO_PEERCRED", 17), size))
-    return uid
+    return _peer_credentials(connection)[1]
+
+
+def peer_pid(connection: socket.socket) -> int:
+    """The peer's pid as the kernel recorded it (SO_PEERCRED): for a client, the process that
+    called the server's listen(); 0 if the peer is outside this pid namespace."""
+    return _peer_credentials(connection)[0]
 
 
 class FeedListener:

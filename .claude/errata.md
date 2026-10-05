@@ -4261,3 +4261,63 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   0.6 = 1.95 M. Projected ≈ 10.6 M > 9.5 M ceiling (low end 9.75 M). Pass-2 stop rule fires: STOP after B10b
   (preferred stop point). Override only on a metered spend ≤ 7.55 M. Next session: B11 → B12 → D1 → pass 4 +
   milestone gate; proposed ceiling 2.5 M (warning 2.0 M). Wall-clock ≈ 8.2 h / 26 h.
+
+## 2026-10-05 · player-health M1 B10a fix cycle 1 (implementer, security finding) · appliance/{feed_socket,display_host/runner,health/runner}.py
+- E-B10a-9 · Defect, fixed (frozen-page change): the display feed's publisher identity was uid-only, and Weston and
+  the overlay client share pw-display's uid, so via /proc/<controller>/root (the controller's mount namespace, where
+  ReadWritePaths makes /run/photo-wall-display-feed writable) they could unlink the feed socket or bind a spoof that
+  the judge read as Display (reviewer probe). E-AP1-2 kept them out of the feeds group; uid-only identity let them back
+  in. Two changes: (a) `runner.undumpable()` = prctl(PR_SET_DUMPABLE, 0) confirmed by PR_GET_DUMPABLE, the first
+  statement of `runner.main` (OSError `display_controller_dumpable` if unconfirmed). (b) Structural, judge side
+  (chosen over a separate controller uid: that uid would carry the controller's Central worker, fence 2 "no new uid for
+  Central I/O", and ripple into shell.c's PHOTO_WALL_CONTROLLER_UID, the runtime dir and ingress): kernel
+  `feed_socket.peer_pid` (SO_PEERCRED pid; `peer_uid` shares its reader); `health.runner.UnitPublisher(unit)` admits
+  a server only if /proc/<peer pid>/cgroup's `0::` path equals the judge's own slice path + `/<unit>` (whole path,
+  never a suffix: pw-display's user manager owns a delegated subtree); `DisplayFeedReader` requires `publisher=`
+  (TypeError without it), `node_readers()` passes `UnitPublisher("photo-wall-display-controller.service")`; a failed
+  check sends no request and is a counted `feed_publisher` failure (cursor stays). A test pins that both units declare
+  `Slice=photowallbase.slice` (the sibling rule). The broker feed (root-owned, root publisher) has no check (None).
+  Leg: as pw-display (setpriv 10005, no groups) `stat /proc/<controller>/root/run` is refused while Weston's succeeds;
+  mutation (no `undumpable()`) turned that leg red; unit mutations: main order, check removed, suffix match, shipped
+  reader without the check — each red.
+- E-B10a-10 · Residual, not fixed (cost stated): (i) the controller runs `systemctl show` (`_unit`, every
+  `verify_process`); exec resets the child's dumpable flag, so for that child's life (≤ 2 s) a same-uid process can
+  open an O_PATH dirfd through /proc/<child>/root into the controller's namespace and keep it. With (b) a spoofed
+  socket is refused by the judge, but deleting the real feed socket stays possible: the judge then counts failures
+  and its display verdict stands still (no crash, no spoof). Closing it needs the feed directory not writable by
+  pw-display at all, i.e. a controller uid of its own (fence 2 decision for the owner/architect). (ii) SO_PEERCRED
+  records the listener's pid at listen(); a spoof whose listener process exits while a child holds the fd, and whose
+  pid is then reused by a controller process, would pass (b): needs the namespace entry of (i) plus pid reuse.
+  SO_PEERPIDFD would close (ii) on kernels ≥ 6.5; not used (no stdlib constant). (iii) Before `undumpable()` runs,
+  interpreter start-up (~100 ms) is a same-uid window, same consequence as (i).
+- E-B10a-11 · Files outside the B10a page: appliance/health/runner.py and tests/test_health_runner.py (B10b's; the
+  judge side of the check), tests/test_feed_socket.py (`peer_pid`). For D1: the display feed's publisher identity
+  (controller non-dumpable; judge admits only the controller unit's cgroup) in docs/display-host-backend.md and
+  module-design §6 "Feeds reachable".
+
+## 2026-10-05 · player-health M1 B10a fix cycle 2 (implementer, STOP: fence 2, needs owner decision) · no code changed
+- E-B10a-12 · Correction of E-B10a-9 and E-B10a-10 (review finding, probed in the node image, systemd 257.13): the
+  claim "spoof class closed" is false, and the stated costs understate it. (1) The controller is dumpable from exec
+  until `runner.undumpable()` (first statement of `main`, after interpreter start-up and every module import), and
+  every `systemctl show` child is dumpable. Weston and the overlay client share its uid, so they can SIGKILL it at
+  will (Restart=always reopens the window up to StartLimitBurst=10) and PTRACE_ATTACH it in that window
+  (probe: "PTRACE_ATTACH 0 ok"). Code under trace runs in the controller unit's cgroup, which `UnitPublisher` admits,
+  so a spoof, or the real controller serving false facts, reaches the judge. (2) The feed directory is writable from
+  Weston's OWN mount namespace, not only the controller's: on systemd 257 any option implying MountAPIVFS
+  (ProtectControlGroups=yes, ProtectKernelTunables=yes) leaves /run rw under ProtectSystem=strict; the directory is
+  0750 pw-display (scripts/build_node_base_deb.py:87). Probe with photo-wall-display.service's [Service] block: the
+  real socket was removed and a spoof bound at the path (judge check (b) refused the spoof; deletion stands). So
+  Weston or the overlay client can delete or replace the real feed socket at any time, not in a ≤ 2 s window. The
+  premise of E-B10a-9 ("only via /proc/<controller>/root") and costs (i)/(iii) of E-B10a-10 are wrong; the leg
+  comment at tests/test_node_pid1.py:977-981 ("its mount namespace (where the feed directory is writable)") is
+  false, and its /proc/<pid>/root stat assertion proves a property the security claim does not rest on.
+- E-B10a-13 · STOP (fence 2): neither finding is fixable within the run's fences. The only fix that closes (1) is
+  identity: the display feed's publisher must not share a uid with Weston and the overlay client, i.e. a dedicated
+  controller uid; that uid carries the controller's Central worker, which is fence 2 "no new uid for Central I/O".
+  A root-owned feed directory with the socket created by PID 1 (.socket unit) closes (2) only; a traced controller
+  still serves false facts, so it does not close the class, and it is wasted work if the owner picks the uid.
+  Owner choice: (A) dedicated controller uid (lift fence 2 for this; ripples into shell.c PHOTO_WALL_CONTROLLER_UID,
+  runtime dir, ingress, feed directory owner; closes (1) and (2)); or (B) accept Weston and the overlay client as
+  trusted for the display feed: then rewrite the B10a security claim to "the display feed trusts every pw-display
+  process", keep `undumpable()`/`UnitPublisher` as defence in depth only, and correct the leg comment. Uncommitted
+  B10a fix-cycle-1 code left in the tree untouched; no gate re-run (no behaviour changed).

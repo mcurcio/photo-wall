@@ -150,3 +150,10 @@ def test_peer_uid_is_the_kernel_credential():
     first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     with first, second:
         assert feed_socket.peer_uid(first) == os.getuid()
+
+
+@pytest.mark.skipif(not LINUX, reason="SO_PEERCRED is Linux-only")
+def test_peer_pid_is_the_kernel_credential():
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    with first, second:
+        assert feed_socket.peer_pid(first) == os.getpid()

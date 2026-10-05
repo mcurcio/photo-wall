@@ -6,8 +6,9 @@ with this node's boot clock: the broker's probe feed (`/run/photo-wall-app-feed/
 the display feed (`/run/photo-wall-display-feed/feed.sock`), whose every page carries Display's
 `outputs` snapshot. A gap or a new incarnation of the broker feed makes the judge forget what the
 missed facts may have changed; a display feed gap needs nothing (the page's snapshot replaces
-the Output set). An unreadable feed (including Display's `response_bound`) leaves the verdict as
-it was and is counted.
+the Output set). An unreadable feed (including Display's `response_bound`, and a display feed
+served by any process outside `photo-wall-display-controller.service`'s cgroup) leaves the
+verdict as it was and is counted.
 
 It serves `/run/photo-wall-health/health.sock` (socket 0666, the operation chosen by the first
 packet and admitted per `SO_PEERCRED` uid): `status` (uid 0 only) answers the verdict, the ring
@@ -42,7 +43,7 @@ from appliance.display_host.overlay.instruction import (
     parse_presented_report,
 )
 from appliance.feed import READ_LIMIT, FeedCursor, FeedEvent
-from appliance.feed_socket import peer_uid
+from appliance.feed_socket import peer_pid, peer_uid
 from appliance.health.judge import HealthJudge, Presented, display_outputs
 from appliance.node.probe import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
@@ -52,6 +53,10 @@ BROKER_FEED_SOCKET = Path("/run/photo-wall-app-feed/feed.sock")
 # Display's feed socket for node readers (appliance/display_host/runner.py FEED_SOCKET; the
 # judge closure must not import the controller, so the path is named here and pinned by a test).
 DISPLAY_FEED_SOCKET = Path("/run/photo-wall-display-feed/feed.sock")
+# The only process that may serve that socket: Weston and the overlay client share the
+# controller's uid, so the uid cannot say who is serving; the unit's cgroup can.
+DISPLAY_PUBLISHER_UNIT = "photo-wall-display-controller.service"
+PROC = Path("/proc")
 HEALTH_SOCKET = Path("/run/photo-wall-health/health.sock")
 READ_PERIOD_SECONDS = 0.5
 DRAIN_READS = 32  # pages per feed per turn
@@ -80,12 +85,42 @@ def shipped_judge() -> HealthJudge:
                        pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
 
 
+def cgroup_of(pid: int | str, proc: Path = PROC) -> str:
+    """The process's cgroup v2 path (its `0::` line in /proc/<pid>/cgroup)."""
+    for line in (proc / str(pid) / "cgroup").read_text().splitlines():
+        if line.startswith("0::"):
+            return line[3:]
+    raise ValueError("feed_publisher")
+
+
+class UnitPublisher:
+    """A feed's publisher check: the serving process (the SO_PEERCRED pid recorded at its
+    listen()) is in `unit`'s own cgroup, the judge's sibling in their shared slice.
+
+    Only the service manager places a process in a system unit's cgroup: a same-uid process
+    (Weston, the overlay client, pw-display's user manager with its delegated subtree) cannot
+    join it, and the path is compared whole, never by suffix. `proc` and `peer` are test seams.
+    """
+
+    def __init__(self, unit: str, *, proc: Path = PROC, peer=peer_pid):
+        self.unit, self.proc, self.peer = unit, proc, peer
+
+    def __call__(self, connection: socket.socket) -> bool:
+        slice_path = cgroup_of("self", self.proc).rpartition("/")[0]
+        return cgroup_of(self.peer(connection), self.proc) == f"{slice_path}/{self.unit}"
+
+
 class FeedReader:
-    """One publisher's feed, read by cursor (the publisher answers one request per accept)."""
+    """One publisher's feed, read by cursor (the publisher answers one request per accept).
+
+    With a `publisher` check, a connected server that fails it gets no request: the read is a
+    counted `feed_publisher` failure and the cursor stays."""
 
     def __init__(self, name: str, path: Path, *, kind: int = SEQPACKET,
-                 wait: float = FEED_REPLY_WAIT_SECONDS):
+                 wait: float = FEED_REPLY_WAIT_SECONDS,
+                 publisher: Callable[[socket.socket], bool] | None = None):
         self.name, self.path, self.kind, self.wait = name, path, kind, wait
+        self.publisher = publisher
         self.cursor = FeedCursor()
         self.reads = self.gaps = self.failures = 0
         self.last_failure: str | None = None
@@ -122,6 +157,8 @@ class FeedReader:
         with socket.socket(socket.AF_UNIX, self.kind) as connection:
             connection.settimeout(self.wait)
             connection.connect(str(self.path))
+            if self.publisher is not None and not self.publisher(connection):
+                raise ValueError("feed_publisher")
             connection.sendall(json.dumps(request, separators=(",", ":")).encode())
             raw = connection.recv(MAX_FEED_REPLY + 1)
         reply = loads_object(raw, max_bytes=MAX_FEED_REPLY)
@@ -140,7 +177,14 @@ class FeedReader:
 class DisplayFeedReader(FeedReader):
     """Display's feed: events refine, then the page's `outputs` snapshot (current at the reply,
     so newer than its events) replaces the Output set. A gap or a restarted controller needs no
-    forgetting: probe-derived state is not Display's, and the snapshot is complete."""
+    forgetting: probe-derived state is not Display's, and the snapshot is complete.
+
+    `publisher` is required: the feed's uid is shared with Weston and the overlay client, so
+    every read first proves the server is the display controller (`UnitPublisher`)."""
+
+    def __init__(self, name: str, path: Path, *, publisher: Callable[[socket.socket], bool],
+                 kind: int = SEQPACKET, wait: float = FEED_REPLY_WAIT_SECONDS):
+        super().__init__(name, path, kind=kind, wait=wait, publisher=publisher)
 
     def _check(self, page: dict) -> None:
         display_outputs(page.get("outputs"))
@@ -396,9 +440,16 @@ class HealthRunner:
                         self.overlay.receive(key.fileobj, self.clock())
 
 
+def node_readers() -> tuple[FeedReader, ...]:
+    """The judge's feeds as shipped: the broker's (root-owned) and Display's, whose server must
+    be the display controller unit's own process."""
+    return (FeedReader("broker", BROKER_FEED_SOCKET),
+            DisplayFeedReader("display", DISPLAY_FEED_SOCKET,
+                              publisher=UnitPublisher(DISPLAY_PUBLISHER_UNIT)))
+
+
 def main() -> None:
-    runner = HealthRunner(shipped_judge(), (FeedReader("broker", BROKER_FEED_SOCKET),
-                                            DisplayFeedReader("display", DISPLAY_FEED_SOCKET)))
+    runner = HealthRunner(shipped_judge(), node_readers())
     server = HealthSocket(HEALTH_SOCKET, runner.answer, stream=runner.stream)
     try:
         runner.run(server)

@@ -974,6 +974,18 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
             assert feed_socket_mode == "660 pw-display:pw-node-feeds", feed_socket_mode
             display_groups = node.run("id", "-nG", "pw-display").split()
             assert "pw-node-feeds" not in display_groups, display_groups
+            # Weston and the overlay client share pw-display's uid: the controller is not
+            # dumpable, so no pw-display process reaches its mount namespace (where the feed
+            # directory is writable) through /proc/<pid>/root; Weston's own is reachable (the
+            # probe's control). And the judge reads only the controller unit's own socket.
+            for unit, reachable in (("photo-wall-display-controller.service", False),
+                                    ("photo-wall-display.service", True)):
+                pid = unit_properties_of(node, unit, "MainPID")["MainPID"]
+                entered = node.container.exec(
+                    "setpriv", "--reuid=10005", "--regid=10005", "--clear-groups", "--",
+                    "stat", "-c", "%i", f"/proc/{pid}/root/run", timeout=30)
+                assert (entered.returncode == 0) is reachable, (unit, pid, entered.stderr)
+            assert display_judged["last_failure"] != "feed_publisher", display_judged
             display_feed.poll()
             snapshot = {output["output_id"]: output for output in display_feed.outputs or ()}
             bound_output = snapshot.get(bound["output_id"])

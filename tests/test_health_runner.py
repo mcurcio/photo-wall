@@ -66,6 +66,10 @@ def local_reader(feed, *, name="broker"):
     return reader
 
 
+def SERVED(connection):  # the publisher check, passed (tests that are not about it)
+    return True
+
+
 def snapshot_output(name="Virtual-1", run=RUN, *, connected=True):
     admitted = None if run is None else {**run, "frame_id": "frame-1"}
     return {"output_id": name, "connected": connected, "admitted": admitted,
@@ -74,7 +78,7 @@ def snapshot_output(name="Virtual-1", run=RUN, *, connected=True):
 
 def local_display_reader(feed, outputs):
     """Display's feed as the controller answers it: every page carries `outputs` (B10a)."""
-    reader = DisplayFeedReader("display", Path("/nonexistent/display.sock"))
+    reader = DisplayFeedReader("display", Path("/nonexistent/display.sock"), publisher=SERVED)
     reader.feed, reader.outputs, reader.calls = feed, outputs, 0
 
     def read(request):
@@ -447,7 +451,7 @@ def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        reader = DisplayFeedReader("display", listener.path, kind=KIND)
+        reader = DisplayFeedReader("display", listener.path, kind=KIND, publisher=SERVED)
         health = HealthRunner(runner.shipped_judge(), (reader,), clock=Clock())
         health.turn()
     finally:
@@ -636,3 +640,114 @@ def test_pw_display_opens_overlay_and_the_connection_stays_open(server):
     finally:
         client.close()
 
+
+
+# -- who serves the display feed -----------------------------------------------------------
+
+JUDGE = "/photowallbase.slice/photo-wall-health.service"
+CONTROLLER = "/photowallbase.slice/photo-wall-display-controller.service"
+
+
+def fake_proc(tmp_path, own=JUDGE, **pids):
+    """A /proc with the judge's own cgroup and one cgroup file per pid (`p<pid>=path`)."""
+    proc = tmp_path / "proc"
+    for pid, path in {"self": own, **{name[1:]: path for name, path in pids.items()}}.items():
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "cgroup").write_text(f"0::{path}\n")
+    return proc
+
+
+@pytest.mark.parametrize(("own", "server", "admitted"), [
+    (JUDGE, CONTROLLER, True),
+    # Weston (and the overlay client it spawns) run as pw-display too.
+    (JUDGE, "/photowallbase.slice/photo-wall-display.service", False),
+    (JUDGE, "/user.slice/user-10005.slice/session-1.scope", False),
+    # pw-display's user manager may create any path under its delegated subtree: never a suffix.
+    (JUDGE, "/user.slice/user-10005.slice/user@10005.service" + CONTROLLER, False),
+    (JUDGE, CONTROLLER + "/inner", False),
+    # A host-namespace prefix (a container's systemd) is the judge's own prefix too.
+    ("/docker/abc" + JUDGE, "/docker/abc" + CONTROLLER, True),
+    ("/docker/abc" + JUDGE, CONTROLLER, False),
+])
+def test_only_the_display_controller_units_process_serves_the_display_feed(
+        tmp_path, own, server, admitted):
+    publisher = runner.UnitPublisher(runner.DISPLAY_PUBLISHER_UNIT,
+                                     proc=fake_proc(tmp_path, own, p42=server),
+                                     peer=lambda connection: 42)
+    assert publisher(None) is admitted
+
+
+def test_an_unknown_or_cgroup_v1_server_is_not_admitted(tmp_path):
+    proc = fake_proc(tmp_path)
+    (proc / "7").mkdir()
+    (proc / "7" / "cgroup").write_text("1:name=systemd:/photowallbase.slice\n")
+    with pytest.raises(ValueError, match="^feed_publisher$"):
+        runner.UnitPublisher(runner.DISPLAY_PUBLISHER_UNIT, proc=proc,
+                             peer=lambda connection: 7)(None)
+    with pytest.raises(FileNotFoundError):  # pid 0: the server is outside this pid namespace
+        runner.UnitPublisher(runner.DISPLAY_PUBLISHER_UNIT, proc=proc,
+                             peer=lambda connection: 0)(None)
+
+
+def test_the_shipped_judge_checks_who_serves_the_display_feed():
+    broker, display = runner.node_readers()
+    assert (broker.path, broker.publisher) == (runner.BROKER_FEED_SOCKET, None)
+    assert display.path == runner.DISPLAY_FEED_SOCKET
+    assert isinstance(display.publisher, runner.UnitPublisher)
+    assert (display.publisher.unit, display.publisher.proc, display.publisher.peer) == (
+        "photo-wall-display-controller.service", Path("/proc"), feed_socket.peer_pid)
+    with pytest.raises(TypeError):  # a display reader cannot be built without the check
+        DisplayFeedReader("display", runner.DISPLAY_FEED_SOCKET)
+
+
+def test_the_judge_and_the_display_controller_share_one_slice():
+    # UnitPublisher finds the controller's cgroup as the judge's sibling.
+    units = REPO / "appliance/systemd"
+    slices = {name: [line for line in (units / name).read_text().splitlines()
+                     if line.startswith("Slice=")]
+              for name in ("photo-wall-health.service", runner.DISPLAY_PUBLISHER_UNIT)}
+    assert list(slices.values()) == [["Slice=photowallbase.slice"]] * 2, slices
+
+
+def test_a_display_feed_served_by_anyone_else_is_a_counted_failure_and_gets_no_request(tmp_path):
+    from test_node_display_runner import FakeBackend
+
+    controller = display_runner.Controller(FakeBackend())
+    controller.feed.append("Observed", {"index": 0})
+    directory = tmp_path / "display-feed"
+    directory.mkdir(mode=0o750)
+    listener = display_runner.feed_listener(controller, directory / "feed.sock",
+                                            group=os.getgid(), peer=lambda connection: 10006,
+                                            kind=KIND)
+    asked = []
+    controller.feed_events = lambda value: asked.append(value) or {}
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            listener.serve()
+            stop.wait(0.005)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        reader = DisplayFeedReader("display", listener.path, kind=KIND,
+                                   publisher=lambda connection: False)
+        health = HealthRunner(runner.shipped_judge(), (reader,), clock=Clock())
+        health.turn()
+    finally:
+        stop.set()
+        thread.join()
+        listener.close()
+    assert (reader.failures, reader.reads, reader.last_failure) == (1, 0, "feed_publisher")
+    assert reader.cursor.after == 0 and health.judge.verdict(0).outputs == ()
+    assert asked == []
+
+
+@pytest.mark.skipif(not LINUX, reason="SO_PEERCRED and /proc are Linux-only")
+def test_the_publisher_check_reads_the_kernels_peer_pid_and_cgroup():
+    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    own_unit = runner.cgroup_of("self").rpartition("/")[2]
+    with first, second:
+        assert runner.UnitPublisher(own_unit)(first) is True
+        assert runner.UnitPublisher(own_unit + "-not")(first) is False

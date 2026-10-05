@@ -8,6 +8,7 @@ bounded local event feed is observation only and acknowledges no Runtime commit.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import selectors
@@ -27,6 +28,24 @@ from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel
 # feed socket. The root-only ingress (`<runtime>/ingress.sock`) keeps every operation.
 FEED_SOCKET = Path("/run/photo-wall-display-feed/feed.sock")
+
+
+PR_GET_DUMPABLE, PR_SET_DUMPABLE = 3, 4  # <linux/prctl.h>
+
+
+def undumpable(prctl=None) -> None:
+    """Refuse every same-uid process access to this one: no ptrace, no /proc/<pid>/root.
+
+    Weston and the overlay client it spawns run as pw-display too. Through
+    /proc/<controller>/root they would land in this unit's mount namespace, where
+    ReadWritePaths makes the feed directory writable, and could unlink the feed socket or bind
+    their own in its place. A non-dumpable process's /proc entries need CAP_SYS_PTRACE (which
+    no pw-display process has). Applied first in `main`, before any socket or credential.
+    Raises OSError if the kernel does not confirm it (`prctl` is a test seam)."""
+    if prctl is None:
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    if prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 or prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "display_controller_dumpable")
 
 
 def _unit(unit: str) -> dict[str, str]:
@@ -181,6 +200,7 @@ class Controller:
 
 
 def main() -> None:
+    undumpable()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", type=Path, default=Path("/run/photo-wall-display"))
     parser.add_argument(

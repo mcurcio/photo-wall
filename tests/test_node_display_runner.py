@@ -273,3 +273,53 @@ def test_the_base_declares_the_display_feed_directory_and_group(tmp_path):
     assert any(line.startswith("ReadWritePaths=")
                and "/run/photo-wall-display-feed" in line.split("=", 1)[1].split()
                for line in lines)
+
+
+# -- same-uid processes (Weston, the overlay client) cannot reach the controller -----------
+
+
+def test_undumpable_sets_and_confirms_the_kernels_dumpable_flag():
+    calls = []
+
+    def prctl(option, *rest):
+        calls.append((option, *rest))
+        return 0
+
+    runner.undumpable(prctl)
+    assert calls == [(runner.PR_SET_DUMPABLE, 0, 0, 0, 0), (runner.PR_GET_DUMPABLE, 0, 0, 0, 0)]
+    assert (runner.PR_SET_DUMPABLE, runner.PR_GET_DUMPABLE) == (4, 3)
+
+
+@pytest.mark.parametrize("answers", [(-1, 0), (0, 1)])
+def test_undumpable_refuses_to_continue_unconfirmed(answers):
+    replies = iter(answers)
+    with pytest.raises(OSError, match="display_controller_dumpable"):
+        runner.undumpable(lambda *arguments: next(replies))
+
+
+def test_main_makes_the_controller_undumpable_before_anything_else(monkeypatch):
+    class First(Exception):
+        pass
+
+    def undumpable():
+        raise First
+
+    monkeypatch.setattr(runner, "undumpable", undumpable)
+    # Reading the credential, the umask and every socket come after it.
+    monkeypatch.setattr(runner.argparse, "ArgumentParser",
+                        lambda *a, **k: pytest.fail("arguments read first"))
+    monkeypatch.setattr(runner.os, "umask", lambda mask: pytest.fail("umask first"))
+    monkeypatch.setattr(runner, "_unit", lambda unit: pytest.fail("systemctl first"))
+    with pytest.raises(First):
+        runner.main()
+
+
+@pytest.mark.skipif(not LINUX, reason="prctl is Linux-only")
+def test_undumpable_leaves_the_process_undumpable():
+    import subprocess
+
+    probe = ("import ctypes; from appliance.display_host.runner import undumpable; undumpable();"
+             " print(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0))")
+    result = subprocess.run([sys.executable, "-c", probe], cwd=REPO, capture_output=True,
+                            text=True, timeout=60, check=True)
+    assert result.stdout.strip() == "0", result
