@@ -3991,3 +3991,46 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   close would not change that, only reading the request would). Listener kept (refuse before reading); the test's
   refused reader accepts EOF or ECONNRESET and still fails on any byte. Reproduced red and green in python:3.12-slim
   arm64.
+
+## 2026-10-05 · player-health M1 architect pass 2 (after B7) · .claude/runs/player-health-m1.md §7, §8
+- Drift check B3–B7 vs module design r9 / system design r8: no frame-changing drift. Doc-only drift routed to D1:
+  E-B3-2a (probe lane), E-B4-6 (fallback-tint key), E-B5-7 (C client), E-B6-5 / E-B7-2 / E-B7-4 (wire, refusal
+  reasons, slot states). Applied to brief (D1 items i–vii).
+- E-B3-1, E-B3-3, E-B3-4, E-B3-5, E-B5-1..6, E-B5-8, E-B4-1..5, E-B6-1..3, E-B6-6, E-B6-7, E-B7-1, E-B7-5, E-B7-6
+  informational (as-built, already reflected in code/tests); nothing further to apply.
+- E-B3-2a applied to brief (D1 item i). E-B5-7 applied to brief (D1 item iii).
+- E-B4-6 applied to brief (B11: tint-off = mapped transparent buffer, never NULL; harness "off" step asserts no amber
+  fallback; NULL-for-off mutation probe; B4's fault-injection test client kept, not deleted; D1 item ii).
+- E-B6-1 applied to brief (B9 builds the K rule from SHIPPED_TIMING). E-B6-5 applied to brief (B9 note, D1 iv).
+- E-B6-3 applied to brief (B8 turn ordering).
+- E-B6-4 applied to brief (B10a lifts FeedListener + peer_uid into kernel `appliance/feed_socket.py`, no copy; the
+  main-loop serving lag is a stated cost in B9, ≈ 1.5 s margin left against K > S + raise + D at a 5.5 s turn).
+- E-B7-2, E-B7-4 applied to brief (D1 iv).
+- E-B7-3 applied to brief: new bead **B7b** before B8. The outbox slot carries the owed relink durably
+  (`{"relink": run}`, cleared by the Player's next accepted proof or a run change); the main loop re-asserts it every
+  `known` turn via `ProbeThread.owe_relink(run | None)` (replaces one-shot `send_relink`); the thread sends once per
+  channel instance, counting only a successful send. Rejected alternative: Player re-proves when unrecorded (the
+  guest contract hides Central's record by design; timer-driven Central POSTs). Mutation probes r1–r4.
+- E-AP2-1 · B8 page addition: the kill-due latch is level (re-asserted every turn while counted ≥ K; the feed fact
+  stays once per episode); otherwise a kill withheld for an armed recovery is never retried after the recovery is
+  acknowledged and a starved app runs forever. Applied to brief (B8, `ProbeClock.overdue`, probe_channel.py in Files).
+- E-AP2-2 · The B7 `unresponsive` leg's `app_link_refused` 409 → relink → `app_link_recorded`
+  (/Volumes/Dock/tmp/node-pid1-b7/test_node_pid1_unresponsive0/broker-feed.jsonl seq 5→19→20 and 34→37→38; journal
+  12:25:23, 12:26:03) is **expected churn, not a bug**. Fresh nonce per proof (app_link.py:178) rules out
+  `node_link_identity_conflict`; the only other 409 is `node_link_control_not_current` (central/fleet/node_app_links.py
+  :27-32), raised while Central's control for the device is not settled (issued ≠ applied or a pending delivery,
+  central/fleet/acceptance_evidence.py:181-196) — i.e. Central issued a newer control (the fixture bind, then a later
+  revision) between the Player's proof and the broker's next-turn delivery. B7 widened the window from "inside the
+  proof" to "≤ one main-loop turn". Bounded: the Player re-proves only its current applied receipt
+  (player/service.py:1210-1219 `applied_current`), retry 5 s (:87). No owner assigned (no code change); B9 judge treats
+  `app_link_*` kinds as non-faults; B8's leg checks refused → relink_sent → recorded; D1 item v documents it.
+- E-AP2-3 · B8 turn ordering made binding (kill consumer only on a `known` turn, after `online.broker.service()` and
+  this turn's `publish_run`, compared with this turn's run; no `take_kill_due` on an unknown turn). Applied to brief.
+- E-AP2-4 · B10 split on its package boundary into B10a (kernel `feed_socket.py` lift + display feed listener and
+  `outputs` snapshot; security lens) and B10b (health: display-feed reading, per-Output verdict, overlay op). Reason:
+  pass 1 already grew B10 to 5 h and the E-B6-4 kernel lift adds a cross-context move; one bead would cross three
+  packages and risk the 90-min / 8-agent per-bead ceiling. Cost ≈ +0.1–0.15 M (one more verify + orchestration).
+  Applied to brief (§7 ledger rows, §8 pages, run order).
+- E-AP2-5 · Budget estimate at pass 2: spent ≈ 5.7 M (5.0–6.5), remaining ≈ 3.7 M, projected ≈ 9.4 M of 9.5 M;
+  stop rule added (stop before a bead whose projected completion exceeds 9.5 M; preferred stops after B8 or B10b).
+  Applied to brief (§8 pass 2 block).
