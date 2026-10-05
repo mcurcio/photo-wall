@@ -93,7 +93,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B7c relink per episode | landed | 5cf47c5 | relink latch per owed episode (E-B7c-1); fix bead from B8 verifier, completes B8 leg |
 | B9 catalogue + judge core | landed | c279b24 | fault catalogue, K-rule judge, health runner + sandboxed unit staged in node-base deb |
 | B10a kernel feed listener + display feed snapshot | landed | cc98853 | kernel FeedListener lifted to appliance/feed_socket.py; display feed (uids 0,10006) with outputs snapshot |
-| B10b judge display verdict + overlay op | open | | split at pass 2 (E-AP2-4) |
+| B10b judge display verdict + overlay op | landed | 96f681c | judge drains display feed, per-Output verdict + projection; overlay op for uid 10005 only |
 | B11 overlay health drawing | open | | |
 | B12 starve role; leg complete | open | | |
 | D1 docs | open | | |
