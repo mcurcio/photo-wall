@@ -3768,3 +3768,20 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-B2b-4 · G-harness does not exercise `runner.Controller` (the smoke drives Weston's control socket directly);
   the controller is covered by the new tests/test_node_display_runner.py (fake backend), the DB-tier
   tests/test_node_display_native.py service probe, and the node-pid1 legs that read the display feed.
+
+## 2026-10-05 · player-health M1 B2c lint contracts + ratchet (implementer) · pyproject.toml, tests/test_import_contracts.py
+- E-B2c-1 · "Display never reads the fault catalogue" checks nothing until B9 creates `contracts/node_faults.py`:
+  grimp drops an import of an absent first-party module, so `import contracts.node_faults` in
+  appliance/display_host/domain.py stays 11 kept today (probed). With a scratch `contracts/node_faults.py` the same
+  import turns it red (probed). **B9's verifier must re-run that probe** once the module exists.
+- E-B2c-2 · Likewise the optional layers `(appliance.authority)`, `(appliance.health)` and the kernel contract's
+  `appliance.authority`/`appliance.health` targets are latent until those packages exist; proved only with a scratch
+  `appliance/health/__init__.py` (node → health and feed → health both red). Layers checks indirect chains, so a
+  kernel module importing a context also breaks "Node contexts point down" via display_host/node → kernel → context.
+- E-B2c-3 · The ratchet test freezes only `ignore_imports` (subset of six) and the layers list, as the page says; it
+  does not freeze the session contract's `source_modules`/`forbidden_modules`, so dropping a source would weaken it
+  unnoticed. Left as specified; B9 adds `appliance.health` to the sources (a later bead could pin them too).
+- E-B2c-3 RESOLVED (B2c) · tests/test_import_contracts.py now also pins each forbidden contract's frozen
+  `source_modules` and `forbidden_modules` (frozen set ⊆ configured: additions such as B9's `appliance.health`
+  source pass, any drop fails); layers stay pinned by equality. Probed: dropping `appliance.node` from the session
+  contract's sources → test red.
