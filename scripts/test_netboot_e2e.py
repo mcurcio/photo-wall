@@ -837,7 +837,7 @@ def node_leg(central: Central, device: DeviceRoot, *, gateway: str, os_root: Pat
     # The 301 was followed: the handoff names Central's own origin, not the command line's root.
     require(located == expected and located != gateway.rstrip("/"), "node_locate_not_redirected")
     offer = handoff["offer"]
-    require(offer["installation_audience"] == "family-room", "node_offer_audience")
+    require(offer["installation_audience"] == "photo-wall", "node_offer_audience")
     require(offer["base"]["content_key"] == content_key
             and offer["base"]["squashfs_sha256"] == sha256, "node_offer_base")
     require(booted["sha256"] == offer["base"]["squashfs_sha256"], "node_base_digest")

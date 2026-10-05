@@ -40,12 +40,13 @@ class NodeControlError(ValueError):
         self.code, self.status, self.details = code, status, details or {}
 
 
-INSTALLATION_AUDIENCE: Final = "family-room"
+# One Central per wall, so the audience is the product, not an installation name.
+NODE_AUDIENCE: Final = "photo-wall"
 
 
 @dataclass(frozen=True, slots=True)
 class NodeControlConfig:
-    installation_audience: str = INSTALLATION_AUDIENCE
+    installation_audience: str = NODE_AUDIENCE
     session_seconds: int = 3600
 
     def __post_init__(self) -> None:

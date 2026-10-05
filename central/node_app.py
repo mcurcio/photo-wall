@@ -1,7 +1,7 @@
 """Alias of ``central.app:create_app``; iac pins this name until iac-1.
 
 ``uvicorn central.node_app:create_app --factory`` builds the same composition
-as the image's own command: node control with the installation audience
+as the image's own command: node control with the fixed node audience
 constant. ``PHOTO_WALL_NODE_AUDIENCE`` is no longer read. This selects
 transport and observation APIs, never opens the persistent effect gate.
 """

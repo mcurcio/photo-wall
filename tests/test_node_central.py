@@ -14,7 +14,7 @@ from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import (
-    INSTALLATION_AUDIENCE,
+    NODE_AUDIENCE,
     NodeControlConfig,
     NodeControlError,
     NodeSessions,
@@ -428,8 +428,8 @@ def test_mounted_routes_enabled_by_default_and_disabled_only_when_asked(registry
         assert response.status_code == 503
         assert response.headers["cache-control"] == "private, no-store"
     app = create_app(registry.db, registry.clock, ADMIN)
-    assert app.state.node_sessions.config == NodeControlConfig(INSTALLATION_AUDIENCE)
-    assert INSTALLATION_AUDIENCE == "family-room"
+    assert app.state.node_sessions.config == NodeControlConfig(NODE_AUDIENCE)
+    assert NODE_AUDIENCE == "photo-wall"
     with TestClient(app) as client:
         response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
         assert response.status_code == 200, response.text
@@ -448,8 +448,8 @@ def test_alias_factory_builds_the_default_config_ignores_audience_env_and_keeps_
     default = create_app(registry.db, registry.clock, ADMIN).state.node_sessions.config
     monkeypatch.delenv("PHOTO_WALL_NODE_AUDIENCE", raising=False)
     app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    assert app.state.node_sessions.config == default == NodeControlConfig(INSTALLATION_AUDIENCE)
+    assert app.state.node_sessions.config == default == NodeControlConfig(NODE_AUDIENCE)
     monkeypatch.setenv("PHOTO_WALL_NODE_AUDIENCE", "node-factory-test")
     app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    assert app.state.node_sessions.config.installation_audience == INSTALLATION_AUDIENCE
+    assert app.state.node_sessions.config.installation_audience == NODE_AUDIENCE
     assert RolloutEffectGate(registry.db).status()["state"] == "closed"

@@ -764,7 +764,7 @@ def test_the_node_leg_boots_the_seeded_base_through_the_gateway_and_refuses_a_fl
                                             "sha256": sha256})
             handoff = json.loads((tmp_path / "root-1" / tracer.NODE_HANDOFF).read_bytes())
             assert handoff["central"].rstrip("/") == f"http://localhost:{port}"
-            assert handoff["offer"]["installation_audience"] == "family-room"
+            assert handoff["offer"]["installation_audience"] == "photo-wall"
             assert handoff["offer"]["base"]["squashfs_sha256"] == sha256
 
             staged.write_bytes(base[:-1] + bytes([base[-1] ^ 0x01]))
