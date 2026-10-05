@@ -3701,3 +3701,20 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-CLK-1 · `last_served_at` is now stamped by the database (`touch_served(tx, key)`, `clock_timestamp()`) and
   compared by it (`AssetRecords.served_within`); file mtimes are compared only with the run's marker file
   (`CLOCK_MARKER` in the cache root). The cleaner takes no clock.
+
+## 2026-10-05 · player-health M1 B0 display harness (implementer) · scripts/run_display_harness.py, tests/native_display_smoke.py
+- E-B0-1 · trixie's `python3-pywayland` 0.4.18-4 does not declare `python3-cffi-backend`, which its `_ffi` imports:
+  with `--no-install-recommends` `import pywayland` fails (`No module named '_cffi_backend'`). The harness installs
+  `python3-cffi-backend` beside `python3-pywayland python3-cairo`. **B5's page must add `python3-cffi-backend` to
+  `node-display`** in scripts/debian_packages.py, or the Python overlay client cannot start on the node.
+- E-B0-2 · B0's mutation probe "skip `bind_diagnostic`'s private-client check" is not caught by a foreign bind while
+  the private client is bound: shell.c:428 also refuses when `s->diagnostic_resource` is held, so dropping only
+  `client != s->diagnostic_client` stayed green (probed). The harness adds a second foreign bind inside the 2 s
+  respawn window after SIGKILL of the private client (no resource held), asserted within 1.8 s of the kill; that
+  variant now turns red. B4 step (3) uses the same window.
+- E-B0-3 · The run command is `/usr/bin/python3 /smoke/native_display_smoke.py`, not `python3 ...`: the builder
+  image's PATH `python3` is /usr/local/bin (the python image's own), which cannot see Debian's dist-packages.
+- E-B0-4 · On this Mac (Docker context `desktop-linux`) `docker_build`'s `--builder default` fails ("use `docker
+  --context=default buildx`"): G-harness (and G-leg's component build) need `PHOTO_WALL_NODE_BUILDER=desktop-linux`
+  in the environment. CI (default context) needs nothing.
+- E-B0-5 · The two design files were already in `docs/design/player-health/` (f930a50); B0 copied nothing.
