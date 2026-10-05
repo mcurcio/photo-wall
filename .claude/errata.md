@@ -4264,3 +4264,23 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 
 ## E-B10a-14 (orchestrator, 2026-10-05) — display-feed trust: owner answer
 A post-landing re-review of B10a (cc98853) proved that a same-uid (pw-display, 10005) process — Weston or the overlay client — can spoof or delete the display feed socket via /proc/<controller>/root, and can ptrace the controller before it could make itself undumpable. A second review showed a dedicated controller uid would not close the class: Weston is already the upstream source of every fact the feed carries. Owner answer: TRUST Weston and the overlay client as base components for the display feed (threat model = buggy app, not hostile; the app cannot reach the feed). The hardening attempt (undumpable() + UnitPublisher cgroup check, entries E-B10a-9..13) is preserved on branch wip/B10a-feed-hardening (549a011) and NOT landed. For D1: rewrite B10a's security claim in module-design-r8 to "the display feed trusts the pw-display uid (controller, Weston, overlay client); the app and other uids are refused by peer uid", and state this cost. No code change required.
+
+## 2026-10-05 · player-health M1 architect pass 3b (resumed session, after E-B10a-14) · .claude/runs/player-health-m1.md §8 (pass 3 block, B11, B12, D1)
+- E-AP3-7 · Drift check: no code commit since 96f681c (B10b); 3784124 (B10b's code) pipeline green in full, incl.
+  `display-harness` and all six node-pid1 legs (`unresponsive` included). No new drift; E-AP3-1 stands.
+- E-AP3-8 · E-B10a-14 folded into pages. B11: base 838baa9+, never `wip/B10a-feed-hardening`; `undumpable`,
+  `peer_pid`, `UnitPublisher` absent and not reintroduced; the overlay client gets nothing beyond its health layer and
+  the judge socket; the judge-link peer check {0, 10006} stays (/run/photo-wall-health is pw-health 0755,
+  appliance/systemd/photo-wall-health.service:7, :14-15). B12: no assertion that pw-display cannot reach the display
+  feed; B10a's mode/group checks unchanged; fixture line ref :183 → :189 (`boots.select(deployments["cold"]...)`).
+- E-AP3-9 · D1 item (xv): display-feed trust statement and cost. E-B10a-14 cites only the /proc/<controller>/root
+  route; E-B10a-12 (on wip/B10a-feed-hardening only) proved the wider fact — a pw-display process can delete or replace
+  the feed socket at any time from its own namespace and can ptrace/kill the controller. D1 states the wider cost.
+  E-B10a-9..13 are not in this file on the working branch; E-B10a-14 is their record here, the branch holds the text.
+- E-AP3-10 · Budget, resumed session (estimate; replace with the metered figure): spent since d562505 ≈ 0.75 M
+  (0.55–0.9) = B10a re-review 0.09 + hardening fix cycle 1 0.25 + second review 0.1 + fix cycle 2 (STOP) 0.1 +
+  orchestration 0.1 + this pass 0.1; the session's fix-cycle reserve is consumed. Remaining B11 0.5, B12 0.65, D1 0.22,
+  pass 4 + milestone gate 0.6 = 1.97 M; projected 2.72 M > 2.5 M ceiling. Decision: GO for B11 → B12 → D1 (2.12 M
+  projected; 2.47 M with one fix cycle); pass 4 + milestone gate only if metered spend after D1 ≤ 1.9 M, else stop
+  cleanly after D1 for the owner's next ceiling. Per-bead checks for this session: before B11, spent + 1.5 ≤ 2.5;
+  before D1, spent + 0.22 ≤ 2.5; before pass 4, spent + 0.6 ≤ 2.5. A second fix cycle anywhere stops at that gate.
