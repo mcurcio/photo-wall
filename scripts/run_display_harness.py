@@ -5,8 +5,9 @@ The harness runs a real headless Weston with the current `photo-wall-shell.so`, 
 private diagnostic client, and reads output pixels through Weston's own `weston_capture_v1`. It
 cannot run on macOS (no Weston there), so every host runs it the same way: in an image built FROM
 the pinned node builder (`scripts.node_build_inputs.BUILDER_IMAGE`), with apt pinned to
-`scripts.debian_packages.PIN`, holding the node display runtime and build packages plus the
-harness-only pywayland and pycairo.
+`scripts.debian_packages.PIN`, holding the node display runtime and build packages (with the
+overlay client's pywayland and pycairo, which the harness also reads pixels and checks the private
+protocol with).
 
 The image is tagged `photo-wall-display-harness:<digest>`, the digest being the sha256 of its
 recipe text (Dockerfile and apt sources), so a pin or package change rebuilds it and nothing else
@@ -40,10 +41,9 @@ from scripts.node_build_inputs import BUILDER_IMAGE, docker_build  # noqa: E402
 
 ARCHITECTURE = "arm64"
 IMAGE = "photo-wall-display-harness"
-# Harness-only: pywayland reads output pixels (weston_capture_v1) and checks the private protocol
-# XML through its scanner; pycairo is what the Python overlay client will draw with. trixie's
-# python3-pywayland (0.4.18-4) does not declare the cffi backend its _ffi module imports.
-HARNESS_PACKAGES = ("python3-pywayland", "python3-cffi-backend", "python3-cairo")
+# Harness-only packages beyond the node display sets: none since the overlay client is Python
+# (node-display brings pywayland, its cffi backend and pycairo, which the harness reads pixels with).
+HARNESS_PACKAGES: tuple[str, ...] = ()
 WESTON_LOG = "/tmp/pw-weston.log"
 
 

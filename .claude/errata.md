@@ -3848,3 +3848,37 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   inside its constructor, so a probe can never hold a control slot whatever dispatcher it is handed. "No answer when
   refused" now means the probe lane is busy, not the control queue full. Module design r8 lines 41/128/149 still say
   "in the shared GLibDispatcher": doc bead to update.
+
+## 2026-10-05 · player-health M1 B5 Python overlay client (implementer) · appliance/display_host/overlay/, meson.build, scripts/debian_packages.py
+- E-B5-1 · Acceptance says "B0 harness unchanged and green ... testing alpha 0.96 blend" and the mutation "testing
+  alpha 1.0 → harness red", but B0's harness asserted no testing pixel and B5's Files omit tests/native_display_smoke.py.
+  Added one step, `testing_slate_pixel_captured`: pixel (40, 40) while the candidate's `starting_new` testing slate is
+  presented over the probe app = (10, 16, 25) (cairo premultiplied ARGB32 + pixman OVER rounding, computed in the
+  harness), tolerance 1; opaque gives (10, 15, 23) (probed: alpha 1.0 → red there). Also found: B0's
+  `slate_pixel_captured` passes even when the client draws NOTHING (transparent buffer) — the shell's curtain has the
+  same colour and pixman leaves its pixels in the framebuffer (probed: painter skipped → slate step green, testing
+  step red). Only the testing-slate step proves the client's drawing.
+- E-B5-2 · Page caps "≤ 8192² px"; the C client capped each side ≤ 8192 AND area ≤ 4096 × 2160 (MAX_PIXELS), and 16
+  Outputs. Kept the C's caps (`client.buffer_admissible`, unit-tested).
+- E-B5-3 · Parity exception, visual only: the C trial overlay drew stray segments from each numeral's end to the next
+  ring (`cairo_arc` after `cairo_show_text` keeps the current point). The draw-list starts each ring on a new path.
+- E-B5-4 · No scripts/release_plan.py, unit, POLICIES, sysusers or tmpfiles change was needed: node-display-deb and
+  node-base-deb already claim `appliance/display_host/**`; the spawn path is unchanged. `libcairo2` kept in
+  node-display (pycairo links it). New packages declare their import roots (`pywayland`, `_cffi_backend`, `cairo`);
+  no closure policy reads the node-display import table today.
+- E-B5-5 · E-B0-3 also binds the build: meson.build runs the scanner with `find_program('/usr/bin/python3')` (the
+  builder image's PATH python3 cannot import Debian's pywayland). pywayland's scanner writes no top-level
+  `__init__.py`, so `overlay/protocol/` is a namespace portion inside the regular `overlay` package (proved in harness
+  and leg). B11/B4: compose through `OverlayClient(hooks=..., manager_version=...)` / `client.main(hooks=...,
+  manager_version=3)`; `OutputHook.output_configured(client, output)` runs after each Output configure; keep every
+  proxy referenced (`OutputState.held`): pywayland destroys a collected proxy.
+- E-B5-6 · Local unit tier on a dirty tree: tests/test_node_component_inputs.py errors (7,
+  `declaration_differs_from_revision`) whenever scripts/debian_packages.py is uncommitted (it builds HEAD and compares
+  the working declaration). On a clean checkout of the same tree: 23 passed. Environment, not code.
+- E-B5-7 · For D1: docs/display-host-backend.md:26 and docs/node-4gb-memory-design.md:243 still describe the C client.
+- E-B5-8 · Overlay client hardening (regression review): a buffer was counted before the painter ran, so two paint
+  failures left an Output at the 2-buffer cap, dirty, never acking again; and `_release` decremented only after
+  `pixels.close()`, so a BufferError leaked the counts. Now `_paint` never raises (a failure logs and commits a
+  cleared buffer, then acks, as the C client did on a cairo error), a buffer counts only once committed, and
+  `_release` frees counts before closing (BufferError logged). Tests in tests/test_display_overlay_render.py, each
+  mutation-probed red.

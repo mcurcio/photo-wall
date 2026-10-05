@@ -77,8 +77,24 @@ from pywayland.client import Display  # noqa: E402
 
 print("PYWAYLAND", pywayland.__version__, PwDiagnosticManagerV1.name,
       PwDiagnosticManagerV1.version, flush=True)
-SLATE = (10, 15, 23)  # diagnostic-client.c background (0.04, 0.06, 0.09), opaque
+SLATE = (10, 15, 23)  # overlay/render.py slate background (0.04, 0.06, 0.09), opaque
 PROBE_APP = (0x22, 0x33, 0x44)  # native_display_probe.c fill 0xff223344
+
+
+def testing_slate(alpha=0.96):
+    """The slate a starting candidate shows through: cairo's premultiplied ARGB32 for the slate at
+    `alpha` (16-bit colour, then the top byte), over the probe app with pixman's OVER rounding."""
+    a = int(alpha * 65535 + 0.5) >> 8
+
+    def over(colour, under):
+        t = under * (255 - a) + 0x80
+        return min(255, (int(colour * alpha * 65535 + 0.5) >> 8) + ((t + (t >> 8)) >> 8))
+
+    return tuple(over(c, u) for c, u in zip((0.04, 0.06, 0.09), PROBE_APP))
+
+
+TESTING_SLATE = testing_slate()  # (10, 16, 25); opaque would be SLATE, 2 off in blue
+assert abs(TESTING_SLATE[2] - SLATE[2]) >= 2, TESTING_SLATE
 # DRM fourcc -> wl_shm format: only the two 32-bit formats differ (wl_shm keeps the rest).
 SHM_FORMAT = {0x34325258: 1, 0x34325241: 0}  # XRGB8888, ARGB8888
 root = pathlib.Path("/tmp/pw-display-smoke")
@@ -289,10 +305,16 @@ try:
         "config_revision": 1,
     }
     grant = str(uuid.uuid4())
+    candidate_at = len(events)
     assert request("candidate", identity=identity, grant_id=grant, uid=10004)["accepted"]
     first = read_until(lambda e: e["event"] == "presented")
     assert first["frame_tag"] == "synthetic-probe" and first["identity"] == identity
     print("PASS candidate_exact_identity_compositor_feedback", flush=True)
+    # The candidate's testing slate (alpha 0.96) is presented over the candidate's own frames.
+    if not any(e["event"] == "diagnostic_presented" for e in events[candidate_at:]):
+        read_until(lambda e: e["event"] == "diagnostic_presented")
+    print("PASS testing_slate_pixel_captured",
+          assert_pixel(40, 40, TESTING_SLATE, tolerance=1), flush=True)
     assert not request(
         "handoff", grant_id=grant, handoff_id=str(uuid.uuid4()), buffer_id="weston-0"
     )["accepted"]
