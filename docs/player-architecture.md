@@ -205,6 +205,7 @@ Facts only; no remedy is implied. "Code" means read from the source at 860465cd.
 
 ## Where to read more
 
+- [Decision 0015 — Player base layer and health overlay](decisions/0015-player-base-layer-and-health-overlay.md): the target design for the gaps above (system layer, owner-reviewed 2026-10-04, not yet built).
 - [Player node domain model](player-node-domain-model.md): layer goals, fact ownership, failure matrix, memory classes, stop and recovery.
 - [Display host backend](display-host-backend.md): shell, lease, presentation evidence, controller ingress.
 - [Execution contract](execution-contract.md#netboot-stage-1-boot-data-the-clock-record-and-liveness): boot segments and their reset owners.
