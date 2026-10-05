@@ -327,6 +327,8 @@ Common to every bead: run the gates in its page with the prefix `P`; never edit 
 
 **Budget at pass 3 (estimate, E-AP3-6; replace with the orchestrator's metered figure if it has one).** Spent ≈ 8.65 M (range 7.8–9.4): pass-2 figure 5.7 + since pass 2: B7b 0.3, B8 incl. security lens and fix cycle 0.75, B7c 0.25, B9 0.35, B10a incl. security lens 0.45, B10b 0.3, orchestration ≈ 0.35, this pass ≈ 0.2. Remaining (re-estimated on the re-cut pages): B11 0.5, B12 0.65, D1 0.2, pass 4 + milestone gate 0.6 = **1.95 M**. Spent + remaining ≈ 10.6 M (10.4 at the pass-2 figures) **> 9.5 M** even at the low end of the range (7.8 + 1.95 = 9.75). Wall-clock ≈ 8.2 h of 26 h (not binding). **Decision: STOP after B10b** (the pass-2 stop rule and its preferred stop point; "never stop between B11 and B12 by choice"). The orchestrator may override only with a metered spend ≤ 7.55 M (9.5 − 1.95). **Next session:** B11, B12, D1, pass 4 + milestone gate, in that order, from 4058f30 (or later green tip) on this branch; proposed session ceiling **2.5 M** (1.95 + one fix cycle 0.35 + orchestration 0.2), warning at 2.0 M; per-bead gates unchanged.
 
+**Owner go (2026-10-05).** The owner approved continuing past the pass-3 STOP: next session ceiling **2.5 M** for B11, B12, D1, pass 4 + milestone gate (warning at 2.0 M; per-bead gates unchanged). Resumed from d562505.
+
 ### B11 — Overlay client draws the health layer (re-cut at architect pass 3, E-AP3-3)
 **Packages:** display_host, tests (+ scripts wiring). **Risk:** none (harness + unit mutation probes). **Size:** 6 h. **Leg:** yes (`unresponsive`, `success`).
 **Frozen page.**
