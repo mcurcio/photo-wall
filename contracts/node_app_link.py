@@ -144,3 +144,92 @@ def parse_node_app_link_begin(raw: bytes) -> dict:
     if receipt is None or receipt.get("authority_epoch") != value["authority_epoch"]:
         raise ValueError("node_link_receipt_invalid")
     return {key: value[key] for key in ("player_id", "authority_epoch", "control_receipt")}
+
+
+NODE_APP_LINK_RESULTS = ("accepted", "recorded", "refused")
+
+
+def encode_node_app_link_result(status: str) -> bytes:
+    """The broker's last packet of an app-link exchange.
+
+    `accepted`: the broker holds the proof locally (Central delivery is its
+    own concern); `recorded`: Central recorded it; `refused`: no proof.
+    """
+    if not isinstance(status, str) or status not in NODE_APP_LINK_RESULTS:
+        raise ValueError("app_link_result_invalid")
+    return _json({"schema": 2, "kind": "result", "status": status})
+
+
+def parse_node_app_link_result(raw: bytes) -> str:
+    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
+    if (value is None or set(value) != {"schema", "kind", "status"}
+            or type(value["schema"]) is not int or value["schema"] != 2 or value["kind"] != "result"
+            or not isinstance(value["status"], str) or value["status"] not in NODE_APP_LINK_RESULTS):
+        raise ValueError("app_link_result_invalid")
+    return value["status"]
+
+
+# Progress-probe channel. The Player opens it on the app-link socket and speaks
+# first (`probe_open`); the broker then sends `probe` and `relink`, and the
+# Player answers each probe it got to on its control queue (`probe_answer`).
+# Every packet is {"schema": 2, "kind": ...} and carries no other authority.
+
+
+@dataclass(frozen=True, slots=True)
+class NodeProbeV2:
+    nonce: str
+
+    def __post_init__(self) -> None:
+        try:
+            digest(self.nonce)
+        except ValueError as exc:
+            raise ValueError("probe_channel_message") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class NodeRelinkV2:
+    """The broker could not deliver this run's link: prove it again."""
+
+
+def _probe_packet(raw: bytes, *, kind: str, fields: frozenset[str]) -> dict:
+    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
+    if (value is None or set(value) != {"schema", "kind", *fields}
+            or type(value["schema"]) is not int or value["schema"] != 2 or value["kind"] != kind):
+        raise ValueError("probe_channel_message")
+    return value
+
+
+def encode_node_probe_open() -> bytes:
+    return _json({"schema": 2, "kind": "probe_open"})
+
+
+def parse_node_probe_open(raw: bytes) -> None:
+    _probe_packet(raw, kind="probe_open", fields=frozenset())
+
+
+def encode_node_probe(nonce: str) -> bytes:
+    return _json({"schema": 2, "kind": "probe", "nonce": NodeProbeV2(nonce).nonce})
+
+
+def encode_node_probe_answer(nonce: str) -> bytes:
+    return _json({"schema": 2, "kind": "probe_answer", "nonce": NodeProbeV2(nonce).nonce})
+
+
+def parse_node_probe_answer(raw: bytes) -> str:
+    return NodeProbeV2(_probe_packet(raw, kind="probe_answer", fields=frozenset({"nonce"}))["nonce"]).nonce
+
+
+def encode_node_relink() -> bytes:
+    return _json({"schema": 2, "kind": "relink"})
+
+
+def parse_node_probe_channel_message(raw: bytes) -> NodeProbeV2 | NodeRelinkV2:
+    """A broker → Player packet on an open probe channel."""
+    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
+    kind = value.get("kind") if value is not None else None
+    if kind == "probe":
+        return NodeProbeV2(_probe_packet(raw, kind="probe", fields=frozenset({"nonce"}))["nonce"])
+    if kind == "relink":
+        _probe_packet(raw, kind="relink", fields=frozenset())
+        return NodeRelinkV2()
+    raise ValueError("probe_channel_message")

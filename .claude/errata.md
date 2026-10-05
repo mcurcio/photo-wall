@@ -3823,3 +3823,28 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   brief (B5, B4).
 - E-AP1-6 · Leg-asserting beads B6, B8, B9, B10, B11 did not list tests/test_node_pid1.py although their acceptance
   needs leg assertions; added to their Files. Applied to brief.
+
+## 2026-10-05 · player-health M1 B3 guest contract + Player probe responder (implementer) · contracts/node_app_link.py, player/{probe_responder,node_app_link,service}.py
+- E-B3-1 · Page gap, decided: the backoff resets only after a channel that **received at least one `probe`**. A reset
+  on connect would make today's broker (connect succeeds, then `refused`) see a 0.5 s retry forever; with this rule
+  it sees 0.5, 1, 2, 4 s, then one `probe_open` every 5 s. **B6:** an admitted `probe_open` gets no ack packet (the
+  page defines none); any packet on the channel other than `probe`/`relink` (e.g. an app-link `result`) ends it.
+- E-B3-2 · Cost, unstated in the page: while the control queue is starved the one queued probe callback holds one of
+  `GLibDispatcher`'s four slots (player/service.py:330-355), so control dispatch has three. Starved = control is
+  stuck anyway; a refused (`dispatch_capacity`) probe frees its slot at once. The responder treats any
+  already-failed future (or a dispatcher exception) as refused — a superset of `dispatch_capacity`.
+- E-B3-3 · Parse refusals: the page names only `ValueError("probe_channel_message")` (unknown kind); every probe
+  channel parser (`probe_open`, `probe`, `probe_answer`, `relink`, nonce shape) uses that one code. Result packets
+  use `app_link_result_invalid`; an invalid result is `"rejected"` in `exchange_applied` (as before).
+- E-B3-4 · G-unit lists `tests/test_node_app_link*.py`, which matched no file at 084975d; the Player-side app-link
+  tests are new in tests/test_node_app_link_client.py (B7's `test_node_app_link_local.py` also matches the glob).
+- E-B3-5 · The responder blocks in `recv` with no timeout (socket blocking so `MSG_DONTWAIT` answers never wait);
+  a broker that holds the channel open without probing leaves the Player idle on it, which is harmless (no answer
+  is owed). `relink` before any applied receipt is a no-op for the proof loop.
+- E-B3-2a · Correction to E-B3-2 (fix cycle 1, correctness review): the cost was a defect, not starvation-only. Four
+  in-cycle loops (control, time, websocket, observation re-poll) can each hold a dispatch at once, so a queued probe
+  made the fourth get `dispatch_capacity` (cycle teardown, or a spurious `clock_probe` fault). Now the responder takes
+  its own one-slot lane, `GLibDispatcher.lane(1)` (same `glib.idle_add`, same default-idle priority, own semaphore),
+  inside its constructor, so a probe can never hold a control slot whatever dispatcher it is handed. "No answer when
+  refused" now means the probe lane is busy, not the control queue full. Module design r8 lines 41/128/149 still say
+  "in the shared GLibDispatcher": doc bead to update.
