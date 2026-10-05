@@ -3959,3 +3959,35 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-B6-7 · Test seams, not production branches: macOS has no CLOCK_BOOTTIME, SO_PASSCRED, SO_PEERCRED or AF_UNIX
   SOCK_SEQPACKET, so unit tests inject a monotonic clock, `FeedListener(peer=..., kind=..., owner_uid=..., group=...)`
   and patch `socket.SO_PASSCRED`; `peer_uid` itself is tested on Linux only (CI).
+
+## 2026-10-05 · player-health M1 B7 app-link accepted locally + outbox + relink (implementer) · appliance/node/{app_link,broker_runner}.py
+- E-B7-1 · Signature additive: `deliver_app_link(store, session, probes, *, current: AppRunKey | None)`. The page's
+  three-argument form cannot apply its own rule "a slot whose run is no longer current is cleared" (the current run is
+  the main loop's, not the probe thread's public state). Feed facts go to `probes.feed` (the ProbeThread's feed, the
+  one broker feed). `BrokerLinkService(..., feed: Feed | None = None)` publishes `app_link_accepted`; optional like
+  `probes`, because tests/node_ipc_pid1_probe.py constructs it positionally.
+- E-B7-2 · Page gap, decided: a held link proved under a session other than the current grant's (producer or
+  `command_session_id`) is cleared and relinked **without a POST**. Central refuses it as `node_link_scope_mismatch`
+  **403** (central/fleet/node_app_links.py:47-49), which the page classes as transient (401/403 keep the slot) and
+  NodeSession treats as session refusal (drops the grant, re-enrolls): a held old-session link would re-enroll the
+  broker every turn forever. Arises whenever a proof is accepted offline under the retained `local-proof-grant`, or the
+  session expired/was refused after acceptance. Feed `app_link_refused` = {run, status: int | null, reason:
+  "central_refused" | "session_changed"} (page: {status}). A 403 for a bad signature on the current session keeps the
+  slot one turn, drops the grant, and is then relinked by this rule.
+- E-B7-3 · Cost, unstated: `send_relink` (B6) reaches the Player only if that run's probe channel is open at that
+  moment; a relink issued while the channel is down (broker restart window, Player responder backoff ≤ 5 s) is lost,
+  and the Player keeps treating the run as linked while Central holds no record (display admission stays refused
+  until the Player's next applied receipt or restart). Fix belongs in probe_channel.py (hold the latest relink per run
+  until a channel for that run is adopted) — not in B7's files. Architect pass 2 to decide.
+- E-B7-4 · An empty slot is stored as `{}` (BootStore has no delete). Delivery runs only on a turn whose
+  `driver.current()` succeeded with a grant (`known and granted`), so a transient systemctl failure never clears the
+  slot as "run not current".
+- E-B7-5 · tests/test_node_stop_operation.py (not in B7's Files) had to change: its proof test expected the Central
+  POST's TimeoutError out of `handle`; it now asserts `accepted` with Central timing out and still asserts the
+  `local-app-control` write (the page's mutation probe target).
+- E-B7-6 · CI fix folded in on request (landed B6, Linux-only): tests/test_node_probe_broker.py
+  `test_any_other_reader_gets_nothing` — FeedListener closes a non-reader with its request unread, so Linux AF_UNIX
+  reports ECONNRESET (unix_release_sock sets the peer's sk_err when the receive queue is non-empty; a shutdown before
+  close would not change that, only reading the request would). Listener kept (refuse before reading); the test's
+  refused reader accepts EOF or ECONNRESET and still fails on any byte. Reproduced red and green in python:3.12-slim
+  arm64.

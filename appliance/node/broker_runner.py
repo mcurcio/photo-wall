@@ -17,7 +17,7 @@ from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
 from appliance.clock import boot_id, boottime_ms
 from appliance.feed import Feed, answer_feed_read
-from appliance.node.app_link import BrokerLinkService
+from appliance.node.app_link import BrokerLinkService, deliver_app_link
 from appliance.node.broker import AppEffectBroker, ColdStart
 from appliance.node.lifecycle_storage import FileEffectJournal, primitive, running_from
 from appliance.node.online_runner import OnlineRunner
@@ -168,11 +168,18 @@ class BrokerLoop:
                 raise
         # Local proofs and stop progress must run even without a Central session.
         self.links.serve_one()
-        known, current = self._observe()
+        known, current, granted = self._observe()
+        run = None if current is None else AppRunKey.of(current)
         if known:
             # B8 supplies the recovery predicate; until then nothing consumes a kill.
-            self.probes.publish_run(None if current is None else AppRunKey.of(current),
-                                    recovery_may_be_armed=False)
+            self.probes.publish_run(run, recovery_may_be_armed=False)
+        if known and granted:
+            # Proofs are accepted locally; Central learns of them here, never inside a proof.
+            try:
+                deliver_app_link(self.store, self.session, self.probes, current=run)
+            except (OSError, ValueError, http.client.HTTPException):
+                if self.store.failed:
+                    raise
         self.feeds.serve()
         # A switch converges even when enrollment or Central is unavailable.
         if time.monotonic() - self.last_online_poll >= 2:
@@ -184,7 +191,7 @@ class BrokerLoop:
                     raise
 
     def _observe(self):
-        """(known, current): one `driver.current()` per turn, Central session or not."""
+        """(known, current, granted): one `driver.current()` per turn, Central session or not."""
         store, session, driver, links = self.store, self.session, self.driver, self.links
         asked = known = False
         current = None
@@ -212,7 +219,7 @@ class BrokerLoop:
             except (OSError, ValueError):
                 if store.failed:
                     raise
-        return known, current
+        return known, current, asked
 
 
 def main() -> None:
@@ -251,7 +258,7 @@ def main() -> None:
     feed = Feed(FEED_CAPACITY)
     probes = ProbeThread(feed)
     links = BrokerLinkService(driver, session, Path("/run/photo-wall-app-proof/app-link.sock"),
-                              probes=probes)
+                              probes=probes, feed=feed)
     feeds = FeedListener(feed, FEED_SOCKET)
     loop = BrokerLoop(broker=broker, online=online, store=store, session=session, driver=driver,
                       links=links, probes=probes, feeds=feeds)

@@ -1,8 +1,15 @@
-"""Base broker proof socket: kernel peer + exact running root + signed app receipt."""
+"""Base broker proof socket: kernel peer + exact running root + signed app receipt.
+
+The broker accepts a proof locally (no Central round trip) and holds the signed link in a
+one-slot outbox, the latest per app run; `deliver_app_link` delivers it to Central from
+the main loop until Central acknowledges, and asks the Player to relink when Central can
+never accept it.
+"""
 from __future__ import annotations
 
 import hashlib
-import json
+import http.client
+import logging
 import os
 import secrets
 import socket
@@ -12,7 +19,9 @@ from typing import Protocol
 
 from appliance.central_session.session import NodeSession
 from appliance.clock import boottime_ms
+from appliance.feed import Feed
 from appliance.node.lifecycle_storage import primitive
+from appliance.node.online_broker import refused_permanently
 from appliance.node.probe import AppRunKey
 from appliance.unix_credentials import receive_credential_packet
 from contracts.node_app_link import (
@@ -20,12 +29,17 @@ from contracts.node_app_link import (
     NodeAppLinkChallengeV2,
     encode_node_app_link,
     encode_node_app_link_challenge,
+    encode_node_app_link_result,
     parse_node_app_link,
     parse_node_app_link_begin,
     parse_node_probe_open,
 )
 from contracts.node_commands import encode_session_grant, parse_session_grant
 from contracts.strict_json import loads_object
+
+# One slot: the latest accepted app link, `{"run", "player_id", "link"}`; `{}` when empty.
+OUTBOX = "app-link-outbox"
+LOG = logging.getLogger(__name__)
 
 
 def proof_directory(path: Path, *, owner_uid: int = 0) -> tuple[int, int]:
@@ -56,9 +70,17 @@ class ProbeChannels(Protocol):
     def adopt(self, connection: socket.socket, run: AppRunKey) -> None: ...
 
 
+class Relinks(Protocol):
+    feed: Feed
+
+    def send_relink(self, run: AppRunKey) -> None: ...
+
+
 class BrokerLinkService:
-    def __init__(self, driver, session: NodeSession, path: Path, *, probes: ProbeChannels | None = None):
+    def __init__(self, driver, session: NodeSession, path: Path, *, probes: ProbeChannels | None = None,
+                 feed: Feed | None = None):
         self.driver, self.session, self.path, self.probes = driver, session, path, probes
+        self.feed = feed
         self.directory_identity = proof_directory(path.parent)
         remove_proof_socket(path)
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -170,11 +192,58 @@ class BrokerLinkService:
                          "app_epoch": running.app_epoch, "environment": running.environment.environment_sha256,
                          "sampled_ms": challenge.sampled_boottime_ms,
                          "challenge_sha256": hashlib.sha256(encoded).hexdigest()}})
-        # Central verifies app signature and exact current ControlApplied receipt.
-        status, _ = self.session.request("POST", "/v2/node/app-links", encode_node_app_link(link))
-        result = "recorded" if status == 200 else "refused"
-        packet = json.dumps({"schema": 2, "kind": "result", "status": result}).encode()
-        connection.send(packet)
+        # Accepted here, with no Central round trip: the latest proof per app run waits in the
+        # outbox until Central (which verifies the signature and the exact current
+        # ControlApplied receipt) acknowledges it; see deliver_app_link.
+        run = AppRunKey.of(running).document()
+        self.session.store.write(OUTBOX, {"run": run, "player_id": begin["player_id"],
+                                          "link": encode_node_app_link(link).decode()})
+        if self.feed is not None:
+            self.feed.append("app_link_accepted", {"run": run, "player_id": begin["player_id"]})
+        connection.send(encode_node_app_link_result("accepted"))
+
+
+def deliver_app_link(store, session: NodeSession, probes: Relinks, *, current: AppRunKey | None) -> None:
+    """Deliver the held app link to Central; called once per main-loop turn with a grant.
+
+    200 clears the slot. A refusal Central repeats for this link (a permanent 4xx, or a link
+    proved under a session other than the current one, which Central refuses as a scope
+    mismatch, central/fleet/node_app_links.py:47-49) clears it and asks that run's Player
+    to relink. Anything else (transport error, 408, 429, 5xx, 401/403) keeps it for the
+    next turn: the slot is never dropped on a transient failure. A slot whose run is no
+    longer current is cleared.
+    """
+    slot = store.read(OUTBOX)
+    if not slot:
+        return
+    run = slot["run"]
+    if current is None or run != current.document():
+        store.write(OUTBOX, {})
+        return
+    grant = session.grant
+    if grant is None:
+        return
+    raw = slot["link"].encode()
+    challenge = parse_node_app_link(raw).challenge
+    if challenge.producer != grant.producer or challenge.command_session_id != grant.session_id:
+        _refused(store, probes, current, status=None, reason="session_changed")
+        return
+    try:
+        status, _ = session.request("POST", "/v2/node/app-links", raw)
+    except (OSError, http.client.HTTPException):
+        return  # Central unreachable: held for the next turn
+    if status == 200:
+        store.write(OUTBOX, {})
+        probes.feed.append("app_link_recorded", {"run": run})
+    elif refused_permanently(status):
+        _refused(store, probes, current, status=status, reason="central_refused")
+
+
+def _refused(store, probes: Relinks, run: AppRunKey, *, status: int | None, reason: str) -> None:
+    store.write(OUTBOX, {})
+    probes.feed.append("app_link_refused", {"run": run.document(), "status": status, "reason": reason})
+    LOG.warning("broker: app link not recordable (%s, %s); asking the Player to relink", reason, status)
+    probes.send_relink(run)
 
 
 def _kind(raw: bytes) -> object:
