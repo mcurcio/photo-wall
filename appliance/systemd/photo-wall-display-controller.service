@@ -13,6 +13,9 @@ StartLimitBurst=10
 [Service]
 User=pw-display
 Group=pw-display
+# Lets the controller chown its display feed socket to pw-node-feeds (0660); never a sysusers
+# membership, which Weston's login session (and so the overlay client) would inherit.
+SupplementaryGroups=pw-node-feeds
 LoadCredential=node-config:/run/photo-wall-node/display.json
 ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-display-controller --config=%d/node-config
 Restart=always
@@ -31,5 +34,5 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
-ReadWritePaths=/run/photo-wall-display
+ReadWritePaths=/run/photo-wall-display /run/photo-wall-display-feed
 InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor

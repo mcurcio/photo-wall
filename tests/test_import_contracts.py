@@ -34,7 +34,7 @@ FROZEN_FORBIDDEN_CONTRACTS = {
         {"appliance.central_session"},
     ),
     "Shared node kernel knows no context": (
-        {"appliance.clock", "appliance.boot_store", "appliance.feed",
+        {"appliance.clock", "appliance.boot_store", "appliance.feed", "appliance.feed_socket",
          "appliance.central_session", "appliance.unix_credentials"},
         {"appliance.authority", "appliance.health", "appliance.display_host", "appliance.node"},
     ),

@@ -4147,3 +4147,37 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-B9-8 · Local environment (as E-B5-6): with B9 uncommitted, tests/test_node_component_inputs.py errors (8) because
   it builds HEAD's tree while scripts/build_node_base_deb.py names the uncommitted `appliance.health.runner`. On a
   clean checkout of the same tree (dangling commit): 23 passed. Not code.
+
+## 2026-10-05 · player-health M1 B10a kernel feed listener + display feed snapshot (implementer) · appliance/feed_socket.py, appliance/display_host/runner.py
+- E-B10a-1 · Page says `appliance/feed_socket.py` is "stdlib only", but the lifted listener parses requests with
+  `contracts.strict_json.loads_object` (size bound, no duplicate keys, UTF-8 only). Kept (behaviour unchanged; the
+  kernel's `appliance.boot_store` already imports it); the kernel lint contract only forbids context packages.
+- E-B10a-2 · Additive: the kernel listener encodes replies with `json.dumps(default=str)` (the display ingress rule):
+  the display `events` answer carries UUID objects (`boot_id`, `incarnation_id`, event values). Broker replies hold
+  only JSON-native values, so its wire is unchanged. `FeedListener` is also a context manager (display `main` adds it
+  to the ingress `with`, no re-indent).
+- E-B10a-3 · Decided: the shared node-feed policy `FEEDS_GROUP = 10007` and `FEED_READERS = {0, 10006}` live in
+  `appliance/feed_socket.py` (one definition for both publishers; display may not import the broker). The
+  constructor arguments stay required; each runner passes them through its own `feed_listener(...)` factory
+  (`broker_runner.feed_listener(feed, path=FEED_SOCKET, *, owner_uid=0, group=FEEDS_GROUP, **seams)`,
+  `runner.feed_listener(controller, path=FEED_SOCKET, *, owner_uid=None→getuid(), group=FEEDS_GROUP, **seams)`), so
+  unit tests exercise the production allowlist with only `peer`/`kind`/owner/group seams. Broker `max_reply` = 65536
+  (`MAX_FEED_REPLY`, the readers' receive buffer); display `max_reply` = `MAX_PACKET`.
+- E-B10a-4 · E-B9-5 applied: `appliance/health/runner.py` imports `peer_uid` from the kernel (its copy deleted).
+  tests/test_health_runner.py (not in the page's Files) changed: it built the broker's `FeedListener`, which no
+  longer exists in broker_runner; its Linux `peer_uid` test moved to tests/test_feed_socket.py.
+- E-B10a-5 · Display feed socket op rule as built: `op` absent or `"events"` (as `answer_feed_read`); any other op →
+  `{"accepted": false, "reason": "feed_read_request"}`. The `outputs` snapshot is on every `events` answer, ingress
+  included.
+- E-B10a-6 · Cost: `outputs` is bounded by `DisplayHost.max_outputs` (shipped 16; the domain refuses more). Worst case
+  at 16 admitted Outputs with maximal identifiers (128-char output_id, 96-char frame_id) plus a full page of 8
+  presentations encodes to 15 793 bytes against MAX_PACKET 16 384 (tests/test_node_display_runner.py); 40 such
+  Outputs → `response_bound`. Real identifiers are far smaller (leg: Virtual-1). A host built with a larger
+  `max_outputs` could see `response_bound` on full pages; B10b's reader must treat it as a counted failure.
+- E-B10a-7 · For B10b (leg evidence): the admitted Output's snapshot shows `"fault": "app_absent"` while
+  `admitted` is set and `diagnostic` is `released` (OutputState.fault is not cleared on admission). Derive the
+  underlay from `admitted`, never from `fault`.
+- E-B10a-8 · Pre-existing, moved unchanged: `FeedListener.close` guards the unlink by (st_dev, st_ino), but Linux
+  reuses inode numbers, so a closed listener whose path a successor already rebound unlinks the successor's socket
+  (probed red in python:3.12-slim arm64; that test was dropped). Unreachable in production (one listener per path per
+  process lifetime).

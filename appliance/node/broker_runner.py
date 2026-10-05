@@ -3,11 +3,6 @@ from __future__ import annotations
 
 import argparse
 import http.client
-import json
-import os
-import socket
-import stat
-import struct
 import subprocess
 import time
 from pathlib import Path
@@ -18,6 +13,7 @@ from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
 from appliance.clock import boot_id, boottime_ms
 from appliance.feed import Feed, answer_feed_read
+from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.node.app_link import BrokerLinkService, deliver_app_link, owed_relink
 from appliance.node.broker import AppEffectBroker, ColdStart
 from appliance.node.lifecycle_storage import FileEffectJournal, primitive, running_from
@@ -44,11 +40,7 @@ from contracts.strict_json import loads_object
 # code reads it; Central receives process evidence and app-effect events only.
 FEED_CAPACITY = 512
 FEED_SOCKET = Path("/run/photo-wall-app-feed/feed.sock")
-FEED_READERS = frozenset({0, 10006})  # root, pw-health
-FEEDS_GROUP = 10007  # pw-node-feeds
-MAX_FEED_REQUEST = 4096
-FEED_READ_WAIT_SECONDS = 0.05
-FEED_READS_PER_TURN = 8
+MAX_FEED_REPLY = 65536  # a reader's receive buffer (the health judge's MAX_FEED_REPLY)
 
 def emit_process_evidence(store, session, running, state: str) -> None:
     document = store.read("process-evidence") or {"sequence": 0, "last": None, "pending": []}
@@ -72,85 +64,13 @@ def emit_process_evidence(store, session, running, state: str) -> None:
         store.write("process-evidence", document)
 
 
-def peer_uid(connection: socket.socket) -> int:
-    size = struct.calcsize("=iII")
-    _pid, uid, _gid = struct.unpack("=iII", connection.getsockopt(
-        socket.SOL_SOCKET, getattr(socket, "SO_PEERCRED", 17), size))
-    return uid
-
-
-class FeedListener:
-    """Serves the feed's `events` op: one request per accept, readers by SO_PEERCRED uid.
-
-    Never blocks the turn beyond a short bounded wait per accepted reader.
-    """
-
-    def __init__(self, feed: Feed, path: Path, *, owner_uid: int = 0, group: int = FEEDS_GROUP,
-                 readers: frozenset[int] = FEED_READERS, peer=peer_uid,
-                 kind: int = getattr(socket, "SOCK_SEQPACKET", socket.SOCK_STREAM)):
-        self.feed, self.path, self.readers, self.peer = feed, path, readers, peer
-        self.owner_uid = owner_uid
-        directory = path.parent.lstat()
-        if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != owner_uid
-                or directory.st_mode & 0o022):
-            raise ValueError("feed_directory")
-        self._remove_stale()
-        self.listener = socket.socket(socket.AF_UNIX, kind)
-        try:
-            self.listener.bind(str(path))
-            os.chown(path, owner_uid, group)
-            os.chmod(path, 0o660)
-            info = path.lstat()
-            self.identity = info.st_dev, info.st_ino
-            self.listener.listen(8)
-            self.listener.setblocking(False)
-        except BaseException:
-            self.listener.close()
-            raise
-
-    def _remove_stale(self) -> None:
-        try:
-            info = self.path.lstat()
-        except FileNotFoundError:
-            return
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != self.owner_uid:
-            raise ValueError("feed_socket_ownership")
-        self.path.unlink()
-
-    def serve(self, budget: int = FEED_READS_PER_TURN) -> None:
-        for _ in range(budget):
-            try:
-                connection, _ = self.listener.accept()
-            except (BlockingIOError, InterruptedError):
-                return
-            with connection:
-                try:
-                    if self.peer(connection) not in self.readers:
-                        continue  # not a reader: closed without a reply
-                    connection.settimeout(FEED_READ_WAIT_SECONDS)
-                    raw = connection.recv(MAX_FEED_REQUEST + 1)
-                except OSError:
-                    continue
-                try:
-                    value = loads_object(raw, max_bytes=MAX_FEED_REQUEST)
-                    if value is None:
-                        raise ValueError("feed_read_request")
-                    reply = {"accepted": True, **answer_feed_read(self.feed, value)}
-                except ValueError as error:
-                    reply = {"accepted": False, "reason": str(error)}
-                try:
-                    connection.sendall(json.dumps(reply, separators=(",", ":")).encode())
-                except OSError:
-                    pass
-
-    def close(self) -> None:
-        self.listener.close()
-        try:
-            info = self.path.lstat()
-        except FileNotFoundError:
-            return
-        if (info.st_dev, info.st_ino) == self.identity:
-            self.path.unlink()
+def feed_listener(feed: Feed, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
+                  group: int = FEEDS_GROUP, **seams) -> FeedListener:
+    """The broker's node feed socket: root-owned, group pw-node-feeds, read by root and
+    pw-health only (`seams`: the kernel listener's `peer` and `kind`, for tests)."""
+    return FeedListener(path, owner_uid=owner_uid, group=group, readers=FEED_READERS,
+                        answer=lambda request: answer_feed_read(feed, request),
+                        max_reply=MAX_FEED_REPLY, **seams)
 
 
 class BrokerLoop:
@@ -314,7 +234,7 @@ def main() -> None:
     probes = ProbeThread(feed)
     links = BrokerLinkService(driver, session, Path("/run/photo-wall-app-proof/app-link.sock"),
                               probes=probes, feed=feed)
-    feeds = FeedListener(feed, FEED_SOCKET)
+    feeds = feed_listener(feed)
     loop = BrokerLoop(broker=broker, online=online, store=store, session=session, driver=driver,
                       links=links, probes=probes, feeds=feeds)
     try:

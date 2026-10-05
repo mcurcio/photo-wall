@@ -21,7 +21,6 @@ import os
 import selectors
 import socket
 import stat
-import struct
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -29,6 +28,7 @@ from pathlib import Path
 from appliance.clock import boottime_ms
 from appliance.display_host.overlay.instruction import PULSE_DEADLINE_MS
 from appliance.feed import READ_LIMIT, FeedCursor
+from appliance.feed_socket import peer_uid
 from appliance.health.judge import HealthJudge
 from appliance.node.probe import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
@@ -54,14 +54,6 @@ def shipped_judge() -> HealthJudge:
                        startup_ms=SHIPPED_TIMING.startup_ms,
                        kill_after_ms=SHIPPED_TIMING.kill_after_ms,
                        pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
-
-
-def peer_uid(connection: socket.socket) -> int:
-    # Same reading as the broker's feed listener; B10a lifts both into the kernel's feed socket.
-    size = struct.calcsize("=iII")
-    _pid, uid, _gid = struct.unpack("=iII", connection.getsockopt(
-        socket.SOL_SOCKET, getattr(socket, "SO_PEERCRED", 17), size))
-    return uid
 
 
 class FeedReader:

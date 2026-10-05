@@ -10,11 +10,12 @@ from uuid import uuid4
 
 import pytest
 
+from appliance import feed_socket
 from appliance.feed import Feed, answer_feed_read
 from appliance.health import runner
 from appliance.health.judge import APP_UNRESPONSIVE
 from appliance.health.runner import FeedReader, HealthRunner, HealthSocket, status_document
-from appliance.node.broker_runner import FeedListener
+from appliance.node.broker_runner import feed_listener
 from appliance.node.probe import AppRunKey
 from contracts.node_faults import FAULTS, catalogue_digest
 
@@ -137,14 +138,14 @@ def test_a_malformed_page_is_a_failure_not_a_crash():
 
 
 def test_the_reader_drains_the_brokers_real_feed_socket(tmp_path):
-    """End to end over the broker's own FeedListener (the judge as uid pw-health)."""
+    """End to end over the broker's own feed socket (the judge as uid pw-health)."""
     directory = tmp_path / "app-feed"
     directory.mkdir(mode=0o750)
     feed = Feed(512)
     for _ in range(20):
         feed.append("probe_answered", {"run": RUN, "rtt_ms": 3})
-    listener = FeedListener(feed, directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid(),
-                            peer=lambda connection: 10006, kind=KIND)
+    listener = feed_listener(feed, directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid(),
+                             peer=lambda connection: 10006, kind=KIND)
     stop = threading.Event()
 
     def serve():
@@ -253,11 +254,10 @@ def test_a_stale_socket_is_replaced_but_a_foreign_file_or_open_directory_is_not(
         HealthSocket(directory / "health.sock", lambda operation: {}, kind=KIND)
 
 
-@pytest.mark.skipif(not LINUX, reason="SO_PEERCRED is Linux-only")
-def test_peer_uid_is_the_kernel_credential():
-    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    with first, second:
-        assert runner.peer_uid(first) == os.getuid()
+def test_health_sock_reads_peers_with_the_kernel_peer_uid():
+    # One SO_PEERCRED reading for every node socket (tests/test_feed_socket.py), never a copy.
+    assert runner.peer_uid is feed_socket.peer_uid
+    assert HealthSocket.__init__.__kwdefaults__["peer"] is feed_socket.peer_uid
 
 
 # -- packaging -----------------------------------------------------------------------------

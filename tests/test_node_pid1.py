@@ -71,9 +71,11 @@ HEALTHY_SECONDS = 20
 RELINK_SETTLE_SECONDS = 30  # a trailing 409 refusal: relink, Player re-proof (<= 5 s), delivery
 LEASE_MS = 5000
 # Node feeds (appliance/feed.py): the display controller's root-only ingress socket (requests
-# carry SCM_CREDENTIALS) and the broker's probe feed (SO_PEERCRED allowlist {0, pw-health}).
+# carry SCM_CREDENTIALS), and the kernel feed sockets (appliance/feed_socket.py, SO_PEERCRED
+# allowlist {0, pw-health}) of the broker's probe feed and the display feed with its `outputs`.
 DISPLAY_FEED_SOCKET = "/run/photo-wall-display/ingress.sock"
 BROKER_FEED_SOCKET = "/run/photo-wall-app-feed/feed.sock"
+DISPLAY_NODE_FEED_SOCKET = "/run/photo-wall-display-feed/feed.sock"
 # Reads one node feed as root inside the node in the FeedCursor request shape: argv = socket,
 # credentials (1/0), after, publisher incarnation ('' = none). Drains up to 64 pages and
 # advances as FeedCursor.advance does (a new publisher incarnation restarts from 0); prints
@@ -749,6 +751,7 @@ class NodeFeed:
     def __init__(self, node, socket_path, *, credentials: bool, dump_name):
         self.node, self.socket_path, self.credentials = node, socket_path, credentials
         self.dump_name, self.cursor, self.events = dump_name, FeedCursor(), []
+        self.outputs = None  # the display feed's latest `outputs` snapshot (B10a)
 
     def poll(self):
         incarnation = "" if self.cursor.incarnation is None else str(self.cursor.incarnation)
@@ -759,10 +762,11 @@ class NodeFeed:
         assert result.returncode == 0, (
             f"node feed {self.socket_path} unreadable: " + result.stderr[-2000:]
         )
-        taken = []
+        taken, snapshot = [], None
         for page in json.loads(result.stdout):
             assert page.get("accepted"), page
             events, resnapshot = self.cursor.advance(page)
+            snapshot = page.get("outputs", snapshot)
             if resnapshot:
                 taken.append({"kind": "fixture_feed_gap",
                               "value": {"publisher_incarnation": page["publisher_incarnation"],
@@ -773,6 +777,10 @@ class NodeFeed:
         with (self.node.work / self.dump_name).open("a") as dump:
             for event in taken:
                 dump.write(json.dumps(event, sort_keys=True) + "\n")
+            if snapshot is not None:  # evidence only: one snapshot per poll, not a feed event
+                self.outputs = snapshot
+                dump.write(json.dumps({"kind": "fixture_outputs_snapshot", "value": snapshot},
+                                      sort_keys=True) + "\n")
         self.events.extend(taken)
         return taken
 
@@ -859,7 +867,9 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
     presenting (no gap of a lease on the node's own clock) and nothing is invalidated, and the
     broker feed shows the real Player answering progress probes for its run (no miss). The
     health judge unit is active and restricted to AF_UNIX, reads that broker feed, and judges
-    the healthy run as having no condition.
+    the healthy run as having no condition. The display feed socket for node readers is
+    pw-display:pw-node-feeds 0660 and its `outputs` snapshot shows the bound Output connected
+    with exactly the broker's run admitted.
     """
     phase = "unresponsive"
     components_dir, _, image = node_pid1_inputs
@@ -879,6 +889,8 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                             dump_name="display-feed.jsonl")
             probes = NodeFeed(node, BROKER_FEED_SOCKET, credentials=False,
                               dump_name="broker-feed.jsonl")
+            display_feed = NodeFeed(node, DISPLAY_NODE_FEED_SOCKET, credentials=False,
+                                    dump_name="display-node-feed.jsonl")
             deadline = time.monotonic() + ADMIT_SECONDS
             while True:
                 feed.poll()
@@ -906,6 +918,7 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                 time.sleep(1)
                 feed.poll()
                 probes.poll()
+                display_feed.poll()
             window = feed.events[healthy_from:]
             # The real Player answers the broker's probes from its control queue, every T.
             run = run_key(current)
@@ -942,6 +955,21 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
             assert judged["publisher_incarnation"] == str(probes.cursor.incarnation), judged
             assert status["verdict"]["conditions"] == [], status["verdict"]
             assert not [entry for entry in status["ring"] if entry["state"] == "raised"], status
+            # The display feed for node readers (B10a): pw-display:pw-node-feeds 0660, the group
+            # from the controller's unit only (never a pw-display membership), and every read's
+            # `outputs` snapshot shows the bound Output connected with the broker's run admitted.
+            feed_socket_mode = node.run("stat", "-c", "%a %U:%G", DISPLAY_NODE_FEED_SOCKET).strip()
+            assert feed_socket_mode == "660 pw-display:pw-node-feeds", feed_socket_mode
+            display_groups = node.run("id", "-nG", "pw-display").split()
+            assert "pw-node-feeds" not in display_groups, display_groups
+            display_feed.poll()
+            snapshot = {output["output_id"]: output for output in display_feed.outputs or ()}
+            bound_output = snapshot.get(bound["output_id"])
+            assert bound_output is not None and bound_output["connected"] is True, snapshot
+            assert bound_output["admitted"] == {**run, "frame_id": bound["frame_id"]}, (
+                f"display snapshot {bound_output} vs broker run {run}; evidence: {work}"
+            )
+            assert display_feed.cursor.after > 0, "display feed for node readers carried no event"
             shown = presentations(window, bound["frame_id"])
             assert not invalidations(window), invalidations(window)
             assert len(shown) >= 2, f"no fresh app presentations; evidence: {work}"
@@ -961,6 +989,7 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                         "max_gap_ms": max(gaps),
                         "probe_answers": len(answered),
                         "health_verdict": status["verdict"],
+                        "display_snapshot": bound_output,
                         "app_link_refusals": sum(event["kind"] == "app_link_refused"
                                                  for event in probes.events),
                         "probe_rtt_ms_max": max(event["value"]["rtt_ms"] for event in answered),

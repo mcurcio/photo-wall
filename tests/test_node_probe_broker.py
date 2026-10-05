@@ -14,10 +14,11 @@ import pytest
 from test_node_boot import environment
 from test_node_linux_adapters import store as boot_store
 
+from appliance import feed_socket
 from appliance.feed import Feed
 from appliance.node import app_link, broker_runner
 from appliance.node.broker import RunningApp
-from appliance.node.broker_runner import BrokerLoop, FeedListener
+from appliance.node.broker_runner import BrokerLoop
 from appliance.node.probe import AppRunKey, OwedRelink, ProbeTiming
 from appliance.node.probe_channel import ProbeThread
 from contracts.node_app_link import parse_node_probe_channel_message
@@ -32,7 +33,7 @@ def monotonic_ms():
     return time.monotonic_ns() // 1_000_000
 
 
-# -- the feed socket -----------------------------------------------------------------------
+# -- the feed socket (the kernel listener's own tests: tests/test_feed_socket.py) -----------
 
 
 @pytest.fixture
@@ -41,9 +42,9 @@ def listener(tmp_path):
     directory.mkdir(mode=0o750)
     feed = Feed(512)
     readers = {"uid": 0}
-    served = FeedListener(feed, directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid(),
-                          peer=lambda connection: readers["uid"],
-                          kind=socket.SOCK_SEQPACKET if LINUX else socket.SOCK_STREAM)
+    served = broker_runner.feed_listener(feed, directory / "feed.sock", owner_uid=os.getuid(),
+                                         group=os.getgid(), peer=lambda connection: readers["uid"],
+                                         kind=socket.SOCK_SEQPACKET if LINUX else socket.SOCK_STREAM)
     yield served, feed, readers
     served.close()
 
@@ -104,29 +105,15 @@ def test_a_bad_request_is_refused_without_detail(listener):
     assert read(served, b"[]") == {"accepted": False, "reason": "feed_read_request"}
 
 
-def test_serving_never_waits_for_an_absent_reader(listener):
+def test_the_broker_serves_its_feed_through_the_kernel_listener_not_a_copy(listener):
     served, _, _ = listener
-    started = time.monotonic()
-    served.serve()
-    assert time.monotonic() - started < 0.05
-
-
-def test_a_stale_socket_is_replaced_but_a_foreign_file_is_not(tmp_path):
-    directory = tmp_path / "app-feed"
-    directory.mkdir(mode=0o750)
-    (directory / "feed.sock").write_text("not a socket")
-    with pytest.raises(ValueError, match="feed_socket_ownership"):
-        FeedListener(Feed(8), directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid())
-    directory.chmod(0o770)
-    with pytest.raises(ValueError, match="feed_directory"):
-        FeedListener(Feed(8), directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid())
-
-
-@pytest.mark.skipif(not LINUX, reason="SO_PEERCRED is Linux-only")
-def test_peer_uid_is_the_kernel_credential():
-    first, second = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
-    with first, second:
-        assert broker_runner.peer_uid(first) == os.getuid()
+    assert broker_runner.FeedListener is feed_socket.FeedListener
+    assert type(served) is feed_socket.FeedListener
+    assert not hasattr(broker_runner, "peer_uid")
+    assert served.readers == feed_socket.FEED_READERS == frozenset({0, 10006})
+    assert broker_runner.feed_listener.__defaults__ == (broker_runner.FEED_SOCKET,)
+    assert broker_runner.feed_listener.__kwdefaults__ == {"owner_uid": 0,
+                                                          "group": feed_socket.FEEDS_GROUP}
 
 
 # -- the main-loop turn --------------------------------------------------------------------

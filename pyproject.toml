@@ -162,6 +162,7 @@ ignore_imports = [
 name = "Shared node kernel knows no context"
 type = "forbidden"
 source_modules = ["appliance.clock", "appliance.boot_store", "appliance.feed",
-                  "appliance.central_session", "appliance.unix_credentials"]
+                  "appliance.feed_socket", "appliance.central_session",
+                  "appliance.unix_credentials"]
 forbidden_modules = ["appliance.authority", "appliance.health", "appliance.display_host",
                      "appliance.node"]
