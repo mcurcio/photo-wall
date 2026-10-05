@@ -3753,3 +3753,18 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-B2a-4 · The implementer cannot commit, but G-leg builds from a commit: the leg was built from a dangling
   commit object (temporary GIT_INDEX_FILE + `git commit-tree`, no ref, HEAD and index untouched) whose tree equals
   the B2a working tree.
+
+## 2026-10-05 · player-health M1 B2b feed primitive (implementer) · appliance/feed.py, appliance/display_host/runner.py
+- E-B2b-1 · Wire is additive beyond the page's "adds `publisher_incarnation`": each event also carries `audience`
+  (`FeedCursor.advance` must rebuild `FeedEvent.audience`; a missing one reads as `node`), and the page document
+  also carries `latest` and `dropped_total` (the `FeedPage` fields, so a remote reader can see counted drops).
+- E-B2b-2 · Request bounds as built in `answer_feed_read`: `after` is now required (was `value.get("after", 0)`);
+  a missing `incarnation` key reads as null (tests/test_node_pid1.py `DISPLAY_FEED_SCRIPT` omits it); `op` absent or
+  `"events"`; any key outside {op, after, incarnation, limit} → `ValueError("feed_read_request")`.
+- E-B2b-3 · tests/test_node_pid1.py `DisplayFeed.poll` detects a controller restart by the compositor's
+  `incarnation_id`, which does not change when only the controller restarts; the feed's restart signal is now
+  `publisher_incarnation` (or simply `stream_gap`). Left unchanged (not in B2b's files); B12, which rewrites that
+  leg, should read the display feed with the `FeedCursor` request/advance shape.
+- E-B2b-4 · G-harness does not exercise `runner.Controller` (the smoke drives Weston's control socket directly);
+  the controller is covered by the new tests/test_node_display_runner.py (fake backend), the DB-tier
+  tests/test_node_display_native.py service probe, and the node-pid1 legs that read the display feed.

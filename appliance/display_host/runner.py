@@ -14,11 +14,11 @@ import selectors
 import socket
 import struct
 import subprocess
-from collections import deque
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from uuid import UUID
 
+from appliance.feed import Feed, answer_feed_read
 from appliance.unix_credentials import receive_credential_packet
 
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
@@ -76,9 +76,7 @@ class Controller:
     def __init__(self, backend: WestonBackend):
         self.backend = backend
         self.host = backend.initialize()
-        self.sequence = 0
-        self.events: deque[dict] = deque(maxlen=256)
-        self.gap = False
+        self.feed = Feed(256)
         self.service = None
 
     def observe(self) -> None:
@@ -87,15 +85,8 @@ class Controller:
             return
         if self.service is not None:
             self.service.observe(observed)
-        self.sequence += 1
-        if len(self.events) == self.events.maxlen:
-            self.gap = True
-        self.events.append(
-            {
-                "sequence": self.sequence,
-                "kind": type(observed).__name__,
-                "value": asdict(observed) if is_dataclass(observed) else observed,
-            }
+        self.feed.append(
+            type(observed).__name__, asdict(observed) if is_dataclass(observed) else observed
         )
 
     def revise(self, decision) -> None:
@@ -106,13 +97,8 @@ class Controller:
     def receive(self, value: dict) -> dict:
         operation = value.get("op")
         if operation == "events":
-            after = value.get("after", 0)
-            if type(after) is not int or after < 0:
-                raise ValueError("display_event_cursor")
-            events = [event for event in self.events if event["sequence"] > after][:8]
             return {
-                "events": events,
-                "stream_gap": self.gap,
+                **answer_feed_read(self.feed, value),
                 "boot_id": self.host.boot_id,
                 "incarnation_id": self.host.incarnation_id,
             }

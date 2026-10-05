@@ -276,7 +276,7 @@ PACKAGES: Final = (
     Package("node-base-deb", "the isolated V2 node base .deb",
             (*_DEB_BUILD, "scripts/build_node_base_deb.py", "appliance/node/**", "appliance/display_host/**", "contracts/**",
              "uplink/**", "appliance/__init__.py", "appliance/unix_credentials.py",
-             "appliance/clock.py", "appliance/boot_store.py", "appliance/central_session/**",
+             "appliance/clock.py", "appliance/boot_store.py", "appliance/central_session/**", "appliance/feed.py",
              "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
              "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target")),
     Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
