@@ -4050,3 +4050,51 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   tests/test_node_probe_channel.py) instead of filling a buffer. For D1: feed kind `relink_sent` {run} (audience node).
 
 - E-ENV-1 (orchestrator, 2026-10-05, after B7b): running Linux tests in a container that bind-mounts the whole worktree lets the container's `uv sync --frozen` overwrite the host macOS `.venv` (pyvenv.cfg home → /usr/local/bin), breaking `.venv/bin/python` on the host. Rule for all remaining beads: never mount `.venv` into a container — mount the source read-only and create the venv inside the container (e.g. `-v $PWD:/src:ro` then copy to /work, or `UV_PROJECT_ENVIRONMENT=/tmp/venv`). The host venv was repaired with `uv sync --frozen`.
+
+## 2026-10-05 · player-health M1 B8 kill after K behind the Q1 predicate (implementer) · appliance/node/{probe,probe_channel,online_broker,process_linux,broker_runner}.py
+- E-B8-1 · Page gap, decided: `app_killed` carries `unanswered_ms`, but B6's `take_kill_due() -> AppRunKey | None`
+  gives the main loop no such number. The latch now holds `KillDue(run, unanswered_ms)` (frozen, appliance/node/probe.py)
+  and `take_kill_due() -> KillDue | None`; the thread re-asserts it every turn while `ProbeClock.overdue`, with the
+  then-current `ProbeClock.unanswered_ms` (both additive properties). tests/test_node_probe_channel.py's one
+  `take_kill_due() == RUN` assertion became `.run == RUN`. `overdue` also requires a turn past S (as the fact does).
+- E-B8-2 · Page gap, decided: an identity mismatch at the signal (`kill` → False) is fed as `kill_withheld`
+  `run_changed` (the page names only `recovery_armed | run_changed`; a process that is no longer this run's main
+  process *is* a run change). An unobservable identity (`systemctl show` timeout/error, OSError, ValueError raised by
+  `kill`) sends nothing, feeds nothing and is retried when the thread re-asserts the latch. A run this broker killed
+  is never signalled again (`BrokerLoop.killed`): the dying app can stay published for a turn or two and the level
+  latch would otherwise fire a second SIGKILL and a second `app_killed`.
+- E-B8-3 · Fail-closed choices: `recovery_may_be_armed` returns True for an obligation whose `operation_id` cannot be
+  read; the loop treats an unreadable `online` record or `recovery-acknowledged` slot (store not poisoned) as armed.
+  The acknowledgement is written only after `advance` with the Player's proof progress returns (the `{"kind":
+  "stopped"}` advance is not an acknowledgement); key `RECOVERY_ACKNOWLEDGED` lives in probe.py beside the predicate,
+  so online_broker.py gains one import (`appliance.node.probe`) — still inside `service` scope; :98-108, :183-184,
+  :211 untouched; recovery.py and recovery_linux.py untouched.
+- E-B8-4 · Files outside the page, test fakes only: tests/test_node_probe_broker.py `Driver.kill` (its FAST loop now
+  reaches K with no online recovery and kills) and tests/test_node_app_link_local.py `take_kill_due=lambda: None` on
+  its fake probe thread. tests/test_node_probe_kill.py reuses `loop_for`/`turns` (test_node_probe_broker) and the
+  switch `Driver`/`stage` (test_node_online_broker).
+- E-B8-5 · The leg asserts the B7b sequence (every `app_link_refused` followed, same run, by `relink_sent` then
+  `app_link_recorded`) after the healthy window with a bounded settle (≤ 30 s) for a refusal near the window's end;
+  `app_killed`/`kill_withheld` are refused over the whole broker feed read, not only the healthy window. For D1: feed
+  kinds `app_killed` {run, reason: "unresponsive", unanswered_ms} and `kill_withheld` {run, reason}; boot-store key
+  `recovery-acknowledged` {operation_id}.
+
+## 2026-10-05 · player-health M1 B8 fix cycle 1 (implementer, safety review) · appliance/node/{probe,probe_channel,online_broker,broker_runner}.py
+- E-B8-6 · Defect, fixed: a stale kill latch. `ProbeThread._receive` reset the `ProbeClock` on a valid answer but left
+  `_kill_due` set (cleared only by `take_kill_due` or a run change), so a latch set before the answer was taken by the
+  next known turn and SIGKILLed an app that had recovered. `_receive` now clears `_kill_due` under the lock when
+  `answered()` is True and the latch names the channel's run. Test: tests/test_node_probe_channel.py
+  `test_an_answer_clears_a_kill_due_latch_set_before_it` (thread driven by hand, no race); mutation (no clear) → red.
+- E-B8-7 · Defect, fixed: the Q1 fence failed open. `recovery_may_be_armed` read the obligation from the online
+  record, which `accept()` replaces (a `running` record, online_broker.py `_REPLACEABLE`) before the old obligation's
+  control is acknowledged, and a new switch's `preparing` record carries none. New boot-store key `recovery-armed`
+  {operation_id} (`RECOVERY_ARMED`, probe.py), written by `OnlineEffectBroker._arm_recovery` after `recovery.arm`
+  returned the receipt (if different) — every arm site (execute, `_start`, reconcile) passes through it; the `arm`
+  calls and recovery.py/recovery_linux.py are unchanged. Predicate is now
+  `recovery_may_be_armed(record, armed, acknowledged)`: True for any record phase but `running`/`fallback_running`
+  (preparing and every switch phase), else True unless every obligation that may be armed (the `recovery-armed` one
+  and the record's own `recovery`, if any) is the one `recovery-acknowledged` names; unreadable → True. The host's
+  admission (recovery.py arm refuses while any row is not `controlled`) means a newer op is never recorded as armed
+  while an older one is uncontrolled. Cost: a stage stuck in `preparing` (roots unverified, capacity) withholds kills
+  for as long as it stays there, even with nothing armed; the key alone would be exact there (decided literal, per
+  the fix brief). For D1: boot-store key `recovery-armed` {operation_id}.

@@ -145,7 +145,74 @@ def test_a_blocked_main_loop_does_not_stop_probe_timing(probes):
     assert unanswered and unanswered[-1].value["misses"] >= FAST.miss_limit
     [due] = facts(probes.feed, "probe_kill_due")
     assert due.value["unanswered_ms"] >= FAST.kill_after_ms
-    assert probes.take_kill_due() == RUN and probes.take_kill_due() is None
+    due = probes.take_kill_due()
+    assert due.run == RUN and due.unanswered_ms >= FAST.kill_after_ms
+
+
+def test_kill_due_is_a_level_while_unanswered_and_the_fact_an_edge(probes):
+    """A kill the main loop took but withheld (an armed recovery) is offered again on later
+    turns while the run stays unanswered (E-AP2-1); `probe_kill_due` is still once."""
+    probes.publish_run(RUN, False)
+    assert until(lambda: probes.take_kill_due() is not None)
+    retaken = []
+    assert until(lambda: retaken.append(probes.take_kill_due()) or retaken[-1] is not None)
+    assert retaken[-1].run == RUN and retaken[-1].unanswered_ms >= FAST.kill_after_ms
+    time.sleep(3 * FAST.period_ms / 1000)
+    assert len(facts(probes.feed, "probe_kill_due")) == 1
+
+
+def test_an_answer_ends_the_kill_due_level(probes):
+    ours, theirs = message_pair()
+    probes.publish_run(RUN, False)
+    assert until(lambda: probes.take_kill_due() is not None)
+    player = Player(theirs)  # the app answers again
+    try:
+        probes.adopt(ours, RUN)
+        assert until(lambda: facts(probes.feed, "probe_answered"))
+        time.sleep(2 * FAST.period_ms / 1000)
+        probes.take_kill_due()  # at most one re-assertion raced the answer
+        time.sleep(3 * FAST.period_ms / 1000)
+        assert probes.take_kill_due() is None
+    finally:
+        player.stop()
+
+
+def test_an_answer_clears_a_kill_due_latch_set_before_it():
+    """E-B8-6: a latch set while overdue must not survive the answer that ends the episode,
+    or the main loop kills an app that recovered. Driven by hand: no thread, no race."""
+    now = [0]
+    probes = ProbeThread(Feed(512), clock=lambda: now[0], timing=FAST)
+    ours, theirs = message_pair()
+    theirs.setblocking(False)
+    try:
+        probes.publish_run(RUN, False)
+        probes.adopt(ours, RUN)
+        probes._apply(now[0])
+        nonces = []
+        while probes._kill_due is None:
+            now[0] += FAST.period_ms
+            probes._turn(now[0], late=False)
+            while True:
+                try:
+                    nonces.append(parse_node_probe_channel_message(theirs.recv(9000)).nonce)
+                except BlockingIOError:
+                    break
+        assert probes._kill_due.unanswered_ms >= FAST.kill_after_ms and nonces
+        theirs.send(encode_node_probe_answer(nonces[-1]))
+        probes._receive(now[0] + 1)
+        assert facts(probes.feed, "probe_answered")
+        assert probes.take_kill_due() is None
+    finally:
+        probes.close()
+        theirs.close()
+
+
+def test_a_run_change_drops_the_kill_due_latch(probes):
+    probes.publish_run(RUN, False)
+    assert until(lambda: facts(probes.feed, "probe_kill_due"))
+    probes.publish_run(OTHER, False)
+    time.sleep(2 * FAST.period_ms / 1000)  # OTHER is inside its startup budget
+    assert probes.take_kill_due() is None
 
 
 def test_a_late_thread_turn_is_not_counted():

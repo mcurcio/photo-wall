@@ -8,7 +8,11 @@ the current run's channel, matches answers, and appends probe facts (audience no
 broker feed. It never calls systemctl, HTTP, the store or the driver. A channel is judged
 against every publication after its adoption: one whose run is not the published run is
 closed. An owed relink is a level, not a packet: each channel instance for the owed run gets
-it once, so a relink owed while no channel is open reaches the next one.
+it once, so a relink owed while no channel is open reaches the next one. Kill-due is a level
+too: the latch is re-asserted on every turn while the run stays unanswered for at least K
+(the `probe_kill_due` fact stays once per episode) and dropped by an answer, so a kill the main
+loop withheld (an armed recovery) is offered again until it is taken and carried out or the
+run answers.
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from dataclasses import dataclass
 
 from appliance.clock import boottime_ms
 from appliance.feed import Feed
-from appliance.node.probe import SHIPPED_TIMING, AppRunKey, ProbeClock, ProbeTiming
+from appliance.node.probe import SHIPPED_TIMING, AppRunKey, KillDue, ProbeClock, ProbeTiming
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
     encode_node_probe,
@@ -51,7 +55,7 @@ class ProbeThread:
         self._adoptions: list[_Channel] = []
         self._owed: AppRunKey | None = None
         # Thread -> main loop (under the lock).
-        self._kill_due: AppRunKey | None = None
+        self._kill_due: KillDue | None = None
         # Thread-owned.
         self._applied = 0
         self._probes: ProbeClock | None = None
@@ -101,7 +105,7 @@ class ProbeThread:
         self._wake()
 
     def publish_run(self, run: AppRunKey | None, recovery_may_be_armed: bool) -> None:
-        """The main loop's current app run, every turn (B8 consumes the predicate)."""
+        """The main loop's current app run and its kill guard, every turn."""
         with self._lock:
             sequence, previous, _ = self._publication
             self._publication = (sequence + 1, run, bool(recovery_may_be_armed))
@@ -113,10 +117,11 @@ class ProbeThread:
         with self._lock:
             return self._publication[2]
 
-    def take_kill_due(self) -> AppRunKey | None:
+    def take_kill_due(self) -> KillDue | None:
+        """Take the kill-due latch; the thread re-asserts it next turn while still overdue."""
         with self._lock:
-            run, self._kill_due = self._kill_due, None
-            return run
+            due, self._kill_due = self._kill_due, None
+            return due
 
     def owe_relink(self, run: AppRunKey | None) -> None:
         """The relink the outbox owes `run`'s Player (Central refused its link), every turn.
@@ -172,7 +177,7 @@ class ProbeThread:
             if run != current:
                 self._probes = ProbeClock(run, now, timing=self.timing) if run is not None else None
                 with self._lock:
-                    if self._kill_due is not None and self._kill_due != run:
+                    if self._kill_due is not None and self._kill_due.run != run:
                         self._kill_due = None
                     if self._owed is not None and self._owed != run:
                         self._owed = None
@@ -208,9 +213,9 @@ class ProbeThread:
             return
         for fact in probes.turn(now, late=late):
             self.feed.append(fact.kind, fact.value)
-            if fact.kind == "probe_kill_due":
-                with self._lock:
-                    self._kill_due = probes.run
+        if probes.overdue:  # level: re-asserted every turn until an answer or a run change
+            with self._lock:
+                self._kill_due = KillDue(probes.run, probes.unanswered_ms)
         if self._channel is not None and self._channel.run == probes.run:
             nonce = secrets.token_hex(32)
             if self._send(encode_node_probe(nonce)):
@@ -235,6 +240,9 @@ class ProbeThread:
             return
         probes = self._probes
         if probes is not None and probes.run == channel.run and probes.answered(nonce, now):
+            with self._lock:  # the run answered: a latch set before the answer is stale
+                if self._kill_due is not None and self._kill_due.run == channel.run:
+                    self._kill_due = None
             self.feed.append("probe_answered", {"run": channel.run.document(),
                                                 "rtt_ms": probes.last_rtt_ms})
 

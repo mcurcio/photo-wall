@@ -149,11 +149,15 @@ class Session:
 
 class Driver:
     def __init__(self, running):
-        self.running, self.calls = running, 0
+        self.running, self.calls, self.kills = running, 0, []
 
     def current(self):
         self.calls += 1
         return self.running
+
+    def kill(self, expected):
+        self.kills.append(expected)
+        return True
 
 
 def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None, links=None):

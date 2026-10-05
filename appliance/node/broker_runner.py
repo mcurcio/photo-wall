@@ -8,6 +8,7 @@ import os
 import socket
 import stat
 import struct
+import subprocess
 import time
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -21,7 +22,12 @@ from appliance.node.app_link import BrokerLinkService, deliver_app_link, owed_re
 from appliance.node.broker import AppEffectBroker, ColdStart
 from appliance.node.lifecycle_storage import FileEffectJournal, primitive, running_from
 from appliance.node.online_runner import OnlineRunner
-from appliance.node.probe import AppRunKey
+from appliance.node.probe import (
+    RECOVERY_ACKNOWLEDGED,
+    RECOVERY_ARMED,
+    AppRunKey,
+    recovery_may_be_armed,
+)
 from appliance.node.probe_channel import ProbeThread
 from appliance.node.process_linux import SystemdAppProcessDriver
 from appliance.node.recovery_linux import RecoveryClient
@@ -149,13 +155,16 @@ class FeedListener:
 
 class BrokerLoop:
     """One main-loop turn. Every blocking call (systemctl, HTTP) lives here, never in the
-    probe thread; the loop publishes the current app run to the probe thread each turn."""
+    probe thread; the loop publishes the current app run to the probe thread each turn and
+    alone carries out a kill the thread found due."""
 
     def __init__(self, *, broker, online, store, session, driver, links, probes: ProbeThread,
                  feeds: FeedListener):
         self.broker, self.online, self.store, self.session = broker, online, store, session
         self.driver, self.links, self.probes, self.feeds = driver, links, probes, feeds
         self.last_online_poll = 0.0
+        self.withheld: tuple[AppRunKey, str] | None = None  # last kill_withheld (run, reason)
+        self.killed: AppRunKey | None = None  # the run this broker killed: never signalled twice
 
     def turn(self) -> None:
         self.probes.check()
@@ -171,8 +180,9 @@ class BrokerLoop:
         known, current, granted = self._observe()
         run = None if current is None else AppRunKey.of(current)
         if known:
-            # B8 supplies the recovery predicate; until then nothing consumes a kill.
-            self.probes.publish_run(run, recovery_may_be_armed=False)
+            # After online.broker.service(), which may have acknowledged a recovery this turn.
+            armed = self._recovery_may_be_armed()
+            self.probes.publish_run(run, recovery_may_be_armed=armed)
             # The owed relink is restated every known turn, grant or not (delivery needs one);
             # the boot store keeps it across a broker restart.
             try:
@@ -180,6 +190,8 @@ class BrokerLoop:
             except ValueError:
                 if self.store.failed:
                     raise
+            # Only on a known turn (an unknown one leaves the latch), against this turn's run.
+            self._consume_kill_due(run, current, armed)
         if known and granted:
             # Proofs are accepted locally; Central learns of them here, never inside a proof.
             try:
@@ -196,6 +208,42 @@ class BrokerLoop:
             except (OSError, ValueError, http.client.HTTPException):
                 if self.store.failed:
                     raise
+
+    def _recovery_may_be_armed(self) -> bool:
+        try:
+            return recovery_may_be_armed(self.online.broker.record, self.store.read(RECOVERY_ARMED),
+                                         self.store.read(RECOVERY_ACKNOWLEDGED))
+        except ValueError:
+            if self.store.failed:
+                raise
+            return True  # unreadable: a recovery may be armed, so no kill this turn
+
+    def _consume_kill_due(self, run: AppRunKey | None, current, armed: bool) -> None:
+        """Kill the unresponsive app iff the due run is this turn's run and no switch recovery
+        may be armed (Q1); the driver re-checks the process identity at the signal. No grant
+        is needed. A withheld kill is offered again by the thread while still overdue."""
+        due = self.probes.take_kill_due()
+        if due is None or due.run == self.killed:
+            return
+        if due.run != run:
+            reason = "run_changed"
+        elif armed:
+            reason = "recovery_armed"
+        else:
+            try:
+                killed = self.driver.kill(current)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return  # identity unobservable this turn: nothing sent, the latch comes back
+            if killed:
+                self.killed, self.withheld = run, None
+                self.probes.feed.append("app_killed", {
+                    "run": run.document(), "reason": "unresponsive",
+                    "unanswered_ms": due.unanswered_ms})
+                return
+            reason = "run_changed"  # the process is no longer this run's: no signal
+        if self.withheld != (due.run, reason):
+            self.withheld = (due.run, reason)
+            self.probes.feed.append("kill_withheld", {"run": due.run.document(), "reason": reason})
 
     def _observe(self):
         """(known, current, granted): one `driver.current()` per turn, Central session or not."""

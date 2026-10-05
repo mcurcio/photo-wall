@@ -68,6 +68,7 @@ SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
 # presenting. A presentation gap of the shell's lease (shell.c LEASE_MS) invalidates the role.
 ADMIT_SECONDS = 120
 HEALTHY_SECONDS = 20
+RELINK_SETTLE_SECONDS = 30  # a trailing 409 refusal: relink, Player re-proof (<= 5 s), delivery
 LEASE_MS = 5000
 # Node feeds (appliance/feed.py): the display controller's root-only ingress socket (requests
 # carry SCM_CREDENTIALS) and the broker's probe feed (SO_PEERCRED allowlist {0, pw-health}).
@@ -773,6 +774,24 @@ def run_key(current):
             "start_ticks": process["start_ticks"], "app_epoch": current["app_epoch"]}
 
 
+def unsettled_refusals(events):
+    """Broker-feed `app_link_refused` facts not yet followed, for the same run, by
+    `relink_sent` and then `app_link_recorded` (B7b's owed relink, E-AP2-2)."""
+    unsettled = []
+    for index, event in enumerate(events):
+        if event["kind"] != "app_link_refused":
+            continue
+        run, step = event["value"]["run"], "relink_sent"
+        for later in events[index + 1:]:
+            if later["kind"] == step and later["value"]["run"] == run:
+                if step == "app_link_recorded":
+                    break
+                step = "app_link_recorded"
+        else:
+            unsettled.append(event)
+    return unsettled
+
+
 def presentations(events, frame_id):
     """Node-clock times of the app's compositor presentations of the bound Frame."""
     return [
@@ -877,6 +896,18 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                 f"{len(answered)} probe answers for {run} in {HEALTHY_SECONDS} s; evidence: {work}"
             )
             assert not missed, missed
+            # A healthy run is never killed, and no kill is ever held back for it (B8).
+            kills = [event for event in probes.events
+                     if event["kind"] in ("app_killed", "kill_withheld")]
+            assert not kills, kills
+            # Every Central refusal of a held link is relinked and then recorded (B7b).
+            settle = time.monotonic() + RELINK_SETTLE_SECONDS
+            while unsettled_refusals(probes.events) and time.monotonic() < settle:
+                time.sleep(1)
+                probes.poll()
+            assert not unsettled_refusals(probes.events), (
+                f"{unsettled_refusals(probes.events)}; evidence: {work}"
+            )
             shown = presentations(window, bound["frame_id"])
             assert not invalidations(window), invalidations(window)
             assert len(shown) >= 2, f"no fresh app presentations; evidence: {work}"
@@ -895,6 +926,8 @@ def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path)
                         "presentations": len(shown),
                         "max_gap_ms": max(gaps),
                         "probe_answers": len(answered),
+                        "app_link_refusals": sum(event["kind"] == "app_link_refused"
+                                                 for event in probes.events),
                         "probe_rtt_ms_max": max(event["value"]["rtt_ms"] for event in answered),
                         "hardware": "synthetic sysfs Virtual-1 and actual headless Weston; "
                         "no physical DRM/HDMI claim",

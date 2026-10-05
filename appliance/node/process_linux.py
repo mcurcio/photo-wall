@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -136,6 +137,34 @@ class SystemdAppProcessDriver:
         if running is not None and result is not None and running.process != result.process:
             raise ValueError("app_process_incarnation_mismatch")
         return result
+
+    def kill(self, expected: RunningApp) -> bool:
+        """SIGKILL exactly `expected`'s main process; False (no signal) on any mismatch.
+
+        The pidfd pins one process before its identity is checked, so a pid reused after the
+        check cannot receive the signal: kernel birth (start ticks) and systemd's MainPID and
+        InvocationID must all match. KillMode=control-group takes the rest of the unit;
+        Restart=no keeps it down. An unavailable observation raises (nothing was sent).
+        """
+        pid = expected.process.pid
+        try:
+            descriptor = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return False
+        try:
+            if read_proc_start_ticks(self.proc, pid) != expected.process.start_ticks:
+                return False
+            rows = systemctl_show(UNIT)
+            if (rows["MainPID"] != str(pid)
+                    or rows["InvocationID"] != str(expected.process.invocation_id)):
+                return False
+            try:
+                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            except ProcessLookupError:
+                return False
+            return True
+        finally:
+            os.close(descriptor)
 
     def absent_and_quiescent(self) -> bool:
         if self.current() is not None:
