@@ -86,7 +86,7 @@ All commands run **unpiped** (no `tee`); paste the tail into the verifier report
 | B4 shell health layer + fallback tint | landed | ffc11c4 | verified PASS; security lens PASS; fix cycle 1: tint keyed on mapped health layer (E-B4-6) — until B11 maps a transparent health surface a healthy handed-off wall shows the fallback tint (fail-closed, expected mid-M1); B11 must commit a mapped transparent buffer for tint-off |
 | B5 Python overlay client parity | landed | e2fbd33 | verified PASS; regression lens PASS; paint-failure hardening E-B5-8; errata E-B5-1..8; D1: docs still describe the C client |
 | B6 probe channel + probe thread + broker feed | landed | e74b409 | verified PASS; leg: real Player answered all probes; Q1 fence intact; errata E-B6-1..7; B8 must confirm take_kill_due/publish_run ordering |
-| B7 app-link accepted locally + outbox + relink | open | | |
+| B7 app-link accepted locally + outbox + relink | landed | 7a57afb | verified PASS; security lens PASS; errata E-B7-1..6; open: E-B7-3 relink lost when probe channel down; leg shows 409 refusals before recorded |
 | Architect pass 2 | open | | |
 | B8 kill after K (Q1 predicate) | open | | |
 | B9 catalogue + judge core | open | | |
