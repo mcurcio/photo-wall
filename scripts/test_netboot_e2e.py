@@ -58,6 +58,18 @@ Central is configured for the NEW ticketless model: NO release-authority env
 (PHOTO_WALL_RELEASE_*) is set, proving central boots and serves the app
 package with no signing key -- the retirement precondition for s4.
 
+NODE LEG (`node_leg`): stage 1's node branch, the REAL `appliance.netboot_init.netboot` from
+its computed initramfs closure under `python3 -I -S` in the device root
+(`uplink_device_harness.py node-boot`), from a command line naming the gateway and
+`photowall.node=v2`: it locates Central through the cross-host 301, gets the node offer from the
+deployment selected through the REAL operator route, and fetches and verifies the base. The
+base is a few KiB of random bytes, PRE-STAGED at its cache path with its produced facts seeded
+(`NODE_SEED`, through the one deployment writer): this Compose has no worker to fill a miss,
+and proving read-through on the node route is the two-pod qualification's job. A flipped byte
+in the cached base is then refused by the device's own BODY check (`netboot_integrity`), since
+Central serves its recorded facts without re-hashing. Only the mount, RAM, clock gate,
+watchdog, serial and kernel boot id are faked.
+
 Part B (a headless Player enrolls TICKETLESS -> pending -> operator bind ->
 render smoke) is proven by the re-keyed scripts/demo_wall.py runner under the
 existing "Controller and Player software e2e" job. This tracer owns Part A
@@ -78,7 +90,9 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path, PurePosixPath
 from typing import IO
 
@@ -128,6 +142,49 @@ TRACER_DEB_URL = "https://example.invalid/photo-wall-player_all.deb"  # never fe
 PROBE_SERIAL = "10000000cafef00d"
 PROBE_BOOT_ID = "11111111-2222-3333-4444-555555555555"
 PROBE_STATE = "/run/photo-wall/packaged-probe"
+NODE_SERIAL = "c0ffee42"
+NODE_BASE_BYTES = 4096
+# Stage 1 exits 0 on a handed-off boot and NODE_REFUSED on a named refusal (the harness's codes).
+NODE_REFUSED = 3
+# The node handoff stage 1 writes beneath its rootmnt (appliance/node_boot_handoff.py HANDOFF).
+NODE_HANDOFF = "etc/photo-wall/node-boot.json"
+# What a release sync plus a finished FetchOsImage leave behind for one node deployment, run with
+# Central's own interpreter and code (`python -c NODE_SEED TAG CONTENT_KEY SHA256 SIZE`, the
+# database from PHOTO_WALL_DATABASE_URL): the deployment through the one writer
+# (`write_deployment`), then the base's produced facts. Prints the deployment id. The manager
+# environment is named, never fetched: the leg stops at the base.
+NODE_SEED = """
+import os, sys, uuid
+from central.content_catalog.deployment import NodeDeployment
+from central.db import Database
+from central.infra.asset_records import PgAssetRecords
+from central.infra.node_releases import write_deployment
+from central.infra.transactions import PgTransaction
+from central.kernel.assets import AssetKey, AssetKind, AssetReady, OriginLocator
+from contracts.app_environment import AppEnvironmentRefV2
+from contracts.node_boot import NodeBaseRefV2
+from contracts.time import SystemClock
+
+tag, content_key, sha256, size = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+abi = ("node-e2e-base", "node-e2e-graphics", "node-e2e-plugin")
+manager = AppEnvironmentRefV2("2" * 64, 128, "e" * 64, "photo-wall-node-manager", "1.0.0",
+                              "arm64", "f" * 64, "1" * 64, "/usr/bin/manager", *abi)
+deployment = NodeDeployment(uuid.uuid4(), NodeBaseRefV2(tag, content_key, sha256, size, *abi),
+                            None, manager, None,
+                            {manager.environment_sha256: "https://example.invalid/manager.tar"})
+clock = SystemClock()
+db = Database(os.environ["PHOTO_WALL_DATABASE_URL"], pool_size=1)
+try:
+    with db.transaction() as conn:
+        write_deployment(conn, deployment, OriginLocator("https://example.invalid/base.tar",
+                                                         content_key, size), clock=clock)
+        PgAssetRecords(clock).record_produced(PgTransaction(conn),
+                                              AssetKey(AssetKind.OS_IMAGE, content_key),
+                                              AssetReady(size, sha256))
+finally:
+    db.close()
+print(deployment.deployment_id)
+"""
 _TAG_SHAPE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 _SHA256_SHAPE = re.compile(r"[0-9a-f]{64}")
 
@@ -294,7 +351,7 @@ def gateway_stub(central_port: int) -> contextlib.AbstractContextManager[Stub]:
 
 
 def compose_document(*, central_image: str, password: str, admin_token: str,
-                     port: int, app_root: Path) -> dict:
+                     port: int, app_root: Path, os_root: Path) -> dict:
     """Minimal REAL central + Postgres -- NOT the demo_wall media topology.
 
     No worker, Immich, media pipeline, or operator role: this tracer exercises
@@ -330,7 +387,9 @@ def compose_document(*, central_image: str, password: str, admin_token: str,
                     "PHOTO_WALL_MDNS_ADVERTISE": "false",
                     "PHOTO_WALL_HORIZON_SECONDS": "15",
                 },
-                "volumes": [f"{app_root}:/var/cache/photo-wall/apps:ro"],
+                "volumes": [f"{app_root}:/var/cache/photo-wall/apps:ro",
+                            # The node leg's pre-staged base, at its cache path.
+                            f"{os_root}:/var/cache/photo-wall/os-images:ro"],
                 "ports": [f"127.0.0.1:{port}:8000"],
                 "networks": ["pw"],
                 "restart": "no", "mem_limit": "384m",
@@ -385,6 +444,17 @@ class Central:
         self.compose("exec", "-T", "database", "psql", "-v", "ON_ERROR_STOP=1",
                      "-U", "wall", "-d", "wall", "-c", release_seed_sql(tag, sha256, size))
         self._request("POST", promote_path(tag), authenticated=True)
+
+    def seed_node_deployment(self, content_key: str, sha256: str, size: int) -> str:
+        """`NODE_SEED` in the Central container, then the deployment selected through the real
+        operator route; returns the deployment id."""
+        require(_SHA256_SHAPE.fullmatch(content_key) and _SHA256_SHAPE.fullmatch(sha256),
+                "node_seed_digest_invalid")
+        deployment = self.compose("exec", "-T", "central", "python", "-c", NODE_SEED,
+                                  TRACER_TAG, content_key, sha256, str(size)).strip()
+        self._request("PUT", "/v1/operator/node/boot-policy",
+                      {"deployment_id": deployment, "expected_revision": 0}, authenticated=True)
+        return deployment
 
     def manifest(self) -> dict:
         return self._request("GET", "/v1/app/manifest")
@@ -603,6 +673,46 @@ class DeviceRoot:
             raise TracerError("device_root_checks_failed") from None
         return {"output": output.strip()}
 
+    def stage_node_boot(self) -> None:
+        """Stage 1's computed closure (`scripts/module_closure.py`, the initrd policy, as
+        build_netboot_bundle.sh computes it) and the device harness, read-only under WORK."""
+        from scripts import module_closure
+
+        node = self.work / "node"
+        node.mkdir(parents=True, exist_ok=True)
+        closure = node / "closure"
+        with contextlib.redirect_stdout(sys.stderr):
+            require(module_closure.main(["--stage", str(closure), "--digest"]) == 0,
+                    "node_closure_failed")
+        harness = node / "harness.py"
+        harness.write_bytes((ROOT / "scripts" / "uplink_device_harness.py").read_bytes())
+        harness.chmod(0o644)
+
+    def node_boot(self, central: str, *, boot_id: str, rootmnt: str, log: Path) -> tuple[int, dict]:
+        """One stage 1 node boot (`uplink_device_harness.py node-boot`) from a command line
+        naming `central`; (its exit code, its JSON line). Its stderr (the console) goes to `log`."""
+        argv = ["docker", "exec", self.container, "python3", "-I", "-S",
+                f"{self.WORK}/node/harness.py", "node-boot", "--closure", f"{self.WORK}/node/closure",
+                "--cmdline-central", central, "--serial", NODE_SERIAL, "--boot-id", boot_id,
+                "--rootmnt", rootmnt]
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=120,
+                                    check=False)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise TracerError("command_failed:docker") from error
+        log.write_text(result.stderr)
+        require(result.returncode in (0, NODE_REFUSED), f"node_boot_exit_{result.returncode}")
+        try:
+            return result.returncode, json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError) as error:
+            raise TracerError("node_boot_output_invalid") from error
+
+    def node_handoff(self, rootmnt: str) -> dict | None:
+        """The node handoff stage 1 wrote beneath `rootmnt`, or None when it wrote none."""
+        text = self._exec("sh", "-ec", f'test ! -e "$1/{NODE_HANDOFF}" || cat "$1/{NODE_HANDOFF}"',
+                          "sh", rootmnt)
+        return json.loads(text) if text.strip() else None
+
     def stop(self) -> None:
         try:
             run(["docker", "rm", "-f", self.container], timeout=60, capture=False)
@@ -692,6 +802,69 @@ def part_a_refusal(origin: str, staged: Path, size: int) -> dict:
     return {"refused": True, "install_calls": recorder.installs}
 
 
+def stage_base(os_root: Path) -> tuple[str, Path]:
+    """A few KiB of random bytes at the OS-image cache path of a random content key (it stands
+    for a tarball digest no step reads: `mount_root` is faked, so any bytes of the declared size
+    boot). Returns (content_key, the staged file)."""
+    os_root.mkdir(parents=True, exist_ok=True)
+    os_root.chmod(0o755)
+    content_key = secrets.token_hex(32)
+    staged = os_root / f"base-{content_key}.squashfs"
+    staged.write_bytes(secrets.token_bytes(NODE_BASE_BYTES))
+    staged.chmod(0o644)
+    return content_key, staged
+
+
+def node_leg(central: Central, device: DeviceRoot, *, gateway: str, os_root: Path, state: Path,
+             log: Path) -> dict:
+    """Stage 1's node branch, as the Pi runs it (see the module docstring), then the
+    flipped-byte refusal. Returns the four evidence phases."""
+    content_key, staged = stage_base(os_root)
+    base = staged.read_bytes()
+    sha256 = hashlib.sha256(base).hexdigest()
+    deployment = central.seed_node_deployment(content_key, sha256, len(base))
+    device.stage_node_boot()
+
+    rootmnt = "/tmp/node-root-1"
+    status, booted = device.node_boot(gateway, boot_id=str(uuid.uuid4()), rootmnt=rootmnt,
+                                      log=log)
+    require(status == 0 and booted["outcome"] == "handed_off",
+            f"node_boot_refused:{booted.get('error')}")
+    handoff = device.node_handoff(rootmnt)
+    require(handoff is not None, "node_handoff_missing")
+    located = handoff["central"].rstrip("/")
+    expected = "http://localhost:" + str(urllib.parse.urlsplit(central.origin).port)
+    # The 301 was followed: the handoff names Central's own origin, not the command line's root.
+    require(located == expected and located != gateway.rstrip("/"), "node_locate_not_redirected")
+    offer = handoff["offer"]
+    require(offer["installation_audience"] == "family-room", "node_offer_audience")
+    require(offer["base"]["content_key"] == content_key
+            and offer["base"]["squashfs_sha256"] == sha256, "node_offer_base")
+    require(booted["sha256"] == offer["base"]["squashfs_sha256"], "node_base_digest")
+
+    corrupt = base[:-1] + bytes([base[-1] ^ 0x01])
+    rootmnt = "/tmp/node-root-2"
+    try:
+        staged.write_bytes(corrupt)
+        status, refused = device.node_boot(gateway, boot_id=str(uuid.uuid4()), rootmnt=rootmnt,
+                                           log=state / "node-refusal.log")
+    finally:
+        staged.write_bytes(base)
+        staged.chmod(0o644)
+    # Central serves its recorded facts without re-hashing, so its Digest header still names the
+    # offer's digest: the refusal is the device's own BODY check, not the header comparison. A
+    # Central refusal first would leave that check unexercised.
+    require(status == NODE_REFUSED, "node_flipped_base_not_refused")
+    require(refused["error"] != "offer_artifact_mismatch", "node_refused_by_central_first")
+    require(refused["error"] == "netboot_integrity", f"node_refusal_unexpected:{refused['error']}")
+    require(device.node_handoff(rootmnt) is None, "node_handoff_on_refusal")
+    return {"node_locate": {"redirected": True, "gateway": gateway, "origin": located},
+            "node_offer": {"offer_id": offer["offer_id"], "deployment_id": deployment,
+                           "audience": offer["installation_audience"]},
+            "node_base": {"sha256": booted["sha256"], "squashfs_sha256": sha256},
+            "node_refusal": {"error": refused["error"], "handoff": None}}
+
+
 def os_claim_evidence(central: Central, *, sequence: int, phase: str,
                       fault: str | None) -> dict:
     """Require one more committed v2 row and an observational status projection."""
@@ -756,10 +929,12 @@ def run_tracer(state: Path, *, central_image: str, device_root: str, bootstrappe
     password = secrets.token_hex(24)
     admin_token = secrets.token_hex(32)
     app_root = state / "app-packages"
+    os_root = state / "os-images"
+    os_root.mkdir(mode=0o755, exist_ok=True)
     compose_path = state / "compose.json"
     compose_path.write_text(json.dumps(compose_document(
         central_image=central_image, password=password,
-        admin_token=admin_token, port=port, app_root=app_root,
+        admin_token=admin_token, port=port, app_root=app_root, os_root=os_root,
     )))
     base = ["docker", "compose", "-p", project, "-f", str(compose_path)]
     origin = f"http://127.0.0.1:{port}"
@@ -824,6 +999,14 @@ def run_tracer(state: Path, *, central_image: str, device_root: str, bootstrappe
         evidence["phases"]["part_a_happy"] = part_a_happy(
             central, device, port, state / "provision.log"
         )
+        save()
+
+        with gateway_stub(port) as gateway:
+            evidence["phases"].update(node_leg(
+                central, device, gateway=f"http://127.0.0.1:{gateway.port}/", os_root=os_root,
+                state=state, log=state / "node-boot.log"))
+        # Only the two locates went through the gateway; every other request went to Central.
+        require(gateway.requests == [LOCATE_PATH] * 2, "node_gateway_saw_more_than_locate")
         save()
         device.stop()
 

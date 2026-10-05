@@ -13,7 +13,12 @@ from central.app import create_app
 from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
+from central.fleet.node_sessions import (
+    INSTALLATION_AUDIENCE,
+    NodeControlConfig,
+    NodeControlError,
+    NodeSessions,
+)
 from central.fleet.rollout_gate import RolloutEffectGate, RolloutGateError
 from contracts.node_commands import NodeSessionClaim, encode_session_claim, parse_session_grant
 from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
@@ -413,15 +418,18 @@ def test_default_gate_cannot_mint_reboot(registry):
         assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 0
 
 
-def test_mounted_routes_disabled_by_default_and_real_when_configured(registry):
+def test_mounted_routes_enabled_by_default_and_disabled_only_when_asked(registry):
     _seed(registry)
     claim = NodeSessionClaim(SERIAL, OFFER_ID, BOOT_ID, "host_core", uuid4(), uuid4(), "d" * 64)
-    app = create_app(registry.db, registry.clock, ADMIN)
+    # An explicit None still builds the disabled branch (A3 deletes it).
+    app = create_app(registry.db, registry.clock, ADMIN, node_control=None)
     with TestClient(app) as client:
         response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
         assert response.status_code == 503
         assert response.headers["cache-control"] == "private, no-store"
-    app = create_app(registry.db, registry.clock, ADMIN, node_control=NodeControlConfig("node-test"))
+    app = create_app(registry.db, registry.clock, ADMIN)
+    assert app.state.node_sessions.config == NodeControlConfig(INSTALLATION_AUDIENCE)
+    assert INSTALLATION_AUDIENCE == "family-room"
     with TestClient(app) as client:
         response = client.post("/v2/node/sessions", content=encode_session_claim(claim))
         assert response.status_code == 200, response.text
@@ -434,12 +442,14 @@ def test_mounted_routes_disabled_by_default_and_real_when_configured(registry):
         assert client.post("/v2/node/observations", content=b"x" * 20000, headers=headers).status_code == 413
 
 
-def test_opt_in_factory_requires_audience_and_keeps_effect_gate_closed(registry, monkeypatch):
+def test_alias_factory_builds_the_default_config_ignores_audience_env_and_keeps_gate_closed(
+        registry, monkeypatch):
     from central.node_app import create_app as create_node_app
+    default = create_app(registry.db, registry.clock, ADMIN).state.node_sessions.config
     monkeypatch.delenv("PHOTO_WALL_NODE_AUDIENCE", raising=False)
-    with pytest.raises(ValueError, match="AUDIENCE required"):
-        create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
+    app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
+    assert app.state.node_sessions.config == default == NodeControlConfig(INSTALLATION_AUDIENCE)
     monkeypatch.setenv("PHOTO_WALL_NODE_AUDIENCE", "node-factory-test")
     app = create_node_app(db=registry.db, clock=registry.clock, admin_token=ADMIN)
-    assert app.state.node_sessions.config.installation_audience == "node-factory-test"
+    assert app.state.node_sessions.config.installation_audience == INSTALLATION_AUDIENCE
     assert RolloutEffectGate(registry.db).status()["state"] == "closed"

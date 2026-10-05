@@ -40,9 +40,12 @@ class NodeControlError(ValueError):
         self.code, self.status, self.details = code, status, details or {}
 
 
+INSTALLATION_AUDIENCE: Final = "family-room"
+
+
 @dataclass(frozen=True, slots=True)
 class NodeControlConfig:
-    installation_audience: str
+    installation_audience: str = INSTALLATION_AUDIENCE
     session_seconds: int = 3600
 
     def __post_init__(self) -> None:

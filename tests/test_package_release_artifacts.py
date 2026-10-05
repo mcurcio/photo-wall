@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import tarfile
 import time
 
@@ -20,6 +21,7 @@ from support.release_build import EPOCH, IMAGE_REFERENCES, REVISION, cmdline_tem
 from support.release_build import base_bundle as _synthetic_base_bundle
 from support.release_build import bootstrapper_deb as _synthetic_bootstrapper_deb
 from support.release_build import player_deb as _synthetic_player_deb
+from test_node_release_artifacts import inputs as _node_release
 
 from central.assets.os_image import _SQUASHFS_MEMBER, _SUMS_MEMBER
 from central.origins.github import _asset_urls, _parse_manifest
@@ -33,6 +35,7 @@ from contracts.release import (
     CHECKSUMS,
     CMDLINE,
     CMDLINE_MEMORY_CONTROLLER,
+    CMDLINE_NODE_TOKEN,
     CMDLINE_PLACEHOLDER,
     FILES,
     IMAGES,
@@ -455,8 +458,11 @@ _TEMPLATE = cmdline_template()
     _TEMPLATE.rstrip("\n") + " " * 4096 + "\n",
     _TEMPLATE.replace(f" {CMDLINE_MEMORY_CONTROLLER}", ""),
     _TEMPLATE.replace(CMDLINE_MEMORY_CONTROLLER, f"{CMDLINE_MEMORY_CONTROLLER} {CMDLINE_MEMORY_CONTROLLER}"),
+    _TEMPLATE.replace(f" {CMDLINE_NODE_TOKEN}", ""),
+    _TEMPLATE.replace(CMDLINE_NODE_TOKEN, f"{CMDLINE_NODE_TOKEN} {CMDLINE_NODE_TOKEN}"),
 ], ids=["comment-line", "commented-out", "two-lines", "no-placeholder", "placeholder-twice",
-        "crlf", "too-long", "no-memory-controller", "memory-controller-twice"])
+        "crlf", "too-long", "no-memory-controller", "memory-controller-twice", "no-node-token",
+        "node-token-twice"])
 def test_verify_refuses_a_cmdline_that_is_not_the_one_line_template(tmp_path, cmdline):
     """The firmware passes cmdline.txt verbatim: a consumer that replaces the placeholder must
     get one bootable line, so anything but one line holding the placeholder once is refused."""
@@ -469,8 +475,36 @@ def test_verify_refuses_a_cmdline_that_is_not_the_one_line_template(tmp_path, cm
 
 def test_the_cmdline_template_enables_the_memory_controller_exactly_once():
     """The Pi 5 device tree's bootargs disable the memory controller; the template, which every
-    release's boot tree (node or not) is built from, is the one place that turns it back on."""
+    release's boot tree (node or not) is built from, is the one place that turns it back on. It
+    also selects the node path, once, for every Pi that boots it."""
     assert _TEMPLATE.split().count(CMDLINE_MEMORY_CONTROLLER) == 1
+    assert _TEMPLATE.split().count(CMDLINE_NODE_TOKEN) == 1
+
+
+# The iac TFTP stager's own pattern (mcurcio/iac stacks/home/prod/photos/stage_tftp.sh:19-31 at
+# 1ce0f92), copied on purpose: it is the consumer's contract, and this is where its drift shows.
+_STAGER_SUMS_LINE = re.compile(r"^[0-9a-f]{64}  (photo-wall-boot-.*\.tar\.gz)$")
+_STAGER_CMDLINE_EXTRA = "photowall.node=v2"   # iac players.yaml cmdline_extra
+
+
+def test_the_iac_stager_finds_one_boot_tarball_and_stages_a_node_cmdline(tmp_path):
+    """Over a packaged release with node assets: exactly one SHA256SUMS line matches the stager's
+    pattern, the boot tarball (no node asset does); it extracts to photo-wall-boot/boot/
+    cmdline.txt; and once the placeholder is replaced and iac's cmdline_extra appended, the line
+    is one line whose first photowall.node value is v2."""
+    _, destination = _node_release(tmp_path)
+    manifest = json.loads((destination / MANIFEST).read_bytes())
+    found = [match[1] for line in (destination / CHECKSUMS).read_text().splitlines()
+             if (match := _STAGER_SUMS_LINE.match(line))]
+    assert found == [manifest["boot_image"]["filename"]]
+    with tarfile.open(destination / found[0]) as archive:
+        cmdline = archive.extractfile(f"{BOOT_ROOT}/{BASE_BOOT}/{CMDLINE}").read().decode()
+    assert cmdline.count(CMDLINE_PLACEHOLDER) == 1
+    staged = cmdline.replace(CMDLINE_PLACEHOLDER, "http://photo-wall.localdomain/").rstrip("\n")
+    staged += f" {_STAGER_CMDLINE_EXTRA}"
+    assert "\n" not in staged
+    values = [word.partition("=")[2] for word in staged.split() if word.startswith("photowall.node=")]
+    assert values[0] == "v2"
 
 
 def test_the_packaged_cmdline_is_the_builders_one_line_template(tmp_path):

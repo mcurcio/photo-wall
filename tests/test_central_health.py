@@ -61,7 +61,8 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
         "MediaRepository",
         lambda *_args, **_kwargs: fake_coordinator.media,
     )
-    return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
+    # A fake database cannot serve the node reconciler's tick: node control off (A3 reworks this).
+    return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled, node_control=None)
 
 
 def wait_for(client, predicate, timeout=3):

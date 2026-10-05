@@ -49,6 +49,7 @@ from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -724,3 +725,53 @@ def test_the_device_root_gets_the_check_tools(monkeypatch, tmp_path):
     for name in ("device_root_checks.py", "debian_packages.py"):
         staged = tmp_path / "tools" / "scripts" / name
         assert staged.read_bytes() == (tracer.ROOT / "scripts" / name).read_bytes()
+
+
+def test_the_node_leg_boots_the_seeded_base_through_the_gateway_and_refuses_a_flipped_byte(
+        registry, tmp_path):
+    """The netboot-e2e node leg in process, against a real schema: the base staged at its cache
+    path (`stage_base`), its deployment and produced facts seeded by the leg's own `NODE_SEED`
+    and selected through the real operator route, then stage 1's node branch
+    (`uplink_device_harness.node_boot`) through the gateway's cross-host 301. A flipped byte in
+    the cached base is refused by the device's body check, with no handoff written."""
+    from scripts.uplink_device_harness import NODE_REFUSED, node_boot
+
+    cache_root = tmp_path / "cache"
+    content_key, staged = tracer.stage_base(cache_root / "os-images")
+    base = staged.read_bytes()
+    sha256 = hashlib.sha256(base).hexdigest()
+    seeded = subprocess.run(
+        [sys.executable, "-c", tracer.NODE_SEED, tracer.TRACER_TAG, content_key, sha256,
+         str(len(base))], cwd=REPO, capture_output=True, text=True, timeout=60, check=True,
+        env={"PHOTO_WALL_DATABASE_URL": registry.db.dsn, "PATH": "/usr/bin:/bin"})
+    deployment = seeded.stdout.strip()
+    bundle = tls.write_bundle(tmp_path / "ca.pem", tls.CA)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with _serve(_app(registry, cache_root)) as origin:
+        select = urllib.request.Request(
+            origin + "/v1/operator/node/boot-policy", method="PUT",
+            data=json.dumps({"deployment_id": deployment, "expected_revision": 0}).encode(),
+            headers={"Authorization": "Bearer " + ADMIN, "Content-Type": "application/json"})
+        with opener.open(select, timeout=15) as response:
+            assert json.loads(response.read())["deployment_id"] == deployment
+        port = int(origin.rsplit(":", 1)[1])
+        with gateway_stub(port) as gateway:
+            root = f"http://127.0.0.1:{gateway.port}/"
+            status, booted = node_boot(None, central=root, serial=tracer.NODE_SERIAL,
+                                       boot_id=str(uuid4()), rootmnt=tmp_path / "root-1",
+                                       ca_bundle=bundle)
+            assert (status, booted) == (0, {"outcome": "handed_off", "error": None,
+                                            "sha256": sha256})
+            handoff = json.loads((tmp_path / "root-1" / tracer.NODE_HANDOFF).read_bytes())
+            assert handoff["central"].rstrip("/") == f"http://localhost:{port}"
+            assert handoff["offer"]["installation_audience"] == "family-room"
+            assert handoff["offer"]["base"]["squashfs_sha256"] == sha256
+
+            staged.write_bytes(base[:-1] + bytes([base[-1] ^ 0x01]))
+            status, refused = node_boot(None, central=root, serial=tracer.NODE_SERIAL,
+                                        boot_id=str(uuid4()), rootmnt=tmp_path / "root-2",
+                                        ca_bundle=bundle)
+        assert gateway.requests == [tracer.LOCATE_PATH] * 2
+    assert (status, refused) == (NODE_REFUSED, {"outcome": "refused", "error": "netboot_integrity",
+                                                "sha256": None})
+    assert not (tmp_path / "root-2" / tracer.NODE_HANDOFF).exists()

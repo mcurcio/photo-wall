@@ -223,7 +223,7 @@ def test_actual_producer_manifest_roundtrips_through_the_sync(registry, sync_wor
 
     from central.origins.github import GitHubReleaseOrigin
     from contracts.node_release import NODE_RELEASE_MANIFEST, parse_node_release
-    _, _, output = inputs(tmp_path)
+    _, output = inputs(tmp_path)
     raw = (output / NODE_RELEASE_MANIFEST).read_bytes()
     manifest = parse_node_release(raw)
     entry = {"tag_name": manifest.base.tag, "draft": False, "prerelease": False, "assets": [

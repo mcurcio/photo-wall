@@ -149,7 +149,7 @@ def create_app(
     mdns_enabled: bool | None = None,
     mdns_port: int | None = None,
     mdns_advertiser: MdnsCentralAdvertiser | None = None,
-    node_control: NodeControlConfig | None = None,
+    node_control: NodeControlConfig | None = NodeControlConfig(),
     node_serving_verifier: ServingImageVerifier | None = None,
     node_serving_verifier_factory=None,
     media_times: TransactionClock | None = None,

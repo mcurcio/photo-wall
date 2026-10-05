@@ -1180,3 +1180,24 @@ def test_a_downloaded_artifact_must_hold_exactly_one_deb(tmp_path):
     assert release_seal._one_deb(tmp_path / "a.deb") == tmp_path / "a.deb"
     (tmp_path / "b.deb").unlink()
     assert release_seal._one_deb(tmp_path) == tmp_path / "a.deb"
+
+
+# --- the PR-time dry run -------------------------------------------------------------------------
+
+def _dry_run_argv(build: Build, *extra: str) -> list[str]:
+    return ["--dry-run", "--tag", "v0.0.0", "--revision", build.revision, "--since", "",
+            "--base-bundle", str(build.base_bundle), "--player-deb", str(build.player_deb),
+            "--bootstrapper-deb", str(build.bootstrapper_deb),
+            *(arg for name, ref in build.images.items() for arg in ("--image", f"{name}={ref}")),
+            "--destination", str(build.destination), "--source-date-epoch", str(EPOCH), *extra]
+
+
+def test_a_dry_run_packages_and_verifies_and_touches_no_github_or_registry(github, registry,
+                                                                          build):
+    state, api = github
+    assert release_seal.main(_dry_run_argv(build), github=api, registry=registry, environ={}) == 0
+    verify(build.destination, revision=REVISION)
+    assert state.seen == [] and state.journal == [] and registry.writes == []
+    with pytest.raises(SystemExit):
+        release_seal.main(_dry_run_argv(_again(build, "again"), "--node-bundle", "x"),
+                          github=api, registry=registry, environ={})

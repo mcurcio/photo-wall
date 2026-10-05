@@ -3701,3 +3701,27 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
 - E-CLK-1 · `last_served_at` is now stamped by the database (`touch_served(tx, key)`, `clock_timestamp()`) and
   compared by it (`AssetRecords.served_within`); file mtimes are compared only with the run's marker file
   (`CLOCK_MARKER` in the cache root). The cleaner takes no clock.
+
+## 2026-10-04 — V2-only posture, slice A1 (A1.1 + A1.2), implementer findings
+
+Source: `.claude/v2-posture/slices.md` §A1. Baseline 860465c.
+
+- E-A1-1 · A1.1 page file list incomplete: `tests/test_central_health.py` builds `create_app` over a FAKE database
+  (`app_with`, :57-64). With node control on by default, the scheduler tick runs `node_reconciler.advance` against
+  the fake and four tests time out (`first_tick.wait`). Edited (one line, the page's own pattern for
+  `test_node_fleet_hosts.py`): `app_with` passes `node_control=None`, commented "A3 reworks this". A3's page must
+  list this file among the fake-database tests it moves onto the one constructor.
+- E-A1-2 · A1.1 page file list incomplete: `tests/test_node_release_catalog.py:226` imports
+  `test_node_release_artifacts.inputs`, whose return the page's rewrite changes from `(legacy, node, output)` to
+  `(bundle, output)`. Edited (one line): `_, output = inputs(tmp_path)`.
+- E-A1-3 · A1.1 mutation-probe prediction wrong in one detail: removing `scripts/release_seal.py` from base-image's
+  `Suite.paths` turns red only `test_every_script_a_release_build_runs_is_claimed_by_what_it_builds`, not the
+  harness-closure test. The harness is the suite's paths, so removing a path also removes it from the closure
+  under test (`release_plan.py` imports no `release_seal`). The claim test is the binding; no code change.
+- E-A1-4 · A1.2 cut assumption confirmed in process (DB-tier wire test): no `node_release_verifications` row is
+  needed for the node offer or the base artifact route. The Compose leg itself (netboot-e2e) has not run locally
+  (arm64 device root, mmdebstrap); CI is its first run.
+- E-A1-5 · Docs not in A1's file list still describe the retired cohort bundle: `docs/runbook.md:185` ("a node
+  release's cmdline.txt is that line plus photowall.node=v2"), `docs/module-appliance-ci.md:337`,
+  `docs/node-4gb-memory-design.md:52,143` (`node_release_artifacts.py:60`, `node_bundle_flag_missing`). Left
+  for the docs bead.

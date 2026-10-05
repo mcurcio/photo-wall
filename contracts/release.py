@@ -49,7 +49,8 @@ not part of the command line the kernel receives. The builder writes it so
 (scripts/build_netboot_bundle.sh) and the seal's verify refuses any other shape. The line also
 carries `CMDLINE_MEMORY_CONTROLLER` exactly once, on every Pi: the Pi 5 device tree's bootargs,
 which the firmware puts before cmdline.txt, disable the memory controller, and the later enable
-wins (raspberrypi/linux#6980). The node release's tree inherits it and adds only its own flag.
+wins (raspberrypi/linux#6980). It also carries `CMDLINE_NODE_TOKEN` exactly once, so every Pi
+booting a release's one boot tree takes the node path; the node release's tree is that same tree.
 
 Nothing here is signed (home LAN, no threat model): every sha256 is a corruption check only.
 
@@ -142,6 +143,7 @@ BOOT_ROOT: Final = "photo-wall-boot"
 CMDLINE: Final = "cmdline.txt"                     # each name is within BASE_BOOT
 CMDLINE_PLACEHOLDER: Final = "@@PHOTOWALL_CENTRAL@@"
 CMDLINE_MEMORY_CONTROLLER: Final = "cgroup_enable=memory"  # in the template exactly once
+CMDLINE_NODE_TOKEN: Final = "photowall.node=v2"  # in the template exactly once
 BOOT_REQUIRED: Final = ("config.txt", CMDLINE, "kernel_2712.img", "initrd.img",
                         "bcm2712-rpi-5-b.dtb", "pieeprom.upd", "pieeprom.sig")
 

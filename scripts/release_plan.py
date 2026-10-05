@@ -390,8 +390,10 @@ class Suite:
 SUITES: Final = (
     Suite("checks", always=True),
     Suite("e2e", always=True),
+    # The PR-time seal check runs the seal and the plan, and no package claims them (NOT_SHIPPED).
     Suite("base-image", packages=("base-bundle", "bootstrapper-deb", "player-deb",
-                                  "player-payload")),
+                                  "player-payload"),
+          paths=("scripts/release_seal.py", "scripts/release_plan.py")),
     # The tracer serves the Player .deb from a real Central: its content-serving layers, and the
     # rest of what its harness imports (tests/test_release_plan.py computes that closure).
     Suite("netboot-e2e", packages=("bootstrapper-deb", "player-deb"),
