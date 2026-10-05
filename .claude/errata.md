@@ -3785,3 +3785,41 @@ HC-3 · STATUS PARTLY FIXED, residual open as a separate bead (workflow `run:` s
   `source_modules` and `forbidden_modules` (frozen set ⊆ configured: additions such as B9's `appliance.health`
   source pass, any drop fails); layers stay pinned by equality. Probed: dropping `appliance.node` from the session
   contract's sources → test red.
+
+## 2026-10-05 · player-health M1 architect pass 1 (after B2c) · .claude/runs/player-health-m1.md §8
+- E-B0-1 applied to brief (B5: `python3-cffi-backend` in node-display / node-display-build; harness extras shrink).
+- E-B0-2 applied to brief (B4 step 3 and its private-client mutation probe use the in-window foreign bind).
+- E-B0-3 applied to brief (§8 common local environment; B4 and B5 launchers, B11 feeder use /usr/bin/python3).
+- E-B0-4 applied to brief (§8 common local environment: G-harness with PHOTO_WALL_NODE_BUILDER=desktop-linux).
+- E-B0-5 informational; nothing to apply.
+- E-B1-1 applied to brief (§8 common local environment: G-leg local recipe).
+- E-B1-2 applied to brief (§8 common; B12 rebuilds components and fixture together for the role and the variant).
+- E-B1-3 applied to brief (B12 step 1 admission criterion reuses B1's `admitted()` via /fixture/display).
+- E-B2a-1 applied to brief (D1 lists the plain-text old-path citations).
+- E-B2a-2, E-B2a-3 informational; nothing to apply.
+- E-B2a-4 applied to brief (§8 common: implementer legs build from a dangling commit).
+- E-B2b-1, E-B2b-2 applied to brief (D1 documents the feed wire as built).
+- E-B2b-3 applied to brief (B6 replaces `DisplayFeed` with a gap-aware generic `NodeFeed` reader; B8-B12 reuse it).
+- E-B2b-4 applied to brief (B10 proves the new listener, allowlist and snapshot by runner unit tests + leg, not G-harness).
+- E-B2c-1, E-B2c-2 applied to brief (B9 verifier re-runs the vacuous-at-B2c lint probes once the modules exist).
+- E-AP1-1 · B10 re-cut: the display feed is ~32 events/s (B2a leg display-feed.jsonl: 733 CompositorPresentation in
+  23 s; ring 256 laps in ~8 s; OutputKey published once), and B2b's feed has no snapshot although system-design-r8
+  §5 has feeds carry `NodeSnapshotV2`. An event-only judge loses the Output set at its first gap or restart, and the
+  overlay client would then paint the V-stale card on a healthy wall. The `events` response gains an `outputs`
+  snapshot from `host.states()`; the judge drains feeds each turn (B9, B10). Applied to brief.
+- E-AP1-2 · B10 re-cut: no sysusers `m pw-display pw-node-feeds` (Weston, uid pw-display, uses PAMName=login →
+  initgroups, so the overlay client and Weston would join the feeds group); the controller gets the group from its
+  unit's SupplementaryGroups only; the feed socket is chowned to pw-node-feeds and chmod 0660 after bind (controller
+  umask 0o077, runner.py:145; B6's broker socket likewise). Applied to brief.
+- E-AP1-3 · B9 page bug: `stage_tree` stages policy "health-judge" at /usr/lib/photo-wall-health-judge
+  (build_node_base_deb.py:57) but the unit's ExecStart named /usr/lib/photo-wall-health. ExecStart corrected;
+  `MappingProxyType({})` as the other policies. Applied to brief.
+- E-AP1-4 · B4/B5 order swapped: B4's harness client was to replace the private client at the spawn path, but the
+  harness's handoff needs the private client's slate `diagnostic_presented` (native_display_smoke.py:254, :405), so a
+  tint-only test client would break every B0 assertion after the first. With B5 first, B4's test client composes the
+  Python client (slate, ack, trial) and adds the v3 health layer. Applied to brief.
+- E-AP1-5 · B5 launcher: `#!/usr/bin/python3 -IB` implies `-P` on Python ≥ 3.11, so the launcher's directory is not on
+  sys.path and `import overlay` would fail on the node; the launcher inserts its own parent directory. Applied to
+  brief (B5, B4).
+- E-AP1-6 · Leg-asserting beads B6, B8, B9, B10, B11 did not list tests/test_node_pid1.py although their acceptance
+  needs leg assertions; added to their Files. Applied to brief.
