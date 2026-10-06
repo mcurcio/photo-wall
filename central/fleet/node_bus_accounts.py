@@ -20,21 +20,16 @@ from contracts.node_link import (
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
-    WALL_MESSAGE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
     account_id,
-    account_store_bytes,
     central_user,
     node_user,
 )
 
 FLEET_SYSTEM_USER: Final = "fleet"
 SYSTEM_ACCOUNT: Final = "SYS"
-# The WALL account's store, by the buffer rule: its one stream's cap plus one largest wall message,
-# so a full WALL drops its oldest instead of the account refusing the write (E-W1-BUF-1).
-WALL_ACCOUNT_STORE_BYTES: Final = account_store_bytes([WALL_STREAM_BYTES], WALL_MESSAGE_BYTES)
 
 # What a Node's mirror of WALL needs from the WALL account: the consumer API it creates and
 # deletes its mirror consumer through, the delivery subjects, and flow control (v1 and v2 forms).
@@ -59,12 +54,12 @@ class HubListeners:
     leaf_port: int
     monitor_port: int | None     # /leafz; None in production until E3d decides
     store_dir: str
-    max_file_store_bytes: int    # the hub's JetStream store; at least WALL_ACCOUNT_STORE_BYTES
+    max_file_store_bytes: int    # the hub's JetStream store; at least WALL_STREAM_BYTES
 
 
 def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
     """The hub's nats-server configuration for this set of enrolled serials, as JSON text."""
-    if listeners.max_file_store_bytes < WALL_ACCOUNT_STORE_BYTES:
+    if listeners.max_file_store_bytes < WALL_STREAM_BYTES:
         raise ValueError("hub_store_too_small")
     node_accounts = {account_id(serial): serial for serial in serials}
     accounts: dict[str, object] = {
@@ -100,7 +95,11 @@ def _user(name: str) -> dict[str, str]:
 
 def _wall_account() -> dict[str, object]:
     return {
-        "jetstream": {"max_file": WALL_ACCOUNT_STORE_BYTES, "max_mem": 0},
+        # No store limit, only "every stream has its own byte cap". An account store limit is checked
+        # with the new message added, before a full stream drops its oldest, so it would refuse (10002)
+        # a write the stream's discard-old policy takes. The hub's max_file_store is the one fence:
+        # the server reserves each stream's cap against it at create, never at a write (E-W1-BUF-2).
+        "jetstream": {"max_bytes_required": True},
         "users": [_user(WALL_WRITER_USER)],
         "exports": [
             *({"service": subject} for subject in _WALL_CONSUMER_SERVICES),

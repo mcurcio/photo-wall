@@ -1,7 +1,8 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
 read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2). Every stream,
-bucket and mirror is a buffer (E-W1-BUF-1): full, it drops its oldest and takes the write.
+bucket and mirror is a buffer (E-W1-BUF-2): limits retention with discard old, so the server drops
+its oldest and takes the write.
 
 The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; raw nats-py
 clients play Central and Node components. Every service, stream and subject here is the test's.
@@ -288,9 +289,9 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
 
 
 def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
-    """WALL is a buffer (E-W1-BUF-1): full, it takes a new subject and the largest message, each
-    dropping the oldest subject's value; the WALL account's store, its cap plus one largest message,
-    never refuses first. Only a message past the largest is refused (a message limit, not fullness)."""
+    """WALL is a buffer (E-W1-BUF-2): full, it takes a new subject and the largest message, the
+    server dropping the oldest subject's value each time; the WALL account has no store limit to
+    refuse first. Only a message past the largest is refused (a message limit, not fullness)."""
     hub = hub_server(tmp_path, [])
     hub.start()
 
@@ -375,7 +376,8 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         central_client = await central(hub, "serial-a")
         kv = await declare_bucket(node_client.jetstream(), bucket(BUCKET, history=2, max_bytes=64 * 1024))
         config = (await node_client.jetstream().stream_info(f"KV_{BUCKET}")).config
-        assert (config.discard, config.max_msgs_per_subject) == (DiscardPolicy.OLD, 2)
+        assert (config.retention, config.discard, config.max_msgs_per_subject) == (
+            RetentionPolicy.LIMITS, DiscardPolicy.OLD, 2)
         await kv.put("scene", b"node")
         watcher = await kv.watch("scene")
 
@@ -481,8 +483,7 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
         jetstream = node_client.jetstream()
         if source == "stream":
             stream = "OBSERVED"
-            await jetstream.add_stream(buffer(
-                stream, 16 * 1024, subjects=["observed.>"], retention=RetentionPolicy.LIMITS))
+            await jetstream.add_stream(buffer(stream, 16 * 1024, subjects=["observed.>"]))
 
             async def write(index: int) -> None:
                 await jetstream.publish("observed.reading", f"reading-{index:04}".encode())

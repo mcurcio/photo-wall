@@ -7,8 +7,10 @@ the bus tests skip with a reason CI's `node-bus` job owns. Every stream, service
 probe uses is the test's own: nothing here is a subject grammar.
 
 Every stream, KV bucket and mirror a probe declares is configured by `buffer` (the buffer rule,
-erratum E-W1-BUF-1): it drops its oldest when full and never refuses a write. The config test
-fails on any other place that configures one.
+erratum E-W1-BUF-2): JetStream's limits retention with discard old, so the server itself drops the
+oldest message when a limit is reached and takes the write. No account carries a store limit that
+could refuse first, so no headroom is computed anywhere. The config test fails on any other place
+that configures one.
 """
 from __future__ import annotations
 
@@ -65,20 +67,23 @@ MIB = 1024 * 1024
 
 
 def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
-    """The one configuration of every stream, KV bucket and mirror: full, it drops its oldest and
-    takes the write (discard OLD); it has a byte cap and lives in the file store. A reader learns of
-    a drop from the sequence hole it leaves (the counted gap). No caller sets the policy."""
-    if {"discard", "storage"} & fields.keys():
+    """The one configuration of every stream, KV bucket and mirror: JetStream's limits retention
+    with discard old (docs.nats.io/learn/jetstream/policies), in the file store, with its own byte
+    cap and any other stream limit the caller gives (max_msgs, max_age, max_msgs_per_subject). When
+    a limit is reached the server drops the oldest message and takes the write; a reader sees the
+    drop as the sequence hole below the stream's first sequence. No caller sets the policy."""
+    if {"retention", "discard", "storage"} & fields.keys():
         raise ValueError("buffer_policy_is_fixed")
     if max_bytes <= 0:
         raise ValueError("buffer_needs_a_byte_cap")
-    return StreamConfig(name=name, max_bytes=max_bytes, discard=DiscardPolicy.OLD,
-                        storage=StorageType.FILE, **fields)
+    return StreamConfig(name=name, max_bytes=max_bytes, retention=RetentionPolicy.LIMITS,
+                        discard=DiscardPolicy.OLD, storage=StorageType.FILE, **fields)
 
 
 def bucket(name: str, *, history: int, max_bytes: int, max_value_size: int | None = None) -> StreamConfig:
     """A KV bucket's stream as nats-py's create_key_value builds it (nats/js/client.py:1448), but a
-    buffer: create_key_value hard-codes discard NEW, which refuses every put once the bucket is full."""
+    buffer: create_key_value hard-codes discard NEW, which refuses every put once the bucket is full.
+    `history` is the per-subject limit: a key's own oldest value goes first."""
     return buffer(f"KV_{name}", max_bytes, subjects=[f"$KV.{name}.>"], allow_rollup_hdrs=True,
                   allow_msg_ttl=True, deny_delete=True, duplicate_window=120, max_consumers=-1,
                   max_msgs=-1, max_msg_size=max_value_size, max_msgs_per_subject=history)
@@ -107,15 +112,14 @@ def wall_mirror_config() -> StreamConfig:
 def node_split() -> dict[str, StreamConfig]:
     """The page's starting split of the Node's store (section 6) as buffers: records, observations,
     state and desired buckets, the wall copy. Held by the harness only; E3b's class table owns the
-    numbers. Their caps leave one largest message of account API's store unreserved (the config
-    test holds it), so a full split still takes every write."""
+    numbers. The server reserves the caps against the store at create; full, each still takes
+    every write."""
     split: dict[str, StreamConfig] = {}
     for component, cap in {"player": 4 * MIB, "apps": MIB, "display": MIB, "host": MIB // 2}.items():
-        split[f"REC_{component}"] = buffer(f"REC_{component}", cap, subjects=[f"{component}.record.>"],
-                                           retention=RetentionPolicy.LIMITS)
+        split[f"REC_{component}"] = buffer(f"REC_{component}", cap, subjects=[f"{component}.record.>"])
     for component in ("health", "content"):
         split[f"OBS_{component}"] = buffer(f"OBS_{component}", MIB, subjects=[f"{component}.observation.>"],
-                                           max_age=6 * 3600, retention=RetentionPolicy.LIMITS)
+                                           max_age=6 * 3600)
     for prefix, components, history in (
             ("state", ("host", "apps", "content", "display", "health", "player"), 4),
             ("desired", ("apps", "display", "health", "player"), 2)):
@@ -365,19 +369,16 @@ async def reload_hub(hub: BusServer, serials: Sequence[str]) -> None:
 
 def kv_bucket_bytes(bucket: str, keys: Sequence[str], history: int, max_value: int,
                     header_bytes: int = 0) -> int:
-    """A KV bucket's byte cap that its listed keys cannot fill: every key holding `history`
-    values of `max_value` bytes, each charged nats-server's per-message file-store size
-    (ns:server/filestore.go:10055-10062), plus one largest message of headroom. The class sizing
-    E3b inherits.
+    """A KV bucket's byte cap that holds `history` values of `max_value` bytes for every listed
+    key, each charged nats-server's per-message file-store size (ns:server/filestore.go:10055-10062,
+    4 bytes high: harmless slack). The class sizing E3b inherits; a sizing, not headroom.
 
-    The bucket is a buffer (drops its oldest, never refuses), and drops a key's own oldest before
-    its byte cap acts (ns:server/filestore.go:5340-5380), so listed keys alone never cost another
-    key a value; the headroom lets the first stray key in without a drop. Past it, a stray costs the
-    bucket its oldest message, which a reader sees as a hole (E-W1-BUF-1; was E-W1-E3a-3-1's
-    discard-NEW headroom)."""
+    The bucket is a buffer: the server drops a key's own oldest at its per-subject limit before the
+    byte cap acts (ns:server/filestore.go:5340-5380), so listed keys never cost another key a value;
+    an unlisted key costs the bucket its oldest message, a hole a reader sees (E-W1-BUF-2, which
+    removes E-W1-E3a-3-1's discard-NEW headroom)."""
     header = 4 + header_bytes if header_bytes else 0
-    per_message = [34 + len(f"$KV.{bucket}.{key}") + max_value + header for key in keys]
-    return sum(history * size for size in per_message) + max(per_message, default=0)
+    return sum(history * (34 + len(f"$KV.{bucket}.{key}") + max_value + header) for key in keys)
 
 
 def leaf_connections(hub: BusServer) -> Mapping[str, int]:

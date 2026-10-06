@@ -4,16 +4,14 @@ No subject grammar lives here: each component owns its subjects. Fleet's hub gen
 Node API library and Central's sessions read these names; nothing here crosses a wire except
 the user names, which both sides derive from the serial.
 
-The buffer rule (owner steer 2026-10-06, erratum E-W1-BUF-1) lives here too, because both ends
-size their stores by it: every stream, bucket and mirror drops its oldest when full and never
-refuses a write, and every account's store holds its streams' caps plus one largest message, so
-the account check (which runs before a stream drops its oldest) never refuses first.
+The buffer rule (owner steer 2026-10-06, erratum E-W1-BUF-2) needs no number here: every stream,
+bucket and mirror is a JetStream limits stream with discard old, so the server drops its oldest
+and takes the write; no account on either end has a store limit that could refuse it first.
 """
 from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable
 from typing import Final
 
 NODE_DOMAIN: Final = "node"                  # every Node bus's JetStream domain; Central reaches it as $JS.node.API
@@ -26,7 +24,6 @@ WALL_DELIVER_PREFIX: Final = "DELIVER.WALL"  # the mirror's delivery prefix, the
 WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selector, not a secret
 
 NODE_MAX_PAYLOAD: Final = 256 * 1024         # node-bus.conf's max_payload (headers + payload); the config test binds it
-MAX_SUBJECT_BYTES: Final = 4096              # nats-server's default max_control_line, which bounds every subject
 # WALL's max_msg_size: every wall message crosses a leaf into a Node account, where one past the
 # Node's max_payload is a protocol error.
 WALL_MESSAGE_BYTES: Final = NODE_MAX_PAYLOAD
@@ -53,17 +50,3 @@ def central_user(serial: str) -> str:
     """Central's client user inside the Node's account; a selector, not a secret."""
     return "central-" + account_id(serial)
 
-
-def largest_message_charge(max_message: int) -> int:
-    """The store's charge for the largest message a buffer takes: nats-server charges 30 + subject +
-    payload, and 4 + headers more with headers (ns:server/filestore.go:10055-10062); `max_message`
-    bounds headers + payload, MAX_SUBJECT_BYTES the subject. An upper bound no real message reaches."""
-    return 34 + MAX_SUBJECT_BYTES + max_message
-
-
-def account_store_bytes(stream_caps: Iterable[int], max_message: int) -> int:
-    """The smallest account store that never refuses a write: the server adds the new message to the
-    account's usage and refuses past its store before a full stream drops its oldest
-    (ns:server/stream.go:7274, jetstream.go:2505), so the store holds every stream's cap plus one
-    largest message (E-W1-BUF-1)."""
-    return sum(stream_caps) + largest_message_charge(max_message)
