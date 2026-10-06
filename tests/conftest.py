@@ -49,6 +49,7 @@ CI_SKIP_ALLOWLIST = (
     "real dpkg-deb build/inspection requires",  # opt-in PHOTO_WALL_IMAGE_TOOL_TESTS only
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
+    "set PHOTO_WALL_IMAGE_MOUNT_TESTS",  # node-components.yml mounts the images (docker, loop, sudo)
 )
 
 
