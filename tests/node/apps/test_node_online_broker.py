@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from node.test_node_linux_adapters import store
 from test_node_boot import environment
-from test_node_linux_adapters import store
 
 from appliance.apps.broker import RunningApp
 from appliance.apps.online_broker import OnlineEffectBroker

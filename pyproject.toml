@@ -58,9 +58,12 @@ major_version_zero = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["tests", "tests/node", "tests/node/apps", "tests/node/boot", "tests/node/display",
-              "tests/node/health", "tests/node/host"]
-addopts = "-ra"
+# importlib + namespace packages name each test module by its path under tests/ (tests/node/apps/
+# test_x.py is `node.apps.test_x`), so equal basenames in two directories never collide and a new
+# test directory needs no entry here. Import a helper by that name; browser/ keeps bare imports.
+pythonpath = ["tests", "tests/browser"]
+consider_namespace_packages = true
+addopts = "-ra --import-mode=importlib"
 
 [tool.ruff]
 target-version = "py312"
@@ -130,8 +133,9 @@ forbidden_modules = ["httpx", "media", "central.db", "central.cache_layout", "ce
 name = "Node contexts point down"
 type = "layers"
 containers = ["appliance"]
-layers = ["node", "boot : netboot_init : bootstrap : boot_offer : central_post : node_boot_handoff",
-          "apps", "health", "display_host | host", "central_session", "kernel : feed : feed_socket"]
+# Siblings are `|` (independent), never `:`: a real dependency is its own layer.
+layers = ["node", "boot | netboot_init", "bootstrap | boot_offer | central_post | node_boot_handoff",
+          "apps", "health", "display_host | host", "central_session", "kernel | feed | feed_socket"]
 exhaustive = true
 ignore_imports = [
   # Retiring (r3 §10): each line leaves with the module it names.
@@ -172,6 +176,16 @@ name = "Health reaches only Display among contexts"
 type = "forbidden"
 source_modules = ["appliance.health"]
 forbidden_modules = ["appliance.host"]
+
+[[tool.importlinter.contracts]]
+# The host-core launcher ships alone. Like the apps fence, this has no ignore lines, so a path
+# through a retiring module the layers contract exempts (host_runner -> node.recovery) still fails.
+name = "Host core reaches no sibling context"
+type = "forbidden"
+source_modules = ["appliance.host"]
+forbidden_modules = ["appliance.display_host", "appliance.health", "appliance.apps", "appliance.boot",
+                     "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
+                     "appliance.central_post", "appliance.node_boot_handoff"]
 
 [[tool.importlinter.contracts]]
 # The judge alone maps faults to household lines; Display draws the instruction it is given.

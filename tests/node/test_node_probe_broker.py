@@ -11,10 +11,10 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from node.test_node_linux_adapters import store as boot_store
 from support.packet_pair import packet_pair
 from support.repo import REPO
 from test_node_boot import environment
-from test_node_linux_adapters import store as boot_store
 
 from appliance import feed_socket
 from appliance.apps import broker_runner

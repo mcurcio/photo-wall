@@ -30,12 +30,13 @@ KERNEL_MAY_IMPORT: Final = ("contracts", "uplink", KERNEL)
 # design change, not a lint fix.
 FROZEN_NODE_LAYERS: Final[list[str]] = [
     "node",
-    "boot : netboot_init : bootstrap : boot_offer : central_post : node_boot_handoff",
+    "boot | netboot_init",
+    "bootstrap | boot_offer | central_post | node_boot_handoff",
     "apps",
     "health",
     "display_host | host",
     "central_session",
-    "kernel : feed : feed_socket",
+    "kernel | feed | feed_socket",
 ]
 
 # The retiring feed's importers when the fence went up (r3 §16.1 B2b/B10a). Each line leaves
@@ -111,6 +112,12 @@ FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[s
         frozenset({"appliance.health"}),
         frozenset({"appliance.host"}),
     ),
+    "Host core reaches no sibling context": (
+        frozenset({"appliance.host"}),
+        frozenset({"appliance.display_host", "appliance.health", "appliance.apps", "appliance.boot",
+                   "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
+                   "appliance.central_post", "appliance.node_boot_handoff"}),
+    ),
     "Display never reads the fault catalogue": (
         frozenset({"appliance.display_host"}),
         frozenset({"contracts.node_faults"}),
@@ -171,6 +178,13 @@ def test_node_layers_are_the_frozen_list() -> None:
     assert contract["containers"] == ["appliance"]
     assert contract["exhaustive"] is True
     assert contract["layers"] == FROZEN_NODE_LAYERS
+
+
+def test_node_layer_siblings_are_independent() -> None:
+    """`a : b` lets siblings import each other in any direction, so a context placed in the group
+    inherits that licence. Siblings are `|`; a real dependency is its own layer."""
+    shared = [layer for layer in _contract(LAYERS_CONTRACT)["layers"] if ":" in layer]
+    assert not shared, f"{LAYERS_CONTRACT}: use `|` or separate layers, not `:`: {shared}"
 
 
 def test_forbidden_contracts_keep_every_frozen_source_and_target() -> None:

@@ -252,7 +252,7 @@ def test_killed_attempt_debris_is_removed_before_admission(tmp_path, monkeypatch
 
 
 def test_prepare_stage_clears_cold_staging_before_admission(tmp_path, monkeypatch):
-    from test_node_boot_linux import ROOT, offer
+    from node.boot.test_node_boot_linux import ROOT, offer
     selected = offer(app=True)
     abi = {name: getattr(selected.base, name) for name in ("base_abi", "graphics_abi", "plugin_abi")}
     monkeypatch.setattr(bootstrap, "materialize_handoff", lambda **_: (ROOT, selected, abi))

@@ -423,7 +423,7 @@ def test_a_response_bound_display_reply_is_a_counted_failure():
 
 def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
     """End to end over Display's own feed socket (the judge as uid pw-health)."""
-    from test_node_display_runner import FakeBackend
+    from node.display.test_node_display_runner import FakeBackend
 
     backend = FakeBackend()
     controller = display_runner.Controller(backend)

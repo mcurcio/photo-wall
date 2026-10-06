@@ -221,7 +221,7 @@ def test_each_bootstrap_mode_runs_as_its_stage(tmp_path, monkeypatch, mode):
 
 @pytest.mark.parametrize("failure", ["marker", "base_abi"])
 def test_host_configuration_is_written_before_the_marker_and_abi_checks(tmp_path, monkeypatch, failure):
-    from test_node_boot_linux import ROOT, offer
+    from node.boot.test_node_boot_linux import ROOT, offer
     selected = offer()
     monkeypatch.setattr(bootstrap, "read_node_handoff", lambda _: (ROOT, selected))
     monkeypatch.setattr(bootstrap, "boot_id", lambda: selected.kernel_boot_id)
@@ -239,7 +239,7 @@ def test_host_configuration_is_written_before_the_marker_and_abi_checks(tmp_path
 
 
 def test_a_stale_handoff_writes_no_host_configuration(tmp_path, monkeypatch):
-    from test_node_boot_linux import ROOT, offer
+    from node.boot.test_node_boot_linux import ROOT, offer
     selected = offer()
     monkeypatch.setattr(bootstrap, "read_node_handoff", lambda _: (ROOT, selected))
     monkeypatch.setattr(bootstrap, "boot_id", lambda: uuid4())
@@ -322,7 +322,7 @@ def test_failed_units_over_4096_bytes_raises(monkeypatch):
 
 
 def test_the_runner_reuses_the_last_failed_units_read_and_sends_none_before_any(tmp_path, monkeypatch):
-    from test_node_host_facts import INTERVAL, VALUES, _run, _runner
+    from node.host.test_node_host_facts import INTERVAL, VALUES, _run, _runner
     clock = [100.0]
     runner, sent = _runner(monkeypatch, clock, dict(VALUES), {})
     runner.boot_stage_directory = tmp_path
@@ -422,7 +422,7 @@ def test_supervision_carries_no_per_unit_rows(monkeypatch):
 
 # The facts sender compares whole documents, boot included.
 def test_a_boot_change_sends_a_new_document_and_an_unchanged_boot_sends_nothing(tmp_path, monkeypatch):
-    from test_node_host_facts import INTERVAL, VALUES, _run, _runner
+    from node.host.test_node_host_facts import INTERVAL, VALUES, _run, _runner
     clock, facts = [100.0], dict(VALUES)
     runner, sent = _runner(monkeypatch, clock, facts, {})
     units = [((), 0)]

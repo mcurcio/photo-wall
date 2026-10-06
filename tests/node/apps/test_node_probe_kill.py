@@ -7,11 +7,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from node.apps.test_node_online_broker import Driver as SwitchDriver
+from node.apps.test_node_online_broker import stage
+from node.test_node_linux_adapters import store as boot_store
+from node.test_node_probe_broker import DUE, FAST, loop_for, turns
 from test_node_boot import environment
-from test_node_linux_adapters import store as boot_store
-from test_node_online_broker import Driver as SwitchDriver
-from test_node_online_broker import stage
-from test_node_probe_broker import DUE, FAST, loop_for, turns
 
 from appliance.apps.broker import RunningApp
 from appliance.apps.broker_runner import BrokerLoop
