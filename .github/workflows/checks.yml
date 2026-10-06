@@ -58,6 +58,22 @@ jobs:
           .venv/bin/python -m pytest -q --tb=short --durations=25 \
             -m "not db and not browser" -n 4 --dist worksteal
 
+  # The Node bus seam on real nats-server processes (tests/integration/bus_servers.py): the
+  # pinned binary, no Docker. The unit tier collects these tests and skips them, owned here.
+  node-bus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
+      - name: Fetch the pinned nats-server
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
+      - name: Run the bus seam tests
+        run: .venv/bin/python -m pytest -q --tb=short --durations=25 tests/integration -k node_bus
+
   db:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
