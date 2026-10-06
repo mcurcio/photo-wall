@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from uuid import UUID
 
-from appliance.node.clock import boottime_ms
+from appliance.clock import boottime_ms
 from appliance.node.recovery import STOP_TIMEOUT_SECONDS  # noqa: F401
 from appliance.node.stop_operation import (
     StopGuaranteeUnavailable,

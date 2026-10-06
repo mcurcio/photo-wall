@@ -12,9 +12,9 @@ import secrets
 from dataclasses import replace
 from uuid import UUID, uuid4
 
-from appliance.node.clock import boottime_ms
-from appliance.node.http import NodeHTTP
-from appliance.node.storage import BootStore
+from appliance.boot_store import BootStore
+from appliance.central_session.http import NodeHTTP
+from appliance.clock import boottime_ms
 from contracts.node_commands import (
     NodeSessionClaim,
     NodeSessionGrant,

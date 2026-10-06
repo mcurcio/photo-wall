@@ -15,11 +15,11 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 sys.path.insert(0, "/repo")
+from appliance.central_session.http import NodeHTTP
+from appliance.clock import boottime_ms
 from appliance.display_host.runner import Controller
 from appliance.display_host.service import DisplayService
 from appliance.display_host.weston import WestonBackend
-from appliance.node.clock import boottime_ms
-from appliance.node.http import NodeHTTP
 
 original_request = NodeHTTP.request
 def trace_request(self, method, path, *args, **kwargs):

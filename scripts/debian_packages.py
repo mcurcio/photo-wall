@@ -173,11 +173,16 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("libweston-14-0", _DISPLAY, why="base display compositor ABI"),
     DebianPackage("libjansson4", _DISPLAY, why="bounded native display JSON protocol"),
     DebianPackage("libcairo2", _DISPLAY, why="base diagnostic rendering"),
+    # The private overlay client (appliance/display_host/overlay) is Python: pywayland at run time
+    # and, through its scanner, at build time; cffi's backend because trixie's python3-pywayland
+    # (0.4.18-4) imports it without declaring it.
+    DebianPackage("python3-pywayland", _DISPLAY | _DISPLAY_BUILD, imports=("pywayland",)),
+    DebianPackage("python3-cffi-backend", _DISPLAY | _DISPLAY_BUILD, imports=("_cffi_backend",)),
+    DebianPackage("python3-cairo", _DISPLAY, imports=("cairo",)),
     DebianPackage("libwayland-client0", _DISPLAY | _PLAYER, why="private base diagnostic Wayland client"),
     DebianPackage("libweston-14-dev", _DISPLAY_BUILD, why="base display shell compiler headers"),
     DebianPackage("libwayland-dev", _DISPLAY_BUILD, why="base display Wayland protocol compiler headers"),
     DebianPackage("libjansson-dev", _DISPLAY_BUILD, why="base display JSON compiler headers"),
-    DebianPackage("libcairo2-dev", _DISPLAY_BUILD, why="base diagnostic compiler headers"),
     DebianPackage("wayland-protocols", _DISPLAY_BUILD, why="xdg-shell protocol source"),
     DebianPackage("build-essential", _DISPLAY_BUILD, why="base native display compiler"),
     DebianPackage("meson", _DISPLAY_BUILD, why="base native display build graph"),

@@ -11,10 +11,10 @@ from pathlib import Path
 from uuid import uuid4
 
 sys.path.insert(0, "/usr/lib/photo-wall-app-broker")
-from appliance.node.clock import boot_id, boottime_ms
+from appliance.boot_store import BootStore
+from appliance.clock import boot_id, boottime_ms
 from appliance.node.environment import verify_root
 from appliance.node.import_worker import RootImportWorker
-from appliance.node.storage import BootStore
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_lifecycle import StageCommandV2, stage_digest
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2

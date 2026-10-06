@@ -10,13 +10,13 @@ from uuid import uuid4
 
 import pytest
 
+from appliance.boot_store import BootStore
 from appliance.node.app_link import BrokerLinkService, proof_directory, remove_proof_socket
 from appliance.node.base_status import read_supervisor_status, supervisor_document
 from appliance.node.host import HostCore
 from appliance.node.host_linux import LinuxHostSampler
 from appliance.node.host_runner import HostRunner
 from appliance.node.host_storage import FileRebootJournal, RebootDelivery, request_dict
-from appliance.node.storage import BootStore
 from contracts.node_commands import RebootRequest, encode_reboot_request, reboot_digest
 from contracts.node_protocol import NodeProducerV2, encode_node_message
 

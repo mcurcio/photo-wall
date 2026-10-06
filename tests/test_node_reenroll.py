@@ -11,9 +11,9 @@ import pytest
 from test_fleet_attempts import BOOT_ID, SERIAL
 from test_node_boot import claim_for, cold_setup
 
-import appliance.node.session as node_session
-from appliance.node.session import NodeSession
-from appliance.node.storage import BootStore
+import appliance.central_session.session as node_session
+from appliance.boot_store import BootStore
+from appliance.central_session.session import NodeSession
 from central.fleet.node_sessions import NodeControlError
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_commands import encode_session_grant, parse_session_claim

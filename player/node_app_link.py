@@ -12,6 +12,7 @@ from contracts.node_app_link import (
     encode_node_app_link,
     encode_node_app_link_begin,
     parse_node_app_link_challenge,
+    parse_node_app_link_result,
 )
 from contracts.player_control import ControlAppliedReceipt
 from player.identity import Identity
@@ -52,6 +53,11 @@ class NodeAppLinkClient:
                 return "stale"
             _send(connection, json.loads(encode_node_app_link(proof)), limit=MAX_NODE_LINK_BYTES)
             result = _receive(connection, limit=MAX_NODE_LINK_BYTES)
-            if result != {"schema": 2, "kind": "result", "status": "recorded"}:
+            try:
+                status = parse_node_app_link_result(json.dumps(result).encode())
+            except ValueError:
+                return "rejected"
+            # `accepted` (held by the broker) and `recorded` (by Central) both link this run.
+            if status == "refused":
                 return "rejected"
             return "recorded" if enrollment_current() else "stale"

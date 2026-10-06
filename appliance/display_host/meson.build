@@ -21,7 +21,6 @@ client_header = custom_target('frame-client-header', input: xml,
   output: 'photo-wall-frame-client.h',
   command: [scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
 wayland_client = dependency('wayland-client', version: '>=1.22')
-cairo = dependency('cairo')
 wayland_protocols = dependency('wayland-protocols')
 presentation_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'stable/presentation-time/presentation-time.xml'
 presentation_header = custom_target('presentation-client-header', input: presentation_xml,
@@ -30,9 +29,18 @@ presentation_header = custom_target('presentation-client-header', input: present
 presentation_code = custom_target('presentation-code', input: presentation_xml,
   output: 'presentation-time-protocol.c',
   command: [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
-executable('diagnostic-client', 'native/diagnostic-client.c', client_header, protocol,
-  presentation_header, presentation_code, dependencies: [wayland_client, cairo, jansson],
-  install: true, install_dir: get_option('libdir') / 'photo-wall-display')
+# The private overlay client is Python (overlay/), spawned by the shell at the unchanged path
+# libdir/photo-wall-display/diagnostic-client. Debian's interpreter by absolute path: a builder
+# image's PATH python3 cannot see Debian's pywayland. Its bindings are generated here.
+python = find_program('/usr/bin/python3')
+display_dir = get_option('libdir') / 'photo-wall-display'
+core_xml = dependency('wayland-scanner', native: true).get_variable(pkgconfig: 'pkgdatadir') / 'wayland.xml'
+custom_target('overlay-protocol', input: [core_xml, presentation_xml, xml], output: 'protocol',
+  command: [python, '-m', 'pywayland.scanner', '-o', '@OUTPUT@', '-i', '@INPUT@'],
+  install: true, install_dir: display_dir / 'overlay')
+install_data('overlay/__init__.py', 'overlay/instruction.py', 'overlay/render.py',
+  'overlay/paint.py', 'overlay/health.py', 'overlay/client.py', install_dir: display_dir / 'overlay')
+install_data('overlay/diagnostic-client', install_dir: display_dir, install_mode: 'rwxr-xr-x')
 # This client artifact belongs in the sealed Player .deb, never in its host
 # import fallback path. The native build emits it for the app package builder.
 shared_library('photo-wall-frame-client', 'native/frame-client.c', client_header,

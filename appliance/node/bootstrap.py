@@ -9,9 +9,9 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
+from appliance.clock import boot_id
 from appliance.node.boot_stage import run_stage
 from appliance.node.capacity import STORE, admit_cold, memory_values
-from appliance.node.clock import boot_id
 from appliance.node.environment import verify_root
 from appliance.node.preparer import DownloadPreparer
 from appliance.node.storage_mount import mount_storage

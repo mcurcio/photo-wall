@@ -58,6 +58,7 @@ from player.identity import Identity, load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
+from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
 from uplink import watchdog
 from uplink.causes import Cause, UplinkError
@@ -328,11 +329,15 @@ class Download:
 
 
 class GLibDispatcher:
-    """At most four queued callbacks; caller awaits each, never blocks GLib."""
+    """At most `slots` queued callbacks on GLib's default-idle queue; caller awaits each, never blocks GLib."""
 
-    def __init__(self, glib):
+    def __init__(self, glib, slots: int = 4):
         self.glib = glib
-        self._slots = threading.BoundedSemaphore(4)
+        self._slots = threading.BoundedSemaphore(slots)
+
+    def lane(self, slots: int) -> GLibDispatcher:
+        """A sibling on the same GLib idle queue and priority with its own slots: it never takes ours."""
+        return GLibDispatcher(self.glib, slots)
 
     def __call__(self, callback: Callable) -> Future:
         future = Future()
@@ -438,6 +443,7 @@ class PlayerService:
         self.node_link_client = node_link_client or NodeAppLinkClient()
         self._proof_active = False
         self._proof_generation = 0
+        self._relink = threading.Event()
         self._thread = None
         self._loop = None
         self._task = None
@@ -1162,6 +1168,10 @@ class PlayerService:
         recorded_applied: tuple[Session, ControlAppliedReceipt] | None = None
         recorded_node: tuple[Session, ControlAppliedReceipt] | None = None
         while self._proof_active and not self._stop.is_set():
+            if self._relink.is_set():
+                # The broker could not deliver the recorded link: prove it again.
+                self._relink.clear()
+                recorded_applied = recorded_node = None
             session = self._session
             registration = session.registration if session is not None else None
             generation = self._proof_generation
@@ -1343,6 +1353,10 @@ class PlayerService:
                                         name="player-network", daemon=False)
         self._thread.start()
 
+    def request_relink(self):
+        """Thread-safe: the proof loop forgets its recorded app link on its next turn."""
+        self._relink.set()
+
     def stop(self):
         self._stop.set()
         if self._loop is not None and self._task is not None:
@@ -1446,12 +1460,13 @@ def main():
                 serial=display_serial(read_pi_serial()))
         except Exception:
             native_fault = "native_initialization"
+    dispatcher = GLibDispatcher(GLib)
     service = PlayerService(
         config,
         identity,
         discovery.outputs,
         renderer,
-        GLibDispatcher(GLib),
+        dispatcher,
         boot_context=boot_context,
         find_central=find,
         trust=trust,
@@ -1485,6 +1500,8 @@ def main():
     signal.signal(signal.SIGINT, finish)
     GLib.timeout_add(33, tick)
     service.start()
+    # Probes are answered on the same GLib queue as control dispatch (own one-slot lane), never here.
+    ProbeResponder(dispatcher, on_relink=service.request_relink).start()
     watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
     with contextlib.suppress(KeyboardInterrupt):
         loop.run()

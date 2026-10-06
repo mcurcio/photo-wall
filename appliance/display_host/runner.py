@@ -14,14 +14,19 @@ import selectors
 import socket
 import struct
 import subprocess
-from collections import deque
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from uuid import UUID
 
+from appliance.feed import Feed, answer_feed_read
+from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.unix_credentials import receive_credential_packet
 
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
+
+# The display feed for node readers (root, pw-health): the `events` op only, over the kernel
+# feed socket. The root-only ingress (`<runtime>/ingress.sock`) keeps every operation.
+FEED_SOCKET = Path("/run/photo-wall-display-feed/feed.sock")
 
 
 def _unit(unit: str) -> dict[str, str]:
@@ -72,13 +77,48 @@ def verify_process(grant: SurfaceGrant) -> bool:
         return False
 
 
+def _output_document(state) -> dict:
+    """One `OutputState` as the feed snapshot shows it (JSON-native values only)."""
+    admitted = state.admitted
+    return {
+        "output_id": state.key.output_id,
+        "connected": state.connected,
+        "admitted": None
+        if admitted is None
+        else {
+            "pid": admitted.process.pid,
+            "start_ticks": admitted.process.start_ticks,
+            "invocation_id": str(admitted.process.invocation_id),
+            "app_epoch": admitted.app_epoch,
+            "frame_id": admitted.frame_id,
+        },
+        "diagnostic": state.diagnostic,
+        "fault": state.fault,
+    }
+
+
+def feed_listener(
+    controller: Controller, path: Path = FEED_SOCKET, *, owner_uid: int | None = None,
+    group: int = FEEDS_GROUP, **seams
+) -> FeedListener:
+    """The display feed socket: owned by the controller's uid (pw-display), group
+    pw-node-feeds, read by root and pw-health only (`seams`: `peer` and `kind`, for tests)."""
+    return FeedListener(
+        path,
+        owner_uid=os.getuid() if owner_uid is None else owner_uid,
+        group=group,
+        readers=FEED_READERS,
+        answer=controller.feed_events,
+        max_reply=MAX_PACKET,
+        **seams,
+    )
+
+
 class Controller:
     def __init__(self, backend: WestonBackend):
         self.backend = backend
         self.host = backend.initialize()
-        self.sequence = 0
-        self.events: deque[dict] = deque(maxlen=256)
-        self.gap = False
+        self.feed = Feed(256)
         self.service = None
 
     def observe(self) -> None:
@@ -87,15 +127,8 @@ class Controller:
             return
         if self.service is not None:
             self.service.observe(observed)
-        self.sequence += 1
-        if len(self.events) == self.events.maxlen:
-            self.gap = True
-        self.events.append(
-            {
-                "sequence": self.sequence,
-                "kind": type(observed).__name__,
-                "value": asdict(observed) if is_dataclass(observed) else observed,
-            }
+        self.feed.append(
+            type(observed).__name__, asdict(observed) if is_dataclass(observed) else observed
         )
 
     def revise(self, decision) -> None:
@@ -103,18 +136,25 @@ class Controller:
             decision.surface, decision.decision_id, expires_boottime_ms=decision.expires_boottime_ms
         )
 
+    def outputs_snapshot(self) -> list[dict]:
+        """Every Output the host knows (bounded by its `max_outputs`) with its admission, so a
+        reader that lapped the ring or restarted learns the Output set from any one read."""
+        return [_output_document(state) for state in self.host.states()]
+
+    def feed_events(self, value: dict) -> dict:
+        """The feed socket's one operation: `events` (an absent `op` reads as `events`)."""
+        if value.get("op", "events") != "events":
+            raise ValueError("feed_read_request")
+        return self.receive({**value, "op": "events"})
+
     def receive(self, value: dict) -> dict:
         operation = value.get("op")
         if operation == "events":
-            after = value.get("after", 0)
-            if type(after) is not int or after < 0:
-                raise ValueError("display_event_cursor")
-            events = [event for event in self.events if event["sequence"] > after][:8]
             return {
-                "events": events,
-                "stream_gap": self.gap,
+                **answer_feed_read(self.feed, value),
                 "boot_id": self.host.boot_id,
                 "incarnation_id": self.host.incarnation_id,
+                "outputs": self.outputs_snapshot(),
             }
         if operation == "outputs":
             return {"outputs": [asdict(state) for state in self.host.states()]}
@@ -177,7 +217,10 @@ def main() -> None:
                 offer_id=UUID(config["offer_id"]),
                 runtime=args.runtime,
             )
-        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress:
+        with (
+            feed_listener(controller) as feeds,
+            socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
+        ):
             path = args.runtime / "ingress.sock"
             path.unlink(missing_ok=True)
             ingress.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
@@ -187,6 +230,7 @@ def main() -> None:
             with selectors.DefaultSelector() as selector:
                 selector.register(channel, selectors.EVENT_READ, "backend")
                 selector.register(ingress, selectors.EVENT_READ, "ingress")
+                selector.register(feeds.listener, selectors.EVENT_READ, "feed")
                 while True:
                     while backend.pending:
                         controller.observe()
@@ -195,6 +239,9 @@ def main() -> None:
                     for key, _mask in selector.select(timeout=0.1):
                         if key.data == "backend":
                             controller.observe()
+                            continue
+                        if key.data == "feed":
+                            feeds.serve()  # bounded: READS_PER_TURN short reads at most
                             continue
                         connection, _ = ingress.accept()
                         with connection:

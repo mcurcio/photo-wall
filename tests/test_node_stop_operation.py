@@ -381,6 +381,7 @@ def test_local_control_proof_survives_expired_session_and_central_timeout(stoppe
         NodeAppLinkV2,
         encode_node_app_link,
         encode_node_app_link_begin,
+        encode_node_app_link_result,
         parse_node_app_link_challenge,
     )
     from contracts.node_commands import NodeSessionGrant, encode_session_grant
@@ -408,8 +409,10 @@ def test_local_control_proof_survives_expired_session_and_central_timeout(stoppe
         return peer, encode_node_app_link(NodeAppLinkV2(challenge, "c" * 64, "d" * 128))
     monkeypatch.setattr("appliance.node.app_link.receive_credential_packet", receive)
     monkeypatch.setattr("appliance.node.app_link.boottime_ms", lambda: 1000)
-    with pytest.raises(TimeoutError):
-        service.handle(SimpleNamespace(send=send))
+    service.feed = None
+    # Accepted locally: the proof never waits on Central (whose request would time out here).
+    service.handle(SimpleNamespace(send=send))
+    assert sent[-1] == encode_node_app_link_result("accepted")
     proof = driver.store.read("local-app-control")
     assert proof["operation_id"] == str(request.old.operation_id)
     assert proof["progress"]["process"]["pid"] == request.old.process.pid
