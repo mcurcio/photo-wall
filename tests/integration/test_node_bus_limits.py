@@ -126,7 +126,8 @@ def test_a_full_node_store_takes_every_write_and_refuses_only_streams_past_its_l
         assert (await jetstream.account_info()).storage == sum(caps.values())
 
         # Full, every buffer takes the next write: it gets the next sequence and the oldest is gone,
-        # a hole a reader counts (F7: a counted hole, never a refused write with no sequence).
+        # never a refused write with no sequence. A log's drop is a hole a reader counts (F7); a
+        # bucket's is a key it no longer holds (`lost_subjects`, E-W1-BUF-2).
         for name in caps:
             full = (await jetstream.stream_info(name)).state
             if name in buckets:
@@ -199,7 +200,7 @@ async def _observation(jetstream) -> None:
 async def _bucket(jetstream, prefix: str, history: int) -> None:
     """Listed keys, at up to max_value bytes and ten times the capacity, are always accepted and keep
     `history` values. A key beyond the list is accepted too: after the headroom's one, each costs
-    the bucket its oldest message, a hole in its sequence. An oversized value is refused (a message
+    the bucket its oldest message (a listed key's oldest value here, so no key is lost). An oversized value is refused (a message
     limit, not fullness); every listed key keeps its last good value."""
     name, keys, max_value = f"{prefix}_probe", ("conditions", "position", "horizon", "verdicts"), 512
     capacity = kv_bucket_bytes(name, keys, history, max_value)
@@ -224,7 +225,7 @@ async def _bucket(jetstream, prefix: str, history: int) -> None:
         assert len(await kv.history(key)) == history, key
 
     # Keys beyond the list: every put accepted; once the headroom is spent the bucket's oldest goes
-    # (here the first key's oldest value) and its first sequence moves past it, the hole a reader counts.
+    # (here the first key's oldest value) and its first sequence moves past it.
     full = (await jetstream.stream_info(f"KV_{name}")).state
     strays = 0
     while (after := (await jetstream.stream_info(f"KV_{name}")).state).first_seq == full.first_seq:

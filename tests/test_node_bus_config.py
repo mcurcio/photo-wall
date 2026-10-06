@@ -13,7 +13,14 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from integration.bus_servers import bucket, buffer, node_split, wall_config, wall_mirror_config
+from integration.bus_servers import (
+    bucket,
+    buffer,
+    is_log,
+    node_split,
+    wall_config,
+    wall_mirror_config,
+)
 from nats.js.api import DiscardPolicy, StorageType
 
 from central.fleet.node_bus_accounts import (
@@ -137,6 +144,8 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER}]}
     assert config["system_account"] == "SYS"
     assert config["jetstream"]["domain"] == HUB_DOMAIN
+    # The hub runs at the Nodes' max_payload: a larger message from Central would close a leaf.
+    assert config["max_payload"] == NODE_MAX_PAYLOAD
     assert config["websocket"] == {"host": "0.0.0.0", "port": 8080, "no_tls": True}
     assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422}
     assert "http" not in config
@@ -163,6 +172,10 @@ def test_every_harness_buffer_drops_its_oldest_and_is_built_in_one_place():
     # Latest per subject where it matters: the wall stream and every Node mirror of it.
     assert wall_config().max_msgs_per_subject == 1
     assert wall_mirror_config().max_msgs_per_subject == 1
+    # A drop's signal follows the kind (E-W1-BUF-2): records and observations are logs (a counted
+    # gap); buckets and the wall copy are keyed (a lost subject).
+    assert {name for name, config in node_split().items() if is_log(config)} == {
+        "REC_player", "REC_apps", "REC_display", "REC_host", "OBS_health", "OBS_content"}
     for field in ("discard", "storage"):
         with pytest.raises(ValueError, match="buffer_policy_is_fixed"):
             buffer("X", 1, **{field: None})

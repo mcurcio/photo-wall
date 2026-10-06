@@ -1,7 +1,9 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
 read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2). Every stream,
-bucket and mirror is a buffer (E-W1-BUF-1): full, it drops its oldest and takes the write.
+bucket and mirror is a buffer (E-W1-BUF-1): full, it drops its oldest and takes the write; a log
+buffer's drop is a counted gap, a keyed buffer's a lost subject (E-W1-BUF-2). No message over a
+Node's max_payload reaches its leaf (E-W1-BUF-2).
 
 The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; raw nats-py
 clients play Central and Node components. Every service, stream and subject here is the test's.
@@ -16,6 +18,7 @@ import nats.errors
 import nats.micro
 import pytest
 from integration.bus_servers import (
+    MIB,
     BusServer,
     Recorder,
     bucket,
@@ -26,18 +29,21 @@ from integration.bus_servers import (
     declare_wall,
     declare_wall_mirror,
     hub_server,
+    is_log,
     leaf_connections,
     local,
+    lost_subjects,
     node_server,
     reload_hub,
     wall_value,
     wall_writer,
 )
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, DiscardPolicy, RetentionPolicy
-from nats.js.errors import APIError, NoStreamResponseError, NotFoundError
+from nats.js.errors import APIError, KeyNotFoundError, NoStreamResponseError, NotFoundError
 
 from contracts.node_link import (
     NODE_DOMAIN,
+    NODE_MAX_PAYLOAD,
     WALL_MESSAGE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
@@ -290,7 +296,8 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
 def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
     """WALL is a buffer (E-W1-BUF-1): full, it takes a new subject and the largest message, each
     dropping the oldest subject's value; the WALL account's store, its cap plus one largest message,
-    never refuses first. Only a message past the largest is refused (a message limit, not fullness)."""
+    never refuses first. Only a message past the largest is refused (a message limit, not fullness),
+    by Central's own client."""
     hub = hub_server(tmp_path, [])
     hub.start()
 
@@ -303,17 +310,19 @@ def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
             acknowledgement = await jetstream.publish(f"wall.s{index:04}", value)
             assert acknowledgement.seq == index + 1
             index += 1
-        # Full: the first subject's only value is gone, a hole below first_seq a reader sees.
+        # Full: the first subject's only value is gone, a subject the writer knows and WALL lost.
         assert index > 1 and full.bytes <= WALL_STREAM_BYTES
+        written = [f"wall.s{number:04}" for number in range(index)]
+        assert await lost_subjects(jetstream, WALL_STREAM, written) == {"wall.s0000"}
         with pytest.raises(NotFoundError):
             await jetstream.get_last_msg(WALL_STREAM, "wall.s0000")
         acknowledgement = await jetstream.publish("wall.largest", b"L" * WALL_MESSAGE_BYTES)
         assert acknowledgement.seq == full.last_seq + 1
         after = (await jetstream.stream_info(WALL_STREAM)).state
         assert after.first_seq > full.first_seq and after.bytes <= WALL_STREAM_BYTES
-        with pytest.raises(APIError) as too_large:
+        # Past the largest, Central's client refuses it: the hub runs at the Nodes' max_payload.
+        with pytest.raises(nats.errors.MaxPayloadError):
             await jetstream.publish("wall.too_large", b"x" * (WALL_MESSAGE_BYTES + 1))
-        assert too_large.value.err_code == 10054, too_large.value
         await writer.close()
 
     try:
@@ -337,11 +346,13 @@ class _Crash(Exception):
 async def _drain(client, stream: str, recorder: Recorder, *, crash_at: int | None = None) -> None:
     """Central's durable read of a Node stream: commit each message, then acknowledge it.
 
-    A delivered sequence past the last recorded one is a gap only for the part the stream no
-    longer holds (below its first_seq); later sequences can still arrive as redeliveries. The gap
-    row is recorded before the message that revealed it. Returns once a fetch longer than the ack
-    wait finds nothing, so every unacknowledged delivery has come back."""
+    In a log buffer, a delivered sequence past the last recorded one is a gap only for the part the
+    stream no longer holds (below its first_seq); later sequences can still arrive as redeliveries.
+    The gap row is recorded before the message that revealed it. A keyed buffer's holes are mostly
+    replaced values, so it records none: its loss is `lost_subjects` (E-W1-BUF-2). Returns once a
+    fetch longer than the ack wait finds nothing, so every unacknowledged delivery has come back."""
     jetstream = client.jetstream(domain=NODE_DOMAIN)
+    counts_gaps = is_log((await jetstream.stream_info(stream)).config)
     await jetstream.add_consumer(stream, CONSUMER)
     subscription = await jetstream.pull_subscribe_bind(CONSUMER.durable_name, stream)
     while True:
@@ -352,7 +363,7 @@ async def _drain(client, stream: str, recorder: Recorder, *, crash_at: int | Non
         for message in messages:
             sequence = message.metadata.sequence.stream
             highest = max([0, *recorder.sequences(), *(first + count - 1 for first, count in recorder.gaps())])
-            if sequence > highest + 1:
+            if counts_gaps and sequence > highest + 1:
                 first_held = (await jetstream.stream_info(stream)).state.first_seq
                 missing = min(first_held, sequence) - highest - 1
                 if missing > 0:
@@ -467,8 +478,7 @@ def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, 
         hub.stop()
 
 
-@pytest.mark.parametrize("source", ["stream", "bucket"])
-def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path, source):
+def test_a_log_buffer_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path):
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
     hub.start()
@@ -479,19 +489,12 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
         await _linked(hub, 1)
         node_client = await local(node)
         jetstream = node_client.jetstream()
-        if source == "stream":
-            stream = "OBSERVED"
-            await jetstream.add_stream(buffer(
-                stream, 16 * 1024, subjects=["observed.>"], retention=RetentionPolicy.LIMITS))
+        stream = "OBSERVED"
+        await jetstream.add_stream(buffer(
+            stream, 16 * 1024, subjects=["observed.>"], retention=RetentionPolicy.LIMITS))
 
-            async def write(index: int) -> None:
-                await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
-        else:
-            stream = "KV_probe_observed"
-            kv = await declare_bucket(jetstream, bucket("probe_observed", history=1, max_bytes=16 * 1024))
-
-            async def write(index: int) -> None:
-                await kv.put(f"reading{index:04}", f"reading-{index:04}".encode())
+        async def write(index: int) -> None:
+            await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
         for index in range(10):
             await write(index)
         central_client = await central(hub, "serial-a")
@@ -520,6 +523,193 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
     finally:
         node.stop()
         hub.stop()
+
+
+def test_a_keyed_bucket_replaces_values_without_loss_and_names_a_dropped_key(tmp_path):
+    """A keyed buffer leaves sequence holes when it replaces a value, which lose nothing: Central's
+    drain records no gap and no subject is lost. When its byte cap drops a key's only value the key
+    is gone with no marker and no watcher event; the client that knows the key set sees it as a lost
+    subject, on the Node and across the leaf (E-W1-BUF-2)."""
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+    recorder = Recorder(tmp_path / "record")
+
+    async def run():
+        await _linked(hub, 1)
+        node_client = await local(node)
+        jetstream = node_client.jetstream()
+        name = "probe_intent"
+        stream = f"KV_{name}"
+        kv = await declare_bucket(jetstream, bucket(name, history=1, max_bytes=16 * 1024))
+        keys = ["intent", "position", "horizon"]
+        known = {f"$KV.{name}.{key}" for key in keys}
+        for index in range(300):  # updates in place: first_seq moves past holes, nothing lost
+            await kv.put(keys[1 + index % 2], f"{index:08}".encode())
+        state = (await jetstream.stream_info(stream)).state
+        assert (state.first_seq, state.messages, state.last_seq) == (299, 2, 300)
+        central_client = await central(hub, "serial-a")
+        await _drain(central_client, stream, recorder)
+        assert recorder.gaps() == [] and recorder.sequences() == [299, 300]
+        # `intent` is written once, then the others move on: it is the bucket's oldest message.
+        await kv.put("intent", b"the-only-value")
+        for key in keys[1:]:
+            await kv.put(key, b"moved on")
+        assert (await jetstream.stream_info(stream)).state.first_seq == 301
+        central_view = central_client.jetstream(domain=NODE_DOMAIN)
+        assert await lost_subjects(jetstream, stream, known) == set()
+        assert await lost_subjects(central_view, stream, known) == set()
+
+        # Strays fill the bucket: its byte cap drops the oldest message, `intent`'s only value. Each
+        # stray is charged less than `intent`, so each drop takes one message.
+        watcher = await kv.watch("intent")
+        assert (await watcher.updates(timeout=2)).value == b"the-only-value"
+        assert await watcher.updates(timeout=2) is None  # the initial values are done
+        strays = 0
+        while (await jetstream.stream_info(stream)).state.first_seq == 301:
+            await kv.put(f"stray{strays:03}", b"s")
+            strays += 1
+        assert await lost_subjects(jetstream, stream, known) == {f"$KV.{name}.intent"}
+        assert await lost_subjects(central_view, stream, known) == {f"$KV.{name}.intent"}
+        # What a reader without the key set sees: no value, no delete marker, no watcher event.
+        with pytest.raises(KeyNotFoundError):
+            await kv.get("intent")
+        with pytest.raises(nats.errors.TimeoutError):
+            await watcher.updates(timeout=1)
+        await watcher.stop()
+        await central_client.close()
+        await node_client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
+def test_wall_and_its_mirror_replace_values_without_loss_and_name_a_dropped_subject(tmp_path):
+    """WALL and a Node's mirror are keyed buffers: rewriting a subject past the cap leaves holes
+    and loses nothing. Once Central's latest values outgrow WALL_STREAM_BYTES, WALL drops the
+    subject written longest ago, and the mirror the same; Central, which knows its subjects, sees
+    them lost at the hub and, across the leaf, on the Node, where they read None (E-W1-BUF-2)."""
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+
+    async def run():
+        await _linked(hub, 1)
+        writer = await wall_writer(hub)
+        await declare_wall(writer)
+        node_client = await local(node)
+        await declare_wall_mirror(node_client)
+        central_view = (await central(hub, "serial-a"))
+        hub_wall, node_wall = writer.jetstream(), central_view.jetstream(domain=NODE_DOMAIN)
+
+        async def put(subject: str, value: bytes) -> None:
+            # Paced: the mirror stores every write, so it holds what WALL holds.
+            seq = (await hub_wall.publish(subject, value)).seq
+            async def caught_up():
+                return (await node_client.jetstream().stream_info(WALL_STREAM)).state.last_seq >= seq
+            await _until(caught_up, 10, f"mirror reaches {seq}")
+
+        latest = {"wall.scene": b"scene", "wall.calendar": b"calendar"}
+        for subject, value in latest.items():
+            await put(subject, value)
+        for index in range(WALL_STREAM_BYTES // 4096 + 16):
+            latest["wall.timing"] = f"{index:08}".encode().ljust(4096, b"t")
+            await put("wall.timing", latest["wall.timing"])
+        for view in (hub_wall, node_wall):
+            state = (await view.stream_info(WALL_STREAM)).state
+            assert state.num_deleted > 0 and state.messages == 3  # holes, nothing lost
+            assert await lost_subjects(view, WALL_STREAM, latest) == set()
+
+        # Central's latest values outgrow the cap: the subjects written longest ago are dropped.
+        index = 0
+        while not await lost_subjects(hub_wall, WALL_STREAM, latest):
+            latest[f"wall.content.{index:03}"] = b"c" * (64 * 1024)
+            await put(f"wall.content.{index:03}", latest[f"wall.content.{index:03}"])
+            index += 1
+        lost = await lost_subjects(hub_wall, WALL_STREAM, latest)
+        assert {"wall.scene", "wall.calendar"} <= lost < set(latest)
+        assert await lost_subjects(node_wall, WALL_STREAM, latest) == lost
+        for subject, value in latest.items():
+            assert await wall_value(node_client, subject) == (None if subject in lost else value), subject
+        for client in (central_view, node_client, writer):
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
+def test_no_central_message_over_a_node_max_payload_reaches_the_leaf(tmp_path):
+    """The hub runs at the Nodes' max_payload, so Central's client refuses an oversized core publish
+    or bucket write itself, a message at the limit lands on the Node, and one that only headers push
+    over the limit (nats-py counts the payload alone) is refused by the hub, closing Central's
+    connection: the leaf link never closes (E-W1-BUF-2)."""
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+
+    async def run():
+        await _linked(hub, 1)
+        link = leaf_connections(hub)[account_id("serial-a")]
+        node_client = await local(node)
+        kv = await declare_bucket(node_client.jetstream(), bucket("probe_large", history=1, max_bytes=MIB))
+        heard: list[int] = []
+
+        async def hear(message):
+            heard.append(len(message.data))
+        await node_client.subscribe("probe.large", cb=hear)
+        central_client = await central(hub, "serial-a")
+        assert central_client.max_payload == NODE_MAX_PAYLOAD
+        await _await_heard(central_client, heard)
+
+        with pytest.raises(nats.errors.MaxPayloadError):
+            await central_client.publish("probe.large", b"x" * (NODE_MAX_PAYLOAD + 1))
+        with pytest.raises(nats.errors.MaxPayloadError):
+            await central_put(central_client, "probe_large", "k", b"x" * (NODE_MAX_PAYLOAD + 1),
+                              expected_revision=None)
+        heard.clear()
+        await central_client.publish("probe.large", b"x" * NODE_MAX_PAYLOAD)
+        revision = await central_put(central_client, "probe_large", "k", b"y" * NODE_MAX_PAYLOAD,
+                                     expected_revision=None)
+        assert (await kv.get("k")).value == b"y" * NODE_MAX_PAYLOAD and revision == 1
+
+        async def heard_at_limit():
+            return heard == [NODE_MAX_PAYLOAD]
+        await _until(heard_at_limit, 5, "the Node hears the message at the limit")
+
+        await central_client.publish("probe.large", b"z" * NODE_MAX_PAYLOAD, headers={"Probe": "over"})
+
+        async def central_closed():
+            return central_client.is_closed
+        await _until(central_closed, 5, "the hub closes Central's connection")
+        await asyncio.sleep(.5)
+        assert leaf_connections(hub)[account_id("serial-a")] == link
+        assert heard == [NODE_MAX_PAYLOAD]
+        await node_client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
+async def _await_heard(client, heard: list[int]) -> None:
+    """Interest in probe.large crosses the leaf asynchronously: publish until the Node hears one."""
+    async def check():
+        await client.publish("probe.large", b"ready")
+        await client.flush()
+        await asyncio.sleep(.1)
+        return heard
+    await _until(check, 10, "the Node hears Central on probe.large")
 
 
 async def _holds(node: BusServer, values: dict[str, bytes], seconds: float) -> None:

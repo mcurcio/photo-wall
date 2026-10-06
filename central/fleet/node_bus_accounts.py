@@ -17,6 +17,7 @@ from typing import Final
 
 from contracts.node_link import (
     HUB_DOMAIN,
+    NODE_MAX_PAYLOAD,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
@@ -77,6 +78,10 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
         "server_name": listeners.server_name,
         "host": listeners.client_host,
         "port": listeners.client_port,
+        # The Nodes' max_payload: a hub client (Central) learns it and refuses a larger message
+        # itself, and the hub refuses one from any other client, so no message over a Node's limit
+        # ever reaches a leaf, where it would close the link (erratum E-W1-BUF-2).
+        "max_payload": NODE_MAX_PAYLOAD,
         "jetstream": {
             "domain": HUB_DOMAIN,
             "store_dir": listeners.store_dir,

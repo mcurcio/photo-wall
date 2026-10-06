@@ -8,7 +8,10 @@ probe uses is the test's own: nothing here is a subject grammar.
 
 Every stream, KV bucket and mirror a probe declares is configured by `buffer` (the buffer rule,
 erratum E-W1-BUF-1): it drops its oldest when full and never refuses a write. The config test
-fails on any other place that configures one.
+fails on any other place that configures one. A drop is visible two ways, by the buffer's kind
+(erratum E-W1-BUF-2): a log buffer's is the sequence hole below its first sequence; a keyed
+buffer's (a per-subject limit: KV buckets, WALL, its mirrors) is a known subject it no longer
+holds (`lost_subjects`), because replacing a value leaves sequence holes too.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ import socket
 import subprocess
 import time
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -66,14 +69,34 @@ MIB = 1024 * 1024
 
 def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
     """The one configuration of every stream, KV bucket and mirror: full, it drops its oldest and
-    takes the write (discard OLD); it has a byte cap and lives in the file store. A reader learns of
-    a drop from the sequence hole it leaves (the counted gap). No caller sets the policy."""
+    takes the write (discard OLD); it has a byte cap and lives in the file store. How a client sees
+    a drop depends on the kind (`is_log`). No caller sets the policy."""
     if {"discard", "storage"} & fields.keys():
         raise ValueError("buffer_policy_is_fixed")
     if max_bytes <= 0:
         raise ValueError("buffer_needs_a_byte_cap")
     return StreamConfig(name=name, max_bytes=max_bytes, discard=DiscardPolicy.OLD,
                         storage=StorageType.FILE, **fields)
+
+
+def is_log(config: StreamConfig) -> bool:
+    """A log buffer keeps every message until its caps drop the oldest, so each sequence hole below
+    its first sequence is a drop a reader counts. A keyed buffer (any per-subject limit) also drops
+    a replaced value, which leaves holes that lose nothing (E-W1-BUF-2): its loss signal is
+    `lost_subjects`, never a hole."""
+    return config.max_msgs_per_subject in (None, -1)
+
+
+async def lost_subjects(jetstream: JetStreamContext, stream: str, known: Iterable[str]) -> set[str]:
+    """The subjects of `known` a keyed buffer no longer holds: its byte cap dropped their only value.
+
+    A replacement keeps a subject, and a KV delete or purge leaves a marker on it, so in a keyed
+    buffer only a drop takes a subject away, and it leaves nothing to read. Only a client that knows
+    the subject set can see it: the writer (Central for WALL and every Node mirror of it, `nodeapi`
+    for its buckets), or a reader it tells. A reader without the set sees a missing value, the same
+    as one never written (E-W1-BUF-2)."""
+    state = (await jetstream.stream_info(stream, subjects_filter=">")).state
+    return set()
 
 
 def bucket(name: str, *, history: int, max_bytes: int, max_value_size: int | None = None) -> StreamConfig:
@@ -373,8 +396,8 @@ def kv_bucket_bytes(bucket: str, keys: Sequence[str], history: int, max_value: i
     The bucket is a buffer (drops its oldest, never refuses), and drops a key's own oldest before
     its byte cap acts (ns:server/filestore.go:5340-5380), so listed keys alone never cost another
     key a value; the headroom lets the first stray key in without a drop. Past it, a stray costs the
-    bucket its oldest message, which a reader sees as a hole (E-W1-BUF-1; was E-W1-E3a-3-1's
-    discard-NEW headroom)."""
+    bucket its oldest message, and a key whose only value that was is a lost subject
+    (`lost_subjects`, E-W1-BUF-2; was E-W1-E3a-3-1's discard-NEW headroom)."""
     header = 4 + header_bytes if header_bytes else 0
     per_message = [34 + len(f"$KV.{bucket}.{key}") + max_value + header for key in keys]
     return sum(history * size for size in per_message) + max(per_message, default=0)
