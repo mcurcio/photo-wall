@@ -216,7 +216,7 @@ class WestonBackend:
         )
 
     def revise(self, surface: Surface, decision_id: UUID, *, expires_boottime_ms: int) -> None:
-        from appliance.node.clock import boottime_ms
+        from appliance.clock import boottime_ms
 
         state = self.host.state(surface.output.output_id)
         active, _ = self.grants[surface.output.output_id]

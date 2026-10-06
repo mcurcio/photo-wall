@@ -10,11 +10,12 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
+from appliance.central_session.session import REFUSED
+from appliance.clock import boottime_ms
 from appliance.node.broker import RunningApp
 from appliance.node.capacity import EMERGENCY_HEADROOM, memory_values
-from appliance.node.clock import boottime_ms
+from appliance.node.probe import RECOVERY_ACKNOWLEDGED, RECOVERY_ARMED
 from appliance.node.recovery import RESTORE_BUDGET_MS, STOP_BUDGET_MS, RecoveryObligation
-from appliance.node.session import REFUSED
 from appliance.node.stop_operation import (
     StopGuaranteeUnavailable,
     StopRequest,
@@ -145,6 +146,12 @@ class OnlineEffectBroker:
     def _arm_recovery(self, obligation):
         if self.recovery.arm(obligation) != obligation.receipt:
             raise ValueError("online_recovery_receipt")
+        # The last obligation the host accepted, kept apart from the online record (which a
+        # newer stage replaces before control is acknowledged): the probe kill rule stays
+        # fenced until this operation is acknowledged (recovery_may_be_armed, probe.py).
+        armed = {"operation_id": str(obligation.operation_id)}
+        if self.store.read(RECOVERY_ARMED) != armed:
+            self.store.write(RECOVERY_ARMED, armed)
 
     def _stop_fault(self, error):
         record = self.record
@@ -175,6 +182,11 @@ class OnlineEffectBroker:
         if record["phase"] in ("running", "fallback_running") and proof is not None:
             if proof["operation_id"] == str(obligation.operation_id):
                 self.recovery.advance(obligation, proof["progress"])
+                # The host accepted control: the obligation no longer guards the app, so the
+                # probe kill rule may act (recovery_may_be_armed, appliance/node/probe.py).
+                acknowledged = {"operation_id": str(obligation.operation_id)}
+                if self.store.read(RECOVERY_ACKNOWLEDGED) != acknowledged:
+                    self.store.write(RECOVERY_ACKNOWLEDGED, acknowledged)
         elif record.get("stop_consumed"):
             self.recovery.advance(obligation, {"kind": "stopped"})
 

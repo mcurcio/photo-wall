@@ -37,5 +37,5 @@ ProtectControlGroups=yes
 CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
-ReadWritePaths=/run/photo-wall-app-broker /run/photo-wall-app-proof
+ReadWritePaths=/run/photo-wall-app-broker /run/photo-wall-app-proof /run/photo-wall-app-feed
 InaccessiblePaths=-/run/photo-wall-host-core

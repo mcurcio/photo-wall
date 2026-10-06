@@ -87,3 +87,74 @@ def test_plan_rejects_old_binding_generation_and_outside_validity():
     layer = layer.model_copy(update={"binding_generation": 2, "end": 401})
     with pytest.raises(ValidationError):
         Plan(**common, layers=(layer,))
+
+
+def test_node_app_link_result_is_one_of_three_statuses():
+    from contracts.node_app_link import (
+        NODE_APP_LINK_RESULTS,
+        encode_node_app_link_result,
+        parse_node_app_link_result,
+    )
+    assert NODE_APP_LINK_RESULTS == ("accepted", "recorded", "refused")
+    for status in NODE_APP_LINK_RESULTS:
+        assert parse_node_app_link_result(encode_node_app_link_result(status)) == status
+    # Today's broker writes its result with default separators and its refusal compactly.
+    assert parse_node_app_link_result(b'{"schema": 2, "kind": "result", "status": "recorded"}') == "recorded"
+    assert parse_node_app_link_result(b'{"schema":2,"kind":"result","status":"refused"}') == "refused"
+    with pytest.raises(ValueError, match="app_link_result_invalid"):
+        encode_node_app_link_result("rejected")
+    for raw in (b'{"schema":2,"kind":"result","status":"ok"}', b'{"schema":2,"kind":"result"}',
+                b'{"schema":true,"kind":"result","status":"accepted"}',
+                b'{"schema":2,"kind":"result","status":["accepted"]}',
+                b'{"schema":2,"kind":"challenge","status":"accepted"}', b"[]", b"\xff"):
+        with pytest.raises(ValueError, match="app_link_result_invalid"):
+            parse_node_app_link_result(raw)
+
+
+def test_node_probe_channel_messages_are_bounded_and_closed():
+    import json
+
+    from contracts.node_app_link import (
+        MAX_NODE_LINK_BYTES,
+        NodeProbeV2,
+        NodeRelinkV2,
+        encode_node_probe,
+        encode_node_probe_answer,
+        encode_node_probe_open,
+        encode_node_relink,
+        parse_node_probe_answer,
+        parse_node_probe_channel_message,
+        parse_node_probe_open,
+    )
+    nonce = "0123456789abcdef" * 4
+    assert json.loads(encode_node_probe_open()) == {"schema": 2, "kind": "probe_open"}
+    assert parse_node_probe_open(encode_node_probe_open()) is None
+    assert json.loads(encode_node_probe(nonce)) == {"schema": 2, "kind": "probe", "nonce": nonce}
+    assert parse_node_probe_channel_message(encode_node_probe(nonce)) == NodeProbeV2(nonce)
+    assert parse_node_probe_channel_message(encode_node_relink()) == NodeRelinkV2()
+    assert json.loads(encode_node_relink()) == {"schema": 2, "kind": "relink"}
+    assert parse_node_probe_answer(encode_node_probe_answer(nonce)) == nonce
+    for bad in ("A" * 64, "a" * 63, "a" * 65, 7, None):
+        with pytest.raises(ValueError, match="probe_channel_message"):
+            encode_node_probe(bad)
+        with pytest.raises(ValueError, match="probe_channel_message"):
+            encode_node_probe_answer(bad)
+    refused = (
+        b'{"schema":2,"kind":"result","status":"refused"}',   # today's broker refusal
+        b'{"schema":2,"kind":"probe_open"}',                   # Player → broker only
+        b'{"schema":2,"kind":"probe_answer","nonce":"' + nonce.encode() + b'"}',
+        b'{"schema":2,"kind":"probe","nonce":"' + nonce.encode() + b'","extra":1}',
+        b'{"schema":2,"kind":"probe"}',
+        b'{"schema":1,"kind":"probe","nonce":"' + nonce.encode() + b'"}',
+        b'{"schema":2,"kind":"relink","nonce":"' + nonce.encode() + b'"}',
+        b'{"schema":2,"kind":"probe","kind":"relink"}',
+        b'{"schema":2,"kind":"relink","pad":"' + b"x" * MAX_NODE_LINK_BYTES + b'"}',
+        b"not json",
+    )
+    for raw in refused:
+        with pytest.raises(ValueError, match="probe_channel_message"):
+            parse_node_probe_channel_message(raw)
+    with pytest.raises(ValueError, match="probe_channel_message"):
+        parse_node_probe_open(b'{"schema":2,"kind":"probe_open","player_id":"p"}')
+    with pytest.raises(ValueError, match="probe_channel_message"):
+        parse_node_probe_answer(encode_node_probe(nonce))

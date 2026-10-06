@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import http.client
 
-from appliance.node.clock import boottime_ms
+from appliance.clock import boottime_ms
 from contracts.node_preparation import ManagerPreparationV2, encode_manager_preparation
 
 

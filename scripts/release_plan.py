@@ -266,8 +266,8 @@ PACKAGES: Final = (
              "appliance/node/__init__.py", "appliance/node/manager.py", "appliance/node/manager_runner.py",
              "appliance/node/manager_desired.py", "appliance/node/manager_observation.py",
              "appliance/node/preparer.py",
-             "appliance/node/environment.py", "appliance/node/capacity.py", "appliance/node/clock.py",
-             "appliance/node/http.py", "appliance/node/session.py", "appliance/node/storage.py",
+             "appliance/node/environment.py", "appliance/node/capacity.py",
+             "appliance/clock.py", "appliance/boot_store.py", "appliance/central_session/**",
              "contracts/**", "uplink/**")),
     Package("node-display-deb", "the isolated native Weston display .deb",
             (*_DEB_BUILD, "scripts/build_node_display_deb.py", "scripts/node_build_inputs.py", "appliance/display_host/**")),
@@ -276,7 +276,9 @@ PACKAGES: Final = (
     Package("node-base-deb", "the isolated V2 node base .deb",
             (*_DEB_BUILD, "scripts/build_node_base_deb.py", "appliance/node/**", "appliance/display_host/**", "contracts/**",
              "uplink/**", "appliance/__init__.py", "appliance/unix_credentials.py",
-             "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
+             "appliance/clock.py", "appliance/boot_store.py", "appliance/central_session/**", "appliance/feed.py",
+             "appliance/feed_socket.py",
+             "appliance/health/**", "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
              "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target")),
     Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
     Package("bootstrapper-deb", "the bootstrapper .deb", _BOOTSTRAPPER_DEB),
@@ -331,6 +333,7 @@ NOT_SHIPPED: Final = (
     "scripts/runtime_provenance.py",
     "scripts/test_local.py", "scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
     "scripts/build_node_pid1_fixture.py",  # the node-pid1 scenarios' fixture; never shipped
+    "scripts/run_display_harness.py",  # node-pid1's display-harness job runner; never shipped
     ".github/workflows/node-pid1.yml",
 )
 
@@ -413,10 +416,14 @@ SUITES: Final = (
                  "central/assets/**", "central/infra/**", "Dockerfile", "uv.lock")),
     # The node lifecycle under real systemd (node-pid1.yml): the node packages it boots, the
     # Central it runs against (its fixture imports central.app, so all of Central's Python), and
-    # its own builder, harness, the test modules the harness borrows from, and workflow.
+    # its own builder, harness, the test modules the harness borrows from, and workflow; and the
+    # display harness job's runner and fixture (the job builds appliance/display_host itself).
     Suite("node-pid1", packages=("node-base-deb", "node-manager-deb", "node-display-deb",
                                  "player-environment"),
           paths=("tests/test_node_pid1.py", "tests/node_pid1_*",
+                 "tests/native_display_smoke.py", "tests/native_display_probe.c",
+                 "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
+                 "scripts/run_display_harness.py",
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",
                  "tests/test_fleet_attempts.py", "tests/test_fleet_rollout_gate.py",
                  "tests/test_node_boot.py", "tests/test_registry.py",

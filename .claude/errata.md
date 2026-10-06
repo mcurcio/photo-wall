@@ -3725,3 +3725,624 @@ Source: `.claude/v2-posture/slices.md` §A1. Baseline 860465c.
   release's cmdline.txt is that line plus photowall.node=v2"), `docs/module-appliance-ci.md:337`,
   `docs/node-4gb-memory-design.md:52,143` (`node_release_artifacts.py:60`, `node_bundle_flag_missing`). Left
   for the docs bead.
+
+## 2026-10-05 · player-health M1 B0 display harness (implementer) · scripts/run_display_harness.py, tests/native_display_smoke.py
+- E-B0-1 · trixie's `python3-pywayland` 0.4.18-4 does not declare `python3-cffi-backend`, which its `_ffi` imports:
+  with `--no-install-recommends` `import pywayland` fails (`No module named '_cffi_backend'`). The harness installs
+  `python3-cffi-backend` beside `python3-pywayland python3-cairo`. **B5's page must add `python3-cffi-backend` to
+  `node-display`** in scripts/debian_packages.py, or the Python overlay client cannot start on the node.
+- E-B0-2 · B0's mutation probe "skip `bind_diagnostic`'s private-client check" is not caught by a foreign bind while
+  the private client is bound: shell.c:428 also refuses when `s->diagnostic_resource` is held, so dropping only
+  `client != s->diagnostic_client` stayed green (probed). The harness adds a second foreign bind inside the 2 s
+  respawn window after SIGKILL of the private client (no resource held), asserted within 1.8 s of the kill; that
+  variant now turns red. B4 step (3) uses the same window.
+- E-B0-3 · The run command is `/usr/bin/python3 /smoke/native_display_smoke.py`, not `python3 ...`: the builder
+  image's PATH `python3` is /usr/local/bin (the python image's own), which cannot see Debian's dist-packages.
+- E-B0-4 · On this Mac (Docker context `desktop-linux`) `docker_build`'s `--builder default` fails ("use `docker
+  --context=default buildx`"): G-harness (and G-leg's component build) need `PHOTO_WALL_NODE_BUILDER=desktop-linux`
+  in the environment. CI (default context) needs nothing.
+- E-B0-5 · The two design files were already in `docs/design/player-health/` (f930a50); B0 copied nothing.
+
+## 2026-10-05 · player-health M1 B1 node-pid1 binds a Frame (implementer) · tests/test_node_pid1.py, tests/node_pid1_central_fixture.py
+- E-B1-1 · The brief's G-leg command does not run on this Mac as written: (a) `python3 scripts/debian_packages.py
+  epoch` is macOS Python 3.9 (`dataclass(slots=)` TypeError) — use `.venv/bin/python`; (b)
+  `scripts.build_node_components` refuses non-Linux (`run_dpkg_deb`: `dpkg_deb_requires_linux`); (c) `docker run
+  python@sha256:<BUILDER_IMAGE>` fails on Docker Desktop ("cannot overwrite digest"); (d) `daemon_image_build`
+  hard-codes `--builder default` (E-B0-4), which `PHOTO_WALL_NODE_BUILDER` does not reach. Local recipe (never
+  committed): `DOCKER_CONTEXT=default` for the whole chain, and the components step via
+  `PYTHONPATH=$PWD .venv/bin/python /Volumes/Dock/tmp/pw-node/build_components_macos.py <same args>`, a wrapper that
+  patches only `run_dpkg_deb` to run `dpkg-deb --build --root-owner-group` in `pw-local-dpkg:builder` (`FROM`
+  BUILDER_IMAGE, built locally with `docker build`). CI (ubuntu-24.04-arm) needs none of this.
+- E-B1-2 · `scripts/build_node_pid1_fixture.py` `build_image` tags the untagged native build image with an alias and
+  `docker rmi`s the alias in `finally`: that deletes the base image (its only reference), so a second fixture build
+  from the same components fails `docker image inspect`. Rebuild components and fixture together (warm: ~1.5 min).
+- E-B1-3 · No Scene needed: the bound real Player presents ~34 frames/s on Virtual-1 with no Scene (B1 page's
+  conditional Scene authoring not taken). Admission = Central's latest decision `retain`/`already_admitted` for the
+  exact bound (frame, binding generation, config revision); the `handoff`/`current_linked_app` decision is superseded
+  within a sample. The fixture adds a read-only `GET /fixture/display` for it (test code only, no Central change).
+
+## 2026-10-05 · player-health M1 B2a shared kernel move (implementer) · appliance/{clock,boot_store}.py, appliance/central_session/
+- E-B2a-1 · "Docs that cite the old paths are D1's" conflicts with G-static: check_docs fails on one relative link,
+  docs/evidence/2026-09-30-node-stop-observation-proposal.md:27 `../../appliance/node/storage.py`. B2a repointed that
+  one link to `../../appliance/boot_store.py` (only edit outside the page's files). Plain-text (non-link) citations
+  of `appliance/node/{session,storage,clock,http}.py` in docs (e.g. docs/operator-console-ddd.md:1677, :2521) stay D1's.
+- E-B2a-2 · No change to scripts/build_node_base_deb.py `POLICIES`, scripts/build_node_manager_deb.py or
+  scripts/module_closure.py was needed: closures are import-derived, and no forbidden prefix names a moved module.
+  The moved modules now ship at `appliance/clock.py`, `appliance/boot_store.py`, `appliance/central_session/*` in
+  every node closure (base + manager), so the base and manager .deb contents change (leg required).
+- E-B2a-3 · Importer count matches the page: 18 files under appliance/ (incl. the moved session.py's own three
+  imports, and weston.py's function-local import) and 9 under tests/; nothing in scripts/ (no string references).
+  `appliance.node.host_linux` keeps its pre-existing `boot_id, boottime_ms` re-export (`# noqa: F401`, used by
+  host_runner) — it is not a shim of the moved module and was left unchanged.
+- E-B2a-4 · The implementer cannot commit, but G-leg builds from a commit: the leg was built from a dangling
+  commit object (temporary GIT_INDEX_FILE + `git commit-tree`, no ref, HEAD and index untouched) whose tree equals
+  the B2a working tree.
+
+## 2026-10-05 · player-health M1 B2b feed primitive (implementer) · appliance/feed.py, appliance/display_host/runner.py
+- E-B2b-1 · Wire is additive beyond the page's "adds `publisher_incarnation`": each event also carries `audience`
+  (`FeedCursor.advance` must rebuild `FeedEvent.audience`; a missing one reads as `node`), and the page document
+  also carries `latest` and `dropped_total` (the `FeedPage` fields, so a remote reader can see counted drops).
+- E-B2b-2 · Request bounds as built in `answer_feed_read`: `after` is now required (was `value.get("after", 0)`);
+  a missing `incarnation` key reads as null (tests/test_node_pid1.py `DISPLAY_FEED_SCRIPT` omits it); `op` absent or
+  `"events"`; any key outside {op, after, incarnation, limit} → `ValueError("feed_read_request")`.
+- E-B2b-3 · tests/test_node_pid1.py `DisplayFeed.poll` detects a controller restart by the compositor's
+  `incarnation_id`, which does not change when only the controller restarts; the feed's restart signal is now
+  `publisher_incarnation` (or simply `stream_gap`). Left unchanged (not in B2b's files); B12, which rewrites that
+  leg, should read the display feed with the `FeedCursor` request/advance shape.
+- E-B2b-4 · G-harness does not exercise `runner.Controller` (the smoke drives Weston's control socket directly);
+  the controller is covered by the new tests/test_node_display_runner.py (fake backend), the DB-tier
+  tests/test_node_display_native.py service probe, and the node-pid1 legs that read the display feed.
+
+## 2026-10-05 · player-health M1 B2c lint contracts + ratchet (implementer) · pyproject.toml, tests/test_import_contracts.py
+- E-B2c-1 · "Display never reads the fault catalogue" checks nothing until B9 creates `contracts/node_faults.py`:
+  grimp drops an import of an absent first-party module, so `import contracts.node_faults` in
+  appliance/display_host/domain.py stays 11 kept today (probed). With a scratch `contracts/node_faults.py` the same
+  import turns it red (probed). **B9's verifier must re-run that probe** once the module exists.
+- E-B2c-2 · Likewise the optional layers `(appliance.authority)`, `(appliance.health)` and the kernel contract's
+  `appliance.authority`/`appliance.health` targets are latent until those packages exist; proved only with a scratch
+  `appliance/health/__init__.py` (node → health and feed → health both red). Layers checks indirect chains, so a
+  kernel module importing a context also breaks "Node contexts point down" via display_host/node → kernel → context.
+- E-B2c-3 · The ratchet test freezes only `ignore_imports` (subset of six) and the layers list, as the page says; it
+  does not freeze the session contract's `source_modules`/`forbidden_modules`, so dropping a source would weaken it
+  unnoticed. Left as specified; B9 adds `appliance.health` to the sources (a later bead could pin them too).
+- E-B2c-3 RESOLVED (B2c) · tests/test_import_contracts.py now also pins each forbidden contract's frozen
+  `source_modules` and `forbidden_modules` (frozen set ⊆ configured: additions such as B9's `appliance.health`
+  source pass, any drop fails); layers stay pinned by equality. Probed: dropping `appliance.node` from the session
+  contract's sources → test red.
+
+## 2026-10-05 · player-health M1 architect pass 1 (after B2c) · .claude/runs/player-health-m1.md §8
+- E-B0-1 applied to brief (B5: `python3-cffi-backend` in node-display / node-display-build; harness extras shrink).
+- E-B0-2 applied to brief (B4 step 3 and its private-client mutation probe use the in-window foreign bind).
+- E-B0-3 applied to brief (§8 common local environment; B4 and B5 launchers, B11 feeder use /usr/bin/python3).
+- E-B0-4 applied to brief (§8 common local environment: G-harness with PHOTO_WALL_NODE_BUILDER=desktop-linux).
+- E-B0-5 informational; nothing to apply.
+- E-B1-1 applied to brief (§8 common local environment: G-leg local recipe).
+- E-B1-2 applied to brief (§8 common; B12 rebuilds components and fixture together for the role and the variant).
+- E-B1-3 applied to brief (B12 step 1 admission criterion reuses B1's `admitted()` via /fixture/display).
+- E-B2a-1 applied to brief (D1 lists the plain-text old-path citations).
+- E-B2a-2, E-B2a-3 informational; nothing to apply.
+- E-B2a-4 applied to brief (§8 common: implementer legs build from a dangling commit).
+- E-B2b-1, E-B2b-2 applied to brief (D1 documents the feed wire as built).
+- E-B2b-3 applied to brief (B6 replaces `DisplayFeed` with a gap-aware generic `NodeFeed` reader; B8-B12 reuse it).
+- E-B2b-4 applied to brief (B10 proves the new listener, allowlist and snapshot by runner unit tests + leg, not G-harness).
+- E-B2c-1, E-B2c-2 applied to brief (B9 verifier re-runs the vacuous-at-B2c lint probes once the modules exist).
+- E-AP1-1 · B10 re-cut: the display feed is ~32 events/s (B2a leg display-feed.jsonl: 733 CompositorPresentation in
+  23 s; ring 256 laps in ~8 s; OutputKey published once), and B2b's feed has no snapshot although system-design-r8
+  §5 has feeds carry `NodeSnapshotV2`. An event-only judge loses the Output set at its first gap or restart, and the
+  overlay client would then paint the V-stale card on a healthy wall. The `events` response gains an `outputs`
+  snapshot from `host.states()`; the judge drains feeds each turn (B9, B10). Applied to brief.
+- E-AP1-2 · B10 re-cut: no sysusers `m pw-display pw-node-feeds` (Weston, uid pw-display, uses PAMName=login →
+  initgroups, so the overlay client and Weston would join the feeds group); the controller gets the group from its
+  unit's SupplementaryGroups only; the feed socket is chowned to pw-node-feeds and chmod 0660 after bind (controller
+  umask 0o077, runner.py:145; B6's broker socket likewise). Applied to brief.
+- E-AP1-3 · B9 page bug: `stage_tree` stages policy "health-judge" at /usr/lib/photo-wall-health-judge
+  (build_node_base_deb.py:57) but the unit's ExecStart named /usr/lib/photo-wall-health. ExecStart corrected;
+  `MappingProxyType({})` as the other policies. Applied to brief.
+- E-AP1-4 · B4/B5 order swapped: B4's harness client was to replace the private client at the spawn path, but the
+  harness's handoff needs the private client's slate `diagnostic_presented` (native_display_smoke.py:254, :405), so a
+  tint-only test client would break every B0 assertion after the first. With B5 first, B4's test client composes the
+  Python client (slate, ack, trial) and adds the v3 health layer. Applied to brief.
+- E-AP1-5 · B5 launcher: `#!/usr/bin/python3 -IB` implies `-P` on Python ≥ 3.11, so the launcher's directory is not on
+  sys.path and `import overlay` would fail on the node; the launcher inserts its own parent directory. Applied to
+  brief (B5, B4).
+- E-AP1-6 · Leg-asserting beads B6, B8, B9, B10, B11 did not list tests/test_node_pid1.py although their acceptance
+  needs leg assertions; added to their Files. Applied to brief.
+
+## 2026-10-05 · player-health M1 B3 guest contract + Player probe responder (implementer) · contracts/node_app_link.py, player/{probe_responder,node_app_link,service}.py
+- E-B3-1 · Page gap, decided: the backoff resets only after a channel that **received at least one `probe`**. A reset
+  on connect would make today's broker (connect succeeds, then `refused`) see a 0.5 s retry forever; with this rule
+  it sees 0.5, 1, 2, 4 s, then one `probe_open` every 5 s. **B6:** an admitted `probe_open` gets no ack packet (the
+  page defines none); any packet on the channel other than `probe`/`relink` (e.g. an app-link `result`) ends it.
+- E-B3-2 · Cost, unstated in the page: while the control queue is starved the one queued probe callback holds one of
+  `GLibDispatcher`'s four slots (player/service.py:330-355), so control dispatch has three. Starved = control is
+  stuck anyway; a refused (`dispatch_capacity`) probe frees its slot at once. The responder treats any
+  already-failed future (or a dispatcher exception) as refused — a superset of `dispatch_capacity`.
+- E-B3-3 · Parse refusals: the page names only `ValueError("probe_channel_message")` (unknown kind); every probe
+  channel parser (`probe_open`, `probe`, `probe_answer`, `relink`, nonce shape) uses that one code. Result packets
+  use `app_link_result_invalid`; an invalid result is `"rejected"` in `exchange_applied` (as before).
+- E-B3-4 · G-unit lists `tests/test_node_app_link*.py`, which matched no file at 084975d; the Player-side app-link
+  tests are new in tests/test_node_app_link_client.py (B7's `test_node_app_link_local.py` also matches the glob).
+- E-B3-5 · The responder blocks in `recv` with no timeout (socket blocking so `MSG_DONTWAIT` answers never wait);
+  a broker that holds the channel open without probing leaves the Player idle on it, which is harmless (no answer
+  is owed). `relink` before any applied receipt is a no-op for the proof loop.
+- E-B3-2a · Correction to E-B3-2 (fix cycle 1, correctness review): the cost was a defect, not starvation-only. Four
+  in-cycle loops (control, time, websocket, observation re-poll) can each hold a dispatch at once, so a queued probe
+  made the fourth get `dispatch_capacity` (cycle teardown, or a spurious `clock_probe` fault). Now the responder takes
+  its own one-slot lane, `GLibDispatcher.lane(1)` (same `glib.idle_add`, same default-idle priority, own semaphore),
+  inside its constructor, so a probe can never hold a control slot whatever dispatcher it is handed. "No answer when
+  refused" now means the probe lane is busy, not the control queue full. Module design r8 lines 41/128/149 still say
+  "in the shared GLibDispatcher": doc bead to update.
+
+## 2026-10-05 · player-health M1 B5 Python overlay client (implementer) · appliance/display_host/overlay/, meson.build, scripts/debian_packages.py
+- E-B5-1 · Acceptance says "B0 harness unchanged and green ... testing alpha 0.96 blend" and the mutation "testing
+  alpha 1.0 → harness red", but B0's harness asserted no testing pixel and B5's Files omit tests/native_display_smoke.py.
+  Added one step, `testing_slate_pixel_captured`: pixel (40, 40) while the candidate's `starting_new` testing slate is
+  presented over the probe app = (10, 16, 25) (cairo premultiplied ARGB32 + pixman OVER rounding, computed in the
+  harness), tolerance 1; opaque gives (10, 15, 23) (probed: alpha 1.0 → red there). Also found: B0's
+  `slate_pixel_captured` passes even when the client draws NOTHING (transparent buffer) — the shell's curtain has the
+  same colour and pixman leaves its pixels in the framebuffer (probed: painter skipped → slate step green, testing
+  step red). Only the testing-slate step proves the client's drawing.
+- E-B5-2 · Page caps "≤ 8192² px"; the C client capped each side ≤ 8192 AND area ≤ 4096 × 2160 (MAX_PIXELS), and 16
+  Outputs. Kept the C's caps (`client.buffer_admissible`, unit-tested).
+- E-B5-3 · Parity exception, visual only: the C trial overlay drew stray segments from each numeral's end to the next
+  ring (`cairo_arc` after `cairo_show_text` keeps the current point). The draw-list starts each ring on a new path.
+- E-B5-4 · No scripts/release_plan.py, unit, POLICIES, sysusers or tmpfiles change was needed: node-display-deb and
+  node-base-deb already claim `appliance/display_host/**`; the spawn path is unchanged. `libcairo2` kept in
+  node-display (pycairo links it). New packages declare their import roots (`pywayland`, `_cffi_backend`, `cairo`);
+  no closure policy reads the node-display import table today.
+- E-B5-5 · E-B0-3 also binds the build: meson.build runs the scanner with `find_program('/usr/bin/python3')` (the
+  builder image's PATH python3 cannot import Debian's pywayland). pywayland's scanner writes no top-level
+  `__init__.py`, so `overlay/protocol/` is a namespace portion inside the regular `overlay` package (proved in harness
+  and leg). B11/B4: compose through `OverlayClient(hooks=..., manager_version=...)` / `client.main(hooks=...,
+  manager_version=3)`; `OutputHook.output_configured(client, output)` runs after each Output configure; keep every
+  proxy referenced (`OutputState.held`): pywayland destroys a collected proxy.
+- E-B5-6 · Local unit tier on a dirty tree: tests/test_node_component_inputs.py errors (7,
+  `declaration_differs_from_revision`) whenever scripts/debian_packages.py is uncommitted (it builds HEAD and compares
+  the working declaration). On a clean checkout of the same tree: 23 passed. Environment, not code.
+- E-B5-7 · For D1: docs/display-host-backend.md:26 and docs/node-4gb-memory-design.md:243 still describe the C client.
+- E-B5-8 · Overlay client hardening (regression review): a buffer was counted before the painter ran, so two paint
+  failures left an Output at the 2-buffer cap, dirty, never acking again; and `_release` decremented only after
+  `pixels.close()`, so a BufferError leaked the counts. Now `_paint` never raises (a failure logs and commits a
+  cleared buffer, then acks, as the C client did on a cairo error), a buffer counts only once committed, and
+  `_release` frees counts before closing (BufferError logged). Tests in tests/test_display_overlay_render.py, each
+  mutation-probed red.
+
+## 2026-10-05 · player-health M1 B4 shell health layer + fallback tint (implementer) · native/shell.c, native/photo-wall-frame-v1.xml, tests/native_display_smoke.py
+- E-B4-1 · Weston's curtain colour (`weston_curtain_params` → solid buffer → pixman solid fill) is **premultiplied**:
+  the page's RGBA (0.55, 0.35, 0.0, 0.5) passed raw rendered (157, 115, 34) over the probe app (super-luminous,
+  R 0.55 > A 0.5; probed). shell.c passes (0.55·0.5, 0.35·0.5, 0, 0.5), which renders the page's colour at alpha 0.5:
+  (87, 70, 34) over the app, asserted. The existing slate curtains (α 1.0 / 0.96) are unaffected in practice.
+- E-B4-2 · The test client is installed over the spawn path by tests/native_display_smoke.py (which already runs
+  `meson install` in the container), not by scripts/run_display_harness.py; run_display_harness.py is unchanged
+  (the CI job and local runs both go through the smoke, so one install site serves both).
+- E-B4-3 · Harness shape as built: the test client tints only the bottom-right quarter of its health surface, so
+  B0/B5's pixels (40, 40) and the Output centre keep their asserted colours; step (1) reads (560, 420) = app OVER
+  tint. Step (3) needs a **new kill while handed off with the app live** (the B0 kill is after app exit, where the
+  Output is not released, so no fallback is due); the B0 kill and its in-window bind are kept. Step (2): a one-shot
+  mode file (/tmp/pw-health-client-mode) makes the next spawn bind v2 and call `get_health_layer`; the refusal is
+  libwayland-server's own `since` check ("invalid method 3 (since 2 < 3)", read from Weston's log), not shell code.
+  Added beyond the page: tint above the slate, `health_layer_exists` on a second layer per Output (same mode file),
+  the respawned client's layer back above the app, and the layer restored after both refusals.
+- E-B4-4 · Mutation (b) (health layer below the app) turns the harness red first at the earlier
+  `health_layer_above_slate` step; with that step skipped in a scratch copy, step (1) itself is red
+  ((560, 420) = app colour). Mutation (k) → step (3) red; dropping `client != s->diagnostic_client` → the
+  post-handoff in-window foreign bind red.
+- E-B4-5 · For B11: the production client takes the layer with `manager.get_health_layer(surface, output_name)`
+  (pywayland drops the new_id arg); the arg is named `output` per the page although sibling requests say
+  `output_id`. The layer maps at the Output origin with the buffer's own size (no size check; masked to the Output),
+  so a viewporter-scaled 1×1 buffer works. The fallback tint is raised only while handed off: before handoff and
+  after an invalidation the shell's own slate curtain shows instead.
+- E-B4-6 · Fix cycle 1 (security review, fail-open): the fallback tint keyed on the private client's manager
+  bind, so a bound client with no mapped health surface showed nothing (before its first commit, with B5's client,
+  and after an Output reconnect, which unmaps the layer). `fallback_sync` now raises the tint while the Output is
+  handed off AND `o->health` is not a mapped surface; it re-syncs on handoff, invalidate, every health commit (map
+  or NULL-buffer unmap) and health destroy; bind/unbind no longer touch it (`fallback_all` removed). Output re-add
+  needs no call: the Output is not released until the next handoff, which syncs. Harness: test-client modes `bare`
+  (layer, no buffer) and `unmap` (map, then NULL buffer on presented) + marker file; steps
+  `fallback_tint_while_bound_client_maps_no_health_surface`, `fallback_tint_back_when_health_surface_unmapped`,
+  `fallback_tint_dropped_when_health_surface_mapped` (replaces `..._when_private_client_binds`); the harness drains
+  control events while it waits (an undrained queue made the shell drop the control peer). Mutations: bind-keyed
+  shell.c → step (a) red; no sync on NULL-buffer unmap → step (c) red. **Consequences for later beads:** until B11
+  maps a health layer, every handed-off Output on a real node shows the amber fallback tint (B5's client binds v2,
+  no layer); and B11's page says "tint off → NULL buffer", which under this rule raises the fallback tint on a
+  healthy wall — B11 must commit a mapped fully transparent buffer for tint off (NULL only on teardown), or its
+  acceptance "no tint on a healthy wall" fails.
+
+## 2026-10-05 · player-health M1 B6 probe channel + probe thread + broker feed (implementer) · appliance/node/{probe,probe_channel,app_link,broker_runner}.py
+- E-B6-1 · Additive to the frozen signatures: `ProbeTiming(period_ms, miss_limit, startup_ms, kill_after_ms)` with
+  `SHIPPED_TIMING` from the four constants; `ProbeClock(run, started_ms, *, timing=SHIPPED_TIMING)` and
+  `ProbeThread(feed, *, clock=boottime_ms, timing=SHIPPED_TIMING)` (so the thread's real timer is unit-tested at
+  50 ms); `AppRunKey.of(running)` / `.document()`; `ProbeClock.last_rtt_ms` (`answered` stays `-> bool`; the rtt
+  feeds `probe_answered`); `ProbeThread.start()`, `close()`, `check()` (raises `probe_thread_stopped`; the main loop
+  calls it each turn, so a dead thread exits the broker → `Restart=on-failure`), `recovery_may_be_armed`
+  (stored, read by nobody until B8). `send_relink(run)` is built (B7 consumes it). B9: build the judge's
+  K-rule from these constants, not from `ProbeTiming` defaults by hand.
+- E-B6-2 · Miss rules as built (page left them open): a turn judges the interval since the previous turn or the
+  last accepted answer; a **miss** = a turn not late with no accepted answer in its interval (so the first turn
+  after an answer is never a miss, and a healthy run's counted time sits near T); counted unanswered time = sum
+  of non-late intervals since the last answer; `probe_unanswered` once misses ≥ k (every turn), `probe_kill_due`
+  once per unanswered episode at counted ≥ K (re-armed by an answer). **Stale** = not one of the last 8 nonces
+  sent since the last accepted answer (an accepted answer drops itself and every older nonce), so a late answer
+  to the previous nonce still counts. `started_ms` = when the probe thread first saw the run published (its
+  launch, or broker start for an app already running). Late = the turn ran > T/2 past its deadline.
+- E-B6-3 · Ordering the page did not state: `serve_one` (adopt) runs before the turn's `publish_run`, so a channel is
+  judged against publications **after** its adoption (a publication sequence number); otherwise a fresh channel
+  would be closed by the previous turn's publication (e.g. right after a broker restart). Probes go only to a
+  channel whose run equals the published run.
+- E-B6-4 · The broker feed is served on the main loop, as the page says (`FeedListener.serve`, ≤ 8 accepts per
+  turn, 50 ms read wait each). Probe *timing* is immune to main-loop blocking, but a reader's *view* of the facts
+  waits for the next turn (systemctl_show timeout 5 s, HTTP 0.5 s). Architect pass 2 / B9: consider serving the
+  feed from the probe thread's selector. **B10:** the display feed needs the same {0, 10006} SO_PEERCRED-allowlisted
+  SEQPACKET `events` listener; lift `FeedListener` (appliance/node/broker_runner.py) into the kernel
+  (`appliance/feed.py` or a sibling) instead of copying it — display_host may not import appliance.node.
+- E-B6-5 · Wire as built for the broker feed: reply `{"accepted": true, **answer_feed_read(...)}` or
+  `{"accepted": false, "reason": "feed_read_request"}` (the display ingress envelope); a peer outside {0, 10006}
+  is closed with no reply. The leg reads it like the display feed. For D1.
+- E-B6-6 · Cost: the main loop now calls `driver.current()` (two `systemctl show`) every turn even with no Central
+  session (page: one call per turn either way); before, only with a grant.
+- E-B6-7 · Test seams, not production branches: macOS has no CLOCK_BOOTTIME, SO_PASSCRED, SO_PEERCRED or AF_UNIX
+  SOCK_SEQPACKET, so unit tests inject a monotonic clock, `FeedListener(peer=..., kind=..., owner_uid=..., group=...)`
+  and patch `socket.SO_PASSCRED`; `peer_uid` itself is tested on Linux only (CI).
+
+## 2026-10-05 · player-health M1 B7 app-link accepted locally + outbox + relink (implementer) · appliance/node/{app_link,broker_runner}.py
+- E-B7-1 · Signature additive: `deliver_app_link(store, session, probes, *, current: AppRunKey | None)`. The page's
+  three-argument form cannot apply its own rule "a slot whose run is no longer current is cleared" (the current run is
+  the main loop's, not the probe thread's public state). Feed facts go to `probes.feed` (the ProbeThread's feed, the
+  one broker feed). `BrokerLinkService(..., feed: Feed | None = None)` publishes `app_link_accepted`; optional like
+  `probes`, because tests/node_ipc_pid1_probe.py constructs it positionally.
+- E-B7-2 · Page gap, decided: a held link proved under a session other than the current grant's (producer or
+  `command_session_id`) is cleared and relinked **without a POST**. Central refuses it as `node_link_scope_mismatch`
+  **403** (central/fleet/node_app_links.py:47-49), which the page classes as transient (401/403 keep the slot) and
+  NodeSession treats as session refusal (drops the grant, re-enrolls): a held old-session link would re-enroll the
+  broker every turn forever. Arises whenever a proof is accepted offline under the retained `local-proof-grant`, or the
+  session expired/was refused after acceptance. Feed `app_link_refused` = {run, status: int | null, reason:
+  "central_refused" | "session_changed"} (page: {status}). A 403 for a bad signature on the current session keeps the
+  slot one turn, drops the grant, and is then relinked by this rule.
+- E-B7-3 · Cost, unstated: `send_relink` (B6) reaches the Player only if that run's probe channel is open at that
+  moment; a relink issued while the channel is down (broker restart window, Player responder backoff ≤ 5 s) is lost,
+  and the Player keeps treating the run as linked while Central holds no record (display admission stays refused
+  until the Player's next applied receipt or restart). Fix belongs in probe_channel.py (hold the latest relink per run
+  until a channel for that run is adopted) — not in B7's files. Architect pass 2 to decide.
+- E-B7-4 · An empty slot is stored as `{}` (BootStore has no delete). Delivery runs only on a turn whose
+  `driver.current()` succeeded with a grant (`known and granted`), so a transient systemctl failure never clears the
+  slot as "run not current".
+- E-B7-5 · tests/test_node_stop_operation.py (not in B7's Files) had to change: its proof test expected the Central
+  POST's TimeoutError out of `handle`; it now asserts `accepted` with Central timing out and still asserts the
+  `local-app-control` write (the page's mutation probe target).
+- E-B7-6 · CI fix folded in on request (landed B6, Linux-only): tests/test_node_probe_broker.py
+  `test_any_other_reader_gets_nothing` — FeedListener closes a non-reader with its request unread, so Linux AF_UNIX
+  reports ECONNRESET (unix_release_sock sets the peer's sk_err when the receive queue is non-empty; a shutdown before
+  close would not change that, only reading the request would). Listener kept (refuse before reading); the test's
+  refused reader accepts EOF or ECONNRESET and still fails on any byte. Reproduced red and green in python:3.12-slim
+  arm64.
+
+## 2026-10-05 · player-health M1 architect pass 2 (after B7) · .claude/runs/player-health-m1.md §7, §8
+- Drift check B3–B7 vs module design r9 / system design r8: no frame-changing drift. Doc-only drift routed to D1:
+  E-B3-2a (probe lane), E-B4-6 (fallback-tint key), E-B5-7 (C client), E-B6-5 / E-B7-2 / E-B7-4 (wire, refusal
+  reasons, slot states). Applied to brief (D1 items i–vii).
+- E-B3-1, E-B3-3, E-B3-4, E-B3-5, E-B5-1..6, E-B5-8, E-B4-1..5, E-B6-1..3, E-B6-6, E-B6-7, E-B7-1, E-B7-5, E-B7-6
+  informational (as-built, already reflected in code/tests); nothing further to apply.
+- E-B3-2a applied to brief (D1 item i). E-B5-7 applied to brief (D1 item iii).
+- E-B4-6 applied to brief (B11: tint-off = mapped transparent buffer, never NULL; harness "off" step asserts no amber
+  fallback; NULL-for-off mutation probe; B4's fault-injection test client kept, not deleted; D1 item ii).
+- E-B6-1 applied to brief (B9 builds the K rule from SHIPPED_TIMING). E-B6-5 applied to brief (B9 note, D1 iv).
+- E-B6-3 applied to brief (B8 turn ordering).
+- E-B6-4 applied to brief (B10a lifts FeedListener + peer_uid into kernel `appliance/feed_socket.py`, no copy; the
+  main-loop serving lag is a stated cost in B9, ≈ 1.5 s margin left against K > S + raise + D at a 5.5 s turn).
+- E-B7-2, E-B7-4 applied to brief (D1 iv).
+- E-B7-3 applied to brief: new bead **B7b** before B8. The outbox slot carries the owed relink durably
+  (`{"relink": run}`, cleared by the Player's next accepted proof or a run change); the main loop re-asserts it every
+  `known` turn via `ProbeThread.owe_relink(run | None)` (replaces one-shot `send_relink`); the thread sends once per
+  channel instance, counting only a successful send. Rejected alternative: Player re-proves when unrecorded (the
+  guest contract hides Central's record by design; timer-driven Central POSTs). Mutation probes r1–r4.
+- E-AP2-1 · B8 page addition: the kill-due latch is level (re-asserted every turn while counted ≥ K; the feed fact
+  stays once per episode); otherwise a kill withheld for an armed recovery is never retried after the recovery is
+  acknowledged and a starved app runs forever. Applied to brief (B8, `ProbeClock.overdue`, probe_channel.py in Files).
+- E-AP2-2 · The B7 `unresponsive` leg's `app_link_refused` 409 → relink → `app_link_recorded`
+  (/Volumes/Dock/tmp/node-pid1-b7/test_node_pid1_unresponsive0/broker-feed.jsonl seq 5→19→20 and 34→37→38; journal
+  12:25:23, 12:26:03) is **expected churn, not a bug**. Fresh nonce per proof (app_link.py:178) rules out
+  `node_link_identity_conflict`; the only other 409 is `node_link_control_not_current` (central/fleet/node_app_links.py
+  :27-32), raised while Central's control for the device is not settled (issued ≠ applied or a pending delivery,
+  central/fleet/acceptance_evidence.py:181-196) — i.e. Central issued a newer control (the fixture bind, then a later
+  revision) between the Player's proof and the broker's next-turn delivery. B7 widened the window from "inside the
+  proof" to "≤ one main-loop turn". Bounded: the Player re-proves only its current applied receipt
+  (player/service.py:1210-1219 `applied_current`), retry 5 s (:87). No owner assigned (no code change); B9 judge treats
+  `app_link_*` kinds as non-faults; B8's leg checks refused → relink_sent → recorded; D1 item v documents it.
+- E-AP2-3 · B8 turn ordering made binding (kill consumer only on a `known` turn, after `online.broker.service()` and
+  this turn's `publish_run`, compared with this turn's run; no `take_kill_due` on an unknown turn). Applied to brief.
+- E-AP2-4 · B10 split on its package boundary into B10a (kernel `feed_socket.py` lift + display feed listener and
+  `outputs` snapshot; security lens) and B10b (health: display-feed reading, per-Output verdict, overlay op). Reason:
+  pass 1 already grew B10 to 5 h and the E-B6-4 kernel lift adds a cross-context move; one bead would cross three
+  packages and risk the 90-min / 8-agent per-bead ceiling. Cost ≈ +0.1–0.15 M (one more verify + orchestration).
+  Applied to brief (§7 ledger rows, §8 pages, run order).
+- E-AP2-5 · Budget estimate at pass 2: spent ≈ 5.7 M (5.0–6.5), remaining ≈ 3.7 M, projected ≈ 9.4 M of 9.5 M;
+  stop rule added (stop before a bead whose projected completion exceeds 9.5 M; preferred stops after B8 or B10b).
+  Applied to brief (§8 pass 2 block).
+
+## 2026-10-05 · player-health M1 B7b relink owed until re-proved (implementer) · appliance/node/{app_link,probe_channel,broker_runner}.py
+- E-B7b-1 · Additive helper, decided: `app_link.owed_relink(store, current: AppRunKey | None) -> AppRunKey | None`
+  (current iff the slot is `{"relink": current.document()}`); `BrokerLoop.turn` calls
+  `probes.owe_relink(owed_relink(store, run))` after `publish_run` on every `known` turn, so the slot's three states
+  stay known to app_link.py only. A slot read error that leaves the store unpoisoned is swallowed for that turn (the
+  turn's existing `store.failed` re-raise pattern); the level is then unchanged until the next turn.
+- E-B7b-2 · `app_link.Relinks` (Protocol with `send_relink`) became `BrokerFeed` (only `feed`); `deliver_app_link`
+  keeps its signature (E-B7-1). `ProbeThread.send_relink` is gone (no shim); the per-channel latch is
+  `_Channel.relinked`. The thread also drops an owed run that differs from a newly applied publication (as it does
+  `_kill_due`); the main loop's restatement is the source of truth either way.
+- E-B7b-3 · Test seam, not production: macOS reports ENOBUFS (not EAGAIN) on a full AF_UNIX datagram socketpair, so
+  the retry test wraps a real channel end whose first sends raise `BlockingIOError` (`Unwritable`,
+  tests/test_node_probe_channel.py) instead of filling a buffer. For D1: feed kind `relink_sent` {run} (audience node).
+
+- E-ENV-1 (orchestrator, 2026-10-05, after B7b): running Linux tests in a container that bind-mounts the whole worktree lets the container's `uv sync --frozen` overwrite the host macOS `.venv` (pyvenv.cfg home → /usr/local/bin), breaking `.venv/bin/python` on the host. Rule for all remaining beads: never mount `.venv` into a container — mount the source read-only and create the venv inside the container (e.g. `-v $PWD:/src:ro` then copy to /work, or `UV_PROJECT_ENVIRONMENT=/tmp/venv`). The host venv was repaired with `uv sync --frozen`.
+
+## 2026-10-05 · player-health M1 B8 kill after K behind the Q1 predicate (implementer) · appliance/node/{probe,probe_channel,online_broker,process_linux,broker_runner}.py
+- E-B8-1 · Page gap, decided: `app_killed` carries `unanswered_ms`, but B6's `take_kill_due() -> AppRunKey | None`
+  gives the main loop no such number. The latch now holds `KillDue(run, unanswered_ms)` (frozen, appliance/node/probe.py)
+  and `take_kill_due() -> KillDue | None`; the thread re-asserts it every turn while `ProbeClock.overdue`, with the
+  then-current `ProbeClock.unanswered_ms` (both additive properties). tests/test_node_probe_channel.py's one
+  `take_kill_due() == RUN` assertion became `.run == RUN`. `overdue` also requires a turn past S (as the fact does).
+- E-B8-2 · Page gap, decided: an identity mismatch at the signal (`kill` → False) is fed as `kill_withheld`
+  `run_changed` (the page names only `recovery_armed | run_changed`; a process that is no longer this run's main
+  process *is* a run change). An unobservable identity (`systemctl show` timeout/error, OSError, ValueError raised by
+  `kill`) sends nothing, feeds nothing and is retried when the thread re-asserts the latch. A run this broker killed
+  is never signalled again (`BrokerLoop.killed`): the dying app can stay published for a turn or two and the level
+  latch would otherwise fire a second SIGKILL and a second `app_killed`.
+- E-B8-3 · Fail-closed choices: `recovery_may_be_armed` returns True for an obligation whose `operation_id` cannot be
+  read; the loop treats an unreadable `online` record or `recovery-acknowledged` slot (store not poisoned) as armed.
+  The acknowledgement is written only after `advance` with the Player's proof progress returns (the `{"kind":
+  "stopped"}` advance is not an acknowledgement); key `RECOVERY_ACKNOWLEDGED` lives in probe.py beside the predicate,
+  so online_broker.py gains one import (`appliance.node.probe`) — still inside `service` scope; :98-108, :183-184,
+  :211 untouched; recovery.py and recovery_linux.py untouched.
+- E-B8-4 · Files outside the page, test fakes only: tests/test_node_probe_broker.py `Driver.kill` (its FAST loop now
+  reaches K with no online recovery and kills) and tests/test_node_app_link_local.py `take_kill_due=lambda: None` on
+  its fake probe thread. tests/test_node_probe_kill.py reuses `loop_for`/`turns` (test_node_probe_broker) and the
+  switch `Driver`/`stage` (test_node_online_broker).
+- E-B8-5 · The leg asserts the B7b sequence (every `app_link_refused` followed, same run, by `relink_sent` then
+  `app_link_recorded`) after the healthy window with a bounded settle (≤ 30 s) for a refusal near the window's end;
+  `app_killed`/`kill_withheld` are refused over the whole broker feed read, not only the healthy window. For D1: feed
+  kinds `app_killed` {run, reason: "unresponsive", unanswered_ms} and `kill_withheld` {run, reason}; boot-store key
+  `recovery-acknowledged` {operation_id}.
+
+## 2026-10-05 · player-health M1 B8 fix cycle 1 (implementer, safety review) · appliance/node/{probe,probe_channel,online_broker,broker_runner}.py
+- E-B8-6 · Defect, fixed: a stale kill latch. `ProbeThread._receive` reset the `ProbeClock` on a valid answer but left
+  `_kill_due` set (cleared only by `take_kill_due` or a run change), so a latch set before the answer was taken by the
+  next known turn and SIGKILLed an app that had recovered. `_receive` now clears `_kill_due` under the lock when
+  `answered()` is True and the latch names the channel's run. Test: tests/test_node_probe_channel.py
+  `test_an_answer_clears_a_kill_due_latch_set_before_it` (thread driven by hand, no race); mutation (no clear) → red.
+- E-B8-7 · Defect, fixed: the Q1 fence failed open. `recovery_may_be_armed` read the obligation from the online
+  record, which `accept()` replaces (a `running` record, online_broker.py `_REPLACEABLE`) before the old obligation's
+  control is acknowledged, and a new switch's `preparing` record carries none. New boot-store key `recovery-armed`
+  {operation_id} (`RECOVERY_ARMED`, probe.py), written by `OnlineEffectBroker._arm_recovery` after `recovery.arm`
+  returned the receipt (if different) — every arm site (execute, `_start`, reconcile) passes through it; the `arm`
+  calls and recovery.py/recovery_linux.py are unchanged. Predicate is now
+  `recovery_may_be_armed(record, armed, acknowledged)`: True for any record phase but `running`/`fallback_running`
+  (preparing and every switch phase), else True unless every obligation that may be armed (the `recovery-armed` one
+  and the record's own `recovery`, if any) is the one `recovery-acknowledged` names; unreadable → True. The host's
+  admission (recovery.py arm refuses while any row is not `controlled`) means a newer op is never recorded as armed
+  while an older one is uncontrolled. Cost: a stage stuck in `preparing` (roots unverified, capacity) withholds kills
+  for as long as it stays there, even with nothing armed; the key alone would be exact there (decided literal, per
+  the fix brief). For D1: boot-store key `recovery-armed` {operation_id}.
+
+## 2026-10-05 · player-health M1 B7c relink per owed episode (implementer) · appliance/node/{probe,probe_channel,app_link}.py
+- E-B7c-1 · Defect (B8 verifier, unresponsive leg: `app_link_refused` at seq 32/50/64 never followed by `relink_sent`),
+  fixed: B7b's `_Channel.relinked` was a bool, so a channel that carried one relink never carried another; a second
+  Central refusal of the same run on a long-lived probe channel was silently dropped (`owe_relink(run)` with an equal
+  run was not even a change). B7b's page said "sent at most once per channel" — that rule was the bug: the latch is
+  now **per owed episode**. The slot is `{"relink": run, "episode": <32 hex nonce>}`, a fresh nonce per `_refused`;
+  `owed_relink(store, current) -> OwedRelink(run, episode) | None` (new frozen `OwedRelink`, probe.py beside
+  `KillDue`); `ProbeThread.owe_relink(OwedRelink | None)`; `_Channel.relinked` holds the episode it carried, set only
+  on a successful send. B7b guarantees kept: once per channel per episode, durable across a broker restart, EAGAIN
+  retried, a new channel gets the current episode, a run change or a new proof clears it, never POSTed. A slot without
+  `episode` (pre-B7c store) reads as episode "". broker_runner.py unchanged. For D1: slot state
+  `{"relink": run, "episode"}` (item iv); `relink_sent` stays {run}.
+
+## 2026-10-05 · player-health M1 B9 catalogue + judge core (implementer) · contracts/node_faults.py, appliance/health/{judge,runner}.py
+- E-B9-1 · Page gap, decided: "`app_killed` keeps the run's condition raised" also **raises** it at once when the
+  judge holds it pending or has not seen it (judge restarted, or a feed replay observes the whole starvation at one
+  instant), and pins it: answers from the killed run never start the clear hold. Without this a judge that missed
+  the window shows no card after the kill (B12 step 4 needs the instruction tint on after `app_killed`).
+- E-B9-2 · Page wording "gap → drop probe-derived state" read as: a pending condition is withdrawn, a running clear
+  hold restarts, the current run is relearned, but a **raised** condition stays raised until fresh answers hold for
+  the clear hold. Dropping a raised one would untint the wall on evidence the judge never saw and, after a kill
+  (no more facts for that run), lose the card for good. Cost: a run that recovered inside a gap stays tinted for one
+  extra hold. Tests: `test_a_feed_gap_withdraws_pending_and_restarts_a_running_hold_but_keeps_raised`.
+- E-B9-3 · One condition per code, carrying the run that holds it: a new run's unanswered facts move it (raised
+  stays raised; a pending one restarts its window), a new run's answers clear an old (killed) run's condition after
+  the hold (system-design tracer step 4, M3 restart). Transition states add `withdrawn` (pending that never raised)
+  to pending/raised/cleared; each ring entry carries `reason` and the verdict `sequence` it produced.
+- E-B9-4 · Additive surface: `HealthJudge.forget(now_ms)`, `.transitions()`, `.ring_dropped`, `.player`
+  (`(run, player_id)` from `app_link_accepted`, for B10b); construction refuses `judge_timing` (non-positive),
+  `fault_catalogue` (row not under its own code) and `fault_code_unknown` (no `app_unresponsive`), besides `k_rule`.
+  `runner.shipped_judge()` is the one K-rule build from `SHIPPED_TIMING` + `PULSE_DEADLINE_MS` + `FAULTS`. `status`
+  answers `{verdict, ring (age_ms on the judge clock), ring_dropped, catalogue (digest), feeds: {broker: {after,
+  publisher_incarnation, reads, gaps, failures, last_failure}}}`; the leg asserts the judge reads the same broker
+  incarnation it does, so "no condition" is not vacuous. For D1.
+- E-B9-5 · DRY debt for B10a: `appliance/health/runner.py` carries its own 4-line `peer_uid` because importing the
+  broker's would put `broker_runner` (and `appliance.central_session`) in the judge closure. B10a's kernel lift
+  (`appliance/feed_socket.py`) must replace this copy too — add `appliance/health/runner.py` to B10a's Files.
+- E-B9-6 · health.sock admission as built: a peer admitted to no operation is closed unread; the op is read first,
+  then admitted per uid (`OPERATIONS = {"status": {0}}`; B10b adds `overlay`); an admitted peer naming an op it is
+  not admitted to is closed with no reply; a malformed request or unknown op from an admitted peer gets
+  `{"accepted": false, "reason": "health_request"}`.
+- E-B9-7 · Cost: the broker answers its feed on its main loop (E-B6-4), so each judge read waits at most 1 s; a
+  longer broker turn ends that judge turn's drain (counted in `failures`) and the abandoned request is answered into a
+  closed socket. The single-threaded judge serves `status` between reads, so a status reply can wait ≤ 1 s. Observed in
+  the B9 `unresponsive` leg: 7 timed-out reads of 101 (`last_failure` TimeoutError), cursor caught up (after 40, no gap).
+- E-B9-8 · Local environment (as E-B5-6): with B9 uncommitted, tests/test_node_component_inputs.py errors (8) because
+  it builds HEAD's tree while scripts/build_node_base_deb.py names the uncommitted `appliance.health.runner`. On a
+  clean checkout of the same tree (dangling commit): 23 passed. Not code.
+
+## 2026-10-05 · player-health M1 B10a kernel feed listener + display feed snapshot (implementer) · appliance/feed_socket.py, appliance/display_host/runner.py
+- E-B10a-1 · Page says `appliance/feed_socket.py` is "stdlib only", but the lifted listener parses requests with
+  `contracts.strict_json.loads_object` (size bound, no duplicate keys, UTF-8 only). Kept (behaviour unchanged; the
+  kernel's `appliance.boot_store` already imports it); the kernel lint contract only forbids context packages.
+- E-B10a-2 · Additive: the kernel listener encodes replies with `json.dumps(default=str)` (the display ingress rule):
+  the display `events` answer carries UUID objects (`boot_id`, `incarnation_id`, event values). Broker replies hold
+  only JSON-native values, so its wire is unchanged. `FeedListener` is also a context manager (display `main` adds it
+  to the ingress `with`, no re-indent).
+- E-B10a-3 · Decided: the shared node-feed policy `FEEDS_GROUP = 10007` and `FEED_READERS = {0, 10006}` live in
+  `appliance/feed_socket.py` (one definition for both publishers; display may not import the broker). The
+  constructor arguments stay required; each runner passes them through its own `feed_listener(...)` factory
+  (`broker_runner.feed_listener(feed, path=FEED_SOCKET, *, owner_uid=0, group=FEEDS_GROUP, **seams)`,
+  `runner.feed_listener(controller, path=FEED_SOCKET, *, owner_uid=None→getuid(), group=FEEDS_GROUP, **seams)`), so
+  unit tests exercise the production allowlist with only `peer`/`kind`/owner/group seams. Broker `max_reply` = 65536
+  (`MAX_FEED_REPLY`, the readers' receive buffer); display `max_reply` = `MAX_PACKET`.
+- E-B10a-4 · E-B9-5 applied: `appliance/health/runner.py` imports `peer_uid` from the kernel (its copy deleted).
+  tests/test_health_runner.py (not in the page's Files) changed: it built the broker's `FeedListener`, which no
+  longer exists in broker_runner; its Linux `peer_uid` test moved to tests/test_feed_socket.py.
+- E-B10a-5 · Display feed socket op rule as built: `op` absent or `"events"` (as `answer_feed_read`); any other op →
+  `{"accepted": false, "reason": "feed_read_request"}`. The `outputs` snapshot is on every `events` answer, ingress
+  included.
+- E-B10a-6 · Cost: `outputs` is bounded by `DisplayHost.max_outputs` (shipped 16; the domain refuses more). Worst case
+  at 16 admitted Outputs with maximal identifiers (128-char output_id, 96-char frame_id) plus a full page of 8
+  presentations encodes to 15 793 bytes against MAX_PACKET 16 384 (tests/test_node_display_runner.py); 40 such
+  Outputs → `response_bound`. Real identifiers are far smaller (leg: Virtual-1). A host built with a larger
+  `max_outputs` could see `response_bound` on full pages; B10b's reader must treat it as a counted failure.
+- E-B10a-7 · For B10b (leg evidence): the admitted Output's snapshot shows `"fault": "app_absent"` while
+  `admitted` is set and `diagnostic` is `released` (OutputState.fault is not cleared on admission). Derive the
+  underlay from `admitted`, never from `fault`.
+- E-B10a-8 · Pre-existing, moved unchanged: `FeedListener.close` guards the unlink by (st_dev, st_ino), but Linux
+  reuses inode numbers, so a closed listener whose path a successor already rebound unlinks the successor's socket
+  (probed red in python:3.12-slim arm64; that test was dropped). Unreachable in production (one listener per path per
+  process lifetime).
+
+## 2026-10-05 · player-health M1 B10b judge display verdict + overlay op (implementer) · appliance/health/{judge,runner}.py
+- E-B10b-1 · Page gap, decided: an Output's `codes` are every **raised** code, node-wide (M1 has one app driving every
+  Output), so every connected Output, including a slate or unbound one, gets the card; after the kill the slate keeps
+  it (B12 step 4). `held` = the admitted run equals the **raised** `app_unresponsive` run (a pending one stays `live`,
+  system design: "Live → Held: judge says unresponsive"). Underlay from `admitted` only (E-B10a-7).
+- E-B10b-2 · Decided: the verdict `sequence` also bumps when an Output's verdict changes (snapshot or refinement),
+  with no ring entry, so one sequence never names two different verdicts. Condition transitions are unchanged.
+- E-B10b-3 · Page wording "invalidations with reason and presentations from events": the display `SurfaceFact`
+  invalidation event carries no reason (weston.py `surface.fact("invalidated")`; the reason is the snapshot's
+  `fault`), and presentations are not a verdict input in M1. As built: an invalidated `SurfaceFact` drops that
+  Output's admission until the next snapshot; every other display event is ignored by the judge. Each page's snapshot
+  is applied **after** its events (it is current at the reply). A display feed gap or controller restart never calls
+  `judge.forget` (probe-derived state is the broker's; a display gap would otherwise withdraw a pending condition);
+  a malformed snapshot is a counted read failure (`display_snapshot`) and the cursor does not move.
+- E-B10b-4 · Overlay wire as built (for B11 and D1): the client sends one packet `{"op":"overlay"}` (uid 10005 only;
+  no ack); every later packet from the judge is one `encode_overlay_instruction`; the client sends one
+  `encode_presented_report` per packet. Pushed: every Output's instruction on connect, changed ones each 500 ms turn,
+  all every V/3 (5 s). A client that sends anything else, closes, or cannot take a packet at once (EAGAIN) is dropped
+  and must reconnect (it is re-pushed everything). At most 4 open clients; a fifth replaces the oldest. Serials come
+  from one judge-wide counter starting at 1 per judge process: **B11 must take any serial after a reconnect, not only a
+  higher one.** `presented` is kept once per (Output, serial) and only for a serial ≤ the Output's projected serial.
+- E-B10b-5 · Decided: line 2 omits ` · Player …` until an `app_link_accepted` is seen, and is cut to 96 chars; an
+  Output whose name exceeds 96 chars (OutputKey allows 128, OverlayInstruction 96) is in the verdict but not projected.
+- E-B10b-6 · `appliance/health/runner.py` names `DISPLAY_FEED_SOCKET` itself (the judge closure may not import the
+  display controller), pinned equal to `appliance.display_host.runner.FEED_SOCKET` by a test. No unit, sysusers or
+  tmpfiles change was needed (the judge unit already has `SupplementaryGroups=pw-node-feeds`).
+- E-B10b-7 · For D1, `status` as built adds `verdict.outputs` [{output, underlay, codes}], `overlay` {instructions:
+  [{output, serial, tint, lines}], clients}, ring entries {sequence, state: "presented", output, serial, age_ms}, and
+  `feeds.display`. Leg: Virtual-1 `live`, codes [], instruction serial 1 tint off; display reads 147, gaps 0, 1 failure
+  (FileNotFoundError before the controller bound its socket).
+
+## 2026-10-05 · player-health M1 architect pass 3 (after B10b) · .claude/runs/player-health-m1.md §8 (B11, B12, D1, pass 3 block)
+- E-AP3-1 · Drift check B7b–B10b vs module design r9 / system design r8: no frame-changing drift. lint-imports 11
+  kept at 4058f30; CI green through 172b3a5 (B10a), 4058f30 in progress. Doc-only drift routed to D1 items viii–xiv
+  (E-B7c-1, E-B8-1..3, E-B8-5, E-B8-7, E-B9-1..7, E-B10a-1..6, E-B10b-1..7). E-B10a-8 informational (unreachable
+  in production). E-B7b-1..3, E-B8-4, E-B8-6, E-B9-8 informational (as built, tests in place).
+- E-AP3-2 · Q1 fence observation (no stop): fence 1 names `_arm_recovery`; B8 fix cycle 1 (E-B8-7, per the
+  orchestrator's fix brief) added an additive boot-store write there AFTER `recovery.arm` returned and its receipt
+  check passed (online_broker.py ~:146-154); `recovery_linux.py` changed only its `boottime_ms` import path (B2a's
+  mandated kernel move). `arm` call, :98-108, :183-184, :211 and recovery.py unchanged (git diff origin/main..HEAD).
+  Arming behaviour unchanged; one new failure path (a store write failing after a successful arm raises, the same
+  class as every other store write in that flow). Disclose in the handoff.
+- E-AP3-3 · B11 re-cut. (a) Page gap: the B5 client loops in `display.dispatch(block=True)` (client.py), so it cannot
+  also serve the judge socket or stale timers; decided one single-threaded selectors loop over `display.get_fd()` +
+  the judge socket (pywayland 0.4.18 Display has get_fd/dispatch/flush/read only, no prepare_read pair; checked in the
+  sdist). (b) Page offered two drawing forms ("viewporter when bound, else full ARGB"); decided one: full-Output ARGB
+  for tint on, 1×1 transparent for off (E-B4-5: layer maps with the buffer's own size); viewporter + card subsurface
+  parked to M3 with the repaint pulse; cost stated in the page (8.3 MB/35 MB per tint-on buffer). Without this the
+  page also needed viewporter bindings in meson.build (not in its Files) and a card subsurface (one health surface
+  per Output, shell refuses a second). (c) Page gap: B4's composed test client calls `client.main(hooks=...)`; if the
+  production client always took a health layer, the test client's own layer would hit `health_layer_exists`. Decided
+  `main(hooks=None)` → production hooks; explicit hooks replace them; harness keeps magenta default and adds a
+  `production` mode block. (d) Pure `overlay/health.py` per-Output state for macOS unit tests (any serial, reconnect
+  forgets drawn/reported, stale after V, no report on discarded/stale). (e) Named mutation (c) moves from harness to
+  unit: the feeder cannot force a `discarded` deterministically. (f) Health commits never `ack` (shell.c:479-491). (g)
+  A size-cap refusal of a tint-on page commits NULL → shell amber fallback (fail-visible), never a transparent buffer
+  under a fault. (h) Socket path named in Display, pinned by test to appliance.health.runner.HEALTH_SOCKET; client
+  checks peer uid ∈ {0, 10006}.
+- E-AP3-4 · B12 corrections. (a) `systemctl kill` defaults to `--kill-whom=all`; use `--kill-whom=main` (UNIT =
+  photo-wall-node-player.service, process_linux.py:20). (b) Step 4's "invalidation `surface_lease_or_process_lost`"
+  is wrong as written: the SurfaceFact invalidation carries no reason (E-B10b-3); a SIGKILLed client usually yields
+  `surface_destroyed` (shell.c:661) before the lease/pidfd path (:964); assert the snapshot's `fault` ∈ both and
+  `admitted` null. (c) "Card over the live app" is proved by `underlay: held` (only possible before the kill, E-B10b-1)
+  + tint-on serial presented + no `app_killed` on a later broker read — not by time comparison; step 3 window 20 s →
+  30 s (judge lag E-B9-7, broker main-loop lag E-B6-4), still < K. (d) E-B8-5 made the leg refuse `app_killed` and
+  unsettled refusals over the whole feed; B12 must scope both to the healthy window. (e) Cost: the `starve` role adds
+  one sealed environment build to every fixture build; check node-pid1.yml timeout-minutes 20 (:69, :89). (f) New
+  mutation: wrapper ignores SIGUSR1 → step 3 red. Probe priorities verified: responder answers via
+  `GLib.idle_add` (player/service.py:359, default-idle 200), the 33 ms frame tick is priority default
+  (:1501), so a 150-priority spin starves only the answer.
+- E-AP3-5 · D1 items viii–xiv added (Q1 predicate/keys, relink per episode, kill feed kinds, judge as built, kernel
+  feed_socket, B11 drawing form, slice table as delivered); D1 size 2 h → 3 h. Final pass renumbered: pass 4 = M1
+  coherence.
+- E-AP3-6 · Budget at pass 3 (estimate; no metered figure available to the architect): spent ≈ 8.65 M (7.8–9.4) =
+  5.7 at pass 2 + B7b 0.3 + B8 (lens + fix cycle) 0.75 + B7c 0.25 + B9 0.35 + B10a (lens) 0.45 + B10b 0.3 +
+  orchestration 0.35 + pass 3 0.2. Remaining on the re-cut pages: B11 0.5, B12 0.65, D1 0.2, pass 4 + milestone gate
+  0.6 = 1.95 M. Projected ≈ 10.6 M > 9.5 M ceiling (low end 9.75 M). Pass-2 stop rule fires: STOP after B10b
+  (preferred stop point). Override only on a metered spend ≤ 7.55 M. Next session: B11 → B12 → D1 → pass 4 +
+  milestone gate; proposed ceiling 2.5 M (warning 2.0 M). Wall-clock ≈ 8.2 h / 26 h.
+
+## E-B10a-14 (orchestrator, 2026-10-05) — display-feed trust: owner answer
+A post-landing re-review of B10a (cc98853) proved that a same-uid (pw-display, 10005) process — Weston or the overlay client — can spoof or delete the display feed socket via /proc/<controller>/root, and can ptrace the controller before it could make itself undumpable. A second review showed a dedicated controller uid would not close the class: Weston is already the upstream source of every fact the feed carries. Owner answer: TRUST Weston and the overlay client as base components for the display feed (threat model = buggy app, not hostile; the app cannot reach the feed). The hardening attempt (undumpable() + UnitPublisher cgroup check, entries E-B10a-9..13) is preserved on branch wip/B10a-feed-hardening (549a011) and NOT landed. For D1: rewrite B10a's security claim in module-design-r8 to "the display feed trusts the pw-display uid (controller, Weston, overlay client); the app and other uids are refused by peer uid", and state this cost. No code change required.
+
+## 2026-10-05 · player-health M1 architect pass 3b (resumed session, after E-B10a-14) · .claude/runs/player-health-m1.md §8 (pass 3 block, B11, B12, D1)
+- E-AP3-7 · Drift check: no code commit since 96f681c (B10b); 3784124 (B10b's code) pipeline green in full, incl.
+  `display-harness` and all six node-pid1 legs (`unresponsive` included). No new drift; E-AP3-1 stands.
+- E-AP3-8 · E-B10a-14 folded into pages. B11: base 838baa9+, never `wip/B10a-feed-hardening`; `undumpable`,
+  `peer_pid`, `UnitPublisher` absent and not reintroduced; the overlay client gets nothing beyond its health layer and
+  the judge socket; the judge-link peer check {0, 10006} stays (/run/photo-wall-health is pw-health 0755,
+  appliance/systemd/photo-wall-health.service:7, :14-15). B12: no assertion that pw-display cannot reach the display
+  feed; B10a's mode/group checks unchanged; fixture line ref :183 → :189 (`boots.select(deployments["cold"]...)`).
+- E-AP3-9 · D1 item (xv): display-feed trust statement and cost. E-B10a-14 cites only the /proc/<controller>/root
+  route; E-B10a-12 (on wip/B10a-feed-hardening only) proved the wider fact — a pw-display process can delete or replace
+  the feed socket at any time from its own namespace and can ptrace/kill the controller. D1 states the wider cost.
+  E-B10a-9..13 are not in this file on the working branch; E-B10a-14 is their record here, the branch holds the text.
+- E-AP3-10 · Budget, resumed session (estimate; replace with the metered figure): spent since d562505 ≈ 0.75 M
+  (0.55–0.9) = B10a re-review 0.09 + hardening fix cycle 1 0.25 + second review 0.1 + fix cycle 2 (STOP) 0.1 +
+  orchestration 0.1 + this pass 0.1; the session's fix-cycle reserve is consumed. Remaining B11 0.5, B12 0.65, D1 0.22,
+  pass 4 + milestone gate 0.6 = 1.97 M; projected 2.72 M > 2.5 M ceiling. Decision: GO for B11 → B12 → D1 (2.12 M
+  projected; 2.47 M with one fix cycle); pass 4 + milestone gate only if metered spend after D1 ≤ 1.9 M, else stop
+  cleanly after D1 for the owner's next ceiling. Per-bead checks for this session: before B11, spent + 1.5 ≤ 2.5;
+  before D1, spent + 0.22 ≤ 2.5; before pass 4, spent + 0.6 ≤ 2.5. A second fix cycle anywhere stops at that gate.
+
+## 2026-10-05 · player-health M1 B11 overlay client draws the health layer (implementer) · appliance/display_host/overlay/{client,render,health}.py
+- E-B11-1 · Page Files omit `appliance/display_host/meson.build`, but its `install_data` lists the overlay modules one by
+  one: without `'overlay/health.py'` the installed client fails `import overlay.health` on the node. Added (one
+  word; no new bindings). D1: none.
+- E-B11-2 · Page gap, decided: `reconnected()` also forgets the connection's instruction, not only what was drawn and
+  reported. Keeping it would repaint the old serial at once and report it to the next connection, i.e. to a restarted
+  judge whose counter restarted at 1 (E-B10b-4) and may project that same number for a different card: a false
+  `presented`. As built the screen keeps its last drawing until the first instruction on the new link (or V → stale
+  card), and `presented(serial)` reports only a serial drawn on the current connection (last 8), once.
+- E-B11-3 · Mutation "accept only a higher serial" must persist across reconnects to reach harness step (4): a
+  per-connection monotonic check is invisible there because of E-B11-2 (probed: harness green, unit red). The
+  cross-connection variant turns step (4) red (no report for serial 1) and the unit red.
+- E-B11-4 · Decided beyond the page: a **paint failure** of a tint-on page commits NULL (amber fallback,
+  fail-visible), like a size refusal; the slate's "commit a cleared buffer" rule (E-B5-8) would hide a fault. Tint
+  off is never painted (a zeroed memfd is transparent ARGB). A NULL commit is not repeated each pass (the page counts
+  as drawn).
+- E-B11-5 · Additive surface (for D1): health.py `HealthBoard` (per-Output states + instructions held for
+  unconfigured Outputs ≤ 16), `health_socket_path`, `JUDGE_UIDS`, `RECONNECT_MS`; client.py `size_admissible`,
+  `OverlayClient.allocate` (shared by slate and health), `JudgeLink`, `HealthLayer` (also a loop hook: `attach`,
+  `service`), `run` (the selectors loop), `late` count of commits not presented within D. Cost: client.py carries its
+  own 3-line `peer_uid` (SO_PEERCRED): the overlay package is installed as top-level `overlay` and may import only
+  itself, so it cannot reuse `appliance.feed_socket.peer_uid`.
+- E-B11-6 · Harness as built: the headless Output's name is `headless` (both the configure and the control socket's
+  `output_id`); step (1) first awaits the amber fallback after the kill so a capture taken before Weston drops the
+  dying magenta client cannot pass it; `await_pixel(drained=True)` keeps the control socket drained over the V wait;
+  `testing_slate` now composes a shared `cairo_over`. The slate-surface mutation turns step (2) red at the
+  presented report (the health surface is never committed), before its pixel check.
+
+## E-RACE-1 (orchestrator, 2026-10-05) — app-link receipt race pauses B12 (frame change)
+CI leg `unresponsive` failed intermittently on 299766c (code identical to a twice-passing sha). Root cause confirmed by two independent agents: Central mints a new control delivery (new sequence, cleared ack nonce) on every state read even when nothing changed (~2–4 Hz), and the app-link proof is admitted only if its receipt is still the LATEST (central/registry.py ~:317-325; central/fleet/node_app_links.py ~:26-32; acceptance_evidence.py ~:181-201). A refused first link also gates Output admission. Class: a fleet-pipe proof validated after an async hop against Show-pipe state that churns without real change; 10 sites. Owner steers: Central records every node event (receiving ≠ judging); fleet and Show pipes stay separate; define the Central↔node channel model (strawman: 0 observability, 1 host, 2 app lifecycle, 3 show lifecycle) with per-channel requirements before the fix. B12 and D1 are PAUSED until the owner's channel-model gate; B11 landed (c6953f6). Design working state: /Volumes/Dock/tmp/applink-frame/.
+
+- E-CI-JL-1 (implementer, 2026-10-05, CI unit red on 840d099): the JudgeLink EOF test faked the judge with a SOCK_DGRAM pair; Linux DGRAM never reports a peer's close, so the link stayed open (product code correct). Fix: one `tests/support/packet_pair.py` (SEQPACKET on Linux, DGRAM on macOS; boundaries everywhere, EOF on Linux only), used by test_display_overlay_health, test_health_runner, test_node_probe_broker, test_node_probe_channel; a Linux test pins its type to `client.connect_seqpacket`; the EOF test drains then asserts the "closed by the judge" reason (required: without it a deleted EOF close still passes via the parse error); `feed_socket.SEQPACKET`/`health.runner.SEQPACKET` are plain `socket.SOCK_SEQPACKET`. Spec correction: "replace all six copies" is wrong for two. `test_player_local_app_proof._PacketSocket` (macOS fallback only; Linux already gets real SEQPACKET) and `test_player_probe_responder.Channel` are Queue doubles that emulate EOF-on-close, and the latter also injects EAGAIN and records send flags. A macOS DGRAM pair cannot report EOF, so swapping in `packet_pair` made 8 local_app_proof tests time out on macOS. Both stay. Residual: neither double models Linux's ECONNRESET-on-unread-data close.
+
+## E-RACE-2 (2026-10-06) — `unresponsive` leg removed; M1 closes without B12/D1
+- Owner (chat 2026-10-06): the Player will not run until after the r3 refactor; finish PR 46 only as far as needed to merge, then start E1.
+- Removed the `unresponsive` node_pid1 leg, its leg-only helpers, the Central fixture's `/fixture/bind` + `/fixture/display` endpoints, and its node-pid1.yml matrix entry. It exposed E-RACE-1 (Central re-mints a delivery on every read, `central/registry.py:313`; a defect on main), which r3 epic E5 replaces. E-RACE-1 stays open for E5.
+- Not done, by owner choice: make-safe kill withholding (the Player is not run before E6 adds a restart), B12, D1/D1′, the M1 coherence pass. The superseded-by-0016 headers on docs/design/player-health/* and the run brief's B1/B12 leg references move to E1-7 (docs sweep).

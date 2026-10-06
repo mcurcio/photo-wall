@@ -358,6 +358,7 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
                 "photo-wall-node-prepare.service",
                 "photo-wall-node-storage.service",
                 "photo-wall-app-broker.service",
+                "photo-wall-health.service",
                 "-p",
                 "Id,ActiveState,SubState,Result,ExecMainStatus,MainPID,RootDirectory,User,Group",
                 timeout=30,
@@ -622,10 +623,13 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
             second.capture_and_remove(fixture, sys.exc_info()[1])
 
 
-def unit_properties(node, unit):
-    names = "ActiveState,Result,ExecMainStartTimestampMonotonic"
+def unit_properties_of(node, unit, names):
     shown = node.run("systemctl", "show", unit, "-p", names)
     return dict(line.split("=", 1) for line in shown.splitlines() if "=" in line)
+
+
+def unit_properties(node, unit):
+    return unit_properties_of(node, unit, "ActiveState,Result,ExecMainStartTimestampMonotonic")
 
 
 def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):

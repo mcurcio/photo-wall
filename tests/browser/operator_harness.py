@@ -158,6 +158,18 @@ def pause_page_clock(page, at):
     page.clock.pause_at(at + 1)
 
 
+def reload_after(page, change):
+    """Run `change()` (Central's state moving while the page is away), then reload the page.
+
+    The only way a paused-clock test expresses a change made while the page is away. A reload
+    makes reads the test did not trigger by running the clock; a change made after
+    `page.reload()` races them (one read can land between the change's own commits), and with
+    the clock paused no poll ever reads again, so the page can stay on a half-applied state.
+    Change first, then reload: every read the reload makes sees the whole change."""
+    change()
+    page.reload()
+
+
 class RequestGate:
     """Holds requests matching `pattern` while `holding` is set, until the test releases them
     -- a slow network response the test controls. Unheld requests pass straight through."""

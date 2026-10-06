@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+from appliance.boot_store import BootStore
 from appliance.node.environment import (
     FORMAT,
     canonical_bytes,
@@ -22,7 +23,6 @@ from appliance.node.environment import (
 )
 from appliance.node.host import HostCore, RebootRequest
 from appliance.node.host_storage import FileRebootJournal
-from appliance.node.storage import BootStore
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import reboot_digest
 from contracts.node_protocol import NodeProducerV2

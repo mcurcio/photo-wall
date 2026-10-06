@@ -6,6 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
+from appliance.clock import boot_id
 from appliance.node.capacity import (
     EMERGENCY_HEADROOM,
     OVERHEAD,
@@ -13,7 +14,6 @@ from appliance.node.capacity import (
     device_class,
     memory_values,
 )
-from appliance.node.clock import boot_id
 from appliance.node.environment import stage_archive, verify_root
 from contracts.node_lifecycle import parse_stage_command
 from contracts.strict_json import loads_object

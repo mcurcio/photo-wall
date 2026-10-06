@@ -33,6 +33,7 @@
 
 struct shell;
 struct app_surface;
+struct health;
 struct output {
     struct shell *shell;
     struct weston_output *weston;
@@ -40,7 +41,8 @@ struct output {
     uint64_t generation;
     int mode_width, mode_height, mode_scale;
     uint32_t mode_refresh, mode_transform;
-    struct weston_curtain *curtain;
+    struct weston_curtain *curtain, *fallback; /* fallback: health tint while no health surface shows */
+    struct health *health;
     struct wl_listener destroyed;
     json_t *identity, *revision_identity, *trial_baseline;
     char revision_grant[37], revision_decision[37];
@@ -75,6 +77,14 @@ struct app_surface {
     char pending_grant[37], pending_tag[97];
     char overlay_grant[37], overlay_tag[97], primitives[513];
 };
+/* The private client's per-Output health surface: above app and slate, never touched by
+ * handoff, invalidate() or the slate path. */
+struct health {
+    struct output *output;
+    struct weston_view *view;
+    struct wl_resource *resource;
+    struct wl_listener committed, destroyed;
+};
 struct feedback {
     struct wl_client *client;
     uint32_t id;
@@ -86,7 +96,7 @@ struct feedback {
 struct shell {
     struct weston_compositor *compositor;
     struct weston_desktop *desktop;
-    struct weston_layer app_layer, diagnostic_layer;
+    struct weston_layer app_layer, diagnostic_layer, health_layer;
     struct output outputs[MAX_OUTPUTS];
     struct app_surface *surfaces[MAX_SURFACES];
     struct feedback feedbacks[MAX_FEEDBACK];
@@ -201,6 +211,24 @@ static void curtain(struct output *o, float alpha) {
     weston_view_set_output(o->curtain->view, o->weston);
     weston_surface_damage(o->curtain->view->surface);
 }
+/* Raised exactly while the Output is handed off and no health surface is mapped on it: a bound
+ * private client that has not (re)mapped its layer shows nothing, so the bind alone never drops it. */
+static void fallback_sync(struct output *o) {
+    struct shell *s = o->shell;
+    bool shown = o->health && weston_surface_is_mapped(o->health->view->surface);
+    bool wanted = o->weston && o->released && !shown && !s->shutting_down;
+    if (!wanted && o->fallback) { weston_shell_utils_curtain_destroy(o->fallback); o->fallback = NULL; }
+    if (!wanted || o->fallback) return;
+    struct weston_curtain_params p = { /* RGBA (0.55, 0.35, 0, 0.5); Weston wants premultiplied */
+        .r = 0.55f * 0.5f, .g = 0.35f * 0.5f, .b = 0.0f, .a = 0.5f, .pos = o->weston->pos,
+        .width = o->weston->width, .height = o->weston->height, .capture_input = false
+    };
+    o->fallback = weston_shell_utils_curtain_create(s->compositor, &p);
+    if (!o->fallback) abort(); /* compositor failure is output_unknown */
+    weston_view_move_to_layer(o->fallback->view, &s->health_layer.view_list);
+    weston_view_set_output(o->fallback->view, o->weston);
+    weston_surface_damage(o->fallback->view->surface);
+}
 static bool client_matches(struct output *o, struct wl_client *client) {
     pid_t pid; uid_t uid; gid_t gid;
     wl_client_get_credentials(client, &pid, &uid, &gid);
@@ -278,6 +306,7 @@ static void invalidate(struct output *o, const char *reason) {
     o->lease_until = o->last_presented = 0;
     memset(o->recent_presented, 0, sizeof o->recent_presented); o->recent_next = 0;
     curtain(o, 1.0f);
+    fallback_sync(o);
 }
 static struct app_surface *find_surface(struct shell *s, struct wl_resource *r) {
     for (int i = 0; i < MAX_SURFACES; i++)
@@ -416,8 +445,71 @@ static void diagnostic_ack(struct wl_client *client, struct wl_resource *r,
         serial != a->output->diagnostic_serial) return;
     a->diagnostic_ack = serial;
 }
+static void health_free(struct health *h) {
+    struct output *o = h->output;
+    wl_list_remove(&h->committed.link);
+    wl_list_remove(&h->destroyed.link);
+    weston_surface_unmap(h->view->surface);
+    weston_view_destroy(h->view);
+    o->health = NULL;
+    wl_resource_set_user_data(h->resource, NULL);
+    free(h);
+    fallback_sync(o);
+}
+static void health_resource_gone(struct wl_resource *r) {
+    struct health *h = wl_resource_get_user_data(r);
+    if (h) health_free(h);
+}
+static void health_surface_gone(struct wl_listener *l, void *data) {
+    (void)data;
+    struct health *h = wl_container_of(l, h, destroyed);
+    health_free(h);
+}
+static void health_committed(struct wl_listener *l, void *data) {
+    (void)data;
+    struct health *h = wl_container_of(l, h, committed);
+    struct output *o = h->output;
+    struct weston_surface *surface = h->view->surface;
+    if (!o->weston || !weston_surface_has_content(surface)) {
+        weston_surface_unmap(surface); fallback_sync(o); return;
+    }
+    weston_view_set_position(h->view, o->weston->pos);
+    weston_view_set_output(h->view, o->weston);
+    weston_view_set_mask(h->view, 0, 0, o->weston->width, o->weston->height);
+    weston_view_move_to_layer(h->view, &o->shell->health_layer.view_list);
+    weston_surface_map(surface);
+    weston_view_update_transform(h->view);
+    weston_surface_damage(surface);
+    fallback_sync(o);
+}
+static const struct pw_health_layer_v1_interface health_impl = { .destroy = destroy_resource };
+static void get_health_layer(struct wl_client *client, struct wl_resource *r, uint32_t id,
+                             struct wl_resource *surface_resource, const char *name) {
+    struct shell *s = wl_resource_get_user_data(r);
+    struct output *o = find_output(s, name);
+    struct weston_surface *surface = wl_resource_get_user_data(surface_resource);
+    if (o && o->health) { wl_resource_post_error(r, 0, "health_layer_exists"); return; }
+    if (client != s->diagnostic_client || !o ||
+        weston_surface_set_role(surface, "photo-wall-health", r, 0) < 0) {
+        wl_resource_post_error(r, 0, "invalid_health_layer"); return;
+    }
+    struct health *h = calloc(1, sizeof *h);
+    if (h) h->view = weston_view_create(surface);
+    if (h && h->view) h->resource = wl_resource_create(client, &pw_health_layer_v1_interface, 1, id);
+    if (!h || !h->view || !h->resource) {
+        if (h && h->view) weston_view_destroy(h->view);
+        free(h); wl_client_post_no_memory(client); return;
+    }
+    wl_resource_set_implementation(h->resource, &health_impl, h, health_resource_gone);
+    h->output = o; o->health = h;
+    h->committed.notify = health_committed;
+    h->destroyed.notify = health_surface_gone;
+    wl_signal_add(&surface->commit_signal, &h->committed);
+    wl_signal_add(&surface->destroy_signal, &h->destroyed);
+}
 static const struct pw_diagnostic_manager_v1_interface diagnostic_impl = {
-    .destroy = destroy_resource, .surface = diagnostic_surface, .ack = diagnostic_ack
+    .destroy = destroy_resource, .surface = diagnostic_surface, .ack = diagnostic_ack,
+    .get_health_layer = get_health_layer
 };
 static void diagnostic_resource_gone(struct wl_resource *r) {
     struct shell *s = wl_resource_get_user_data(r); s->diagnostic_resource = NULL;
@@ -428,7 +520,7 @@ static void bind_diagnostic(struct wl_client *client, void *data, uint32_t versi
     if (client != s->diagnostic_client || s->diagnostic_resource) {
         wl_client_post_implementation_error(client, "private_diagnostic_role"); return;
     }
-    struct wl_resource *r = wl_resource_create(client, &pw_diagnostic_manager_v1_interface, version < 2 ? version : 2, id);
+    struct wl_resource *r = wl_resource_create(client, &pw_diagnostic_manager_v1_interface, version < 3 ? version : 3, id);
     if (!r) { wl_client_post_no_memory(client); return; }
     s->diagnostic_resource = r;
     wl_resource_set_implementation(r, &diagnostic_impl, s, diagnostic_resource_gone);
@@ -730,6 +822,7 @@ static bool command(struct shell *s, json_t *j) {
         if (o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
         snprintf(o->handoff, sizeof o->handoff, "%s", handoff);
         weston_surface_damage(o->app->view->surface);
+        fallback_sync(o);
         return true;
     }
     return false;
@@ -782,7 +875,8 @@ static void output_destroyed(struct wl_listener *l, void *data) {
     struct output *o = wl_container_of(l, o, destroyed);
     wl_list_remove(&o->destroyed.link);
     o->weston = NULL;
-    invalidate(o, "output_disconnected");
+    if (o->health) weston_surface_unmap(o->health->view->surface); /* re-maps on its next commit */
+    invalidate(o, "output_disconnected"); /* drops o->fallback: no Output */
     o->generation++;
     output_event(o);
 }
@@ -906,12 +1000,14 @@ static void shell_destroyed(struct wl_listener *l, void *data) {
         struct output *o = &s->outputs[i];
         if (o->weston) wl_list_remove(&o->destroyed.link);
         if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
+        if (o->fallback) weston_shell_utils_curtain_destroy(o->fallback);
         json_decref(o->identity);
         json_decref(o->revision_identity);
         json_decref(o->trial_baseline);
     }
     weston_layer_fini(&s->app_layer);
     weston_layer_fini(&s->diagnostic_layer);
+    weston_layer_fini(&s->health_layer);
     weston_desktop_destroy(s->desktop);
     free(s);
 }
@@ -936,12 +1032,15 @@ WL_EXPORT int wet_shell_init(struct weston_compositor *ec, int *argc, char *argv
         chmod(addr.sun_path, 0600) < 0 || listen(s->listen_fd, 1) < 0) return -1;
     weston_layer_init(&s->app_layer, ec);
     weston_layer_init(&s->diagnostic_layer, ec);
+    weston_layer_init(&s->health_layer, ec);
     weston_layer_set_position(&s->app_layer, WESTON_LAYER_POSITION_NORMAL);
     weston_layer_set_position(&s->diagnostic_layer, WESTON_LAYER_POSITION_LOCK);
+    /* Above the protected slate, below Weston's own cursor and fade. */
+    weston_layer_set_position(&s->health_layer, WESTON_LAYER_POSITION_LOCK + 1);
     s->desktop = weston_desktop_create(ec, &desktop_api, s);
     if (!s->desktop) return -1;
     s->frame_global = wl_global_create(ec->wl_display, &pw_frame_manager_v1_interface, 3, s, bind_frame);
-    s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, 2, s, bind_diagnostic);
+    s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, 3, s, bind_diagnostic);
     s->logger = wl_display_add_protocol_logger(ec->wl_display, protocol_log, s);
     if (!s->frame_global || !s->diagnostic_global || !s->logger) return -1;
     s->output_created.notify = output_created;

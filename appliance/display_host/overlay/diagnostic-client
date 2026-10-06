@@ -1,0 +1,14 @@
+#!/usr/bin/python3 -IB
+"""Launcher Weston's shell execs for its private client (shell.c `start_diagnostic`; path unchanged).
+
+-I implies -P (Python >= 3.11): this file's own directory is not on sys.path, so the launcher puts it
+there before importing the `overlay` package installed beside it.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from overlay.client import main  # noqa: E402
+
+sys.exit(main())
