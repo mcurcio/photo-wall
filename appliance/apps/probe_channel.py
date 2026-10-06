@@ -68,6 +68,7 @@ class ProbeThread:
         self._applied = 0
         self._probes: ProbeClock | None = None
         self._channel: _Channel | None = None
+        self._deadline: int | None = None  # the next turn's; set by the first pass
         self._stopping = False
         self._selector = selectors.DefaultSelector()
         self._wake_reader, self._wake_writer = socket.socketpair()
@@ -151,29 +152,36 @@ class ProbeThread:
     # -- probe thread ---------------------------------------------------------------------
 
     def _run(self) -> None:
-        period = self.timing.period_ms
-        deadline = self._now() + period
+        self._deadline = self._now() + self.timing.period_ms
         while True:
             with self._lock:
                 if self._stopping:
                     return
-            now = self._now()
-            for key, _ in self._selector.select(max(0, deadline - now) / 1000):
-                if key.data is None:
-                    try:
-                        self._wake_reader.recv(4096)
-                    except BlockingIOError:
-                        pass
-                elif self._channel is not None and key.fileobj is self._channel.connection:
-                    self._receive(self._now())
-            now = self._now()
-            self._apply(now)
-            if now >= deadline:
-                # A turn more than T/2 behind its deadline: this thread stalled, not the app.
-                self._turn(now, late=now - deadline > period // 2)
-                deadline += period
-                if deadline <= now:
-                    deadline = now + period
+            self._selector.select(max(0, self._deadline - self._now()) / 1000)  # wait only
+            self.step(self._now())
+
+    def step(self, now: int) -> None:
+        """One pass at `now`: read what is ready (a wake, an answer), apply the main loop's
+        handover, and run the turn if its deadline is due. The thread runs a pass after every
+        wait; a test drives an unstarted thread with its own clock instead."""
+        for key, _ in self._selector.select(0):
+            if key.data is None:
+                try:
+                    self._wake_reader.recv(4096)
+                except BlockingIOError:
+                    pass
+            elif self._channel is not None and key.fileobj is self._channel.connection:
+                self._receive(now)
+        period = self.timing.period_ms
+        if self._deadline is None:
+            self._deadline = now + period
+        self._apply(now)
+        if now >= self._deadline:
+            # A turn more than T/2 behind its deadline: this thread stalled, not the app.
+            self._turn(now, late=now - self._deadline > period // 2)
+            self._deadline += period
+            if self._deadline <= now:
+                self._deadline = now + period
 
     def _apply(self, now: int) -> None:
         with self._lock:

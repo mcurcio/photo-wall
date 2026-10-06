@@ -28,6 +28,7 @@ from contracts.node_app_link import parse_node_probe_channel_message
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 
 FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=100, kill_after_ms=300)
+DUE = -(-FAST.kill_after_ms // FAST.period_ms) + 1  # turns until kill-due (the first pass is at 0)
 LINUX = sys.platform.startswith("linux")
 
 
@@ -150,15 +151,16 @@ class Driver:
 
 
 def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None, links=None):
-    """A turn over fakes, a real BootStore and a real probe thread (no channel: misses)."""
+    """A turn over fakes, a real BootStore and a real probe thread (no channel: misses), not
+    started: `turns` runs its passes on the test's clock, `loop.now`."""
     monkeypatch.setattr(broker_runner, "boottime_ms", monotonic_ms)  # CLOCK_BOOTTIME is Linux-only
     producer = producer or NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker",
                                           uuid4())
     running = running or RunningApp(environment("a"), NodeProcessIdentity(396, 31751781, uuid4()), 1, uuid4())
     store = boot_store(tmp_path / f"broker-{granted}", producer.kernel_boot_id)
     feed = Feed(512)
-    probes = ProbeThread(feed, clock=monotonic_ms, timing=FAST)
-    probes.start()
+    probes = ProbeThread(feed, clock=lambda: loop.now, timing=FAST)
+    probes.check = lambda: None  # alive by construction: the test runs its passes
     session, driver = Session(producer, granted=granted), Driver(running)
     online = SimpleNamespace(broker=SimpleNamespace(record={"phase": "running"}, service=lambda: None),
                              tick=lambda: None)
@@ -166,23 +168,23 @@ def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,
                       session=session, driver=driver, links=links, probes=probes,
                       feeds=SimpleNamespace(serve=lambda: None))
+    loop.now = 0
     return loop, feed, session, driver, running, store
 
 
-def turns(loop, seconds):
-    end = time.monotonic() + seconds
-    count = 0
-    while time.monotonic() < end:
+def turns(loop, count):
+    """`count` main-loop turns, each followed by one probe pass, a period apart: time is
+    counted in turns, so a stalled test process changes nothing."""
+    for _ in range(count):
         loop.turn()
-        count += 1
-        time.sleep(0.02)
-    return count
+        loop.probes.step(loop.now)
+        loop.now += FAST.period_ms
 
 
 def test_probe_facts_never_reach_a_central_request(tmp_path, monkeypatch):
     loop, feed, session, _, running, store = loop_for(tmp_path, monkeypatch)
     try:
-        turns(loop, 0.8)
+        turns(loop, DUE)
         page = feed.read(0, incarnation=None, limit=8)
         kinds = {event.kind for event in page.events}
         assert {"probe_unanswered", "probe_kill_due"} <= kinds, kinds
@@ -200,8 +202,8 @@ def test_each_turn_asks_the_driver_once_and_publishes_with_or_without_a_session(
     for granted in (True, False):
         loop, feed, session, driver, running, store = loop_for(tmp_path, monkeypatch, granted=granted)
         try:
-            count = turns(loop, 0.5)
-            assert driver.calls == count
+            turns(loop, 3)
+            assert driver.calls == 3
             assert feed.read(0, incarnation=None).events[0].value["run"] == AppRunKey.of(running).document()
             assert loop.probes.recovery_may_be_armed is False
             if not granted:
@@ -214,6 +216,8 @@ def test_each_turn_asks_the_driver_once_and_publishes_with_or_without_a_session(
 def test_a_dead_probe_thread_stops_the_broker(tmp_path, monkeypatch):
     loop, _, _, _, _, store = loop_for(tmp_path, monkeypatch)
     try:
+        del loop.probes.check
+        loop.probes.start()
         loop.probes.close()
         with pytest.raises(RuntimeError, match="probe_thread_stopped"):
             loop.turn()
@@ -238,9 +242,9 @@ def test_a_relink_owed_before_a_broker_restart_reaches_the_next_channel(tmp_path
     ours, theirs = packet_pair()
     theirs.settimeout(2)
     try:
-        turns(loop, 0.1)
+        turns(loop, 2)
         pending.append((ours, run))  # the Player's responder reconnects to the new broker
-        turns(loop, 0.1)
+        turns(loop, 2)
         first = parse_node_probe_channel_message(theirs.recv(9000))
         assert type(first).__name__ == "NodeRelinkV2"
         relinked = [e for e in feed.read(0, incarnation=None, limit=8).events if e.kind == "relink_sent"]
@@ -274,13 +278,13 @@ def test_every_refusal_on_a_long_lived_channel_is_relinked(tmp_path, monkeypatch
 
     try:
         pending.append((ours, run))
-        turns(loop, 0.1)
+        turns(loop, 2)
         for refusal in range(2):
             app_link._refused(store, SimpleNamespace(feed=feed), run, status=409, reason="central_refused")
-            turns(loop, 0.15)  # restated every turn
+            turns(loop, 3)  # restated every turn
             assert relinks_received() == 1, refusal
             store.write(app_link.OUTBOX, {"run": run.document(), "player_id": "p", "link": "{}"})
-            turns(loop, 0.05)  # the Player re-proved: nothing owed until Central refuses again
+            turns(loop, 1)  # the Player re-proved: nothing owed until Central refuses again
         events = feed.read(0, incarnation=None, limit=8)
         kinds = []
         after = 0

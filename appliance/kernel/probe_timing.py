@@ -1,6 +1,7 @@
 """Progress-probe timing: the published constants T, k, S and K and the timing they make.
 
-Stdlib only: the broker's probe clock (`appliance.apps.probe`) and the judge both import it.
+This module is stdlib only (the kernel's rule allows `contracts` and `uplink` too): the broker's
+probe clock (`appliance.apps.probe`) and the judge both import it.
 """
 from __future__ import annotations
 

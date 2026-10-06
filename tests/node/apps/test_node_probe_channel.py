@@ -25,6 +25,7 @@ from contracts.node_protocol import NodeProcessIdentity
 
 # Small timing so the thread's real timer is exercised in well under a second per check.
 FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=150, kill_after_ms=400)
+DUE = -(-FAST.kill_after_ms // FAST.period_ms) + 1  # passes until kill-due (the first is at 0)
 RUN = AppRunKey(uuid4(), 4242, 31751781, 1)
 OTHER = AppRunKey(uuid4(), 4343, 31751999, 2)
 OWED = OwedRelink(RUN, "a" * 32)  # one owed episode for RUN (one Central refusal)
@@ -45,6 +46,14 @@ def facts(feed, kind=None, run=RUN):
         after = page.events[-1].sequence
     return [e for e in taken if (kind is None or e.kind == kind)
             and (run is None or e.value.get("run") == run.document())]
+
+
+def passes(probes, count, now=0):
+    """`count` passes of an unstarted thread, a period apart from `now`; the next `now`."""
+    for _ in range(count):
+        probes.step(now)
+        now += FAST.period_ms
+    return now
 
 
 def until(predicate, seconds=5.0):
@@ -98,24 +107,25 @@ def probes():
     thread.close()
 
 
-def test_healthy_channel_is_answered_every_period(probes):
+def test_healthy_channel_is_answered_every_period(stepped):
     ours, theirs = packet_pair()
-    player = Player(theirs)
+    theirs.settimeout(2)
     try:
-        probes.publish_run(RUN, False)
-        probes.adopt(ours, RUN)
-        started = time.monotonic()
-        time.sleep(1.0)
-        elapsed_ms = (time.monotonic() - started) * 1000
-        answered = facts(probes.feed, "probe_answered")
-        assert len(answered) >= elapsed_ms / FAST.period_ms / 2, len(answered)
-        assert all(type(e.value["rtt_ms"]) is int and e.value["rtt_ms"] >= 0 for e in answered)
-        assert facts(probes.feed, "probe_unanswered") == []
-        assert facts(probes.feed, "probe_kill_due") == [] and probes.take_kill_due() is None
-        assert [e.value["state"] for e in facts(probes.feed, "probe_channel")] == ["open"]
-        assert all(e.audience == "node" for e in facts(probes.feed, run=None))
+        stepped.publish_run(RUN, False)
+        stepped.adopt(ours, RUN)
+        now = passes(stepped, 2)  # the channel opens, then the first probe goes out
+        for _ in range(2 * DUE):  # past K: the Player answers each probe within the period
+            theirs.send(encode_node_probe_answer(parse_node_probe_channel_message(
+                theirs.recv(9000)).nonce))
+            now = passes(stepped, 1, now)
+        answered = facts(stepped.feed, "probe_answered")
+        assert [e.value["rtt_ms"] for e in answered] == [FAST.period_ms] * 2 * DUE
+        assert facts(stepped.feed, "probe_unanswered") == []
+        assert facts(stepped.feed, "probe_kill_due") == [] and stepped.take_kill_due() is None
+        assert [e.value["state"] for e in facts(stepped.feed, "probe_channel")] == ["open"]
+        assert all(e.audience == "node" for e in facts(stepped.feed, run=None))
     finally:
-        player.stop()
+        theirs.close()
 
 
 def test_stale_nonces_are_never_answers(probes):
@@ -125,22 +135,23 @@ def test_stale_nonces_are_never_answers(probes):
         probes.publish_run(RUN, False)
         probes.adopt(ours, RUN)
         assert until(lambda: facts(probes.feed, "probe_kill_due"))
+        assert until(lambda: len([m for m in player.received if hasattr(m, "nonce")]) >= 3)
         assert facts(probes.feed, "probe_answered") == []
-        assert len([m for m in player.received if hasattr(m, "nonce")]) >= 3
     finally:
         player.stop()
 
 
 def test_a_blocked_main_loop_does_not_stop_probe_timing(probes):
-    """The main loop publishes once and then blocks (systemctl, HTTP): misses still count."""
-    probes.publish_run(RUN, False)
-    time.sleep(1.0)  # the main loop is blocked: no publish, no adopt, no take
+    """The main loop publishes once and then blocks (systemctl, HTTP): misses still count.
+    The real thread's timer is the point: a stall only delays the latch, the wait is bounded."""
+    probes.publish_run(RUN, False)  # then nothing but the latch read: no publish, no adopt
+    taken = []
+    assert until(lambda: taken.append(probes.take_kill_due()) or taken[-1] is not None)
+    assert taken[-1].run == RUN and taken[-1].unanswered_ms >= FAST.kill_after_ms
     unanswered = facts(probes.feed, "probe_unanswered")
     assert unanswered and unanswered[-1].value["misses"] >= FAST.miss_limit
     [due] = facts(probes.feed, "probe_kill_due")
     assert due.value["unanswered_ms"] >= FAST.kill_after_ms
-    due = probes.take_kill_due()
-    assert due.run == RUN and due.unanswered_ms >= FAST.kill_after_ms
 
 
 def test_kill_due_is_a_level_while_unanswered_and_the_fact_an_edge(probes):
@@ -171,42 +182,45 @@ def test_an_answer_ends_the_kill_due_level(probes):
         player.stop()
 
 
-def test_an_answer_clears_a_kill_due_latch_set_before_it():
+@pytest.fixture
+def stepped():
+    """A real probe thread, not started: the test runs its passes on its own clock."""
+    probes = ProbeThread(Feed(512), timing=FAST)
+    yield probes
+    probes.close()
+
+
+def test_an_answer_clears_a_kill_due_latch_set_before_it(stepped):
     """E-B8-6: a latch set while overdue must not survive the answer that ends the episode,
-    or the main loop kills an app that recovered. Driven by hand: no thread, no race."""
-    now = [0]
-    probes = ProbeThread(Feed(512), clock=lambda: now[0], timing=FAST)
+    or the main loop kills an app that recovered."""
     ours, theirs = packet_pair()
     theirs.setblocking(False)
     try:
-        probes.publish_run(RUN, False)
-        probes.adopt(ours, RUN)
-        probes._apply(now[0])
+        stepped.publish_run(RUN, False)
+        stepped.adopt(ours, RUN)
+        now = passes(stepped, DUE)  # the last pass set the latch (and the once-only fact)
+        assert facts(stepped.feed, "probe_kill_due")
         nonces = []
-        while probes._kill_due is None:
-            now[0] += FAST.period_ms
-            probes._turn(now[0], late=False)
-            while True:
-                try:
-                    nonces.append(parse_node_probe_channel_message(theirs.recv(9000)).nonce)
-                except BlockingIOError:
-                    break
-        assert probes._kill_due.unanswered_ms >= FAST.kill_after_ms and nonces
+        while True:
+            try:
+                nonces.append(parse_node_probe_channel_message(theirs.recv(9000)).nonce)
+            except BlockingIOError:
+                break
         theirs.send(encode_node_probe_answer(nonces[-1]))
-        probes._receive(now[0] + 1)
-        assert facts(probes.feed, "probe_answered")
-        assert probes.take_kill_due() is None
+        passes(stepped, 1, now)
+        assert facts(stepped.feed, "probe_answered")
+        assert stepped.take_kill_due() is None
     finally:
-        probes.close()
         theirs.close()
 
 
-def test_a_run_change_drops_the_kill_due_latch(probes):
-    probes.publish_run(RUN, False)
-    assert until(lambda: facts(probes.feed, "probe_kill_due"))
-    probes.publish_run(OTHER, False)
-    time.sleep(2 * FAST.period_ms / 1000)  # OTHER is inside its startup budget
-    assert probes.take_kill_due() is None
+def test_a_run_change_drops_the_kill_due_latch(stepped):
+    stepped.publish_run(RUN, False)
+    now = passes(stepped, DUE)
+    assert facts(stepped.feed, "probe_kill_due")
+    stepped.publish_run(OTHER, False)
+    passes(stepped, 1, now)  # OTHER is inside its startup budget
+    assert stepped.take_kill_due() is None
 
 
 def test_a_late_thread_turn_is_not_counted():

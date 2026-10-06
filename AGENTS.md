@@ -18,7 +18,7 @@ This page is the map; open an owning document only when the routing table sends 
 | `contracts/` | Versioned wire models shared by every side | `models.py`, `node_*.py` |
 | `uplink/` | Stdlib-only initramfs client that locates and trusts Central | `locate.py`, `fetch.py` |
 | `appliance/` | OS base, netboot initramfs, provisioning, systemd units, OS agent | `netboot_init.py`, `os_agent.py`, `systemd/` |
-| `appliance/kernel/` | Node kernel: stdlib-only primitives (clock, boot store, credentials, capacity, boot-stage records, probe timing) | `capacity.py`, `boot_stage.py` |
+| `appliance/kernel/` | Node kernel: primitives on the stdlib, `contracts` and `uplink` alone (clock, boot store, credentials, capacity, boot-stage records, probe timing) | `capacity.py`, `boot_stage.py` |
 | `appliance/host/` | HostCore: host metrics and facts, operator reboot, local recovery deadlines | `host_runner.py` |
 | `appliance/boot/` | The Node's one-shot boot stages: storage, handoff, prepare | `node_bootstrap.py` |
 | `appliance/apps/` | App lifecycle: effect broker, progress probe, app process, stop, root import | `broker_runner.py`, `online_runner.py`, `root_import.py` |

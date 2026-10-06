@@ -4,10 +4,13 @@ shrink; layers stay exact; forbidden contracts only grow.
 lint-imports proves the contracts hold; this test proves nobody loosened them to make it pass.
 """
 
+import sys
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
+
+import grimp
 
 from scripts.module_closure import first_party_packages
 
@@ -19,6 +22,9 @@ SESSION_CONTRACT: Final = "The Central session is retiring: only the listed work
 NATS_CONTRACT: Final = "Only the Node API library talks to NATS"
 FEED_CONTRACT: Final = "The feed is retiring: it gains no importer"
 NODE_API_PACKAGE: Final = "nodeapi"
+# The Node kernel's whole allow-list besides the stdlib (AGENTS.md code map).
+KERNEL: Final = "appliance.kernel"
+KERNEL_MAY_IMPORT: Final = ("contracts", "uplink", KERNEL)
 
 # One directory per Node context, in import order (node redesign r3 §3.4). Exact: a change is a
 # design change, not a lint fix.
@@ -61,7 +67,7 @@ FROZEN_EXEMPTIONS: Final[Mapping[str, frozenset[str]]] = {
     }),
     "Boot is an island": frozenset({
         "appliance.boot.node_bootstrap -> appliance.apps.environment",
-        "appliance.boot.node_bootstrap -> appliance.node.preparer",
+        "appliance.node.preparer -> appliance.apps.environment",
     }),
     SESSION_CONTRACT: frozenset({
         "appliance.host.host_runner -> appliance.central_session.*",
@@ -209,3 +215,14 @@ def test_feed_exemptions_only_shrink() -> None:
     assert set(contract["protected_modules"]) == {"appliance.feed", "appliance.feed_socket"}
     added = set(contract.get("ignore_imports", ())) - FROZEN_FEED_EXEMPTIONS
     assert not added, f"new feed importers are not allowed: {sorted(added)}"
+
+
+def test_the_node_kernel_imports_only_the_stdlib_contracts_and_uplink() -> None:
+    """An allow-list, not a denylist: a package first imported tomorrow fails here too."""
+    graph = grimp.build_graph(*_importlinter()["root_packages"], include_external_packages=True)
+    reached = graph.find_upstream_modules(KERNEL, as_package=True)
+    foreign = sorted(module for module in reached
+                     if module.split(".")[0] not in sys.stdlib_module_names
+                     and not any(module == allowed or module.startswith(allowed + ".")
+                                 for allowed in KERNEL_MAY_IMPORT))
+    assert not foreign, f"{KERNEL} reaches beyond the stdlib, contracts and uplink: {foreign}"

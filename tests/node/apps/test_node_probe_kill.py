@@ -3,7 +3,6 @@ main loop's kill consumer and the driver's identity-checked SIGKILL."""
 import os
 import signal
 import subprocess
-import time
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,7 +11,7 @@ from test_node_boot import environment
 from test_node_linux_adapters import store as boot_store
 from test_node_online_broker import Driver as SwitchDriver
 from test_node_online_broker import stage
-from test_node_probe_broker import FAST, loop_for, turns
+from test_node_probe_broker import DUE, FAST, loop_for, turns
 
 from appliance.apps.broker import RunningApp
 from appliance.apps.broker_runner import BrokerLoop
@@ -226,7 +225,7 @@ def test_a_refused_or_foreign_proof_acknowledges_nothing(switched):
     assert journal.read(RECOVERY_ACKNOWLEDGED) is None and armed(broker, journal) is True
 
 
-# -- the main loop's kill consumer (real probe thread, FAST timing) ------------------------
+# -- the main loop's kill consumer (real probe thread, FAST timing, stepped by turn) -------
 
 
 def killer(tmp_path, monkeypatch, **kwargs):
@@ -240,14 +239,9 @@ def test_cold_start_kills_after_k_once_without_a_grant(tmp_path, monkeypatch):
     loop, feed, driver, running, store = killer(tmp_path, monkeypatch, granted=False)
     loop.online.broker.record = None
     try:
-        started = time.monotonic()
-        while not driver.kills and time.monotonic() - started < 5:
-            loop.turn()
-            time.sleep(0.01)
-        elapsed_ms = (time.monotonic() - started) * 1000
-        assert driver.kills == [running]
-        assert elapsed_ms >= FAST.kill_after_ms, elapsed_ms
-        turns(loop, 0.3)  # the fake app lives on: still overdue, still published
+        turns(loop, DUE)  # kill-due at the last pass: no turn has taken it yet
+        assert driver.kills == []
+        turns(loop, DUE)  # the fake app lives on: still overdue, still published
         assert driver.kills == [running]
         [killed] = events(feed, "app_killed")
         assert killed["run"] == AppRunKey.of(running).document()
@@ -262,7 +256,7 @@ def test_an_armed_recovery_withholds_the_kill(tmp_path, monkeypatch):
     loop, feed, driver, running, store = killer(tmp_path, monkeypatch)
     loop.online.broker.record = {"phase": "running", "recovery": {"operation_id": str(uuid4())}}
     try:
-        turns(loop, 1.0)
+        turns(loop, 2 * DUE)
         assert driver.kills == []
         assert events(feed, "probe_kill_due")
         assert events(feed, "kill_withheld") == [
@@ -280,7 +274,7 @@ def test_an_armed_obligation_the_record_no_longer_names_withholds_the_kill(tmp_p
     loop.online.broker.record = {"phase": "running"}  # replaced; its obligation unacknowledged
     store.write(RECOVERY_ARMED, {"operation_id": str(uuid4())})
     try:
-        turns(loop, 1.0)
+        turns(loop, 2 * DUE)
         assert driver.kills == [] and events(feed, "app_killed") == []
         assert events(feed, "kill_withheld") == [
             {"run": AppRunKey.of(running).document(), "reason": "recovery_armed"}]
@@ -296,10 +290,10 @@ def test_withheld_then_acknowledged_while_still_unanswered_is_killed(tmp_path, m
     loop.online.broker.record = {"phase": "running", "recovery": {"operation_id": operation}}
     store.write(RECOVERY_ARMED, {"operation_id": operation})
     try:
-        turns(loop, 0.8)
+        turns(loop, DUE + 2)
         assert driver.kills == [] and events(feed, "kill_withheld")
         store.write(RECOVERY_ACKNOWLEDGED, {"operation_id": operation})
-        turns(loop, 0.5)
+        turns(loop, 1)  # the level is back on the next turn
         assert driver.kills == [running]
         assert len(events(feed, "app_killed")) == 1
     finally:
@@ -333,7 +327,7 @@ def test_a_turn_whose_observation_failed_takes_no_kill(tmp_path, monkeypatch):
         loop.turn()  # the run is published once; the probe thread keeps judging it
         loop.probes.take_kill_due = lambda: taken.append(1) or take()
         driver.failing = True
-        turns(loop, 0.6)  # well past K: kill due, but no turn knows the current run
+        turns(loop, 2 * DUE)  # well past K: kill due, but no turn knows the current run
         assert taken == [] and driver.kills == [] and events(feed, "probe_kill_due")
         driver.failing = False
         loop.turn()
