@@ -6,6 +6,7 @@ from typing import Any, Final
 
 import procrastinate
 
+from central.infra.job_queue import async_connector
 from central.media_queue import (
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
@@ -55,7 +56,7 @@ class RefreshRetryStrategy(MediaRetryStrategy):
 def create_worker_app(dsn: str) -> procrastinate.App:
     """Build the async worker app; runtime collaborators arrive via context."""
     app = procrastinate.App(
-        connector=procrastinate.PsycopgConnector(conninfo=dsn),
+        connector=async_connector(dsn),
     )
 
     @app.task(

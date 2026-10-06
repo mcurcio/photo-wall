@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import croniter
 import procrastinate
 import psycopg
+import psycopg_pool
 import pytest
 from fakes.transactions import FakeTransaction
 from hypothesis import given
@@ -21,6 +22,7 @@ from runtime_fakes import catalog_instances
 from central.infra.job_queue import (
     ATTEMPT_KWARG,
     TASK_PREFIX,
+    async_connector,
     build_app,
     decode,
     defer,
@@ -354,3 +356,44 @@ def test_outcome_notify_is_sent_only_on_commit(registry):
             outcomes.record(tx, job, status="ok", reason=None, retry_not_before=None, now=1.0)
         payloads = [n.payload for n in listener.notifies(timeout=2, stop_after=1)]
     assert payloads == [job_keys(job).lock]
+
+
+# -- the async connector ----------------------------------------------------------------------
+
+
+def test_a_cancel_during_the_pool_check_always_stops_the_task(registry, monkeypatch):
+    """psycopg_pool swallows a cancel raised inside its getconn check (pool_async.py
+    `_getconn_with_check_loop`); procrastinate enables that check. A procrastinate side task
+    cancelled there kept running and the worker hung on SIGTERM. `async_connector` builds the
+    pool without the check, so every cancel lands. The slow check below widens the window: were
+    the check on, a cancel 5-40 ms after the task starts lands inside it.
+    """
+    async def slow_check(conn):
+        await asyncio.sleep(0.05)
+
+    monkeypatch.setattr(psycopg_pool.AsyncConnectionPool, "check_connection",
+                        staticmethod(slow_check))
+    connector = async_connector(registry.db.dsn, min_size=1, max_size=1)
+
+    async def side_task():
+        while True:
+            async with connector.pool.connection():
+                pass
+            await asyncio.sleep(3600)
+
+    async def run():
+        await connector.open_async()
+        try:
+            for attempt in range(50):
+                task = asyncio.create_task(side_task())
+                await asyncio.sleep(0.005 * (1 + attempt % 8))
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=1)
+                if not done:
+                    task.cancel()  # the swallowed cancel left it asleep; free it
+                    await asyncio.wait({task}, timeout=1)
+                assert done and task.cancelled(), f"cancel {attempt} was swallowed"
+        finally:
+            await connector.close_async()
+
+    asyncio.run(run())
