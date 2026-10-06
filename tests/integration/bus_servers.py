@@ -8,12 +8,14 @@ probe uses is the test's own: nothing here is a subject grammar.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
 import socket
 import subprocess
 import time
+import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,11 +23,22 @@ from typing import TYPE_CHECKING
 
 import nats
 import pytest
-from nats.js.api import DiscardPolicy, ExternalStream, StorageType, StreamConfig, StreamSource
+from nats.js.api import (
+    AckPolicy,
+    ConsumerConfig,
+    DeliverPolicy,
+    DiscardPolicy,
+    ExternalStream,
+    Header,
+    StorageType,
+    StreamConfig,
+    StreamSource,
+)
 from nats.js.errors import NotFoundError
 
-from central.fleet.node_bus_accounts import HubListeners, hub_configuration
+from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
+    NODE_DOMAIN,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
     WALL_STREAM,
@@ -54,6 +67,7 @@ class BusServer:
     environment: Mapping[str, str]
     websocket_port: int | None = None    # the hub's leaf listener for Nodes
     monitor_url: str | None = None       # the hub's /leafz
+    listeners: HubListeners | None = None  # the hub's generator input, kept for a reload
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
@@ -129,7 +143,7 @@ def hub_server(tmp: Path, serials: Sequence[str]) -> BusServer:
         name="hub", config=config, store=directory / "store",
         client_url=f"nats://127.0.0.1:{listeners.client_port}", environment={},
         websocket_port=listeners.websocket_port,
-        monitor_url=f"http://127.0.0.1:{listeners.monitor_port}")
+        monitor_url=f"http://127.0.0.1:{listeners.monitor_port}", listeners=listeners)
 
 
 def node_server(tmp: Path, serial: str, hub: BusServer, *, prefix: str = "bus") -> BusServer:
@@ -182,16 +196,39 @@ async def declare_wall(writer: Client) -> None:
             max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE))
 
 
-async def declare_wall_mirror(node_client: Client) -> None:
-    """Create-if-absent on the Node: a read-only local mirror of the hub's wall stream."""
+async def declare_wall_mirror(node_client: Client) -> bool:
+    """Create-if-absent on the Node: a read-only local mirror of the hub's wall stream.
+
+    A mirror that holds a sequence the hub's stream never reached is re-created: the hub lost its
+    store and restarted its sequence at 1, and the mirror would wait for its old next sequence
+    forever (§6 row 11's fallback, erratum E-W1-E3a-2-2). Returns True when it created a mirror."""
     jetstream = node_client.jetstream()
     try:
-        await jetstream.stream_info(WALL_STREAM)
+        held = (await jetstream.stream_info(WALL_STREAM)).state.last_seq
     except NotFoundError:
-        await jetstream.add_stream(StreamConfig(
-            name=WALL_STREAM, max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE,
-            mirror=StreamSource(name=WALL_STREAM, external=ExternalStream(
-                api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))))
+        held = None
+    if held is not None:
+        if await wall_origin_last(node_client) >= held:
+            return False
+        await jetstream.delete_stream(WALL_STREAM)
+    await jetstream.add_stream(StreamConfig(
+        name=WALL_STREAM, max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE,
+        mirror=StreamSource(name=WALL_STREAM, external=ExternalStream(
+            api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))))
+    return True
+
+
+async def wall_origin_last(node_client: Client) -> int:
+    """The hub wall stream's last sequence, read through the Node account's imported consumer API
+    (the only WALL API a Node account has): an ephemeral consumer starting at the last message
+    reports it, and is deleted at once."""
+    wall_api = node_client.jetstream(prefix=WALL_API_PREFIX)
+    info = await wall_api.add_consumer(WALL_STREAM, ConsumerConfig(
+        deliver_policy=DeliverPolicy.LAST, ack_policy=AckPolicy.NONE, inactive_threshold=5))
+    try:
+        return info.delivered.stream_seq + info.num_pending
+    finally:
+        await wall_api.delete_consumer(WALL_STREAM, info.name)
 
 
 async def wall_value(node_client: Client, subject: str) -> bytes | None:
@@ -201,3 +238,83 @@ async def wall_value(node_client: Client, subject: str) -> bytes | None:
     except NotFoundError:
         return None
     return message.data
+
+
+def node_kv_subject(bucket: str, key: str) -> str:
+    """The only subject a KV write from Central lands on across the leaf (W9): the Node's domain
+    API maps it to `$KV.<bucket>.<key>` on the Node; a plain `$KV.` subject is denied on the leaf."""
+    return f"$JS.{NODE_DOMAIN}.API.$KV.{bucket}.{key}"
+
+
+async def central_put(central_client: Client, bucket: str, key: str, value: bytes,
+                      *, expected_revision: int | None) -> int:
+    """Central writes a Node bucket's key, conditionally when `expected_revision` is set (API9).
+
+    Returns the new revision; a stale revision raises nats.js.errors.APIError (err_code 10071)."""
+    headers = None if expected_revision is None else {
+        Header.EXPECTED_LAST_SUBJECT_SEQUENCE.value: str(expected_revision)}
+    acknowledgement = await central_client.jetstream().publish(
+        node_kv_subject(bucket, key), value, headers=headers)
+    return acknowledgement.seq
+
+
+@dataclass
+class Recorder:
+    """Central's commit, an append-only file: one row per committed stream sequence or counted gap."""
+    path: Path
+
+    def commit(self, seq: int, payload: bytes) -> None:
+        self._append(f"seq {seq} {payload.hex()}")
+
+    def gap(self, first: int, count: int) -> None:
+        self._append(f"gap {first} {count}")
+
+    def rows(self) -> list[tuple[str, int, int]]:
+        """("seq", sequence, 0) and ("gap", first missing, count) rows, in commit order."""
+        if not self.path.exists():
+            return []
+        rows = []
+        for line in self.path.read_text().splitlines():
+            kind, first, rest = line.split(" ")
+            rows.append((kind, int(first), int(rest) if kind == "gap" else 0))
+        return rows
+
+    def sequences(self) -> list[int]:
+        return [first for kind, first, _ in self.rows() if kind == "seq"]
+
+    def gaps(self) -> list[tuple[int, int]]:
+        return [(first, count) for kind, first, count in self.rows() if kind == "gap"]
+
+    def _append(self, row: str) -> None:
+        with self.path.open("a") as record:
+            record.write(row + "\n")
+            record.flush()
+            os.fsync(record.fileno())
+
+
+async def reload_hub(hub: BusServer, serials: Sequence[str]) -> None:
+    """Rewrite the hub's configuration for `serials` in place and reload it through the system
+    account (W7): a request as FLEET_SYSTEM_USER, answered once the server has applied it."""
+    if hub.listeners is None:
+        raise RuntimeError(f"{hub.name} is not a hub")
+    hub.config.write_text(hub_configuration(serials, hub.listeners))
+    fleet = await _connect(hub.client_url, user=FLEET_SYSTEM_USER, password=FLEET_SYSTEM_USER)
+    try:
+        identity = json.loads((await fleet.request("$SYS.REQ.SERVER.PING.IDZ", b"", timeout=2)).data)
+        # nats-server 2.15.0 subscribes a reload-added account's service imports only on the next
+        # reload (server/server.go:1413 skips them while reloading; the re-subscribe pass covers
+        # accounts that already existed), so the new account's WALL consumer API answers "no
+        # responders" until then. The second request applies them (erratum E-W1-E3a-2-1).
+        for _ in range(2):
+            reply = json.loads((await fleet.request(
+                f"$SYS.REQ.SERVER.{identity['id']}.RELOAD", b"", timeout=5)).data)
+            if reply.get("error"):
+                raise RuntimeError(f"hub reload refused: {reply['error']}")
+    finally:
+        await fleet.close()
+
+
+def leaf_connections(hub: BusServer) -> Mapping[str, int]:
+    """Account -> the leaf connection's id (cid), from the hub's /leafz."""
+    with urllib.request.urlopen(f"{hub.monitor_url}/leafz", timeout=2) as response:
+        return {leaf["account"]: leaf["id"] for leaf in json.load(response).get("leafs") or []}
