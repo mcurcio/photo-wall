@@ -5,11 +5,32 @@ lint-imports proves the contracts hold; this test proves nobody widened them to 
 
 import tomllib
 from pathlib import Path
+from typing import Final
 
-PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
+from scripts.module_closure import first_party_packages
+
+REPO = Path(__file__).resolve().parents[1]
+PYPROJECT = REPO / "pyproject.toml"
 
 SESSION_CONTRACT = "Central session only in Authority and the two exemptions"
 LAYERS_CONTRACT = "Node contexts point down"
+NATS_CONTRACT: Final = "Only the Node API library talks to NATS"
+FEED_CONTRACT: Final = "The feed is retiring: it gains no importer"
+NODE_API_PACKAGE: Final = "nodeapi"
+
+# The retiring feed's importers when the fence went up (r3 §16.1 B2b/B10a). Each line leaves
+# with its importer; adding one is a design change, not a lint fix.
+FROZEN_FEED_EXEMPTIONS: Final[frozenset[str]] = frozenset({
+    "appliance.display_host.runner -> appliance.feed",
+    "appliance.display_host.runner -> appliance.feed_socket",
+    "appliance.health.judge -> appliance.feed",
+    "appliance.health.runner -> appliance.feed",
+    "appliance.health.runner -> appliance.feed_socket",
+    "appliance.node.app_link -> appliance.feed",
+    "appliance.node.broker_runner -> appliance.feed",
+    "appliance.node.broker_runner -> appliance.feed_socket",
+    "appliance.node.probe_channel -> appliance.feed",
+})
 
 # The six exemptions frozen by the player-health module design (r8). Removing a line is the
 # ratchet turning; adding one is a design change, not a lint fix.
@@ -47,8 +68,12 @@ FROZEN_NODE_LAYERS = [
 ]
 
 
+def _importlinter() -> dict:
+    return tomllib.loads(PYPROJECT.read_text())["tool"]["importlinter"]
+
+
 def _contract(name: str) -> dict:
-    contracts = tomllib.loads(PYPROJECT.read_text())["tool"]["importlinter"]["contracts"]
+    contracts = _importlinter()["contracts"]
     matches = [contract for contract in contracts if contract["name"] == name]
     assert len(matches) == 1, f"expected exactly one import contract named {name!r}"
     return matches[0]
@@ -75,3 +100,23 @@ def test_forbidden_contracts_keep_every_frozen_source_and_target():
         dropped_targets = targets - set(contract["forbidden_modules"])
         assert not dropped_sources, f"{name}: sources dropped {sorted(dropped_sources)}"
         assert not dropped_targets, f"{name}: forbidden modules dropped {sorted(dropped_targets)}"
+
+
+def test_root_packages_are_every_first_party_package() -> None:
+    assert set(_importlinter()["root_packages"]) == set(first_party_packages(REPO))
+
+
+def test_the_nats_fence_covers_every_root_package_but_the_node_api() -> None:
+    contract = _contract(NATS_CONTRACT)
+    assert contract["type"] == "forbidden"
+    assert set(contract["source_modules"]) == (
+        set(_importlinter()["root_packages"]) - {NODE_API_PACKAGE})
+    assert contract["forbidden_modules"] == ["nats"]
+
+
+def test_feed_exemptions_only_shrink() -> None:
+    contract = _contract(FEED_CONTRACT)
+    assert contract["type"] == "protected"
+    assert set(contract["protected_modules"]) == {"appliance.feed", "appliance.feed_socket"}
+    added = set(contract.get("ignore_imports", ())) - FROZEN_FEED_EXEMPTIONS
+    assert not added, f"new feed importers are not allowed: {sorted(added)}"

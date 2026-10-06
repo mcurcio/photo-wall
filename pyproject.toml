@@ -166,3 +166,28 @@ source_modules = ["appliance.clock", "appliance.boot_store", "appliance.feed",
                   "appliance.unix_credentials"]
 forbidden_modules = ["appliance.authority", "appliance.health", "appliance.display_host",
                      "appliance.node"]
+
+[[tool.importlinter.contracts]]
+# The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).
+name = "Only the Node API library talks to NATS"
+type = "forbidden"
+source_modules = ["central", "contracts", "media", "player", "appliance", "uplink"]
+forbidden_modules = ["nats"]
+
+[[tool.importlinter.contracts]]
+# Retiring (r3 §16.1 B2b/B10a): the feed gains no importer; each line leaves with its importer.
+name = "The feed is retiring: it gains no importer"
+type = "protected"
+protected_modules = ["appliance.feed", "appliance.feed_socket"]
+allowed_importers = ["appliance.feed", "appliance.feed_socket"]
+ignore_imports = [
+  "appliance.display_host.runner -> appliance.feed",
+  "appliance.display_host.runner -> appliance.feed_socket",
+  "appliance.health.judge -> appliance.feed",
+  "appliance.health.runner -> appliance.feed",
+  "appliance.health.runner -> appliance.feed_socket",
+  "appliance.node.app_link -> appliance.feed",
+  "appliance.node.broker_runner -> appliance.feed",
+  "appliance.node.broker_runner -> appliance.feed_socket",
+  "appliance.node.probe_channel -> appliance.feed",
+]

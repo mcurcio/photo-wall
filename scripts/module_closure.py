@@ -49,7 +49,7 @@ from scripts import debian_packages  # noqa: E402
 class ClosurePolicy:
     name: Literal["initrd", "bootstrapper", "player"]
     roots: tuple[str, ...]
-    forbidden: tuple[str, ...]              # top-level names, first- or third-party
+    forbidden: tuple[str, ...]              # top-level names, or dotted first-party modules/packages
     third_party: Mapping[str, str]          # import root -> Debian package; never hand-written
 
 
@@ -151,6 +151,19 @@ class _Finder(modulefinder.ModuleFinder):
         return self.importer.get(name, "?")
 
 
+def _forbidden_entry(name: str, forbidden: frozenset[str]) -> str | None:
+    """The first `forbidden` entry (sorted) that `name` equals or sits under as a dotted
+    prefix, or None."""
+    return next((entry for entry in sorted(forbidden)
+                 if name == entry or name.startswith(entry + ".")), None)
+
+
+def _names_a_module(repo: Path, dotted: str) -> bool:
+    """Whether `dotted` is a module (`a/b.py`) or a package (`a/b/__init__.py`) under `repo`."""
+    path = repo.joinpath(*dotted.split("."))
+    return path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()
+
+
 def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[str],
                     forbidden: Sequence[str] = (),
                     third_party: Mapping[str, str] = MappingProxyType({})) -> Closure:
@@ -159,8 +172,15 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
     own imports are the Debian package's business, as the stdlib's are the interpreter's).
     Raises ClosureError naming the importer and the import when the closure reaches a top-level
     name that is neither first-party, stdlib nor declared, a first-party module that does not
-    exist, or any name under `forbidden`."""
+    exist, or any name under `forbidden`. A `forbidden` entry matches a module that equals it or
+    sits under it as a dotted prefix ("appliance.apps" matches "appliance.apps.broker";
+    "appliance.node.host" does not match "appliance.node.host_runner"); a dotted entry under a
+    first-party package must name an existing module or package under `repo`."""
     first_party, forbidden = frozenset(first_party), frozenset(forbidden)
+    for entry in sorted(forbidden):
+        if "." in entry and entry.partition(".")[0] in first_party and not _names_a_module(
+                repo, entry):
+            raise ClosureError(f"forbidden entry {entry} names no module under {repo}")
     declared, reached_third_party = frozenset(third_party), set()
     finder = _Finder([str(repo), *search_path()], first_party)
     for root in roots:
@@ -169,13 +189,13 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
         except ImportError as error:
             raise ClosureError(f"root {root} not found under {repo}: {error}") from None
     reached = sorted(set(finder.modules) | set(finder.badmodules))
-    crossings = [name for name in reached if name.partition(".")[0] in forbidden]
+    crossings = [name for name in reached if _forbidden_entry(name, forbidden) is not None]
     if crossings:
         # Name the edge into the forbidden package, not one inside it.
         name = min(crossings, key=lambda name: (
-            finder.importers(name).partition(".")[0] in forbidden, name))
+            _forbidden_entry(finder.importers(name), forbidden) is not None, name))
         raise ClosureError(f"{finder.importers(name)} imports {name}: "
-                           f"{name.partition('.')[0]} is forbidden here")
+                           f"{_forbidden_entry(name, forbidden)} is forbidden here")
     for name in sorted(finder.modules):
         top = name.partition(".")[0]
         if top in declared:
