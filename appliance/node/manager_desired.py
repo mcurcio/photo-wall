@@ -6,11 +6,11 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from appliance.boot_store import BootStore
 from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
-from appliance.clock import boot_id
-from appliance.node.capacity import StorageShort
+from appliance.kernel.boot_store import BootStore
+from appliance.kernel.capacity import StorageShort
+from appliance.kernel.clock import boot_id
 from appliance.node.manager_observation import PreparationObservation
 from appliance.node.preparer import DownloadPreparer
 from contracts.node_lifecycle import parse_stage_command

@@ -58,6 +58,8 @@ major_version_zero = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests", "tests/node", "tests/node/apps", "tests/node/boot", "tests/node/display",
+              "tests/node/health", "tests/node/host"]
 addopts = "-ra"
 
 [tool.ruff]
@@ -141,31 +143,32 @@ forbidden_modules = ["contracts.node_faults"]
 # tests/test_import_contracts.py fails on any line outside the frozen six.
 name = "Central session only in Authority and the two exemptions"
 type = "forbidden"
-source_modules = ["appliance.display_host", "appliance.node", "appliance.health"]
+source_modules = ["appliance.display_host", "appliance.node", "appliance.health", "appliance.host",
+                  "appliance.boot", "appliance.apps"]
 forbidden_modules = ["appliance.central_session"]
 ignore_imports = [
   # Permanent: HostCore's reboot session, a separate credential (system-design-r8 rule 3).
-  "appliance.node.host_runner -> appliance.central_session.*",
+  "appliance.host.host_runner -> appliance.central_session.*",
   # Permanent: the Manager's read-only preparation session (system-design-r8 rule 3, #36).
   "appliance.node.manager_desired -> appliance.central_session.*",
   # Ratchet, removed in M2-13: the display controller's Central worker moves to Authority.
   "appliance.display_host.service -> appliance.central_session.*",
   # Ratchet, removed in M2-15: the broker's own Central session moves to the Central link.
-  "appliance.node.broker_runner -> appliance.central_session.*",
+  "appliance.apps.broker_runner -> appliance.central_session.*",
   # Ratchet, removed in M2-15: app-link delivery moves to the Central link.
   "appliance.node.app_link -> appliance.central_session.*",
   # Ratchet, removed in M2-15: the online broker's Central reports move to the Central link.
-  "appliance.node.online_broker -> appliance.central_session.*",
+  "appliance.apps.online_broker -> appliance.central_session.*",
 ]
 
 [[tool.importlinter.contracts]]
 name = "Shared node kernel knows no context"
 type = "forbidden"
-source_modules = ["appliance.clock", "appliance.boot_store", "appliance.feed",
+source_modules = ["appliance.kernel.clock", "appliance.kernel.boot_store", "appliance.feed",
                   "appliance.feed_socket", "appliance.central_session",
-                  "appliance.unix_credentials"]
+                  "appliance.kernel.unix_credentials"]
 forbidden_modules = ["appliance.authority", "appliance.health", "appliance.display_host",
-                     "appliance.node"]
+                     "appliance.node", "appliance.host", "appliance.boot", "appliance.apps"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).
@@ -187,7 +190,7 @@ ignore_imports = [
   "appliance.health.runner -> appliance.feed",
   "appliance.health.runner -> appliance.feed_socket",
   "appliance.node.app_link -> appliance.feed",
-  "appliance.node.broker_runner -> appliance.feed",
-  "appliance.node.broker_runner -> appliance.feed_socket",
-  "appliance.node.probe_channel -> appliance.feed",
+  "appliance.apps.broker_runner -> appliance.feed",
+  "appliance.apps.broker_runner -> appliance.feed_socket",
+  "appliance.apps.probe_channel -> appliance.feed",
 ]

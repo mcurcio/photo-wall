@@ -15,12 +15,12 @@ import pytest
 from test_node_boot import environment
 from test_node_linux_adapters import store as boot_store
 
+from appliance.apps.broker import RunningApp
+from appliance.apps.broker_runner import BrokerLoop
+from appliance.apps.probe import AppRunKey, OwedRelink
 from appliance.feed import Feed
 from appliance.node import app_link
 from appliance.node.app_link import OUTBOX, BrokerLinkService, deliver_app_link, owed_relink
-from appliance.node.broker import RunningApp
-from appliance.node.broker_runner import BrokerLoop
-from appliance.node.probe import AppRunKey, OwedRelink
 from contracts.node_app_link import (
     NodeAppLinkV2,
     encode_node_app_link,
@@ -327,7 +327,7 @@ def test_a_turn_delivers_the_slot_only_with_a_grant(monkeypatch, node):
     session = Session(node.store, node.grant, [200, 200])  # process evidence, then the link
     prove(monkeypatch, node, running, session)
     link = node.store.read(OUTBOX)["link"]
-    monkeypatch.setattr("appliance.node.broker_runner.boottime_ms", lambda: 1000)
+    monkeypatch.setattr("appliance.apps.broker_runner.boottime_ms", lambda: 1000)
     loop_turn(node, running, session, granted=False)
     assert session.requests == [] and node.store.read(OUTBOX)["link"] == link
     probes = loop_turn(node, running, session, granted=True)
@@ -340,7 +340,7 @@ def test_every_known_turn_restates_the_owed_relink_with_or_without_a_grant(monke
     running = running_app()
     session = owe(monkeypatch, node, running)
     session.statuses = [200, 200]  # process evidence on each granted turn
-    monkeypatch.setattr("appliance.node.broker_runner.boottime_ms", lambda: 1000)
+    monkeypatch.setattr("appliance.apps.broker_runner.boottime_ms", lambda: 1000)
     owed = OwedRelink(AppRunKey.of(running), owes(node.store, AppRunKey.of(running)))
     for granted in (False, True):
         probes = loop_turn(node, running, session, granted=granted)

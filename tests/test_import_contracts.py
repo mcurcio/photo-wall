@@ -27,20 +27,20 @@ FROZEN_FEED_EXEMPTIONS: Final[frozenset[str]] = frozenset({
     "appliance.health.runner -> appliance.feed",
     "appliance.health.runner -> appliance.feed_socket",
     "appliance.node.app_link -> appliance.feed",
-    "appliance.node.broker_runner -> appliance.feed",
-    "appliance.node.broker_runner -> appliance.feed_socket",
-    "appliance.node.probe_channel -> appliance.feed",
+    "appliance.apps.broker_runner -> appliance.feed",
+    "appliance.apps.broker_runner -> appliance.feed_socket",
+    "appliance.apps.probe_channel -> appliance.feed",
 })
 
 # The six exemptions frozen by the player-health module design (r8). Removing a line is the
 # ratchet turning; adding one is a design change, not a lint fix.
 FROZEN_SESSION_EXEMPTIONS = frozenset({
-    "appliance.node.host_runner -> appliance.central_session.*",
+    "appliance.host.host_runner -> appliance.central_session.*",
     "appliance.node.manager_desired -> appliance.central_session.*",
     "appliance.display_host.service -> appliance.central_session.*",  # M2-13
-    "appliance.node.broker_runner -> appliance.central_session.*",  # M2-15
+    "appliance.apps.broker_runner -> appliance.central_session.*",  # M2-15
     "appliance.node.app_link -> appliance.central_session.*",  # M2-15
-    "appliance.node.online_broker -> appliance.central_session.*",  # M2-15
+    "appliance.apps.online_broker -> appliance.central_session.*",  # M2-15
 })
 
 # Each forbidden contract's frozen sources and targets. A contract may gain modules (that only
@@ -55,8 +55,8 @@ FROZEN_FORBIDDEN_CONTRACTS = {
         {"appliance.central_session"},
     ),
     "Shared node kernel knows no context": (
-        {"appliance.clock", "appliance.boot_store", "appliance.feed", "appliance.feed_socket",
-         "appliance.central_session", "appliance.unix_credentials"},
+        {"appliance.kernel.clock", "appliance.kernel.boot_store", "appliance.feed", "appliance.feed_socket",
+         "appliance.central_session", "appliance.kernel.unix_credentials"},
         {"appliance.authority", "appliance.health", "appliance.display_host", "appliance.node"},
     ),
 }

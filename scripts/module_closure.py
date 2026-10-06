@@ -174,7 +174,7 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
     name that is neither first-party, stdlib nor declared, a first-party module that does not
     exist, or any name under `forbidden`. A `forbidden` entry matches a module that equals it or
     sits under it as a dotted prefix ("appliance.apps" matches "appliance.apps.broker";
-    "appliance.node.host" does not match "appliance.node.host_runner"); a dotted entry under a
+    "appliance.host.host" does not match "appliance.host.host_runner"); a dotted entry under a
     first-party package must name an existing module or package under `repo`."""
     first_party, forbidden = frozenset(first_party), frozenset(forbidden)
     for entry in sorted(forbidden):

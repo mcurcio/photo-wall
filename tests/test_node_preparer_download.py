@@ -15,7 +15,9 @@ from uuid import uuid4
 
 import pytest
 
-from appliance.node import boot_stage, bootstrap, preparer
+from appliance.boot import node_bootstrap as bootstrap
+from appliance.kernel import boot_stage
+from appliance.node import preparer
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from uplink import fetch
@@ -250,7 +252,7 @@ def test_killed_attempt_debris_is_removed_before_admission(tmp_path, monkeypatch
 
 
 def test_prepare_stage_clears_cold_staging_before_admission(tmp_path, monkeypatch):
-    from tests.test_node_boot_linux import ROOT, offer
+    from test_node_boot_linux import ROOT, offer
     selected = offer(app=True)
     abi = {name: getattr(selected.base, name) for name in ("base_abi", "graphics_abi", "plugin_abi")}
     monkeypatch.setattr(bootstrap, "materialize_handoff", lambda **_: (ROOT, selected, abi))

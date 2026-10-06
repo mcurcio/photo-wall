@@ -17,13 +17,13 @@ import stat
 from pathlib import Path
 from typing import Protocol
 
+from appliance.apps.lifecycle_storage import primitive
+from appliance.apps.online_broker import refused_permanently
+from appliance.apps.probe import AppRunKey, OwedRelink
 from appliance.central_session.session import NodeSession
-from appliance.clock import boottime_ms
 from appliance.feed import Feed
-from appliance.node.lifecycle_storage import primitive
-from appliance.node.online_broker import refused_permanently
-from appliance.node.probe import AppRunKey, OwedRelink
-from appliance.unix_credentials import receive_credential_packet
+from appliance.kernel.clock import boottime_ms
+from appliance.kernel.unix_credentials import receive_credential_packet
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
     NodeAppLinkChallengeV2,
