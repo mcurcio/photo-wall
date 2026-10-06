@@ -13,6 +13,7 @@ from uuid import UUID
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from test_player_service import close, rig
 
 from contracts.app_process_proof import (
     AppProofChallenge,
@@ -24,7 +25,6 @@ from contracts.app_process_proof import (
 from contracts.player_control import ControlAppliedReceipt, ControlSelection
 from player.identity import load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError, _receive
-from tests.test_player_service import close, rig
 
 BOOT_ID = "12345678-1234-1234-1234-123456789abc"
 DEVICE_ID = "device-" + "b" * 64

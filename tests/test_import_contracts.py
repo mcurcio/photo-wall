@@ -233,7 +233,8 @@ def test_feed_exemptions_only_shrink() -> None:
 
 def test_the_node_kernel_imports_only_the_stdlib_contracts_and_uplink() -> None:
     """An allow-list, not a denylist: a package first imported tomorrow fails here too."""
-    graph = grimp.build_graph(*_importlinter()["root_packages"], include_external_packages=True)
+    graph = grimp.build_graph(*_importlinter()["root_packages"],
+                               include_external_packages=True, cache_dir=None)
     reached = graph.find_upstream_modules(KERNEL, as_package=True)
     foreign = sorted(module for module in reached
                      if module.split(".")[0] not in sys.stdlib_module_names

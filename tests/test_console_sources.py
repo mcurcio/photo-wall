@@ -22,8 +22,9 @@ import re
 import subprocess
 from pathlib import Path
 
+from test_console_flow import _require_node
+
 from central.infra.runtime import COMPLETION_NOT_RECORDED, WORKER_EXITED
-from tests.test_console_flow import _require_node
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 

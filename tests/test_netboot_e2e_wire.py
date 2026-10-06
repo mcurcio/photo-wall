@@ -52,6 +52,7 @@ from types import SimpleNamespace
 
 import psycopg
 import pytest
+import tls_fixture as tls
 import uvicorn
 
 from appliance.bootstrap import read_pi_serial
@@ -83,7 +84,6 @@ from scripts.test_netboot_e2e import (  # reuse tracer helpers
     promote_path,
     release_seed_sql,
 )
-from tests import tls_fixture as tls
 from uplink.causes import Cause, UplinkError
 from uplink.fetch import DirectFetch
 from uplink.finder import find_central

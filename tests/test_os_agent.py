@@ -5,6 +5,7 @@ import json
 import threading
 
 import pytest
+from uplink_fakes import FakeReply, finding
 
 from appliance.app_evidence import AppEvidence, ProcessSample, RunningEvidence
 from appliance.boot_offer import BootOffer, write_handoff
@@ -18,7 +19,6 @@ from appliance.os_agent import (
     read_phase,
     write_phase,
 )
-from tests.uplink_fakes import FakeReply, finding
 from uplink.causes import UplinkError
 
 BOOT = "11111111-2222-3333-4444-555555555555"

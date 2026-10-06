@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from tests.test_console_flow import _require_node
+from test_console_flow import _require_node
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 LINKED = "9f8e7d" + "0" * 58

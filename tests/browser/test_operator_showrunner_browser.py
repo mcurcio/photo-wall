@@ -55,6 +55,7 @@ from operator_harness import (
 )
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
+from public_media import public_photo, publish_photo
 from test_registry import ADMIN, enroll
 
 from central.catalog import CatalogSnapshot
@@ -67,7 +68,6 @@ from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, FrameProfile
 from media.models import RefreshResult, SourceSpec
-from tests.public_media import public_photo, publish_photo
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",

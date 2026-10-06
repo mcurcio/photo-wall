@@ -6,11 +6,11 @@ import dataclasses
 import time
 
 import pytest
+import tls_fixture as tls
+from test_uplink_transport import TRICKLE_DEADLINE, TRICKLE_SLACK, trickle_peer
+from uplink_fakes import FakeReply, FakeTransport, central
 
 from contracts.central_identity import MAX_IDENTITY_BYTES, CentralIdentity, identity_body
-from tests import tls_fixture as tls
-from tests.test_uplink_transport import TRICKLE_DEADLINE, TRICKLE_SLACK, trickle_peer
-from tests.uplink_fakes import FakeReply, FakeTransport, central
 from uplink import locate as locate_module
 from uplink.causes import Cause, UplinkError
 from uplink.locate import LOCATE_DEADLINE, LOCATE_HEADERS, LocatedCentral, locate

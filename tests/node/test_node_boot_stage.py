@@ -448,7 +448,7 @@ def test_a_boot_change_sends_a_new_document_and_an_unchanged_boot_sends_nothing(
 
 
 def test_observation_rows_pass_through_valid_metrics(monkeypatch):
-    from tests.test_node_host_cadence import _runner
+    from test_node_host_cadence import _runner
     clock = [100.0]
     runner, posts, session_for = _runner(monkeypatch, clock)
     runner.sampler.memory_rows = lambda: (("memcg_present", 1, "boolean", "cgroup"),

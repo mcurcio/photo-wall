@@ -8,12 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_app_executor import Service as MutableService
+from test_app_executor import payload
 
 from appliance.app_evidence import AppEvidenceCollector, ProcessSample, SystemdProcessSampler
 from appliance.app_executor import AppExecutor, CapacitySnapshot
 from contracts.player_payload import canonical_json
-from tests.test_app_executor import Service as MutableService
-from tests.test_app_executor import payload
 
 ABI = "sha256:" + "a" * 64
 BOOT = "11111111-2222-3333-4444-555555555555"

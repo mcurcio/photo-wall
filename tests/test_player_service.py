@@ -18,10 +18,12 @@ from pathlib import Path
 
 import httpx
 import pytest
+import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
 from test_executor import binding, layer
+from uplink_fakes import FakeReply, FakeTransport, central, finding
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response as Http11Response
@@ -55,8 +57,6 @@ from player.service import (
     display_serial,
     load_config,
 )
-from tests import tls_fixture as tls
-from tests.uplink_fakes import FakeReply, FakeTransport, central, finding
 from uplink.causes import Cause, UplinkError
 from uplink.finder import find_central
 from uplink.origin import Origin

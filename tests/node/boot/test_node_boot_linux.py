@@ -7,14 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from support.repo import REPO
-
-import appliance.netboot_init as netboot
-from appliance.boot import node_bootstrap as bootstrap
-from appliance.central_post import UnsupportedRoute
-from appliance.node_boot_handoff import node_nonce
-from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_boot import NodeBaseRefV2, NodeBootOfferV2, encode_node_boot_offer
-from tests.test_netboot_init import (
+from test_netboot_init import (
     BODY,
     PROVENANCE,
     RECORD,
@@ -25,8 +18,15 @@ from tests.test_netboot_init import (
     Ops,
     RecordingLog,
 )
-from tests.test_netboot_offer_flow import BOOT_ID, ORIGIN, SHA256, OfferTransport, base_reply
-from tests.uplink_fakes import FakeReply, central
+from test_netboot_offer_flow import BOOT_ID, ORIGIN, SHA256, OfferTransport, base_reply
+from uplink_fakes import FakeReply, central
+
+import appliance.netboot_init as netboot
+from appliance.boot import node_bootstrap as bootstrap
+from appliance.central_post import UnsupportedRoute
+from appliance.node_boot_handoff import node_nonce
+from contracts.app_environment import AppEnvironmentRefV2
+from contracts.node_boot import NodeBaseRefV2, NodeBootOfferV2, encode_node_boot_offer
 
 
 def offer(*, app=False):

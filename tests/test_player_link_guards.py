@@ -15,6 +15,19 @@ from pathlib import Path
 
 import httpx
 import pytest
+import tls_fixture as tls
+from test_player_service import (
+    CMDLINE,
+    LOCATED,
+    NoMdns,
+    _until_steady,
+    close,
+    finder_rig,
+    gateway,
+    rig,
+)
+from test_player_uplink_faults import _BrokenBody
+from uplink_fakes import FakeTransport, central, finding, located
 
 from player.central_link import REQUEST_TIMEOUT, Session
 from player.mdns_discovery import DEFAULT_TIMEOUT as MDNS_TIMEOUT
@@ -30,19 +43,6 @@ from player.service import (
     load_config,
 )
 from player.service import main as player_main
-from tests import tls_fixture as tls
-from tests.test_player_service import (
-    CMDLINE,
-    LOCATED,
-    NoMdns,
-    _until_steady,
-    close,
-    finder_rig,
-    gateway,
-    rig,
-)
-from tests.test_player_uplink_faults import _BrokenBody
-from tests.uplink_fakes import FakeTransport, central, finding, located
 from uplink.causes import Cause, UplinkError
 from uplink.finder import find_central
 from uplink.locate import LOCATE_DEADLINE
