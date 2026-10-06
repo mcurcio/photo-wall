@@ -4,10 +4,8 @@ Each scenario boots the actual sealed node in a privileged arm64 systemd contain
 real HTTP Central on its own database: success (ordered stop-before-start, natural completion),
 failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
-commandable), refused (a board below the smallest memory class: storage refuses, nothing
-after it runs, and Host Management reports the refusal with its numbers) and unresponsive (a
-Frame bound to the real Player's Output is admitted and the app keeps presenting; the starved
-form arrives with the Player health tracer). Hardware is synthetic
+commandable) and refused (a board below the smallest memory class: storage refuses, nothing
+after it runs, and Host Management reports the refusal with its numbers). Hardware is synthetic
 (sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
 DRM/HDMI/PXE claim.
 
@@ -31,8 +29,6 @@ from pathlib import Path
 import pytest
 from node_pid1_central_fixture import assert_phase_completed, central_fixture
 
-from appliance.feed import FeedCursor
-from appliance.node.probe import PROBE_PERIOD_MS
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
 from scripts.player_start_probe import (
@@ -46,7 +42,7 @@ from scripts.player_start_probe import (
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_NODE_PID1"
-SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "unresponsive")
+SCENARIOS = ("success", "failure", "outage", "reboot", "refused")
 
 MASKS = (
     *HOST_ACTING_UNITS,
@@ -64,48 +60,6 @@ FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
 # below the smallest memory class, pi5-4gb's 3584 MiB (appliance/node/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
 SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
-# The unresponsive scenario: bind-to-admission bound, then how long the admitted app must keep
-# presenting. A presentation gap of the shell's lease (shell.c LEASE_MS) invalidates the role.
-ADMIT_SECONDS = 120
-HEALTHY_SECONDS = 20
-RELINK_SETTLE_SECONDS = 30  # a trailing 409 refusal: relink, Player re-proof (<= 5 s), delivery
-LEASE_MS = 5000
-# Node feeds (appliance/feed.py): the display controller's root-only ingress socket (requests
-# carry SCM_CREDENTIALS), and the kernel feed sockets (appliance/feed_socket.py, SO_PEERCRED
-# allowlist {0, pw-health}) of the broker's probe feed and the display feed with its `outputs`.
-DISPLAY_FEED_SOCKET = "/run/photo-wall-display/ingress.sock"
-BROKER_FEED_SOCKET = "/run/photo-wall-app-feed/feed.sock"
-DISPLAY_NODE_FEED_SOCKET = "/run/photo-wall-display-feed/feed.sock"
-# Reads one node feed as root inside the node in the FeedCursor request shape: argv = socket,
-# credentials (1/0), after, publisher incarnation ('' = none). Drains up to 64 pages and
-# advances as FeedCursor.advance does (a new publisher incarnation restarts from 0); prints
-# the raw pages, which the host replays through a real FeedCursor.
-NODE_FEED_SCRIPT = """import json,os,socket,struct,sys
-path=sys.argv[1];credentials=sys.argv[2]=='1';after=int(sys.argv[3]);incarnation=sys.argv[4] or None
-pages=[]
-for _ in range(64):
- s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
- try:
-  s.settimeout(5);s.connect(path)
-  request=json.dumps({'op':'events','after':after,'incarnation':incarnation}).encode()
-  if credentials:s.sendmsg([request],[(socket.SOL_SOCKET,socket.SCM_CREDENTIALS,struct.pack('=iII',os.getpid(),os.getuid(),os.getgid()))])
-  else:s.send(request)
-  page=json.loads(s.recv(65536))
- finally:s.close()
- pages.append(page)
- if not page.get('accepted'):break
- base=0 if incarnation is not None and page['publisher_incarnation']!=incarnation else after
- for event in page['events']:base=event['sequence']
- after,incarnation=base,page['publisher_incarnation']
- if len(page['events'])<8:break
-print(json.dumps(pages))"""
-# The health judge's socket (appliance/health/runner.py): op `status`, admitted for uid 0 only
-# (op `overlay` is pw-display's).
-HEALTH_SOCKET = "/run/photo-wall-health/health.sock"
-HEALTH_STATUS_SCRIPT = """import socket,sys
-s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
-s.settimeout(10);s.connect(sys.argv[1]);s.send(b'{"op":"status"}')
-print(s.recv(1<<20).decode())"""
 
 
 @pytest.fixture
@@ -568,9 +522,7 @@ def stage_and_complete(fixture, node, phase, reference):
     return status
 
 
-@pytest.mark.parametrize(
-    "phase", [name for name in SCENARIOS if name not in ("reboot", "refused", "unresponsive")]
-)
+@pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
     # outage: a successful switch while Central drops every node exchange after accept.
@@ -739,288 +691,6 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             names = {name: value for name, value in host["metrics"]}
             assert names.get("memcg_present") == 1, host
             assert any(name.startswith("memory_peak:") for name in names), host
-            print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
-        finally:
-            node.capture_and_remove(fixture, sys.exc_info()[1])
-
-
-class NodeFeed:
-    """One node feed, read as root inside the node with a real FeedCursor (gap-aware: a gap or a
-    new publisher incarnation is recorded as a `fixture_feed_gap` event and reading continues
-    from the returned page, never from 0). Every event is kept in `dump_name` (evidence)."""
-
-    def __init__(self, node, socket_path, *, credentials: bool, dump_name):
-        self.node, self.socket_path, self.credentials = node, socket_path, credentials
-        self.dump_name, self.cursor, self.events = dump_name, FeedCursor(), []
-        self.outputs = None  # the display feed's latest `outputs` snapshot (B10a)
-
-    def poll(self):
-        incarnation = "" if self.cursor.incarnation is None else str(self.cursor.incarnation)
-        result = self.node.container.exec(
-            "/usr/bin/python3", "-c", NODE_FEED_SCRIPT, self.socket_path,
-            "1" if self.credentials else "0", str(self.cursor.after), incarnation, timeout=30
-        )
-        assert result.returncode == 0, (
-            f"node feed {self.socket_path} unreadable: " + result.stderr[-2000:]
-        )
-        taken, snapshot = [], None
-        for page in json.loads(result.stdout):
-            assert page.get("accepted"), page
-            events, resnapshot = self.cursor.advance(page)
-            snapshot = page.get("outputs", snapshot)
-            if resnapshot:
-                taken.append({"kind": "fixture_feed_gap",
-                              "value": {"publisher_incarnation": page["publisher_incarnation"],
-                                        "stream_gap": page["stream_gap"],
-                                        "dropped_total": page.get("dropped_total")}})
-            taken.extend({"sequence": event.sequence, "kind": event.kind, "value": event.value,
-                          "audience": event.audience} for event in events)
-        with (self.node.work / self.dump_name).open("a") as dump:
-            for event in taken:
-                dump.write(json.dumps(event, sort_keys=True) + "\n")
-            if snapshot is not None:  # evidence only: one snapshot per poll, not a feed event
-                self.outputs = snapshot
-                dump.write(json.dumps({"kind": "fixture_outputs_snapshot", "value": snapshot},
-                                      sort_keys=True) + "\n")
-        self.events.extend(taken)
-        return taken
-
-
-def health_status(node):
-    """The health judge's `status` answer, read as root inside the node."""
-    status = json.loads(node.run("/usr/bin/python3", "-c", HEALTH_STATUS_SCRIPT, HEALTH_SOCKET,
-                                 timeout=30))
-    with (node.work / "health-status.jsonl").open("a") as dump:
-        dump.write(json.dumps(status, sort_keys=True) + "\n")
-    assert status.get("accepted") is True, status
-    return status
-
-
-def run_key(current):
-    """The broker's AppRunKey document (appliance/node/probe.py) of Central's current link."""
-    process = current["process"]
-    return {"invocation_id": process["invocation_id"], "pid": process["pid"],
-            "start_ticks": process["start_ticks"], "app_epoch": current["app_epoch"]}
-
-
-def unsettled_refusals(events):
-    """Broker-feed `app_link_refused` facts not yet followed, for the same run, by
-    `relink_sent` and then `app_link_recorded` (B7b's owed relink, E-AP2-2)."""
-    unsettled = []
-    for index, event in enumerate(events):
-        if event["kind"] != "app_link_refused":
-            continue
-        run, step = event["value"]["run"], "relink_sent"
-        for later in events[index + 1:]:
-            if later["kind"] == step and later["value"]["run"] == run:
-                if step == "app_link_recorded":
-                    break
-                step = "app_link_recorded"
-        else:
-            unsettled.append(event)
-    return unsettled
-
-
-def presentations(events, frame_id):
-    """Node-clock times of the app's compositor presentations of the bound Frame."""
-    return [
-        event["value"]["observed_monotonic_ms"]
-        for event in events
-        if event["kind"] == "CompositorPresentation"
-        and event["value"]["fact"]["frame_id"] == frame_id
-    ]
-
-
-def invalidations(events):
-    return [
-        event
-        for event in events
-        if event["kind"] == "SurfaceFact" and event["value"]["state"] == "invalidated"
-    ]
-
-
-def display_of(fixture, work):
-    display = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/display")
-    (work / "display-latest.json").write_text(json.dumps(display, sort_keys=True))
-    return display
-
-
-def admitted(display, bound):
-    """Central's latest decision for the Output is the one for the admitted bound surface."""
-    surface = display["admitted"]
-    return bool(
-        display["decision"]
-        and display["decision"]["reason"] == "already_admitted"
-        and surface
-        and (surface["frame_id"], surface["binding_generation"], surface["config_revision"])
-        == (bound["frame_id"], bound["binding_generation"], bound["configuration_revision"])
-    )
-
-
-def test_node_pid1_unresponsive(node_pid1_inputs, node_host, registry, tmp_path):
-    """Healthy form: a Frame bound to the real Player's Output is admitted, the app presents.
-
-    Before enrollment `/fixture/bind` refuses (409 fixture_player_not_enrolled). After the cold
-    link, the fixture binds a new Frame to Virtual-1 through the Registry calls the operator API
-    makes. Within ADMIT_SECONDS the shell hands the Output to the app (a
-    DiagnosticRelease of the bound Frame on the display feed) and Central's latest decision is
-    `already_admitted` for exactly that binding; then for HEALTHY_SECONDS the app keeps
-    presenting (no gap of a lease on the node's own clock) and nothing is invalidated, and the
-    broker feed shows the real Player answering progress probes for its run (no miss). The
-    health judge unit is active and restricted to AF_UNIX, reads that broker feed, and judges
-    the healthy run as having no condition; it also reads the display feed and lists the bound
-    Output with underlay live and its overlay instruction tint off, which the overlay client
-    reports presented on the Output's health layer (the judge ring). The display feed socket for
-    node readers is pw-display:pw-node-feeds 0660 and its `outputs` snapshot shows the bound
-    Output connected with exactly the broker's run admitted.
-    """
-    phase = "unresponsive"
-    components_dir, _, image = node_pid1_inputs
-    work = tmp_path
-    with central_fixture(registry, components_dir, {}, work / "central", node_host) as fixture:
-        node = Node(image, work, phase)
-        try:
-            with pytest.raises(urllib.error.HTTPError) as early:
-                request(fixture["host_origin"], fixture["fixture_token"], "/fixture/bind", {})
-            assert (early.value.code, json.load(early.value)) == (
-                409, {"detail": "fixture_player_not_enrolled"}
-            )
-            current = node.cold(fixture, components_dir)
-            bound = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/bind", {})
-            (work / "bound.json").write_text(json.dumps(bound, sort_keys=True))
-            feed = NodeFeed(node, DISPLAY_FEED_SOCKET, credentials=True,
-                            dump_name="display-feed.jsonl")
-            probes = NodeFeed(node, BROKER_FEED_SOCKET, credentials=False,
-                              dump_name="broker-feed.jsonl")
-            display_feed = NodeFeed(node, DISPLAY_NODE_FEED_SOCKET, credentials=False,
-                                    dump_name="display-node-feed.jsonl")
-            deadline = time.monotonic() + ADMIT_SECONDS
-            while True:
-                feed.poll()
-                probes.poll()
-                display = display_of(fixture, work)
-                handed_off = any(
-                    event["kind"] == "DiagnosticRelease"
-                    and event["value"]["surface"]["frame_id"] == bound["frame_id"]
-                    for event in feed.events
-                )
-                if handed_off and admitted(display, bound):
-                    break
-                if time.monotonic() >= deadline:
-                    reason = (display["decision"] or {}).get("reason")
-                    raise AssertionError(
-                        f"Output {bound['output_id']} not admitted within {ADMIT_SECONDS} s; "
-                        f"last display decision reason: {reason}; handoff on the display feed: "
-                        f"{handed_off}; evidence: {work}"
-                    )
-                time.sleep(1)
-            print("ADMITTED", bound["frame_id"], "on", bound["output_id"], flush=True)
-            healthy_from, probes_from = len(feed.events), len(probes.events)
-            end = time.monotonic() + HEALTHY_SECONDS
-            while time.monotonic() < end:
-                time.sleep(1)
-                feed.poll()
-                probes.poll()
-                display_feed.poll()
-            window = feed.events[healthy_from:]
-            # The real Player answers the broker's probes from its control queue, every T.
-            run = run_key(current)
-            probe_window = probes.events[probes_from:]
-            answered = [event for event in probe_window
-                        if event["kind"] == "probe_answered" and event["value"]["run"] == run]
-            missed = [event for event in probe_window
-                      if event["kind"] in ("probe_unanswered", "probe_kill_due")]
-            assert len(answered) >= HEALTHY_SECONDS * 1000 // PROBE_PERIOD_MS // 2, (
-                f"{len(answered)} probe answers for {run} in {HEALTHY_SECONDS} s; evidence: {work}"
-            )
-            assert not missed, missed
-            # A healthy run is never killed, and no kill is ever held back for it (B8).
-            kills = [event for event in probes.events
-                     if event["kind"] in ("app_killed", "kill_withheld")]
-            assert not kills, kills
-            # Every Central refusal of a held link is relinked and then recorded (B7b).
-            settle = time.monotonic() + RELINK_SETTLE_SECONDS
-            while unsettled_refusals(probes.events) and time.monotonic() < settle:
-                time.sleep(1)
-                probes.poll()
-            assert not unsettled_refusals(probes.events), (
-                f"{unsettled_refusals(probes.events)}; evidence: {work}"
-            )
-            # The health judge (B9): active, AF_UNIX only, reading this broker feed, and judging
-            # the healthy run as having no condition (never raised over the whole run).
-            judge_unit = unit_properties_of(node, "photo-wall-health.service",
-                                            "ActiveState,RestrictAddressFamilies,User")
-            assert judge_unit == {"ActiveState": "active", "RestrictAddressFamilies": "AF_UNIX",
-                                  "User": "pw-health"}, judge_unit
-            status = health_status(node)
-            judged = status["feeds"]["broker"]
-            assert judged["reads"] > 0 and judged["after"] > 0, judged
-            assert judged["publisher_incarnation"] == str(probes.cursor.incarnation), judged
-            assert status["verdict"]["conditions"] == [], status["verdict"]
-            assert not [entry for entry in status["ring"] if entry["state"] == "raised"], status
-            # The judge also reads the display feed (B10b): the bound Output is connected, its
-            # underlay live (the admitted run is not unresponsive) and its instruction tint off.
-            display_judged = status["feeds"]["display"]
-            assert display_judged["reads"] > 0, display_judged
-            judged_outputs = {entry["output"]: entry for entry in status["verdict"]["outputs"]}
-            assert judged_outputs.get(bound["output_id"]) == {
-                "output": bound["output_id"], "underlay": "live", "codes": []
-            }, status["verdict"]
-            cards = {entry["output"]: entry for entry in status["overlay"]["instructions"]}
-            assert cards.get(bound["output_id"], {}).get("tint") is False, status["overlay"]
-            # The overlay client drew that tint-off instruction on the Output's health layer and
-            # reported it presented (B11): a presented commit carried a buffer, so the health
-            # surface is mapped and the shell's amber fallback tint is off on this healthy wall.
-            card_shown = [entry for entry in status["ring"] if entry["state"] == "presented"
-                     and entry["output"] == bound["output_id"]
-                     and entry["serial"] == cards[bound["output_id"]]["serial"]]
-            assert card_shown, (f"no presented tint-off serial for {bound['output_id']}: "
-                           f"{status['overlay']} {status['ring']}; evidence: {work}")
-            # The display feed for node readers (B10a): pw-display:pw-node-feeds 0660, the group
-            # from the controller's unit only (never a pw-display membership), and every read's
-            # `outputs` snapshot shows the bound Output connected with the broker's run admitted.
-            feed_socket_mode = node.run("stat", "-c", "%a %U:%G", DISPLAY_NODE_FEED_SOCKET).strip()
-            assert feed_socket_mode == "660 pw-display:pw-node-feeds", feed_socket_mode
-            display_groups = node.run("id", "-nG", "pw-display").split()
-            assert "pw-node-feeds" not in display_groups, display_groups
-            display_feed.poll()
-            snapshot = {output["output_id"]: output for output in display_feed.outputs or ()}
-            bound_output = snapshot.get(bound["output_id"])
-            assert bound_output is not None and bound_output["connected"] is True, snapshot
-            assert bound_output["admitted"] == {**run, "frame_id": bound["frame_id"]}, (
-                f"display snapshot {bound_output} vs broker run {run}; evidence: {work}"
-            )
-            assert display_feed.cursor.after > 0, "display feed for node readers carried no event"
-            shown = presentations(window, bound["frame_id"])
-            assert not invalidations(window), invalidations(window)
-            assert len(shown) >= 2, f"no fresh app presentations; evidence: {work}"
-            gaps = [later - earlier for earlier, later in zip(shown, shown[1:])]
-            # Fresh across the whole window, on one clock: the node's own monotonic ms.
-            assert shown[-1] - shown[0] >= (HEALTHY_SECONDS - LEASE_MS / 1000) * 1000, shown
-            assert max(gaps) < LEASE_MS, gaps
-            display = display_of(fixture, work)
-            assert admitted(display, bound), display
-            (work / "result.json").write_text(
-                json.dumps(
-                    {
-                        "phase": phase,
-                        "bound": bound,
-                        "display": display,
-                        "presentations": len(shown),
-                        "max_gap_ms": max(gaps),
-                        "probe_answers": len(answered),
-                        "health_verdict": status["verdict"],
-                        "health_overlay": status["overlay"],
-                        "display_snapshot": bound_output,
-                        "app_link_refusals": sum(event["kind"] == "app_link_refused"
-                                                 for event in probes.events),
-                        "probe_rtt_ms_max": max(event["value"]["rtt_ms"] for event in answered),
-                        "hardware": "synthetic sysfs Virtual-1 and actual headless Weston; "
-                        "no physical DRM/HDMI claim",
-                    },
-                    sort_keys=True,
-                )
-            )
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])

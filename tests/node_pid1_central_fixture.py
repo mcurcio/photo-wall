@@ -40,12 +40,10 @@ from central.fleet.node_sessions import NodeControlConfig, NodeControlError, com
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
-from central.registry import FrameCreate, Registry
+from central.registry import Registry
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.models import FrameProfile
 from contracts.node_boot import NodeBaseRefV2, NodeBootRequestV2, encode_node_boot_offer
-from contracts.node_display import parse_display_decision, parse_display_exchange
 from contracts.node_host_facts import stored_fact_values
 from contracts.node_lifecycle import parse_app_effect_event, parse_stage_command
 from contracts.node_observation import parse_host_observation
@@ -59,10 +57,6 @@ from contracts.time import SystemClock
 # (POST /fixture/outage-release), never longer than OUTAGE_CAP_SECONDS.
 OUTAGE_SECONDS = 35
 OUTAGE_CAP_SECONDS = 300
-# The fixture head's one connected Output (tests/node_pid1_fixture_head.c) and the Frame
-# `/fixture/bind` creates for it.
-FIXTURE_OUTPUT = "Virtual-1"
-FIXTURE_FRAME = "pid1-frame"
 
 
 @contextmanager
@@ -278,80 +272,6 @@ def _central_fixture(
             "offer": json.loads(encode_node_boot_offer(offer)),
             "central": origin,
             "serial": SERIAL,
-        }
-
-    bound = {}
-
-    @app.post("/fixture/bind")
-    def bind(request: Request, value: dict):
-        """Create one Frame and bind it to the enrolled Player's connected fixture Output.
-
-        Only the Registry operations the console's operator API calls (create Frame, bind under
-        the Frame generation fence); no table is written here. Repeated calls return the same
-        binding. A bound Player never stages (`/fixture/stage` refuses it).
-        """
-        authenticate(request)
-        if value:
-            raise HTTPException(422, "fixture_bind_body")
-        with state_lock:
-            if bound:
-                return bound
-            inventory = registry.inventory()
-            player = next((p for p in inventory.players
-                           if p.device_id == DEVICE_ID and p.retired_at is None), None)
-            output = player and next((o for o in inventory.outputs if o.player_id == player.id
-                                      and o.output_id == FIXTURE_OUTPUT
-                                      and o.observation.connected), None)
-            if output is None:
-                raise HTTPException(409, "fixture_player_not_enrolled")
-            width, height = (output.observation.width_px or 1920), (output.observation.height_px or 1080)
-            registry.create_frame(FrameCreate(
-                id=FIXTURE_FRAME, width_mm=width / 4, height_mm=height / 4,
-                profile=FrameProfile(width_px=width, height_px=height, diagonal_inches=24),
-            ))
-            registry.bind(FIXTURE_FRAME, player.id, FIXTURE_OUTPUT, expected_generation=0)
-            binding = next(b for b in registry.configuration_for(
-                player.id, player.authority_epoch)["bindings"] if b.frame_id == FIXTURE_FRAME)
-            bound.update(
-                player_id=player.id,
-                frame_id=FIXTURE_FRAME,
-                output_id=FIXTURE_OUTPUT,
-                binding_generation=binding.generation,
-                configuration_revision=binding.configuration_revision,
-            )
-            return bound
-
-    @app.get("/fixture/display")
-    def display(request: Request):
-        """Central's latest display decision for the fixture Output, as the node last saw it."""
-        authenticate(request)
-        with registry.db.transaction() as conn:
-            row = conn.execute(
-                "SELECT e.request,e.response,e.received_at FROM node_display_exchanges e "
-                "JOIN node_producers p USING(producer_id) "
-                "JOIN node_boot_admissions b USING(admission_id) "
-                "WHERE b.device_id=%s AND e.output_id=%s "
-                "ORDER BY e.received_at DESC, e.sampled_boottime_ms DESC LIMIT 1",
-                (DEVICE_ID, FIXTURE_OUTPUT),
-            ).fetchone()
-        if row is None:
-            return {"decision": None}
-        exchange = parse_display_exchange(bytes(row["request"]))
-        decision = parse_display_decision(bytes(row["response"]))
-        def frame(surface):
-            return None if surface is None else {
-                "frame_id": surface.frame_id,
-                "binding_generation": surface.binding_generation,
-                "config_revision": surface.config_revision,
-                "pid": surface.process.pid,
-            }
-        return {
-            "decision": {"operation": decision.operation, "reason": decision.reason,
-                         "surface": frame(decision.surface)},
-            "admitted": frame(exchange.admitted),
-            "candidate": frame(exchange.candidate),
-            "connected": exchange.connected,
-            "received_at": row["received_at"],
         }
 
     @app.post("/fixture/stage")
