@@ -23,8 +23,8 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
-from appliance.node.capacity import admit_preparation, memory_values
-from appliance.node.environment import stage_archive
+from appliance.apps.environment import stage_archive
+from appliance.kernel.capacity import admit_preparation, memory_values
 from contracts.app_environment import AppEnvironmentRefV2
 from uplink.causes import Cause, UplinkError
 from uplink.fetch import STATUS_TIMEOUT, Refused, stream

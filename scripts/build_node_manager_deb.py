@@ -12,8 +12,8 @@ from scripts.debian_packages import packages
 from scripts.module_closure import ClosurePolicy, closure_for, stage_application
 
 POLICY = ClosurePolicy("node-manager", ("appliance.node.manager_runner",),
-                       ("player", "central", "media", "gi", "appliance.node.host",
-                        "appliance.node.broker", "appliance.node.process_linux"), MappingProxyType({}))
+                       ("player", "central", "media", "gi", "appliance.host", "appliance.apps.broker",
+                        "appliance.apps.broker_runner", "appliance.apps.process_linux"), MappingProxyType({}))
 
 
 def sources(tree: Path) -> set[str]:
@@ -24,8 +24,6 @@ def sources(tree: Path) -> set[str]:
 def stage_tree(tree: Path, destination: Path) -> str:
     destination.mkdir(parents=True)
     closure = closure_for(POLICY, repo=tree)
-    if any(module.startswith(("appliance.node.host", "appliance.node.broker", "appliance.node.process_linux")) for module in closure.modules):
-        raise ValueError("manager_effect_import_forbidden")
     stage_application(closure, POLICY, repo=tree, into=destination / "usr/lib/photo-wall-node-manager")
     entry = destination / "usr/lib/photo-wall-node-manager/entry"
     entry.write_text('#!/bin/sh\nexec /usr/bin/python3 -I -B /usr/lib/photo-wall-node-manager\n')

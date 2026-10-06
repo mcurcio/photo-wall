@@ -7,11 +7,7 @@ import json
 import time
 
 import pytest
-
-import appliance.netboot_init as netboot
-from appliance.boot_offer import read_handoff
-from appliance.netboot_init import hand_over_resolver as original_hand_over_resolver
-from tests.test_netboot_init import (
+from test_netboot_init import (
     BODY,
     PROVENANCE,
     RECORD,
@@ -22,7 +18,11 @@ from tests.test_netboot_init import (
     Ops,
     RecordingLog,
 )
-from tests.uplink_fakes import FakeReply, central
+from uplink_fakes import FakeReply, central
+
+import appliance.netboot_init as netboot
+from appliance.boot_offer import read_handoff
+from appliance.netboot_init import hand_over_resolver as original_hand_over_resolver
 from uplink.causes import UplinkError
 from uplink.origin import Origin
 from uplink.transport import HOP_TIMEOUT

@@ -102,6 +102,23 @@ def test_a_forbidden_package_not_reached_is_fine(tmp_path):
     assert closure_of(tmp_path, forbidden=("pkg_d",)).modules[0] == "pkg_a"
 
 
+def test_a_dotted_forbidden_entry_catches_a_two_hop_chain(tmp_path):
+    with pytest.raises(ClosureError,
+                       match="pkg_b.helper imports pkg_d.target: pkg_d.target is forbidden here"):
+        closure_of(tmp_path, {"pkg_b/helper.py": "import pkg_d.target\n", "pkg_d/target.py": ""},
+                   forbidden=("pkg_d.target",))
+
+
+def test_a_dotted_forbidden_entry_does_not_match_a_sibling_sharing_its_prefix(tmp_path):
+    closure = closure_of(tmp_path, {"pkg_b/help.py": ""}, forbidden=("pkg_b.help",))
+    assert "pkg_b.helper" in closure.modules
+
+
+def test_a_dotted_forbidden_entry_naming_no_module_is_refused(tmp_path):
+    with pytest.raises(ClosureError, match="forbidden entry pkg_c.absent names no module under"):
+        closure_of(tmp_path, forbidden=("pkg_c.absent",))
+
+
 def fake_stdlib(tmp_path: Path, monkeypatch) -> None:
     """A directory searched before the real stdlib: `colorsys` (a real stdlib name) whose own
     code imports `_pw_not_stdlib`, a module that is neither first-party nor stdlib -- the shape

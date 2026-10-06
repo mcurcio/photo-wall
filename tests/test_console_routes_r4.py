@@ -41,8 +41,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-from tests.test_console_flow import _require_node
+from test_console_flow import _require_node
 
 CONSOLE = Path(__file__).parents[1] / "central/console"
 SRC = CONSOLE / "src"

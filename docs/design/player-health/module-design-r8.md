@@ -1,5 +1,7 @@
 # Player base layer: module design and delivery slices (on r8)
 
+**Superseded** wherever Central is assumed in charge: see [0016](../../decisions/0016-central-and-node-relationship.md) and the node redesign ([0017](../../decisions/0017-node-redesign-r3.md)). Paths inside are historical: the Node modules moved to `appliance/{kernel,host,boot,apps}/` in E1.
+
 **Layer: module.** Boundaries, contracts (takes / gives / never), data flow, state ownership, wire growth, enforcement, slice plan. Binding frame: `player-shape-final.md` r8 (owner-accepted 2026-10-04). Values and per-slice signatures live in each bead's frozen page (run brief `.claude/runs/player-health-m1.md` for M1). Grounded at `origin/main` 860465c. Supersedes `player-module-design.md` (pre-r6).
 
 ## 1. Module map

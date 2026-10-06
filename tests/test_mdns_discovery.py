@@ -170,7 +170,8 @@ def test_an_advertisement_that_is_no_central_root_is_none(info):
 def test_a_failing_browse_reaches_find_central_as_an_uplink_error(monkeypatch):
     """find_central's contract ("raises only UplinkError") holds for the real mDNS provider:
     a browse that cannot open its socket is named, not leaked as OSError."""
-    from tests.uplink_fakes import FakeTransport
+    from uplink_fakes import FakeTransport
+
     from uplink.causes import Cause, UplinkError
     from uplink.finder import find_central
 
@@ -186,7 +187,8 @@ def test_a_failing_browse_reaches_find_central_as_an_uplink_error(monkeypatch):
 
 
 def _find_with(discovery: MdnsCentralDiscovery):
-    from tests.uplink_fakes import FakeTransport
+    from uplink_fakes import FakeTransport
+
     from uplink.finder import find_central
 
     return asyncio.run(find_central(PROOF, transport=FakeTransport({}), discovery=discovery))

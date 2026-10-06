@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+from test_app_executor import Service, payload
 
 from appliance.app_executor import (
     STAGING_ALLOWANCE_BYTES,
@@ -13,7 +14,6 @@ from appliance.app_executor import (
 from appliance.app_payload import verify_root
 from appliance.online_activation import OnlineArtifactRef, OnlineAttempt
 from appliance.process_identity import ProcessSample
-from tests.test_app_executor import Service, payload
 
 ABI = "sha256:" + "a" * 64
 PROCESS = ProcessSample(123, 456, "d" * 32)

@@ -7,6 +7,7 @@ import threading
 from queue import Empty, Queue
 
 import pytest
+from test_player_service import close, rig
 
 from contracts.node_app_link import (
     encode_node_probe,
@@ -17,7 +18,6 @@ from contracts.node_app_link import (
 from contracts.player_control import ControlAppliedReceipt
 from player.probe_responder import RETRY_DELAYS, ProbeResponder
 from player.service import GLibDispatcher, ServiceError
-from tests.test_player_service import close, rig
 
 NONCES = [format(index, "x") * 64 for index in range(1, 6)]
 BOOT_ID = "12345678-1234-1234-1234-123456789abc"

@@ -91,8 +91,8 @@ def probe(image: str, components: Path, work: Path) -> None:
         stage = """import sys,json
 from pathlib import Path
 sys.path.insert(0,'/usr/lib/photo-wall-node-bootstrap')
-from appliance.node.storage_mount import mount_storage
-from appliance.node.environment import stage_archive
+from appliance.boot.storage_mount import mount_storage
+from appliance.apps.environment import stage_archive
 from contracts.app_environment import AppEnvironmentRefV2
 installed={}
 for path in ('/usr/lib/photo-wall-node-base/abi.json','/usr/lib/photo-wall-display/abi.json'):

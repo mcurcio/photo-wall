@@ -5,9 +5,9 @@ import asyncio
 import threading
 
 import pytest
+from uplink_fakes import FakeReply, FakeTransport, central
 
 from contracts.central_identity import LOCATE_PATH
-from tests.uplink_fakes import FakeReply, FakeTransport, central
 from uplink.causes import Cause, UplinkError
 from uplink.finder import DiscoveryError, Found, choose_root, find_central
 from uplink.locate import LocatedCentral

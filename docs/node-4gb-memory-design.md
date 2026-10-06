@@ -15,7 +15,7 @@ This document covers three parts:
 Related: [requirements, supported Player hardware](requirements.md), [Player node domain
 model](player-node-domain-model.md), [console DDD §62](operator-console-ddd.md), [runbook](runbook.md).
 
-Path note: `appliance/node/bootstrap.py` is the node's post-switch_root bootstrap. `appliance/bootstrap.py` is the initramfs stage-1 library. Every reference below names the full path.
+Path note: `appliance/boot/node_bootstrap.py` is the node's post-switch_root bootstrap. `appliance/bootstrap.py` is the initramfs stage-1 library. Every reference below names the full path.
 
 ## 1. Today
 
@@ -35,12 +35,12 @@ flowchart TD
 ```
 
 Evidence for the diagram:
-- `appliance/node/capacity.py:20-23` refuses below 7 GiB.
-- `appliance/node/storage_mount.py:10-11` calls it first.
+- `appliance/kernel/capacity.py:20-23` refuses below 7 GiB.
+- `appliance/boot/storage_mount.py:10-11` calls it first.
 - A probe of the v0.15.0 module: a 3.95 GiB total raises.
-- The broker crash comes from the uncaught `cold_start` at `appliance/node/broker_runner.py:89`.
+- The broker crash comes from the uncaught `cold_start` at `appliance/apps/broker_runner.py:89`.
 - The supervisor parks at `appliance/node/manager.py:95-96`.
-- HostCore watches five named units at `appliance/node/host_linux.py:184-207`.
+- HostCore watches five named units at `appliance/host/host_linux.py:184-207`.
 - The console catalog at `central/console/src/hostHealth.js:77-110` has no unit item.
 
 ### Step 0 finding: the memory controller was off on every Pi (fixed in T1)
@@ -101,7 +101,7 @@ The Pi 5 runs 16 KiB pages.
 | Shape | `HostFactsV2` gains one optional `boot` field: stages, faults, required/room, failed units. Metrics carry only numbers: measurements, OOM counts, `metrics_dropped` | Fault tokens and unit names are encoded into metric names (`boot_fault_<stage>:<token>`, `failed_unit:<name>`) |
 | Fit | Facts are short text, reported on change; that is the right cadence and shape for stage state. Required and room travel in the same document as the refusal, so they cannot disagree | A categorical value hides in a name. Uses 60 of 64 rows. Names need collision-proof stripping |
 | Central cost | No route, table or migration: `node_host_facts.payload` is a blob, and G12 serves it through `stored_fact_values` (`central/fleet/node_observations.py:236-257`). One tolerant reader for `boot` | None |
-| Skew cost | Ingest is strict (`contracts/node_host_facts.py:112`). An older Central refuses the new document, and the node drops it until a value changes (`appliance/node/host_runner.py` §64 machine). **Central must be deployed first**, which is the normal flow | None |
+| Skew cost | Ingest is strict (`contracts/node_host_facts.py:112`). An older Central refuses the new document, and the node drops it until a value changes (`appliance/host/host_runner.py` §64 machine). **Central must be deployed first**, which is the normal flow | None |
 | Row budget | 39 − 15 retired + 11 new = 35 of 64 | 60 of 64 |
 
 **Chosen: F.** It costs a contract field and Central-first deploy ordering. In return it removes name encoding and leaves 29 rows of headroom.
@@ -133,12 +133,12 @@ The 15 per-unit rows (5 units × known/active/failed) are retired:
 |---|---|---|
 | `capacity.DeviceClass(name: str, min_total_bytes: int, store_bytes: int)` | frozen; `0 < store_bytes < min_total_bytes` | `ValueError("device_class_invalid")` at import |
 | `capacity.CLASSES` | `(DeviceClass("pi5-4gb", 3584 MiB, 2560 MiB), DeviceClass("pi5-8gb", 7168 MiB, 3840 MiB))`, ascending. Interim values, replaced at C | — |
-| `capacity.PREPARATION_PROCESS_BYTES = 256 MiB`; `PREPARATION_SLICE_BYTES = max(store_bytes) + PREPARATION_PROCESS_BYTES` (= 4096 MiB) | A test asserts `photowallpreparation.slice` `MemoryMax=` equals it. The duplicate `MemoryMax=4G` lines at `appliance/node/manager_launcher.py:64` and `appliance/node/import_worker.py:63` are deleted (they inherit the slice) | — |
+| `capacity.PREPARATION_PROCESS_BYTES = 256 MiB`; `PREPARATION_SLICE_BYTES = max(store_bytes) + PREPARATION_PROCESS_BYTES` (= 4096 MiB) | A test asserts `photowallpreparation.slice` `MemoryMax=` equals it. The duplicate `MemoryMax=4G` lines at `appliance/node/manager_launcher.py:64` and `appliance/apps/import_worker.py:63` are deleted (they inherit the slice) | — |
 | `capacity.memory_total(path=/proc/meminfo) -> int` | — | `ValueError("meminfo_invalid")` |
 | `capacity.memory_controller_present(path=/sys/fs/cgroup/cgroup.controllers) -> bool` | — | `OSError` → False |
 | `capacity.device_class(total: int) -> DeviceClass` | The largest class with `min_total_bytes ≤ total` | `StorageShort(CLASSES[0].min_total_bytes, total, "node_memory_class")` |
 | `capacity.StorageShort(required: int, room: int, fault: str = "node_storage_capacity")` | Still a `ValueError`; message = fault | — |
-| `admit_cold`, `preparation_room`, `admit_preparation`, `appliance/node/root_import.py` check | Signatures unchanged. `storage_budget(total, available)` is replaced by `device_class(total).store_bytes`. `admit_cold` raises `StorageShort(retained_peak, store_bytes)` or `StorageShort(incremental, min(free, available − EMERGENCY))`. **Admission still reads MemAvailable** (the tar era). Removed: `MIN_MEMORY`, `RESERVE`, `MAX_STORE`, `storage_budget` | `StorageShort` |
+| `admit_cold`, `preparation_room`, `admit_preparation`, `appliance/apps/root_import.py` check | Signatures unchanged. `storage_budget(total, available)` is replaced by `device_class(total).store_bytes`. `admit_cold` raises `StorageShort(retained_peak, store_bytes)` or `StorageShort(incremental, min(free, available − EMERGENCY))`. **Admission still reads MemAvailable** (the tar era). Removed: `MIN_MEMORY`, `RESERVE`, `MAX_STORE`, `storage_budget` | `StorageShort` |
 | `storage_mount.mount_storage() -> None` | Order: read memcg (an absent controller is logged and **reported only**, never refused: ruling E-FX2-1), then class, then mount `size=store_bytes`, then require `0 < f_blocks × f_frsize ≤ store_bytes` | `StorageShort`; `ValueError("node_storage_mount_budget")` |
 | `scripts/node_release_artifacts.py:60` | Appends `photowall.node=v2 cgroup_enable=memory`. The checks at `:73` and `:141` require each token exactly once | `ValueError("node_bundle_flag_missing")` |
 | Units | `photo-wall-node-prepare.service`: + `Requires=photo-wall-node-handoff.service`. `photo-wall-app-broker.service` and `photo-wall-manager-supervisor.service`: + `Requires=photo-wall-node-prepare.service`. Broker, manager-supervisor, display and display-controller: `StartLimitIntervalSec=10min`, `StartLimitBurst=10`, **no** `StartLimitAction` (R8; prior art `photo-wall-provision.service:15-17`). `OOMScoreAdjust`: app unit `+500` (`app_unit_properties`), App Manager unit `+300`, HostCore `-900`, the four base services `-500` | — |
@@ -163,12 +163,12 @@ Central (`central/fleet/node_observations.py`): G12 serves `facts.boot` through 
 
 | Surface | Contract | Errors |
 |---|---|---|
-| `appliance/node/boot_stage.DIRECTORY = /run/photo-wall-boot-stage` | Created `0755 root` by a tmpfiles.d line in node-base.deb. It is **not** under `/run/photo-wall-node` (0700), so the display controller (A5) can read it. Added to `ReadWritePaths=` of the handoff and prepare units | — |
+| `appliance/kernel/boot_stage.DIRECTORY = /run/photo-wall-boot-stage` | Created `0755 root` by a tmpfiles.d line in node-base.deb. It is **not** under `/run/photo-wall-node` (0700), so the display controller (A5) can read it. Added to `ReadWritePaths=` of the handoff and prepare units | — |
 | `fault_token(error: BaseException) -> str` | `StorageShort` gives `.fault`. A `ValueError` whose message passes `token(·, 64)` gives the message. An `OSError` with an errno gives `"os:" + errno.errorcode[errno]`. An `OSError` with errno None (for example `http.client.RemoteDisconnected`) gives `"os:" + type(error).__name__[:60]`. Anything else gives `"unexpected:" + type name[:52]` | never raises |
 | `write_stage(stage: BootStageV2, *, directory=DIRECTORY) -> None` | Atomic `<stage>.json`, 0644 | `OSError` |
 | `run_stage(stage: str, action: Callable[[], None]) -> None` | Writes `running`, runs `action`, then writes `done`, `refused` (`StorageShort`) or `failed`, and re-raises. **Every write is best-effort:** a write `OSError` is logged once and never changes the stage's outcome | re-raises `action`'s error only |
 | `read_boot_report(*, directory=DIRECTORY, units: Callable[[], tuple[tuple[str, ...], int] \| None]) -> BootReportV2 \| None` | Missing stage files are omitted, and an invalid file is omitted. A record is read only as a regular file (`O_NOFOLLOW \| O_NONBLOCK`, `fstat`), at most `MAX_STAGE_BYTES + 1` bytes; a symlink, FIFO or oversized file is not readable. `units()` returns the failed photo-wall units and the overflow count, or None (not read); a failing `units()` is not read. None only if both are unreadable | never raises |
-| `appliance/node/bootstrap.main()` | Each mode runs inside `run_stage(mode, …)`. `materialize_handoff` writes `host.json` **directly after the boot-id check** (`appliance/node/bootstrap.py:33-34`), before the base-marker and ABI checks, so marker and ABI failures are reported. Failures before the boot-id check are **not** reported: there is no current offer to report under, so they show as host silence (claim withdrawn) | unchanged codes |
+| `appliance/boot/node_bootstrap.main()` | Each mode runs inside `run_stage(mode, …)`. `materialize_handoff` writes `host.json` **directly after the boot-id check** (`appliance/boot/node_bootstrap.py:33-34`), before the base-marker and ABI checks, so marker and ABI failures are reported. Failures before the boot-id check are **not** reported: there is no current offer to report under, so they show as host silence (claim withdrawn) | unchanged codes |
 | `LinuxHostSampler.failed_units() -> tuple[tuple[str, ...], int]` | One call: `systemctl list-units --state=failed --plain --no-legend 'photo-wall-*'` (timeout 0.25 s, output ≤ 4096 bytes). `HostRunner` keeps the last successful reading for the process and reuses it when a read fails; None until one succeeds (ruling E-T3-2) | `ValueError("failed_units_unreadable")` |
 | `LinuxHostSampler.memory_rows() -> tuple` | `memcg_present` (from `cgroup.controllers`); `cma_total`/`cma_free` (from meminfo); `memory_peak:<cgroup>` (`memory.peak` of each slice and of the display service, only when memcg is present); `oom_kill:<slice>` (`memory.events`) | Rows are omitted on read errors |
 | `LinuxHostSampler.supervision()` | The 15 unit rows are deleted; the manager summary rows stay | — |
@@ -217,7 +217,7 @@ flowchart LR
   T5 --> T6
 ```
 
-`contracts` imports nothing new. `appliance.node.boot_stage` imports `contracts.node_host_facts` and `appliance.node.capacity` only.
+`contracts` imports nothing new. `appliance.kernel.boot_stage` imports `contracts.node_host_facts` and `appliance.kernel.capacity` only.
 
 ### 4.5 Tracer proof (all observed through Central)
 
@@ -313,9 +313,9 @@ Where revision 1's ~640 MiB came from. It is an **image-era number, not a tar-er
 | minus preparation (store 1024 + process 256) | − 1280 |
 | **= app line** | **640** |
 
-The 1024 MiB store holds the old app image 288, the manager 62, the downloaded new image 288 and **the base's import copy** 288, which is 926 MiB. The import copy exists because the base re-hashes the App Manager's download into a root-owned file (today's tar-era boundary, `appliance/node/root_import.py`). A staged image has no extra page-cache cost: it *is* tmpfs pages, charged to the preparation slice. The running image's decompressed page cache is clean, reclaimable and inside the app line.
+The 1024 MiB store holds the old app image 288, the manager 62, the downloaded new image 288 and **the base's import copy** 288, which is 926 MiB. The import copy exists because the base re-hashes the App Manager's download into a root-owned file (today's tar-era boundary, `appliance/apps/root_import.py`). A staged image has no extra page-cache cost: it *is* tmpfs pages, charged to the preparation slice. The running image's decompressed page cache is clean, reclaimable and inside the app line.
 
-What the Player needs (estimates; node config: cache 64 MiB per `appliance/node/bootstrap.py:65`, `texture_budget` 512 MiB and `decoder_limit` 4 per `player/service.py:126-127`):
+What the Player needs (estimates; node config: cache 64 MiB per `appliance/boot/node_bootstrap.py:65`, `texture_budget` 512 MiB and `decoder_limit` 4 per `player/service.py:126-127`):
 
 | Part | MiB |
 |---|---|
@@ -372,7 +372,7 @@ Deferred: A5 (crash screen and app status); the envelope gate; Shape C; deriving
 
 ## 10. Contradictions found (cumulative)
 
-1. The comment at `appliance/node/capacity.py:27` says tar bytes bound tmpfs pages. At 16 KiB pages that is false (+251 MiB).
+1. The comment at `appliance/kernel/capacity.py:27` says tar bytes bound tmpfs pages. At 16 KiB pages that is false (+251 MiB).
 2. Caps are duplicated: the 4G preparation cap appears 3× in code and once in a slice file, and the 2G app cap appears 2×.
 3. `preparation_room`'s comment says the reserve is applied once, but every call recomputes `storage_budget`.
 4. Docs assume an "8 GiB appliance", against R6.

@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from uplink_fakes import FakeReply, FakeTransport, central, finding, located
 
 import uplink.watchdog
 from appliance import provision
@@ -43,7 +44,6 @@ from appliance.provision import (
 from contracts.central_identity import LOCATE_PATH
 from contracts.clock_record import ClockRecord, ClockState
 from player.service import load_config
-from tests.uplink_fakes import FakeReply, FakeTransport, central, finding, located
 from uplink.causes import Cause, UplinkError
 from uplink.diagnosis import failure_text
 from uplink.fetch import DirectFetch

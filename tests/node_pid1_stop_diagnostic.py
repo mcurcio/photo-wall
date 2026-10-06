@@ -8,8 +8,8 @@ import threading
 from pathlib import Path
 
 sys.path.insert(0, "/usr/lib/photo-wall-app-broker")
-from appliance.node import process_linux
-from appliance.node.broker_runner import main
+from appliance.apps import process_linux
+from appliance.apps.broker_runner import main
 
 local = threading.local()
 original_show = process_linux.systemctl_show

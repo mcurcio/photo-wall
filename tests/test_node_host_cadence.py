@@ -10,8 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-from appliance.node.host_linux import LinuxHostSampler
-from appliance.node.host_runner import HostRunner
+from appliance.host.host_linux import LinuxHostSampler
+from appliance.host.host_runner import HostRunner
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
 from central.fleet.node_sessions import OBSERVATION_DAILY_CAP
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS, parse_host_observation
@@ -34,7 +34,7 @@ def _rows(sampler):
 
 
 def test_a_thermal_zone_reading_yields_soc_temperature_in_celsius(tmp_path, monkeypatch):
-    monkeypatch.setattr("appliance.node.host_linux.boottime_ms", lambda: 5000)
+    monkeypatch.setattr("appliance.host.host_linux.boottime_ms", lambda: 5000)
     sys_root = tmp_path / "sys"
     zone = sys_root / "class/thermal/thermal_zone0"
     zone.mkdir(parents=True)
@@ -44,7 +44,7 @@ def test_a_thermal_zone_reading_yields_soc_temperature_in_celsius(tmp_path, monk
 
 
 def test_no_readable_thermal_zone_sends_no_temperature_row(tmp_path, monkeypatch):
-    monkeypatch.setattr("appliance.node.host_linux.boottime_ms", lambda: 5000)
+    monkeypatch.setattr("appliance.host.host_linux.boottime_ms", lambda: 5000)
     proc = _proc(tmp_path)
     assert "soc_temperature" not in _rows(LinuxHostSampler(proc, tmp_path, tmp_path / "no-sys"))
     zone = tmp_path / "sys/class/thermal/thermal_zone0"
@@ -89,7 +89,7 @@ def _runner(monkeypatch, clock):
                                          ensure=lambda: object(), request=request)
 
     runner.establish_session = lambda: True
-    monkeypatch.setattr("appliance.node.host_runner.boottime_ms", lambda: int(clock[0] * 1000))
+    monkeypatch.setattr("appliance.host.host_runner.boottime_ms", lambda: int(clock[0] * 1000))
     return runner, posts, session_for
 
 

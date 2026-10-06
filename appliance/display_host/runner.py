@@ -20,7 +20,7 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
-from appliance.unix_credentials import receive_credential_packet
+from appliance.kernel.unix_credentials import receive_credential_packet
 
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 

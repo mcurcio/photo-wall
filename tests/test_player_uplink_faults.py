@@ -9,18 +9,18 @@ import logging
 
 import httpx
 import pytest
+import tls_fixture as tls
 from fastapi import FastAPI
+from test_player_service import Server, _until_steady, boot_context, close, immediate
+from test_uplink_diagnosis import RECORD
+from test_uplink_transport import closed_port
+from uplink_fakes import finding
 
 from contracts.time import ManualClock
 from player import central_link
 from player.identity import load_identity
 from player.rendering import RecordingRenderer
 from player.service import PlayerConfig, PlayerService
-from tests import tls_fixture as tls
-from tests.test_player_service import Server, _until_steady, boot_context, close, immediate
-from tests.test_uplink_diagnosis import RECORD
-from tests.test_uplink_transport import closed_port
-from tests.uplink_fakes import finding
 from uplink.trust import Trust
 
 

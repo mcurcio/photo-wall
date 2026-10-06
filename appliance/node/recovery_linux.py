@@ -8,10 +8,10 @@ import subprocess
 from pathlib import Path
 from uuid import UUID
 
-from appliance.clock import boottime_ms
+from appliance.kernel.clock import boottime_ms
+from appliance.kernel.unix_credentials import receive_credential_packet
 from appliance.node.recovery import RecoveryObligation, canonical
 from appliance.process_identity import read_proc_start_ticks
-from appliance.unix_credentials import receive_credential_packet
 from contracts.strict_json import loads_object
 
 SOCKET = Path("/run/photo-wall-recovery/control.sock")

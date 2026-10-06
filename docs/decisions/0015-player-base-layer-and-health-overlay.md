@@ -2,6 +2,8 @@
 
 **Date:** 2026-10-04 · **Layer:** system design (bounded contexts, dependency direction, supervision, health model, technology choices) · **Status:** Owner-accepted at this layer on 2026-10-04 after eight revisions (r8): "It looks reasonable, and if it has the right domain breakdown then future iteration will be simpler." Nothing here is built yet. The requirements are the owner's hard rules; every design choice below stays revisable.
 
+**Superseded** wherever Central is assumed in charge: see [0016](0016-central-and-node-relationship.md) and the node redesign ([0017](0017-node-redesign-r3.md)). The sections marked below are replaced by 0017's current choices.
+
 Briefing reviewed by the owner (private to the owner): <https://claude.ai/artifact/V39dLhUzAwhyMhafaDAx2v>
 
 ## Problem
@@ -9,6 +11,8 @@ Briefing reviewed by the owner (private to the owner): <https://claude.ai/artifa
 On 2026-10-04, after display handoff, a Player's readiness stopped and the console showed `player-silent`. The process stayed alive, kept re-tagging its last frame, and so kept its display lease and the Output; host CPU and SoC temperature climbed; nothing on the node or in Central acted. The [Player architecture](../player-architecture.md#observed-gaps) records why: no app restart or watchdog (G1, G2), a control loop that starves while it still paints (G3, G4, G8), no rule acting on host facts or `player-silent` (G5, G6), nothing measuring app progress (G9), and a base diagnostic page withdrawn at handoff. Two processes also mix Central I/O with local actuation: the display controller's Central worker sits beside the only shell connection, and the broker makes blocking Central calls between app-link proofs (N8).
 
 ## Requirements (hard rules)
+
+**Superseded by [0017](0017-node-redesign-r3.md) in two rows:** R2's "the node cannot reach Central" overlay (now R2′, a console fact) and R10's full-screen overlay (now R12, per Frame). The other rows stand.
 
 | ID | Requirement | Source |
 |---|---|---|
@@ -27,6 +31,8 @@ On 2026-10-04, after display handoff, a Player's readiness stopped and the conso
 Working definitions the owner adopted: **unhealthy** is the node's own judgement that a named fault held past its window; Central may add a fault, never clear a locally seen one. **App unresponsive** is no progress through the real work path within N s; presented frames are not progress. **Cannot reach Central** is no successful exchange past a window on the node's monotonic clock. Desired-versus-observed state is a design steer, not a requirement.
 
 ## Shape (current choice): five bounded contexts
+
+**Superseded by [0017](0017-node-redesign-r3.md)** (C3–C6): the Authority context, the Central link and feeds read by cursor give way to the Node API, a NATS leaf per Node.
 
 ```mermaid
 flowchart TB
@@ -88,6 +94,8 @@ An arrow means "depends on". Facts flow up on each publisher's bounded **feed re
 
 ## Central link and permits
 
+**Superseded by [0017](0017-node-redesign-r3.md)** (C6 rule 1): held documents never expire, and a restart reads files; no permits.
+
 | Path | Current choice |
 |---|---|
 | Admission | The Central link checks what belongs to Central (producer, request, lifetime) and hands the display link a **permit**: which app run (process, app epoch, config revision) may hold which Output (connector, mode, compositor incarnation) in which stage, until when. The display link checks what belongs to the screen and drives the shell. |
@@ -99,6 +107,8 @@ An arrow means "depends on". Facts flow up on each publisher's bounded **feed re
 | Restart isolation | Central link and judge restarts touch no Output and no app; a display-link restart blanks to the slate for its restart plus a re-handoff. |
 
 ## Health overlay mechanics (R11)
+
+**Superseded by [0017](0017-node-redesign-r3.md) for the drawing** (R12): regions per Frame, with the full-Output tint kept as the no-Frame fallback. The other rows stand.
 
 | Concern | Current choice | Prior art |
 |---|---|---|
@@ -113,6 +123,8 @@ An arrow means "depends on". Facts flow up on each publisher's bounded **feed re
 | Memory | Client buffers capped at 128 MB; an OOM in Weston's cgroup takes the client, never Weston | Android lmkd |
 
 ## Faults, conditions, events: one catalogue
+
+**Superseded by [0017](0017-node-redesign-r3.md) wherever Central or permits appear** (R2′; conditions with Frame, Display or Node scope on the Node bus replace the Central window and the feed ring).
 
 | Term | Meaning |
 |---|---|
@@ -130,6 +142,8 @@ An arrow means "depends on". Facts flow up on each publisher's bounded **feed re
 **Restart and backoff.** Base units: `Restart=always`, `RestartSteps=`, `RestartMaxDelaySec=` (systemd 257 in trixie), `StartLimitIntervalSec=0`, reset after a stable period; every pet is earned by the unit's own loop turn (the judge's by a completed verdict cycle), never by Central. The broker applies the same shape to the app and raises `app_failed` when the budget is spent; never a reboot. Judge state (ages, intent, mute, sequence, ring) persists in `/run`; a restarted judge withholds "overlay off" until every fact lease is fresh. Memory pressure takes the background prepare first. Central rolls a failed trial back to the accepted release.
 
 ## Design rules (design choices)
+
+**Superseded by [0017](0017-node-redesign-r3.md) for rules 1 and 3** (C6).
 
 1. **One concern per context; dependencies point down; Central enters only through Authority.** Separation of concerns is this design's answer to the owner's question about the display link, not a requirement. The compositor holds no health policy.
 2. **Every proof is earned on the path it guards, never on another system's availability.** A dispatch loop's liveness is never progress; Central's reachability never feeds a pet or gates a local answer.
@@ -178,6 +192,8 @@ Not edited yet: each amendment lands with the implementation that makes it true.
 | [Player service module](../module-player-service.md) line 13 | Player liveness via `player.service` `WatchdogSec=300` | Stale V1 claim (G10): replaced by the progress probe guest contract |
 
 ## Next gates
+
+**Superseded by [0017](0017-node-redesign-r3.md)** (C10): the programme runs as epics E1–E9.
 
 1. **Module layer:** context contracts first (permit, stage-document pass-through and grant bytes, intent and mute, overlay instruction, feeds and cursors, `node_health` producer); the `layers` and `forbidden` contracts and package layout; the catalogue and console fold-in; the Central link (uid, moved sessions, cadence, acks, refused-link condition); display link permit store and re-admit rules; overlay client and the health-layer protocol with its CI job; the broker's local loop, probe channel and local app-link acceptance; the unit table; rollback and dark-period messages; all values (windows, T, k, K, V, D, budgets, permit lifetime).
 2. **Delivery**, starting with the tracer bullet: one `node_pid1` leg with the **real Player** and the real Central link, display link, judge, overlay client and broker. It proves first admission through Authority (permit only, app link accepted locally, display link, broker and judge unable to open a network socket); a healthy Player answering probes; a Central-link kill leaving the screen untouched; and the G7 class: a test-only seam starves the Player's control queue while it keeps rendering, the judge raises `app_unresponsive` (pending, then raised, in the acked ring), the overlay client draws the tint and card above the still-live app and the pulse reports that serial presented, the broker kills after K s, the slate shows under the tint, the restarted Player waits for a fresh permit and the fault clears after its hold-down. Mutation probe: a Player answering through `asyncio.to_thread` turns it red. The idle-starved stub remains the unit-level guest-contract test.

@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 
 import pytest
+import tls_fixture as tls
+from uplink_fakes import FakeReply, FakeTransport, central
 
 import appliance.netboot_init as netboot_module
 from appliance.bootstrap import BootstrapError, LinuxOps, read_pi_serial
@@ -38,8 +40,6 @@ from appliance.netboot_init import (
     parse_digest_header,
 )
 from contracts.clock_record import ClockRecord, ClockState
-from tests import tls_fixture as tls
-from tests.uplink_fakes import FakeReply, FakeTransport, central
 from uplink.causes import Cause, UplinkError
 from uplink.clock import DHCP_NTP_SERVERS
 from uplink.fetch import MAX_FETCH_SECONDS

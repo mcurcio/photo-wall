@@ -20,16 +20,23 @@ from scripts.debian_packages import packages
 from scripts.module_closure import ClosurePolicy, closure_for, stage_application
 
 POLICIES = {
-    "root-import": ClosurePolicy("root-import", ("appliance.node.root_import",),
-                                ("player", "central", "gi", "appliance.node.broker", "appliance.node.process_linux", "appliance.node.host"), MappingProxyType({})),
-    "node-bootstrap": ClosurePolicy("node-bootstrap", ("appliance.node.bootstrap",),
-                                    ("player", "central", "media", "gi"), MappingProxyType({})),
+    "root-import": ClosurePolicy("root-import", ("appliance.apps.root_import",),
+                                ("player", "central", "gi", "appliance.host", "appliance.apps.broker",
+                                 "appliance.apps.broker_runner", "appliance.apps.process_linux"), MappingProxyType({})),
+    "node-bootstrap": ClosurePolicy("node-bootstrap", ("appliance.boot.node_bootstrap",),
+                                    ("player", "central", "media", "gi", "appliance.host",
+                                     "appliance.health", "appliance.display_host",
+                                     "appliance.central_session"), MappingProxyType({})),
     "display-controller": ClosurePolicy("display-controller", ("appliance.display_host.runner",),
                                         ("player", "central", "media", "gi"), MappingProxyType({})),
-    "host-core": ClosurePolicy("host-core", ("appliance.node.host_runner",),
-                               ("player", "central", "media", "gi", "appliance.node.broker", "appliance.node.manager"), MappingProxyType({})),
-    "app-broker": ClosurePolicy("app-broker", ("appliance.node.broker_runner",),
-                                ("player", "central", "media", "gi"), MappingProxyType({})),
+    "host-core": ClosurePolicy("host-core", ("appliance.host.host_runner",),
+                               ("player", "central", "media", "gi", "appliance.apps", "appliance.display_host",
+                                "appliance.health", "appliance.node.manager",
+                                "appliance.node.manager_desired", "appliance.node.manager_launcher",
+                                "appliance.node.manager_observation", "appliance.node.manager_runner"),
+                               MappingProxyType({})),
+    "app-broker": ClosurePolicy("app-broker", ("appliance.apps.broker_runner",),
+                                ("player", "central", "media", "gi", "appliance.host"), MappingProxyType({})),
     "manager-supervisor": ClosurePolicy("manager-supervisor", ("appliance.node.manager_launcher",),
                                         ("player", "central", "media", "gi"), MappingProxyType({})),
     "health-judge": ClosurePolicy("health-judge", ("appliance.health.runner",),
@@ -55,10 +62,6 @@ def stage_tree(tree: Path, destination: Path) -> str:
     digests = ["debian-depends", json.dumps(dependencies, separators=(",", ":"))]
     for name, policy in POLICIES.items():
         closure = closure_for(policy, repo=tree)
-        if name == "host-core" and any(module.startswith(("appliance.node.manager", "appliance.node.broker", "appliance.node.process_linux", "appliance.node.environment", "appliance.node.lifecycle_storage")) for module in closure.modules):
-            raise ValueError("host_import_boundary")
-        if name == "app-broker" and any(module.startswith("appliance.node.host") for module in closure.modules):
-            raise ValueError("app_import_boundary")
         stage_application(closure, policy, repo=tree, into=destination / ("usr/lib/photo-wall-" + name))
         digests.append(closure.digest)
     unit_dir = destination / "lib/systemd/system"
