@@ -11,7 +11,7 @@
 |---|---|---|---|
 | E1-1 | landed | ed8c807 | Guards (fences, deny matching, path/launcher-import tests); errata E-E1-1 |
 | E1-2 | landed | 726c5a3 | Big-bang move to kernel/host/boot/apps, tests under tests/node, no shims; errata E-E1-2 |
-| E1-3 | open | | |
+| E1-3 | landed | b4180cc | Strict layer contracts: exhaustive Node layers, boot/apps/health fences, shrink-only ignores; errata E-E1-3 |
 | E1-4 | open | | |
 | Final verify | open | | |
 
