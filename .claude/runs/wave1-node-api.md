@@ -40,7 +40,7 @@
 | E3a-3 | E3 | open | | The Node server refuses past its store limit; each retention class keeps its promise |
 | E2a-1 | E2 | open | | Line table; caps from readings; double counts removed |
 | E2b-1 | E2 | open | | Reproducible squashfs image from the sealed archive, proven by mount and `verify_root` |
-| D-0017 | docs | open | | 0017 updated to the Node API framing and the API answers |
+| D-0017 | docs | landed | d958ab3 | 0017 records Node API rounds 1-2 as revisable current choices; static gates green |
 | Wave-1 verify | all | open | | One CI run per branch |
 
 ## What this re-cut changed (history, one line per round)
