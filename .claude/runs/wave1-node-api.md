@@ -35,7 +35,7 @@
 
 | Bead | Lane | Status | Sha | Note |
 |---|---|---|---|---|
-| E3a-1 | E3 (tracer) | open | | WebSocket leaf, a method across it, same-domain isolation, the wall-wide mirror. Three stop branches |
+| E3a-1 | E3 (tracer) | landed | e0c79f5 | WebSocket leaf, method, same-domain isolation and wall-wide mirror proven on nats-server 2.15.0; no stop branch taken; errata E-W1-E3a-1-1 |
 | E3a-2 | E3 | open | | Central writes a Node bucket conditionally, drains a Node stream after commit, counts a gap; hub reload and hub wipe |
 | E3a-3 | E3 | open | | The Node server refuses past its store limit; each retention class keeps its promise |
 | E2a-1 | E2 | open | | Line table; caps from readings; double counts removed |
