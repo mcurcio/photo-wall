@@ -6,6 +6,7 @@ import socket
 import stat
 import sys
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -323,7 +324,7 @@ def test_broker_closure_has_no_host_module_and_the_base_declares_the_feed(tmp_pa
     modules = closure_for(POLICIES["app-broker"], repo=REPO).modules
     assert {"appliance.apps.probe", "appliance.apps.probe_channel", "appliance.feed"} <= set(modules)
     assert not [module for module in modules if module.startswith("appliance.host.host")]
-    stage_tree(REPO, tmp_path / "package")  # refuses app_import_boundary itself
+    stage_tree(REPO, tmp_path / "package")  # the app-broker deny list refuses a host module itself
     root = tmp_path / "package"
     users = (root / "usr/lib/sysusers.d/photo-wall-node.conf").read_text().splitlines()
     assert 'u pw-health 10006 "Photo Wall health judge" /nonexistent' in users
@@ -335,18 +336,10 @@ def test_broker_closure_has_no_host_module_and_the_base_declares_the_feed(tmp_pa
                for line in unit.splitlines())
 
 
-def test_a_host_module_in_the_broker_closure_is_refused(tmp_path, monkeypatch):
-    from scripts import build_node_base_deb
+def test_a_host_module_in_the_broker_closure_is_refused() -> None:
+    from scripts.build_node_base_deb import POLICIES
+    from scripts.module_closure import ClosureError, closure_for
 
-    real = build_node_base_deb.closure_for
-
-    def closure_for(policy, *, repo):
-        closure = real(policy, repo=repo)
-        if policy.name == "app-broker":
-            return SimpleNamespace(**{**{name: getattr(closure, name) for name in ("files", "digest")},
-                                      "modules": (*closure.modules, "appliance.host.host_linux")})
-        return closure
-
-    monkeypatch.setattr(build_node_base_deb, "closure_for", closure_for)
-    with pytest.raises(ValueError, match="app_import_boundary"):
-        build_node_base_deb.stage_tree(REPO, tmp_path / "package")
+    policy = POLICIES["app-broker"]
+    with pytest.raises(ClosureError, match="appliance.host is forbidden here"):
+        closure_for(replace(policy, roots=(*policy.roots, "appliance.host.host_linux")), repo=REPO)

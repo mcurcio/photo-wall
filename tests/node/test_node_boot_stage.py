@@ -472,7 +472,7 @@ def test_host_core_closure_carries_the_boot_report_reader_and_no_forbidden_modul
                  "appliance.apps.environment", "appliance.apps.lifecycle_storage", "appliance.node.preparer")
     assert not [module for module in modules
                 if any(module == name or module.startswith(name + ".") for name in forbidden)]
-    stage_tree(REPO, tmp_path / "package")  # refuses host_import_boundary itself
+    stage_tree(REPO, tmp_path / "package")  # the host-core deny list refuses a forbidden module itself
     root = tmp_path / "package"
     assert (root / "usr/lib/photo-wall-host-core/appliance/kernel/boot_stage.py").exists()
     assert (root / "usr/lib/photo-wall-node-bootstrap/appliance/kernel/boot_stage.py").exists()
