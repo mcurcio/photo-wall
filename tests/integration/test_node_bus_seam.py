@@ -1,6 +1,7 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
-read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2).
+read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2). Every stream,
+bucket and mirror is a buffer (E-W1-BUF-1): full, it drops its oldest and takes the write.
 
 The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; raw nats-py
 clients play Central and Node components. Every service, stream and subject here is the test's.
@@ -17,8 +18,11 @@ import pytest
 from integration.bus_servers import (
     BusServer,
     Recorder,
+    bucket,
+    buffer,
     central,
     central_put,
+    declare_bucket,
     declare_wall,
     declare_wall_mirror,
     hub_server,
@@ -26,23 +30,19 @@ from integration.bus_servers import (
     local,
     node_server,
     reload_hub,
-    wall_content_bytes,
     wall_value,
     wall_writer,
 )
-from nats.js.api import (
-    AckPolicy,
-    ConsumerConfig,
-    DeliverPolicy,
-    DiscardPolicy,
-    KeyValueConfig,
-    RetentionPolicy,
-    StorageType,
-    StreamConfig,
-)
-from nats.js.errors import APIError, NoStreamResponseError
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, DiscardPolicy, RetentionPolicy
+from nats.js.errors import APIError, NoStreamResponseError, NotFoundError
 
-from contracts.node_link import NODE_DOMAIN, WALL_STREAM, WALL_STREAM_BYTES, account_id
+from contracts.node_link import (
+    NODE_DOMAIN,
+    WALL_MESSAGE_BYTES,
+    WALL_STREAM,
+    WALL_STREAM_BYTES,
+    account_id,
+)
 
 SERVICE = "probe"
 ENDPOINT = "probe.echo"
@@ -171,9 +171,7 @@ def test_two_node_accounts_in_domain_node_stay_isolated(tmp_path):
         # The same stream name on both Nodes, both in domain `node`: each Central sees its own.
         for client, count in ((local_a, 3), (local_b, 5)):
             jetstream = client.jetstream()
-            await jetstream.add_stream(StreamConfig(
-                name="PROBE", subjects=["probe.events.>"], max_bytes=64 * 1024,
-                storage=StorageType.FILE))
+            await jetstream.add_stream(buffer("PROBE", 64 * 1024, subjects=["probe.events.>"]))
             for index in range(count):
                 await jetstream.publish(f"probe.events.{index}", b"event")
         info_a = await central_a.jetstream(domain=NODE_DOMAIN).stream_info("PROBE")
@@ -289,11 +287,10 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
             server.stop()
 
 
-def test_a_nearly_full_wall_still_takes_an_update_of_every_subject(tmp_path):
-    """WALL discards NEW and the server checks bytes before it drops a subject's old value, so a
-    nearly full wall must still take updates (E-W1-E3a-R-2): within its content budget, an update
-    up to the largest message (the stream's headroom); past it, a same-size update (the account's
-    room above the stream's cap)."""
+def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
+    """WALL is a buffer (E-W1-BUF-1): full, it takes a new subject and the largest message, each
+    dropping the oldest subject's value; the WALL account's store, its cap plus one largest message,
+    never refuses first. Only a message past the largest is refused (a message limit, not fullness)."""
     hub = hub_server(tmp_path, [])
     hub.start()
 
@@ -301,31 +298,22 @@ def test_a_nearly_full_wall_still_takes_an_update_of_every_subject(tmp_path):
         writer = await wall_writer(hub)
         jetstream = writer.jetstream()
         await declare_wall(writer)
-        largest, value = 16 * 1024, b"v" * 1000
-        subjects = (f"wall.s{index:04}" for index in range(10_000))
-        held, written = 0, []
-        budget = wall_content_bytes(len("wall.s0000"), largest)
-        while held + 34 + len("wall.s0000") + len(value) <= budget:
-            written.append(next(subjects))
-            await jetstream.publish(written[-1], value)
-            held += 34 + len(written[-1]) + len(value)
-
-        # Within the budget, any subject takes an update up to the largest message.
-        await jetstream.publish(written[0], b"L" * largest)
-
-        # A writer past the budget fills the stream until it refuses a new subject ...
-        while True:
-            try:
-                await jetstream.publish(next(subjects), value)
-            except APIError as full:
-                assert full.err_code == 10077, full  # discard NEW: maximum bytes exceeded
-                break
-        state = (await jetstream.stream_info(WALL_STREAM)).state
-        assert state.bytes > WALL_STREAM_BYTES - (34 + len("wall.s0000") + len(value))
-        # ... and an existing subject still takes a same-size update, its old value dropped.
-        acknowledgement = await jetstream.publish(written[1], value)
-        assert acknowledgement.seq == state.last_seq + 1
-        assert (await jetstream.stream_info(WALL_STREAM)).state.messages == state.messages
+        value, index = b"v" * 1000, 0
+        while (full := (await jetstream.stream_info(WALL_STREAM)).state).first_seq == 1:
+            acknowledgement = await jetstream.publish(f"wall.s{index:04}", value)
+            assert acknowledgement.seq == index + 1
+            index += 1
+        # Full: the first subject's only value is gone, a hole below first_seq a reader sees.
+        assert index > 1 and full.bytes <= WALL_STREAM_BYTES
+        with pytest.raises(NotFoundError):
+            await jetstream.get_last_msg(WALL_STREAM, "wall.s0000")
+        acknowledgement = await jetstream.publish("wall.largest", b"L" * WALL_MESSAGE_BYTES)
+        assert acknowledgement.seq == full.last_seq + 1
+        after = (await jetstream.stream_info(WALL_STREAM)).state
+        assert after.first_seq > full.first_seq and after.bytes <= WALL_STREAM_BYTES
+        with pytest.raises(APIError) as too_large:
+            await jetstream.publish("wall.too_large", b"x" * (WALL_MESSAGE_BYTES + 1))
+        assert too_large.value.err_code == 10054, too_large.value
         await writer.close()
 
     try:
@@ -385,12 +373,11 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         await _linked(hub, 1)
         node_client = await local(node)
         central_client = await central(hub, "serial-a")
-        bucket = await node_client.jetstream().create_key_value(KeyValueConfig(
-            bucket=BUCKET, history=2, max_bytes=64 * 1024, storage=StorageType.FILE))
+        kv = await declare_bucket(node_client.jetstream(), bucket(BUCKET, history=2, max_bytes=64 * 1024))
         config = (await node_client.jetstream().stream_info(f"KV_{BUCKET}")).config
-        assert (config.discard, config.max_msgs_per_subject) == (DiscardPolicy.NEW, 2)
-        await bucket.put("scene", b"node")
-        watcher = await bucket.watch("scene")
+        assert (config.discard, config.max_msgs_per_subject) == (DiscardPolicy.OLD, 2)
+        await kv.put("scene", b"node")
+        watcher = await kv.watch("scene")
 
         # Central reads the revision across the leaf, then writes conditionally on it.
         revision = (await (await central_client.jetstream(domain=NODE_DOMAIN).key_value(BUCKET)).get("scene")).revision
@@ -409,7 +396,7 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         with pytest.raises(APIError) as stale:
             await central_put(central_client, BUCKET, "scene", b"stale", expected_revision=revision)
         assert stale.value.err_code == 10071
-        entry = await bucket.get("scene")
+        entry = await kv.get("scene")
         assert (entry.value, entry.revision) == (b"central", written)
 
         # A plain $KV publish from Central never reaches the Node: the leaf denies $KV.> (W9).
@@ -418,7 +405,7 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         await central_client.publish(f"$KV.{BUCKET}.scene", b"plain")
         await central_client.flush()
         await asyncio.sleep(.5)
-        entry = await bucket.get("scene")
+        entry = await kv.get("scene")
         assert (entry.value, entry.revision) == (b"central", written)
 
         await watcher.stop()
@@ -446,16 +433,14 @@ def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, 
         jetstream = node_client.jetstream()
         if source == "stream":
             stream = "EVENTS"
-            await jetstream.add_stream(StreamConfig(
-                name=stream, subjects=["events.>"], max_bytes=256 * 1024, storage=StorageType.FILE))
+            await jetstream.add_stream(buffer(stream, 256 * 1024, subjects=["events.>"]))
             for index in range(200):
                 await jetstream.publish(f"events.{index % 4}", f"event-{index}".encode())
         else:
             stream = "KV_probe_state"
-            bucket = await jetstream.create_key_value(KeyValueConfig(
-                bucket="probe_state", max_bytes=256 * 1024, storage=StorageType.FILE))
+            kv = await declare_bucket(jetstream, bucket("probe_state", history=1, max_bytes=256 * 1024))
             for index in range(200):
-                await bucket.put(f"key{index}", f"state-{index}".encode())
+                await kv.put(f"key{index}", f"state-{index}".encode())
         assert (await jetstream.stream_info(stream)).state.last_seq == 200
 
         # Central dies mid-batch: the message it committed and the rest of its batch go unacknowledged.
@@ -482,31 +467,41 @@ def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, 
         hub.stop()
 
 
-def test_a_stream_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path):
+@pytest.mark.parametrize("source", ["stream", "bucket"])
+def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path, source):
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
     hub.start()
     node.start()
     recorder = Recorder(tmp_path / "record")
-    stream = "OBSERVED"
 
     async def run():
         await _linked(hub, 1)
         node_client = await local(node)
         jetstream = node_client.jetstream()
-        await jetstream.add_stream(StreamConfig(
-            name=stream, subjects=["observed.>"], retention=RetentionPolicy.LIMITS,
-            discard=DiscardPolicy.OLD, max_bytes=16 * 1024, storage=StorageType.FILE))
+        if source == "stream":
+            stream = "OBSERVED"
+            await jetstream.add_stream(buffer(
+                stream, 16 * 1024, subjects=["observed.>"], retention=RetentionPolicy.LIMITS))
+
+            async def write(index: int) -> None:
+                await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
+        else:
+            stream = "KV_probe_observed"
+            kv = await declare_bucket(jetstream, bucket("probe_observed", history=1, max_bytes=16 * 1024))
+
+            async def write(index: int) -> None:
+                await kv.put(f"reading{index:04}", f"reading-{index:04}".encode())
         for index in range(10):
-            await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
+            await write(index)
         central_client = await central(hub, "serial-a")
         await _drain(central_client, stream, recorder)
         await central_client.close()
         assert recorder.sequences() == list(range(1, 11))
 
-        # Central is away: the Node keeps publishing, every publish accepted, the oldest discarded.
+        # Central is away: the Node keeps writing, every write accepted, the oldest discarded.
         for index in range(10, 1010):
-            await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
+            await write(index)
         state = (await jetstream.stream_info(stream)).state
         assert state.last_seq == 1010 and state.first_seq > 11
 

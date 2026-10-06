@@ -5,6 +5,10 @@ The hub runs Fleet's generated configuration and every Node runs the shipped
 binary is the pinned one (`scripts/nats_server.py`), named by PHOTO_WALL_NATS_SERVER; without it
 the bus tests skip with a reason CI's `node-bus` job owns. Every stream, service and subject a
 probe uses is the test's own: nothing here is a subject grammar.
+
+Every stream, KV bucket and mirror a probe declares is configured by `buffer` (the buffer rule,
+erratum E-W1-BUF-1): it drops its oldest when full and never refuses a write. The config test
+fails on any other place that configures one.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from nats.js.api import (
     DiscardPolicy,
     ExternalStream,
     Header,
+    RetentionPolicy,
     StorageType,
     StreamConfig,
     StreamSource,
@@ -38,6 +43,7 @@ from contracts.node_link import (
     NODE_DOMAIN,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
+    WALL_MESSAGE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
@@ -48,11 +54,76 @@ from contracts.node_link import (
 
 if TYPE_CHECKING:
     from nats.aio.client import Client
+    from nats.js.client import JetStreamContext
+    from nats.js.kv import KeyValue
 
 NODE_BUS_CONF = Path(__file__).resolve().parents[2] / "appliance" / "bus" / "node-bus.conf"
 NATS_SERVER_VARIABLE = "PHOTO_WALL_NATS_SERVER"
 HUB_STORE_BYTES = 4 * 1024 * 1024
 START_SECONDS = 10.0
+MIB = 1024 * 1024
+
+
+def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
+    """The one configuration of every stream, KV bucket and mirror: full, it drops its oldest and
+    takes the write (discard OLD); it has a byte cap and lives in the file store. A reader learns of
+    a drop from the sequence hole it leaves (the counted gap). No caller sets the policy."""
+    if {"discard", "storage"} & fields.keys():
+        raise ValueError("buffer_policy_is_fixed")
+    if max_bytes <= 0:
+        raise ValueError("buffer_needs_a_byte_cap")
+    return StreamConfig(name=name, max_bytes=max_bytes, discard=DiscardPolicy.OLD,
+                        storage=StorageType.FILE, **fields)
+
+
+def bucket(name: str, *, history: int, max_bytes: int, max_value_size: int | None = None) -> StreamConfig:
+    """A KV bucket's stream as nats-py's create_key_value builds it (nats/js/client.py:1448), but a
+    buffer: create_key_value hard-codes discard NEW, which refuses every put once the bucket is full."""
+    return buffer(f"KV_{name}", max_bytes, subjects=[f"$KV.{name}.>"], allow_rollup_hdrs=True,
+                  allow_msg_ttl=True, deny_delete=True, duplicate_window=120, max_consumers=-1,
+                  max_msgs=-1, max_msg_size=max_value_size, max_msgs_per_subject=history)
+
+
+async def declare_bucket(jetstream: JetStreamContext, config: StreamConfig) -> KeyValue:
+    """Create a `bucket` configuration and bind a KeyValue handle to it."""
+    await jetstream.add_stream(config)
+    return await jetstream.key_value(config.name.removeprefix("KV_"))
+
+
+def wall_config(*, first_seq: int = 1) -> StreamConfig:
+    """The hub's wall-wide stream: latest value per subject; every message fits a Node's max_payload."""
+    return buffer(WALL_STREAM, WALL_STREAM_BYTES, subjects=["wall.>"], max_msgs_per_subject=1,
+                  max_msg_size=WALL_MESSAGE_BYTES, first_seq=first_seq)
+
+
+def wall_mirror_config() -> StreamConfig:
+    """A Node's read-only local mirror of WALL. max_msgs_per_subject 1, as the origin: without it the
+    mirror keeps every delivered message and its byte cap drops the oldest, a rarely written
+    subject's only value first (E-W1-E3a-R-1)."""
+    return buffer(WALL_STREAM, WALL_STREAM_BYTES, max_msgs_per_subject=1, mirror=StreamSource(
+        name=WALL_STREAM, external=ExternalStream(api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX)))
+
+
+def node_split() -> dict[str, StreamConfig]:
+    """The page's starting split of the Node's store (section 6) as buffers: records, observations,
+    state and desired buckets, the wall copy. Held by the harness only; E3b's class table owns the
+    numbers. Their caps leave one largest message of account API's store unreserved (the config
+    test holds it), so a full split still takes every write."""
+    split: dict[str, StreamConfig] = {}
+    for component, cap in {"player": 4 * MIB, "apps": MIB, "display": MIB, "host": MIB // 2}.items():
+        split[f"REC_{component}"] = buffer(f"REC_{component}", cap, subjects=[f"{component}.record.>"],
+                                           retention=RetentionPolicy.LIMITS)
+    for component in ("health", "content"):
+        split[f"OBS_{component}"] = buffer(f"OBS_{component}", MIB, subjects=[f"{component}.observation.>"],
+                                           max_age=6 * 3600, retention=RetentionPolicy.LIMITS)
+    for prefix, components, history in (
+            ("state", ("host", "apps", "content", "display", "health", "player"), 4),
+            ("desired", ("apps", "display", "health", "player"), 2)):
+        for component in components:
+            config = bucket(f"{prefix}_{component}", history=history, max_bytes=MIB // 4, max_value_size=4096)
+            split[config.name] = config
+    split[WALL_STREAM] = wall_mirror_config()
+    return split
 
 
 @dataclass
@@ -183,7 +254,7 @@ async def local(node: BusServer) -> Client:
 
 
 async def declare_wall(writer: Client, *, first_seq: int = 1) -> None:
-    """Create-if-absent: the hub's wall-wide stream, latest value per subject.
+    """Create-if-absent: the hub's wall-wide stream (`wall_config`).
 
     `first_seq` is one past the last sequence Central had acknowledged: a WALL re-created after the
     hub lost its store continues where every Node mirror stopped, so the mirrors resume with no
@@ -192,36 +263,20 @@ async def declare_wall(writer: Client, *, first_seq: int = 1) -> None:
     try:
         await jetstream.stream_info(WALL_STREAM)
     except NotFoundError:
-        await jetstream.add_stream(StreamConfig(
-            name=WALL_STREAM, subjects=["wall.>"], max_msgs_per_subject=1, discard=DiscardPolicy.NEW,
-            max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE, first_seq=first_seq))
-
-
-def wall_content_bytes(longest_subject: int, largest_message: int) -> int:
-    """The bytes Central's latest wall values may total so that an update of any subject, up to
-    `largest_message` bytes, is accepted: WALL_STREAM_BYTES less one largest per-message charge.
-    kv_bucket_bytes's headroom rule: WALL discards NEW, and checks the new message's bytes before
-    it drops the subject's old value (E-W1-E3a-3-1's class, erratum E-W1-E3a-R-2)."""
-    return WALL_STREAM_BYTES - (34 + longest_subject + largest_message)
+        await jetstream.add_stream(wall_config(first_seq=first_seq))
 
 
 async def declare_wall_mirror(node_client: Client) -> bool:
-    """Create-if-absent on the Node: a read-only local mirror of the hub's wall stream, latest value
-    per subject. Local only: it never asks the hub, so it succeeds while the hub is away, in any
-    order with Central's WALL declare (erratum E-W1-E3a-R-4). Returns True when it created one.
-
-    max_msgs_per_subject 1, as the origin: without it the mirror keeps every delivered message and
-    its byte cap drops the oldest, a rarely written subject's only value first (E-W1-E3a-R-1)."""
+    """Create-if-absent on the Node: the local mirror of the hub's wall stream (`wall_mirror_config`).
+    Local only: it never asks the hub, so it succeeds while the hub is away, in any order with
+    Central's WALL declare (erratum E-W1-E3a-R-4). Returns True when it created one."""
     jetstream = node_client.jetstream()
     try:
         await jetstream.stream_info(WALL_STREAM)
         return False
     except NotFoundError:
         pass
-    await jetstream.add_stream(StreamConfig(
-        name=WALL_STREAM, max_bytes=WALL_STREAM_BYTES, max_msgs_per_subject=1, storage=StorageType.FILE,
-        mirror=StreamSource(name=WALL_STREAM, external=ExternalStream(
-            api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))))
+    await jetstream.add_stream(wall_mirror_config())
     return True
 
 
@@ -315,10 +370,11 @@ def kv_bucket_bytes(bucket: str, keys: Sequence[str], history: int, max_value: i
     (ns:server/filestore.go:10055-10062), plus one largest message of headroom. The class sizing
     E3b inherits.
 
-    The headroom: a full discard-new bucket checks the new message's bytes before it drops the
-    key's oldest value, and lets the put through only when that oldest value is no shorter than the
-    new one (ns:server/filestore.go:5277-5279). Without it, a key whose oldest value is short is
-    refused a full-length update in a bucket its listed keys fill (§6 row 12, E-W1-E3a-3-1)."""
+    The bucket is a buffer (drops its oldest, never refuses), and drops a key's own oldest before
+    its byte cap acts (ns:server/filestore.go:5340-5380), so listed keys alone never cost another
+    key a value; the headroom lets the first stray key in without a drop. Past it, a stray costs the
+    bucket its oldest message, which a reader sees as a hole (E-W1-BUF-1; was E-W1-E3a-3-1's
+    discard-NEW headroom)."""
     header = 4 + header_bytes if header_bytes else 0
     per_message = [34 + len(f"$KV.{bucket}.{key}") + max_value + header for key in keys]
     return sum(history * size for size in per_message) + max(per_message, default=0)

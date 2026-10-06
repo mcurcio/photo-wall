@@ -20,21 +20,21 @@ from contracts.node_link import (
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
+    WALL_MESSAGE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
     account_id,
+    account_store_bytes,
     central_user,
     node_user,
 )
 
 FLEET_SYSTEM_USER: Final = "fleet"
 SYSTEM_ACCOUNT: Final = "SYS"
-# The WALL account's store: the stream's cap plus room for any message the stream can hold. The
-# server checks an account's usage plus the new message before WALL drops the subject's old value,
-# so an account capped at the stream's own cap refuses every write to a nearly full stream, even a
-# same-size update (10002; erratum E-W1-E3a-R-2). No storable message exceeds the stream's cap.
-WALL_ACCOUNT_STORE_BYTES: Final = 2 * WALL_STREAM_BYTES
+# The WALL account's store, by the buffer rule: its one stream's cap plus one largest wall message,
+# so a full WALL drops its oldest instead of the account refusing the write (E-W1-BUF-1).
+WALL_ACCOUNT_STORE_BYTES: Final = account_store_bytes([WALL_STREAM_BYTES], WALL_MESSAGE_BYTES)
 
 # What a Node's mirror of WALL needs from the WALL account: the consumer API it creates and
 # deletes its mirror consumer through, the delivery subjects, and flow control (v1 and v2 forms).
