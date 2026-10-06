@@ -9,7 +9,7 @@
 
 | Bead | Status | Sha | Note |
 |---|---|---|---|
-| E1-1 | open | | |
+| E1-1 | landed | ed8c807 | Guards (fences, deny matching, path/launcher-import tests); errata E-E1-1 |
 | E1-2 | open | | |
 | E1-3 | open | | |
 | E1-4 | open | | |
