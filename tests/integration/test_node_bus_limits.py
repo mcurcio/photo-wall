@@ -25,15 +25,26 @@ KEY_REFUSED = 10077             # JSStreamStoreFailedF "maximum bytes exceeded":
 VALUE_TOO_LARGE = 10054         # JSStreamMessageExceedsMaximumErr: over max_value_size
 
 # The page's 12 MiB split (section 6): records, observations, state, desired, the wall copy and
-# the unassigned room. Streams stand in for the wall mirror and the room; their bytes are the point.
+# the unassigned room. A stream stands in for the wall mirror; its bytes are the point.
 RECORD_STREAMS = {"player": 4 * MIB, "apps": MIB, "display": MIB, "host": MIB // 2}
 OBSERVATION_STREAMS = {"health": MIB, "content": MIB}
 STATE_BUCKETS = ("host", "apps", "content", "display", "health", "player")
 DESIRED_BUCKETS = ("apps", "display", "health", "player")
 BUCKET_BYTES = MIB // 4
 WALL_COPY_BYTES = MIB // 2
-UNASSIGNED_BYTES = MIB // 2
 STORE_LIMIT = 12 * MIB           # node-bus.conf's max_file_store and account API's max_file
+# The unassigned room, held by a reserved stream that nothing can write (it takes one message of at
+# most one byte), so no stream can reserve it. The server checks the account's usage plus the new
+# message before a full limits stream drops its oldest; without unreserved room, a full split
+# refuses every record and observation publish (10002; erratum E-W1-E3a-R-3).
+ROOM_BYTES = MIB // 2
+MAX_PAYLOAD = 256 * 1024         # node-bus.conf's max_payload: headers + payload
+MAX_CONTROL_LINE = 4096          # nats-server's default, which bounds a message's subject
+# nats-server's per-message store charge: 30 + subject + payload, and 4 + headers more with headers
+# (ns:server/filestore.go:10055-10062, erratum E-W1-E3a-3-1).
+CHARGE = 30
+LARGEST_MESSAGE = CHARGE + 4 + MAX_CONTROL_LINE + MAX_PAYLOAD
+FILL_CHARGE = 4096               # every fill message is charged exactly this, so the caps tile exactly
 
 
 def _node(tmp_path) -> BusServer:
@@ -61,6 +72,8 @@ def test_the_node_server_refuses_streams_past_its_store_limit_and_without_a_cap(
     async def body():
         client = await local(node)
         jetstream = client.jetstream()
+        assert client.max_payload == MAX_PAYLOAD  # the shipped file's pin, as the server applies it
+        assert ROOM_BYTES >= LARGEST_MESSAGE
 
         # The server, not a library convention, refuses an uncapped stream and a memory one.
         await _refused(jetstream.add_stream(StreamConfig(
@@ -71,13 +84,16 @@ def test_the_node_server_refuses_streams_past_its_store_limit_and_without_a_cap(
 
         # The page's split, every byte cap reserved, fills the store exactly.
         caps: dict[str, int] = {}
+        subjects: dict[str, str] = {}   # a stream's publish subject, for the fill below
         for component, cap in RECORD_STREAMS.items():
             caps[f"REC_{component}"] = cap
+            subjects[f"REC_{component}"] = f"{component}.record.asrun"
             await jetstream.add_stream(StreamConfig(
                 name=f"REC_{component}", subjects=[f"{component}.record.>"], max_bytes=cap,
                 retention=RetentionPolicy.LIMITS, discard=DiscardPolicy.OLD, storage=StorageType.FILE))
         for component, cap in OBSERVATION_STREAMS.items():
             caps[f"OBS_{component}"] = cap
+            subjects[f"OBS_{component}"] = f"{component}.observation.verdict"
             await jetstream.add_stream(StreamConfig(
                 name=f"OBS_{component}", subjects=[f"{component}.observation.>"], max_bytes=cap,
                 max_age=6 * 3600, discard=DiscardPolicy.OLD, storage=StorageType.FILE))
@@ -88,10 +104,14 @@ def test_the_node_server_refuses_streams_past_its_store_limit_and_without_a_cap(
                 await jetstream.create_key_value(KeyValueConfig(
                     bucket=bucket, history=history, max_bytes=BUCKET_BYTES, max_value_size=4096,
                     storage=StorageType.FILE))
-        for name, cap in (("WALL_COPY", WALL_COPY_BYTES), ("UNASSIGNED", UNASSIGNED_BYTES)):
-            caps[name] = cap
-            await jetstream.add_stream(StreamConfig(
-                name=name, subjects=[f"{name.lower()}.>"], max_bytes=cap, storage=StorageType.FILE))
+        caps["WALL_COPY"] = WALL_COPY_BYTES
+        subjects["WALL_COPY"] = "wall_copy.timing"
+        await jetstream.add_stream(StreamConfig(
+            name="WALL_COPY", subjects=["wall_copy.>"], max_bytes=WALL_COPY_BYTES, storage=StorageType.FILE))
+        caps["ROOM"] = ROOM_BYTES
+        await jetstream.add_stream(StreamConfig(
+            name="ROOM", subjects=["room.>"], max_bytes=ROOM_BYTES, max_msgs=1, max_msg_size=1,
+            discard=DiscardPolicy.NEW, storage=StorageType.FILE))
         assert sum(caps.values()) == STORE_LIMIT
         await jetstream.publish("player.record.asrun", b"as-run 1")
         before = {name: (await jetstream.stream_info(name)) for name in caps}
@@ -111,9 +131,39 @@ def test_the_node_server_refuses_streams_past_its_store_limit_and_without_a_cap(
             assert (info.state.messages, info.state.last_seq) == (
                 before[name].state.messages, before[name].state.last_seq), name
         assert (await jetstream.get_last_msg("REC_player", "player.record.asrun")).data == b"as-run 1"
+
+        # Fill the whole split: every stream and bucket holds exactly its cap. The room takes
+        # nothing that counts, so the store keeps one largest message unreserved and unused.
+        await _refused(jetstream.publish("room.held", b"xx"), VALUE_TOO_LARGE)
+        for name, cap in caps.items():
+            if name.startswith("KV_"):
+                kv = await jetstream.key_value(name.removeprefix("KV_"))
+                for index in range(cap // FILL_CHARGE):
+                    key = f"fill{index}"
+                    await kv.put(key, _fill(f"$KV.{name.removeprefix('KV_')}.{key}"))
+                await _refused(kv.put("one-more", b"x"), KEY_REFUSED)
+            elif name in subjects:
+                for _ in range(cap // FILL_CHARGE):
+                    await jetstream.publish(subjects[name], _fill(subjects[name]))
+            assert (await jetstream.stream_info(name)).state.bytes == (0 if name == "ROOM" else cap), name
+        assert (await jetstream.account_info()).storage == STORE_LIMIT - ROOM_BYTES
+
+        # Full, every record and observation stream still takes a publish, dropping its oldest
+        # (F7: a gap stays a counted hole, never a refused publish with no sequence).
+        for name, subject in subjects.items():
+            if name.startswith(("REC_", "OBS_")):
+                before_full = (await jetstream.stream_info(name)).state
+                acknowledgement = await jetstream.publish(subject, _fill(subject))
+                assert (acknowledgement.stream, acknowledgement.seq) == (name, before_full.last_seq + 1)
+                assert (await jetstream.stream_info(name)).state.first_seq > before_full.first_seq, name
         await client.close()
 
     _run(node, body)
+
+
+def _fill(subject: str) -> bytes:
+    """A payload the store charges exactly FILL_CHARGE bytes on `subject` (no headers)."""
+    return b"f" * (FILL_CHARGE - CHARGE - len(subject))
 
 
 async def _record(jetstream) -> None:

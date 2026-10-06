@@ -26,6 +26,7 @@ from integration.bus_servers import (
     local,
     node_server,
     reload_hub,
+    wall_content_bytes,
     wall_value,
     wall_writer,
 )
@@ -41,7 +42,7 @@ from nats.js.api import (
 )
 from nats.js.errors import APIError, NoStreamResponseError
 
-from contracts.node_link import NODE_DOMAIN, WALL_STREAM, account_id
+from contracts.node_link import NODE_DOMAIN, WALL_STREAM, WALL_STREAM_BYTES, account_id
 
 SERVICE = "probe"
 ENDPOINT = "probe.echo"
@@ -259,6 +260,25 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
         assert await wall_value(local_a, "wall.other") is None
         hub_after = (await writer.jetstream().stream_info(WALL_STREAM)).state
         assert (hub_after.messages, hub_after.last_seq) == (hub_before.messages, hub_before.last_seq)
+
+        # Latest per subject (API6): a subject written once stays in every mirror while another is
+        # rewritten past the mirror's byte cap. The writes are paced so each mirror stores them all
+        # (a mirror that lags skips what the hub already replaced) (E-W1-E3a-R-1).
+        local_b = await local(node_b)
+        await writer.jetstream().publish("wall.scene", b"scene-the-only-value")
+        value, rewrites = b"t" * 1024, WALL_STREAM_BYTES // 1024 + 64
+        for index in range(rewrites):
+            acknowledgement = await writer.jetstream().publish("wall.timing", value)
+            if index % 16 == 15 or index == rewrites - 1:
+                for client in (local_a, local_b):
+                    async def caught_up(client=client, seq=acknowledgement.seq):
+                        return (await client.jetstream().stream_info(WALL_STREAM)).state.last_seq >= seq
+                    await _until(caught_up, 10, f"mirror reaches {acknowledgement.seq}")
+        for client in (local_a, local_b):
+            assert await wall_value(client, "wall.scene") == b"scene-the-only-value"
+            assert await wall_value(client, "wall.timing") == value
+            assert (await client.jetstream().stream_info(WALL_STREAM)).state.messages == 2
+        await local_b.close()
         await local_a.close()
         await writer.close()
 
@@ -267,6 +287,51 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
     finally:
         for server in (node_b, node_a, hub):
             server.stop()
+
+
+def test_a_nearly_full_wall_still_takes_an_update_of_every_subject(tmp_path):
+    """WALL discards NEW and the server checks bytes before it drops a subject's old value, so a
+    nearly full wall must still take updates (E-W1-E3a-R-2): within its content budget, an update
+    up to the largest message (the stream's headroom); past it, a same-size update (the account's
+    room above the stream's cap)."""
+    hub = hub_server(tmp_path, [])
+    hub.start()
+
+    async def run():
+        writer = await wall_writer(hub)
+        jetstream = writer.jetstream()
+        await declare_wall(writer)
+        largest, value = 16 * 1024, b"v" * 1000
+        subjects = (f"wall.s{index:04}" for index in range(10_000))
+        held, written = 0, []
+        budget = wall_content_bytes(len("wall.s0000"), largest)
+        while held + 34 + len("wall.s0000") + len(value) <= budget:
+            written.append(next(subjects))
+            await jetstream.publish(written[-1], value)
+            held += 34 + len(written[-1]) + len(value)
+
+        # Within the budget, any subject takes an update up to the largest message.
+        await jetstream.publish(written[0], b"L" * largest)
+
+        # A writer past the budget fills the stream until it refuses a new subject ...
+        while True:
+            try:
+                await jetstream.publish(next(subjects), value)
+            except APIError as full:
+                assert full.err_code == 10077, full  # discard NEW: maximum bytes exceeded
+                break
+        state = (await jetstream.stream_info(WALL_STREAM)).state
+        assert state.bytes > WALL_STREAM_BYTES - (34 + len("wall.s0000") + len(value))
+        # ... and an existing subject still takes a same-size update, its old value dropped.
+        acknowledgement = await jetstream.publish(written[1], value)
+        assert acknowledgement.seq == state.last_seq + 1
+        assert (await jetstream.stream_info(WALL_STREAM)).state.messages == state.messages
+        await writer.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        hub.stop()
 
 
 # E3a-2: Central's client role on a Node's objects, and the hub's lifecycle.
@@ -510,23 +575,29 @@ def test_a_reload_that_adds_an_account_keeps_existing_leaf_links(tmp_path):
 
 
 class _WallCentral:
-    """Central's wall writer: it keeps the latest value per subject and, on every connect,
-    declares WALL (create-if-absent) and re-puts each latest value."""
+    """Central's wall writer: it keeps the latest value per subject and the last sequence WALL
+    acknowledged and, on every connect, declares WALL (create-if-absent, continuing past that
+    sequence) and re-puts each latest value."""
 
     def __init__(self, hub: BusServer) -> None:
         self.hub = hub
         self.latest: dict[str, bytes] = {}
+        self.last_seq = 0
         self._client = None
 
     async def connect(self) -> None:
         self._client = await wall_writer(self.hub)
-        await declare_wall(self._client)
+        await declare_wall(self._client, first_seq=self.last_seq + 1)
         for subject, value in self.latest.items():
-            await self._client.jetstream().publish(subject, value)
+            await self._publish(subject, value)
 
     async def put(self, subject: str, value: bytes) -> None:
         self.latest[subject] = value
-        await self._client.jetstream().publish(subject, value)
+        await self._publish(subject, value)
+
+    async def _publish(self, subject: str, value: bytes) -> None:
+        acknowledgement = await self._client.jetstream().publish(subject, value)
+        self.last_seq = max(self.last_seq, acknowledgement.seq)
 
     async def close(self) -> None:
         await self._client.close()
@@ -556,17 +627,28 @@ def test_the_wall_mirror_catches_up_after_the_hub_loses_its_store(tmp_path):
         await wall.close()
 
         # The hub loses its store; one value changes in Central while the hub is down.
+        acknowledged = wall.last_seq
         hub.wipe()
         wall.latest["wall.scene"] = b"scene-outage"
+
+        # Hub away: a Node component's declare needs nothing from the hub; the mirror still reads.
+        client = await local(node_a)
+        assert not await declare_wall_mirror(client)
+        assert await wall_value(client, "wall.timing") == b"timing-3"
+        await client.close()
+
+        # Each mirror waits for its next sequence; Central's new WALL starts there (§6 row 11 needs
+        # no Node rule, E-W1-E3a-R-4). Either order of declares: Node A before Central's, Node B after.
         hub.start()
         await _linked(hub, 2)
+        client = await local(node_a)
+        assert not await declare_wall_mirror(client)
+        await client.close()
         await wall.connect()
-        # The hub's sequence restarted below what each mirror holds; a mirror left alone waits for
-        # its old next sequence. The Node component's declare on link-up re-creates it (§6 row 11).
-        for node in (node_a, node_b):
-            client = await local(node)
-            assert await declare_wall_mirror(client)
-            await client.close()
+        assert (await wall._client.jetstream().stream_info(WALL_STREAM)).state.first_seq == acknowledged + 1
+        client = await local(node_b)
+        assert not await declare_wall_mirror(client)
+        await client.close()
         for node in (node_a, node_b):
             await _holds(node, wall.latest, 30)
         await wall.close()

@@ -30,6 +30,11 @@ from contracts.node_link import (
 
 FLEET_SYSTEM_USER: Final = "fleet"
 SYSTEM_ACCOUNT: Final = "SYS"
+# The WALL account's store: the stream's cap plus room for any message the stream can hold. The
+# server checks an account's usage plus the new message before WALL drops the subject's old value,
+# so an account capped at the stream's own cap refuses every write to a nearly full stream, even a
+# same-size update (10002; erratum E-W1-E3a-R-2). No storable message exceeds the stream's cap.
+WALL_ACCOUNT_STORE_BYTES: Final = 2 * WALL_STREAM_BYTES
 
 # What a Node's mirror of WALL needs from the WALL account: the consumer API it creates and
 # deletes its mirror consumer through, the delivery subjects, and flow control (v1 and v2 forms).
@@ -54,12 +59,12 @@ class HubListeners:
     leaf_port: int
     monitor_port: int | None     # /leafz; None in production until E3d decides
     store_dir: str
-    max_file_store_bytes: int    # the hub's JetStream store
+    max_file_store_bytes: int    # the hub's JetStream store; at least WALL_ACCOUNT_STORE_BYTES
 
 
 def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
     """The hub's nats-server configuration for this set of enrolled serials, as JSON text."""
-    if listeners.max_file_store_bytes < WALL_STREAM_BYTES:
+    if listeners.max_file_store_bytes < WALL_ACCOUNT_STORE_BYTES:
         raise ValueError("hub_store_too_small")
     node_accounts = {account_id(serial): serial for serial in serials}
     accounts: dict[str, object] = {
@@ -95,7 +100,7 @@ def _user(name: str) -> dict[str, str]:
 
 def _wall_account() -> dict[str, object]:
     return {
-        "jetstream": {"max_file": WALL_STREAM_BYTES, "max_mem": 0},
+        "jetstream": {"max_file": WALL_ACCOUNT_STORE_BYTES, "max_mem": 0},
         "users": [_user(WALL_WRITER_USER)],
         "exports": [
             *({"service": subject} for subject in _WALL_CONSUMER_SERVICES),

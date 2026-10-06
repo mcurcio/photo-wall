@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
+from central.fleet.node_bus_accounts import (
+    FLEET_SYSTEM_USER,
+    WALL_ACCOUNT_STORE_BYTES,
+    HubListeners,
+    hub_configuration,
+)
 from contracts.node_link import (
     HUB_DOMAIN,
     NODE_DOMAIN,
@@ -91,6 +96,7 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert config["host"] == "127.0.0.1"
     assert config["jetstream"]["domain"] == NODE_DOMAIN
     assert config["jetstream"]["max_memory_store"] == "0"
+    assert config["max_payload"] == "256KB"  # API8's unreservable room is sized from it (E-W1-E3a-R-3)
     account = config["accounts"]["API"]
     assert account["jetstream"]["max_bytes_required"] is True
     assert account["jetstream"]["max_mem"] == "0"
@@ -114,7 +120,10 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
                                     {"user": central_user(serial), "password": central_user(serial)}]
         assert account["imports"] == WALL_IMPORTS
     wall = accounts[WALL_ACCOUNT]
-    assert wall["jetstream"] == {"max_file": WALL_STREAM_BYTES, "max_mem": 0}
+    # Room above the stream's cap for any storable message, so a full stream still takes an update
+    # (E-W1-E3a-R-2); the seam test's near-full update probes it on a real server.
+    assert wall["jetstream"] == {"max_file": WALL_ACCOUNT_STORE_BYTES, "max_mem": 0}
+    assert WALL_ACCOUNT_STORE_BYTES >= 2 * WALL_STREAM_BYTES
     assert wall["users"] == [{"user": WALL_WRITER_USER, "password": WALL_WRITER_USER}]
     assert wall["exports"] == [
         {"service": "$JS.API.CONSUMER.CREATE.WALL"}, {"service": "$JS.API.CONSUMER.CREATE.WALL.>"},
@@ -127,7 +136,7 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422}
     assert "http" not in config
     with pytest.raises(ValueError, match="hub_store_too_small"):
-        hub_configuration([], replace(LISTENERS, max_file_store_bytes=WALL_STREAM_BYTES - 1))
+        hub_configuration([], replace(LISTENERS, max_file_store_bytes=WALL_ACCOUNT_STORE_BYTES - 1))
 
 
 def test_the_generated_configuration_is_deterministic():

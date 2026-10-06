@@ -24,9 +24,6 @@ from typing import TYPE_CHECKING
 import nats
 import pytest
 from nats.js.api import (
-    AckPolicy,
-    ConsumerConfig,
-    DeliverPolicy,
     DiscardPolicy,
     ExternalStream,
     Header,
@@ -185,50 +182,47 @@ async def local(node: BusServer) -> Client:
     return await _connect(node.client_url)
 
 
-async def declare_wall(writer: Client) -> None:
-    """Create-if-absent: the hub's wall-wide stream, latest value per subject."""
+async def declare_wall(writer: Client, *, first_seq: int = 1) -> None:
+    """Create-if-absent: the hub's wall-wide stream, latest value per subject.
+
+    `first_seq` is one past the last sequence Central had acknowledged: a WALL re-created after the
+    hub lost its store continues where every Node mirror stopped, so the mirrors resume with no
+    Node rule (erratum E-W1-E3a-R-4, which replaces E-W1-E3a-2-2's fallback)."""
     jetstream = writer.jetstream()
     try:
         await jetstream.stream_info(WALL_STREAM)
     except NotFoundError:
         await jetstream.add_stream(StreamConfig(
             name=WALL_STREAM, subjects=["wall.>"], max_msgs_per_subject=1, discard=DiscardPolicy.NEW,
-            max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE))
+            max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE, first_seq=first_seq))
+
+
+def wall_content_bytes(longest_subject: int, largest_message: int) -> int:
+    """The bytes Central's latest wall values may total so that an update of any subject, up to
+    `largest_message` bytes, is accepted: WALL_STREAM_BYTES less one largest per-message charge.
+    kv_bucket_bytes's headroom rule: WALL discards NEW, and checks the new message's bytes before
+    it drops the subject's old value (E-W1-E3a-3-1's class, erratum E-W1-E3a-R-2)."""
+    return WALL_STREAM_BYTES - (34 + longest_subject + largest_message)
 
 
 async def declare_wall_mirror(node_client: Client) -> bool:
-    """Create-if-absent on the Node: a read-only local mirror of the hub's wall stream.
+    """Create-if-absent on the Node: a read-only local mirror of the hub's wall stream, latest value
+    per subject. Local only: it never asks the hub, so it succeeds while the hub is away, in any
+    order with Central's WALL declare (erratum E-W1-E3a-R-4). Returns True when it created one.
 
-    A mirror that holds a sequence the hub's stream never reached is re-created: the hub lost its
-    store and restarted its sequence at 1, and the mirror would wait for its old next sequence
-    forever (§6 row 11's fallback, erratum E-W1-E3a-2-2). Returns True when it created a mirror."""
+    max_msgs_per_subject 1, as the origin: without it the mirror keeps every delivered message and
+    its byte cap drops the oldest, a rarely written subject's only value first (E-W1-E3a-R-1)."""
     jetstream = node_client.jetstream()
     try:
-        held = (await jetstream.stream_info(WALL_STREAM)).state.last_seq
+        await jetstream.stream_info(WALL_STREAM)
+        return False
     except NotFoundError:
-        held = None
-    if held is not None:
-        if await wall_origin_last(node_client) >= held:
-            return False
-        await jetstream.delete_stream(WALL_STREAM)
+        pass
     await jetstream.add_stream(StreamConfig(
-        name=WALL_STREAM, max_bytes=WALL_STREAM_BYTES, storage=StorageType.FILE,
+        name=WALL_STREAM, max_bytes=WALL_STREAM_BYTES, max_msgs_per_subject=1, storage=StorageType.FILE,
         mirror=StreamSource(name=WALL_STREAM, external=ExternalStream(
             api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))))
     return True
-
-
-async def wall_origin_last(node_client: Client) -> int:
-    """The hub wall stream's last sequence, read through the Node account's imported consumer API
-    (the only WALL API a Node account has): an ephemeral consumer starting at the last message
-    reports it, and is deleted at once."""
-    wall_api = node_client.jetstream(prefix=WALL_API_PREFIX)
-    info = await wall_api.add_consumer(WALL_STREAM, ConsumerConfig(
-        deliver_policy=DeliverPolicy.LAST, ack_policy=AckPolicy.NONE, inactive_threshold=5))
-    try:
-        return info.delivered.stream_seq + info.num_pending
-    finally:
-        await wall_api.delete_consumer(WALL_STREAM, info.name)
 
 
 async def wall_value(node_client: Client, subject: str) -> bytes | None:
