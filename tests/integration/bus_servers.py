@@ -314,6 +314,22 @@ async def reload_hub(hub: BusServer, serials: Sequence[str]) -> None:
         await fleet.close()
 
 
+def kv_bucket_bytes(bucket: str, keys: Sequence[str], history: int, max_value: int,
+                    header_bytes: int = 0) -> int:
+    """A KV bucket's byte cap that its listed keys cannot fill: every key holding `history`
+    values of `max_value` bytes, each charged nats-server's per-message file-store size
+    (ns:server/filestore.go:10055-10062), plus one largest message of headroom. The class sizing
+    E3b inherits.
+
+    The headroom: a full discard-new bucket checks the new message's bytes before it drops the
+    key's oldest value, and lets the put through only when that oldest value is no shorter than the
+    new one (ns:server/filestore.go:5277-5279). Without it, a key whose oldest value is short is
+    refused a full-length update in a bucket its listed keys fill (§6 row 12, E-W1-E3a-3-1)."""
+    header = 4 + header_bytes if header_bytes else 0
+    per_message = [34 + len(f"$KV.{bucket}.{key}") + max_value + header for key in keys]
+    return sum(history * size for size in per_message) + max(per_message, default=0)
+
+
 def leaf_connections(hub: BusServer) -> Mapping[str, int]:
     """Account -> the leaf connection's id (cid), from the hub's /leafz."""
     with urllib.request.urlopen(f"{hub.monitor_url}/leafz", timeout=2) as response:
