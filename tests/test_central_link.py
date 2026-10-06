@@ -8,6 +8,8 @@ import ssl
 
 import httpx
 import pytest
+import tls_fixture as tls
+from uplink_fakes import located
 from websockets.asyncio.client import connect as library_connect
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidStatus
@@ -23,8 +25,6 @@ from player.central_link import (
     read_refusal,
     websocket_url,
 )
-from tests import tls_fixture as tls
-from tests.uplink_fakes import located
 from uplink.causes import Cause, UplinkError
 from uplink.trust import Trust
 

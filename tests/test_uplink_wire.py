@@ -4,11 +4,12 @@ digest-checked. Skips without PHOTO_WALL_TEST_DATABASE_URL, like every DB-backed
 
 import hashlib
 
+import tls_fixture as tls
+from test_netboot_e2e_wire import SERIAL, SQUASHFS, _app, _seed_base
+
 from appliance.bootstrap import CHUNK
 from appliance.netboot_init import NETBOOT_BASE_PATH, SERIAL_HEADER, parse_digest_header
 from contracts.release import MAX_ROOTFS_BYTES
-from tests import tls_fixture as tls
-from tests.test_netboot_e2e_wire import SERIAL, SQUASHFS, _app, _seed_base
 from uplink.fetch import DirectFetch
 from uplink.locate import locate
 from uplink.origin import Origin

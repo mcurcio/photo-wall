@@ -12,9 +12,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_eeprom_update import _RPI_EEPROM_CONFIG_STUB, _RPI_EEPROM_DIGEST_STUB
 
 from scripts.build_boot_data import CA_BUNDLE_PATH, FLOOR_PATH, read_archive
-from tests.test_eeprom_update import _RPI_EEPROM_CONFIG_STUB, _RPI_EEPROM_DIGEST_STUB
 
 REPO = Path(__file__).resolve().parents[1]
 BUNDLE = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"

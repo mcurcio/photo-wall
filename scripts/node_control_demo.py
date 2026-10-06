@@ -156,7 +156,7 @@ class RecordingAppDriver:
         self.selected = environment
 
     def start(self, environment, operation_id):
-        from appliance.node.broker import RunningApp
+        from appliance.apps.broker import RunningApp
         from contracts.node_protocol import NodeProcessIdentity
 
         self.calls.append("start_simulated_process")
@@ -178,9 +178,9 @@ class SimulatedPreparer:
 
 def run_demo() -> dict:
     """Return a trace of real domain transitions driven by simulator adapters."""
+    from appliance.apps.broker import AppEffectBroker, ColdStart
     from appliance.display_host.domain import DisplayHost, Surface
-    from appliance.node.broker import AppEffectBroker, ColdStart
-    from appliance.node.host import HostCore, RebootRequest
+    from appliance.host.host import HostCore, RebootRequest
     from appliance.node.manager import AppManager
     from contracts.app_environment import AppEnvironmentRefV2
     from contracts.node_protocol import AppProcessFact

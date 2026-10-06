@@ -57,7 +57,7 @@ MASKS = (
 # Bound over the kernel's boot_id inside the container before systemd starts as PID 1.
 FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
 # The refused scenario's fake board (tests/node_pid1_central_inner.py): MemTotal 2097152 kB,
-# below the smallest memory class, pi5-4gb's 3584 MiB (appliance/node/capacity.py CLASSES).
+# below the smallest memory class, pi5-4gb's 3584 MiB (appliance/kernel/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
 SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
 
@@ -312,7 +312,7 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         components = json.loads((components_dir / "components.json").read_text())
         verify_script = """import json,pathlib,sys
 sys.path.insert(0,'/usr/lib/photo-wall-node-bootstrap')
-from appliance.node.environment import verify_root
+from appliance.apps.environment import verify_root
 from contracts.app_environment import AppEnvironmentRefV2
 value=json.loads(sys.argv[1]);refs=json.loads(sys.argv[2]);count=0
 for kind,ref in refs:

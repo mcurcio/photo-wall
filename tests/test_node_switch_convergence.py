@@ -11,16 +11,16 @@ import os
 from types import SimpleNamespace
 from uuid import uuid4
 
+from node.apps.test_node_online_broker import Driver
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_lifecycle import Rig
-from test_node_online_broker import Driver
 
+import appliance.apps.online_broker as online_broker
 import appliance.central_session.session as node_session
-import appliance.node.online_broker as online_broker
-from appliance.boot_store import BootStore
+from appliance.apps.broker import RunningApp
+from appliance.apps.online_runner import OnlineRunner
 from appliance.central_session.session import NodeSession
-from appliance.node.broker import RunningApp
-from appliance.node.online_runner import OnlineRunner
+from appliance.kernel.boot_store import BootStore
 from central.fleet.node_sessions import NodeControlError
 from contracts.node_commands import encode_session_grant, parse_session_claim
 from contracts.node_lifecycle import parse_app_effect_event

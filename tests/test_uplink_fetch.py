@@ -14,11 +14,11 @@ import time
 from collections.abc import Iterator
 
 import pytest
+import tls_fixture as tls
+from test_uplink_transport import TRICKLE_DEADLINE, TRICKLE_SLACK, trickle_peer
+from uplink_fakes import FakeReply, FakeTransport, located
 
 from contracts.read_through import READ_THROUGH_WAIT_SECONDS
-from tests import tls_fixture as tls
-from tests.test_uplink_transport import TRICKLE_DEADLINE, TRICKLE_SLACK, trickle_peer
-from tests.uplink_fakes import FakeReply, FakeTransport, located
 from uplink.causes import Cause, UplinkError
 from uplink.fetch import (
     MAX_ERROR_BODY,

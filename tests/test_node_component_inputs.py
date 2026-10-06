@@ -152,7 +152,7 @@ def test_every_file_the_component_builders_read_is_in_the_key(reads, sources):
             "scripts/debian_packages.py"} <= reads["tree"]
     assert any(name.startswith(display.SOURCE_DIR + "/") for name in reads["tree"])
     assert {"tests/node_pid1_fixture_head.c", "scripts/build_app_environment.py",
-            "appliance/node/environment.py"} <= reads["repo"]
+            "appliance/apps/environment.py"} <= reads["repo"]
 
 
 @pytest.mark.parametrize("dropped", ["appliance/systemd/weston.service",
@@ -164,7 +164,7 @@ def test_the_guard_names_a_tree_read_the_key_would_miss(reads, sources, dropped)
 
 
 @pytest.mark.parametrize("dropped", ["tests/node_pid1_fixture_head.c",
-                                     "appliance/node/environment.py"])
+                                     "appliance/apps/environment.py"])
 def test_the_guard_names_a_working_tree_read_the_key_would_miss(reads, sources, dropped):
     builder = set(inputs.builder_files()) - {dropped}
     assert _uncovered(reads, sources, builder) == {dropped}

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 sys.path.insert(0, "/usr/lib/photo-wall-manager-supervisor")
 import contracts
-from appliance.node.environment import verify_root
+from appliance.apps.environment import verify_root
 from appliance.node.manager_launcher import UNIT, SystemdManagerLauncher
 
 contracts.__path__.append("/usr/lib/photo-wall-app-broker/contracts")

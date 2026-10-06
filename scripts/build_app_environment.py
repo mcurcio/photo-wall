@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 
-from appliance.node.environment import (
+from appliance.apps.environment import (
     FORMAT,
     MAX_EXPANDED,
     MAX_FILES,
@@ -111,7 +111,7 @@ def build(deb: Path, output: Path, *, builder_image: str, architecture: str,
     validate_builder(builder_image, architecture, purpose="closure")
     input_files = {name: file_sha256(Path(__file__).resolve().parents[1] / name) for name in (
         "scripts/build_app_environment.py", "scripts/debian_packages.py",
-        "scripts/node_build_inputs.py", "appliance/node/environment.py")}
+        "scripts/node_build_inputs.py", "appliance/apps/environment.py")}
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="photo-wall-closure-") as temporary:
         work = Path(temporary)

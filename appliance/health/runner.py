@@ -18,7 +18,7 @@ ring. It never connects to the compositor, launches or kills anything, or talks 
 unit allows AF_UNIX only).
 
 The judge is built from the published constants: T, k, S and K from App lifecycle
-(`appliance.node.probe`), D from Display (`appliance.display_host.overlay.instruction`) and the
+(`appliance.kernel.probe_timing`), D from Display (`appliance.display_host.overlay.instruction`) and the
 catalogue (`contracts.node_faults`); a K that could kill before the card shows refuses to start.
 """
 
@@ -33,7 +33,6 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from appliance.clock import boottime_ms
 from appliance.display_host.overlay.instruction import (
     INSTRUCTION_STALE_MS,
     PULSE_DEADLINE_MS,
@@ -44,7 +43,8 @@ from appliance.display_host.overlay.instruction import (
 from appliance.feed import READ_LIMIT, FeedCursor, FeedEvent
 from appliance.feed_socket import peer_uid
 from appliance.health.judge import HealthJudge, Presented, display_outputs
-from appliance.node.probe import SHIPPED_TIMING
+from appliance.kernel.clock import boottime_ms
+from appliance.kernel.probe_timing import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
 from contracts.strict_json import loads_object
 

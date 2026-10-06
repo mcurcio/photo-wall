@@ -58,7 +58,12 @@ major_version_zero = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# importlib + namespace packages name each test module by its path under tests/ (tests/node/apps/
+# test_x.py is `node.apps.test_x`), so equal basenames in two directories never collide and a new
+# test directory needs no entry here. Import a helper by that name; browser/ keeps bare imports.
+pythonpath = ["tests", "tests/browser"]
+consider_namespace_packages = true
+addopts = "-ra --import-mode=importlib"
 
 [tool.ruff]
 target-version = "py312"
@@ -72,9 +77,14 @@ select = ["E4", "E7", "E9", "F", "I", "TID251"]
 # pool. `async_connector` builds the pool without it (see `central/infra/job_queue.py`).
 "procrastinate.PsycopgConnector".msg = "use central.infra.job_queue.async_connector"
 "procrastinate.psycopg_connector.PsycopgConnector".msg = "use central.infra.job_queue.async_connector"
+# Under importlib mode a test module is named by its path under tests/, so `tests.x` loads a
+# second copy of a collected module. Scripts outside tests/ may still import the package.
+"tests".msg = "import a test helper by its name under tests/ (`uplink_fakes`, `node.x`), not via `tests`"
 
 [tool.ruff.lint.per-file-ignores]
+# Both bans apply everywhere; each exemption names the one file that owns the banned use.
 "central/infra/job_queue.py" = ["TID251"]
+"scripts/uplink_device_harness.py" = ["TID251"]
 
 [tool.importlinter]
 root_packages = ["central", "contracts", "media", "player", "appliance", "uplink"]
@@ -132,11 +142,64 @@ source_modules = ["central.kernel"]
 forbidden_modules = ["httpx", "media", "central.db", "central.cache_layout", "central.artifact_io"]
 
 [[tool.importlinter.contracts]]
-# Player health frame: a context may import only the layers below it. Parenthesised layers are
-# optional until their package exists (Authority is M2).
+# One directory per Node context (node redesign r3 §3.4). A layer imports only the layers below.
+# `exhaustive`: a new appliance module that names no layer fails.
 name = "Node contexts point down"
 type = "layers"
-layers = ["(appliance.authority)", "appliance.health", "appliance.display_host | appliance.node"]
+containers = ["appliance"]
+# Siblings are `|` (independent), never `:`: a real dependency is its own layer.
+layers = ["node", "boot | netboot_init", "bootstrap | boot_offer | central_post | node_boot_handoff",
+          "apps", "health", "display_host | host", "central_session", "kernel | feed | feed_socket"]
+exhaustive = true
+ignore_imports = [
+  # Retiring (r3 §10): each line leaves with the module it names.
+  "appliance.apps.broker_runner -> appliance.node.app_link",
+  "appliance.apps.broker_runner -> appliance.node.recovery_linux",
+  "appliance.apps.online_broker -> appliance.node.recovery",
+  "appliance.apps.stop_linux -> appliance.node.recovery",
+  "appliance.apps.lifecycle_storage -> appliance.node.manager",
+  "appliance.host.host_runner -> appliance.node.recovery",
+  "appliance.host.host_runner -> appliance.node.recovery_linux",
+  "appliance.boot.node_bootstrap -> appliance.node.preparer",
+]
+exhaustive_ignores = ["app_evidence", "app_executor", "app_launcher", "app_payload",
+                      "app_process_proof", "app_proof_service", "linux_app_proof",
+                      "online_activation", "os_agent", "provision", "process_identity"]
+
+[[tool.importlinter.contracts]]
+name = "Boot is an island"
+type = "forbidden"
+source_modules = ["appliance.boot", "appliance.netboot_init", "appliance.bootstrap",
+                  "appliance.boot_offer", "appliance.central_post", "appliance.node_boot_handoff"]
+forbidden_modules = ["appliance.apps", "appliance.health", "appliance.display_host",
+                     "appliance.host", "appliance.central_session"]
+ignore_imports = [
+  # Boot's only edges out: the retiring prepare verb's apps.environment (r3 §10); E6 removes them.
+  "appliance.boot.node_bootstrap -> appliance.apps.environment",
+  "appliance.node.preparer -> appliance.apps.environment",
+]
+
+[[tool.importlinter.contracts]]
+name = "App lifecycle reaches no sibling context"
+type = "forbidden"
+source_modules = ["appliance.apps"]
+forbidden_modules = ["appliance.health", "appliance.display_host", "appliance.host"]
+
+[[tool.importlinter.contracts]]
+name = "Health reaches only Display among contexts"
+type = "forbidden"
+source_modules = ["appliance.health"]
+forbidden_modules = ["appliance.host"]
+
+[[tool.importlinter.contracts]]
+# The host-core launcher ships alone. Like the apps fence, this has no ignore lines, so a path
+# through a retiring module the layers contract exempts (host_runner -> node.recovery) still fails.
+name = "Host core reaches no sibling context"
+type = "forbidden"
+source_modules = ["appliance.host"]
+forbidden_modules = ["appliance.display_host", "appliance.health", "appliance.apps", "appliance.boot",
+                     "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
+                     "appliance.central_post", "appliance.node_boot_handoff"]
 
 [[tool.importlinter.contracts]]
 # The judge alone maps faults to household lines; Display draws the instruction it is given.
@@ -146,32 +209,63 @@ source_modules = ["appliance.display_host"]
 forbidden_modules = ["contracts.node_faults"]
 
 [[tool.importlinter.contracts]]
-# Central I/O belongs to Authority. The ignore list is a ratchet: it only shrinks, and
-# tests/test_import_contracts.py fails on any line outside the frozen six.
-name = "Central session only in Authority and the two exemptions"
-type = "forbidden"
-source_modules = ["appliance.display_host", "appliance.node", "appliance.health"]
-forbidden_modules = ["appliance.central_session"]
+# Retiring (r3 §10): the programme deletes each worker and its line with it.
+name = "The Central session is retiring: only the listed workers import it"
+type = "protected"
+protected_modules = ["appliance.central_session"]
+allowed_importers = ["appliance.central_session"]
 ignore_imports = [
-  # Permanent: HostCore's reboot session, a separate credential (system-design-r8 rule 3).
-  "appliance.node.host_runner -> appliance.central_session.*",
-  # Permanent: the Manager's read-only preparation session (system-design-r8 rule 3, #36).
+  "appliance.host.host_runner -> appliance.central_session.*",
   "appliance.node.manager_desired -> appliance.central_session.*",
-  # Ratchet, removed in M2-13: the display controller's Central worker moves to Authority.
   "appliance.display_host.service -> appliance.central_session.*",
-  # Ratchet, removed in M2-15: the broker's own Central session moves to the Central link.
-  "appliance.node.broker_runner -> appliance.central_session.*",
-  # Ratchet, removed in M2-15: app-link delivery moves to the Central link.
+  "appliance.apps.broker_runner -> appliance.central_session.*",
   "appliance.node.app_link -> appliance.central_session.*",
-  # Ratchet, removed in M2-15: the online broker's Central reports move to the Central link.
-  "appliance.node.online_broker -> appliance.central_session.*",
+  "appliance.apps.online_broker -> appliance.central_session.*",
 ]
 
 [[tool.importlinter.contracts]]
-name = "Shared node kernel knows no context"
+name = "The base never imports the guest"
 type = "forbidden"
-source_modules = ["appliance.clock", "appliance.boot_store", "appliance.feed",
-                  "appliance.feed_socket", "appliance.central_session",
-                  "appliance.unix_credentials"]
-forbidden_modules = ["appliance.authority", "appliance.health", "appliance.display_host",
-                     "appliance.node"]
+source_modules = ["appliance"]
+forbidden_modules = ["player"]
+ignore_imports = ["appliance.os_agent -> player.mdns_discovery",
+                  "appliance.provision -> player.mdns_discovery"]
+
+[[tool.importlinter.contracts]]
+name = "Node contexts never reach V1"
+type = "forbidden"
+source_modules = ["appliance.kernel", "appliance.feed", "appliance.feed_socket",
+                  "appliance.central_session", "appliance.host", "appliance.display_host",
+                  "appliance.health", "appliance.apps", "appliance.boot", "appliance.process_identity",
+                  "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
+                  "appliance.central_post", "appliance.node_boot_handoff"]
+forbidden_modules = ["appliance.app_evidence", "appliance.app_executor", "appliance.app_launcher",
+                     "appliance.app_payload", "appliance.app_process_proof",
+                     "appliance.app_proof_service", "appliance.linux_app_proof",
+                     "appliance.online_activation", "appliance.os_agent", "appliance.provision"]
+ignore_imports = ["appliance.process_identity -> appliance.app_launcher"]
+
+[[tool.importlinter.contracts]]
+# The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).
+name = "Only the Node API library talks to NATS"
+type = "forbidden"
+source_modules = ["central", "contracts", "media", "player", "appliance", "uplink"]
+forbidden_modules = ["nats"]
+
+[[tool.importlinter.contracts]]
+# Retiring (r3 §16.1 B2b/B10a): the feed gains no importer; each line leaves with its importer.
+name = "The feed is retiring: it gains no importer"
+type = "protected"
+protected_modules = ["appliance.feed", "appliance.feed_socket"]
+allowed_importers = ["appliance.feed", "appliance.feed_socket"]
+ignore_imports = [
+  "appliance.display_host.runner -> appliance.feed",
+  "appliance.display_host.runner -> appliance.feed_socket",
+  "appliance.health.judge -> appliance.feed",
+  "appliance.health.runner -> appliance.feed",
+  "appliance.health.runner -> appliance.feed_socket",
+  "appliance.node.app_link -> appliance.feed",
+  "appliance.apps.broker_runner -> appliance.feed",
+  "appliance.apps.broker_runner -> appliance.feed_socket",
+  "appliance.apps.probe_channel -> appliance.feed",
+]

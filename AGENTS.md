@@ -18,13 +18,19 @@ This page is the map; open an owning document only when the routing table sends 
 | `contracts/` | Versioned wire models shared by every side | `models.py`, `node_*.py` |
 | `uplink/` | Stdlib-only initramfs client that locates and trusts Central | `locate.py`, `fetch.py` |
 | `appliance/` | OS base, netboot initramfs, provisioning, systemd units, OS agent | `netboot_init.py`, `os_agent.py`, `systemd/` |
-| `appliance/node/` | Host core, AppManager, broker, storage, stop/recovery | `*_runner.py`, `bootstrap.py` |
+| `appliance/kernel/` | Node kernel: primitives on the stdlib, `contracts` and `uplink` alone (clock, boot store, credentials, capacity, boot-stage records, probe timing) | `capacity.py`, `boot_stage.py` |
+| `appliance/host/` | HostCore: host metrics and facts, operator reboot, local recovery deadlines | `host_runner.py` |
+| `appliance/boot/` | The Node's one-shot boot stages: storage, handoff, prepare | `node_bootstrap.py` |
+| `appliance/apps/` | App lifecycle: effect broker, progress probe, app process, stop, root import | `broker_runner.py`, `online_runner.py`, `root_import.py` |
+| `appliance/health/` | Health judge: Node facts to one verdict and the overlay instruction | `runner.py`, `judge.py` |
+| `appliance/node/` | *Retiring:* AppManager, preparer, app link, recovery; gains no new code | `manager_runner.py` |
+| `appliance/central_session/` | *Retiring:* the Node's Central session and HTTP, imported only by the listed workers | `session.py` |
 | `appliance/display_host/` | Weston display host and native C clients | `runner.py`, `native/` |
 | `scripts/` | Builds, fixtures, demos, wrappers | `test_local.py`, `demo_wall.py`, `immich_fixture.py`, `check_docs.py` |
-| `tests/` | `test_*.py` (unit + DB); `browser/` Playwright; `integration/` Compose files; `test_node_pid1.py` + `node_pid1_*` real-systemd node scenarios | `conftest.py` assigns tiers |
+| `tests/` | `test_*.py` (unit + DB); `node/<ctx>/` Node tests per context (`apps`, `boot`, `display`, `health`, `host`; cross-context ones in `node/`), imported by path under `tests/` (`node.apps.test_x`), so a new directory needs no registration and may reuse file names; `browser/` Playwright; `integration/` Compose files; `test_node_pid1.py` + `node_pid1_*` real-systemd node scenarios | `conftest.py` assigns tiers |
 | `.github/workflows/` | `pipeline.yml` gates merges; calls `checks.yml`, `software-e2e.yml`, `netboot-e2e.yml`, `node-pid1.yml`, … | |
 
-**Import layering** (`pyproject.toml` `[tool.importlinter]`): `contracts` imports no domain or persistence package; `uplink` is stdlib-only (no pydantic, httpx or domain package); `player` never imports `central`, `media`, `appliance` or a database/queue; Central layers run `app : content_wiring : content_routes` → `infra` → `content_catalog | assets | health` → `origins` → `kernel`, the inner ones free of psycopg, Procrastinate and FastAPI.
+**Import layering** (`pyproject.toml` `[tool.importlinter]`): `contracts` imports no domain or persistence package; `uplink` is stdlib-only (no pydantic, httpx or domain package); `player` never imports `central`, `media`, `appliance` or a database/queue; Central layers run `app : content_wiring : content_routes` → `infra` → `content_catalog | assets | health` → `origins` → `kernel`, the inner ones free of psycopg, Procrastinate and FastAPI. Node contexts under `appliance/` run `node` (retiring) → `boot | netboot_init` → stage-1 helpers → `apps` → `health` → `display_host | host` → `central_session` (retiring) → `kernel | feed` (feed retiring), each importing only the layers below and never a `|` sibling; `boot` reaches no other context except the retiring prepare verb's `apps.environment` edge, which E6 removes; `host` reaches no sibling context; only `nodeapi` imports NATS.
 
 ## Verify
 
