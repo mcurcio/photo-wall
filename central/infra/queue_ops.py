@@ -27,7 +27,7 @@ from typing import Any, Final
 import procrastinate
 from procrastinate.jobs import Status
 
-from central.infra.job_queue import build_app, decode, defer_async, task_name
+from central.infra.job_queue import async_connector, build_app, decode, defer_async, task_name
 from central.infra.outcomes import JobOutcomes
 from central.kernel.handling import TransientFailure
 from central.kernel.job_types import CATALOG, PurgeFinishedJobs, RescueStalledJobs
@@ -54,9 +54,7 @@ class QueueAdmin:
     """
 
     def __init__(self, dsn: str, *, job_types: Sequence[type[Job[Any]]] = CATALOG) -> None:
-        self._app = build_app(procrastinate.PsycopgConnector(conninfo=dsn, min_size=0,
-                                                             max_size=2),
-                              job_types, None)
+        self._app = build_app(async_connector(dsn, min_size=0, max_size=2), job_types, None)
         self._names = frozenset(task_name(job_type) for job_type in job_types)
         self._queues = sorted({job_type.delivery.queue.value for job_type in job_types})
         self._opening = asyncio.Lock()

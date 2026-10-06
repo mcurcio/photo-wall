@@ -65,7 +65,16 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I"]
+select = ["E4", "E7", "E9", "F", "I", "TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+# psycopg_pool's getconn check swallows a cancel; procrastinate turns the check on for every async
+# pool. `async_connector` builds the pool without it (see `central/infra/job_queue.py`).
+"procrastinate.PsycopgConnector".msg = "use central.infra.job_queue.async_connector"
+"procrastinate.psycopg_connector.PsycopgConnector".msg = "use central.infra.job_queue.async_connector"
+
+[tool.ruff.lint.per-file-ignores]
+"central/infra/job_queue.py" = ["TID251"]
 
 [tool.importlinter]
 root_packages = ["central", "contracts", "media", "player", "appliance", "uplink"]

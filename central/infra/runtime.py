@@ -38,7 +38,12 @@ from procrastinate import sql
 from procrastinate.manager import JobManager
 
 from central.infra.execution import JobExecutor, Redelivery
-from central.infra.job_queue import build_app, carry_attempt_async, defer_async
+from central.infra.job_queue import (
+    async_connector,
+    build_app,
+    carry_attempt_async,
+    defer_async,
+)
 from central.infra.outcomes import JobOutcomes
 from central.infra.transactions import PgTransactions
 from central.kernel.handling import Handler
@@ -134,7 +139,7 @@ class JobRuntime:
         if any(type(n) is not int or n < 1 for n in concurrency.values()):
             raise ValueError("concurrency must be at least 1 per queue")
         self._concurrency = dict(concurrency)
-        self._app = build_app(procrastinate.PsycopgConnector(conninfo=dsn), catalog, self._body)
+        self._app = build_app(async_connector(dsn), catalog, self._body)
         # The worker reads `app.job_manager` at every call (procrastinate worker.py), so the
         # guard sees every completion write.
         self._app.job_manager = _CompletionGuard(self._app.connector, self._completion_lost)

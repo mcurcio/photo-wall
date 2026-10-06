@@ -14,7 +14,14 @@ import pytest
 from procrastinate.periodic import PeriodicDeferrer
 from runtime_fakes import apply_procrastinate_schema
 
-from central.infra.job_queue import build_app, decode, defer, job_kwargs, task_name
+from central.infra.job_queue import (
+    async_connector,
+    build_app,
+    decode,
+    defer,
+    job_kwargs,
+    task_name,
+)
 from central.infra.queue_ops import QueueAdmin, RescueStalledJobsHandler
 from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.job_types import CATALOG, FetchOsImage, FetchPackage, RescueStalledJobs
@@ -47,7 +54,7 @@ class Queue:
 
     def tick(self, job_type, timestamp):
         """Defer one periodic tick exactly as procrastinate's periodic deferrer does."""
-        app = build_app(procrastinate.PsycopgConnector(conninfo=self.dsn), CATALOG, None)
+        app = build_app(async_connector(self.dsn), CATALOG, None)
         (entry,) = [pt for pt in app.periodic_registry.periodic_tasks.values()
                     if pt.task.name == task_name(job_type)]
 
