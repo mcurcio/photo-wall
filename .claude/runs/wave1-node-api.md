@@ -36,7 +36,7 @@
 | Bead | Lane | Status | Sha | Note |
 |---|---|---|---|---|
 | E3a-1 | E3 (tracer) | landed | e0c79f5 | WebSocket leaf, method, same-domain isolation and wall-wide mirror proven on nats-server 2.15.0; no stop branch taken; errata E-W1-E3a-1-1 |
-| E3a-2 | E3 | open | | Central writes a Node bucket conditionally, drains a Node stream after commit, counts a gap; hub reload and hub wipe |
+| E3a-2 | E3 | landed | 1656baf | Conditional Node-bucket write, ack-after-commit drain with gap count, reload and wipe proven; row 9 (reload twice) and row 11 (mirror re-create) fallbacks recorded; errata E-W1-E3a-2-1..3 |
 | E3a-3 | E3 | open | | The Node server refuses past its store limit; each retention class keeps its promise |
 | E2a-1 | E2 | open | | Line table; caps from readings; double counts removed |
 | E2b-1 | E2 | landed | 65e9f3e | Deterministic squashfs build script + mount/`verify_root` test, CI leg, release-plan claim; errata E-W1-E2b-1-1 (append conflict with D-0017 errata resolved by keeping both); static gates green |
