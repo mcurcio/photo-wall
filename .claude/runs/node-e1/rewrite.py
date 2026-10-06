@@ -4,8 +4,9 @@ Run tool, unshipped (`.claude/**`). Prior art: `lintprobe/simulate.py`, `sim2/si
 `lintprobe/split.py` (sim2, sim3, sim4), with the slash look-behind fixed to `(?<![\\w.])` so
 `usr/lib/photo-wall-<x>/appliance/node/...` literals are rewritten too.
 
-Usage: python .claude/runs/node-e1/rewrite.py <repo> [--check]
+Usage: python .claude/runs/node-e1/rewrite.py <repo> [--check] [--scope <path> ...]
 `--check` edits nothing and reports the residual: old names still present in scope (must be empty).
+`--scope` replaces the code scope (E1-4's docs pass: `--scope docs AGENTS.md`); `HISTORICAL` stays out.
 Afterwards run `ruff check --fix` for the import order the per-name split leaves.
 """
 from __future__ import annotations
@@ -27,6 +28,8 @@ SCOPE = ("appliance", "scripts", "tests", ".github", "pyproject.toml",
          "docs/evidence/2026-09-30-node-stop-observation-proposal.md",
          "docs/player-architecture.md")
 FROZEN = ("appliance/systemd/", "appliance/display_host/meson.build")
+# E1-4: the two superseded r8 documents keep their paths as history.
+HISTORICAL = ("docs/design/player-health/system-design-r8.md", "docs/design/player-health/module-design-r8.md")
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,13 +84,13 @@ def rewrite_text(text: str) -> str:
     return text
 
 
-def _scope_files(root: Path) -> Iterator[Path]:
-    for entry in SCOPE:
+def _scope_files(root: Path, scope: tuple[str, ...] = SCOPE) -> Iterator[Path]:
+    for entry in scope:
         base = root / entry
         candidates = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
         for path in candidates:
             relative = path.relative_to(root).as_posix()
-            if "__pycache__" in path.parts or relative.startswith(FROZEN):
+            if "__pycache__" in path.parts or relative.startswith(FROZEN) or relative in HISTORICAL:
                 continue
             yield path
 
@@ -99,13 +102,13 @@ def _read(path: Path) -> str | None:
         return None
 
 
-def residual(root: Path) -> tuple[tuple[str, int, str], ...]:
+def residual(root: Path, scope: tuple[str, ...] = SCOPE) -> tuple[tuple[str, int, str], ...]:
     found: list[tuple[str, int, str]] = []
     package_form = [re.compile(r"^\s*from " + re.escape(package) + r" import .*(?<![\w])(" +
                                "|".join(map(re.escape, names)) + r")(?![\w])", re.M)
                     for package, names in _PARENTS.items()]
     split_form = re.compile(r"""["']appliance/node["']\s*/""")
-    for path in _scope_files(root):
+    for path in _scope_files(root, scope):
         text = _read(path)
         if text is None:
             continue
@@ -144,12 +147,20 @@ def _split_probe(root: Path) -> None:
         "from appliance.apps.probe import SHIPPED_TIMING", f"from {PROBE_TIMING} import SHIPPED_TIMING"))
 
 
-def rewrite_tree(root: Path, *, check_only: bool = False) -> RewriteReport:
+def rewrite_tree(root: Path, *, check_only: bool = False, scope: tuple[str, ...] = SCOPE) -> RewriteReport:
     moved = tuple((_path(old), _path(new)) for old, new in MOVES)
     if check_only:
-        edited = tuple(path.relative_to(root).as_posix() for path in _scope_files(root)
+        edited = tuple(path.relative_to(root).as_posix() for path in _scope_files(root, scope)
                        if (text := _read(path)) is not None and rewrite_text(text) != text)
-        return RewriteReport(moved, edited, residual(root))
+        return RewriteReport(moved, edited, residual(root, scope))
+    if scope != SCOPE:  # E1-4's docs pass: rewrite references only; nothing moves.
+        edited = []
+        for path in _scope_files(root, scope):
+            text = _read(path)
+            if text is not None and (new_text := rewrite_text(text)) != text:
+                path.write_bytes(new_text.encode("utf-8"))
+                edited.append(path.relative_to(root).as_posix())
+        return RewriteReport((), tuple(edited), residual(root, scope))
     for package, doc in PACKAGES.items():
         init = root / package.replace(".", "/") / "__init__.py"
         init.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +183,9 @@ def rewrite_tree(root: Path, *, check_only: bool = False) -> RewriteReport:
 
 def main() -> int:
     root = Path(sys.argv[1]).resolve()
-    report = rewrite_tree(root, check_only="--check" in sys.argv[2:])
+    options = sys.argv[2:]
+    scope = tuple(options[options.index("--scope") + 1:]) if "--scope" in options else SCOPE
+    report = rewrite_tree(root, check_only="--check" in options, scope=tuple(s for s in scope if s != "--check") or SCOPE)
     print(f"moved {len(report.moved)}; edited {len(report.edited)}; residual {len(report.residual)}")
     for file in report.edited:
         print("  edited", file)
