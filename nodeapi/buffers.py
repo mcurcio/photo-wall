@@ -7,13 +7,13 @@ being full:
 - **circular** (`buffer`, `bucket`): event buffers (records, observations, reported state). A byte
   cap and any other limit; full, the server drops the oldest and takes the write, and a reader
   sees the loss as a sequence gap.
-- **sticky** (`Documents`, `sticky_bucket`, `wall_config`, `wall_mirror_config`): documents that
-  must stay (desired-state buckets, WALL and every Node mirror of it). Per-subject history only and
-  no count limit. The byte cap is the document table's budget (keys x history x largest value),
-  which the table's one writer, `documents.DocumentWriter`, never exceeds: it refuses its own
-  unlisted or oversize write before sending. So the per-subject limit always drops a key's own
-  oldest value first (ns:server/filestore.go:5340-5380, before the byte limit) and no document is
-  evicted by bytes or count. Nothing on the Node refuses anything.
+- **sticky** (`state_bucket`, `desired_bucket`, `wall_config`, `wall_mirror_config`): keyed data
+  that must stay (state, desired documents, WALL and every Node mirror of it). Per-subject history
+  only and no count limit. The byte cap is the key table's budget (keys x history x largest value),
+  and the table travels in the stream's metadata, so every writer (`documents.DocumentWriter`, the
+  session's state put) refuses its own unlisted or oversize write before sending. So the per-subject
+  limit always drops a key's own oldest value first (ns:server/filestore.go:5340-5380, before the
+  byte limit) and no key loses its only value to bytes or count. Nothing on the Node refuses anything.
 
 Every builder sets `max_msg_size` to at most `MAX_STORED_MESSAGE`, so a reply carrying a stored
 message always fits the leaf (E-W1-TD-2). A builder carries no epoch: `declare` writes a fresh one
@@ -41,7 +41,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
@@ -81,7 +81,6 @@ if TYPE_CHECKING:
 KIND_KEY: Final = "photo_wall_kind"     # stream metadata: CIRCULAR or STICKY
 CIRCULAR: Final = "circular"
 STICKY: Final = "sticky"
-MANIFEST_KEY: Final = "_manifest"       # a sticky buffer's list of the documents written to it
 HEADER_ALLOWANCE: Final = 256           # the header block a document writer may send with a document
 # The longest document subject: half of NODE_MAX_CONTROL_LINE, so the line of any client naming it
 # fits with what it adds (a writer's inbox and sizes, a reader's `$JS.<domain>.API.DIRECT.GET.<stream>.`
@@ -142,85 +141,6 @@ def bucket(name: str, *, history: int, max_bytes: int, max_value_size: int | Non
     """A circular KV bucket (reported state): `history` values per key, a key's own oldest first;
     an unlisted key past the byte cap costs the bucket its oldest message."""
     return _build(CIRCULAR, f"KV_{name}", max_bytes, _kv_fields(name, history, max_value_size))
-
-
-@dataclass(frozen=True)
-class Documents:
-    """A sticky buffer's document table: every key it may hold, each with its largest value, and the
-    history kept per key. Its budget is the sticky buffer's byte cap; its one writer keeps to it."""
-    stream: str
-    subject_prefix: str             # the stored subject of key k is subject_prefix + k
-    sizes: Mapping[str, int]        # key -> largest value in bytes (headers are HEADER_ALLOWANCE more)
-    history: int = 1
-
-    def __post_init__(self) -> None:
-        if type(self.history) is not int or self.history < 1:
-            raise ValueError("documents_need_history")
-        if not self.sizes or MANIFEST_KEY in self.sizes:
-            raise ValueError("documents_key_set")
-        object.__setattr__(self, "sizes", MappingProxyType(dict(self.sizes)))
-        for key, size in self.all_sizes().items():
-            if not 0 < size <= MAX_STORED_MESSAGE - HEADER_ALLOWANCE:
-                raise ValueError("documents_value_past_the_leaf")
-            if len((self.subject_prefix + key).encode()) > MAX_PUBLISH_SUBJECT:
-                raise ValueError("documents_subject_past_the_control_line")
-
-    @classmethod
-    def bucket(cls, bucket_name: str, sizes: Mapping[str, int], *, history: int) -> Documents:
-        """A sticky KV bucket's table (a desired-state bucket)."""
-        return cls(f"KV_{bucket_name}", f"$KV.{bucket_name}.", sizes, history)
-
-    @classmethod
-    def wall(cls, sizes: Mapping[str, int]) -> Documents:
-        """WALL's table (keys are subjects under `wall.`). Its budget must fit WALL_STREAM_BYTES, the
-        one cap of the hub stream and of every Node mirror, which hold no key list of their own."""
-        table = cls(WALL_STREAM, "wall.", sizes, 1)
-        if table.budget > WALL_STREAM_BYTES:
-            raise ValueError("wall_documents_over_budget")
-        return table
-
-    def manifest(self, keys: Iterable[str]) -> bytes:
-        """The manifest document's value for these written keys."""
-        return json.dumps(sorted(keys), separators=(",", ":")).encode()
-
-    def all_sizes(self) -> dict[str, int]:
-        return {**self.sizes, MANIFEST_KEY: len(self.manifest(self.sizes))}
-
-    @property
-    def budget(self) -> int:
-        """Bytes the stream holds with every document, the manifest included, at its largest value
-        and largest headers, `history` times: the sticky buffer's byte cap."""
-        return self.history * sum(message_charge(self.subject_prefix + key, size, HEADER_ALLOWANCE)
-                                  for key, size in self.all_sizes().items())
-
-    @property
-    def largest(self) -> int:
-        """The largest message (headers + value) the table admits: the stream's max_msg_size."""
-        return max(self.all_sizes().values()) + HEADER_ALLOWANCE
-
-
-def sticky_bucket(table: Documents) -> StreamConfig:
-    """A sticky KV bucket: per-key history only; its byte cap is the table's budget."""
-    if not table.stream.startswith("KV_"):
-        raise ValueError("sticky_bucket_needs_a_bucket_table")
-    return _build(STICKY, table.stream, table.budget,
-                  _kv_fields(table.stream.removeprefix("KV_"), table.history, table.largest))
-
-
-def wall_config(*, first_seq: int = 1) -> StreamConfig:
-    """The hub's wall-wide stream: sticky, latest value per subject, WALL_STREAM_BYTES (the cap its
-    mirrors share). `first_seq` continues a lost WALL past Central's last acknowledged sequence
-    (erratum E-W1-E3a-R-4)."""
-    return _build(STICKY, WALL_STREAM, WALL_STREAM_BYTES,
-                  dict(subjects=["wall.>"], max_msgs_per_subject=1, max_msgs=-1, first_seq=first_seq))
-
-
-def wall_mirror_config() -> StreamConfig:
-    """A Node's read-only local mirror of WALL, sticky as its origin: max_msgs_per_subject 1 and the
-    same cap (erratum E-W1-E3a-R-1)."""
-    return _build(STICKY, WALL_STREAM, WALL_STREAM_BYTES, dict(
-        max_msgs_per_subject=1, max_msgs=-1, mirror=StreamSource(
-            name=WALL_STREAM, external=ExternalStream(api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))))
 
 
 def buffer_kind(config: StreamConfig) -> str:
@@ -394,6 +314,19 @@ def event_buffer(line: str, topic: str, max_bytes: int, *, max_age: float | None
     return _build(CIRCULAR, f"{topic.upper()}_{line}", max_bytes, fields, _line_metadata(line, Role.EVENTS))
 
 
+def _keyed(name: str, table: KeyTable, metadata: Mapping[str, str]) -> StreamConfig:
+    """A sticky KV bucket `KV_<name>` sized by `table`, which rides in its metadata."""
+    _check_subjects(f"$KV.{name}.", table)
+    return _build(STICKY, f"KV_{name}", table.budget(f"$KV.{name}."), _kv_fields(name, table.history, table.largest),
+                  {**metadata, TABLE_KEY: table.encoded()})
+
+
+def _check_subjects(prefix: str, table: KeyTable) -> None:
+    # Every stored subject fits the control line both servers enforce, with room for what a client adds.
+    if any(len((prefix + key).encode()) > MAX_PUBLISH_SUBJECT for key in table.sizes):
+        raise ValueError("key_table_key")
+
+
 def state_bucket(line: str, table: KeyTable) -> StreamConfig:
     """`line`'s state bucket `KV_state_<line>`, sticky by `table` plus the reserved BIRTH_KEY and
     OUTBOX_KEY: its byte cap is that table's budget, and the session refuses a put outside it."""
@@ -401,11 +334,38 @@ def state_bucket(line: str, table: KeyTable) -> StreamConfig:
         raise ValueError("state_key_reserved")
     full = KeyTable({**table.sizes, BIRTH_KEY: RESERVED_STATE_BYTES, OUTBOX_KEY: RESERVED_STATE_BYTES},
                     table.history)
-    name = f"state_{line}"
-    if any(len(f"$KV.{name}.{key}".encode()) > MAX_PUBLISH_SUBJECT for key in full.sizes):
-        raise ValueError("key_table_key")
-    return _build(STICKY, f"KV_{name}", full.budget(f"$KV.{name}."), _kv_fields(name, full.history, full.largest),
-                  {**_line_metadata(line, Role.STATE), TABLE_KEY: full.encoded()})
+    return _keyed(f"state_{line}", full, _line_metadata(line, Role.STATE))
+
+
+def desired_bucket(line: str, table: KeyTable) -> StreamConfig:
+    """`line`'s desired bucket `KV_desired_<line>`, sticky by its document table: its byte cap is the
+    table's budget, and every `DocumentWriter` refuses a write outside it."""
+    return _keyed(f"desired_{line}", table, _line_metadata(line, Role.DESIRED))
+
+
+WALL_PREFIX: Final = "wall."   # the subject of wall key k is WALL_PREFIX + k, in WALL and every mirror
+
+
+def wall_config(table: KeyTable, *, first_seq: int) -> StreamConfig:
+    """The hub's wall-wide stream: sticky by the wall table (in its metadata), at WALL_STREAM_BYTES,
+    the frozen cap its mirrors share (Q3). `first_seq` continues a lost WALL past Central's last
+    acknowledged sequence plus a margin (E3b design §9.6, erratum E-W1-E3a-R-4)."""
+    if table.budget(WALL_PREFIX) > WALL_STREAM_BYTES:
+        raise ValueError("wall_table_over_budget")
+    _check_subjects(WALL_PREFIX, table)
+    return _build(STICKY, WALL_STREAM, WALL_STREAM_BYTES,
+                  dict(subjects=[WALL_PREFIX + ">"], max_msgs_per_subject=table.history, max_msgs=-1,
+                       first_seq=first_seq),
+                  {ROLE_KEY: Role.WALL.value, TABLE_KEY: table.encoded()})
+
+
+def wall_mirror_config() -> StreamConfig:
+    """A Node's read-only local mirror of WALL, sticky as its origin: max_msgs_per_subject 1 and the
+    same frozen cap (erratum E-W1-E3a-R-1). It carries no table: no one writes it."""
+    return _build(STICKY, WALL_STREAM, WALL_STREAM_BYTES, dict(
+        max_msgs_per_subject=1, max_msgs=-1, mirror=StreamSource(
+            name=WALL_STREAM, external=ExternalStream(api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))),
+                  {ROLE_KEY: Role.WALL.value})
 
 
 def role_of(config: StreamConfig) -> Role | None:

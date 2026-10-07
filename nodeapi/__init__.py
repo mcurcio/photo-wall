@@ -4,11 +4,13 @@ It imports `contracts`, the NATS client and the stdlib, and nothing else (pyproj
 contracts). Its own modules point down (pyproject's "The Node API library points down"): `node | hub`
 over `documents` over `buffers | pull | envelope` over `epoch`, and siblings never import each other.
 
-- `node`: the Node-role session: attach (apply the slice, re-put state and birth, register methods),
-  the event outbox, state, method calls.
-- `hub`: Central's NodeLink per Node and pipe: reconcile, drain into Central's store, call, discover.
-- `documents`: sticky documents' writer (Central's, which refuses its own over-budget write) and
-  reader (which finds a missing document).
+- `node`: the Node-role session: attach (apply the slice, create the WALL mirror for a wall reader,
+  re-put state and birth, register methods), the event outbox, state, method calls, and read-only
+  views of its desired bucket and of WALL.
+- `hub`: Central's NodeLink per Node and pipe (reconcile, drain into Central's store, assert
+  Central's documents, call, discover) and WallWriter (WALL re-created past every mirror).
+- `documents`: a desired bucket's or WALL's writer, bound to the stream's own key table and epoch:
+  it refuses its own over-budget write and writes only on condition; and its read (value, writer, token).
 - `buffers`: every stream, KV bucket and mirror, circular or sticky; self-describing line streams, a
   component's `Slice` inside its store line and `apply`; the wave-1 class table until E3b retires it.
 - `pull`: the one way to pull from a consumer, one byte budget per connection below the server's

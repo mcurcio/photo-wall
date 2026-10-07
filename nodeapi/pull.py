@@ -296,8 +296,10 @@ class CursorReader:
             if cursor is None and self._start is StartAt.FIRST:
                 cursor = epoch_start(epoch)
             name = uuid.uuid4().hex
-            if cursor is None:   # the server wants a filter for last-per-subject: the stream's own
-                position = {"deliver_policy": DeliverPolicy.LAST_PER_SUBJECT, "filter_subjects": info.config.subjects}
+            if cursor is None:   # the server wants a filter for last-per-subject: the stream's own, or
+                # every subject for a mirror, which has none of its own (WALL's mirror)
+                position = {"deliver_policy": DeliverPolicy.LAST_PER_SUBJECT,
+                            "filter_subjects": info.config.subjects or [">"]}
             else:
                 position = {"deliver_policy": DeliverPolicy.BY_START_SEQUENCE, "opt_start_seq": cursor.seq + 1}
             try:

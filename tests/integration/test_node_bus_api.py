@@ -3,10 +3,13 @@
 One component (`display`, fleet pipe) runs on a real `NodeSession` on a Node with the shipped
 `node-bus.conf`; Central's fleet `NodeLink` reaches it across the leaf, through a path-prefix proxy
 that can drop bytes and cut the link, from the hub on Fleet's generated configuration, and records
-into a file-backed `LinkStore`. Steps 1 and 2 are slice S1's: the method answers, every event and
-state change is recorded once and in order, a Node-local watch sees the latest state; consumers
-deleted behind the readers' backs, leaf drops mid-drain and a Central crash mid-commit lose nothing,
-repeat nothing and invent no gap. Later slices extend the same test.
+into a file-backed `LinkStore`. Step 1: the method answers, every event and state change is recorded
+once and in order, a Node-local watch sees the latest state; Central's documents reach the session's
+desired view and a wall value its wall view; a second writer's document is adopted, and Central's own
+write whose acknowledgement it lost is taken back without one. Step 2: consumers deleted behind the
+readers' backs, leaf drops mid-drain and a Central crash mid-commit lose nothing, repeat nothing and
+invent no gap. Step 4: the hub restarts empty; WALL comes back past every mirror and the drain resumes.
+Later slices extend the same test.
 """
 from __future__ import annotations
 
@@ -21,18 +24,28 @@ from integration.bus_servers import (
     FileLinkStore,
     LinkStoreCrash,
     PrefixProxy,
+    Projection,
     central,
     hub_server,
     leaf_connections,
     local,
     node_server,
     until,
+    wall_writer,
 )
 from nats.js.api import AckPolicy, ConsumerConfig
 
-from contracts.node_link import CENTRAL_WRITER, NODE_DOMAIN, Pipe, account_id
-from nodeapi.buffers import KeyTable, Slice, apply, event_buffer, state_bucket
-from nodeapi.hub import NodeLink
+from contracts.node_link import (
+    CENTRAL_WRITER,
+    NODE_DOMAIN,
+    STORE_LINES,
+    WALL_STREAM,
+    Pipe,
+    account_id,
+)
+from nodeapi.buffers import KeyTable, Slice, apply, desired_bucket, event_buffer, state_bucket
+from nodeapi.documents import DocumentWriter
+from nodeapi.hub import WALL_MARGIN, NodeLink, WallWriter
 from nodeapi.node import MethodCall, NodeSession, Release
 from nodeapi.pull import ConsumerLost, CursorReader, Pulled, Read, StartAt, pull
 
@@ -41,13 +54,18 @@ LEAF_PREFIX = "photo-wall/bus"
 KIB = 1024
 RECORDS = "RECORD_display"
 STATE = "KV_state_display"
+DESIRED = "KV_desired_display"
 TICK = "display.record.tick"
 RELEASE = Release("1.0.0", "sha256:display-release", {"display": 1})
+WALL_TABLE = KeyTable({"timing": 256})
 
 
 def _display_slice() -> Slice:
-    return Slice("display", (event_buffer("display", "record", 512 * KIB),
-                             state_bucket("display", KeyTable({"mode": 256, "panel": 256}))))
+    """The display line filled exactly: records take what state and desired leave (3 streams, 1.5 MiB)."""
+    state = state_bucket("display", KeyTable({"mode": 256, "panel": 256}))
+    desired = desired_bucket("display", KeyTable({"show": 256, "layout": 256}))
+    records = event_buffer("display", "record", STORE_LINES["display"].max_bytes - state.max_bytes - desired.max_bytes)
+    return Slice("display", (records, state, desired))
 
 
 async def _relinked(hub: BusServer, previous: int | None) -> int:
@@ -82,6 +100,20 @@ async def _watched(watch: CursorReader, latest: dict[str, bytes], expected: dict
     await until(check, 20, f"the local watch sees {expected}")
 
 
+async def _desired(session: NodeSession, expected: dict[str, tuple[bytes, str]]) -> None:
+    """The session's desired view holds each key's (value, writer)."""
+    async def check():
+        return all((document := session.desired.get(key)) is not None and (document.value, document.writer) == held
+                   for key, held in expected.items())
+    await until(check, 15, f"the desired view holds {expected}")
+
+
+async def _walled(session: NodeSession, value: bytes, seconds: float = 15) -> None:
+    async def check():
+        return session.wall.get("timing") == value
+    await until(check, seconds, f"the wall view holds {value!r}")
+
+
 def test_the_node_api_tracer(tmp_path):
     hub = hub_server(tmp_path, [SERIAL])
     proxy = PrefixProxy(hub.websocket_port, LEAF_PREFIX)
@@ -93,7 +125,10 @@ def test_the_node_api_tracer(tmp_path):
         callers.append(call.caller)
         return b"display:" + call.payload
 
-    session = NodeSession("display", slice_, RELEASE, url=node.client_url, methods={"identify": identify})
+    assert sum(config.max_bytes for config in slice_.buffers) == STORE_LINES["display"].max_bytes
+    assert len(slice_.buffers) == STORE_LINES["display"].streams
+    session = NodeSession("display", slice_, RELEASE, url=node.client_url, methods={"identify": identify},
+                          reads_wall=True)
     emitted: list[bytes] = []
 
     def emit(count: int) -> None:
@@ -117,8 +152,10 @@ def test_the_node_api_tracer(tmp_path):
             watcher = await local(node)
             clients += [client, watcher]
             store = FileLinkStore(tmp_path / "link.jsonl")
+            projection = Projection()
+            projection.streams[DESIRED] = {"show": b"show-1", "layout": b"layout-1"}
             stop = asyncio.Event()
-            link = NodeLink(client, Pipe.FLEET, store)
+            link = NodeLink(client, Pipe.FLEET, store, projection)
             running = asyncio.create_task(link.run(stop))
 
             # Step 1: the method answers across the leaf; events and state are recorded once, in order.
@@ -156,8 +193,51 @@ def test_the_node_api_tracer(tmp_path):
             latest: dict[str, bytes] = {}
             await _watched(watch, latest, {"mode": b"normal", "panel": b"lit", "birth": held["birth"]})
 
-            # Step 2: both readers' consumers deleted behind their backs; both recover from their cursors.
+            # Central's two documents reach the session's desired view, written by Central.
+            await _desired(session, {"show": (b"show-1", CENTRAL_WRITER), "layout": (b"layout-1", CENTRAL_WRITER)})
+            seen: list[tuple[str, bytes, str | None]] = []
+            session.desired.on_change(lambda key, document: seen.append((key, document.value, document.writer)))
+
+            # WallWriter creates WALL past the margin and its value reaches the session's wall view.
+            walls = await wall_writer(hub)
+            clients.append(walls)
+            wall = WallWriter(walls, WALL_TABLE, store)
+            assert await wall.ensure() is True
+            assert (await walls.jetstream().stream_info(WALL_STREAM)).config.first_seq == 1 + WALL_MARGIN
+            store.hold_wall("timing", b"timing-1")
+            await wall.put("timing", b"timing-1")
+            await _walled(session, b"timing-1")
+
+            # A second writer (a local UI) changes one document; Central's next assert of a changed
+            # projection conflicts, reads, adopts the Node's value and flags it, and leaves it there.
+            local_ui = await DocumentWriter.bind(watcher, DESIRED, writer="local-ui")
+            await local_ui.put("show", b"show-local", expect=(await local_ui.read("show")).token)
+            await _desired(session, {"show": (b"show-local", "local-ui")})
+            assert ("show", b"show-local", "local-ui") in seen
+            projection.streams[DESIRED]["show"] = b"show-2"
+            await link.assert_documents(DESIRED)
+            await link.assert_documents(DESIRED)
+            assert store.actions("document_adopted") == [{"stream": DESIRED, "key": "show", "writer": "local-ui"}]
+            assert (await local_ui.read("show")).value == b"show-local"
+
+            # Central's write lands but its record does not (the acknowledgement lost): the next
+            # assert conflicts on Central's stale token, finds its own value and takes its token,
+            # with no adoption and no second write.
+            projection.streams[DESIRED]["layout"] = b"layout-2"
+            store.crash_next = "wrote"
+            with pytest.raises(LinkStoreCrash):
+                await link.assert_documents(DESIRED)
             jetstream = watcher.jetstream()
+            written = (await jetstream.stream_info(DESIRED)).state.last_seq
+            await link.assert_documents(DESIRED)
+            assert (await jetstream.stream_info(DESIRED)).state.last_seq == written
+            layout = await local_ui.read("layout")
+            assert (layout.value, layout.writer) == (b"layout-2", CENTRAL_WRITER)
+            assert (await store.own_tokens(DESIRED))["layout"][1] == layout.token
+            assert len(store.actions("document_adopted")) == 1
+            await _desired(session, {"layout": (b"layout-2", CENTRAL_WRITER)})
+
+            # Step 2: both readers' consumers deleted behind their backs; both recover from their cursors.
             for stream in (RECORDS, STATE):
                 consumers = await jetstream.consumers_info(stream)
                 assert consumers, stream
@@ -218,15 +298,50 @@ def test_the_node_api_tracer(tmp_path):
             assert store.repeats == []
 
             # Central crashes mid-commit; a new NodeLink on the same store resumes from its cursors.
-            store.crash_next_commit = True
+            store.crash_next = "commit"
             emit(50)
             with pytest.raises(LinkStoreCrash):
                 await asyncio.wait_for(running, 30)
-            restarted = FileLinkStore(store.path)
-            running = asyncio.create_task(NodeLink(client, Pipe.FLEET, restarted).run(stop))
+            store = FileLinkStore(store.path)
+            running = asyncio.create_task(NodeLink(client, Pipe.FLEET, store, projection).run(stop))
             emit(20)
-            await _recorded(restarted, emitted)
-            assert restarted.rows("gap") == [] and restarted.repeats == []
+            await _recorded(store, emitted)
+            assert store.rows("gap") == [] and store.repeats == []
+
+            # Step 4: the hub restarts empty. A wall write whose mark Central lost (a crash between the
+            # hub's ack and its record) leaves every mirror past Central's mark, and the wall value
+            # changes while the hub is away.
+            wall = WallWriter(walls, WALL_TABLE, store)   # Central's restarted process
+            assert await wall.ensure() is False
+            store.hold_wall("timing", b"timing-2")
+            store.crash_next = "record_mark"
+            with pytest.raises(LinkStoreCrash):
+                await wall.put("timing", b"timing-2")
+            await _walled(session, b"timing-2")
+            mark = await store.mark()
+            assert (await jetstream.stream_info(WALL_STREAM)).state.last_seq == mark + 1
+            emit(30)
+            hub.wipe()
+            store.hold_wall("timing", b"timing-outage")
+            emit(30)
+            await asyncio.wait_for(running, 15)   # its client closed with the hub
+            hub.start()
+            leaf = await _relinked(hub, leaf)
+
+            # Central reconnects (E3d's supervisors): WallWriter re-creates WALL at mark + 1 + K and
+            # re-puts; every mirror and the wall view are current; the drain resumes from its cursors.
+            client, walls = await central(hub, SERIAL), await wall_writer(hub)
+            clients += [client, walls]
+            running = asyncio.create_task(NodeLink(client, Pipe.FLEET, store, projection).run(stop))
+            assert await WallWriter(walls, WALL_TABLE, store).ensure() is True
+            assert (await walls.jetstream().stream_info(WALL_STREAM)).config.first_seq == mark + 1 + WALL_MARGIN
+            # The mirror resumes on the server's own retry of its source: 12-19 s measured after
+            # ensure() (erratum E-E3B-S2-1); 30 s as the wave-1 hub-loss test allowed.
+            await _walled(session, b"timing-outage", 30)
+            emit(20)
+            await _recorded(store, emitted)
+            assert store.rows("gap") == [] and store.repeats == []
+            assert len(store.actions("document_adopted")) == 1
             stop.set()
             await asyncio.wait_for(running, 15)
             await watch.close()

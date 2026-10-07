@@ -1,7 +1,7 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
-isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, a counted gap, hub
-reload and hub store loss (E3a-2; Central's drain, its consumer loss, a leaf drop and a crash
-mid-drain are test_node_bus_api.py's tracer); the leaf through
+isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, a counted gap and hub
+reload (E3a-2; Central's drain, its consumer loss, a leaf drop, a crash mid-drain and the hub's
+restart with an empty store are test_node_bus_api.py's tracer); the leaf through
 a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3); the leaf's
 subject contract, nothing a `nodeapi` program does crossing toward a stalled hub, and the mirror's
 flow control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
@@ -41,6 +41,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, DiscardPolicy,
 from nats.js.errors import APIError, NoStreamResponseError
 
 from contracts.node_link import (
+    CENTRAL_WRITER,
     MAX_STORED_MESSAGE,
     NODE_DOMAIN,
     NODE_MAX_PAYLOAD,
@@ -49,8 +50,8 @@ from contracts.node_link import (
     WALL_STREAM_BYTES,
     account_id,
 )
-from nodeapi.buffers import Documents, bucket, buffer, declare, sticky_bucket
-from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter
+from nodeapi.buffers import KeyTable, bucket, buffer, declare, desired_bucket
+from nodeapi.documents import ABSENT, Conflict, DocumentWriter
 from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import pull
 
@@ -340,7 +341,7 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
 
 # E3a-2: Central's client role on a Node's objects, and the hub's lifecycle.
 
-BUCKET = "probe_desired"
+BUCKET = "desired_player"   # the player line's desired bucket
 CONSUMER = ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT, ack_wait=2,
                           deliver_policy=DeliverPolicy.ALL)
 IDLE_SECONDS = 3.0   # longer than the ack wait, so an idle fetch means nothing is left to redeliver
@@ -400,9 +401,8 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
         await declare_wall_mirror(node_client)
         await declare(jetstream, buffer("REC_player", 4 * MIB, subjects=["player.record.>"]))
         await declare(jetstream, buffer("REC_flood", 4 * MIB, subjects=["flood.>"]))
-        table = Documents.bucket(BUCKET, {"show": 64}, history=2)
-        await declare(jetstream, sticky_bucket(table))
-        await DocumentWriter(jetstream, table).put("show", b"node")
+        await declare(jetstream, desired_bucket("player", KeyTable({"show": 64}, history=2)))
+        await (await DocumentWriter.bind(node_client, f"KV_{BUCKET}", writer="node")).put("show", b"node", expect=ABSENT)
 
         # A component's methods are `<component>.method.<name>`; anything else is not Central's to call.
         async def echo(request):
@@ -492,12 +492,11 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
         assert leaf_connections(hub) == linked
         assert [ping["id"] for ping in await _gather(central_client, "$SRV.PING.player")] == [service.id]
         assert (await central_client.request("player.method.echo", b"hi", timeout=2)).data == b"echo:hi"
-        document = DocumentWriter.node_bucket(central_client, table)
-        _, token = await document.read("show")
-        await document.put("show", b"central", token=token)
-        with pytest.raises(APIError) as stale:
-            await document.put("show", b"stale", token=token)
-        assert stale.value.err_code == WRONG_LAST_SEQUENCE
+        document = await DocumentWriter.bind(central_client, f"KV_{BUCKET}", writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
+        token = (await document.read("show")).token
+        await document.put("show", b"central", expect=token)
+        with pytest.raises(Conflict):
+            await document.put("show", b"stale", expect=token)
         await writer.jetstream().publish("wall.after", b"after")
 
         async def mirrored():
@@ -587,8 +586,7 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         await _linked(hub, 1)
         node_client = await local(node)
         central_client = await central(hub, "serial-a")
-        table = Documents.bucket(BUCKET, {"scene": 64}, history=2)
-        kv = await declare_bucket(node_client.jetstream(), sticky_bucket(table))
+        kv = await declare_bucket(node_client.jetstream(), desired_bucket("player", KeyTable({"scene": 64}, history=2)))
         config = (await node_client.jetstream().stream_info(f"KV_{BUCKET}")).config
         assert (config.retention, config.discard, config.max_msgs_per_subject) == (
             RetentionPolicy.LIMITS, DiscardPolicy.OLD, 2)
@@ -596,12 +594,12 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         watcher = await kv.watch("scene")
 
         # Central reads the revision across the leaf, then writes conditionally on it.
-        writer = DocumentWriter.node_bucket(central_client, table)
-        value, token = await writer.read("scene")
+        writer = await DocumentWriter.bind(central_client, f"KV_{BUCKET}", writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
+        value, _, token = await writer.read("scene")
         assert value == b"node"
         assert token.seq == (await (await central_client.jetstream(domain=NODE_DOMAIN).key_value(BUCKET)).get(
             "scene")).revision
-        written = (await writer.put("scene", b"central", token=token)).seq
+        written = (await writer.put("scene", b"central", expect=token)).seq
         assert written > token.seq
 
         async def watcher_saw_central():
@@ -612,10 +610,9 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
             return entry is not None and (entry.value, entry.revision) == (b"central", written)
         await until(watcher_saw_central, 5, "the Node's watcher sees Central's value")
 
-        # A second write on the stale revision is refused by the Node's server.
-        with pytest.raises(APIError) as stale:
-            await writer.put("scene", b"stale", token=token)
-        assert stale.value.err_code == 10071
+        # A second write on the stale revision is refused by the Node's server: a conflict.
+        with pytest.raises(Conflict):
+            await writer.put("scene", b"stale", expect=token)
         entry = await kv.get("scene")
         assert (entry.value, entry.revision) == (b"central", written)
 
@@ -867,89 +864,3 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
     finally:
         node.stop()
         hub.stop()
-
-
-class _WallCentral:
-    """Central's wall writer: it keeps the latest value per subject and the last sequence WALL
-    acknowledged and, on every connect, declares WALL (create-if-absent, continuing past that
-    sequence) and re-puts each latest value."""
-
-    def __init__(self, hub: BusServer) -> None:
-        self.hub = hub
-        self.latest: dict[str, bytes] = {}
-        self.last_seq = 0
-        self._client = None
-
-    async def connect(self) -> None:
-        self._client = await wall_writer(self.hub)
-        await declare_wall(self._client, first_seq=self.last_seq + 1)
-        for subject, value in self.latest.items():
-            await self._publish(subject, value)
-
-    async def put(self, subject: str, value: bytes) -> None:
-        self.latest[subject] = value
-        await self._publish(subject, value)
-
-    async def _publish(self, subject: str, value: bytes) -> None:
-        acknowledgement = await self._client.jetstream().publish(subject, value)
-        self.last_seq = max(self.last_seq, acknowledgement.seq)
-
-    async def close(self) -> None:
-        await self._client.close()
-
-
-def test_the_wall_mirror_catches_up_after_the_hub_loses_its_store(tmp_path):
-    hub = hub_server(tmp_path, ["serial-a", "serial-b"])
-    node_a = node_server(tmp_path, "serial-a", hub)
-    node_b = node_server(tmp_path, "serial-b", hub)
-    for server in (hub, node_a, node_b):
-        server.start()
-
-    async def run():
-        await _linked(hub, 2)
-        wall = _WallCentral(hub)
-        await wall.connect()
-        for node in (node_a, node_b):
-            client = await local(node)
-            await declare_wall_mirror(client)
-            await client.close()
-        # Several rounds, so the hub's sequence is well past what a fresh store re-puts.
-        for round_ in range(4):
-            await wall.put("wall.timing", f"timing-{round_}".encode())
-            await wall.put("wall.scene", f"scene-{round_}".encode())
-        for node in (node_a, node_b):
-            await _holds(node, wall.latest, 10)
-        await wall.close()
-
-        # The hub loses its store; one value changes in Central while the hub is down.
-        acknowledged = wall.last_seq
-        hub.wipe()
-        wall.latest["wall.scene"] = b"scene-outage"
-
-        # Hub away: a Node component's declare needs nothing from the hub; the mirror still reads.
-        client = await local(node_a)
-        assert not await declare_wall_mirror(client)
-        assert await wall_value(client, "wall.timing") == b"timing-3"
-        await client.close()
-
-        # Each mirror waits for its next sequence; Central's new WALL starts there (§6 row 11 needs
-        # no Node rule, E-W1-E3a-R-4). Either order of declares: Node A before Central's, Node B after.
-        hub.start()
-        await _linked(hub, 2)
-        client = await local(node_a)
-        assert not await declare_wall_mirror(client)
-        await client.close()
-        await wall.connect()
-        assert (await wall._client.jetstream().stream_info(WALL_STREAM)).state.first_seq == acknowledged + 1
-        client = await local(node_b)
-        assert not await declare_wall_mirror(client)
-        await client.close()
-        for node in (node_a, node_b):
-            await _holds(node, wall.latest, 30)
-        await wall.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        for server in (node_b, node_a, hub):
-            server.stop()

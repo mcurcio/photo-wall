@@ -1,52 +1,69 @@
-"""Sticky documents: the one writer's client-side budget, a reader's missing-document check, and the
-epoch-scoped tokens every cursor and conditional write carries (errata E-W1-TD-4, E-W1-TD-5).
+"""Documents: one writer's conditional put and a read, on a self-describing sticky stream (E3b design
+§7.2 documents, §9.2; errata E-W1-TD-4, E-W1-TD-5).
 
-A sticky buffer (`buffers.Documents`) never evicts a document because its only writer never sends
-past the table's budget: `DocumentWriter` refuses its own unlisted, oversize or over-headered write
-before anything leaves the client. The Node refuses nothing. The writer also keeps a manifest
-document listing every key written, so a reader (a Node component, or Central) finds a document the
-stream should hold and does not: `missing_documents`. A table may have more than one writer (Central,
-and a Node component writing its default), so the manifest is only ever extended by a conditional
-write on the manifest as read, retried on a lost race: no writer drops another's key (E-W1-FV-4).
+A desired bucket and WALL carry their key table in their metadata (`buffers`), so a `DocumentWriter`
+learns it with the epoch from one description read at `bind`, and never writes past it: it refuses
+its own unlisted, oversize or over-headered write before anything leaves the client, and the sticky
+stream never evicts a document. The Node refuses nothing.
 
-A stream sequence (a KV revision, a drain cursor) is a position only inside one creation of its
-stream. Every token is `Token(epoch, seq)`, the epoch read from the stream's metadata; a write or
-read that carries another epoch is stale and never applied (`StaleToken`): the store was lost and
-re-created, and the caller re-reads. On a Node stream the new creation also starts at a sequence
-derived from its epoch, so even a raw conditional write on a stale revision misses (`buffers`).
+Every put is conditional (the server's expected last subject sequence): on the key's token as last
+read or written, or on `ABSENT` (no value yet). A put that finds the key moved on raises `Conflict`
+and is never retried here: the caller re-reads (`read`, which also refreshes the epoch and table) and
+decides by the value's writer, carried in the envelope's writer header. A token names a message only
+inside one creation of its stream; one from another epoch than the writer's raises `Conflict` before
+sending, and on a Node stream a later creation starts at another sequence (`epoch`), so even a token
+the writer never saw re-created misses. No writer deletes, purges or lists documents: an absent key
+means "unknown" and its reader keeps last good.
 """
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from nats.js.api import Header
 from nats.js.errors import APIError, NotFoundError
 
-from contracts.node_link import NODE_DOMAIN
-from nodeapi.buffers import (
-    HEADER_ALLOWANCE,
-    MANIFEST_KEY,
-    MAX_PUBLISH_SUBJECT,
-    Documents,
-)
-from nodeapi.epoch import Token, stream_epoch
+from nodeapi.buffers import HEADER_ALLOWANCE, MAX_PUBLISH_SUBJECT, KeyTable, Role, role_of, table_of
+from nodeapi.envelope import caller_headers, writer_of
+from nodeapi.epoch import Token, epoch_of
 
 if TYPE_CHECKING:
     from nats.aio.client import Client
+    from nats.js.api import StreamInfo
     from nats.js.client import JetStreamContext
 
-_REMOVED: Final = frozenset({"DEL", "PURGE"})   # KV-Operation of a deleted or purged key
-WRONG_LAST_SEQUENCE: Final = 10071   # a conditional write whose subject moved on since it was read
+WRONG_LAST_SEQUENCE: Final = 10071   # a conditional write whose subject moved on since `expect`
+_EXPECTED: Final = Header.EXPECTED_LAST_SUBJECT_SEQUENCE.value
+_LONGEST_SEQUENCE: Final = "9" * 20   # the widest sequence a header carries
+
+
+class Absent:
+    """The expectation that a key holds no value yet."""
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ABSENT"
+
+
+ABSENT: Final[Absent] = Absent()
+
+
+class Document(NamedTuple):
+    value: bytes
+    writer: str | None                  # the writer header of the value; None when it has none
+    token: Token
 
 
 class DocumentRefused(ValueError):
-    """The writer refuses its own write, before sending: it would break the table's budget."""
+    """The writer refuses its own write before sending: unlisted, too large, its headers or subject too large."""
 
 
-class StaleToken(Exception):
-    """The token was read from another creation of the stream: re-read, then write."""
+class Conflict(Exception):
+    """The key moved on since `expect` (the server's 10071), or `expect` is from another epoch."""
+
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
 
 
 def header_bytes(headers: Mapping[str, str] | None) -> int:
@@ -58,124 +75,90 @@ def header_bytes(headers: Mapping[str, str] | None) -> int:
 
 
 class DocumentWriter:
-    """The one writer of a sticky table: it holds the table's budget (keys x history x largest value)
-    and refuses its own write past it, so the sticky buffer never evicts a document."""
+    """One writer of one desired bucket or WALL, bound to the stream's own key table and epoch."""
 
-    def __init__(self, jetstream: JetStreamContext, table: Documents, *, publish_prefix: str | None = None) -> None:
-        self.table = table
+    def __init__(self, jetstream: JetStreamContext, stream: str, stored_prefix: str, publish_prefix: str,
+                 headers: Mapping[str, str], info: StreamInfo) -> None:
         self._jetstream = jetstream
-        self._prefix = table.subject_prefix if publish_prefix is None else publish_prefix
-        # Every subject this writer may publish fits the control line both servers enforce, so the
-        # server never closes the writer for one (E-W1-TD-6); Central's prefix is longer than the
-        # stored one, so the table's own check does not cover it.
-        if any(len((self._prefix + key).encode()) > MAX_PUBLISH_SUBJECT for key in table.all_sizes()):
-            raise ValueError("document_subject_past_the_control_line")
-        # (epoch, keys) this writer has seen listed: only ever a reason to skip a manifest write, never
-        # the content of one. A listed key stays listed in its creation, since the manifest only grows.
-        self._listed: tuple[str, frozenset[str]] | None = None
+        self._stream = stream
+        self._stored = stored_prefix
+        self._publish = publish_prefix
+        self._headers = dict(headers)
+        self._epoch, self._table = self._described(info)
 
     @classmethod
-    def node_bucket(cls, central_client: Client, table: Documents) -> DocumentWriter:
-        """Central's writer of a Node's sticky bucket across the leaf: a plain `$KV.` publish never
-        reaches the Node, so it writes `$JS.node.API.$KV.<bucket>.<key>` (W9)."""
-        bucket_name = table.stream.removeprefix("KV_")
-        return cls(central_client.jetstream(domain=NODE_DOMAIN), table,
-                   publish_prefix=f"$JS.{NODE_DOMAIN}.API.$KV.{bucket_name}.")
+    async def bind(cls, client: Client, stream: str, *, writer: str, domain: str | None = None) -> DocumentWriter:
+        """A writer of `stream` as `writer`, from one read of its description (no options). Central
+        passes domain=NODE_DOMAIN and publishes on `$JS.node.API.$KV.<bucket>.<key>`, since a plain
+        `$KV.` publish never reaches the Node (W9). ValueError("document_stream") for a stream that is
+        not a desired bucket or WALL with its table."""
+        headers = caller_headers(writer)
+        jetstream = client.jetstream(domain=domain)
+        info = await jetstream.stream_info(stream)
+        if role_of(info.config) not in (Role.DESIRED, Role.WALL) or not info.config.subjects:
+            raise ValueError("document_stream")
+        stored = info.config.subjects[0].removesuffix(">")
+        publish = f"$JS.{domain}.API.{stored}" if domain else stored
+        return cls(jetstream, stream, stored, publish, headers, info)
 
-    def admit(self, key: str, value: bytes, headers: Mapping[str, str] | None = None) -> None:
-        """Raise DocumentRefused unless the table admits this write."""
-        if key not in self.table.sizes:
+    @property
+    def table(self) -> KeyTable:
+        return self._table
+
+    @property
+    def epoch(self) -> str:
+        return self._epoch
+
+    def admit(self, key: str, value: bytes) -> None:
+        """Raise DocumentRefused unless the stream's table admits this write."""
+        if key not in self._table.sizes:
             raise DocumentRefused("document_unlisted")
-        if len(value) > self.table.sizes[key]:
+        if len(value) > self._table.sizes[key]:
             raise DocumentRefused("document_too_large")
-        if header_bytes(headers) > HEADER_ALLOWANCE:
+        if header_bytes({**self._headers, _EXPECTED: _LONGEST_SEQUENCE}) > HEADER_ALLOWANCE:
             raise DocumentRefused("document_headers_too_large")
+        # The stored subject fits the table's check; Central's publish prefix is longer (E-W1-TD-6).
+        if len((self._publish + key).encode()) > MAX_PUBLISH_SUBJECT:
+            raise DocumentRefused("document_subject_past_the_control_line")
 
-    async def put(self, key: str, value: bytes, *, token: Token | None = None,
-                  headers: Mapping[str, str] | None = None) -> Token:
-        """Write one document, conditionally on `token` (the key's revision as last read). Returns the
-        new revision's token. Raises DocumentRefused before sending, StaleToken when `token` is from
-        another creation of the stream, and the server's 10071 when the key moved on since."""
-        headers = dict(headers or {})
-        if token is not None:
-            headers[Header.EXPECTED_LAST_SUBJECT_SEQUENCE.value] = str(token.seq)
-        self.admit(key, value, headers)
-        epoch = await stream_epoch(self._jetstream, self.table.stream)
-        if token is not None and token.epoch != epoch:
-            raise StaleToken(f"{self.table.stream}: token epoch {token.epoch}, stream epoch {epoch}")
-        acknowledgement = await self._jetstream.publish(self._prefix + key, value, headers=headers or None)
-        await self._list(epoch, key)
-        return Token(epoch, acknowledgement.seq)
+    async def put(self, key: str, value: bytes, *, expect: Token | Absent) -> Token:
+        """Write one document on condition that the key is still at `expect`; its new token. Raises
+        DocumentRefused before sending and Conflict when the key moved on; never retries."""
+        self.admit(key, value)
+        if isinstance(expect, Absent):
+            last = 0
+        elif expect.epoch != self._epoch:
+            raise Conflict(key)
+        else:
+            last = expect.seq
+        try:
+            acknowledgement = await self._jetstream.publish(
+                self._publish + key, value, headers={**self._headers, _EXPECTED: str(last)})
+        except APIError as error:
+            if error.err_code == WRONG_LAST_SEQUENCE:
+                raise Conflict(key) from None
+            raise
+        return Token(self._epoch, acknowledgement.seq)
 
-    async def read(self, key: str) -> tuple[bytes | None, Token | None]:
-        """The key's latest value and its token (None, None when absent), from one creation."""
+    async def read(self, key: str) -> Document | None:
+        """The key's latest value, its writer and its token, from one creation of the stream; None
+        when absent. Re-reads the description, so the writer's epoch and table follow the stream."""
         while True:
-            epoch = await stream_epoch(self._jetstream, self.table.stream)
+            info = await self._jetstream.stream_info(self._stream)
+            epoch = epoch_of(info)
             try:
-                message = await self._jetstream.get_last_msg(self.table.stream, self.table.subject_prefix + key)
+                message = await self._jetstream.get_last_msg(self._stream, self._stored + key)
             except NotFoundError:
-                found: tuple[bytes | None, Token | None] = (None, None)
+                found = None
             else:
-                found = (message.data, Token(epoch, message.seq))
-            if await stream_epoch(self._jetstream, self.table.stream) == epoch:
+                found = Document(message.data, writer_of(message.headers), Token(epoch, message.seq))
+            if epoch_of(again := await self._jetstream.stream_info(self._stream)) == epoch:
+                self._epoch, self._table = self._described(again)
                 return found
 
-    async def _list(self, epoch: str, key: str) -> None:
-        """Add `key` to the manifest unless it is listed: a compare-and-set on the manifest's last
-        sequence (0: none yet), re-read and merged on every lost race, so a concurrent writer's keys
-        stay. What this writer saw listed in this creation is merged in too, so a manifest a bypass
-        evicted comes back whole as far as this writer knows. Only the table's keys are kept, so the
-        manifest stays inside its budgeted size."""
-        seen = self._listed[1] if self._listed is not None and self._listed[0] == epoch else frozenset()
-        if key in seen:
-            return
-        while True:
-            try:
-                manifest = await self._jetstream.get_last_msg(self.table.stream,
-                                                              self.table.subject_prefix + MANIFEST_KEY)
-            except NotFoundError:
-                listed, last = frozenset(), 0
-            else:
-                listed, last = frozenset(json.loads(manifest.data)) & self.table.sizes.keys(), manifest.seq
-            if key not in listed or not seen <= listed:
-                try:
-                    await self._jetstream.publish(
-                        self._prefix + MANIFEST_KEY, self.table.manifest(listed | seen | {key}),
-                        headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE.value: str(last)})
-                except APIError as error:
-                    if error.err_code != WRONG_LAST_SEQUENCE:
-                        raise
-                    continue   # another writer extended it first: re-read and merge
-                listed |= seen | {key}
-            self._listed = (epoch, listed)
-            return
-
-
-async def listed_documents(jetstream: JetStreamContext, stream: str, subject_prefix: str) -> frozenset[str]:
-    """The keys the stream's manifest lists; none when it has no manifest."""
-    try:
-        manifest = await jetstream.get_last_msg(stream, subject_prefix + MANIFEST_KEY)
-    except NotFoundError:
-        return frozenset()
-    return frozenset(json.loads(manifest.data))
-
-
-async def missing_documents(jetstream: JetStreamContext, stream: str, subject_prefix: str) -> frozenset[str]:
-    """The documents the manifest lists that the stream does not hold (a deleted or purged key is
-    missing), plus the manifest itself when the stream holds messages but no manifest. A reader
-    needs only the stream and its prefix, not the writer's table: a Node reads its WALL mirror so."""
-    try:
-        manifest = await jetstream.get_last_msg(stream, subject_prefix + MANIFEST_KEY)
-    except NotFoundError:
-        held = (await jetstream.stream_info(stream)).state.messages
-        return frozenset({MANIFEST_KEY}) if held else frozenset()
-    missing = set()
-    for key in json.loads(manifest.data):
-        try:
-            message = await jetstream.get_last_msg(stream, subject_prefix + key)
-        except NotFoundError:
-            missing.add(key)
-            continue
-        if message.headers and message.headers.get("KV-Operation") in _REMOVED:
-            missing.add(key)
-    return frozenset(missing)
+    @staticmethod
+    def _described(info: StreamInfo) -> tuple[str, KeyTable]:
+        table = table_of(info.config)
+        if table is None:
+            raise ValueError("document_stream")
+        return epoch_of(info), table

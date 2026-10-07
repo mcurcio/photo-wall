@@ -1,10 +1,11 @@
-"""Sticky documents on real servers (errata E-W1-TD-4, E-W1-TD-5): a desired bucket and WALL keep
-every document whatever else is written, because their one writer refuses its own over-budget
-write; a reader finds a document that went missing; a token read before a Node store loss is stale
-and never applied.
+"""Sticky documents on real servers (errata E-W1-TD-4, E-W1-TD-5; E3b design §7.2 documents, §9.2):
+a desired bucket and WALL keep every document whatever else is written, because each writer takes
+the key table from the stream itself and refuses its own over-budget write; a token read before a
+Node store loss raises a conflict and is never applied blind.
 
-The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; Central's writer
-is `nodeapi.documents.DocumentWriter`. Every bucket, subject and document is the test's.
+The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; Central's writers
+are `nodeapi.documents.DocumentWriter` and `nodeapi.hub.WallWriter`. Every bucket, subject and
+document is the test's.
 """
 from __future__ import annotations
 
@@ -13,9 +14,9 @@ import asyncio
 import pytest
 from integration.bus_servers import (
     BusServer,
+    FileLinkStore,
     central,
     declare_bucket,
-    declare_wall,
     declare_wall_mirror,
     desired_documents,
     hub_server,
@@ -23,23 +24,20 @@ from integration.bus_servers import (
     local,
     node_server,
     until,
+    wall_value,
     wall_writer,
 )
 from nats.js.api import Header
 from nats.js.errors import APIError
 
-from contracts.node_link import MAX_STORED_MESSAGE, NODE_DOMAIN, WALL_STREAM
-from nodeapi.buffers import HEADER_ALLOWANCE, Documents, sticky_bucket
-from nodeapi.documents import (
-    DocumentRefused,
-    DocumentWriter,
-    StaleToken,
-    listed_documents,
-    missing_documents,
-)
+from contracts.node_link import CENTRAL_WRITER, MAX_STORED_MESSAGE, NODE_DOMAIN, WALL_STREAM
+from nodeapi.buffers import HEADER_ALLOWANCE, KeyTable, desired_bucket
+from nodeapi.documents import ABSENT, Conflict, DocumentRefused, DocumentWriter
 from nodeapi.epoch import epoch_of
+from nodeapi.hub import WallWriter
 
 WRONG_LAST_SEQUENCE = 10071   # JSStreamWrongLastSequenceErr: the key moved on since the token
+PLAYER = "KV_desired_player"
 
 
 async def _linked(hub: BusServer, count: int) -> None:
@@ -64,9 +62,9 @@ def _run(hub: BusServer, nodes: list[BusServer], body) -> None:
 
 
 def test_a_desired_document_written_once_survives_every_other_write(tmp_path):
-    # The teardown's case: "show" written once, then seventy other documents. Every listed document
-    # is written past the bucket's budget many times over; "show" stays. Seventy unlisted ones are
-    # refused by Central's own writer before sending, so the Node sees none (E-W1-TD-4).
+    # The teardown's case: "show" written once, then every other document past the bucket's budget
+    # many times over; "show" stays. Seventy unlisted documents are refused by Central's own writer,
+    # which read the table from the bucket, before sending, so the Node sees none (E-W1-TD-4).
     hub, [node] = _servers(tmp_path)
 
     async def body():
@@ -74,35 +72,32 @@ def test_a_desired_document_written_once_survives_every_other_write(tmp_path):
         client = await local(node)
         jetstream = client.jetstream()
         table = desired_documents("player")
-        kv = await declare_bucket(jetstream, sticky_bucket(table))
-        writer = DocumentWriter.node_bucket(await central(hub, "serial-a"), table)
+        config = desired_bucket("player", table)
+        kv = await declare_bucket(jetstream, config)
+        writer = await DocumentWriter.bind(await central(hub, "serial-a"), PLAYER, writer=CENTRAL_WRITER,
+                                           domain=NODE_DOMAIN)
+        assert writer.table == table
 
-        await writer.put("show", b"frame-1: run 42")
+        tokens = {"show": await writer.put("show", b"frame-1: run 42", expect=ABSENT)}
         others = sorted(set(table.sizes) - {"show"})
         for round_ in range(3 * table.history):
             for key in others:
-                await writer.put(key, bytes([65 + round_]) * table.sizes[key])
-        state = (await jetstream.stream_info(table.stream)).state
-        assert state.bytes <= table.budget
+                tokens[key] = await writer.put(key, bytes([65 + round_]) * table.sizes[key],
+                                               expect=tokens.get(key, ABSENT))
+        state = (await jetstream.stream_info(PLAYER)).state
+        assert state.bytes <= config.max_bytes
         for index in range(70):
             with pytest.raises(DocumentRefused, match="document_unlisted"):
-                await writer.put(f"frame{index + 20}", b"d" * 3800)
+                await writer.put(f"frame{index + 20}", b"d" * 3800, expect=ABSENT)
         with pytest.raises(DocumentRefused, match="document_too_large"):
-            await writer.put("layout", b"x" * (table.sizes["layout"] + 1))
-        assert (await jetstream.stream_info(table.stream)).state.last_seq == state.last_seq
+            await writer.put("layout", b"x" * (table.sizes["layout"] + 1), expect=tokens["layout"])
+        assert (await jetstream.stream_info(PLAYER)).state.last_seq == state.last_seq
 
         assert (await kv.get("show")).value == b"frame-1: run 42"
-        assert await missing_documents(jetstream, table.stream, table.subject_prefix) == set()
-
-        # A stray writer that bypasses nodeapi (raw puts of unlisted keys) can still fill the bucket,
-        # and the server drops its oldest; the reader finds the listed document that went. (Small
-        # strays, so each drops one message: a large one also takes the manifest, which the reader
-        # then reports as missing instead.)
-        index = 0
-        while not (missing := await missing_documents(jetstream, table.stream, table.subject_prefix)):
-            await kv.put(f"stray{index:04}", b"s")
-            index += 1
-        assert missing == {"show"}
+        for key in table.sizes:
+            document = await writer.read(key)
+            assert document is not None and document.writer == CENTRAL_WRITER, key
+            assert document.token == tokens[key], key
         await client.close()
 
     _run(hub, [node], body)
@@ -115,126 +110,92 @@ def test_wall_documents_survive_the_largest_messages_in_the_hub_and_every_mirror
     hub, [node] = _servers(tmp_path)
     small = ("scene", "timing", "palette", "brightness", "layout")
     largest = MAX_STORED_MESSAGE - HEADER_ALLOWANCE
+    table = KeyTable({**{key: 64 for key in small}, "big1": largest, "big2": largest})
 
     async def body():
         await _linked(hub, 1)
         client = await local(node)
         await declare_wall_mirror(client)
         writer_client = await wall_writer(hub)
-        await declare_wall(writer_client)
-        table = Documents.wall({**{key: 64 for key in small}, "big1": largest, "big2": largest})
-        writer = DocumentWriter(writer_client.jetstream(), table)
+        wall = WallWriter(writer_client, table, FileLinkStore(tmp_path / "marks.jsonl"))
+        assert await wall.ensure() is True
         for key in small:
-            await writer.put(key, f"small-{key}".encode())
+            await wall.put(key, f"small-{key}".encode())
         for round_ in range(3):
             for key in ("big1", "big2"):
-                last = await writer.put(key, bytes([65 + round_]) * largest)
+                last = await wall.put(key, bytes([65 + round_]) * largest)
         for refused, value in (("big3", b"C" * largest), ("scene", b"x" * 65)):
             with pytest.raises(DocumentRefused):
-                await writer.put(refused, value)
+                await wall.put(refused, value)
         hub_wall = writer_client.jetstream()
-        assert (await hub_wall.stream_info(WALL_STREAM)).state.last_seq == last.seq
+        assert (await hub_wall.stream_info(WALL_STREAM)).state.last_seq == last
 
         mirror = client.jetstream()
 
         async def caught_up():
-            return (await mirror.stream_info(WALL_STREAM)).state.last_seq >= last.seq
+            return (await mirror.stream_info(WALL_STREAM)).state.last_seq >= last
         await until(caught_up, 10, "the mirror reaches the last wall write")
         for jetstream in (hub_wall, mirror):
-            assert await missing_documents(jetstream, WALL_STREAM, "wall.") == set()
             for key in small:
                 assert (await jetstream.get_last_msg(WALL_STREAM, f"wall.{key}")).data == f"small-{key}".encode()
             for key in ("big1", "big2"):
                 assert (await jetstream.get_last_msg(WALL_STREAM, f"wall.{key}")).data == b"C" * largest
+        assert await wall_value(client, "wall.big1") == b"C" * largest
         await writer_client.close()
         await client.close()
 
     _run(hub, [node], body)
 
 
-def test_a_token_from_a_lost_store_is_stale_and_never_applied(tmp_path):
-    # The teardown's case: the Node's store is lost (tmpfs, every reboot) and a Node component writes
-    # its default before Central returns; Central's conditional write on its old revision must not
-    # land. Its token carries the old epoch, so its writer refuses it as stale, and even a raw
-    # conditional write on the old revision misses: the new creation's sequences start elsewhere
-    # (E-W1-TD-5). Central re-reads and writes on the new token. The Node component holds its bucket's
-    # configuration and re-declares that same object on every connect: the epoch is drawn when the
-    # stream is created, not when the configuration was built (E-W1-FV-1).
+def test_a_token_from_a_lost_store_raises_a_conflict_and_is_never_applied(tmp_path):
+    # The teardown's case: the Node's store is lost and a Node component writes its default before
+    # Central returns; Central's conditional write on its old token must not land. The new creation's
+    # sequences start elsewhere (E-W1-TD-5), so the write meets the server's 10071 and Central's writer
+    # raises Conflict: it never writes blind. Central re-reads (which follows the new epoch) and writes
+    # on the new token. The Node component holds its bucket's configuration and declares that same
+    # object on every connect: the epoch is drawn when the stream is created (E-W1-FV-1).
     hub, [node] = _servers(tmp_path)
 
     async def body():
         await _linked(hub, 1)
-        table = desired_documents("player")
-        config = sticky_bucket(table)
+        config = desired_bucket("player", desired_documents("player"))
         client = await local(node)
         await declare_bucket(client.jetstream(), config)
-        first = await client.jetstream().stream_info(table.stream)
+        first = await client.jetstream().stream_info(PLAYER)
         await client.close()
         central_client = await central(hub, "serial-a")
-        writer = DocumentWriter.node_bucket(central_client, table)
-        boot_one = await writer.put("show", b"central: run 42")
+        writer = await DocumentWriter.bind(central_client, PLAYER, writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
+        boot_one = await writer.put("show", b"central: run 42", expect=ABSENT)
 
         node.wipe()
         node.start()
         await _linked(hub, 1)
         client = await local(node)
-        kv = await declare_bucket(client.jetstream(), config)
-        second = await client.jetstream().stream_info(table.stream)
+        await declare_bucket(client.jetstream(), config)
+        second = await client.jetstream().stream_info(PLAYER)
         assert epoch_of(second) != epoch_of(first) and second.config.first_seq != first.config.first_seq
         # A configuration read back from a stream names its creation; declaring it is refused, so a
         # re-create never reuses an old epoch or origin.
         with pytest.raises(ValueError, match="declare_needs_a_built_buffer"):
             await declare_bucket(client.jetstream(), first.config)
-        node_revision = await kv.put("show", b"node: local default")
+        node_writer = await DocumentWriter.bind(client, PLAYER, writer="node")
+        node_token = await node_writer.put("show", b"node: local default", expect=ABSENT)
 
-        with pytest.raises(StaleToken):
-            await writer.put("show", b"central: run 43", token=boot_one)
+        with pytest.raises(Conflict) as conflict:
+            await writer.put("show", b"central: run 43", expect=boot_one)
+        assert conflict.value.key == "show"
         with pytest.raises(APIError) as raw:
             await central_client.jetstream(domain=NODE_DOMAIN).publish(
-                f"$JS.{NODE_DOMAIN}.API.$KV.{table.stream.removeprefix('KV_')}.show", b"central: raw",
+                f"$JS.{NODE_DOMAIN}.API.$KV.{PLAYER.removeprefix('KV_')}.show", b"central: raw",
                 headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE.value: str(boot_one.seq)})
         assert raw.value.err_code == WRONG_LAST_SEQUENCE
-        entry = await kv.get("show")
-        assert (entry.value, entry.revision) == (b"node: local default", node_revision)
+        assert await node_writer.read("show") == (b"node: local default", "node", node_token)
 
-        value, boot_two = await writer.read("show")
-        assert value == b"node: local default" and boot_two.epoch != boot_one.epoch
-        assert boot_two.seq == node_revision
-        written = await writer.put("show", b"central: run 43", token=boot_two)
-        assert (await kv.get("show")).value == b"central: run 43" and written.epoch == boot_two.epoch
-        await central_client.close()
-        await client.close()
-
-    _run(hub, [node], body)
-
-
-def test_every_writer_of_a_table_keeps_the_others_documents_in_the_manifest(tmp_path):
-    # A desired bucket has two writers: Central, and the Node component that writes its default. Each
-    # extends the manifest by a conditional write on the manifest as read, so neither drops the
-    # other's key, and a document a bypass removes later is still reported missing (E-W1-FV-4).
-    hub, [node] = _servers(tmp_path)
-
-    async def body():
-        await _linked(hub, 1)
-        table = desired_documents("player")
-        client = await local(node)
-        jetstream = client.jetstream()
-        kv = await declare_bucket(jetstream, sticky_bucket(table))
-        central_client = await central(hub, "serial-a")
-        central_writer = DocumentWriter.node_bucket(central_client, table)
-        node_writer = DocumentWriter(jetstream, table)
-
-        await central_writer.put("show", b"central: show")
-        await node_writer.put("layout", b"node: default layout")
-        await central_writer.put("frame00", b"central: frame")
-        # Concurrent first writes of new keys race on the manifest; every one is listed.
-        await asyncio.gather(*(writer.put(f"frame{index:02}", b"f") for index, writer in
-                               zip(range(1, 9), [central_writer, node_writer] * 4, strict=True)))
-        expected = {"show", "layout", "frame00", *(f"frame{index:02}" for index in range(1, 9))}
-        assert await listed_documents(jetstream, table.stream, table.subject_prefix) == expected
-
-        await kv.purge("layout")   # a bypass: no writer removes a document
-        assert await missing_documents(jetstream, table.stream, table.subject_prefix) == {"layout"}
+        found = await writer.read("show")
+        assert found == (b"node: local default", "node", node_token)
+        assert writer.epoch == epoch_of(second) != boot_one.epoch
+        written = await writer.put("show", b"central: run 43", expect=found.token)
+        assert await node_writer.read("show") == (b"central: run 43", CENTRAL_WRITER, written)
         await central_client.close()
         await client.close()
 

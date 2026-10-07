@@ -3,13 +3,20 @@
 A session runs its own thread and event loop and connects forever. Every connect runs **attach**:
 apply the component's slice, re-put the state it holds plus `birth`, register its methods once as a
 `nats.micro` service named the component (subjects `<component>.method.<name>`), then mark attached.
-A bus that started empty is refilled so, by the writer that owns the data.
+A session that reads the wall also creates the Node's WALL mirror at attach when it is absent. A bus
+that started empty is refilled so, by the writer that owns the data.
 
 The handles never wait on the bus: `Events.emit` enqueues into a bounded outbox (full, it drops its
 oldest) whose events carry headers built once at the emit, so a retried publish keeps its message id
 and the server dedupes it; `State.put` keeps the latest value per key and publishes it. Both publish
 only while attached, in order, retrying until the bus acknowledges. Each handled method call emits
 `<line>.record.call` naming its caller. The raw client is never exposed.
+
+Two read-only views follow their streams through a cursor reader that starts at each key's latest
+value (`pull.StartAt.LAST_PER_SUBJECT`): `desired`, the slice's desired bucket, written by Central and
+any later local writer, and `wall`, the Node's WALL mirror. Each holds the latest value per key, kept
+across a bus restart until the key is written again (an absent key is "unknown": last good stays),
+and calls its callbacks on the session's thread.
 """
 from __future__ import annotations
 
@@ -22,17 +29,29 @@ import threading
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Generic, TypeVar
 
 import nats
 import nats.errors
 import nats.micro
 from nats.micro.service import ServiceConfig
 
-from contracts.node_link import METHOD_TOKEN
-from nodeapi.buffers import BIRTH_KEY, OUTBOX_KEY, Role, Slice, apply, role_of, table_of
-from nodeapi.documents import header_bytes
+from contracts.node_link import METHOD_TOKEN, WALL_STREAM
+from nodeapi.buffers import (
+    BIRTH_KEY,
+    OUTBOX_KEY,
+    WALL_PREFIX,
+    Role,
+    Slice,
+    apply,
+    declare,
+    role_of,
+    table_of,
+    wall_mirror_config,
+)
+from nodeapi.documents import Document, header_bytes
 from nodeapi.envelope import event_headers, writer_of
+from nodeapi.pull import CursorReader, Read, StartAt
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +78,8 @@ SESSION_SCHEMA_MAJOR: Final = 1         # the major of the session's own events 
 _UNKNOWN_CALLER: Final = "unknown"
 _BACKOFF: Final = (0.1, 2.0)            # first and largest wait between attempts
 _PUBLISH_SECONDS: Final = 2.0
+_WATCH_BATCH: Final = 64
+_WATCH_SECONDS: Final = 1.0
 _COMPONENT = re.compile(r"[a-z]+")
 
 
@@ -66,7 +87,7 @@ class NodeSession:
     """One component's session on its Node's bus (its line's declarer in S1)."""
 
     def __init__(self, component: str, slice_: Slice, release: Release, *, url: str,
-                 methods: Mapping[str, MethodHandler] | None = None) -> None:
+                 methods: Mapping[str, MethodHandler] | None = None, reads_wall: bool = False) -> None:
         if type(component) is not str or not _COMPONENT.fullmatch(component):
             raise ValueError("session_component")
         if slice_.store_line.declarer != component:
@@ -79,6 +100,12 @@ class NodeSession:
             raise ValueError("session_methods_need_records")
         self._service_config = ServiceConfig(name=component, version=release.version) if self._methods else None
         [state] = (config for config in slice_.buffers if role_of(config) is Role.STATE)
+        desired = [config for config in slice_.buffers if role_of(config) is Role.DESIRED]
+        if len(desired) > 1:
+            raise ValueError("session_one_desired_bucket")
+        self._desired_stream = desired[0].name if desired else None
+        self._desired_prefix = desired[0].subjects[0].removesuffix(">") if desired else ""
+        self._reads_wall = bool(reads_wall)
         self._state_table = table_of(state)
         self._state_prefix = state.subjects[0].removesuffix(">")
         self._birth = json.dumps({
@@ -98,6 +125,8 @@ class NodeSession:
         self._thread: threading.Thread | None = None
         self._events = Events(self)
         self._state = State(self)
+        self._desired = DesiredView() if self._desired_stream is not None else None
+        self._wall = WallView() if self._reads_wall else None
 
     @property
     def events(self) -> Events:
@@ -106,6 +135,16 @@ class NodeSession:
     @property
     def state(self) -> State:
         return self._state
+
+    @property
+    def desired(self) -> DesiredView | None:
+        """The slice's desired bucket, read-only; None when the slice has none."""
+        return self._desired
+
+    @property
+    def wall(self) -> WallView | None:
+        """The Node's WALL mirror, read-only; None unless the session reads the wall."""
+        return self._wall
 
     def start(self) -> None:
         """Run the session on its own thread and loop; returns at once."""
@@ -147,6 +186,12 @@ class NodeSession:
         self._attach_needed.set()
         self._wake.set()
         tasks = [asyncio.create_task(self._attacher()), asyncio.create_task(self._publisher())]
+        if self._desired is not None:
+            tasks.append(asyncio.create_task(self._watch(
+                self._desired_stream, self._desired_prefix, self._desired,
+                lambda item: Document(item.data, writer_of(item.headers), item.token))))
+        if self._wall is not None:
+            tasks.append(asyncio.create_task(self._watch(WALL_STREAM, WALL_PREFIX, self._wall, lambda item: item.data)))
         try:
             await self._stopping.wait()
         finally:
@@ -200,8 +245,11 @@ class NodeSession:
                     delay = min(delay * 2, _BACKOFF[1])
 
     async def _attach(self) -> None:
-        """Apply the slice, re-put every held state key and birth, register the methods once."""
+        """Apply the slice, create the WALL mirror if this session reads it, re-put every held state
+        key and birth, register the methods once."""
         await apply(self._jetstream, self._slice)
+        if self._reads_wall:
+            await declare(self._jetstream, wall_mirror_config())   # create only, never updated (§10)
         with self._lock:
             held = dict(self._held)
         for key, value in {**held, BIRTH_KEY: self._birth}.items():
@@ -220,6 +268,31 @@ class NodeSession:
             self._service = service
         self._ready.set()
         self._attached.set()
+
+    async def _watch(self, stream: str, prefix: str, view: _View, value: Callable[[Read], object]) -> None:
+        """Follow `stream` into `view` from each key's latest value, while attached. The reader keeps
+        its own cursor and recreates its consumer itself; a stream absent or a bus away is read again
+        after a pause."""
+        reader = CursorReader(self._client, stream, None, start=StartAt.LAST_PER_SUBJECT)
+        delay = _BACKOFF[0]
+        try:
+            while True:
+                await self._ready.wait()
+                try:
+                    batch = await reader.read(_WATCH_BATCH, timeout=_WATCH_SECONDS)
+                except Exception as error:   # the stream is absent or the bus away: read again
+                    log.debug("%s: watch %s: %r", self._component, stream, error)
+                    await self._pause(delay)
+                    delay = min(delay * 2, _BACKOFF[1])
+                    continue
+                delay = _BACKOFF[0]
+                latest = {item.subject.removeprefix(prefix): value(item)
+                          for item in batch.items if isinstance(item, Read)}
+                if latest:
+                    view._changed(latest)
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(reader.close(), _PUBLISH_SECONDS)
 
     def _endpoint(self, name: str, handler: MethodHandler):
         async def answer(request) -> None:
@@ -337,3 +410,43 @@ class State:
     def get(self, key: str) -> bytes | None:
         """This session's own last put."""
         return self._session._get(key)
+
+
+_Value = TypeVar("_Value")
+
+
+class _View(Generic[_Value]):
+    """The latest value per key of one stream, and the callbacks told of each change."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._values: dict[str, _Value] = {}
+        self._callbacks: list[Callable[[str, _Value], None]] = []
+
+    def get(self, key: str) -> _Value | None:
+        with self._lock:
+            return self._values.get(key)
+
+    def on_change(self, callback: Callable[[str, _Value], None]) -> None:
+        """Call `callback(key, value)` on the session's thread for each key's latest new value."""
+        with self._lock:
+            self._callbacks.append(callback)
+
+    def _changed(self, latest: Mapping[str, _Value]) -> None:
+        with self._lock:
+            self._values.update(latest)
+            callbacks = list(self._callbacks)
+        for key, value in latest.items():
+            for callback in callbacks:
+                try:
+                    callback(key, value)
+                except Exception:
+                    log.exception("view callback for %s", key)
+
+
+class DesiredView(_View[Document]):
+    """The session's desired bucket, read-only: each key's latest document, its writer and token."""
+
+
+class WallView(_View[bytes]):
+    """The Node's WALL mirror, read-only: each wall key's latest value (keys without `wall.`)."""

@@ -1,4 +1,5 @@
-"""Central's side of one Node, per pipe: the NodeLink (E3b design §7.2, §8, §9.1, §9.3; E3d runs it).
+"""Central's side of one Node, per pipe, and of the wall: NodeLink and WallWriter (E3b design §7.2,
+§8, §9.1-§9.3, §9.6, §10; E3d runs them).
 
 A NodeLink holds one client in the Node's hub account and one pipe. It finds what the Node has from
 the streams themselves (names, then each description with no options: never a reply that grows with
@@ -7,11 +8,25 @@ Central's own cursors, and calls and discovers the pipe's components. Every read
 with its cursor in one store transaction: a gap row (a count, or "unknown" when an epoch ended), the
 raw record keyed (stream, epoch, sequence) with its message id, then the cursor. A crash mid-commit
 resumes from the store's cursor; a repeat is idempotent. Central records before it judges.
+
+A NodeLink also asserts Central's documents into each desired bucket of its pipe, by diff against
+Central's own last write per key (`LinkStore.own_tokens`): only a key whose projection changed, or
+every key in an epoch Central has not written. Each put is conditional on Central's own token, or on
+"absent" in a new epoch. A conflict re-reads the key: Central's own value (an earlier write whose
+acknowledgement was lost) gives Central its token; any other writer's value is adopted as Central's
+for that projection and logged (`document_adopted`), so Central never overwrites it until its
+projection changes again (C16).
+
+WallWriter keeps WALL in the hub's wall account: absent (the hub restarted empty), it is created at
+Central's mark + 1 + WALL_MARGIN and every wall document is put again. The mark is recorded after
+each acknowledgement, so a crash between the two loses at most the writes in flight, which the
+margin covers: no Node mirror is ever ahead of the new WALL's first sequence (X8).
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -22,8 +37,16 @@ from typing import TYPE_CHECKING, Final, Protocol
 import nats.errors
 from nats.js.errors import APIError, NotFoundError
 
-from contracts.node_link import CENTRAL_WRITER, METHOD_TOKEN, NODE_DOMAIN, STORE_LINES, Pipe
-from nodeapi.buffers import BIRTH_KEY, PIPE_KEY, Role, role_of
+from contracts.node_link import (
+    CENTRAL_WRITER,
+    METHOD_TOKEN,
+    NODE_DOMAIN,
+    STORE_LINES,
+    WALL_STREAM,
+    Pipe,
+)
+from nodeapi.buffers import BIRTH_KEY, PIPE_KEY, KeyTable, Role, declare, role_of, wall_config
+from nodeapi.documents import ABSENT, Absent, Conflict, DocumentWriter
 from nodeapi.envelope import caller_headers
 from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import Batch, CursorReader, Gap, Read, StreamAbsent
@@ -43,6 +66,15 @@ class LinkStore(Protocol):
 
     async def action(self, kind: str, body: Mapping[str, object]) -> None: ...   # the action log
 
+    async def own_tokens(self, stream: str) -> Mapping[str, tuple[str, Token]]: ...
+        # key -> (digest, token) of Central's last write of each key of one desired bucket
+
+    async def wrote(self, stream: str, key: str, digest: str, token: Token) -> None: ...
+
+
+class DocumentSource(Protocol):
+    async def documents(self, stream: str) -> Mapping[str, bytes]: ...   # Central's projection for one desired bucket
+
 
 DRAIN_BATCH: Final = 64
 DRAIN_TIMEOUT_SECONDS: Final = 1.0
@@ -53,27 +85,34 @@ _SERVICE_ERROR: Final = "Nats-Service-Error-Code"   # nats.micro's error reply h
 
 
 class NodeLink:
-    """One Node, one pipe: reconcile, drain, call, discover."""
+    """One Node, one pipe: reconcile, drain, assert, call, discover."""
 
-    def __init__(self, client: Client, pipe: Pipe, store: LinkStore) -> None:
+    def __init__(self, client: Client, pipe: Pipe, store: LinkStore, documents: DocumentSource) -> None:
         self._client = client
         self._pipe = Pipe(pipe)
         self._store = store
+        self._documents = documents
         self._jetstream = client.jetstream(domain=NODE_DOMAIN)
         self._readers: dict[str, CursorReader] = {}
         self._state_streams: set[str] = set()
 
     async def reconcile(self) -> Mapping[str, str]:
         """Stream -> epoch for every events and state stream of this pipe. A cursor whose stream is
-        gone is committed as Gap(epoch, seq, None) with no cursor; a reader is kept per stream."""
+        gone is committed as Gap(epoch, seq, None) with no cursor; a reader is kept per stream. Then
+        every desired bucket of this pipe is asserted (a no-op for one Central is current in)."""
         epochs: dict[str, str] = {}
+        desired: list[str] = []
         for name in await self._stream_names():
             try:
                 info = await self._jetstream.stream_info(name)
             except NotFoundError:
                 continue
             role = role_of(info.config)
-            if role not in (Role.EVENTS, Role.STATE) or info.config.metadata.get(PIPE_KEY) != self._pipe.value:
+            if (info.config.metadata or {}).get(PIPE_KEY) != self._pipe.value:
+                continue
+            if role is Role.DESIRED:
+                desired.append(name)
+            if role not in (Role.EVENTS, Role.STATE):
                 continue
             epochs[name] = epoch_of(info)
             if role is Role.STATE:
@@ -87,7 +126,48 @@ class NodeLink:
         for stream in epochs:
             if stream not in self._readers:
                 self._readers[stream] = CursorReader(self._client, stream, cursors.get(stream), domain=NODE_DOMAIN)
+        for stream in desired:
+            with contextlib.suppress(NotFoundError):   # pruned meanwhile: nothing to assert into
+                await self.assert_documents(stream)
         return MappingProxyType(epochs)
+
+    async def assert_documents(self, stream: str) -> None:
+        """Put each of Central's documents for one desired bucket whose digest differs from Central's
+        own last write in the stream's current epoch, conditional on that write's token, or on
+        ABSENT when Central has none in this epoch."""
+        writer = await DocumentWriter.bind(self._client, stream, writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
+        own = await self._store.own_tokens(stream)
+        for key, value in (await self._documents.documents(stream)).items():
+            digest = _digest(value)
+            held = own.get(key)
+            if held is not None and held[1].epoch == writer.epoch:
+                if held[0] == digest:
+                    continue
+                expect: Token | Absent = held[1]
+            else:
+                expect = ABSENT
+            await self._assert_one(writer, stream, key, value, digest, expect)
+
+    async def _assert_one(self, writer: DocumentWriter, stream: str, key: str, value: bytes, digest: str,
+                          expect: Token | Absent) -> None:
+        while True:
+            try:
+                token = await writer.put(key, value, expect=expect)
+                break
+            except Conflict:
+                found = await writer.read(key)
+            if found is None:   # nothing there (a new epoch under the write): write it fresh
+                expect = ABSENT
+            elif found.writer == CENTRAL_WRITER:   # Central's own write, its acknowledgement lost
+                if _digest(found.value) == digest:
+                    token = found.token
+                    break
+                expect = found.token
+            else:   # another writer's value: Central's for this projection, flagged to the operator
+                await self._store.wrote(stream, key, digest, found.token)
+                await self._store.action("document_adopted", {"stream": stream, "key": key, "writer": found.writer})
+                return
+        await self._store.wrote(stream, key, digest, token)
 
     async def run(self, stop: asyncio.Event) -> None:
         """Reconcile, then drain every stream until `stop` or the client closes. Reconcile again when
@@ -210,3 +290,60 @@ class NodeLink:
 async def _pause(stop: asyncio.Event, seconds: float) -> None:
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(stop.wait(), seconds)
+
+
+def _digest(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+WALL_MARGIN: Final = 1024   # K: more than the wall writes ever in flight between an ack and its mark
+
+
+class WallMarks(Protocol):
+    async def mark(self) -> int: ...                       # the highest WALL sequence Central recorded; 0 for none
+
+    async def record_mark(self, seq: int) -> None: ...
+
+    async def wall_documents(self) -> Mapping[str, bytes]: ...   # Central's wall documents, key -> value
+
+
+class WallWriter:
+    """Central's one writer of the hub's WALL, inside the wall table."""
+
+    def __init__(self, client: Client, table: KeyTable, marks: WallMarks) -> None:
+        wall_config(table, first_seq=1)   # ValueError("wall_table_over_budget") at construction
+        self._client = client
+        self._table = table
+        self._marks = marks
+        self._writer: DocumentWriter | None = None
+
+    async def ensure(self) -> bool:
+        """Create WALL at mark + 1 + WALL_MARGIN if it is absent and put every wall document again;
+        True when this call created it. Create-if-absent is race-safe with another Central."""
+        jetstream = self._client.jetstream()
+        try:
+            await jetstream.stream_info(WALL_STREAM)
+            created = False
+        except NotFoundError:
+            first = await self._marks.mark() + 1 + WALL_MARGIN
+            created = await declare(jetstream, wall_config(self._table, first_seq=first))
+        self._writer = await DocumentWriter.bind(self._client, WALL_STREAM, writer=CENTRAL_WRITER)
+        if created:
+            for key, value in (await self._marks.wall_documents()).items():
+                await self.put(key, value)
+        return created
+
+    async def put(self, key: str, value: bytes) -> int:
+        """Write one wall document, admitted by the table; the mark is recorded after the ack. WALL
+        has one writer, Central, so a conflict (another Central instance) re-reads and writes again."""
+        if self._writer is None:
+            raise RuntimeError("wall_writer_not_ensured")
+        while True:
+            found = await self._writer.read(key)
+            try:
+                token = await self._writer.put(key, value, expect=ABSENT if found is None else found.token)
+                break
+            except Conflict:
+                continue
+        await self._marks.record_mark(token.seq)
+        return token.seq

@@ -48,11 +48,11 @@ from contracts.node_link import (
 )
 from nodeapi.buffers import (
     ClassTable,
-    Documents,
+    KeyTable,
     bucket,
     buffer,
     declare,
-    sticky_bucket,
+    desired_bucket,
     wall_config,
     wall_mirror_config,
 )
@@ -78,18 +78,22 @@ PORT_CEILING = 32000
 
 
 async def declare_bucket(jetstream: JetStreamContext, config: StreamConfig) -> KeyValue:
-    """Declare a bucket configuration (`nodeapi.buffers.bucket` or `sticky_bucket`) and bind a
-    KeyValue handle to it."""
+    """Declare a bucket configuration (`nodeapi.buffers.bucket`, `state_bucket` or `desired_bucket`)
+    and bind a KeyValue handle to it."""
     await declare(jetstream, config)
     return await jetstream.key_value(config.name.removeprefix("KV_"))
 
 
-def desired_documents(component: str) -> Documents:
+def desired_documents(component: str) -> KeyTable:
     """The harness's desired-bucket document table for one component: a show document, a layout,
     a retention override and twenty Frame documents, two values each. The page's numbers (E3b's
     class table owns them); its budget stays inside the page's 0.25 MiB per desired bucket."""
     sizes = {"show": 4096, "layout": 4096, "retention": 1024, **{f"frame{index:02}": 4096 for index in range(20)}}
-    return Documents.bucket(f"desired_{component}", sizes, history=2)
+    return KeyTable(sizes, history=2)
+
+
+# The harness's wall table: the wall keys its probes write through a writer.
+WALL_TABLE = KeyTable({"timing": 4096, "scene": 4096})
 
 
 def node_split() -> ClassTable:
@@ -107,7 +111,7 @@ def node_split() -> ClassTable:
         config = bucket(f"state_{component}", history=4, max_bytes=MIB // 4, max_value_size=4096)
         split[config.name] = config
     for component in ("apps", "display", "health", "player"):
-        config = sticky_bucket(desired_documents(component))
+        config = desired_bucket(component, desired_documents(component))
         split[config.name] = config
     split[WALL_STREAM] = wall_mirror_config()
     return ClassTable(split)
@@ -376,13 +380,10 @@ async def local(node: BusServer, **options) -> Client:
     return await _connect(node.client_url, **options)
 
 
-async def declare_wall(writer: Client, *, first_seq: int = 1) -> None:
-    """Create-if-absent: the hub's wall-wide stream (`wall_config`).
-
-    `first_seq` is one past the last sequence Central had acknowledged: a WALL re-created after the
-    hub lost its store continues where every Node mirror stopped, so the mirrors resume with no
-    Node rule (erratum E-W1-E3a-R-4, which replaces E-W1-E3a-2-2's fallback)."""
-    await declare(writer.jetstream(), wall_config(first_seq=first_seq))
+async def declare_wall(writer: Client, table: KeyTable = WALL_TABLE, *, first_seq: int = 1) -> None:
+    """Create-if-absent: the hub's wall-wide stream (`wall_config`) with `table` in its metadata.
+    A WALL re-created after the hub lost its store is `nodeapi.hub.WallWriter`'s (tracer step 4)."""
+    await declare(writer.jetstream(), wall_config(table, first_seq=first_seq))
 
 
 async def declare_wall_mirror(node_client: Client) -> bool:
@@ -445,19 +446,27 @@ class Recorder:
 
 
 class LinkStoreCrash(Exception):
-    """Central's process dies mid-commit: the transaction never happened."""
+    """Central's process dies mid-transaction: the transaction never happened."""
 
 
 class FileLinkStore:
-    """Central's link store (`nodeapi.hub.LinkStore`) as an append-only file of JSON rows: one
-    commit is one write of its gap rows, raw records and cursor. A record already held is not written
-    again (the idempotent repeat) but is kept in `repeats`, so a test sees a reader that repeated
-    itself. `crash_next_commit` makes the next commit raise before it writes anything."""
+    """Central's link store (`nodeapi.hub.LinkStore`) and WALL marks (`nodeapi.hub.WallMarks`) as an
+    append-only file of JSON rows: one commit is one write of its gap rows, raw records and cursor. A
+    record already held is not written again (the idempotent repeat) but is kept in `repeats`, so a
+    test sees a reader that repeated itself. `crash_next` names the next transaction ("commit",
+    "wrote" or "record_mark") to raise before it writes anything, as a Central that dies between a
+    Node's or the hub's acknowledgement and its own record. `hold_wall` keeps one of Central's wall
+    documents, as its projection would."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.crash_next_commit = False
+        self.crash_next: str | None = None
         self.repeats: list[tuple[str, str, int]] = []
+
+    def _crash(self, kind: str, what: str) -> None:
+        if self.crash_next == kind:
+            self.crash_next = None
+            raise LinkStoreCrash(what)
 
     async def cursors(self) -> Mapping[str, Token]:
         cursors: dict[str, Token | None] = {}
@@ -466,9 +475,7 @@ class FileLinkStore:
         return {stream: cursor for stream, cursor in cursors.items() if cursor is not None}
 
     async def commit(self, stream: str, batch: Batch) -> None:
-        if self.crash_next_commit:
-            self.crash_next_commit = False
-            raise LinkStoreCrash(stream)
+        self._crash("commit", stream)
         held = {(row["stream"], row["epoch"], row["seq"]) for row in self.rows("record")}
         rows: list[dict] = []
         for item in batch.items:
@@ -493,6 +500,28 @@ class FileLinkStore:
     async def action(self, kind: str, body: Mapping[str, object]) -> None:
         self._append([{"kind": "action", "action": kind, "body": body}])
 
+    async def own_tokens(self, stream: str) -> Mapping[str, tuple[str, Token]]:
+        return {row["key"]: (row["digest"], Token(row["epoch"], row["seq"])) for row in self.rows("own")
+                if row["stream"] == stream}
+
+    async def wrote(self, stream: str, key: str, digest: str, token: Token) -> None:
+        self._crash("wrote", f"{stream} {key}")
+        self._append([{"kind": "own", "stream": stream, "key": key, "digest": digest, "epoch": token.epoch,
+                       "seq": token.seq}])
+
+    async def mark(self) -> int:
+        return max((row["seq"] for row in self.rows("mark")), default=0)
+
+    async def record_mark(self, seq: int) -> None:
+        self._crash("record_mark", str(seq))
+        self._append([{"kind": "mark", "seq": seq}])
+
+    def hold_wall(self, key: str, value: bytes) -> None:
+        self._append([{"kind": "wall", "key": key, "value": value.decode("latin-1")}])
+
+    async def wall_documents(self) -> Mapping[str, bytes]:
+        return {row["key"]: row["value"].encode("latin-1") for row in self.rows("wall")}
+
     def rows(self, kind: str) -> list[dict]:
         if not self.path.exists():
             return []
@@ -511,6 +540,16 @@ class FileLinkStore:
             store.write("".join(json.dumps(row) + "\n" for row in rows))
             store.flush()
             os.fsync(store.fileno())
+
+
+class Projection:
+    """Central's document projection (`nodeapi.hub.DocumentSource`): stream -> key -> value."""
+
+    def __init__(self) -> None:
+        self.streams: dict[str, dict[str, bytes]] = {}
+
+    async def documents(self, stream: str) -> Mapping[str, bytes]:
+        return dict(self.streams.get(stream, {}))
 
 
 async def reload_hub(hub: BusServer, serials: Sequence[str], *, requests: int = 2) -> None:

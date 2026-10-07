@@ -40,13 +40,20 @@ from pathlib import Path
 
 import nats
 import pytest
-from integration.bus_servers import HUB_STORE_BYTES, NODE_BUS_CONF, desired_documents, node_split
+from integration.bus_servers import (
+    HUB_STORE_BYTES,
+    NODE_BUS_CONF,
+    WALL_TABLE,
+    desired_documents,
+    node_split,
+)
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 from nats.js.errors import APIError
 
 from central.fleet.node_bus_accounts import HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
+    CENTRAL_WRITER,
     MAX_STORED_MESSAGE,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_MEMORY_MAX,
@@ -60,16 +67,16 @@ from contracts.node_link import (
 )
 from nodeapi.buffers import (
     CIRCULAR,
-    Documents,
+    KeyTable,
     buffer,
     buffer_kind,
     declare,
     declare_table,
-    sticky_bucket,
+    desired_bucket,
     wall_config,
     wall_mirror_config,
 )
-from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter
+from nodeapi.documents import ABSENT, Conflict, DocumentWriter
 from nodeapi.epoch import epoch_of
 from nodeapi.pull import pull
 from scripts.nats_server import NATS_SERVER_VERSION
@@ -140,7 +147,7 @@ def _writes(name: str, config) -> tuple[list[str], list[bytes]]:
     if name.startswith("KV_desired_"):
         table = desired_documents(name.removeprefix("KV_desired_"))
         keys = sorted(table.sizes)
-        return [table.subject_prefix + key for key in keys], [b"d" * table.sizes[key] for key in keys]
+        return [f"$KV.{name.removeprefix('KV_')}.{key}" for key in keys], [b"d" * table.sizes[key] for key in keys]
     if name.startswith("KV_"):
         return [f"$KV.{name.removeprefix('KV_')}.key{index}" for index in range(80)], [b"s" * 900]
     return [config.subjects[0].replace(">", "fill")], [b"r" * 200, b"r" * 4000]
@@ -236,7 +243,7 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
                              password=WALL_WRITER_USER, allow_reconnect=False, connect_timeout=5)
     node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
     wall, jetstream = hub.jetstream(timeout=10), node.jetstream(timeout=10)
-    await declare(wall, wall_config())
+    await declare(wall, wall_config(WALL_TABLE, first_seq=1))
     await declare_table(jetstream, table)
     await wall.publish("wall.first", b"w")
     deadline = time.monotonic() + 60
@@ -343,13 +350,12 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
     node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5,
                               error_cb=count)
     jetstream, across = node.jetstream(timeout=10), central.jetstream(domain=NODE_DOMAIN, timeout=10)
-    await declare(wall.jetstream(), wall_config())
+    await declare(wall.jetstream(), wall_config(WALL_TABLE, first_seq=1))
     await declare(jetstream, wall_mirror_config())
     await declare(jetstream, buffer("REC_probe", 4 * MIB, subjects=["probe.record.>"]))
     await declare(jetstream, buffer("REC_flood", 4 * MIB, subjects=["flood.>"]))
-    table = Documents.bucket("desired_probe", {"show": 64}, history=2)
-    await declare(jetstream, sticky_bucket(table))
-    await DocumentWriter(jetstream, table).put("show", b"node")
+    await declare(jetstream, desired_bucket("player", KeyTable({"show": 64}, history=2)))
+    await (await DocumentWriter.bind(node, "KV_desired_player", writer="node")).put("show", b"node", expect=ABSENT)
     await wall.jetstream().publish("wall.first", b"w")
     deadline = time.monotonic() + 60
     while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < 1:
@@ -439,12 +445,11 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
     assert got and got[0].subject == "probe.record.0", [message.subject for message in got]
     for message in got:
         await message.ack_sync()
-    document = DocumentWriter.node_bucket(central, table)
-    _, token = await document.read("show")
-    await document.put("show", b"central", token=token)
-    with pytest.raises(APIError) as stale:
-        await document.put("show", b"stale", token=token)
-    assert stale.value.err_code == WRONG_LAST_SEQUENCE
+    document = await DocumentWriter.bind(central, "KV_desired_player", writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
+    token = (await document.read("show")).token
+    await document.put("show", b"central", expect=token)
+    with pytest.raises(Conflict):
+        await document.put("show", b"stale", expect=token)
     acknowledgement = await wall.jetstream().publish("wall.after", b"w")
     deadline = time.monotonic() + 30
     while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < acknowledgement.seq:

@@ -17,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from integration.bus_servers import desired_documents, node_split
+from integration.bus_servers import WALL_TABLE, desired_documents, node_split
 from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
@@ -58,20 +58,22 @@ from nodeapi.buffers import (
     MAX_PUBLISH_SUBJECT,
     MAX_TABLE_METADATA,
     STICKY,
+    WALL_PREFIX,
     ClassTable,
-    Documents,
     KeyTable,
+    Role,
     Slice,
     bucket,
     buffer,
     buffer_kind,
+    desired_bucket,
     event_buffer,
+    role_of,
     state_bucket,
-    sticky_bucket,
+    table_of,
     wall_config,
     wall_mirror_config,
 )
-from nodeapi.documents import DocumentWriter
 from nodeapi.epoch import EPOCH_KEY
 from nodeapi.pull import PULL_MAX_BYTES, PULL_ONE_BYTES
 
@@ -245,19 +247,16 @@ def test_a_stored_message_fits_every_reply_the_node_generates_for_it():
     assert 4 * -(-MAX_STORED_MESSAGE // 3) + REPLY_ENVELOPE <= NODE_MAX_PAYLOAD
     # A document's subject leaves its writer's control line room for an inbox and the sizes, so the
     # server never closes the writer for it; Central's longer publish prefix is checked by its writer.
-    longest = "k" * (MAX_PUBLISH_SUBJECT - len("$KV.b."))
-    table = Documents.bucket("b", {longest: 1}, history=1)
-    with pytest.raises(ValueError, match="documents_subject_past_the_control_line"):
-        Documents.bucket("b", {longest + "k": 1}, history=1)
-    DocumentWriter(None, table)
-    with pytest.raises(ValueError, match="document_subject_past_the_control_line"):
-        DocumentWriter(None, table, publish_prefix=f"$JS.{NODE_DOMAIN}.API.$KV.b.")
+    longest = "k" * (MAX_PUBLISH_SUBJECT - len("$KV.desired_player."))
+    desired_bucket("player", KeyTable({longest: 1}))
+    with pytest.raises(ValueError, match="key_table_key"):
+        desired_bucket("player", KeyTable({longest + "k": 1}))
 
 
 def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
     # Everything a Node or the hub declares comes from nodeapi.buffers: JetStream's limits retention
     # with discard old, a byte cap, a stored message that fits a leaf reply and a kind.
-    hub_wall = wall_config()
+    hub_wall = wall_config(WALL_TABLE, first_seq=1)
     configs = [*node_split().buffers.values(), hub_wall, wall_mirror_config(),
                bucket("probe", history=1, max_bytes=1), buffer("PROBE", 1, subjects=["probe.>"])]
     for config in configs:
@@ -271,17 +270,22 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
         # each create, so a configuration held across a store loss re-creates nothing old (E-W1-FV-1).
         assert EPOCH_KEY not in config.metadata, config.name
         assert config.first_seq == (1 if config is hub_wall else None), config.name
-    assert wall_config(first_seq=7).first_seq == 7   # WALL's continuation is the builder's (E-W1-E3a-R-4)
+    assert wall_config(WALL_TABLE, first_seq=7).first_seq == 7   # WALL's continuation is the builder's (§9.6)
     # Sticky: per-subject history only, no count limit, the byte cap a document table's budget.
     split = node_split().buffers
     sticky = {name for name, config in split.items() if buffer_kind(config) == STICKY}
     assert sticky == {"KV_desired_apps", "KV_desired_display", "KV_desired_health", "KV_desired_player", "WALL"}
     for name in sticky - {"WALL"}:
         table = desired_documents(name.removeprefix("KV_desired_"))
-        assert split[name].max_bytes == table.budget and split[name].max_msgs_per_subject == table.history
+        assert split[name].max_bytes == table.budget(f"$KV.{name.removeprefix('KV_')}.")
+        assert split[name].max_msgs_per_subject == table.history
         assert split[name].max_msgs == -1 and split[name].max_msg_size == table.largest
-    for config in (wall_config(), wall_mirror_config()):
+        # Self-describing: a writer takes the table from the stream (E3b design §4 rule 2).
+        assert (role_of(split[name]), table_of(split[name])) == (Role.DESIRED, table)
+    for config in (hub_wall, wall_mirror_config()):
         assert (config.max_msgs_per_subject, config.max_msgs, config.max_bytes) == (1, -1, WALL_STREAM_BYTES)
+        assert role_of(config) is Role.WALL
+    assert (table_of(hub_wall), table_of(wall_mirror_config())) == (WALL_TABLE, None)
     assert {name for name, config in split.items() if buffer_kind(config) == CIRCULAR} == set(split) - sticky
     for field in ("retention", "discard", "storage", "metadata"):
         with pytest.raises(ValueError, match="buffer_policy_is_fixed"):
@@ -295,12 +299,12 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
             buffer("X", 1, **{field: None})
     with pytest.raises(ValueError, match="buffer_message_past_the_leaf"):
         buffer("X", 1, max_msg_size=MAX_STORED_MESSAGE + 1)
-    with pytest.raises(ValueError, match="documents_value_past_the_leaf"):
-        Documents.bucket("big", {"one": MAX_STORED_MESSAGE}, history=1)
-    with pytest.raises(ValueError, match="wall_documents_over_budget"):
-        Documents.wall({key: MAX_STORED_MESSAGE - 1024 for key in "abc"})  # WALL holds two
-    with pytest.raises(ValueError, match="sticky_bucket_needs_a_bucket_table"):
-        sticky_bucket(Documents.wall({"a": 1}))
+    with pytest.raises(ValueError, match="key_table_value_past_the_leaf"):
+        KeyTable({"one": MAX_STORED_MESSAGE})
+    big = KeyTable({key: MAX_STORED_MESSAGE - 1024 for key in "abc"})   # WALL holds two
+    assert big.budget(WALL_PREFIX) > WALL_STREAM_BYTES
+    with pytest.raises(ValueError, match="wall_table_over_budget"):
+        wall_config(big, first_seq=1)
 
 
 def test_one_class_table_holds_the_whole_store_within_the_servers_stream_count():
@@ -424,7 +428,7 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     # The server's store is the outer fence, reserved per stream at create: the split fits it.
     assert sum(config.max_bytes for config in node_split().buffers.values()) <= _bytes(
         node["jetstream"]["max_file_store"])
-    assert wall_config().max_bytes == wall_mirror_config().max_bytes == WALL_STREAM_BYTES
+    assert wall_config(WALL_TABLE, first_seq=1).max_bytes == wall_mirror_config().max_bytes == WALL_STREAM_BYTES
 
 
 def test_the_generated_configuration_is_deterministic():

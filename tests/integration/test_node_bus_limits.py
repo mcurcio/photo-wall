@@ -57,16 +57,17 @@ from nodeapi.buffers import (
     HEADER_ALLOWANCE,
     MAX_PUBLISH_SUBJECT,
     STICKY,
+    WALL_PREFIX,
     ClassTable,
-    Documents,
+    KeyTable,
     bucket,
     buffer,
     buffer_kind,
     declare,
     declare_table,
-    sticky_bucket,
+    desired_bucket,
 )
-from nodeapi.documents import DocumentRefused, DocumentWriter, missing_documents
+from nodeapi.documents import ABSENT, DocumentRefused, DocumentWriter
 from nodeapi.epoch import epoch_of, stream_epoch
 from nodeapi.pull import PULL_MAX_BYTES, pull
 
@@ -119,8 +120,8 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
             return len(leaf_connections(hub)) == 1
         await until(linked, 10, "the Node's leaf link")
         writer = await wall_writer(hub)
-        await declare_wall(writer)
-        wall = writer.jetstream()
+        wall_table = _full_wall_table()
+        await declare_wall(writer, wall_table)
         client = await local(node)
         jetstream = client.jetstream()
         assert client.max_payload == NODE_MAX_PAYLOAD  # the shipped file's pin, as the server applies it
@@ -157,16 +158,16 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         # Fill the whole store: every circular stream and bucket holds exactly its cap; every sticky
         # one every document at its largest, `history` times, through its writer; WALL on the hub too,
         # and the Node's mirror with it.
-        buckets, writers = {}, {}
-        wall_table = _full_wall_table()
+        buckets, writers, tokens = {}, {}, {}
         for name, cap in caps.items():
             if name == WALL_STREAM:
-                writers[name] = DocumentWriter(wall, wall_table)
-                acknowledgement = await _fill_documents(writers[name])
-                await _mirror_reaches(jetstream, acknowledgement)
+                writers[name] = await DocumentWriter.bind(writer, WALL_STREAM, writer="central")
+                assert writers[name].table == wall_table
+                tokens[name] = await _fill_documents(writers[name])
+                await _mirror_reaches(jetstream, max(token.seq for token in tokens[name].values()))
             elif buffer_kind(split[name]) == STICKY:
-                writers[name] = DocumentWriter(jetstream, desired_documents(name.removeprefix("KV_desired_")))
-                await _fill_documents(writers[name])
+                writers[name] = await DocumentWriter.bind(client, name, writer="node")
+                tokens[name] = await _fill_documents(writers[name])
             elif name.startswith("KV_"):
                 buckets[name] = kv = await jetstream.key_value(name.removeprefix("KV_"))
                 for index in range(cap // FILL_CHARGE):
@@ -187,13 +188,14 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
             full = (await jetstream.stream_info(name)).state
             if name in writers:
                 key = sorted(writers[name].table.sizes)[0]
-                token = await writers[name].put(key, b"n" * writers[name].table.sizes[key])
+                token = await writers[name].put(key, b"n" * writers[name].table.sizes[key], expect=tokens[name][key])
                 assert token.seq == full.last_seq + 1, name
+                for listed in writers[name].table.sizes:
+                    assert await writers[name].read(listed) is not None, (name, listed)
                 if name == WALL_STREAM:
                     await _mirror_reaches(jetstream, token.seq)
                     assert await wall_value(client, f"wall.{key}") == b"n" * wall_table.sizes[key]
-                assert await missing_documents(jetstream, name, writers[name].table.subject_prefix) == set()
-                assert len(await _held_keys(jetstream, name)) == len(writers[name].table.sizes) + 1, name
+                assert len(await _held_keys(jetstream, name)) == len(writers[name].table.sizes), name
                 continue
             if name in buckets:
                 revision = await buckets[name].put("one-more", b"x")
@@ -231,22 +233,23 @@ def _whole_store() -> ClassTable:
         split["REC_host"], max_bytes=split["REC_host"].max_bytes + rest)})
 
 
-def _full_wall_table() -> Documents:
+def _full_wall_table() -> KeyTable:
     """As many 4 KiB wall documents as WALL's budget holds."""
     def sizes(count: int) -> dict[str, int]:
         return {f"fill{index:03}": 4096 for index in range(count)}
     count = 1
-    while Documents(WALL_STREAM, "wall.", sizes(count + 1)).budget <= WALL_STREAM_BYTES:
+    while KeyTable(sizes(count + 1)).budget(WALL_PREFIX) <= WALL_STREAM_BYTES:
         count += 1
-    return Documents.wall(sizes(count))
+    return KeyTable(sizes(count))
 
 
-async def _fill_documents(writer: DocumentWriter) -> int:
-    """Every document at its largest, `history` times; the last sequence written."""
+async def _fill_documents(writer: DocumentWriter) -> dict:
+    """Every document at its largest, `history` times; each key's last token."""
+    tokens: dict = {}
     for round_ in range(writer.table.history):
         for key, size in writer.table.sizes.items():
-            last = (await writer.put(key, bytes([97 + round_]) * size)).seq
-    return last
+            tokens[key] = await writer.put(key, bytes([97 + round_]) * size, expect=tokens.get(key, ABSENT))
+    return tokens
 
 
 async def _held_keys(jetstream, stream: str) -> set[str]:
@@ -265,8 +268,9 @@ def _fill(subject: str, charge: int = FILL_CHARGE) -> bytes:
     return b"f" * (charge - CHARGE - len(subject))
 
 
-async def _record(jetstream) -> None:
+async def _record(client) -> None:
     """Past its cap the oldest go, every publish is accepted, and first_seq advances by the drop."""
+    jetstream = client.jetstream()
     cap = 16 * 1024
     await declare(jetstream, buffer("REC_probe", cap, subjects=["probe.record.>"]))
     origin = (await jetstream.stream_info("REC_probe")).config.first_seq
@@ -282,8 +286,9 @@ async def _record(jetstream) -> None:
     assert (config.max_age or 0) == 0 and config.max_msgs_per_subject in (None, -1)
 
 
-async def _observation(jetstream) -> None:
+async def _observation(client) -> None:
     """A message older than max_age is gone; a fresh one stays."""
+    jetstream = client.jetstream()
     await declare(jetstream, buffer("OBS_probe", 16 * 1024, subjects=["probe.observation.>"], max_age=1))
     origin = (await jetstream.stream_info("OBS_probe")).config.first_seq
     published = time.monotonic()
@@ -300,12 +305,13 @@ async def _observation(jetstream) -> None:
     assert (await jetstream.get_last_msg("OBS_probe", "probe.observation.verdict")).data == b"fresh"
 
 
-async def _state(jetstream) -> None:
+async def _state(client) -> None:
     """A circular bucket (reported state). Listed keys, at up to max_value bytes and ten times the
     capacity, are always accepted and keep `history` values. A key beyond the list is accepted too:
     the bucket has no headroom, so the first costs the bucket its oldest message, a hole in its
     sequence. An oversized value is refused (a message limit, not fullness); every listed key keeps
     its last good value."""
+    jetstream = client.jetstream()
     name, history, keys, max_value = "state_probe", 4, ("conditions", "position", "horizon", "verdicts"), 512
     capacity = kv_bucket_bytes(name, keys, history, max_value)
     kv = await declare_bucket(jetstream, bucket(
@@ -341,35 +347,39 @@ async def _state(jetstream) -> None:
         assert (await kv.get(key)).value == last[key], key
 
 
-async def _desired(jetstream) -> None:
+async def _desired(client) -> None:
     """A sticky bucket (desired state, E-W1-TD-4). Its writer's listed documents, at up to their
     largest and ten times the budget, are always accepted and keep `history` values; a document
     written once stays. The writer refuses its own unlisted or oversize write before sending, so
-    the stream never sees one; the reader finds nothing missing."""
-    table = desired_documents("probe")
-    await declare_bucket(jetstream, sticky_bucket(table))
-    writer = DocumentWriter(jetstream, table)
-    await writer.put("retention", b"written-once")
+    the stream never sees one; every listed document is held."""
+    jetstream = client.jetstream()
+    table = desired_documents("apps")
+    config = desired_bucket("apps", table)
+    await declare_bucket(jetstream, config)
+    writer = await DocumentWriter.bind(client, config.name, writer="node")
+    tokens = {"retention": await writer.put("retention", b"written-once", expect=ABSENT)}
     keys = sorted(set(table.sizes) - {"retention"})
     written, put = 0, 0
-    while written < 10 * table.budget:
+    while written < 10 * config.max_bytes:
         key = keys[put % len(keys)]
         size = table.sizes[key] if put % 3 else table.sizes[key] // 3
-        await writer.put(key, f"{put:08}".encode().ljust(size, b"."))
+        tokens[key] = await writer.put(key, f"{put:08}".encode().ljust(size, b"."), expect=tokens.get(key, ABSENT))
         written, put = written + size, put + 1
-    state = (await jetstream.stream_info(table.stream)).state
+    state = (await jetstream.stream_info(config.name)).state
     for unlisted, value in (("unlisted", b"x"), ("show", b"x" * (table.sizes["show"] + 1))):
         with pytest.raises(DocumentRefused):
-            await writer.put(unlisted, value)
-    assert (await jetstream.stream_info(table.stream)).state.last_seq == state.last_seq
-    assert state.bytes <= table.budget
-    assert (await writer.read("retention"))[0] == b"written-once"
+            await writer.put(unlisted, value, expect=tokens.get(unlisted, ABSENT))
+    assert (await jetstream.stream_info(config.name)).state.last_seq == state.last_seq
+    assert state.bytes <= config.max_bytes
+    assert (await writer.read("retention")).value == b"written-once"
     # One stream info counts every key's values: a kv.history per key holds a consumer for 5 minutes,
     # and 22 of them pass the server's per-stream consumer cap (10026, erratum E-W1-CONS-2).
-    held = (await jetstream.stream_info(table.stream, subjects_filter=f"{table.subject_prefix}>")).state.subjects
+    prefix = config.subjects[0].removesuffix(">")
+    held = (await jetstream.stream_info(config.name, subjects_filter=f"{prefix}>")).state.subjects
     for key in keys:
-        assert held[table.subject_prefix + key] == table.history, key
-    assert await missing_documents(jetstream, table.stream, table.subject_prefix) == set()
+        assert held[prefix + key] == table.history, key
+    for key in table.sizes:
+        assert await writer.read(key) is not None, key
 
 
 @pytest.mark.parametrize("retention_class", ["record", "observation", "state", "desired"])
@@ -378,9 +388,8 @@ def test_each_retention_class_keeps_its_promise(tmp_path, retention_class):
 
     async def body():
         client = await local(node)
-        jetstream = client.jetstream()
         await {"record": _record, "observation": _observation, "state": _state,
-               "desired": _desired}[retention_class](jetstream)
+               "desired": _desired}[retention_class](client)
         await client.close()
 
     _run(node, body)
@@ -519,19 +528,20 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
         client = await local(node)
         jetstream = client.jetstream()
         await declare(jetstream, buffer("REC_player", MIB, subjects=["player.record.>"], allow_direct=True))
-        table = Documents.bucket("desired_big", {"show": MAX_STORED_MESSAGE - 512}, history=1)
-        await declare_bucket(jetstream, sticky_bucket(table))
+        table = KeyTable({"show": MAX_STORED_MESSAGE - 512})
+        await declare_bucket(jetstream, desired_bucket("player", table))
         for size in (MAX_STORED_MESSAGE + 1, NODE_MAX_PAYLOAD - 1024):
             await _refused(jetstream.publish("player.record.asrun", b"x" * size), VALUE_TOO_LARGE)
         await jetstream.publish("player.record.asrun", b"x" * MAX_STORED_MESSAGE)
-        await DocumentWriter(jetstream, table).put("show", b"s" * table.sizes["show"], headers={"Writer": "node"})
+        await (await DocumentWriter.bind(client, "KV_desired_player", writer="node")).put(
+            "show", b"s" * table.sizes["show"], expect=ABSENT)
 
         central_client = await central(hub, "serial-a")
         across = central_client.jetstream(domain=NODE_DOMAIN)
         for direct in (False, True):
             message = await across.get_last_msg("REC_player", "player.record.asrun", direct=direct)
             assert len(message.data) == MAX_STORED_MESSAGE, direct
-        assert len((await (await across.key_value("desired_big")).get("show")).value) == table.sizes["show"]
+        assert len((await (await across.key_value("desired_player")).get("show")).value) == table.sizes["show"]
         await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
         [delivered] = (await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
         assert len(delivered.data) == MAX_STORED_MESSAGE
@@ -593,17 +603,19 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         state = await declare_bucket(jetstream, bucket("state_host", history=1, max_bytes=MIB))
         await state.put("k" * 1004, b"kept")
         assert (await state.get("k" * 1004)).value == b"kept" and client.is_connected
-        bucket_name = "desired_long"
-        key = "<" * (MAX_PUBLISH_SUBJECT - len(f"$KV.{bucket_name}."))
-        table = Documents.bucket(bucket_name, {key: MAX_STORED_MESSAGE - HEADER_ALLOWANCE}, history=1)
-        await declare_bucket(jetstream, sticky_bucket(table))
-        await DocumentWriter(jetstream, table).put(key, b"d" * table.sizes[key], headers={"Writer": "node"})
+        # A key table admits only [A-Za-z0-9_-] keys, so the longest key escapes to itself.
+        bucket_name = "desired_player"
+        key = "k" * (MAX_PUBLISH_SUBJECT - len(f"$KV.{bucket_name}."))
+        table = KeyTable({key: MAX_STORED_MESSAGE - HEADER_ALLOWANCE})
+        await declare_bucket(jetstream, desired_bucket("player", table))
+        await (await DocumentWriter.bind(client, f"KV_{bucket_name}", writer="node")).put(
+            key, b"d" * table.sizes[key], expect=ABSENT)
 
         central_client = await central(hub, "serial-a")
         across = central_client.jetstream(domain=NODE_DOMAIN)
         for subject in subjects:
             assert len((await across.get_last_msg("REC_player", subject)).data) == MAX_STORED_MESSAGE
-        document = await across.get_last_msg(table.stream, table.subject_prefix + key)
+        document = await across.get_last_msg(f"KV_{bucket_name}", f"$KV.{bucket_name}.{key}")
         assert len(document.data) == table.sizes[key]
         await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
         delivered = (await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
