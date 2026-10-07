@@ -8,8 +8,11 @@ once and in order, a Node-local watch sees the latest state; Central's documents
 desired view and a wall value its wall view; a second writer's document is adopted, and Central's own
 write whose acknowledgement it lost is taken back without one. Step 2: consumers deleted behind the
 readers' backs, leaf drops mid-drain and a Central crash mid-commit lose nothing, repeat nothing and
-invent no gap. Step 4: the hub restarts empty; WALL comes back past every mirror and the drain resumes.
-Later slices extend the same test.
+invent no gap. Step 3: the bus is killed (kill -9) and starts empty (the memory store): the session
+re-attaches, the mirror re-syncs, Central writes one unknown gap per drained stream and asserts its
+documents again, every value is back and the drain continues in the new epochs. Step 4: the hub
+restarts empty; WALL comes back past every mirror and the drain resumes. Later slices extend the same
+test.
 """
 from __future__ import annotations
 
@@ -31,9 +34,11 @@ from integration.bus_servers import (
     local,
     node_server,
     until,
+    wall_value,
     wall_writer,
 )
 from nats.js.api import AckPolicy, ConsumerConfig
+from nats.js.errors import NotFoundError
 
 from contracts.node_link import (
     CENTRAL_WRITER,
@@ -45,15 +50,17 @@ from contracts.node_link import (
 )
 from nodeapi.buffers import KeyTable, Slice, apply, desired_bucket, event_buffer, state_bucket
 from nodeapi.documents import DocumentWriter
-from nodeapi.hub import WALL_MARGIN, NodeLink, WallWriter
+from nodeapi.epoch import Token, epoch_of
+from nodeapi.hub import DRAIN_BATCH, WALL_MARGIN, NodeLink, WallWriter
 from nodeapi.node import MethodCall, NodeSession, Release
-from nodeapi.pull import ConsumerLost, CursorReader, Pulled, Read, StartAt, pull
+from nodeapi.pull import ConsumerLost, CursorReader, Gap, Pulled, Read, StartAt, StreamAbsent, pull
 
 SERIAL = "serial-a"
 LEAF_PREFIX = "photo-wall/bus"
 KIB = 1024
 RECORDS = "RECORD_display"
 STATE = "KV_state_display"
+STATE_PREFIX = "$KV.state_display."
 DESIRED = "KV_desired_display"
 TICK = "display.record.tick"
 RELEASE = Release("1.0.0", "sha256:display-release", {"display": 1})
@@ -77,14 +84,16 @@ async def _relinked(hub: BusServer, previous: int | None) -> int:
 
 
 async def _recorded(store: FileLinkStore, emitted: list[bytes], seconds: float = 30) -> None:
-    """Every emitted tick is recorded once, in order, each with its own message id."""
+    """Every emitted tick is recorded once, in order (by sequence inside each epoch), each with its
+    own message id."""
     async def check():
         return len([row for row in store.records(RECORDS) if row["subject"] == TICK]) >= len(emitted)
     await until(check, seconds, f"{len(emitted)} ticks recorded")
     ticks = [row for row in store.records(RECORDS) if row["subject"] == TICK]
     assert [row["data"] for row in ticks] == emitted
-    sequences = [row["seq"] for row in ticks]
-    assert sequences == sorted(sequences) and len(set(sequences)) == len(sequences)
+    for epoch in {row["epoch"] for row in ticks}:
+        sequences = [row["seq"] for row in ticks if row["epoch"] == epoch]
+        assert sequences == sorted(sequences) and len(set(sequences)) == len(sequences)
     ids = [row["message_id"] for row in ticks]
     assert None not in ids and len(set(ids)) == len(ids)
 
@@ -308,6 +317,83 @@ def test_the_node_api_tracer(tmp_path):
             await _recorded(store, emitted)
             assert store.rows("gap") == [] and store.repeats == []
 
+            # Step 3: the bus is killed (kill -9) and starts empty: the memory store keeps nothing
+            # (owner answer Q1, E3b design §9.5). Before it, Central has drained every stream to its end.
+            drained = (RECORDS, STATE)
+
+            async def caught_up():
+                cursors = await store.cursors()
+                ends = {stream: (await jetstream.stream_info(stream)).state.last_seq for stream in drained}
+                return all(stream in cursors and cursors[stream].seq == ends[stream] for stream in drained) and cursors
+            cursors = await until(caught_up, 15, "Central drained every stream to its end")
+            old = {stream: cursors[stream] for stream in drained}
+            assert {stream: cursor.epoch for stream, cursor in old.items()} == {
+                stream: epoch_of(await jetstream.stream_info(stream)) for stream in drained}
+            values = {key: (await jetstream.get_last_msg(STATE, STATE_PREFIX + key)).data
+                      for key in ("mode", "panel", "birth")}
+            assert (values["mode"], values["panel"], json.loads(values["birth"])) == (b"dim", b"lit", birth)
+            assert {key: ((document := await local_ui.read(key)).value, document.writer) for key in ("show", "layout")} == {
+                "show": (b"show-local", "local-ui"), "layout": (b"layout-2", CENTRAL_WRITER)}
+            assert await wall_value(watcher, "wall.timing") == b"timing-1"
+            desired_epoch = local_ui.epoch
+            probe = CursorReader(client, RECORDS, old[RECORDS], domain=NODE_DOMAIN)   # as Central's drain reads
+            assert (await probe.read(DRAIN_BATCH, timeout=.5)).items == ()
+            await watch.close()
+            await watcher.close()
+            clients.remove(watcher)
+            node.crash()
+            emit(30)   # held in the session's outbox while the bus is away
+            node.start()
+            watcher = await local(node)
+            clients.append(watcher)
+            jetstream = watcher.jetstream()
+
+            # The session re-attaches (its streams in new epochs, state and birth put again), its
+            # mirror is re-created and re-syncs, and Central asserts its documents into the new epoch:
+            # within 15 s every state key and wall value is its pre-crash value, and every document
+            # Central's projection holds. The local UI's adopted value is not re-asserted by anyone
+            # (erratum E-E3B-S3-2): Central's projection goes back in.
+            async def refilled():
+                with contextlib.suppress(NotFoundError):
+                    reader = await DocumentWriter.bind(watcher, DESIRED, writer="local-ui")
+                    documents = {key: await reader.read(key) for key in ("show", "layout")}
+                    state = {key: (await jetstream.get_last_msg(STATE, STATE_PREFIX + key)).data for key in values}
+                    return (state == values and await wall_value(watcher, "wall.timing") == b"timing-1"
+                            and reader.epoch != desired_epoch and None not in documents.values()
+                            and {key: (document.value, document.writer) for key, document in documents.items()} == {
+                                "show": (b"show-2", CENTRAL_WRITER), "layout": (b"layout-2", CENTRAL_WRITER)})
+                return False
+            await until(refilled, 15, "every document, wall value and state key back after the bus start")
+            leaf = await _relinked(hub, leaf)
+
+            # Central's reader finds its consumer gone (recreated) and the stream in a new epoch: one
+            # unknown gap row per drained stream, after its last sequence, and nothing else lost or
+            # repeated; the drain continues in the new epochs.
+            batches = []
+
+            async def epoch_ended():
+                with contextlib.suppress(nats.errors.Error, asyncio.TimeoutError, StreamAbsent):
+                    batches.append(batch := await probe.read(DRAIN_BATCH, timeout=.5))
+                    return any(isinstance(item, Gap) for item in batch.items)
+            await until(epoch_ended, 15, "Central's reader reaches the new epoch")
+            assert batches[0].recreated and batches[-1].items[0] == Gap(old[RECORDS].epoch, old[RECORDS].seq, None)
+            await probe.close()
+            await _recorded(store, emitted)
+            new = {stream: epoch_of(await jetstream.stream_info(stream)) for stream in drained}
+            assert all(new[stream] != old[stream].epoch for stream in drained)
+            assert [row["data"] for row in store.records(RECORDS) if row["epoch"] == new[RECORDS]
+                    and row["subject"] == TICK] == emitted[-30:]
+            unknown = store.rows("gap")
+            assert sorted((row["stream"], Token(row["epoch"], row["after"]), row["count"]) for row in unknown) == sorted(
+                (stream, cursor, None) for stream, cursor in old.items())
+            assert store.repeats == []
+
+            async def state_drained():
+                rows = {row["subject"].removeprefix(STATE_PREFIX): row["data"] for row in store.records(STATE)
+                        if row["epoch"] == new[STATE]}
+                return {key: rows.get(key) for key in values} == values
+            await until(state_drained, 15, "Central records state and birth in the new epoch")
+
             # Step 4: the hub restarts empty. A wall write whose mark Central lost (a crash between the
             # hub's ack and its record) leaves every mirror past Central's mark, and the wall value
             # changes while the hub is away.
@@ -321,7 +407,7 @@ def test_the_node_api_tracer(tmp_path):
             mark = await store.mark()
             assert (await jetstream.stream_info(WALL_STREAM)).state.last_seq == mark + 1
             emit(30)
-            hub.wipe()
+            hub.stop()   # a memory store: the start below is empty
             store.hold_wall("timing", b"timing-outage")
             emit(30)
             await asyncio.wait_for(running, 15)   # its client closed with the hub
@@ -340,7 +426,7 @@ def test_the_node_api_tracer(tmp_path):
             await _walled(session, b"timing-outage", 30)
             emit(20)
             await _recorded(store, emitted)
-            assert store.rows("gap") == [] and store.repeats == []
+            assert store.rows("gap") == unknown and store.repeats == []
             assert len(store.actions("document_adopted")) == 1
             stop.set()
             await asyncio.wait_for(running, 15)

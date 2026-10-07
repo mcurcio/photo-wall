@@ -119,9 +119,9 @@ def node_split() -> ClassTable:
 
 @dataclass
 class BusServer:
+    """One nats-server process. Its JetStream store is memory, so every `start` is empty."""
     name: str
     config: Path
-    store: Path
     client_url: str
     environment: Mapping[str, str]
     websocket_port: int | None = None    # the hub's leaf listener for Nodes
@@ -142,7 +142,11 @@ class BusServer:
         log = self.config.with_suffix(".log").open("ab")
         self._process = subprocess.Popen(
             [str(nats_server_binary()), "-c", str(self.config), "--ports_file_dir", str(ports_dir)],
-            env={**os.environ, **self.environment}, stdout=log, stderr=subprocess.STDOUT)
+            # Its own TMPDIR: with no store_dir, nats-server 2.15.0 still makes
+            # $TMPDIR/nats/jetstream/<account>/streams at start, and servers sharing one race on it
+            # (fatal at start; erratum E-E3B-S3-1).
+            env={**os.environ, "TMPDIR": str(self.config.parent), **self.environment}, stdout=log,
+            stderr=subprocess.STDOUT)
         log.close()
         _RUNNING[id(self)] = self
         try:
@@ -204,13 +208,20 @@ class BusServer:
         return "running" if code is None else f"exited {code}"
 
     def stop(self) -> None:
-        """SIGTERM and wait (a paused server is resumed first); the store stays."""
+        """SIGTERM and wait (a paused server is resumed first); the memory store goes with it."""
+        self._end(signal.SIGTERM)
+
+    def crash(self) -> None:
+        """SIGKILL and wait, as a crash or an OOM kill: the server stops nothing cleanly."""
+        self._end(signal.SIGKILL)
+
+    def _end(self, number: int) -> None:
         _RUNNING.pop(id(self), None)
         process, self._process = self._process, None
         if process is None or process.poll() is not None:
             return
         process.send_signal(signal.SIGCONT)
-        process.send_signal(signal.SIGTERM)
+        process.send_signal(number)
         try:
             process.wait(timeout=START_SECONDS)
         except subprocess.TimeoutExpired:
@@ -237,11 +248,6 @@ class BusServer:
         if self._process is None or self._process.poll() is not None:
             raise RuntimeError(f"{self.name} is not running")
         self._process.send_signal(number)
-
-    def wipe(self) -> None:
-        """Stop, then delete the store directory."""
-        self.stop()
-        shutil.rmtree(self.store, ignore_errors=True)
 
     def log_tail(self, lines: int = 20) -> str:
         path = self.config.with_suffix(".log")
@@ -327,11 +333,11 @@ def hub_server(tmp: Path, serials: Sequence[str]) -> BusServer:
         server_name="hub", client_host="127.0.0.1", client_port=_free_port(),
         websocket_host="127.0.0.1", websocket_port=_free_port(),
         leaf_host="127.0.0.1", leaf_port=_free_port(), monitor_port=_free_port(),
-        store_dir=str(directory / "store"), max_file_store_bytes=HUB_STORE_BYTES)
+        max_memory_store_bytes=HUB_STORE_BYTES)
     config = directory / "hub.conf"
     config.write_text(hub_configuration(serials, listeners))
     return BusServer(
-        name="hub", config=config, store=directory / "store",
+        name="hub", config=config,
         client_url=f"nats://127.0.0.1:{listeners.client_port}", environment={},
         websocket_port=listeners.websocket_port,
         monitor_url=f"http://127.0.0.1:{listeners.monitor_port}", listeners=listeners)
@@ -351,10 +357,9 @@ def node_server(tmp: Path, serial: str, hub: BusServer, *, prefix: str = "bus",
     environment = {
         "PHOTO_WALL_BUS_NAME": f"node-{account_id(serial)}",
         "PHOTO_WALL_BUS_PORT": str(port),
-        "PHOTO_WALL_BUS_STORE": str(directory / "store"),
         "PHOTO_WALL_BUS_LEAF_URL": f"ws://{user}:{user}@127.0.0.1:{leaf_port or hub.websocket_port}/{prefix}",
     }
-    return BusServer(name=f"node {serial}", config=config, store=directory / "store",
+    return BusServer(name=f"node {serial}", config=config,
                      client_url=f"nats://127.0.0.1:{port}", environment=environment)
 
 
@@ -579,11 +584,12 @@ async def reload_hub(hub: BusServer, serials: Sequence[str], *, requests: int = 
 def kv_bucket_bytes(bucket: str, keys: Sequence[str], history: int, max_value: int,
                     header_bytes: int = 0) -> int:
     """A KV bucket's byte cap that holds `history` values of `max_value` bytes for every listed
-    key, each charged nats-server's per-message file-store size (ns:server/filestore.go:10055-10062,
-    4 bytes high: harmless slack). The class sizing E3b inherits; a sizing, not headroom.
+    key, each charged at most nats-server's per-message memory-store size (subject + headers + value
+    + 16, ns:server/memstore.go:2511-2513; the file store's larger charge, harmless slack). The class
+    sizing E3b inherits; a sizing, not headroom.
 
     The bucket is a buffer: the server drops a key's own oldest at its per-subject limit before the
-    byte cap acts (ns:server/filestore.go:5340-5380), so listed keys never cost another key a value;
+    byte cap acts (ns:server/memstore.go:337-348), so listed keys never cost another key a value;
     an unlisted key costs the bucket its oldest message, a hole a reader sees (E-W1-BUF-2, which
     removes E-W1-E3a-3-1's discard-NEW headroom)."""
     header = 4 + header_bytes if header_bytes else 0

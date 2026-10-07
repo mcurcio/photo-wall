@@ -1,5 +1,5 @@
 """The Node bus's store budget on a real server (E3a-3, API8): the server itself refuses, at create,
-a stream past the store limit, an 18th stream, one without a byte cap and one in memory; with every
+a stream past the store limit, an 18th stream and one without a byte cap; with every
 buffer on the Node full at once and the store wholly reserved, each still takes a write, a circular
 one dropping its oldest and a sticky one keeping every document (the buffer rule, E-W1-BUF-2,
 E-W1-TD-4); each retention class keeps the promise the Node API page states for it. Also: one class
@@ -40,7 +40,7 @@ from integration.bus_servers import (
     wall_value,
     wall_writer,
 )
-from nats.js.api import AckPolicy, ConsumerConfig, StorageType
+from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError, KeyNotFoundError
 
 from contracts.node_link import (
@@ -71,16 +71,15 @@ from nodeapi.documents import ABSENT, DocumentRefused, DocumentWriter
 from nodeapi.epoch import epoch_of, stream_epoch
 from nodeapi.pull import PULL_MAX_BYTES, pull
 
-STORAGE_EXCEEDED = 10047        # JSStorageResourcesExceededErr: past the store's reservation
+MEMORY_EXCEEDED = 10028         # JSMemoryResourcesExceededErr: past the memory store's reservation
 MAX_STREAMS_REACHED = 10027     # JSMaximumStreamsLimitErr: past node-bus.conf's max_streams
 MAX_BYTES_REQUIRED = 10113      # JSStreamMaxBytesRequired: account API refuses an uncapped stream
-MEMORY_EXCEEDED = 10028         # JSMemoryResourcesExceededErr: the server has no memory store
 VALUE_TOO_LARGE = 10054         # JSStreamMessageExceedsMaximumErr: over max_value_size
 
-STORE_LIMIT = NODE_STORE_BYTES  # node-bus.conf's max_file_store, the outer fence
-# nats-server's per-message store charge: 30 + subject + payload, and 4 + headers more with headers
-# (ns:server/filestore.go:10055-10062, erratum E-W1-E3a-3-1).
-CHARGE = 30
+STORE_LIMIT = NODE_STORE_BYTES  # node-bus.conf's max_memory_store, the outer fence
+# nats-server's per-message memory-store charge: 16 + subject + headers + payload
+# (ns:server/memstore.go:2511-2513).
+CHARGE = 16
 FILL_CHARGE = 4096               # every fill message is charged exactly this, so the caps tile exactly
 
 
@@ -126,12 +125,9 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         jetstream = client.jetstream()
         assert client.max_payload == NODE_MAX_PAYLOAD  # the shipped file's pin, as the server applies it
 
-        # The server, not a library convention, refuses at create an uncapped stream and a memory one.
+        # The server, not a library convention, refuses at create an uncapped stream.
         await _refused(declare(jetstream, dataclasses.replace(
             buffer("UNCAPPED", 1, subjects=["uncapped.>"]), max_bytes=None)), MAX_BYTES_REQUIRED)
-        await _refused(declare(jetstream, dataclasses.replace(
-            buffer("MEMORY", 64 * 1024, subjects=["memory.>"]), storage=StorageType.MEMORY)),
-            MEMORY_EXCEEDED)
 
         # The page's split as one class table, its wall copy the real mirror, with the rest of the
         # store given to one buffer: the caps reserve the whole store, with no headroom anywhere.
@@ -179,7 +175,7 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
                     await jetstream.publish(subject, _fill(subject, FILL_CHARGE + cap % FILL_CHARGE * last))
             held = (await jetstream.stream_info(name)).state.bytes
             assert held <= cap if name in writers else held == cap, name
-        assert (await jetstream.account_info()).storage <= STORE_LIMIT
+        assert (await jetstream.account_info()).memory <= STORE_LIMIT
 
         # Every buffer full at once, each takes the next write at the next sequence: a circular one
         # drops its oldest, a hole below first_seq a reader counts (F7: never a refused write); a
@@ -213,7 +209,7 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         acknowledgement = await jetstream.publish("player.record.asrun", b"L" * MAX_STORED_MESSAGE)
         assert acknowledgement.seq == full.last_seq + 1
         assert (await jetstream.stream_info("REC_player")).state.first_seq > full.first_seq
-        assert (await jetstream.account_info()).storage <= STORE_LIMIT
+        assert (await jetstream.account_info()).memory <= STORE_LIMIT
         await client.close()
         await writer.close()
 
@@ -225,7 +221,7 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
 
 def _whole_store() -> ClassTable:
     """The page's split with the rest of the store given to REC_host: the caps total the store. A
-    larger cap, not a new buffer, so the table keeps its 17 file streams, the server's most
+    larger cap, not a new buffer, so the table keeps its 17 streams, the server's most
     (E-W1-FIT-1)."""
     split = node_split().buffers
     rest = STORE_LIMIT - sum(config.max_bytes for config in split.values())
@@ -397,7 +393,7 @@ def test_each_retention_class_keeps_its_promise(tmp_path, retention_class):
 
 def test_one_class_table_declares_in_any_order_on_a_wholly_reserved_store(tmp_path):
     # One owner declares the whole table; its caps total the store, so whichever buffer comes last
-    # is never the one refused (10047), and every connect's re-declare changes nothing (E-W1-TD-S2).
+    # is never the one refused (10028), and every connect's re-declare changes nothing (E-W1-TD-S2).
     node = _node(tmp_path)
 
     async def body():
@@ -420,7 +416,7 @@ def test_one_class_table_declares_in_any_order_on_a_wholly_reserved_store(tmp_pa
 def test_the_server_refuses_an_eighteenth_stream_and_a_stream_past_the_store(tmp_path):
     # The fit's two server limits act at create only (E-W1-FIT-1): on a store at its 17 streams an
     # 18th is refused for the count (10027) and every stream still takes writes; with one stream gone,
-    # a stream past the room left is refused for the store (10047), and one inside it is created.
+    # a stream past the room left is refused for the store (10028), and one inside it is created.
     node = _node(tmp_path)
 
     async def body():
@@ -438,7 +434,7 @@ def test_the_server_refuses_an_eighteenth_stream_and_a_stream_past_the_store(tmp
 
         freed = table.buffers["REC_host"].max_bytes
         await jetstream.delete_stream("REC_host")
-        await _refused(declare(jetstream, buffer("EXTRA", freed + 1, subjects=["extra.>"])), STORAGE_EXCEEDED)
+        await _refused(declare(jetstream, buffer("EXTRA", freed + 1, subjects=["extra.>"])), MEMORY_EXCEEDED)
         assert await declare(jetstream, buffer("EXTRA", freed, subjects=["extra.>"])) is True
         await _refused(declare(jetstream, table.buffers["REC_host"]), MAX_STREAMS_REACHED)
         await client.close()
@@ -449,7 +445,7 @@ def test_the_server_refuses_an_eighteenth_stream_and_a_stream_past_the_store(tmp
 def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declarers_race(tmp_path):
     # Every connect re-declares, and a Node's store is wholly reserved. The server checks a create's
     # reservation (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891),
-    # so re-adding a stream that exists, identical or not, is 10047 on a full store. nodeapi's declare
+    # so re-adding a stream that exists, identical or not, is 10028 on a full store. nodeapi's declare
     # looks the stream up instead, and a create that loses a race to another declarer is a no-op too
     # (E-W1-STORE-1).
     node = _node(tmp_path)
@@ -472,7 +468,7 @@ def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declar
         assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(mine.buffers)
 
         # The race's worst order, on the same full store less one stream: they look and find it
-        # absent, I create it, then their create meets the full reservation (10047, not 10058).
+        # absent, I create it, then their create meets the full reservation (10028, not 10058).
         # Theirs is a no-op, not a refusal, and mine stays.
         racing = "REC_player"
         await jetstream.delete_stream(racing)

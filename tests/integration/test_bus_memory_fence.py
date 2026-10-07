@@ -1,23 +1,22 @@
-"""The Node bus inside its memory fence (owner answer STORE1 = A, erratum E-W1-STORE-1).
+"""The Node bus inside its memory fence (owner answer Q1 = start clean, E3b design §6).
 
-Every Node buffer is a file stream on tmpfs, so the store is RAM charged to the bus's cgroup, beside
-the server's heap. This runs the pinned linux-arm64 nats-server in a container fenced as the bus
-unit is (`--memory` = `--memory-swap` = NODE_BUS_MEMORY_MAX, GOMEMLIMIT = NODE_BUS_GOMEMLIMIT, the
-store on `--tmpfs`) with the shipped `node-bus.conf` and the class table `nodeapi` builds, its wall
-copy the real mirror of a hub's WALL. It gives every stream the most durable consumers the server
-admits (the next is refused, erratum E-W1-CONS-2), fills every buffer and keeps writing flat out for
-minutes, and fails on any OOM kill, server restart or refused write. Then it kills the server with the
-store full: the restart in the same cgroup, which still holds the store's pages, must come back with
-every stream and consumer and stay up (a store that cannot fit its fence on restart OOM-loops forever).
+Every Node buffer is a memory stream, so the store is heap charged to the bus's cgroup with the rest
+of the server. This runs the pinned linux-arm64 nats-server in a container fenced as the bus unit is
+(`--memory` = `--memory-swap` = NODE_BUS_MEMORY_MAX, GOMEMLIMIT = NODE_BUS_GOMEMLIMIT) with the shipped
+`node-bus.conf` and the class table `nodeapi` builds, its wall copy the real mirror of a hub's WALL.
+It gives every stream the most consumers the server admits (the next is refused, erratum
+E-W1-CONS-2), fills every buffer and keeps writing flat out for minutes, and fails on any OOM kill,
+server restart or refused write. Nothing survives a bus start, so there is no reload to prove (E3b
+design §12); E3c re-adds a kill -9 inside the fence, the store coming back empty.
 
 The shipped file binds the client port to loopback; `-a 0.0.0.0` (a command-line flag, which
 nats-server applies over the file) lets Docker publish it. Nothing else differs from the file.
 
-A second run hangs the hub (SIGSTOP) while a Node program floods every subject the hub may hold
-interest in, churns subscriptions and points push consumers across the leaf, with Central's pull
-waiting: the leaf has no pending limit toward the hub, so anything that crossed would queue in the
-bus until its fence OOM-killed it. The leaf's subject contract keeps it all on the Node (erratum
-E-W1-LEAF-1); once the hub resumes, Central's pull, conditional write and the wall mirror all work.
+A second run hangs the hub (SIGSTOP) while a Node program floods a local stream, churns
+subscriptions, with Central's pull waiting: the leaf has no pending limit toward the hub, so anything
+that crossed would queue in the bus until its fence OOM-killed it. The leaf's subject contract keeps
+it all on the Node (erratum E-W1-LEAF-1); once the hub resumes, Central's pull, conditional write and
+the wall mirror all work. A raw client publishing on the leaf's exports is out of scope (R16).
 
 Needs Docker and PHOTO_WALL_BUS_FENCE_SERVER, a linux-arm64 nats-server (`scripts/nats_server.py
 fetch` on an arm64 Linux host); checks.yml's `bus-fence` job runs it on ubuntu-24.04-arm.
@@ -47,7 +46,7 @@ from integration.bus_servers import (
     desired_documents,
     node_split,
 )
-from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError
 
 from central.fleet.node_bus_accounts import HubListeners, hub_configuration
@@ -59,7 +58,6 @@ from contracts.node_link import (
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
     NODE_MAX_CONSUMERS,
-    WALL_API_PREFIX,
     WALL_STREAM,
     WALL_WRITER_USER,
     central_user,
@@ -84,7 +82,6 @@ from scripts.nats_server import NATS_SERVER_VERSION
 SERVER_VARIABLE = "PHOTO_WALL_BUS_FENCE_SERVER"
 MINUTES_VARIABLE = "PHOTO_WALL_BUS_FENCE_MINUTES"
 STALL_VARIABLE = "PHOTO_WALL_BUS_FENCE_STALL_SECONDS"
-FLOOD_BODY = 200_000   # random, so nothing on the way compresses it
 IMAGE = "alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11"
 MIB = 1024 * 1024
 SERIAL = "fence-node"
@@ -92,7 +89,6 @@ SERVER = "/opt/nats/nats-server"
 CONF = "/etc/photo-wall/node-bus.conf"
 MAXIMUM_CONSUMERS = 10026   # JSMaximumConsumersLimitErr: a stream's max_consumers reached
 SAMPLE_SECONDS = 2.0
-RELOAD_SECONDS = 20.0
 # One line per server start, so a restart (an OOM kill or a crash) is counted, not missed.
 SUPERVISOR = (f"while true; do echo start >> /tmp/starts; {SERVER} -c {CONF} -a 0.0.0.0; "
               "echo \"exited $?\" >> /tmp/exits; sleep 1; done")
@@ -131,11 +127,10 @@ class _Bus:
     def sample(self) -> dict[str, float]:
         lines = self.sh("cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak; "
                         "grep '^oom_kill ' /sys/fs/cgroup/memory.events; wc -l < /tmp/starts; "
-                        "grep -E '^(anon|shmem) ' /sys/fs/cgroup/memory.stat").split("\n")
-        stat = dict(line.split() for line in lines[4:])
+                        "grep '^anon ' /sys/fs/cgroup/memory.stat").split("\n")
         return {"current_mib": int(lines[0]) / MIB, "peak_mib": int(lines[1]) / MIB,
                 "oom_kill": int(lines[2].split()[1]), "starts": int(lines[3]),
-                "anon_mib": int(stat["anon"]) / MIB, "store_mib": int(stat["shmem"]) / MIB}
+                "anon_mib": int(lines[4].split()[1]) / MIB}
 
     def logs(self) -> str:
         done = subprocess.run(["docker", "logs", "--tail", "60", self.name], capture_output=True, text=True)
@@ -192,7 +187,7 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
     hub_conf.write_text(hub_configuration([SERIAL], HubListeners(
         server_name="hub", client_host="0.0.0.0", client_port=4222, websocket_host="0.0.0.0",
         websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
-        store_dir="/hubstore", max_file_store_bytes=HUB_STORE_BYTES)))
+        max_memory_store_bytes=HUB_STORE_BYTES)))
     hub_conf.chmod(0o644)
     user = node_user(SERIAL)
     platform = ("--platform", "linux/arm64")
@@ -203,14 +198,12 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
         _docker("run", "-d", "--name", hub_name, "--network", network, *platform, "-p", "127.0.0.1::4222",
                 "-v", f"{binary}:{SERVER}:ro", "-v", f"{hub_conf}:/etc/photo-wall/hub.conf:ro",
                 IMAGE, SERVER, "-c", "/etc/photo-wall/hub.conf")
-        # The bus unit's fence: MemoryMax, no swap, GOMEMLIMIT, the store on tmpfs with no size= (a
-        # sized tmpfs refuses writes when full, which the buffer rule forbids).
+        # The bus unit's fence: MemoryMax, no swap, GOMEMLIMIT; the store is the server's own heap.
         _docker("run", "-d", "--name", bus.name, "--network", network, *platform, "--cgroupns=private",
                 f"--memory={NODE_BUS_MEMORY_MAX // MIB}m", f"--memory-swap={NODE_BUS_MEMORY_MAX // MIB}m",
-                "--tmpfs", "/store:rw", "-p", "127.0.0.1::4222",
+                "-p", "127.0.0.1::4222",
                 "-e", f"GOMEMLIMIT={NODE_BUS_GOMEMLIMIT // MIB}MiB",
                 "-e", f"PHOTO_WALL_BUS_NAME={user}", "-e", "PHOTO_WALL_BUS_PORT=4222",
-                "-e", "PHOTO_WALL_BUS_STORE=/store",
                 "-e", f"PHOTO_WALL_BUS_LEAF_URL=ws://{user}:{user}@{hub_name}:8080/bus",
                 "-v", f"{binary}:{SERVER}:ro", "-v", f"{NODE_BUS_CONF}:{CONF}:ro",
                 IMAGE, "sh", "-c", SUPERVISOR)
@@ -224,7 +217,7 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
         subprocess.run(["docker", "network", "rm", network], capture_output=True)
 
 
-def test_a_full_store_keeps_writing_inside_the_bus_fence_and_reloads_after_a_crash(tmp_path):
+def test_a_full_store_keeps_writing_inside_the_bus_fence(tmp_path):
     minutes = float(os.environ.get(MINUTES_VARIABLE, "5"))
     with _fenced_bus(tmp_path) as (bus, _, hub_port, bus_port):
         asyncio.run(_exercise(bus, hub_port, bus_port, minutes))
@@ -253,8 +246,8 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     # Each stream's origin as the server holds it: `declare` stamps a Node stream's first_seq at the
     # create (E-W1-FV-1), so the built configuration carries none to compare against.
     start = await _states(jetstream, names)
-    # Every stream at the server's consumer cap: durable consumers keep their state files on the
-    # store's tmpfs and their heap across a restart, so the fence must hold all of them (E-W1-CONS-2).
+    # Every stream at the server's consumer cap: each consumer is heap the fit charges (CONSUMER_HEAP),
+    # so the fence must hold all of them (E-W1-CONS-2).
     for name in names:
         for index in range(NODE_MAX_CONSUMERS + 1):
             consumer = ConsumerConfig(durable_name=f"held{index}", ack_policy=AckPolicy.EXPLICIT)
@@ -290,7 +283,7 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     peak = max(sample["peak_mib"] for sample in samples)
     print(f"bus fence {NODE_BUS_MEMORY_MAX // MIB} MiB, GOMEMLIMIT {NODE_BUS_GOMEMLIMIT // MIB} MiB: "
           f"{sum(counts.values())} writes in {minutes} min, peak {peak:.1f} MiB, "
-          f"store up to {max(sample['store_mib'] for sample in samples):.1f} MiB")
+          f"anon up to {max(sample['anon_mib'] for sample in samples):.1f} MiB")
 
     # Every buffer was full: each circular one dropped its oldest, each desired bucket holds every
     # document `history` times, the mirror holds WALL's churn.
@@ -307,35 +300,6 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     await node.close()
     await hub.close()
 
-    # The crash with the store full: the server restarts in the same cgroup, whose store pages are
-    # still charged, reloads every stream and stays up.
-    bus.sh(f"kill -9 $(pidof {Path(SERVER).name})")
-    deadline = time.monotonic() + 60
-    while bus.sample()["starts"] < 2:
-        assert time.monotonic() < deadline, f"the bus never restarted:\n{bus.logs()}"
-        await asyncio.sleep(.5)
-    _accepts(bus_port, 60, "the restarted bus")
-    reloaded = time.monotonic() + RELOAD_SECONDS
-    while time.monotonic() < reloaded:
-        sample = bus.sample()
-        assert sample["oom_kill"] == 0 and sample["starts"] == 2, (
-            f"the bus did not come back with its full store inside its fence: {sample}\n{bus.logs()}")
-        await asyncio.sleep(SAMPLE_SECONDS)
-    node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
-    jetstream = node.jetstream(timeout=10)
-    assert await _states(jetstream, names) == full
-    for name in names:
-        assert (await jetstream.stream_info(name)).state.consumer_count == NODE_MAX_CONSUMERS, name
-    await declare_table(jetstream, table)   # every connect re-declares: a no-op on the full store
-    for name in names:
-        if name == WALL_STREAM:
-            continue
-        subjects, bodies = _writes(name, table.buffers[name])
-        acknowledgement = await jetstream.publish(subjects[0], bodies[0])
-        assert (acknowledgement.stream, acknowledgement.seq) == (name, full[name][2] + 1)
-    print(f"reloaded full store: {bus.sample()}")
-    await node.close()
-
 
 async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds: float) -> None:
     user = central_user(SERIAL)
@@ -343,12 +307,7 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
                                  inbox_prefix=CENTRAL_INBOX_PREFIX, allow_reconnect=False, connect_timeout=5)
     wall = await nats.connect(f"nats://127.0.0.1:{hub_port}", user=WALL_WRITER_USER,
                               password=WALL_WRITER_USER, allow_reconnect=False, connect_timeout=5)
-    refused = Counter()
-
-    async def count(error):   # the program's publishes on the leaf's exports, refused locally
-        refused[type(error).__name__] += 1
-    node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5,
-                              error_cb=count)
+    node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
     jetstream, across = node.jetstream(timeout=10), central.jetstream(domain=NODE_DOMAIN, timeout=10)
     await declare(wall.jetstream(), wall_config(WALL_TABLE, first_seq=1))
     await declare(jetstream, wall_mirror_config())
@@ -362,64 +321,42 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
         assert time.monotonic() < deadline, f"the wall mirror never linked:\n{bus.logs()}"
         await asyncio.sleep(.5)
 
-    # A component's method reveals Central's live wildcard inbox, the flood's first target.
-    replies: list[str] = []
-
-    async def reveal(message):
-        replies.append(message.reply)
-        await message.respond(b"ok")
-    await node.subscribe("probe.method.reveal", cb=reveal)
-    await node.flush()
-    while not replies:
-        assert time.monotonic() < deadline, "no method across the leaf"
-        try:
-            await central.request("probe.method.reveal", b"", timeout=1)
-        except (nats.errors.NoRespondersError, nats.errors.TimeoutError):
-            await asyncio.sleep(.2)
-    central_reply = replies[-1]
-
-    # Central's pull waits on an empty stream; its request's reply subject is the other push target.
+    # Central's pull waits on an empty stream, its request already at the Node.
     await across.add_consumer("REC_probe", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
     waiting_request = asyncio.get_running_loop().create_future()
 
     async def spy(message):
         if "expires" in json.loads(message.data) and not waiting_request.done():
-            waiting_request.set_result(message.reply)
+            waiting_request.set_result(True)
     await node.subscribe("$JS.API.CONSUMER.MSG.NEXT.REC_probe.central", cb=spy)
     await node.flush()
     pulling = asyncio.create_task(pull(central, "REC_probe", "central", 50, timeout=seconds + 30,
                                        domain=NODE_DOMAIN))
-    pull_reply = await asyncio.wait_for(waiting_request, 10)
+    await asyncio.wait_for(waiting_request, 10)
     print(f"before the stall: {bus.sample()}")
 
     _docker("kill", "--signal=STOP", hub_name)
     started = time.monotonic()
     stop, sent = asyncio.Event(), Counter()
-    consumer_api = f"{WALL_API_PREFIX}.CONSUMER.CREATE.{WALL_STREAM}"
-    subjects = ["player.event.x", central_reply.rsplit(".", 1)[0] + ".flood", consumer_api, "$JS.FC.WALL.a.b"]
-    body = os.urandom(FLOOD_BODY)
+    record = os.urandom(MAX_STORED_MESSAGE - 1024)   # random, so nothing on the way compresses it
 
     async def flood(subject: str | None) -> None:
+        # A publisher flat out on a local stream (a nodeapi outbox waits for each acknowledgement, so
+        # this is more), or subscription churn when `subject` is None.
         while not stop.is_set():
             if subject is None:
                 await (await node.subscribe(node.new_inbox())).unsubscribe()
             else:
-                await node.publish(subject, body)
+                await node.publish(f"{subject}.{sent[subject] % 64}", record)
             sent[subject or "churn"] += 1
             if sent[subject or "churn"] % 20 == 0:
                 await asyncio.sleep(0)
-    pushers = [f"push{target}{index}" for target in range(2) for index in range(5)]
     samples = []
+    floods: list[asyncio.Task] = []
     try:
-        record = os.urandom(MAX_STORED_MESSAGE - 1024)
         for index in range(40):
             await jetstream.publish(f"probe.record.{index}", record)
-            await jetstream.publish(f"flood.{index}", record)
-        for name in pushers:
-            await jetstream.add_consumer("REC_flood", ConsumerConfig(
-                durable_name=name, deliver_subject=(consumer_api, pull_reply)[int(name[4])],
-                ack_policy=AckPolicy.NONE, deliver_policy=DeliverPolicy.ALL))
-        floods = [asyncio.create_task(flood(subject)) for subject in [*subjects, None]]
+        floods = [asyncio.create_task(flood(subject)) for subject in ("flood", None)]
         while time.monotonic() - started < seconds:
             await asyncio.sleep(SAMPLE_SECONDS)
             try:
@@ -433,12 +370,10 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
         stop.set()
         _docker("kill", "--signal=CONT", hub_name)
     await asyncio.gather(*floods)
-    assert all(count > 100 for count in sent.values()) and len(sent) == 5, dict(sent)
-    assert refused, "the program's publishes on the leaf's exports were never refused"
+    assert all(count > 100 for count in sent.values()) and len(sent) == 2, dict(sent)
+    assert (await jetstream.stream_info("REC_flood")).state.messages > 0
     print(f"stalled hub {seconds:.0f} s: peak {max(sample['peak_mib'] for sample in samples):.1f} MiB "
           f"of {NODE_BUS_MEMORY_MAX // MIB}, sent {dict(sent)}")
-    bound = [name for name in pushers if (await jetstream.consumer_info("REC_flood", name)).push_bound]
-    assert bound == [], f"push consumers bound to a subject across the leaf: {bound}"
 
     # The hub resumed: Central's pull returns, its conditional write lands, the mirror catches up.
     got = (await pulling).messages

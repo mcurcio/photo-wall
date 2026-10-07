@@ -10,18 +10,18 @@ The leaf rule (erratum E-W1-LEAF-1): nothing crosses the leaf toward the hub exc
 Central, the WALL mirror's own consumer API and flow control (LEAF_EXPORTS). Central reaches into the
 Node only on LEAF_IMPORTS: the Node's JetStream API, acknowledgements, service discovery, component
 methods (`<component>.method.<name>`) and the mirror's deliveries. The hub enforces both lists on the
-Node's leaf user, the Node's own server refuses every local publish on an export, and Central may
-subscribe only to two-token-deep inboxes under CENTRAL_INBOX_PREFIX, so no Node stream can push to
-it. A Node program built on `nodeapi` therefore queues nothing toward a stalled hub: the leaf carries
-only what Central's own requests and pulls asked for. A raw client can still aim a JetStream API reply
-at Central's inbox or churn subscriptions on an import; neither happens in normal operation and a
-restart of the bus clears either (erratum E-W1-CONS-3).
+Node's leaf user, and Central may subscribe only to two-token-deep inboxes under CENTRAL_INBOX_PREFIX,
+so no Node stream can push to it. A Node program built on `nodeapi` publishes on no export, so it
+queues nothing toward a stalled hub: the leaf carries only what Central's own requests and pulls asked
+for. A raw client can still publish on an export, aim a JetStream API reply at Central's inbox or churn
+subscriptions on an import; that is out of scope (R16), never normal operation, and a restart of the
+bus clears it (erratum E-W1-CONS-3; the local deny list L3 is gone, E3b design §12).
 
 The buffer rule (owner steer 2026-10-06, errata E-W1-BUF-2, E-W1-TD-4) needs no number here: every
 stream, bucket and mirror is a JetStream limits stream with discard old, built only by `nodeapi`;
 event buffers drop their oldest when full, sticky documents are never full. The numbers both ends
 bind are the leaf's largest message, the largest stored one, the Node's store, stream, consumer and
-pending caps, and the bus's memory fence the store must fit (E-W1-STORE-1, E-W1-FIT-1, E-W1-CONS-2).
+pending caps, and the bus's memory fence the memory store must fit (E3b design §6, E-W1-CONS-2).
 """
 from __future__ import annotations
 
@@ -68,59 +68,45 @@ REPLY_ENVELOPE: Final = 6 * NODE_MAX_CONTROL_LINE + 1024
 # leaf closes the leaf, again on every retry. nodeapi sends none of them (its STREAM.INFO carries no
 # options); nothing stops a raw client that does (E-W1-TD-9).
 MAX_STORED_MESSAGE: Final = (NODE_MAX_PAYLOAD - REPLY_ENVELOPE) * 3 // 4
-# node-bus.conf's max_file_store: the whole Node store a class table may split (the config test binds it).
+# node-bus.conf's max_memory_store: the whole Node store the store lines split (the config test binds it).
 NODE_STORE_BYTES: Final = 12 * 1024 * 1024
 
-# The bus's memory fence (owner answer STORE1 = A, erratum E-W1-STORE-1): every Node buffer is a file
-# stream whose store directory is tmpfs, so the store's pages are RAM charged to the bus's cgroup and
-# stay charged across a restart of the server in that cgroup. The bus unit (E3c) runs nats-server with
-# MemoryMax = NODE_BUS_MEMORY_MAX and Environment=GOMEMLIMIT=NODE_BUS_GOMEMLIMIT, and the memory
-# line table's bus line is NODE_BUS_MEMORY_MAX. Measured on 2.15.0 linux-arm64 with every buffer full
-# and written flat out: 224/140 MiB survived 10 minutes; without GOMEMLIMIT every fence OOM-looped.
-# 256 MiB since the consumer cap (owner: RAM is not a limiting factor; erratum E-W1-CONS-2).
-# The one place these numbers live: nodeapi's class table and the CI fence test read them here, and
-# the line table (E2a) and the unit (E3c) are to read them here too.
+# The bus's memory fence (owner answer Q1 = start clean, E3b design §6): every Node buffer, and the
+# hub's WALL, is a memory stream, so every bus start is empty and nothing a store held outlives the
+# server (E-W1-CRASH-1, E-W1-FIT-2 closed). The store is heap: the bus unit (E3c) runs nats-server with
+# MemoryMax = NODE_BUS_MEMORY_MAX and Environment=GOMEMLIMIT=NODE_BUS_GOMEMLIMIT. 256 MiB since the
+# consumer cap (owner: RAM is not a limiting factor; erratum E-W1-CONS-2). The one place these numbers
+# live: the CI fence test reads them here, and the line table (E2a) and the unit (E3c) are to read
+# them here too.
 NODE_BUS_MEMORY_MAX: Final = 256 * 1024 * 1024
 NODE_BUS_GOMEMLIMIT: Final = 140 * 1024 * 1024
 # What the server holds that GOMEMLIMIT does not count (thread stacks, runtime metadata, kernel
 # memory charged to the cgroup): the low end of the measured 4-20 MiB.
 NODE_BUS_HEADROOM: Final = 4 * 1024 * 1024
 # node-bus.conf's API account `max_streams`: the server refuses an 18th stream at create (10027), never
-# a write into a full one (erratum E-W1-FIT-1). With max_file_store capping the sum of every cap, it
-# bounds the store's files for any client and any class table.
+# a write into a full one (erratum E-W1-FIT-1).
 NODE_MAX_STREAMS: Final = 17
-# The most one file stream's block can be: nats-server 2.15.0 fixes a stream's block when it creates
-# it, from its cap (ns:server/stream.go:1595-1607, ns:server/filestore.go:373-393): cap // 4 + 1 rounded
-# up to 100 bytes, 32,000 at or under that, 8 MiB at or over 8 MiB, 4 MiB between. A cap is at most
-# NODE_STORE_BYTES, so no block passes 4 MiB. A discard-old stream frees a block only when its last
-# message goes, so a circular (front-discard) stream's files reach its cap plus one block; every
-# stream is charged this flat bound, whatever cap it was created with or has since. A sticky (KV)
-# stream's per-subject limit removes messages from the middle, so its files can transiently reach
-# about one block plus twice its cap until the 2-minute sync compacts them (ns:server/filestore.go:6457;
-# 22.22 MiB measured against 13.75 MiB for a 60 x 170,000 B history-1 table, 11.51 MiB after 135 s).
-# That overshoot clears by itself and is not charged in the fit; E3b revisits it (erratum E-W1-FIT-2).
-FILESTORE_BLOCK_BOUND: Final = 4 * 1024 * 1024
-_FILESTORE_MAX_BLOCK = 8 * 1024 * 1024   # nats-server's largest block, which no cap here may reach
 # node-bus.conf's API account `max_consumers`: the most consumers one stream holds; the server refuses
-# the next at create (10026), never a write (erratum E-W1-CONS-2). A durable consumer persists on the
-# tmpfs store across a restart, and nats-py's KV keys, history and watch each hold one for up to
-# 5 minutes, so without a cap normal use could grow past the fence and OOM-loop the bus on restart.
-# The largest count whose charge fits the 256 MiB fence: 13 would need 256.8 MiB.
+# the next at create (10026), never a write (erratum E-W1-CONS-2).
 NODE_MAX_CONSUMERS: Final = 12
-# What one consumer costs in the fence: its 3 state files (meta.inf, meta.sum, o.dat) on the tmpfs
-# store, one 16 KiB Pi 5 page each, plus 104 KiB of heap, the measured anon growth per consumer
-# (103.5 KiB: 272 idle durables on 17 streams, 2.15.0 linux-arm64, 4 KiB pages; rounded up).
-CONSUMER_BOUND: Final = 3 * 16 * 1024 + 104 * 1024
-# Every stream is charged its block and a full set of consumers, whatever it holds.
-STREAM_BOUND: Final = FILESTORE_BLOCK_BOUND + NODE_MAX_CONSUMERS * CONSUMER_BOUND
+# Heap per stored byte at the smallest nodeapi event: the memory store keeps each message as its own
+# object, so a store of small messages costs a multiple of their bytes (X14 measured 4.7 on 2.15.0).
+MEMORY_STORE_FACTOR: Final = 5
+# Heap per consumer: the measured anon growth per consumer (103.5 KiB: 272 idle consumers on 17
+# streams, 2.15.0 linux-arm64; rounded up; E-W1-CONS-2).
+CONSUMER_HEAP: Final = 104 * 1024
+# The server's idle resident memory (X14: 43.9 MiB), rounded up.
+NODE_BUS_BASELINE: Final = 48 * 1024 * 1024
 
-# The fit (E-W1-FIT-1, E-W1-CONS-2), checked here at import so no build of this tree can ship a store
-# past its fence: every byte the store may hold (12 MiB) plus, per stream, a block and 12 consumers
-# (17 x (4 MiB + 12 x 152 KiB)) plus the heap GOMEMLIMIT allows (140 MiB) plus the headroom (4 MiB) is
-# 254.28 MiB, under the 256 MiB fence by 1.72 MiB. A sticky stream's transient overshoot past its cap
-# plus one block is not charged here (E-W1-FIT-2).
-if (NODE_STORE_BYTES + NODE_MAX_STREAMS * STREAM_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
-        > NODE_BUS_MEMORY_MAX or -(-(NODE_STORE_BYTES // 4 + 1) // 100) * 100 >= _FILESTORE_MAX_BLOCK):
+# The fit (E3b design §7.2), checked here at import so no build of this tree can ship a store past its
+# fence: the store at the heap factor (60 MiB), plus 12 consumers on each of 17 streams (20.72 MiB),
+# plus the idle server (48 MiB) is 128.72 MiB, under GOMEMLIMIT (140 MiB); GOMEMLIMIT plus the
+# headroom (144 MiB) is under the fence (256 MiB). The server caps the store (max_memory_store), the
+# stream count and the consumers per stream for any client, so the fit holds whatever is declared.
+# E3c's fence job re-measures the factor on linux-arm64 with small messages.
+if (NODE_STORE_BYTES * MEMORY_STORE_FACTOR + NODE_MAX_STREAMS * NODE_MAX_CONSUMERS * CONSUMER_HEAP
+        + NODE_BUS_BASELINE > NODE_BUS_GOMEMLIMIT
+        or NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX):
     raise RuntimeError("node_bus_store_past_its_fence")
 
 

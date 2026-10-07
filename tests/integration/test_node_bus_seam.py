@@ -1,7 +1,7 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, a counted gap and hub
-reload (E3a-2; Central's drain, its consumer loss, a leaf drop, a crash mid-drain and the hub's
-restart with an empty store are test_node_bus_api.py's tracer); the leaf through
+reload (E3a-2; Central's drain, its consumer loss, a leaf drop, a crash mid-drain, a kill -9 of the
+Node's bus and the hub's restart with an empty store are test_node_bus_api.py's tracer); the leaf through
 a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3); the leaf's
 subject contract, nothing a `nodeapi` program does crossing toward a stalled hub, and the mirror's
 flow control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
@@ -45,7 +45,6 @@ from contracts.node_link import (
     MAX_STORED_MESSAGE,
     NODE_DOMAIN,
     NODE_MAX_PAYLOAD,
-    WALL_API_PREFIX,
     WALL_STREAM,
     WALL_STREAM_BYTES,
     account_id,
@@ -289,11 +288,15 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
         await holds(node_a, "wall.timing", b"first")
         await holds(node_b, "wall.timing", b"first")
 
-        # Node B misses the second publish while down; its kept store catches up on restart.
+        # Node B misses the second publish while down; it starts empty (the memory store), its mirror
+        # is created again, as a wall-reading session's attach does, and re-syncs all of WALL.
         node_b.stop()
         await writer.jetstream().publish("wall.timing", b"second")
         await holds(node_a, "wall.timing", b"second")
         node_b.start()
+        client = await local(node_b)
+        assert await declare_wall_mirror(client) is True
+        await client.close()
         await holds(node_b, "wall.timing", b"second")
 
         # A local publish on a wall subject changes neither the Node's mirror nor the hub stream.
@@ -369,38 +372,33 @@ async def _flood(client, subject: str | None, body: bytes) -> int:
 
 
 def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(tmp_path):
-    # The hub hangs (SIGSTOP) while a Node program publishes 200,000 B of random bytes flat out on every
-    # subject the hub may hold interest in, churns subscriptions, and points push consumers at the
-    # WALL consumer API and at Central's in-flight pull. The leaf has no pending limit toward the hub,
+    # The hub hangs (SIGSTOP) while a Node program publishes 200,000 B of random bytes flat out and
+    # churns subscriptions, with Central's pull waiting. The leaf has no pending limit toward the hub,
     # so anything that crossed would queue in the Node's server until its fence OOM-killed the bus.
-    # The leaf's allow-lists, the Node's refusal of a local publish on an export and Central's
-    # wildcard-only inboxes keep it all on the Node (E-W1-LEAF-1): its memory stays flat, the leaf is
+    # The leaf's allow-lists keep it on the Node (E-W1-LEAF-1): its memory stays flat, the leaf is
     # kept, and once the hub resumes, Central's pull, methods, discovery, conditional write and the
-    # wall mirror all work. Central itself reaches only the Node's API, methods and discovery.
+    # wall mirror all work. Central itself reaches only the Node's API, methods and discovery. A raw
+    # client publishing on the leaf's exports or aiming push consumers across it is out of scope
+    # (R16): no `nodeapi` program does either, and the local deny list is gone (E3b design §12).
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
     hub.start()
     node.start()
     refused_at_hub: list[str] = []
-    refused_on_node: list[str] = []
 
     async def at_hub(error):
         refused_at_hub.append(str(error))
-
-    async def on_node(error):
-        refused_on_node.append(str(error))
 
     async def run():
         await _linked(hub, 1)
         linked = leaf_connections(hub)
         central_client = await central(hub, "serial-a", error_cb=at_hub)
-        node_client = await local(node, error_cb=on_node)
+        node_client = await local(node)
         jetstream = node_client.jetstream()
         writer = await wall_writer(hub)
         await declare_wall(writer)
         await declare_wall_mirror(node_client)
         await declare(jetstream, buffer("REC_player", 4 * MIB, subjects=["player.record.>"]))
-        await declare(jetstream, buffer("REC_flood", 4 * MIB, subjects=["flood.>"]))
         await declare(jetstream, desired_bucket("player", KeyTable({"show": 64}, history=2)))
         await (await DocumentWriter.bind(node_client, f"KV_{BUCKET}", writer="node")).put("show", b"node", expect=ABSENT)
 
@@ -409,19 +407,11 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
             await request.respond(b"echo:" + request.data)
         service = await nats.micro.add_service(node_client, name="player", version="0.1.0")
         await service.add_endpoint(name="echo", subject="player.method.echo", handler=echo)
-        replies: list[str] = []
-
-        async def reveal(message):
-            replies.append(message.reply)
-            await message.respond(b"ok")
 
         async def answer(message):
             await message.respond(b"answered")
-        await node_client.subscribe("player.method.reveal", cb=reveal)
         await node_client.subscribe("player.echo", cb=answer)
         await _await_interest(central_client, "player.method.echo")
-        await central_client.request("player.method.reveal", b"", timeout=2)
-        [central_reply] = replies   # `_CENTRAL.<id>.<token>`: Central's live wildcard inbox
 
         # Central's reach, refused at the hub: a publish outside the Node's API and methods, a
         # subscription outside its wildcard inboxes, and a call to a subject that is not a method.
@@ -440,49 +430,37 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
             assert any(refused in error.lower() for error in refused_at_hub), (refused, refused_at_hub)
         assert (await jetstream.stream_info("REC_player")).state.messages == 0
 
-        # Central's pull waits on an empty stream; its request's reply subject is the push target.
+        # Central's pull waits on an empty stream, its request already at the Node.
         await central_client.jetstream(domain=NODE_DOMAIN).add_consumer(
             "REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
         waiting_request = asyncio.get_running_loop().create_future()
 
         async def spy(message):
             if "expires" in json.loads(message.data) and not waiting_request.done():
-                waiting_request.set_result(message.reply)
+                waiting_request.set_result(True)
         await node_client.subscribe("$JS.API.CONSUMER.MSG.NEXT.REC_player.central", cb=spy)
         await node_client.flush()
         waiting = asyncio.create_task(pull(central_client, "REC_player", "central", 10, timeout=60,
                                            domain=NODE_DOMAIN))
-        pull_reply = await asyncio.wait_for(waiting_request, 5)
+        await asyncio.wait_for(waiting_request, 5)
         await asyncio.sleep(.5)
 
         hub.pause()
         record = os.urandom(MAX_STORED_MESSAGE - 1024)
         for index in range(20):
             await jetstream.publish(f"player.record.{index}", record)
-            await jetstream.publish(f"flood.{index}", record)
-        consumer_api = f"{WALL_API_PREFIX}.CONSUMER.CREATE.{WALL_STREAM}"
-        pushers = [f"push{target}{index}" for target in range(2) for index in range(5)]
-        for name in pushers:
-            await jetstream.add_consumer("REC_flood", ConsumerConfig(
-                durable_name=name, deliver_subject=(consumer_api, pull_reply)[int(name[4])],
-                ack_policy=AckPolicy.NONE, deliver_policy=DeliverPolicy.ALL))
         await asyncio.sleep(1)
-        # The baseline is taken after the records, whose blocks the store caches: what follows is
+        # The baseline is taken after the records, which the memory store holds: what follows is
         # only what the program sends and churns.
         before = node.rss_bytes()
         body = os.urandom(FLOOD_BODY)
-        flooded = {subject: await _flood(node_client, subject, body) for subject in (
-            "player.event.x", central_reply.rsplit(".", 1)[0] + ".flood", consumer_api, "$JS.FC.WALL.a.b")}
-        flooded["churn"] = await _flood(node_client, None, body)
+        flooded = {"player.event.x": await _flood(node_client, "player.event.x", body),
+                   "churn": await _flood(node_client, None, body)}
         grown = node.rss_bytes() - before
-        bound = [name for name in pushers if (await jetstream.consumer_info("REC_flood", name)).push_bound]
         hub.resume()
 
         assert all(count > 100 for count in flooded.values()), flooded
         assert grown <= RSS_ALLOWANCE, f"the Node grew {grown / MIB:.1f} MiB under a stalled hub: {flooded}"
-        assert bound == [], f"push consumers bound to a subject across the leaf: {bound}"
-        # The program's publishes on the leaf's exports were refused at its own connection.
-        assert any('publish to "_central.' in error.lower() for error in refused_on_node)
 
         # The hub resumed: the same leaf, and every path Central uses works.
         got = (await waiting).messages
@@ -502,7 +480,6 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
         async def mirrored():
             return await wall_value(node_client, "wall.after") == b"after"
         await until(mirrored, 10, "the wall mirror holds the write made after the stall")
-        assert [name for name in pushers if (await jetstream.consumer_info("REC_flood", name)).push_bound] == []
         assert leaf_connections(hub) == linked
         for client in (writer, central_client, node_client):
             await client.close()
@@ -684,56 +661,6 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
         assert recorder.gaps() == [(origin + 10, state.first_seq - origin - 10)]
         assert recorder.sequences()[10:] == list(range(state.first_seq, state.last_seq + 1))
         await node_client.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        node.stop()
-        hub.stop()
-
-
-def test_a_drain_cursor_from_a_lost_node_store_starts_the_new_creation_fresh(tmp_path):
-    # The Node's store is lost (tmpfs, every reboot) and its stream re-created. Central's cursor is
-    # (epoch, seq): the new creation's messages are new rows from its own origin, neither folded
-    # into the old creation's sequences nor counted as a gap after them (E-W1-TD-5). The component
-    # declares the one configuration it holds, before and after the loss: the create draws the
-    # epoch and the origin, not the builder (E-W1-FV-1).
-    hub = hub_server(tmp_path, ["serial-a"])
-    node = node_server(tmp_path, "serial-a", hub)
-    hub.start()
-    node.start()
-    recorder = Recorder(tmp_path / "record")
-    events = buffer("EVENTS", 64 * 1024, subjects=["events.>"])
-
-    async def creation(count: int) -> int:
-        node_client = await local(node)
-        jetstream = node_client.jetstream()
-        await declare(jetstream, events)
-        for index in range(count):
-            await jetstream.publish("events.reading", f"reading-{index}".encode())
-        origin = (await jetstream.stream_info("EVENTS")).config.first_seq
-        await node_client.close()
-        return origin
-
-    async def drain() -> None:
-        central_client = await central(hub, "serial-a")
-        await _drain(central_client, "EVENTS", recorder)
-        await central_client.close()
-
-    async def run():
-        await _linked(hub, 1)
-        first_origin = await creation(10)
-        await drain()
-        node.wipe()
-        node.start()
-        await _linked(hub, 1)
-        second_origin = await creation(5)
-        await drain()
-        first, second = recorder.epochs()
-        assert first_origin != second_origin
-        assert recorder.sequences(first) == list(range(first_origin, first_origin + 10))
-        assert recorder.sequences(second) == list(range(second_origin, second_origin + 5))
-        assert recorder.gaps() == []
 
     try:
         asyncio.run(run())

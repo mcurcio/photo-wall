@@ -5,8 +5,8 @@ this file holds the configuration properties a server run cannot show cheaply, a
 buffer rule (E-W1-BUF-2, E-W1-TD-4): every stream, bucket and mirror is a limits stream with discard
 old, built only by the shipped `nodeapi.buffers`, circular or sticky, and no account has a store
 limit that could refuse a write first; the numbers both ends of a leaf bind (E-W1-TD-2, -3); the
-leaf's subject contract as both ends configure it (E-W1-LEAF-1); and the store's fit in the bus's
-memory fence (E-W1-FIT-1).
+leaf's subject contract as both ends configure it (E-W1-LEAF-1); and the memory store's fit in the
+bus's memory fence (E3b design §6).
 """
 from __future__ import annotations
 
@@ -23,12 +23,13 @@ from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
-    CONSUMER_BOUND,
-    FILESTORE_BLOCK_BOUND,
+    CONSUMER_HEAP,
     HUB_DOMAIN,
     LEAF_EXPORTS,
     LEAF_IMPORTS,
     MAX_STORED_MESSAGE,
+    MEMORY_STORE_FACTOR,
+    NODE_BUS_BASELINE,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
@@ -41,7 +42,6 @@ from contracts.node_link import (
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
     STORE_LINES,
-    STREAM_BOUND,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_STREAM_BYTES,
@@ -51,7 +51,6 @@ from contracts.node_link import (
     central_user,
     node_user,
 )
-from nodeapi import buffers
 from nodeapi.buffers import (
     CIRCULAR,
     KIND_KEY,
@@ -84,7 +83,7 @@ SERVER_DEFAULT_WRITE_DEADLINE = 10   # seconds, nats-server DEFAULT_FLUSH_DEADLI
 LISTENERS = HubListeners(
     server_name="hub", client_host="0.0.0.0", client_port=4222, websocket_host="0.0.0.0",
     websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
-    store_dir="/var/lib/photo-wall/hub", max_file_store_bytes=4 * 1024 * 1024)
+    max_memory_store_bytes=4 * 1024 * 1024)
 WALL_IMPORTS = [
     {"service": {"account": WALL_ACCOUNT, "subject": "$JS.API.CONSUMER.CREATE.*"},
      "to": f"{WALL_API_PREFIX}.CONSUMER.CREATE.*"},
@@ -144,9 +143,9 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     text = NODE_BUS_CONF.read_text()
     config = _parse_nats_conf(text)
     assert config["host"] == "127.0.0.1"
-    assert config["jetstream"]["domain"] == NODE_DOMAIN
-    assert config["jetstream"]["max_memory_store"] == "0"
-    assert _bytes(config["jetstream"]["max_file_store"]) == NODE_STORE_BYTES  # what a class table splits
+    # The memory store only, with no store directory: every bus start is empty (Q1, E3b design §6).
+    assert config["jetstream"] == {"domain": NODE_DOMAIN, "max_memory_store": "12MB", "max_file_store": "0"}
+    assert _bytes(config["jetstream"]["max_memory_store"]) == NODE_STORE_BYTES  # what the store lines split
     assert _bytes(config["max_payload"]) == NODE_MAX_PAYLOAD
     # The control line bounds every stored subject, and is the server's default (const.go:90
     # MAX_CONTROL_LINE_SIZE), pinned: a lower one closed a component the base kept (E-W1-TD-8).
@@ -169,18 +168,16 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert int(account["jetstream"]["max_streams"]) == NODE_MAX_STREAMS
     # And the 13th consumer on a stream, per stream: the fit's consumer count (E-W1-CONS-2).
     assert int(account["jetstream"]["max_consumers"]) == NODE_MAX_CONSUMERS
-    assert config["no_auth_user"] in {user["user"] for user in account["users"]}
-    # A local program may publish anything except what the leaf carries to the hub, bar one reply to a
-    # request it was delivered (E-W1-LEAF-1). allow_responses drops the default allow-all, so ">".
-    [user] = account["users"]
-    assert user["permissions"] == {"publish": {"allow": [">"], "deny": list(LEAF_EXPORTS)},
-                                   "allow_responses": True}
+    # One local user with no permissions: the local deny list is gone (E3b design §12); the hub's
+    # allow-lists on the leaf user hold the leaf's subject contract (E-W1-LEAF-1).
+    assert account["users"] == [{"user": "local", "password": "local"}]
+    assert config["no_auth_user"] == "local"
     assert [remote["account"] for remote in config["leafnodes"]["remotes"]] == ["API"]
     assert config["leafnodes"]["remotes"][0]["urls"] == ["$PHOTO_WALL_BUS_LEAF_URL"]
     assert "deny_" not in text
     # Every per-Node value is the unit's environment, so the base ships one file for every Node.
     assert set(re.findall(r"\$(PHOTO_WALL_[A-Z_]+)", text)) == {
-        "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_STORE", "PHOTO_WALL_BUS_LEAF_URL"}
+        "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_LEAF_URL"}
 
 
 def test_node_accounts_import_only_the_wall_set_and_export_nothing():
@@ -208,7 +205,9 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
         {"service": "$JS.FC.WALL.>"}, {"service": "$JS.FC.*.*.WALL.>"}]
     assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER}]}
     assert config["system_account"] == "SYS"
-    assert config["jetstream"]["domain"] == HUB_DOMAIN
+    # The hub's JetStream is the memory store, with no store directory: it starts empty and Central
+    # rebuilds WALL (E3b design §9.6, §12).
+    assert config["jetstream"] == {"domain": HUB_DOMAIN, "max_memory_store": 4 * 1024 * 1024, "max_file_store": 0}
     # Both ends of every leaf take the same largest message: the hub refuses one past the Node's
     # max_payload, which the Node would otherwise answer by closing the leaf (E-W1-BUF-3).
     node = _parse_nats_conf(NODE_BUS_CONF.read_text())
@@ -220,7 +219,7 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422}
     assert "http" not in config
     with pytest.raises(ValueError, match="hub_store_too_small"):
-        hub_configuration([], replace(LISTENERS, max_file_store_bytes=WALL_STREAM_BYTES - 1))
+        hub_configuration([], replace(LISTENERS, max_memory_store_bytes=WALL_STREAM_BYTES - 1))
 
 
 def _seconds(duration: str) -> float:
@@ -255,14 +254,14 @@ def test_a_stored_message_fits_every_reply_the_node_generates_for_it():
 
 def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
     # Everything a Node or the hub declares comes from nodeapi.buffers: JetStream's limits retention
-    # with discard old, a byte cap, a stored message that fits a leaf reply and a kind.
+    # with discard old in the memory store, a byte cap, a stored message that fits a leaf reply and a kind.
     hub_wall = wall_config(WALL_TABLE, first_seq=1)
     configs = [*node_split().buffers.values(), hub_wall, wall_mirror_config(),
                bucket("probe", history=1, max_bytes=1), buffer("PROBE", 1, subjects=["probe.>"])]
     for config in configs:
         assert config.retention == RetentionPolicy.LIMITS, config.name
         assert config.discard == DiscardPolicy.OLD, config.name
-        assert config.storage == StorageType.FILE, config.name
+        assert config.storage == StorageType.MEMORY, config.name
         assert config.max_bytes and config.max_bytes > 0, config.name
         assert 0 < config.max_msg_size <= MAX_STORED_MESSAGE, config.name
         assert config.metadata[KIND_KEY] in (CIRCULAR, STICKY), config.name
@@ -308,7 +307,7 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
 
 
 def test_one_class_table_holds_the_whole_store_within_the_servers_stream_count():
-    # One owner declares the whole table; its caps never pass the store, so no declare meets 10047
+    # One owner declares the whole table; its caps never pass the store, so no declare meets 10028
     # in any order (E-W1-TD-S2), and it has no more streams than the server admits (E-W1-FIT-1).
     table = node_split()
     assert len(table.buffers) == NODE_MAX_STREAMS
@@ -325,38 +324,21 @@ def test_one_class_table_holds_the_whole_store_within_the_servers_stream_count()
         ClassTable({"RAW": replace(buffer("RAW", 1), metadata=None)})
 
 
-def test_the_store_fits_the_bus_fence_for_any_class_table(monkeypatch):
-    # The store is tmpfs inside the bus's cgroup. A discard-old file stream's files reach its cap plus
-    # one block, which the server fixes at create and which no cap up to the store makes larger than
-    # 4 MiB. The server caps the sum of the caps (max_file_store) and the stream count (max_streams),
-    # so for any client and any table the files fit beside the heap GOMEMLIMIT holds (E-W1-STORE-1,
-    # E-W1-FIT-1); contracts checks this at import. Each stream also holds at most 12 consumers
-    # (max_consumers), each 3 state files of 16 KiB Pi pages on the store plus 104 KiB of measured heap
-    # (E-W1-CONS-2). 1.72 MiB of slack: a 13th consumer per stream or an 18th stream needs the owner.
+def test_the_memory_store_fits_the_bus_fence():
+    # The store is heap (Q1 = start clean, E3b design §6). The server caps the store (max_memory_store),
+    # the streams and the consumers per stream for any client, so its heap is at most the store at the
+    # measured factor for the smallest nodeapi event (X14: 4.7), plus every consumer the caps admit, plus
+    # the idle server: under GOMEMLIMIT, which with the headroom is under the unit's MemoryMax.
+    # contracts.node_link checks the same identity at import; E3c's fence job re-measures the factor.
     mib, kib = 1024 * 1024, 1024
-    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT) == (256 * mib, 140 * mib)   # owner, E-W1-CONS-2
-    assert (NODE_STORE_BYTES, NODE_MAX_STREAMS, FILESTORE_BLOCK_BOUND, NODE_BUS_HEADROOM) == (12 * mib, 17, 4 * mib, 4 * mib)
-    assert (NODE_MAX_CONSUMERS, CONSUMER_BOUND) == (12, 3 * 16 * kib + 104 * kib)
-    assert STREAM_BOUND == FILESTORE_BLOCK_BOUND + NODE_MAX_CONSUMERS * CONSUMER_BOUND
-    need = 12 * mib + 17 * (4 * mib + 12 * 152 * kib) + 140 * mib + 4 * mib
-    assert need == NODE_STORE_BYTES + NODE_MAX_STREAMS * STREAM_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
-    assert need <= 256 * mib < need + 17 * 152 * kib   # 12 is the largest per-stream count that fits
-    # The largest cap's block (ns:server/stream.go:1595-1607): cap // 4 + 1 rounded up to 100, under
-    # the 8 MiB maximum, so the 4 MiB medium block.
-    assert -(-(NODE_STORE_BYTES // 4 + 1) // 100) * 100 < 8 * mib
-    # The whole store in the page's 17 streams builds: the per-table check is the same identity.
-    table = node_split()
-    rest = NODE_STORE_BYTES - sum(config.max_bytes for config in table.buffers.values())
-    whole = {**table.buffers, "REC_host": replace(table.buffers["REC_host"],
-                                                  max_bytes=table.buffers["REC_host"].max_bytes + rest)}
-    ClassTable(whole)
-    # A fence one byte under the identity refuses it: the table charges every stream the flat block
-    # and a full set of consumers.
-    monkeypatch.setattr(buffers, "NODE_BUS_MEMORY_MAX", need)
-    ClassTable(whole)
-    monkeypatch.setattr(buffers, "NODE_BUS_MEMORY_MAX", need - 1)
-    with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
-        ClassTable(whole)
+    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT, NODE_BUS_HEADROOM) == (256 * mib, 140 * mib, 4 * mib)
+    assert (NODE_STORE_BYTES, MEMORY_STORE_FACTOR, NODE_MAX_STREAMS, NODE_MAX_CONSUMERS) == (12 * mib, 5, 17, 12)
+    assert (CONSUMER_HEAP, NODE_BUS_BASELINE) == (104 * kib, 48 * mib)
+    heap = (NODE_STORE_BYTES * MEMORY_STORE_FACTOR + NODE_MAX_STREAMS * NODE_MAX_CONSUMERS * CONSUMER_HEAP
+            + NODE_BUS_BASELINE)
+    assert heap == 60 * mib + 21216 * kib + 48 * mib            # 128.72 MiB
+    assert heap <= NODE_BUS_GOMEMLIMIT                          # 140 MiB
+    assert NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM == 144 * mib <= NODE_BUS_MEMORY_MAX
 
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
@@ -427,7 +409,7 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]
     # The server's store is the outer fence, reserved per stream at create: the split fits it.
     assert sum(config.max_bytes for config in node_split().buffers.values()) <= _bytes(
-        node["jetstream"]["max_file_store"])
+        node["jetstream"]["max_memory_store"])
     assert wall_config(WALL_TABLE, first_seq=1).max_bytes == wall_mirror_config().max_bytes == WALL_STREAM_BYTES
 
 

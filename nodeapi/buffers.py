@@ -1,8 +1,8 @@
 """Every stream, KV bucket and mirror on a Node bus or in the hub's WALL account, built in one place.
 
 The buffer rule (owner, 2026-10-06; errata E-W1-BUF-2, E-W1-TD-4) has two kinds. Both are
-JetStream limits retention with discard old in the file store, so no buffer refuses a write for
-being full:
+JetStream limits retention with discard old in the memory store (owner answer Q1 = start clean: every
+bus start is empty, E3b design §6), so no buffer refuses a write for being full:
 
 - **circular** (`buffer`, `bucket`): event buffers (records, observations, reported state). A byte
   cap and any other limit; full, the server drops the oldest and takes the write, and a reader
@@ -12,7 +12,7 @@ being full:
   only and no count limit. The byte cap is the key table's budget (keys x history x largest value),
   and the table travels in the stream's metadata, so every writer (`documents.DocumentWriter`, the
   session's state put) refuses its own unlisted or oversize write before sending. So the per-subject
-  limit always drops a key's own oldest value first (ns:server/filestore.go:5340-5380, before the
+  limit always drops a key's own oldest value first (ns:server/memstore.go:337-348, before the
   byte limit) and no key loses its only value to bytes or count. Nothing on the Node refuses anything.
 
 Every builder sets `max_msg_size` to at most `MAX_STORED_MESSAGE`, so a reply carrying a stored
@@ -28,12 +28,10 @@ send across the leaf what Central did not pull (erratum E-W1-LEAF-1); the WALL m
 by `wall_mirror_config`.
 
 `ClassTable` declares a Node's whole store at once: its caps never total more than the store, so
-no declare meets 10047 whatever the order (E-W1-TD-S2). The store is tmpfs inside the bus's memory
-fence, so a table whose files (caps plus a flat 4 MiB file-store block per stream) cannot fit beside
-the server's heap, or that has more streams than the server admits, fails to build: a store that
-cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1, E-W1-FIT-1). Nothing here
-changes a declared stream's limits: a per-Node override (re-splitting the store) waits for E3b's
-design, and the server's own `max_file_store` and `max_streams` bound the files of any client.
+no declare meets 10028 whatever the order (E-W1-TD-S2), and it has no more streams than the server
+admits (E-W1-FIT-1). The store's fit in the bus's memory fence is a property of the server's own caps
+(`max_memory_store`, `max_streams`, `max_consumers`), checked once in `contracts.node_link`, so it
+holds for any client and needs no per-table check. Nothing here changes a declared stream's limits.
 """
 from __future__ import annotations
 
@@ -59,14 +57,10 @@ from nats.js.errors import APIError, NotFoundError
 
 from contracts.node_link import (
     MAX_STORED_MESSAGE,
-    NODE_BUS_GOMEMLIMIT,
-    NODE_BUS_HEADROOM,
-    NODE_BUS_MEMORY_MAX,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
     STORE_LINES,
-    STREAM_BOUND,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
     WALL_STREAM,
@@ -89,7 +83,8 @@ MAX_PUBLISH_SUBJECT: Final = NODE_MAX_CONTROL_LINE // 2
 STREAM_NAME_IN_USE: Final = 10058       # two declarers raced: the other one created it
 # The same race on a store whose reservations are near full: the server checks the new stream's
 # reservation (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891).
-STORAGE_EXCEEDED: Final = 10047
+# The memory store's code (JSMemoryResourcesExceededErr); the file store answered 10047.
+MEMORY_EXCEEDED: Final = 10028
 # The same race on a store at its stream count (node-bus.conf's max_streams), checked before the name too.
 MAX_STREAMS_REACHED: Final = 10027
 _FIXED: Final = frozenset({"retention", "discard", "storage", "metadata"})
@@ -97,7 +92,10 @@ _FORWARDS: Final = frozenset({"republish", "sources", "mirror", "subject_transfo
 
 
 def message_charge(subject: str, value_bytes: int, header_bytes: int = 0) -> int:
-    """nats-server's file-store charge for one message (ns:server/filestore.go:10054-10062)."""
+    """An upper bound of nats-server's memory-store charge for one message, len(subject) +
+    len(headers) + len(value) + 16 (ns:server/memstore.go:2511-2513), so a sticky budget built from it
+    is never short. The formula is the file store's charge (ns:server/filestore.go:10054-10062), kept
+    unchanged: it is at least the memory charge for every message."""
     return 30 + len(subject.encode()) + value_bytes + (4 + header_bytes if header_bytes else 0)
 
 
@@ -115,7 +113,7 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict,
     elif not 0 < size <= MAX_STORED_MESSAGE:
         raise ValueError("buffer_message_past_the_leaf")
     return StreamConfig(name=name, max_bytes=max_bytes, max_msg_size=size, retention=RetentionPolicy.LIMITS,
-                        discard=DiscardPolicy.OLD, storage=StorageType.FILE,
+                        discard=DiscardPolicy.OLD, storage=StorageType.MEMORY,
                         metadata={**(metadata or {}), KIND_KEY: kind}, **fields)
 
 
@@ -165,7 +163,7 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     builder's configuration is declared: one read back from a stream carries that creation's epoch
     and first sequence, which a re-create must never reuse. Re-declaring is a no-op on any store, a
     wholly reserved one included: the stream is looked up, never re-added, since the server answers
-    an add of a stream that exists with 10047 once the reservations are near full, and with 10027 once
+    an add of a stream that exists with 10028 once the reservations are near full, and with 10027 once
     the store holds its most streams (E-W1-STORE-1, E-W1-FIT-1). A create that loses a race to another
     declarer is a no-op too."""
     metadata = config.metadata or {}
@@ -179,12 +177,12 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     try:
         await jetstream.add_stream(_stamped(config))
     except APIError as error:
-        if error.err_code not in (STREAM_NAME_IN_USE, STORAGE_EXCEEDED, MAX_STREAMS_REACHED):
+        if error.err_code not in (STREAM_NAME_IN_USE, MEMORY_EXCEEDED, MAX_STREAMS_REACHED):
             raise
         try:
             await jetstream.stream_info(config.name)
         except NotFoundError:
-            raise error from None   # 10047 or 10027 for a stream that is still absent: the store is full
+            raise error from None   # 10028 or 10027 for a stream that is still absent: the store is full
         return False
     return True
 
@@ -192,11 +190,8 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
 @dataclass(frozen=True)
 class ClassTable:
     """One Node store's whole declaration, by one owner. Its caps total at most `total`, itself at
-    most the store, so the server never refuses a declare of it for room (10047) in any order; it has
-    at most the streams the server admits (10027). Its files (every cap plus a flat STREAM_BOUND per
-    stream: the block each may have whatever cap it was created with, and the consumers the server
-    admits on it) fit the bus's memory fence beside the server's heap, so a full store reloads inside
-    the fence after any restart (E-W1-STORE-1, E-W1-FIT-1, E-W1-CONS-2)."""
+    most the store, so the server never refuses a declare of it for room (10028) in any order; it has
+    at most the streams the server admits (10027) (E-W1-FIT-1)."""
     buffers: Mapping[str, StreamConfig]
     total: int = NODE_STORE_BYTES
 
@@ -215,8 +210,6 @@ class ClassTable:
             raise ValueError("class_table_over_total")
         if len(buffers) > NODE_MAX_STREAMS:
             raise ValueError("class_table_too_many_streams")
-        if caps + len(buffers) * STREAM_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX:
-            raise ValueError("class_table_past_the_bus_fence")
 
 
 async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:

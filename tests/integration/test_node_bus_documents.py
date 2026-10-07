@@ -167,7 +167,7 @@ def test_a_token_from_a_lost_store_raises_a_conflict_and_is_never_applied(tmp_pa
         writer = await DocumentWriter.bind(central_client, PLAYER, writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
         boot_one = await writer.put("show", b"central: run 42", expect=ABSENT)
 
-        node.wipe()
+        node.stop()   # a memory store: the start below is empty
         node.start()
         await _linked(hub, 1)
         client = await local(node)

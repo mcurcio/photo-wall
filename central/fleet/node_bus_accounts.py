@@ -56,13 +56,12 @@ class HubListeners:
     leaf_host: str               # nats-server accepts WebSocket leaves only with a leafnodes port; no Node dials this one
     leaf_port: int
     monitor_port: int | None     # /leafz; None in production until E3d decides
-    store_dir: str
-    max_file_store_bytes: int    # the hub's JetStream store; at least WALL_STREAM_BYTES
+    max_memory_store_bytes: int  # the hub's JetStream store, in memory; at least WALL_STREAM_BYTES
 
 
 def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
     """The hub's nats-server configuration for this set of enrolled serials, as JSON text."""
-    if listeners.max_file_store_bytes < WALL_STREAM_BYTES:
+    if listeners.max_memory_store_bytes < WALL_STREAM_BYTES:
         raise ValueError("hub_store_too_small")
     node_accounts = {account_id(serial): serial for serial in serials}
     accounts: dict[str, object] = {
@@ -83,11 +82,12 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
         # Central writes into a Node is no longer than one a local client writes, so every stored
         # subject fits the reply envelope MAX_STORED_MESSAGE leaves (E-W1-TD-6, -8). Leaves are exempt.
         "max_control_line": NODE_MAX_CONTROL_LINE,
+        # The memory store and no store directory (E3b design §6, §12): the hub starts empty, and
+        # Central rebuilds WALL from its own records (nodeapi.hub.WallWriter).
         "jetstream": {
             "domain": HUB_DOMAIN,
-            "store_dir": listeners.store_dir,
-            "max_file_store": listeners.max_file_store_bytes,
-            "max_memory_store": 0,
+            "max_memory_store": listeners.max_memory_store_bytes,
+            "max_file_store": 0,
         },
         "accounts": accounts,
         "system_account": SYSTEM_ACCOUNT,
@@ -112,7 +112,7 @@ def _wall_account() -> dict[str, object]:
     return {
         # No store limit, only "every stream has its own byte cap". An account store limit is checked
         # with the new message added, before a full stream drops its oldest, so it would refuse (10002)
-        # a write the stream's discard-old policy takes. The hub's max_file_store is the one fence:
+        # a write the stream's discard-old policy takes. The hub's max_memory_store is the one fence:
         # the server reserves each stream's cap against it at create, never at a write (E-W1-BUF-2).
         "jetstream": {"max_bytes_required": True},
         "users": [_user(WALL_WRITER_USER)],
