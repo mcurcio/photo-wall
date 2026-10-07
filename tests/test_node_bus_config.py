@@ -40,11 +40,13 @@ from contracts.node_link import (
     NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
+    STORE_LINES,
     STREAM_BOUND,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
+    Pipe,
     account_id,
     central_user,
     node_user,
@@ -52,20 +54,25 @@ from contracts.node_link import (
 from nodeapi import buffers
 from nodeapi.buffers import (
     CIRCULAR,
-    EPOCH_KEY,
     KIND_KEY,
     MAX_PUBLISH_SUBJECT,
+    MAX_TABLE_METADATA,
     STICKY,
     ClassTable,
     Documents,
+    KeyTable,
+    Slice,
     bucket,
     buffer,
     buffer_kind,
+    event_buffer,
+    state_bucket,
     sticky_bucket,
     wall_config,
     wall_mirror_config,
 )
 from nodeapi.documents import DocumentWriter
+from nodeapi.epoch import EPOCH_KEY
 from nodeapi.pull import PULL_MAX_BYTES, PULL_ONE_BYTES
 
 REPO = Path(__file__).resolve().parents[1]
@@ -438,3 +445,45 @@ def test_account_id_is_stable_and_refuses_an_unsafe_serial():
     for unsafe in ("", "a" * 129, "has space", "user@host", "slash/serial", "star*", "gt>"):
         with pytest.raises(ValueError, match="node_link_serial"):
             account_id(unsafe)
+
+
+def test_the_store_lines_fill_the_store_and_each_slice_stays_in_its_line():
+    # E3b design §7.3: every line plus the WALL mirror fits the store and the stream count, so no
+    # line's apply is refused for room by another's; contracts checks it at import.
+    mib, kib = 1024 * 1024, 1024
+    assert {name: (line.pipe, line.declarer, line.streams, line.max_bytes) for name, line in STORE_LINES.items()} == {
+        "host": (Pipe.FLEET, "host", 2, 768 * kib), "apps": (Pipe.FLEET, "apps", 3, 1536 * kib),
+        "display": (Pipe.FLEET, "display", 3, 1536 * kib), "health": (Pipe.FLEET, "health", 3, 1536 * kib),
+        "content": (Pipe.SHOW, "content", 2, 1280 * kib), "player": (Pipe.SHOW, "apps", 3, 4608 * kib)}
+    assert sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES == 11 * mib + mib // 2
+    assert NODE_STORE_BYTES == 12 * mib
+    assert sum(line.streams for line in STORE_LINES.values()) + 1 == NODE_MAX_STREAMS == 17
+
+    state = state_bucket("display", KeyTable({"mode": 256}))
+    records = event_buffer("display", "record", 512 * kib)
+    assert Slice("display", (records, state)).captures("display.record.call") == "RECORD_display"
+    assert Slice("display", (records, state)).captures("host.record.call") is None
+    refusals = {
+        "slice_unknown_line": lambda: Slice("nowhere", (records, state)),
+        "slice_unbuilt_buffer": lambda: Slice("display", (records, state, buffer("RAW", 1, subjects=["raw.>"]))),
+        "slice_outside_its_line": lambda: Slice("display", (state, event_buffer("host", "record", 1))),
+        "slice_names": lambda: Slice("display", (records, records, state)),
+        "slice_past_its_line": lambda: Slice("display", (event_buffer("display", "record", 1536 * kib), state)),
+        "slice_needs_state": lambda: Slice("display", (records,)),
+    }
+    for error, build in refusals.items():
+        with pytest.raises(ValueError, match=error):
+            build()
+    with pytest.raises(ValueError, match="slice_past_its_line"):   # streams, not bytes
+        Slice("display", (records, state, event_buffer("display", "observation", 1),
+                          event_buffer("display", "trace", 1)))
+    with pytest.raises(ValueError, match="state_key_reserved"):
+        state_bucket("display", KeyTable({"birth": 1}))
+
+    # A key table's encoding stays under a fixed bound, so a stream description stays far under the
+    # leaf's largest reply whatever the table.
+    keys = {f"k{index:05}": 1 for index in range(2000)}
+    with pytest.raises(ValueError, match="key_table_metadata_too_large"):
+        KeyTable(keys)
+    fits = dict(list(keys.items())[:MAX_TABLE_METADATA // 16])
+    assert KeyTable.decoded(KeyTable(fits).encoded()) == KeyTable(fits)

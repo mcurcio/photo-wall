@@ -65,12 +65,12 @@ from nodeapi.buffers import (
     buffer_kind,
     declare,
     declare_table,
-    epoch_of,
     sticky_bucket,
     wall_config,
     wall_mirror_config,
 )
 from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter
+from nodeapi.epoch import epoch_of
 from nodeapi.pull import pull
 from scripts.nats_server import NATS_SERVER_VERSION
 
@@ -435,7 +435,7 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
     assert bound == [], f"push consumers bound to a subject across the leaf: {bound}"
 
     # The hub resumed: Central's pull returns, its conditional write lands, the mirror catches up.
-    got = await pulling
+    got = (await pulling).messages
     assert got and got[0].subject == "probe.record.0", [message.subject for message in got]
     for message in got:
         await message.ack_sync()

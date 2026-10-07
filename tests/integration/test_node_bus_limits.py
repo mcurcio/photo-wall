@@ -64,11 +64,10 @@ from nodeapi.buffers import (
     buffer_kind,
     declare,
     declare_table,
-    epoch_of,
     sticky_bucket,
-    stream_epoch,
 )
 from nodeapi.documents import DocumentRefused, DocumentWriter, missing_documents
+from nodeapi.epoch import epoch_of, stream_epoch
 from nodeapi.pull import PULL_MAX_BYTES, pull
 
 STORAGE_EXCEEDED = 10047        # JSStorageResourcesExceededErr: past the store's reservation
@@ -534,7 +533,7 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
             assert len(message.data) == MAX_STORED_MESSAGE, direct
         assert len((await (await across.key_value("desired_big")).get("show")).value) == table.sizes["show"]
         await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
-        [delivered] = await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)
+        [delivered] = (await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
         assert len(delivered.data) == MAX_STORED_MESSAGE
         await delivered.ack_sync()
         assert leaf_connections(hub) == before
@@ -607,7 +606,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         document = await across.get_last_msg(table.stream, table.subject_prefix + key)
         assert len(document.data) == table.sizes[key]
         await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
-        delivered = await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)
+        delivered = (await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
         assert [message.subject for message in delivered] == subjects
         for message in delivered:
             await message.ack_sync()
@@ -641,10 +640,10 @@ def test_a_busy_component_is_never_cut_off_by_a_large_pull(tmp_path):
         pending = asyncio.ensure_future(pull(reader, "REC_player", "component", 16, timeout=8))
         await asyncio.sleep(.05)   # the pull request is out
         time.sleep(3)              # the loop is busy past write_deadline ("2s")
-        received = await pending
+        received = (await pending).messages
         assert received and sum(len(message.data) for message in received) <= PULL_MAX_BYTES
         while len(received) < 16:
-            more = await pull(reader, "REC_player", "component", 16, timeout=2)
+            more = (await pull(reader, "REC_player", "component", 16, timeout=2)).messages
             assert more, f"{len(received)} of 16 records"
             received += more
         for message in received:
@@ -680,11 +679,11 @@ def test_concurrent_pulls_on_one_busy_connection_share_one_byte_budget(tmp_path)
         pending = [asyncio.ensure_future(pull(reader, stream, "component", 6, timeout=8)) for stream in streams]
         await asyncio.sleep(.05)   # the pulls have started
         time.sleep(3)              # the loop is busy past write_deadline ("2s")
-        received = {stream: await task for stream, task in zip(streams, pending, strict=True)}
+        received = {stream: (await task).messages for stream, task in zip(streams, pending, strict=True)}
         for stream in streams:
             assert received[stream], stream
             while len(received[stream]) < 6:
-                more = await pull(reader, stream, "component", 6, timeout=2)
+                more = (await pull(reader, stream, "component", 6, timeout=2)).messages
                 assert more, f"{stream}: {len(received[stream])} of 6 records"
                 received[stream] += more
             for message in received[stream]:

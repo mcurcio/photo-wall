@@ -29,7 +29,7 @@ from nats.js.api import Header
 from nats.js.errors import APIError
 
 from contracts.node_link import MAX_STORED_MESSAGE, NODE_DOMAIN, WALL_STREAM
-from nodeapi.buffers import HEADER_ALLOWANCE, Documents, epoch_of, sticky_bucket
+from nodeapi.buffers import HEADER_ALLOWANCE, Documents, sticky_bucket
 from nodeapi.documents import (
     DocumentRefused,
     DocumentWriter,
@@ -37,6 +37,7 @@ from nodeapi.documents import (
     listed_documents,
     missing_documents,
 )
+from nodeapi.epoch import epoch_of
 
 WRONG_LAST_SEQUENCE = 10071   # JSStreamWrongLastSequenceErr: the key moved on since the token
 

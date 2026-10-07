@@ -27,6 +27,10 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 
 NODE_DOMAIN: Final = "node"                  # every Node bus's JetStream domain; Central reaches it as $JS.node.API
@@ -168,6 +172,45 @@ LEAF_IMPORTS: Final = (
 # Central's subscribe allow-list: a wildcard inbox (`_CENTRAL.<id>.*`) only. A literal inbox, the only
 # subject a push consumer binds to, is refused at the hub (nodeapi.pull subscribes `<inbox>.*`).
 CENTRAL_SUBSCRIPTIONS: Final = (f"{CENTRAL_INBOX_PREFIX}.*.*",)
+
+# The envelope (E3b design §7.2): the header names `nodeapi.envelope` alone builds and reads.
+MESSAGE_ID_HEADER: Final = "Nats-Msg-Id"              # the server's dedupe; Central's projection dedupe
+SCHEMA_MAJOR_HEADER: Final = "Photo-Wall-Schema-Major"   # Central's adapter per major (C12)
+WRITER_HEADER: Final = "Photo-Wall-Writer"            # documents' writer; a method call's caller
+CENTRAL_WRITER: Final = "central"                     # every Central instance writes as this
+
+
+class Pipe(StrEnum):
+    """The two pipes (0017 R13): each stream, line and NodeLink belongs to one."""
+    FLEET = "fleet"
+    SHOW = "show"
+
+
+@dataclass(frozen=True)
+class StoreLine:
+    """A component's share of the Node store (E3b design §7.3): a byte total and a stream count. The
+    split inside it ships with the component's release (`nodeapi.buffers.Slice`)."""
+    name: str        # [a-z]+: the line's namespace, in each stream's metadata and subjects
+    pipe: Pipe
+    declarer: str    # the component whose session applies this line
+    streams: int
+    max_bytes: int
+
+
+_KIB = 1024
+STORE_LINES: Final[Mapping[str, StoreLine]] = MappingProxyType({line.name: line for line in (
+    StoreLine("host", Pipe.FLEET, "host", 2, 768 * _KIB),
+    StoreLine("apps", Pipe.FLEET, "apps", 3, 1536 * _KIB),
+    StoreLine("display", Pipe.FLEET, "display", 3, 1536 * _KIB),
+    StoreLine("health", Pipe.FLEET, "health", 3, 1536 * _KIB),
+    StoreLine("content", Pipe.SHOW, "content", 2, 1280 * _KIB),
+    StoreLine("player", Pipe.SHOW, "apps", 3, 4608 * _KIB),   # the app line: apps declares it (§7.3)
+)})
+# Every line and the WALL mirror fit the store and the server's stream count, so no line's apply is
+# refused for room by another's (11.5 of 12 MiB, 17 of 17 streams).
+if (sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES > NODE_STORE_BYTES
+        or sum(line.streams for line in STORE_LINES.values()) + 1 > NODE_MAX_STREAMS):
+    raise RuntimeError("store_lines_past_the_store")
 
 # The enrolment serial's charset (central/content_catalog/catalog.py). A `:` would break a leaf
 # URL's user:password@ and a `.` would split $SYS.ACCOUNT.<name> subjects, so the account name

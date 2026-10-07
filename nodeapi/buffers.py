@@ -37,10 +37,13 @@ design, and the server's own `max_file_store` and `max_streams` bound the files 
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -62,18 +65,19 @@ from contracts.node_link import (
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
+    STORE_LINES,
     STREAM_BOUND,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
     WALL_STREAM,
     WALL_STREAM_BYTES,
+    StoreLine,
 )
+from nodeapi.epoch import EPOCH_KEY, epoch_origin, stream_epoch
 
 if TYPE_CHECKING:
-    from nats.js.api import StreamInfo
     from nats.js.client import JetStreamContext
 
-EPOCH_KEY: Final = "photo_wall_epoch"   # stream metadata: a fresh uuid at every create
 KIND_KEY: Final = "photo_wall_kind"     # stream metadata: CIRCULAR or STICKY
 CIRCULAR: Final = "circular"
 STICKY: Final = "sticky"
@@ -98,13 +102,8 @@ def message_charge(subject: str, value_bytes: int, header_bytes: int = 0) -> int
     return 30 + len(subject.encode()) + value_bytes + (4 + header_bytes if header_bytes else 0)
 
 
-def epoch_origin(epoch: str) -> int:
-    """The first sequence of a Node stream created with `epoch`: 1 plus 40 bits of the epoch, so two
-    creations of one stream share no sequence unless their origins fall within a stream's length."""
-    return 1 + int(epoch[:10], 16)
-
-
-def _build(kind: str, name: str, max_bytes: int, fields: dict) -> StreamConfig:
+def _build(kind: str, name: str, max_bytes: int, fields: dict,
+           metadata: Mapping[str, str] | None = None) -> StreamConfig:
     # No epoch and no epoch-derived first_seq: `declare` stamps both when it creates the stream, so a
     # configuration held across a store loss never re-creates its stream as the old creation.
     if _FIXED & fields.keys():
@@ -117,7 +116,8 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict) -> StreamConfig:
     elif not 0 < size <= MAX_STORED_MESSAGE:
         raise ValueError("buffer_message_past_the_leaf")
     return StreamConfig(name=name, max_bytes=max_bytes, max_msg_size=size, retention=RetentionPolicy.LIMITS,
-                        discard=DiscardPolicy.OLD, storage=StorageType.FILE, metadata={KIND_KEY: kind}, **fields)
+                        discard=DiscardPolicy.OLD, storage=StorageType.FILE,
+                        metadata={**(metadata or {}), KIND_KEY: kind}, **fields)
 
 
 def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
@@ -227,18 +227,6 @@ def buffer_kind(config: StreamConfig) -> str:
     return (config.metadata or {})[KIND_KEY]
 
 
-def epoch_of(info: StreamInfo) -> str:
-    """The epoch the stream was created with."""
-    epoch = (info.config.metadata or {}).get(EPOCH_KEY)
-    if not epoch:
-        raise ValueError("stream_has_no_epoch")
-    return epoch
-
-
-async def stream_epoch(jetstream: JetStreamContext, stream: str) -> str:
-    return epoch_of(await jetstream.stream_info(stream))
-
-
 def _stamped(config: StreamConfig) -> StreamConfig:
     """`config` as one create sends it: a fresh epoch in its metadata and, on a Node stream (not a
     mirror, no first_seq of the builder's own such as WALL's continuation), the first sequence
@@ -316,3 +304,181 @@ async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
     for config in table.buffers.values():
         await declare(jetstream, config)
 
+
+
+# Self-describing Node streams (E3b design §4 rule 2, §7.2): each one built here carries its role, its
+# line's namespace, its pipe and, when keyed, its key table in metadata, so every client reads them
+# from the stream. A component's buffers make one `Slice` inside its store line (§7.3).
+ROLE_KEY: Final = "photo_wall_role"
+NAMESPACE_KEY: Final = "photo_wall_namespace"
+PIPE_KEY: Final = "photo_wall_pipe"
+TABLE_KEY: Final = "photo_wall_table"
+# The most a key table's encoding may take in metadata: a stream description stays far under the
+# leaf's largest reply (L, contracts.node_link.NODE_MAX_PAYLOAD) whatever the table.
+MAX_TABLE_METADATA: Final = 16 * 1024
+BIRTH_KEY: Final = "birth"               # every state bucket: the session's birth (§7.2 node)
+OUTBOX_KEY: Final = "outbox"             # every state bucket: the outbox's drop count (written from S6)
+RESERVED_STATE_BYTES: Final = 4096       # each reserved key's largest value
+_LOWER = re.compile(r"[a-z]+")
+_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+class Role(StrEnum):
+    EVENTS = "events"     # circular
+    STATE = "state"       # sticky by its state table
+    DESIRED = "desired"   # sticky by its document table (built from S2)
+    WALL = "wall"         # sticky: the hub's WALL and every Node mirror
+
+
+@dataclass(frozen=True)
+class KeyTable:
+    """A keyed buffer's table: every key it may hold, each with its largest value, and the history
+    kept per key. Its budget is the buffer's byte cap, so bytes never evict a key's only value."""
+    sizes: Mapping[str, int]             # key -> largest value in bytes
+    history: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.sizes:
+            raise ValueError("key_table_empty")
+        if type(self.history) is not int or self.history < 1:
+            raise ValueError("key_table_history")
+        sizes = dict(self.sizes)
+        for key, size in sizes.items():
+            if type(key) is not str or not _KEY.fullmatch(key):
+                raise ValueError("key_table_key")
+            if type(size) is not int or not 0 < size <= MAX_STORED_MESSAGE - HEADER_ALLOWANCE:
+                raise ValueError("key_table_value_past_the_leaf")
+        object.__setattr__(self, "sizes", MappingProxyType(sizes))
+        if len(self.encoded().encode()) > MAX_TABLE_METADATA:
+            raise ValueError("key_table_metadata_too_large")
+
+    def budget(self, subject_prefix: str) -> int:
+        """Bytes the buffer holds with every key at its largest value and largest headers, `history`
+        times: the keyed buffer's byte cap."""
+        return self.history * sum(message_charge(subject_prefix + key, size, HEADER_ALLOWANCE)
+                                  for key, size in self.sizes.items())
+
+    @property
+    def largest(self) -> int:
+        """The largest message (headers + value) the table admits: the buffer's max_msg_size."""
+        return max(self.sizes.values()) + HEADER_ALLOWANCE
+
+    def encoded(self) -> str:
+        return json.dumps({"history": self.history, "sizes": dict(self.sizes)}, sort_keys=True,
+                          separators=(",", ":"))
+
+    @classmethod
+    def decoded(cls, text: str) -> KeyTable:
+        data = json.loads(text)
+        return cls(data["sizes"], data["history"])
+
+
+def _line_metadata(line: str, role: Role) -> dict[str, str]:
+    store_line = STORE_LINES.get(line)
+    if store_line is None:
+        raise ValueError("buffer_unknown_line")
+    return {ROLE_KEY: role.value, NAMESPACE_KEY: line, PIPE_KEY: store_line.pipe.value}
+
+
+def event_buffer(line: str, topic: str, max_bytes: int, *, max_age: float | None = None,
+                 max_msg_size: int | None = None) -> StreamConfig:
+    """A circular event buffer of `line`: stream `<TOPIC>_<line>` on subjects `<line>.<topic>.>`
+    (erratum E-E3B-CUT-5). Full, the server drops the oldest and takes the write."""
+    if type(topic) is not str or not _LOWER.fullmatch(topic):
+        raise ValueError("buffer_topic")
+    fields: dict = {"subjects": [f"{line}.{topic}.>"]}
+    if max_age is not None:
+        fields["max_age"] = max_age
+    if max_msg_size is not None:
+        fields["max_msg_size"] = max_msg_size
+    return _build(CIRCULAR, f"{topic.upper()}_{line}", max_bytes, fields, _line_metadata(line, Role.EVENTS))
+
+
+def state_bucket(line: str, table: KeyTable) -> StreamConfig:
+    """`line`'s state bucket `KV_state_<line>`, sticky by `table` plus the reserved BIRTH_KEY and
+    OUTBOX_KEY: its byte cap is that table's budget, and the session refuses a put outside it."""
+    if BIRTH_KEY in table.sizes or OUTBOX_KEY in table.sizes:
+        raise ValueError("state_key_reserved")
+    full = KeyTable({**table.sizes, BIRTH_KEY: RESERVED_STATE_BYTES, OUTBOX_KEY: RESERVED_STATE_BYTES},
+                    table.history)
+    name = f"state_{line}"
+    if any(len(f"$KV.{name}.{key}".encode()) > MAX_PUBLISH_SUBJECT for key in full.sizes):
+        raise ValueError("key_table_key")
+    return _build(STICKY, f"KV_{name}", full.budget(f"$KV.{name}."), _kv_fields(name, full.history, full.largest),
+                  {**_line_metadata(line, Role.STATE), TABLE_KEY: full.encoded()})
+
+
+def role_of(config: StreamConfig) -> Role | None:
+    """The stream's role; None for a stream that is not a self-describing Node stream."""
+    value = (config.metadata or {}).get(ROLE_KEY)
+    return Role(value) if value in Role._value2member_map_ else None
+
+
+def table_of(config: StreamConfig) -> KeyTable | None:
+    text = (config.metadata or {}).get(TABLE_KEY)
+    return KeyTable.decoded(text) if text else None
+
+
+def _subject_matches(pattern: str, subject: str) -> bool:
+    tokens, wanted = subject.split("."), pattern.split(".")
+    for index, token in enumerate(wanted):
+        if token == ">":
+            return len(tokens) > index
+        if index >= len(tokens) or token not in ("*", tokens[index]):
+            return False
+    return len(tokens) == len(wanted)
+
+
+@dataclass(frozen=True)
+class Slice:
+    """One component's buffers inside one store line: built here, within the line's bytes and
+    streams, in the line's namespace, with exactly one state bucket. It ships with the release."""
+    line: str
+    buffers: tuple[StreamConfig, ...]
+
+    def __post_init__(self) -> None:
+        if self.line not in STORE_LINES:
+            raise ValueError("slice_unknown_line")
+        buffers = tuple(self.buffers)
+        object.__setattr__(self, "buffers", buffers)
+        for config in buffers:
+            if role_of(config) in (None, Role.WALL) or EPOCH_KEY in config.metadata:
+                raise ValueError("slice_unbuilt_buffer")
+            if config.metadata.get(NAMESPACE_KEY) != self.line:
+                raise ValueError("slice_outside_its_line")
+        if len({config.name for config in buffers}) != len(buffers):
+            raise ValueError("slice_names")
+        line = self.store_line
+        if len(buffers) > line.streams or sum(config.max_bytes for config in buffers) > line.max_bytes:
+            raise ValueError("slice_past_its_line")
+        if sum(role_of(config) is Role.STATE for config in buffers) != 1:
+            raise ValueError("slice_needs_state")
+
+    @property
+    def store_line(self) -> StoreLine:
+        return STORE_LINES[self.line]
+
+    @property
+    def digest(self) -> str:
+        """sha256 of the canonical slice; a session's birth carries it."""
+        canonical = {"line": self.line,
+                     "buffers": sorted((config.as_dict() for config in self.buffers), key=lambda c: c["name"])}
+        return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def captures(self, subject: str) -> str | None:
+        """The stream of this slice whose subjects take `subject`, or None."""
+        for config in self.buffers:
+            if any(_subject_matches(pattern, subject) for pattern in config.subjects or ()):
+                return config.name
+        return None
+
+
+async def apply(jetstream: JetStreamContext, slice_: Slice) -> Mapping[str, str]:
+    """Stream -> epoch for every buffer of the slice: each absent one is created (stamped as
+    `declare` stamps it), each existing one is kept as it is (S1; S4 adds prune, purge, shrink and
+    grow)."""
+    epochs = {}
+    for config in slice_.buffers:
+        await declare(jetstream, config)
+        epochs[config.name] = await stream_epoch(jetstream, config.name)
+    return MappingProxyType(epochs)

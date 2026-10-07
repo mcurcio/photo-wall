@@ -1,6 +1,7 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
-isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
-read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2); the leaf through
+isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, a counted gap, hub
+reload and hub store loss (E3a-2; Central's drain, its consumer loss, a leaf drop and a crash
+mid-drain are test_node_bus_api.py's tracer); the leaf through
 a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3); the leaf's
 subject contract, nothing a `nodeapi` program does crossing toward a stalled hub, and the mirror's
 flow control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
@@ -48,8 +49,9 @@ from contracts.node_link import (
     WALL_STREAM_BYTES,
     account_id,
 )
-from nodeapi.buffers import Documents, bucket, buffer, declare, epoch_of, sticky_bucket
-from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter, Token
+from nodeapi.buffers import Documents, bucket, buffer, declare, sticky_bucket
+from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter
+from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import pull
 
 VALUE_TOO_LARGE = 10054   # JSStreamMessageExceedsMaximumErr: past the stream's max_msg_size
@@ -483,7 +485,7 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
         assert any('publish to "_central.' in error.lower() for error in refused_on_node)
 
         # The hub resumed: the same leaf, and every path Central uses works.
-        got = await waiting
+        got = (await waiting).messages
         assert got and [message.subject for message in got] == [f"player.record.{index}" for index in range(len(got))]
         for message in got:
             await message.ack_sync()
@@ -547,26 +549,21 @@ def test_the_wall_mirror_carries_more_than_its_flow_control_window(tmp_path):
         hub.stop()
 
 
-class _Crash(Exception):
-    """Central's process dies between committing a message and acknowledging it."""
-
-
-async def _drain(client, stream: str, recorder: Recorder, *, crash_at: int | None = None) -> None:
+async def _drain(client, stream: str, recorder: Recorder) -> None:
     """Central's durable read of a Node stream: commit each message, then acknowledge it.
 
     The cursor is (epoch, seq) (E-W1-TD-5): sequences of another creation of the stream are another
     epoch's rows, and a new creation's cursor starts at its origin. A delivered sequence past the
     last recorded one is a gap only for the part the stream no longer holds (below its first_seq);
     later sequences can still arrive as redeliveries. The gap row is recorded before the message
-    that revealed it. `crash_at` is a position from the origin (1 = the creation's first message).
-    Returns once a pull longer than the ack wait finds nothing, so every unacknowledged delivery
+    that revealed it. Returns once a pull longer than the ack wait finds nothing, so every unacknowledged delivery
     has come back. Pulls go through nodeapi's capped pull."""
     jetstream = client.jetstream(domain=NODE_DOMAIN)
     await jetstream.add_consumer(stream, CONSUMER)
     info = await jetstream.stream_info(stream)
     epoch, origin = epoch_of(info), info.config.first_seq
-    while messages := await pull(client, stream, CONSUMER.durable_name, 10, timeout=IDLE_SECONDS,
-                                 domain=NODE_DOMAIN):
+    while messages := (await pull(client, stream, CONSUMER.durable_name, 10, timeout=IDLE_SECONDS,
+                                  domain=NODE_DOMAIN)).messages:
         for message in messages:
             sequence = message.metadata.sequence.stream
             highest = max([origin - 1, *recorder.sequences(epoch),
@@ -577,8 +574,6 @@ async def _drain(client, stream: str, recorder: Recorder, *, crash_at: int | Non
                 if missing > 0:
                     recorder.gap(epoch, highest + 1, missing)
             recorder.commit(Token(epoch, sequence), message.data)
-            if crash_at is not None and sequence == origin + crash_at - 1:
-                raise _Crash
             await message.ack_sync()
 
 
@@ -637,56 +632,6 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         await watcher.stop()
         await node_client.close()
         await central_client.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        node.stop()
-        hub.stop()
-
-
-@pytest.mark.parametrize("source", ["stream", "bucket"])
-def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, source):
-    hub = hub_server(tmp_path, ["serial-a"])
-    node = node_server(tmp_path, "serial-a", hub)
-    hub.start()
-    node.start()
-    recorder = Recorder(tmp_path / "record")
-
-    async def run():
-        await _linked(hub, 1)
-        node_client = await local(node)
-        jetstream = node_client.jetstream()
-        if source == "stream":
-            stream = "EVENTS"
-            await declare(jetstream, buffer(stream, 256 * 1024, subjects=["events.>"]))
-            for index in range(200):
-                await jetstream.publish(f"events.{index % 4}", f"event-{index}".encode())
-        else:
-            stream = "KV_probe_state"
-            kv = await declare_bucket(jetstream, bucket("probe_state", history=1, max_bytes=256 * 1024))
-            for index in range(200):
-                await kv.put(f"key{index}", f"state-{index}".encode())
-        info = await jetstream.stream_info(stream)
-        origin = info.config.first_seq
-        assert info.state.last_seq == origin + 199
-
-        # Central dies mid-batch: the message it committed and the rest of its batch go unacknowledged.
-        first = await central(hub, "serial-a")
-        with pytest.raises(_Crash):
-            await _drain(first, stream, recorder, crash_at=78)
-        await first.close()
-        assert 60 < len(recorder.sequences()) < 200
-
-        # A new client binds the same durable and drains what the server still owes it.
-        second = await central(hub, "serial-a")
-        await _drain(second, stream, recorder)
-        await second.close()
-        assert sorted(set(recorder.sequences())) == list(range(origin, origin + 200))
-        # The committed-but-unacknowledged message came back once: at least once, folded by sequence.
-        assert recorder.sequences().count(origin + 77) == 2
-        assert recorder.gaps() == [] and len(recorder.epochs()) == 1
-        await node_client.close()
 
     try:
         asyncio.run(run())

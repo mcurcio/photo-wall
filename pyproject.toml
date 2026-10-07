@@ -162,6 +162,14 @@ exhaustive_ignores = ["app_evidence", "app_executor", "app_launcher", "app_paylo
                       "online_activation", "os_agent", "provision", "process_identity"]
 
 [[tool.importlinter.contracts]]
+# E3b design §7.1: siblings (`|`) never import each other; `epoch` is the bottom.
+name = "The Node API library points down"
+type = "layers"
+containers = ["nodeapi"]
+layers = ["node | hub", "documents", "buffers | pull | envelope", "epoch"]
+exhaustive = true
+
+[[tool.importlinter.contracts]]
 name = "Boot is an island"
 type = "forbidden"
 source_modules = ["appliance.boot", "appliance.netboot_init", "appliance.bootstrap",

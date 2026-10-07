@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Final
 
 from nats.js.api import Header
 from nats.js.errors import APIError, NotFoundError
@@ -30,8 +30,8 @@ from nodeapi.buffers import (
     MANIFEST_KEY,
     MAX_PUBLISH_SUBJECT,
     Documents,
-    stream_epoch,
 )
+from nodeapi.epoch import Token, stream_epoch
 
 if TYPE_CHECKING:
     from nats.aio.client import Client
@@ -39,13 +39,6 @@ if TYPE_CHECKING:
 
 _REMOVED: Final = frozenset({"DEL", "PURGE"})   # KV-Operation of a deleted or purged key
 WRONG_LAST_SEQUENCE: Final = 10071   # a conditional write whose subject moved on since it was read
-
-
-class Token(NamedTuple):
-    """A cursor or a conditional-write token: `seq` names a message only inside the stream creation
-    `epoch` identifies."""
-    epoch: str
-    seq: int
 
 
 class DocumentRefused(ValueError):

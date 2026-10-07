@@ -56,7 +56,9 @@ from nodeapi.buffers import (
     wall_config,
     wall_mirror_config,
 )
-from nodeapi.documents import Token
+from nodeapi.envelope import message_id
+from nodeapi.epoch import Token
+from nodeapi.pull import Batch, Gap, Read
 
 if TYPE_CHECKING:
     from nats.aio.client import Client
@@ -442,6 +444,75 @@ class Recorder:
             os.fsync(record.fileno())
 
 
+class LinkStoreCrash(Exception):
+    """Central's process dies mid-commit: the transaction never happened."""
+
+
+class FileLinkStore:
+    """Central's link store (`nodeapi.hub.LinkStore`) as an append-only file of JSON rows: one
+    commit is one write of its gap rows, raw records and cursor. A record already held is not written
+    again (the idempotent repeat) but is kept in `repeats`, so a test sees a reader that repeated
+    itself. `crash_next_commit` makes the next commit raise before it writes anything."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.crash_next_commit = False
+        self.repeats: list[tuple[str, str, int]] = []
+
+    async def cursors(self) -> Mapping[str, Token]:
+        cursors: dict[str, Token | None] = {}
+        for row in self.rows("cursor"):
+            cursors[row["stream"]] = None if row["epoch"] is None else Token(row["epoch"], row["seq"])
+        return {stream: cursor for stream, cursor in cursors.items() if cursor is not None}
+
+    async def commit(self, stream: str, batch: Batch) -> None:
+        if self.crash_next_commit:
+            self.crash_next_commit = False
+            raise LinkStoreCrash(stream)
+        held = {(row["stream"], row["epoch"], row["seq"]) for row in self.rows("record")}
+        rows: list[dict] = []
+        for item in batch.items:
+            if isinstance(item, Gap):
+                rows.append({"kind": "gap", "stream": stream, "epoch": item.epoch, "after": item.after,
+                             "count": item.count})
+                continue
+            assert isinstance(item, Read)
+            key = (stream, item.token.epoch, item.token.seq)
+            if key in held:
+                self.repeats.append(key)
+                continue
+            held.add(key)
+            rows.append({"kind": "record", "stream": stream, "epoch": item.token.epoch, "seq": item.token.seq,
+                         "subject": item.subject, "message_id": message_id(item.headers),
+                         "data": item.data.decode("latin-1")})
+        cursor = batch.cursor
+        rows.append({"kind": "cursor", "stream": stream, "epoch": cursor and cursor.epoch,
+                     "seq": cursor and cursor.seq})
+        self._append(rows)
+
+    async def action(self, kind: str, body: Mapping[str, object]) -> None:
+        self._append([{"kind": "action", "action": kind, "body": body}])
+
+    def rows(self, kind: str) -> list[dict]:
+        if not self.path.exists():
+            return []
+        return [row for row in map(json.loads, self.path.read_text().splitlines()) if row["kind"] == kind]
+
+    def records(self, stream: str) -> list[dict]:
+        """The stream's raw records in commit order, each `data` as bytes."""
+        return [{**row, "data": row["data"].encode("latin-1")} for row in self.rows("record")
+                if row["stream"] == stream]
+
+    def actions(self, kind: str) -> list[Mapping[str, object]]:
+        return [row["body"] for row in self.rows("action") if row["action"] == kind]
+
+    def _append(self, rows: list[dict]) -> None:
+        with self.path.open("a") as store:
+            store.write("".join(json.dumps(row) + "\n" for row in rows))
+            store.flush()
+            os.fsync(store.fileno())
+
+
 async def reload_hub(hub: BusServer, serials: Sequence[str], *, requests: int = 2) -> None:
     """Rewrite the hub's configuration for `serials` in place and reload it through the system
     account (W7): `requests` requests as FLEET_SYSTEM_USER, each answered once the server applied it.
@@ -489,7 +560,9 @@ def leaf_connections(hub: BusServer) -> Mapping[str, int]:
 class PrefixProxy:
     """A reverse proxy in front of the hub's WebSocket listener, as the origin's ingress route is
     (W11, E3d/E4): it forwards a connection whose HTTP request path starts with `/<prefix>/`
-    unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction."""
+    unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction.
+    `drop` discards every byte in both directions for a while and `sever` cuts every link through it,
+    as a Wi-Fi stall and a dropped uplink do."""
 
     def __init__(self, upstream_port: int, prefix: str) -> None:
         self.upstream_port = upstream_port
@@ -497,6 +570,18 @@ class PrefixProxy:
         self.port = _free_port()
         self.paths: list[str] = []
         self._server: asyncio.base_events.Server | None = None
+        self._writers: set[asyncio.StreamWriter] = set()
+        self._dropping_until = 0.0
+
+    async def drop(self, seconds: float) -> None:
+        """Discard every byte either way for `seconds`; returns when the window ends."""
+        self._dropping_until = time.monotonic() + seconds
+        await asyncio.sleep(seconds)
+
+    def sever(self) -> None:
+        """Cut every connection through the proxy; a client dials again on its own."""
+        for writer in list(self._writers):
+            writer.transport.abort()
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
@@ -521,17 +606,22 @@ class PrefixProxy:
             return
         upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", self.upstream_port)
         upstream_writer.write(head)
-        await asyncio.gather(_pipe(reader, upstream_writer), _pipe(upstream_reader, writer))
+        self._writers |= {writer, upstream_writer}
+        try:
+            await asyncio.gather(self._pipe(reader, upstream_writer), self._pipe(upstream_reader, writer))
+        finally:
+            self._writers -= {writer, upstream_writer}
 
-
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        while True:
-            if not (data := await reader.read(65536)):
-                break
-            writer.write(data)
-            await writer.drain()
-    except (ConnectionError, OSError):
-        pass
-    finally:
-        writer.close()
+    async def _pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                if not (data := await reader.read(65536)):
+                    break
+                if time.monotonic() < self._dropping_until:
+                    continue
+                writer.write(data)
+                await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            writer.close()
