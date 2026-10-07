@@ -4,7 +4,9 @@ Node full at once and the store wholly reserved, each still takes a write, a cir
 its oldest and a sticky one keeping every document (the buffer rule, E-W1-BUF-2, E-W1-TD-4); each
 retention class keeps the promise the Node API page states for it. Also: one class table declares
 in any order and re-splits on a full store (E-W1-TD-S2); no reply for a stored message is past the
-leaf (E-W1-TD-2), whatever its subject (E-W1-TD-6); a busy component is never cut off by a pull (E-W1-TD-3).
+leaf (E-W1-TD-2), whatever its subject (E-W1-TD-6), and a reply that grows with a stream's state does
+close it, which nodeapi never asks (recorded, E-W1-TD-9); a busy component is never cut off by a pull,
+however many it runs at once (E-W1-TD-3, -7).
 
 The Node runs the shipped `node-bus.conf`, unmodified. The split is the harness's `node_split` (the
 page's numbers; E3b's class table owns them). Only the tests that cross the leaf start the hub;
@@ -15,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import time
 
+import nats.errors
 import pytest
 from integration.bus_servers import (
     MIB,
@@ -56,9 +60,11 @@ from nodeapi.buffers import (
     bucket,
     buffer,
     buffer_kind,
+    declare,
     declare_table,
     epoch_of,
     sticky_bucket,
+    stream_epoch,
 )
 from nodeapi.documents import DocumentRefused, DocumentWriter, missing_documents
 from nodeapi.pull import PULL_MAX_BYTES, pull
@@ -126,9 +132,9 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         assert client.max_payload == NODE_MAX_PAYLOAD  # the shipped file's pin, as the server applies it
 
         # The server, not a library convention, refuses at create an uncapped stream and a memory one.
-        await _refused(jetstream.add_stream(dataclasses.replace(
+        await _refused(declare(jetstream, dataclasses.replace(
             buffer("UNCAPPED", 1, subjects=["uncapped.>"]), max_bytes=None)), MAX_BYTES_REQUIRED)
-        await _refused(jetstream.add_stream(dataclasses.replace(
+        await _refused(declare(jetstream, dataclasses.replace(
             buffer("MEMORY", 64 * 1024, subjects=["memory.>"]), storage=StorageType.MEMORY)),
             MEMORY_EXCEEDED)
 
@@ -143,10 +149,9 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         before = {name: (await jetstream.stream_info(name)) for name in caps}
 
         # The fence acts at create only: one more stream, or a raised cap, does not fit (10047).
-        await _refused(jetstream.add_stream(buffer("EXTRA", MIB, subjects=["extra.>"])), STORAGE_EXCEEDED)
-        raised = before["REC_player"].config
-        raised.max_bytes = 5 * MIB
-        await _refused(jetstream.update_stream(raised), STORAGE_EXCEEDED)
+        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), STORAGE_EXCEEDED)
+        raised = ClassTable({"REC_player": dataclasses.replace(before["REC_player"].config, max_bytes=5 * MIB)})
+        await _refused(apply_table(jetstream, raised), STORAGE_EXCEEDED)
 
         # Nothing that was there moved.
         assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(caps)
@@ -268,7 +273,7 @@ def _fill(subject: str, charge: int = FILL_CHARGE) -> bytes:
 async def _record(jetstream) -> None:
     """Past its cap the oldest go, every publish is accepted, and first_seq advances by the drop."""
     cap = 16 * 1024
-    await jetstream.add_stream(buffer("REC_probe", cap, subjects=["probe.record.>"]))
+    await declare(jetstream, buffer("REC_probe", cap, subjects=["probe.record.>"]))
     origin = (await jetstream.stream_info("REC_probe")).config.first_seq
     published = 1000
     for index in range(published):
@@ -284,7 +289,7 @@ async def _record(jetstream) -> None:
 
 async def _observation(jetstream) -> None:
     """A message older than max_age is gone; a fresh one stays."""
-    await jetstream.add_stream(buffer("OBS_probe", 16 * 1024, subjects=["probe.observation.>"], max_age=1))
+    await declare(jetstream, buffer("OBS_probe", 16 * 1024, subjects=["probe.observation.>"], max_age=1))
     origin = (await jetstream.stream_info("OBS_probe")).config.first_seq
     published = time.monotonic()
     for index in range(3):
@@ -427,7 +432,7 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
         before = leaf_connections(hub)
         client = await local(node)
         jetstream = client.jetstream()
-        await jetstream.add_stream(buffer("REC_player", MIB, subjects=["player.record.>"], allow_direct=True))
+        await declare(jetstream, buffer("REC_player", MIB, subjects=["player.record.>"], allow_direct=True))
         table = Documents.bucket("desired_big", {"show": MAX_STORED_MESSAGE - 512}, history=1)
         await declare_bucket(jetstream, sticky_bucket(table))
         for size in (MAX_STORED_MESSAGE + 1, NODE_MAX_PAYLOAD - 1024):
@@ -459,8 +464,8 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
 def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tmp_path):
     # A reply naming a stored message repeats its subject, JSON-escaped at six bytes for `<` or `&`,
     # so a long subject on the largest record once closed the leaf. Both servers' max_control_line
-    # bounds every stored subject: the longest line a Node component or Central sends is stored, one
-    # byte more closes only that client, and Central reads the largest record under each worst-escaping
+    # (the server's default, pinned) bounds every stored subject: the longest line a Node component or
+    # Central sends is stored, one byte more closes only that client, and Central reads the largest record under each worst-escaping
     # longest subject, and the largest document under the longest key a writer admits, every way that
     # carries a subject back across the leaf, with the leaf kept (E-W1-TD-6).
     hub = hub_server(tmp_path, ["serial-a"])
@@ -474,7 +479,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         before = leaf_connections(hub)
         client = await local(node)
         jetstream = client.jetstream()
-        await jetstream.add_stream(buffer("REC_player", MIB, subjects=["player.record.>"]))
+        await declare(jetstream, buffer("REC_player", MIB, subjects=["player.record.>"]))
         record = b"x" * MAX_STORED_MESSAGE
         # nats-py's line for a publish with no reply: PUB, the subject, two spaces and the size.
         longest = NODE_MAX_CONTROL_LINE - len(f"  {len(record)}") - len("player.record.")
@@ -496,6 +501,11 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         async def stored():
             return (await jetstream.stream_info("REC_player")).state.messages == len(subjects)
         await _until(stored, 5, "both longest-subject records are stored, neither past one")
+        # A component's KV put under a 1004-byte key, which a lowered control line once answered by
+        # closing the component: the server's default line takes it and keeps the client (E-W1-TD-8).
+        state = await declare_bucket(jetstream, bucket("state_host", history=1, max_bytes=MIB))
+        await state.put("k" * 1004, b"kept")
+        assert (await state.get("k" * 1004)).value == b"kept" and client.is_connected
         bucket_name = "desired_long"
         key = "<" * (MAX_PUBLISH_SUBJECT - len(f"$KV.{bucket_name}."))
         table = Documents.bucket(bucket_name, {key: MAX_STORED_MESSAGE - HEADER_ALLOWANCE}, history=1)
@@ -534,7 +544,7 @@ def test_a_busy_component_is_never_cut_off_by_a_large_pull(tmp_path):
     async def body():
         writer = await local(node)
         jetstream = writer.jetstream()
-        await jetstream.add_stream(buffer("REC_player", 8 * MIB, subjects=["player.record.>"]))
+        await declare(jetstream, buffer("REC_player", 8 * MIB, subjects=["player.record.>"]))
         for _ in range(16):
             await jetstream.publish("player.record.asrun", b"r" * MAX_STORED_MESSAGE)
         reader = await local(node)
@@ -558,3 +568,99 @@ def test_a_busy_component_is_never_cut_off_by_a_large_pull(tmp_path):
         await writer.close()
 
     _run(node, body)
+
+
+def test_concurrent_pulls_on_one_busy_connection_share_one_byte_budget(tmp_path):
+    # Four tasks of one component pull four streams of the largest records on one connection while
+    # its loop is busy past the write deadline. Each request alone is capped, but a connection's open
+    # requests add up past max_pending, so the cap is the connection's: the pulls queue for one
+    # budget, and the component keeps its connection and gets every record (E-W1-TD-7).
+    node = _node(tmp_path)
+    streams = [f"REC_part{index}" for index in range(4)]
+
+    async def body():
+        writer = await local(node)
+        jetstream = writer.jetstream()
+        for stream in streams:
+            await declare(jetstream, buffer(stream, 2 * MIB, subjects=[f"{stream.lower()}.>"]))
+            for _ in range(6):
+                await jetstream.publish(f"{stream.lower()}.asrun", b"r" * MAX_STORED_MESSAGE)
+        reader = await local(node)
+        for stream in streams:
+            await reader.jetstream().add_consumer(stream, ConsumerConfig(
+                durable_name="component", ack_policy=AckPolicy.EXPLICIT))
+        pending = [asyncio.ensure_future(pull(reader, stream, "component", 6, timeout=8)) for stream in streams]
+        await asyncio.sleep(.05)   # the pulls have started
+        time.sleep(3)              # the loop is busy past write_deadline ("2s")
+        received = {stream: await task for stream, task in zip(streams, pending, strict=True)}
+        for stream in streams:
+            assert received[stream], stream
+            while len(received[stream]) < 6:
+                more = await pull(reader, stream, "component", 6, timeout=2)
+                assert more, f"{stream}: {len(received[stream])} of 6 records"
+                received[stream] += more
+            for message in received[stream]:
+                await message.ack_sync()
+        assert reader.is_connected and not reader.is_closed
+        assert "Slow Consumer" not in node.log_tail(400)
+        await reader.close()
+        await writer.close()
+
+    _run(node, body)
+
+
+def test_a_reply_that_grows_with_stream_state_closes_the_leaf_and_nodeapi_asks_none(tmp_path):
+    # Recorded, not fixed (E-W1-TD-9). MAX_STORED_MESSAGE bounds every reply about one stored message,
+    # not one that grows with a stream's state: Central's STREAM.INFO across the leaf asking for every
+    # interior delete of a hot state bucket, or every subject of a record stream, passes L, and the
+    # hub closes the leaf for it. nodeapi's own STREAM.INFO (the epoch read) asks neither and keeps the
+    # leaf. The day this fails, such replies are bounded or fenced: update contracts.node_link with it.
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+
+    async def body():
+        async def linked():
+            return leaf_connections(hub)
+        await _until(linked, 10, "the Node's leaf link")
+        client = await local(node)
+        jetstream = client.jetstream()
+        await declare(jetstream, bucket("state_host", history=1, max_bytes=MIB))
+        await declare(jetstream, buffer("REC_host", 4 * MIB, subjects=["host.record.>"]))
+        await jetstream.publish("$KV.state_host.pinned", b"pinned")
+        for _ in range(60_000):     # each write deletes the hot key's last value below the newest
+            await client.publish("$KV.state_host.hot", b"h")
+        for index in range(12_000):  # a distinct subject per record
+            await client.publish(f"host.record.{index:010}.{'s' * 16}", b"r")
+        await jetstream.publish("$KV.state_host.hot", b"h")   # acknowledged after every write before it
+        await jetstream.publish("host.record.last", b"r")
+
+        central_client = await central(hub, "serial-a")
+        across = central_client.jetstream(domain=NODE_DOMAIN)
+        for stream, details in (("KV_state_host", {"deleted_details": True}), ("REC_host", {"subjects_filter": ">"})):
+            before = await _until(linked, 10, "the Node's leaf link")
+
+            async def epoch_read(stream=stream):
+                try:
+                    return await stream_epoch(across, stream)
+                except (nats.errors.NoRespondersError, nats.errors.TimeoutError):
+                    return None
+            await _until(epoch_read, 10, f"nodeapi's epoch read of {stream} across the leaf")
+            assert leaf_connections(hub) == before
+            request = json.dumps(details).encode()
+            assert len((await client.request(f"$JS.API.STREAM.INFO.{stream}", request, timeout=5)).data) > NODE_MAX_PAYLOAD
+            with pytest.raises(nats.errors.TimeoutError):
+                await central_client.request(f"$JS.{NODE_DOMAIN}.API.STREAM.INFO.{stream}", request, timeout=2)
+
+            async def relinked(before=before):
+                now = leaf_connections(hub)
+                return now and now != before
+            await _until(relinked, 10, f"the leaf closed for {stream} and relinked")
+        assert hub.log_tail(400).count("Leafnode connection closed: Maximum Message Payload Exceeded") >= 2
+        await central_client.close()
+        await client.close()
+
+    try:
+        _run(node, body)
+    finally:
+        hub.stop()

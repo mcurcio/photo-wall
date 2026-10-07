@@ -29,19 +29,26 @@ WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selecto
 # would close the leaf, so the hub refuses it first, at its own client (E-W1-BUF-3).
 NODE_MAX_PAYLOAD: Final = 256 * 1024
 # The longest control line (a PUB's subject, reply and sizes) a client may send on either end of a
-# leaf: node-bus.conf's max_control_line AND the hub's (the config test binds both). The server
-# closes a client that sends a longer one; a leaf is exempt (it carries only what some client sent).
-# Every message a Node stores came through a client on one end, so no stored subject (a KV key
-# included) is longer than this (E-W1-TD-6).
-NODE_MAX_CONTROL_LINE: Final = 1024
+# leaf: nats-server's default (MAX_CONTROL_LINE_SIZE, ns:server/const.go:90), pinned as node-bus.conf's
+# max_control_line AND the hub's (the config test binds both) so an upgrade cannot move it under the
+# envelope. It is the default, so it refuses nothing the base server accepted. The server closes a
+# client that sends a longer line; a leaf is exempt (it carries only what some client sent). Every
+# message a Node stores came through a client on one end, so no stored subject (a KV key included)
+# is longer than this (E-W1-TD-6, E-W1-TD-8).
+NODE_MAX_CONTROL_LINE: Final = 4096
 # What a reply naming a stored message adds besides the message: the subject, JSON-escaped at worst
-# six bytes per byte (Go's encoder writes `<` as `<`), plus 1 KiB for the reply's own fields.
+# six bytes per byte (Go's encoder writes `<` as `\u003c`), plus 1 KiB for the reply's own fields.
 REPLY_ENVELOPE: Final = 6 * NODE_MAX_CONTROL_LINE + 1024
 # The largest message any stream, bucket or mirror stores (headers + payload; the max_msg_size every
-# nodeapi builder sets). A server reply carrying a stored message is at most 4/3 of it plus the
-# envelope: a JSON STREAM.MSG.GET base64-encodes it and names its subject, a direct get or a
-# delivery adds a few headers. (L - REPLY_ENVELOPE) * 3/4 keeps every such reply under L whatever
-# the subject, so no reply the Node generates can close the leaf (E-W1-TD-2, E-W1-TD-6).
+# nodeapi builder sets): 177,408 B. A server reply about ONE stored message is at most 4/3 of it plus
+# the envelope: a JSON STREAM.MSG.GET base64-encodes it and names its subject, a direct get or a
+# delivery adds a few headers. (L - REPLY_ENVELOPE) * 3/4 keeps every such reply under L whatever the
+# subject (E-W1-TD-2, E-W1-TD-6).
+# NOT covered: a reply whose size grows with the stream's state rather than with one message. A
+# STREAM.INFO asking `deleted_details` (every interior delete) or `subjects_filter` (every matching
+# subject), STREAM.LIST/NAMES and CONSUMER.LIST/NAMES can pass L, and Central asking one across the
+# leaf closes the leaf, again on every retry. nodeapi sends none of them (its STREAM.INFO carries no
+# options); nothing stops a raw client that does (E-W1-TD-9).
 MAX_STORED_MESSAGE: Final = (NODE_MAX_PAYLOAD - REPLY_ENVELOPE) * 3 // 4
 # node-bus.conf's max_file_store: the whole Node store a class table may split (the config test binds it).
 NODE_STORE_BYTES: Final = 12 * 1024 * 1024

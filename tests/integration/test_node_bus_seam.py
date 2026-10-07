@@ -43,7 +43,7 @@ from contracts.node_link import (
     WALL_STREAM_BYTES,
     account_id,
 )
-from nodeapi.buffers import Documents, bucket, buffer, epoch_of, sticky_bucket
+from nodeapi.buffers import Documents, bucket, buffer, declare, epoch_of, sticky_bucket
 from nodeapi.documents import DocumentWriter, Token
 from nodeapi.pull import pull
 
@@ -177,7 +177,7 @@ def test_two_node_accounts_in_domain_node_stay_isolated(tmp_path):
         # The same stream name on both Nodes, both in domain `node`: each Central sees its own.
         for client, count in ((local_a, 3), (local_b, 5)):
             jetstream = client.jetstream()
-            await jetstream.add_stream(buffer("PROBE", 64 * 1024, subjects=["probe.events.>"]))
+            await declare(jetstream, buffer("PROBE", 64 * 1024, subjects=["probe.events.>"]))
             for index in range(count):
                 await jetstream.publish(f"probe.events.{index}", b"event")
         info_a = await central_a.jetstream(domain=NODE_DOMAIN).stream_info("PROBE")
@@ -228,7 +228,7 @@ def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf
         await _linked(hub, 1)
         linked = leaf_connections(hub)
         node_client = await local(node)
-        await node_client.jetstream().add_stream(buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
+        await declare(node_client.jetstream(), buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
         central_client = await central(hub, "serial-a")
         assert central_client.max_payload == NODE_MAX_PAYLOAD
         jetstream = central_client.jetstream(domain=NODE_DOMAIN)
@@ -476,7 +476,7 @@ def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, 
         jetstream = node_client.jetstream()
         if source == "stream":
             stream = "EVENTS"
-            await jetstream.add_stream(buffer(stream, 256 * 1024, subjects=["events.>"]))
+            await declare(jetstream, buffer(stream, 256 * 1024, subjects=["events.>"]))
             for index in range(200):
                 await jetstream.publish(f"events.{index % 4}", f"event-{index}".encode())
         else:
@@ -526,7 +526,7 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
         jetstream = node_client.jetstream()
         if source == "stream":
             stream = "OBSERVED"
-            await jetstream.add_stream(buffer(stream, 16 * 1024, subjects=["observed.>"]))
+            await declare(jetstream, buffer(stream, 16 * 1024, subjects=["observed.>"]))
 
             async def write(index: int) -> None:
                 await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
@@ -580,7 +580,7 @@ def test_a_drain_cursor_from_a_lost_node_store_starts_the_new_creation_fresh(tmp
     async def creation(count: int) -> int:
         node_client = await local(node)
         jetstream = node_client.jetstream()
-        await jetstream.add_stream(buffer("EVENTS", 64 * 1024, subjects=["events.>"]))
+        await declare(jetstream, buffer("EVENTS", 64 * 1024, subjects=["events.>"]))
         for index in range(count):
             await jetstream.publish("events.reading", f"reading-{index}".encode())
         origin = (await jetstream.stream_info("EVENTS")).config.first_seq
@@ -712,7 +712,7 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
             assert (await central_client.request(ENDPOINT, b"via", timeout=2)).data == b"node-a:via"
 
             jetstream = node_client.jetstream()
-            await jetstream.add_stream(buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
+            await declare(jetstream, buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
             await jetstream.publish("player.record.asrun", b"P" * MAX_STORED_MESSAGE)
             message = await central_client.jetstream(domain=NODE_DOMAIN).get_last_msg(
                 "REC_player", "player.record.asrun")

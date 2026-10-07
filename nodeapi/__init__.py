@@ -9,5 +9,6 @@ envelope and the typed handles around them.
   declares a Node's whole store at once.
 - `documents`: sticky documents' writer (Central's, which refuses its own over-budget write) and
   reader (which finds a missing document), and the epoch-scoped tokens and cursors.
-- `pull`: the one way to pull from a consumer, capped below the server's pending limit.
+- `pull`: the one way to pull from a consumer, one byte budget per connection below the server's
+  pending limit.
 """

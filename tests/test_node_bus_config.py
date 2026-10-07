@@ -53,10 +53,11 @@ from nodeapi.buffers import (
     wall_mirror_config,
 )
 from nodeapi.documents import DocumentWriter
-from nodeapi.pull import PULL_MAX_BYTES
+from nodeapi.pull import PULL_MAX_BYTES, PULL_ONE_BYTES
 
 REPO = Path(__file__).resolve().parents[1]
 NODE_BUS_CONF = REPO / "appliance" / "bus" / "node-bus.conf"
+SERVER_DEFAULT_CONTROL_LINE = 4096   # nats-server MAX_CONTROL_LINE_SIZE (ns:server/const.go:90)
 LISTENERS = HubListeners(
     server_name="hub", client_host="0.0.0.0", client_port=4222, websocket_host="0.0.0.0",
     websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
@@ -124,12 +125,16 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert config["jetstream"]["max_memory_store"] == "0"
     assert _bytes(config["jetstream"]["max_file_store"]) == NODE_STORE_BYTES  # what a class table splits
     assert _bytes(config["max_payload"]) == NODE_MAX_PAYLOAD
-    assert _bytes(config["max_control_line"]) == NODE_MAX_CONTROL_LINE  # bounds every stored subject
+    # The control line bounds every stored subject, and is the server's default (const.go:90
+    # MAX_CONTROL_LINE_SIZE), pinned: a lower one closed a component the base kept (E-W1-TD-8).
+    assert _bytes(config["max_control_line"]) == NODE_MAX_CONTROL_LINE == SERVER_DEFAULT_CONTROL_LINE
     # A busy local client is never cut off (E-W1-TD-3): a missed write deadline is retried, and the
     # server's pending limit holds one capped pull plus as much again for the rest of the connection.
     assert config["write_timeout"] == "retry"
     assert _bytes(config["max_pending"]) == NODE_MAX_PENDING
     assert PULL_MAX_BYTES * 2 <= NODE_MAX_PENDING and PULL_MAX_BYTES >= 2 * NODE_MAX_PAYLOAD
+    # A request asks at least one delivery's charge, so the largest stored message always fits one.
+    assert MAX_STORED_MESSAGE + NODE_MAX_CONTROL_LINE < PULL_ONE_BYTES <= PULL_MAX_BYTES
     account = config["accounts"]["API"]
     assert account["jetstream"]["max_bytes_required"] is True
     assert config["no_auth_user"] in {user["user"] for user in account["users"]}
@@ -237,7 +242,7 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
     with pytest.raises(ValueError, match="documents_value_past_the_leaf"):
         Documents.bucket("big", {"one": MAX_STORED_MESSAGE}, history=1)
     with pytest.raises(ValueError, match="wall_documents_over_budget"):
-        Documents.wall({"a": MAX_STORED_MESSAGE - 1024, "b": MAX_STORED_MESSAGE - 1024, "c": 150 * 1024})
+        Documents.wall({key: MAX_STORED_MESSAGE - 1024 for key in "abc"})  # WALL holds two
     with pytest.raises(ValueError, match="sticky_bucket_needs_a_bucket_table"):
         sticky_bucket(Documents.wall({"a": 1}))
 
@@ -264,12 +269,25 @@ def test_one_class_table_holds_the_whole_store_and_a_resplit_never_raises_it():
 
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
-# stream configuration built elsewhere bypasses the buffer rule (E-W1-TD-S1). Pulls go through
-# nodeapi.pull, the only request with a byte cap (E-W1-TD-3).
+# stream configured or created elsewhere bypasses the buffer rule (E-W1-TD-S1). The guard bans the
+# calls and API subjects that create or change a stream, in any argument form (kwargs included), not
+# only the configuration class, outside nodeapi/buffers.py (E-W1-TD-S5). Pulls go through
+# nodeapi.pull, the only request with a byte budget (E-W1-TD-3).
 _NOWHERE = ("DiscardPolicy.NEW", "RetentionPolicy.WORK_QUEUE", "RetentionPolicy.INTEREST",
             "create_key_value(", "KeyValueConfig(")
 _STREAM_BUILDER = "nodeapi/buffers.py"
+_STREAM_WRITES = re.compile(r"StreamConfig\(|\b(?:add|update)_stream\b|STREAM\.(?:CREATE|UPDATE)\b")
 _PULLS = (".fetch(", "pull_subscribe")
+
+
+def _guard_violations(path: str, text: str) -> list[tuple[str, str]]:
+    """What the buffer guard refuses in one file of the tree."""
+    found = [(path, forbidden) for forbidden in _NOWHERE if forbidden in text]
+    if path != _STREAM_BUILDER:
+        found += [(path, match.group()) for match in _STREAM_WRITES.finditer(text)]
+    if re.search(r"^\s*(import nats|from nats)", text, re.MULTILINE) and path != "nodeapi/pull.py":
+        found += [(path, forbidden) for forbidden in _PULLS if forbidden in text]
+    return found
 
 
 def test_only_nodeapi_configures_a_buffer_or_pulls_anywhere_in_the_tree():
@@ -279,16 +297,26 @@ def test_only_nodeapi_configures_a_buffer_or_pulls_anywhere_in_the_tree():
     this = Path(__file__).resolve().relative_to(REPO).as_posix()
     checked = 0
     for path in sorted(name for name in listed if name != this and (REPO / name).is_file()):
-        text = (REPO / path).read_text(errors="replace")
-        for forbidden in _NOWHERE:
-            assert forbidden not in text, (path, forbidden)
-        if "StreamConfig(" in text:
-            assert path == _STREAM_BUILDER, (path, "StreamConfig(")
-        if re.search(r"^\s*(import nats|from nats)", text, re.MULTILINE) and path != "nodeapi/pull.py":
-            for forbidden in _PULLS:
-                assert forbidden not in text, (path, forbidden)
+        assert _guard_violations(path, (REPO / path).read_text(errors="replace")) == []
         checked += 1
     assert checked > 500 and "nodeapi/buffers.py" in listed
+
+
+def test_the_buffer_guard_refuses_a_stream_created_in_any_form():
+    # The evasion the re-review proved: no nats import, no StreamConfig, a discard-new KV bucket
+    # created by keyword arguments (E-W1-TD-S5). Each form is refused outside nodeapi/buffers.py.
+    evasion = ("async def declare(jetstream):\n"
+               "    await jetstream.add_stream(name='KV_desired_x', subjects=['$KV.desired_x.>'],\n"
+               "                               max_bytes=4096, max_msgs_per_subject=1, discard='new')\n")
+    assert _guard_violations("central/fleet/rr_evasion.py", evasion) == [
+        ("central/fleet/rr_evasion.py", "add_stream")]
+    for form in ("await js.update_stream(config=config)", "create = jetstream.add_stream",
+                 "await nc.request('$JS.API.STREAM.CREATE.X', body)",
+                 "await nc.request(f'$JS.{domain}.API.STREAM.UPDATE.{name}', body)",
+                 "StreamConfig(name='X')", "await js.create_key_value(bucket='x')"):
+        assert _guard_violations("central/fleet/rr_evasion.py", form), form
+    assert _guard_violations("nodeapi/buffers.py", "await jetstream.add_stream(config)") == []
+    assert _guard_violations("central/fleet/reader.py", "await jetstream.stream_info(name)") == []
 
 
 def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
