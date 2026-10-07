@@ -22,20 +22,25 @@ sequence derived from it, so a revision or cursor read before a store loss names
 re-created stream, however long its declarer held the configuration (E-W1-TD-5, E-W1-FV-1). A
 caller never sets the policy, the storage or the metadata.
 
+No buffer forwards: `buffer` refuses republish, sources, mirror and subject transforms. A republish
+is an internal server publish that no permission checks, so it is the one way a Node stream could
+send across the leaf what Central did not pull (erratum E-W1-LEAF-1); the WALL mirror is built only
+by `wall_mirror_config`.
+
 `ClassTable` declares a Node's whole store at once: its caps never total more than the store, so
-no declare meets 10047 whatever the order, and Central's override re-splits that total and cannot
-raise it (E-W1-TD-S2). The store is tmpfs inside the bus's memory fence, so a table whose store
-bound (caps plus one file-store block per stream) does not fit beside the server's heap fails to
-build: a store that cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1). The server
-fixes a stream's block when it creates it, so a re-split keeps charging every block the stream may
-have been created with (E-W1-FV-3).
+no declare meets 10047 whatever the order (E-W1-TD-S2). The store is tmpfs inside the bus's memory
+fence, so a table whose files (caps plus a flat 4 MiB file-store block per stream) cannot fit beside
+the server's heap, or that has more streams than the server admits, fails to build: a store that
+cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1, E-W1-FIT-1). Nothing here
+changes a declared stream's limits: a per-Node override (re-splitting the store) waits for E3b's
+design, and the server's own `max_file_store` and `max_streams` bound the files of any client.
 """
 from __future__ import annotations
 
 import json
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -50,15 +55,18 @@ from nats.js.api import (
 from nats.js.errors import APIError, NotFoundError
 
 from contracts.node_link import (
+    FILESTORE_BLOCK_BOUND,
     MAX_STORED_MESSAGE,
-    NODE_BUS_STORE_ROOM,
+    NODE_BUS_GOMEMLIMIT,
+    NODE_BUS_HEADROOM,
+    NODE_BUS_MEMORY_MAX,
     NODE_MAX_CONTROL_LINE,
+    NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
     WALL_STREAM,
     WALL_STREAM_BYTES,
-    filestore_block_bytes,
 )
 
 if TYPE_CHECKING:
@@ -79,7 +87,10 @@ STREAM_NAME_IN_USE: Final = 10058       # two declarers raced: the other one cre
 # The same race on a store whose reservations are near full: the server checks the new stream's
 # reservation (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891).
 STORAGE_EXCEEDED: Final = 10047
+# The same race on a store at its stream count (node-bus.conf's max_streams), checked before the name too.
+MAX_STREAMS_REACHED: Final = 10027
 _FIXED: Final = frozenset({"retention", "discard", "storage", "metadata"})
+_FORWARDS: Final = frozenset({"republish", "sources", "mirror", "subject_transform"})
 
 
 def message_charge(subject: str, value_bytes: int, header_bytes: int = 0) -> int:
@@ -112,7 +123,10 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict) -> StreamConfig:
 def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
     """A circular event buffer: its byte cap and any other limit the caller gives (subjects, max_age,
     max_msgs, max_msgs_per_subject, a smaller max_msg_size). Full, the server drops the oldest and
-    takes the write; a reader sees the drop as the hole below the stream's first sequence."""
+    takes the write; a reader sees the drop as the hole below the stream's first sequence. Never one
+    that forwards what it stores (republish, sources, mirror, a subject transform)."""
+    if _FORWARDS & fields.keys():
+        raise ValueError("buffer_never_forwards")
     return _build(CIRCULAR, name, max_bytes, dict(fields))
 
 
@@ -243,8 +257,9 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     builder's configuration is declared: one read back from a stream carries that creation's epoch
     and first sequence, which a re-create must never reuse. Re-declaring is a no-op on any store, a
     wholly reserved one included: the stream is looked up, never re-added, since the server answers
-    an add of a stream that exists with 10047 once the reservations are near full (E-W1-STORE-1). A
-    create that loses a race to another declarer is a no-op too."""
+    an add of a stream that exists with 10047 once the reservations are near full, and with 10027 once
+    the store holds its most streams (E-W1-STORE-1, E-W1-FIT-1). A create that loses a race to another
+    declarer is a no-op too."""
     metadata = config.metadata or {}
     if metadata.get(KIND_KEY) not in (CIRCULAR, STICKY) or EPOCH_KEY in metadata:
         raise ValueError("declare_needs_a_built_buffer")
@@ -256,37 +271,26 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     try:
         await jetstream.add_stream(_stamped(config))
     except APIError as error:
-        if error.err_code not in (STREAM_NAME_IN_USE, STORAGE_EXCEEDED):
+        if error.err_code not in (STREAM_NAME_IN_USE, STORAGE_EXCEEDED, MAX_STREAMS_REACHED):
             raise
         try:
             await jetstream.stream_info(config.name)
         except NotFoundError:
-            raise error from None   # 10047 for a stream that is still absent: the store is full
+            raise error from None   # 10047 or 10027 for a stream that is still absent: the store is full
         return False
     return True
-
-
-def _block(config: StreamConfig) -> int:
-    """The file-store block nats-server gives `config` at its create (0 for a memory stream). It fixes
-    the block then (ns:server/stream.go:1098, 1578-1607) and no update changes it."""
-    return filestore_block_bytes(config.max_bytes) if config.storage == StorageType.FILE else 0
 
 
 @dataclass(frozen=True)
 class ClassTable:
     """One Node store's whole declaration, by one owner. Its caps total at most `total`, itself at
-    most the store, so the server never refuses a declare of it for room (10047) in any order. Its
-    store bound fits the room the bus's memory fence leaves beside the server's heap, so a full store
-    reloads inside the fence after any restart (E-W1-STORE-1).
-
-    `blocks` is the largest block each buffer may have been created with: the block of every cap the
-    buffer has had in this table's line of re-splits, its current one included. A stream's files
-    grow in the block of the cap it was created at, whatever cap it has since, so the bound charges
-    that largest block and a re-split that shrinks a stream into a smaller block is charged the old
-    one (E-W1-FV-3). A caller never passes it: the constructor and `resplit` keep it."""
+    most the store, so the server never refuses a declare of it for room (10047) in any order; it has
+    at most the streams the server admits (10027). Its files (every cap plus a flat FILESTORE_BLOCK_BOUND
+    per stream, the block each may have whatever cap it was created with) fit the bus's memory fence
+    beside the server's heap, so a full store reloads inside the fence after any restart
+    (E-W1-STORE-1, E-W1-FIT-1)."""
     buffers: Mapping[str, StreamConfig]
     total: int = NODE_STORE_BYTES
-    blocks: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not 0 < self.total <= NODE_STORE_BYTES:
@@ -297,41 +301,14 @@ class ClassTable:
                 raise ValueError("class_table_names")
             if (config.metadata or {}).get(KIND_KEY) not in (CIRCULAR, STICKY):
                 raise ValueError("class_table_unbuilt_buffer")
-        if not self.blocks.keys() <= buffers.keys():
-            raise ValueError("class_table_names")
-        blocks = {name: max(self.blocks.get(name, 0), _block(config)) for name, config in buffers.items()}
         object.__setattr__(self, "buffers", MappingProxyType(buffers))
-        object.__setattr__(self, "blocks", MappingProxyType(blocks))
-        if sum(config.max_bytes for config in buffers.values()) > self.total:
+        caps = sum(config.max_bytes for config in buffers.values())
+        if caps > self.total:
             raise ValueError("class_table_over_total")
-        if self.store_bound > NODE_BUS_STORE_ROOM:
+        if len(buffers) > NODE_MAX_STREAMS:
+            raise ValueError("class_table_too_many_streams")
+        if caps + len(buffers) * FILESTORE_BLOCK_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX:
             raise ValueError("class_table_past_the_bus_fence")
-
-    def charge(self, name: str) -> int:
-        """The most one buffer's files can hold: its cap plus one block, the dropped messages a
-        discard-old stream keeps until their block empties, at the largest block it may have."""
-        return self.buffers[name].max_bytes + self.blocks[name]
-
-    @property
-    def store_bound(self) -> int:
-        """The most the store's files can hold for this table. The store is tmpfs, so this is RAM
-        charged to the bus (E-W1-STORE-1)."""
-        return sum(self.charge(name) for name in self.buffers)
-
-    def resplit(self, caps: Mapping[str, int]) -> ClassTable:
-        """Central's per-Node override: new caps for circular buffers inside the same total, every
-        buffer still charged the largest block it may have been created with. A sticky buffer's cap
-        is its table's budget, never an override."""
-        buffers = dict(self.buffers)
-        for name, cap in caps.items():
-            if name not in buffers:
-                raise ValueError("class_table_unknown_buffer")
-            if buffer_kind(buffers[name]) != CIRCULAR:
-                raise ValueError("class_table_sticky_cap")
-            if cap <= 0:
-                raise ValueError("buffer_needs_a_byte_cap")
-            buffers[name] = replace(buffers[name], max_bytes=cap)
-        return ClassTable(buffers, self.total, self.blocks)
 
 
 async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
@@ -339,17 +316,3 @@ async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
     for config in table.buffers.values():
         await declare(jetstream, config)
 
-
-async def apply_table(jetstream: JetStreamContext, table: ClassTable) -> None:
-    """Bring a declared store's caps to `table`'s: every shrink before any growth, so the reserved
-    total never passes the table's on the way (10047). Each stream keeps its epoch and sequence, and
-    its block: the table is first charged the block of each stream's live cap too, so a table not
-    re-split from the one that created the store still fails the fence check before any change
-    (`class_table_past_the_bus_fence`, E-W1-FV-3)."""
-    current = {name: (await jetstream.stream_info(name)).config for name in table.buffers}
-    ClassTable(table.buffers, table.total,
-               {name: max(table.blocks[name], _block(config)) for name, config in current.items()})
-    changes = sorted((table.buffers[name].max_bytes - config.max_bytes, name)
-                     for name, config in current.items() if config.max_bytes != table.buffers[name].max_bytes)
-    for _, name in changes:
-        await jetstream.update_stream(replace(current[name], max_bytes=table.buffers[name].max_bytes))

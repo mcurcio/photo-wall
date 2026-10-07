@@ -4,7 +4,9 @@ The live behaviour of both is proven on real servers in tests/integration/test_n
 this file holds the configuration properties a server run cannot show cheaply, among them the
 buffer rule (E-W1-BUF-2, E-W1-TD-4): every stream, bucket and mirror is a limits stream with discard
 old, built only by the shipped `nodeapi.buffers`, circular or sticky, and no account has a store
-limit that could refuse a write first; and the numbers both ends of a leaf bind (E-W1-TD-2, -3).
+limit that could refuse a write first; the numbers both ends of a leaf bind (E-W1-TD-2, -3); the
+leaf's subject contract as both ends configure it (E-W1-LEAF-1); and the store's fit in the bus's
+memory fence (E-W1-FIT-1).
 """
 from __future__ import annotations
 
@@ -20,16 +22,20 @@ from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
+    CENTRAL_SUBSCRIPTIONS,
+    FILESTORE_BLOCK_BOUND,
     HUB_DOMAIN,
+    LEAF_EXPORTS,
+    LEAF_IMPORTS,
     MAX_STORED_MESSAGE,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
-    NODE_BUS_STORE_ROOM,
     NODE_DOMAIN,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     NODE_MAX_PENDING,
+    NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
     WALL_ACCOUNT,
@@ -38,9 +44,9 @@ from contracts.node_link import (
     WALL_WRITER_USER,
     account_id,
     central_user,
-    filestore_block_bytes,
     node_user,
 )
+from nodeapi import buffers
 from nodeapi.buffers import (
     CIRCULAR,
     EPOCH_KEY,
@@ -68,8 +74,8 @@ LISTENERS = HubListeners(
     websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
     store_dir="/var/lib/photo-wall/hub", max_file_store_bytes=4 * 1024 * 1024)
 WALL_IMPORTS = [
-    {"service": {"account": WALL_ACCOUNT, "subject": "$JS.API.CONSUMER.CREATE.WALL"},
-     "to": f"{WALL_API_PREFIX}.CONSUMER.CREATE.WALL"},
+    {"service": {"account": WALL_ACCOUNT, "subject": "$JS.API.CONSUMER.CREATE.*"},
+     "to": f"{WALL_API_PREFIX}.CONSUMER.CREATE.*"},
     {"service": {"account": WALL_ACCOUNT, "subject": "$JS.API.CONSUMER.CREATE.WALL.>"},
      "to": f"{WALL_API_PREFIX}.CONSUMER.CREATE.WALL.>"},
     {"service": {"account": WALL_ACCOUNT, "subject": "$JS.API.CONSUMER.DELETE.WALL.*"},
@@ -137,7 +143,8 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     # server's pending limit holds one capped pull plus as much again for the rest of the connection.
     assert config["write_timeout"] == "retry"
     # The leaf has its own write deadline, at least the server's default: it would otherwise take the
-    # clients' 2 s and close on a short uplink stall, retry policy and all (E-W1-FV-2).
+    # clients' 2 s and close on a short uplink stall, retry policy and all (E-W1-FV-2). It is the
+    # uplink's stall budget only; the allow-lists bound what the leaf queues (E-W1-LEAF-1).
     assert _seconds(config["leafnodes"]["write_deadline"]) >= SERVER_DEFAULT_WRITE_DEADLINE
     assert _seconds(config["leafnodes"]["write_deadline"]) > _seconds(config["write_deadline"])
     assert _bytes(config["max_pending"]) == NODE_MAX_PENDING
@@ -146,7 +153,14 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert MAX_STORED_MESSAGE + NODE_MAX_CONTROL_LINE < PULL_ONE_BYTES <= PULL_MAX_BYTES
     account = config["accounts"]["API"]
     assert account["jetstream"]["max_bytes_required"] is True
+    # The server refuses an 18th stream at create: the fit's stream count (E-W1-FIT-1).
+    assert int(account["jetstream"]["max_streams"]) == NODE_MAX_STREAMS
     assert config["no_auth_user"] in {user["user"] for user in account["users"]}
+    # A local program may publish anything except what the leaf carries to the hub, bar one reply to a
+    # request it was delivered (E-W1-LEAF-1). allow_responses drops the default allow-all, so ">".
+    [user] = account["users"]
+    assert user["permissions"] == {"publish": {"allow": [">"], "deny": list(LEAF_EXPORTS)},
+                                   "allow_responses": True}
     assert [remote["account"] for remote in config["leafnodes"]["remotes"]] == ["API"]
     assert config["leafnodes"]["remotes"][0]["urls"] == ["$PHOTO_WALL_BUS_LEAF_URL"]
     assert "deny_" not in text
@@ -162,14 +176,20 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     for serial in ("serial-a", "serial-b"):
         account = accounts[account_id(serial)]
         assert set(account) == {"users", "imports"}  # no jetstream, no exports
-        assert account["users"] == [{"user": node_user(serial), "password": node_user(serial)},
-                                    {"user": central_user(serial), "password": central_user(serial)}]
+        # The leaf's subject contract (E-W1-LEAF-1): the Node's leaf user sends only the exports and
+        # receives only the imports; Central sends only the imports and subscribes only to its
+        # wildcard inboxes.
+        assert account["users"] == [
+            {"user": node_user(serial), "password": node_user(serial), "permissions": {
+                "publish": {"allow": list(LEAF_EXPORTS)}, "subscribe": {"allow": list(LEAF_IMPORTS)}}},
+            {"user": central_user(serial), "password": central_user(serial), "permissions": {
+                "publish": {"allow": list(LEAF_IMPORTS)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
         assert account["imports"] == WALL_IMPORTS
     wall = accounts[WALL_ACCOUNT]
     assert wall["jetstream"] == {"max_bytes_required": True}
     assert wall["users"] == [{"user": WALL_WRITER_USER, "password": WALL_WRITER_USER}]
     assert wall["exports"] == [
-        {"service": "$JS.API.CONSUMER.CREATE.WALL"}, {"service": "$JS.API.CONSUMER.CREATE.WALL.>"},
+        {"service": "$JS.API.CONSUMER.CREATE.*"}, {"service": "$JS.API.CONSUMER.CREATE.WALL.>"},
         {"service": "$JS.API.CONSUMER.DELETE.WALL.*"}, {"stream": "DELIVER.WALL.>"},
         {"service": "$JS.FC.WALL.>"}, {"service": "$JS.FC.*.*.WALL.>"}]
     assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER}]}
@@ -256,6 +276,11 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
             buffer("X", 1, **{field: None})
     with pytest.raises(ValueError, match="buffer_needs_a_byte_cap"):
         buffer("X", 0)
+    # No buffer forwards: a republish is a server publish no permission checks, the one way a Node
+    # stream could send across the leaf what Central did not pull (E-W1-LEAF-1).
+    for field in ("republish", "sources", "mirror", "subject_transform"):
+        with pytest.raises(ValueError, match="buffer_never_forwards"):
+            buffer("X", 1, **{field: None})
     with pytest.raises(ValueError, match="buffer_message_past_the_leaf"):
         buffer("X", 1, max_msg_size=MAX_STORED_MESSAGE + 1)
     with pytest.raises(ValueError, match="documents_value_past_the_leaf"):
@@ -266,88 +291,62 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
         sticky_bucket(Documents.wall({"a": 1}))
 
 
-def test_one_class_table_holds_the_whole_store_and_a_resplit_never_raises_it():
+def test_one_class_table_holds_the_whole_store_within_the_servers_stream_count():
     # One owner declares the whole table; its caps never pass the store, so no declare meets 10047
-    # in any order, and Central's override moves bytes inside the same total (E-W1-TD-S2).
+    # in any order (E-W1-TD-S2), and it has no more streams than the server admits (E-W1-FIT-1).
     table = node_split()
+    assert len(table.buffers) == NODE_MAX_STREAMS
     assert sum(config.max_bytes for config in table.buffers.values()) <= table.total == NODE_STORE_BYTES
     room = table.total - sum(config.max_bytes for config in table.buffers.values())
-    with pytest.raises(ValueError, match="class_table_over_total"):
-        table.resplit({"REC_player": table.buffers["REC_player"].max_bytes + room + 1})
-    moved = table.resplit({"REC_player": table.buffers["REC_player"].max_bytes - 4096,
-                           "REC_host": table.buffers["REC_host"].max_bytes + 4096 + room})
-    assert sum(config.max_bytes for config in moved.buffers.values()) == table.total
-    with pytest.raises(ValueError, match="class_table_sticky_cap"):
-        table.resplit({"KV_desired_player": 1})
     with pytest.raises(ValueError, match="class_table_past_the_store"):
         ClassTable(dict(table.buffers), NODE_STORE_BYTES + 1)
     with pytest.raises(ValueError, match="class_table_over_total"):
-        ClassTable({**table.buffers, "EXTRA": buffer("EXTRA", room + 1)})
+        ClassTable({**table.buffers, "REC_host": replace(table.buffers["REC_host"],
+                                                         max_bytes=table.buffers["REC_host"].max_bytes + room + 1)})
+    with pytest.raises(ValueError, match="class_table_too_many_streams"):
+        ClassTable({**table.buffers, "EXTRA": buffer("EXTRA", 1)})
     with pytest.raises(ValueError, match="class_table_unbuilt_buffer"):
         ClassTable({"RAW": replace(buffer("RAW", 1), metadata=None)})
 
 
-
-def test_a_class_table_whose_store_cannot_fit_the_bus_fence_fails_to_build():
+def test_the_store_fits_the_bus_fence_for_any_class_table(monkeypatch):
     # The store is tmpfs inside the bus's cgroup. A discard-old file stream's files reach its cap plus
-    # one block, 4 MiB from a 128,000-byte cap up, beside the heap GOMEMLIMIT holds. A table past
-    # that room would OOM-loop its bus on every restart that reloads a full store, so building the
-    # table fails, Central's re-split included (E-W1-STORE-1).
+    # one block, which the server fixes at create and which no cap up to the store makes larger than
+    # 4 MiB. The server caps the sum of the caps (max_file_store) and the stream count (max_streams),
+    # so for any client and any table the files fit beside the heap GOMEMLIMIT holds (E-W1-STORE-1,
+    # E-W1-FIT-1); contracts checks this at import. Zero slack: an 18th stream needs the owner.
     mib = 1024 * 1024
     assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT) == (224 * mib, 140 * mib)   # STORE1 = A, measured
-    assert NODE_BUS_STORE_ROOM == NODE_BUS_MEMORY_MAX - NODE_BUS_GOMEMLIMIT - NODE_BUS_HEADROOM > NODE_STORE_BYTES
-    # ns:server/stream.go:1595-1607; 127,999 and 128,000 probed on 2.15.0 (32,000-byte blocks below).
-    assert [filestore_block_bytes(cap) for cap in (1, 127_999, 128_000, 33_554_399, 33_554_400)] == [
-        32_000, 32_000, 4 * mib, 4 * mib, 8 * mib]
+    assert (NODE_STORE_BYTES, NODE_MAX_STREAMS, FILESTORE_BLOCK_BOUND, NODE_BUS_HEADROOM) == (12 * mib, 17, 4 * mib, 4 * mib)
+    assert 12 * mib + 17 * 4 * mib + 140 * mib + 4 * mib <= 224 * mib
+    assert (NODE_STORE_BYTES + NODE_MAX_STREAMS * FILESTORE_BLOCK_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
+            == NODE_BUS_MEMORY_MAX)
+    # The largest cap's block (ns:server/stream.go:1595-1607): cap // 4 + 1 rounded up to 100, under
+    # the 8 MiB maximum, so the 4 MiB medium block.
+    assert -(-(NODE_STORE_BYTES // 4 + 1) // 100) * 100 < 8 * mib
+    # The whole store in the page's 17 streams builds: the per-table check is the same identity.
     table = node_split()
-    caps = {name: config.max_bytes for name, config in table.buffers.items()}
-    assert table.store_bound == sum(caps.values()) + 17 * 4 * mib <= NODE_BUS_STORE_ROOM
-    room = table.total - sum(caps.values())
-    assert room > 128_000
-    # One more small buffer fits; the same one at 128,000 bytes brings a 4 MiB block and does not.
-    small = ClassTable({**table.buffers, "SMALL": buffer("SMALL", 127_999)})
+    rest = NODE_STORE_BYTES - sum(config.max_bytes for config in table.buffers.values())
+    whole = {**table.buffers, "REC_host": replace(table.buffers["REC_host"],
+                                                  max_bytes=table.buffers["REC_host"].max_bytes + rest)}
+    ClassTable(whole)
+    # A fence one byte smaller refuses it: the table charges every stream the flat block.
+    monkeypatch.setattr(buffers, "NODE_BUS_MEMORY_MAX", NODE_BUS_MEMORY_MAX - 1)
     with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
-        ClassTable({**table.buffers, "LARGE": buffer("LARGE", 128_000)})
-    with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
-        small.resplit({"SMALL": 128_000})
-    # The whole store in the page's 17 streams fills the room exactly.
-    whole = table.resplit({"REC_host": caps["REC_host"] + room})
-    assert whole.store_bound == NODE_BUS_STORE_ROOM
+        ClassTable(whole)
 
-
-def test_a_resplit_is_charged_the_block_each_stream_was_created_with():
-    # nats-server fixes a stream's block when it creates it (ns:server/stream.go:1098, 1578-1607) and
-    # an update keeps it, so a stream created at 128,000 B and shrunk below it still grows in 4 MiB
-    # blocks. A re-split keeps charging that block: one that would pass the fence once applied to a
-    # store created by its source table fails to build (E-W1-FV-3). The live proof is
-    # test_a_stream_shrunk_by_a_resplit_stays_within_its_charge (limits).
-    mib = 1024 * 1024
-    x = ClassTable({f"B{index:02}": buffer(f"B{index:02}", 128_000, subjects=[f"b{index}.>"])
-                    for index in range(19)})
-    assert x.store_bound == 19 * (128_000 + 4 * mib) <= NODE_BUS_STORE_ROOM
-    rest = (NODE_STORE_BYTES - 3 * 1_000) // 16
-    caps = {**{f"B{index:02}": 1_000 for index in range(3)}, **{f"B{index:02}": rest for index in range(3, 19)}}
-    # Charged its current caps' blocks, Y would fit (3 small blocks, 16 large): 76.09 MiB.
-    assert sum(caps.values()) + 3 * 32_000 + 16 * 4 * mib <= NODE_BUS_STORE_ROOM
-    # Applied to a store created as X, every stream keeps its 4 MiB block: 88 MiB, past the room.
-    assert sum(caps.values()) + 19 * 4 * mib > NODE_BUS_STORE_ROOM
-    with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
-        x.resplit(caps)
-    # The block is kept along the whole line of re-splits, and a re-split back up is charged its own.
-    small = ClassTable({"S": buffer("S", 1_000), "T": buffer("T", 128_000)})
-    assert small.resplit({"T": 1_000}).resplit({"T": 2_000}).charge("T") == 2_000 + 4 * mib
-    assert small.resplit({"S": 128_000}).charge("S") == 128_000 + 4 * mib
-    assert small.charge("S") == 1_000 + 32_000
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
 # stream configured or created elsewhere bypasses the buffer rule (E-W1-TD-S1). The guard bans the
 # calls and API subjects that create or change a stream, in any argument form (kwargs included), not
-# only the configuration class, outside nodeapi/buffers.py (E-W1-TD-S5). Pulls go through
-# nodeapi.pull, the only request with a byte budget (E-W1-TD-3).
+# only the configuration class, outside nodeapi/buffers.py (E-W1-TD-S5). Nothing updates a stream's
+# configuration, nodeapi/buffers.py included: a per-Node override waits for E3b (E-W1-FIT-1). Pulls go
+# through nodeapi.pull, the only request with a byte budget (E-W1-TD-3).
 _NOWHERE = ("DiscardPolicy.NEW", "RetentionPolicy.WORK_QUEUE", "RetentionPolicy.INTEREST",
             "create_key_value(", "KeyValueConfig(")
 _STREAM_BUILDER = "nodeapi/buffers.py"
-_STREAM_WRITES = re.compile(r"StreamConfig\(|\b(?:add|update)_stream\b|STREAM\.(?:CREATE|UPDATE)\b")
+_STREAM_WRITES = re.compile(r"StreamConfig\(|\badd_stream\b|STREAM\.CREATE\b")
+_STREAM_UPDATES = re.compile(r"\bupdate_stream\b|STREAM\.UPDATE\b")
 _PULLS = (".fetch(", "pull_subscribe")
 
 
@@ -356,6 +355,7 @@ def _guard_violations(path: str, text: str) -> list[tuple[str, str]]:
     found = [(path, forbidden) for forbidden in _NOWHERE if forbidden in text]
     if path != _STREAM_BUILDER:
         found += [(path, match.group()) for match in _STREAM_WRITES.finditer(text)]
+    found += [(path, match.group()) for match in _STREAM_UPDATES.finditer(text)]
     if re.search(r"^\s*(import nats|from nats)", text, re.MULTILINE) and path != "nodeapi/pull.py":
         found += [(path, forbidden) for forbidden in _PULLS if forbidden in text]
     return found
@@ -387,6 +387,8 @@ def test_the_buffer_guard_refuses_a_stream_created_in_any_form():
                  "StreamConfig(name='X')", "await js.create_key_value(bucket='x')"):
         assert _guard_violations("central/fleet/rr_evasion.py", form), form
     assert _guard_violations("nodeapi/buffers.py", "await jetstream.add_stream(config)") == []
+    assert _guard_violations("nodeapi/buffers.py", "await jetstream.update_stream(config)") == [
+        ("nodeapi/buffers.py", "update_stream")]
     assert _guard_violations("central/fleet/reader.py", "await jetstream.stream_info(name)") == []
 
 
@@ -395,7 +397,7 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     # oldest (ns:server/stream.go:7274, jetstream.go:2536), so it would refuse (10002) the write
     # discard-old takes. Each account only requires every stream to carry its own cap.
     node = _parse_nats_conf(NODE_BUS_CONF.read_text())
-    assert node["accounts"]["API"]["jetstream"] == {"max_bytes_required": True}
+    assert node["accounts"]["API"]["jetstream"] == {"max_bytes_required": True, "max_streams": "17"}
     hub = json.loads(hub_configuration(["serial-a"], LISTENERS))
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
     assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]

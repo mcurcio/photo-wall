@@ -1,8 +1,10 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
 read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2); the leaf through
-a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3). Every stream,
-bucket and mirror is built by `nodeapi.buffers` (E-W1-TD-S1).
+a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3); the leaf's
+subject contract, nothing a Node program does crossing toward a stalled hub, and the mirror's flow
+control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
+(E-W1-TD-S1).
 
 The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; raw nats-py
 clients play Central and Node components. Every service, stream and subject here is the test's.
@@ -41,19 +43,20 @@ from contracts.node_link import (
     MAX_STORED_MESSAGE,
     NODE_DOMAIN,
     NODE_MAX_PAYLOAD,
+    WALL_API_PREFIX,
     WALL_STREAM,
     WALL_STREAM_BYTES,
     account_id,
 )
 from nodeapi.buffers import Documents, bucket, buffer, declare, epoch_of, sticky_bucket
-from nodeapi.documents import DocumentWriter, Token
+from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter, Token
 from nodeapi.pull import pull
 
 VALUE_TOO_LARGE = 10054   # JSStreamMessageExceedsMaximumErr: past the stream's max_msg_size
 LEAF_PREFIX = "photo-wall/bus"   # the test's path prefix; the production route is E3d/E4's
 
 SERVICE = "probe"
-ENDPOINT = "probe.echo"
+ENDPOINT = "probe.method.echo"   # a component's methods are `<component>.method.<name>` (C4)
 
 
 def _leaf_accounts(hub: BusServer) -> list[str]:
@@ -67,10 +70,11 @@ async def _linked(hub: BusServer, count: int) -> None:
 
 
 async def _gather(client, subject: str, seconds: float = .5) -> list[dict]:
-    """Every reply to one request within `seconds` ($SRV discovery answers once per instance)."""
+    """Every reply to one request within `seconds` ($SRV discovery answers once per instance), on a
+    wildcard inbox: the hub lets Central subscribe to no literal one (E-W1-LEAF-1)."""
     inbox = client.new_inbox()
-    subscription = await client.subscribe(inbox)
-    await client.publish(subject, b"", reply=inbox)
+    subscription = await client.subscribe(inbox + ".*")
+    await client.publish(subject, b"", reply=inbox + ".r")
     replies = []
     deadline = time.monotonic() + seconds
     while (left := deadline - time.monotonic()) > 0:
@@ -175,23 +179,6 @@ def test_two_node_accounts_in_domain_node_stay_isolated(tmp_path):
         info_b = await central_b.jetstream(domain=NODE_DOMAIN).stream_info("PROBE")
         assert (info_a.state.messages, info_b.state.messages) == (3, 5)
 
-        # A Node A publish reaches its own Central, and nothing on Node B or as Central B.
-        heard = {"central-a": [], "central-b": [], "node-b": []}
-        for name, client in (("central-a", central_a), ("central-b", central_b), ("node-b", local_b)):
-            async def record(message, name=name):
-                heard[name].append(message.data)
-            await client.subscribe("probe.isolation", cb=record)
-        for client in (central_a, central_b, local_b):
-            await client.flush()
-
-        async def central_a_heard():
-            await local_a.publish("probe.isolation", b"from-a")
-            await local_a.flush()
-            await asyncio.sleep(.1)
-            return heard["central-a"]
-        await until(central_a_heard, 10, "Central A hears Node A")
-        await asyncio.sleep(.5)
-        assert heard["central-b"] == [] and heard["node-b"] == []
         assert sorted(_leaf_accounts(hub)) == sorted([account_id("serial-a"), account_id("serial-b")])
 
         for client in (local_a, local_b, central_a, central_b):
@@ -219,45 +206,46 @@ def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf
         await _linked(hub, 1)
         linked = leaf_connections(hub)
         node_client = await local(node)
-        await declare(node_client.jetstream(), buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
+        # Central stores into a Node only through its JetStream API (E-W1-LEAF-1): a bucket's put.
+        await declare(node_client.jetstream(), bucket("state_probe", history=1, max_bytes=1024 * 1024))
         central_client = await central(hub, "serial-a")
         assert central_client.max_payload == NODE_MAX_PAYLOAD
         jetstream = central_client.jetstream(domain=NODE_DOMAIN)
 
         async def stored():
             try:
-                return await jetstream.publish("player.record.small", b"small", timeout=.5)
+                return await jetstream.publish("$JS.node.API.$KV.state_probe.small", b"small", timeout=.5)
             except (nats.errors.NoRespondersError, nats.errors.TimeoutError, NoStreamResponseError):
                 return None
-        assert (await until(stored, 10, "the Node's stream interest at the hub")).stream == "REC_player"
+        assert (await until(stored, 10, "the Node's stream interest at the hub")).stream == "KV_state_probe"
 
         with pytest.raises(nats.errors.MaxPayloadError):
-            await jetstream.publish("player.record.big", b"B" * (NODE_MAX_PAYLOAD + 1))
+            await jetstream.publish("$JS.node.API.$KV.state_probe.big", b"B" * (NODE_MAX_PAYLOAD + 1))
         with pytest.raises(nats.errors.MaxPayloadError):
-            await central_client.publish("player.record.big", b"B" * (NODE_MAX_PAYLOAD + 1))
+            await central_client.publish("$JS.node.API.$KV.state_probe.big", b"B" * (NODE_MAX_PAYLOAD + 1))
 
         # The largest message crosses the leaf, and the stream refuses it (a message limit, E-W1-TD-2):
         # the largest it stores is MAX_STORED_MESSAGE, which crosses and is stored.
         with pytest.raises(APIError) as too_large:
-            await jetstream.publish("player.record.big", b"L" * NODE_MAX_PAYLOAD)
+            await jetstream.publish("$JS.node.API.$KV.state_probe.big", b"L" * NODE_MAX_PAYLOAD)
         assert too_large.value.err_code == VALUE_TOO_LARGE
-        acknowledgement = await jetstream.publish("player.record.big", b"L" * MAX_STORED_MESSAGE)
-        assert acknowledgement.stream == "REC_player"
+        acknowledgement = await jetstream.publish("$JS.node.API.$KV.state_probe.big", b"L" * MAX_STORED_MESSAGE)
+        assert acknowledgement.stream == "KV_state_probe"
 
         # Past the limit only with its headers: the client sends it, the hub refuses it and closes
         # that client; the Node never sees it.
-        before = (await node_client.jetstream().stream_info("REC_player")).state.messages
-        await central_client.publish("player.record.big", b"H" * NODE_MAX_PAYLOAD, headers={"Probe": "x" * 64})
+        before = (await node_client.jetstream().stream_info("KV_state_probe")).state.messages
+        await central_client.publish("$JS.node.API.$KV.state_probe.big", b"H" * NODE_MAX_PAYLOAD, headers={"Probe": "x" * 64})
         async def closed():
             return central_client.is_closed
         await until(closed, 5, "the hub closes the client that sent past max_payload")
         await asyncio.sleep(.5)
-        assert (await node_client.jetstream().stream_info("REC_player")).state.messages == before
+        assert (await node_client.jetstream().stream_info("KV_state_probe")).state.messages == before
 
         # The leaf never dropped: the same connection id.
         assert leaf_connections(hub) == linked
         again = await central(hub, "serial-a")
-        assert (await again.jetstream(domain=NODE_DOMAIN).publish("player.record.small", b"after")).stream == "REC_player"
+        assert (await again.jetstream(domain=NODE_DOMAIN).publish("$JS.node.API.$KV.state_probe.small", b"after")).stream == "KV_state_probe"
         assert leaf_connections(hub) == linked
         await again.close()
         await node_client.close()
@@ -356,6 +344,209 @@ CONSUMER = ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT,
 IDLE_SECONDS = 3.0   # longer than the ack wait, so an idle fetch means nothing is left to redeliver
 
 
+MIB = 1024 * 1024
+FLOOD_SECONDS = 4.0                    # flat out on each subject while the hub is stalled
+FLOOD_BODY = 200_000                   # random, so nothing on the way compresses it
+RSS_ALLOWANCE = 32 * MIB               # what the Node may grow by while its hub is stalled
+
+
+async def _flood(client, subject: str | None, body: bytes) -> int:
+    """FLOOD_SECONDS of publishes on `subject` flat out, or of subscription churn when it is None."""
+    sent, end = 0, time.monotonic() + FLOOD_SECONDS
+    while time.monotonic() < end:
+        if subject is None:
+            await (await client.subscribe(client.new_inbox())).unsubscribe()
+        else:
+            await client.publish(subject, body)
+        sent += 1
+        if sent % 50 == 0:
+            await asyncio.sleep(0)
+    await client.flush(10)
+    return sent
+
+
+def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(tmp_path):
+    # The hub hangs (SIGSTOP) while a Node program publishes 200,000 B of random bytes flat out on every
+    # subject the hub may hold interest in, churns subscriptions, and points push consumers at the
+    # WALL consumer API and at Central's in-flight pull. The leaf has no pending limit toward the hub,
+    # so anything that crossed would queue in the Node's server until its fence OOM-killed the bus.
+    # The leaf's allow-lists, the Node's refusal of a local publish on an export and Central's
+    # wildcard-only inboxes keep it all on the Node (E-W1-LEAF-1): its memory stays flat, the leaf is
+    # kept, and once the hub resumes, Central's pull, methods, discovery, conditional write and the
+    # wall mirror all work. Central itself reaches only the Node's API, methods and discovery.
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+    refused_at_hub: list[str] = []
+    refused_on_node: list[str] = []
+
+    async def at_hub(error):
+        refused_at_hub.append(str(error))
+
+    async def on_node(error):
+        refused_on_node.append(str(error))
+
+    async def run():
+        await _linked(hub, 1)
+        linked = leaf_connections(hub)
+        central_client = await central(hub, "serial-a", error_cb=at_hub)
+        node_client = await local(node, error_cb=on_node)
+        jetstream = node_client.jetstream()
+        writer = await wall_writer(hub)
+        await declare_wall(writer)
+        await declare_wall_mirror(node_client)
+        await declare(jetstream, buffer("REC_player", 4 * MIB, subjects=["player.record.>"]))
+        await declare(jetstream, buffer("REC_flood", 4 * MIB, subjects=["flood.>"]))
+        table = Documents.bucket(BUCKET, {"show": 64}, history=2)
+        await declare(jetstream, sticky_bucket(table))
+        await DocumentWriter(jetstream, table).put("show", b"node")
+
+        # A component's methods are `<component>.method.<name>`; anything else is not Central's to call.
+        async def echo(request):
+            await request.respond(b"echo:" + request.data)
+        service = await nats.micro.add_service(node_client, name="player", version="0.1.0")
+        await service.add_endpoint(name="echo", subject="player.method.echo", handler=echo)
+        replies: list[str] = []
+
+        async def reveal(message):
+            replies.append(message.reply)
+            await message.respond(b"ok")
+
+        async def answer(message):
+            await message.respond(b"answered")
+        await node_client.subscribe("player.method.reveal", cb=reveal)
+        await node_client.subscribe("player.echo", cb=answer)
+        await _await_interest(central_client, "player.method.echo")
+        await central_client.request("player.method.reveal", b"", timeout=2)
+        [central_reply] = replies   # `_CENTRAL.<id>.<token>`: Central's live wildcard inbox
+
+        # Central's reach, refused at the hub: a publish outside the Node's API and methods, a
+        # subscription outside its wildcard inboxes, and a call to a subject that is not a method.
+        await central_client.publish("player.record.x", b"central")
+        await central_client.subscribe("player.event.>")
+        await central_client.subscribe("_CENTRAL.x")
+        await central_client.flush()
+        with pytest.raises((nats.errors.NoRespondersError, nats.errors.TimeoutError)):
+            await central_client.request("player.echo", b"", timeout=1)
+
+        async def refusals():
+            return len(refused_at_hub) >= 4
+        await until(refusals, 5, "the hub refuses Central's four")
+        for refused in ('publish to "player.record.x"', 'subscription to "player.event.>"',
+                        'subscription to "_central.x"', 'publish to "player.echo"'):   # nats-py lowercases
+            assert any(refused in error.lower() for error in refused_at_hub), (refused, refused_at_hub)
+        assert (await jetstream.stream_info("REC_player")).state.messages == 0
+
+        # Central's pull waits on an empty stream; its request's reply subject is the push target.
+        await central_client.jetstream(domain=NODE_DOMAIN).add_consumer(
+            "REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
+        waiting_request = asyncio.get_running_loop().create_future()
+
+        async def spy(message):
+            if "expires" in json.loads(message.data) and not waiting_request.done():
+                waiting_request.set_result(message.reply)
+        await node_client.subscribe("$JS.API.CONSUMER.MSG.NEXT.REC_player.central", cb=spy)
+        await node_client.flush()
+        waiting = asyncio.create_task(pull(central_client, "REC_player", "central", 10, timeout=60,
+                                           domain=NODE_DOMAIN))
+        pull_reply = await asyncio.wait_for(waiting_request, 5)
+        await asyncio.sleep(.5)
+
+        hub.pause()
+        record = os.urandom(MAX_STORED_MESSAGE - 1024)
+        for index in range(20):
+            await jetstream.publish(f"player.record.{index}", record)
+            await jetstream.publish(f"flood.{index}", record)
+        consumer_api = f"{WALL_API_PREFIX}.CONSUMER.CREATE.{WALL_STREAM}"
+        pushers = [f"push{target}{index}" for target in range(2) for index in range(5)]
+        for name in pushers:
+            await jetstream.add_consumer("REC_flood", ConsumerConfig(
+                durable_name=name, deliver_subject=(consumer_api, pull_reply)[int(name[4])],
+                ack_policy=AckPolicy.NONE, deliver_policy=DeliverPolicy.ALL))
+        await asyncio.sleep(1)
+        # The baseline is taken after the records, whose blocks the store caches: what follows is
+        # only what the program sends and churns.
+        before = node.rss_bytes()
+        body = os.urandom(FLOOD_BODY)
+        flooded = {subject: await _flood(node_client, subject, body) for subject in (
+            "player.event.x", central_reply.rsplit(".", 1)[0] + ".flood", consumer_api, "$JS.FC.WALL.a.b")}
+        flooded["churn"] = await _flood(node_client, None, body)
+        grown = node.rss_bytes() - before
+        bound = [name for name in pushers if (await jetstream.consumer_info("REC_flood", name)).push_bound]
+        hub.resume()
+
+        assert all(count > 100 for count in flooded.values()), flooded
+        assert grown <= RSS_ALLOWANCE, f"the Node grew {grown / MIB:.1f} MiB under a stalled hub: {flooded}"
+        assert bound == [], f"push consumers bound to a subject across the leaf: {bound}"
+        # The program's publishes on the leaf's exports were refused at its own connection.
+        assert any('publish to "_central.' in error.lower() for error in refused_on_node)
+
+        # The hub resumed: the same leaf, and every path Central uses works.
+        got = await waiting
+        assert got and [message.subject for message in got] == [f"player.record.{index}" for index in range(len(got))]
+        for message in got:
+            await message.ack_sync()
+        assert leaf_connections(hub) == linked
+        assert [ping["id"] for ping in await _gather(central_client, "$SRV.PING.player")] == [service.id]
+        assert (await central_client.request("player.method.echo", b"hi", timeout=2)).data == b"echo:hi"
+        document = DocumentWriter.node_bucket(central_client, table)
+        _, token = await document.read("show")
+        await document.put("show", b"central", token=token)
+        with pytest.raises(APIError) as stale:
+            await document.put("show", b"stale", token=token)
+        assert stale.value.err_code == WRONG_LAST_SEQUENCE
+        await writer.jetstream().publish("wall.after", b"after")
+
+        async def mirrored():
+            return await wall_value(node_client, "wall.after") == b"after"
+        await until(mirrored, 10, "the wall mirror holds the write made after the stall")
+        assert [name for name in pushers if (await jetstream.consumer_info("REC_flood", name)).push_bound] == []
+        assert leaf_connections(hub) == linked
+        for client in (writer, central_client, node_client):
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
+def test_the_wall_mirror_carries_more_than_its_flow_control_window(tmp_path):
+    # The hub's consumer for a mirror pauses once its flow-control window is out until the mirror
+    # answers on `$JS.FC.WALL...`, one of the few subjects the leaf carries toward the hub
+    # (E-W1-LEAF-1). 80 paced writes of nearly the largest stored message, far past the window: each
+    # reaches the Node's mirror within 5 s.
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+
+    async def run():
+        await _linked(hub, 1)
+        writer = await wall_writer(hub)
+        await declare_wall(writer)
+        node_client = await local(node)
+        await declare_wall_mirror(node_client)
+        value = os.urandom(MAX_STORED_MESSAGE - 1024)
+        for index in range(80):
+            acknowledgement = await writer.jetstream().publish("wall.timing", value)
+
+            async def mirrored(seq=acknowledgement.seq):
+                return (await node_client.jetstream().stream_info(WALL_STREAM)).state.last_seq >= seq
+            await until(mirrored, 5, f"write {index} in the Node's mirror")
+        assert await wall_value(node_client, "wall.timing") == value
+        for client in (writer, node_client):
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
 class _Crash(Exception):
     """Central's process dies between committing a message and acknowledging it."""
 
@@ -433,8 +624,9 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         entry = await kv.get("scene")
         assert (entry.value, entry.revision) == (b"central", written)
 
-        # A plain $KV publish from Central never reaches the Node: the leaf denies $KV.> (W9).
-        with pytest.raises(NoStreamResponseError):
+        # A plain $KV publish from Central never reaches the Node: Central may publish only on the
+        # leaf's import list (E-W1-LEAF-1), so the hub refuses it (W9).
+        with pytest.raises((NoStreamResponseError, nats.errors.TimeoutError)):
             await central_client.jetstream().publish(f"$KV.{BUCKET}.scene", b"plain", timeout=1)
         await central_client.publish(f"$KV.{BUCKET}.scene", b"plain")
         await central_client.flush()
@@ -720,65 +912,6 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
             await _holds(node, {"wall.timing": b"through-the-proxy"}, 10)
             assert len(leaf_connections(hub)) == 1 and proxy.paths == [f"/{LEAF_PREFIX}/leafnode"]
             for client in (writer, central_client, node_client):
-                await client.close()
-        finally:
-            node.stop()
-            await proxy.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        node.stop()
-        hub.stop()
-
-
-def test_a_short_uplink_stall_keeps_the_leaf_and_every_event(tmp_path):
-    # Wi-Fi, the ingress or the WAN stalls what the Node sends for 5 s while a component publishes
-    # 40 MB of incompressible events toward Central, more than the socket buffers on the way hold.
-    # The leaf has its own write deadline (the server's default), not the clients' 2 s, so the
-    # server's flush waits the stall out: the leaf keeps its connection and Central gets every event.
-    # With the clients' deadline the Node closed the leaf as a slow consumer and Central got a few
-    # (E-W1-FV-2).
-    hub = hub_server(tmp_path, ["serial-a"])
-    proxy = PrefixProxy(hub.websocket_port, LEAF_PREFIX)
-    node = node_server(tmp_path, "serial-a", hub, prefix=LEAF_PREFIX, leaf_port=proxy.port)
-    hub.start()
-    count, body = 200, os.urandom(200_000)   # under NODE_MAX_PAYLOAD
-
-    async def run():
-        await proxy.start()
-        node.start()
-        try:
-            await _linked(hub, 1)
-            linked = leaf_connections(hub)
-            central_client = await central(hub, "serial-a")
-            received: list[str] = []
-
-            async def on_event(message):
-                received.append(message.subject)
-            await central_client.subscribe("player.event.>", cb=on_event)
-            node_client = await local(node)
-
-            async def central_hears():   # Central's interest crosses the leaf asynchronously
-                await node_client.publish("player.event.ready", b"")
-                await asyncio.sleep(.1)
-                return "player.event.ready" in received
-            await until(central_hears, 10, "Central's interest at the Node")
-
-            proxy.stall()
-            for index in range(count):
-                await node_client.publish(f"player.event.{index}", body)
-            await node_client.flush()
-            await asyncio.sleep(5)
-            proxy.resume()
-
-            async def all_arrived():
-                return len([subject for subject in received if subject != "player.event.ready"]) == count
-            await until(all_arrived, 20, f"all {count} events at Central")
-            assert received[-count:] == [f"player.event.{index}" for index in range(count)]
-            assert leaf_connections(hub) == linked
-            assert "Slow Consumer" not in node.config.with_suffix(".log").read_text()
-            for client in (central_client, node_client):
                 await client.close()
         finally:
             node.stop()

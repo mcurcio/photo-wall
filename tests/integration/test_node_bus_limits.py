@@ -1,10 +1,10 @@
 """The Node bus's store budget on a real server (E3a-3, API8): the server itself refuses, at create,
-a stream past the store limit, one without a byte cap and one in memory; with every buffer on the
-Node full at once and the store wholly reserved, each still takes a write, a circular one dropping
-its oldest and a sticky one keeping every document (the buffer rule, E-W1-BUF-2, E-W1-TD-4); each
-retention class keeps the promise the Node API page states for it. Also: one class table declares
-in any order and re-splits on a full store (E-W1-TD-S2), and re-declaring on it is a no-op, a racing
-create included (E-W1-STORE-1); no reply for a stored message is past the
+a stream past the store limit, an 18th stream, one without a byte cap and one in memory; with every
+buffer on the Node full at once and the store wholly reserved, each still takes a write, a circular
+one dropping its oldest and a sticky one keeping every document (the buffer rule, E-W1-BUF-2,
+E-W1-TD-4); each retention class keeps the promise the Node API page states for it. Also: one class
+table declares in any order (E-W1-TD-S2), and re-declaring on a full store is a no-op, a racing
+create included (E-W1-STORE-1, E-W1-FIT-1); no reply for a stored message is past the
 leaf (E-W1-TD-2), whatever its subject (E-W1-TD-6), and a reply that grows with a stream's state does
 close it, which nodeapi never asks (recorded, E-W1-TD-9); a busy component is never cut off by a pull,
 however many it runs at once (E-W1-TD-3, -7).
@@ -48,6 +48,7 @@ from contracts.node_link import (
     NODE_DOMAIN,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
+    NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
@@ -58,7 +59,6 @@ from nodeapi.buffers import (
     STICKY,
     ClassTable,
     Documents,
-    apply_table,
     bucket,
     buffer,
     buffer_kind,
@@ -72,6 +72,7 @@ from nodeapi.documents import DocumentRefused, DocumentWriter, missing_documents
 from nodeapi.pull import PULL_MAX_BYTES, pull
 
 STORAGE_EXCEEDED = 10047        # JSStorageResourcesExceededErr: past the store's reservation
+MAX_STREAMS_REACHED = 10027     # JSMaximumStreamsLimitErr: past node-bus.conf's max_streams
 MAX_BYTES_REQUIRED = 10113      # JSStreamMaxBytesRequired: account API refuses an uncapped stream
 MEMORY_EXCEEDED = 10028         # JSMemoryResourcesExceededErr: the server has no memory store
 VALUE_TOO_LARGE = 10054         # JSStreamMessageExceedsMaximumErr: over max_value_size
@@ -142,10 +143,8 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         await jetstream.publish("player.record.asrun", b"as-run 1")
         before = {name: (await jetstream.stream_info(name)) for name in caps}
 
-        # The fence acts at create only: one more stream, or a raised cap, does not fit (10047).
-        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), STORAGE_EXCEEDED)
-        raised = ClassTable({"REC_player": dataclasses.replace(before["REC_player"].config, max_bytes=5 * MIB)})
-        await _refused(apply_table(jetstream, raised), STORAGE_EXCEEDED)
+        # The fence acts at create only: one more stream does not fit (10027, the stream count).
+        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), MAX_STREAMS_REACHED)
 
         # Nothing that was there moved.
         assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(caps)
@@ -224,12 +223,13 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
 
 
 def _whole_store() -> ClassTable:
-    """The page's split with the rest of the store re-split to REC_host: the caps total the store.
-    Re-split, not a new buffer, so the table keeps its 17 file streams and its store bound fits the
-    bus's memory fence exactly (an 18th 4 MiB-block stream would not, E-W1-STORE-1)."""
-    split = node_split()
-    rest = STORE_LIMIT - sum(config.max_bytes for config in split.buffers.values())
-    return split.resplit({"REC_host": split.buffers["REC_host"].max_bytes + rest})
+    """The page's split with the rest of the store given to REC_host: the caps total the store. A
+    larger cap, not a new buffer, so the table keeps its 17 file streams, the server's most
+    (E-W1-FIT-1)."""
+    split = node_split().buffers
+    rest = STORE_LIMIT - sum(config.max_bytes for config in split.values())
+    return ClassTable({**split, "REC_host": dataclasses.replace(
+        split["REC_host"], max_bytes=split["REC_host"].max_bytes + rest)})
 
 
 def _full_wall_table() -> Documents:
@@ -385,10 +385,9 @@ def test_each_retention_class_keeps_its_promise(tmp_path, retention_class):
     _run(node, body)
 
 
-def test_one_class_table_declares_in_any_order_and_resplits_a_wholly_reserved_store(tmp_path):
+def test_one_class_table_declares_in_any_order_on_a_wholly_reserved_store(tmp_path):
     # One owner declares the whole table; its caps total the store, so whichever buffer comes last
-    # is never the one refused (10047), and Central's override moves bytes inside that total on a
-    # live store, every shrink before any growth (E-W1-TD-S2).
+    # is never the one refused (10047), and every connect's re-declare changes nothing (E-W1-TD-S2).
     node = _node(tmp_path)
 
     async def body():
@@ -396,18 +395,42 @@ def test_one_class_table_declares_in_any_order_and_resplits_a_wholly_reserved_st
         jetstream = client.jetstream()
         table = _whole_store()
         await declare_table(jetstream, ClassTable(dict(reversed(list(table.buffers.items())))))
-        await declare_table(jetstream, table)   # every connect re-declares: nothing changes
         epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in table.buffers}
+        await declare_table(jetstream, table)   # every connect re-declares: nothing changes
         caps = {name: config.max_bytes for name, config in table.buffers.items()}
         assert sum(caps.values()) == STORE_LIMIT
-
-        moved = table.resplit({"REC_player": caps["REC_player"] - MIB, "REC_host": caps["REC_host"] + MIB})
-        await apply_table(jetstream, moved)
-        for name, config in moved.buffers.items():
+        for name, cap in caps.items():
             info = await jetstream.stream_info(name)
-            assert (info.config.max_bytes, epoch_of(info)) == (config.max_bytes, epochs[name]), name
-        await apply_table(jetstream, table)
-        assert {name: (await jetstream.stream_info(name)).config.max_bytes for name in caps} == caps
+            assert (info.config.max_bytes, epoch_of(info)) == (cap, epochs[name]), name
+        await client.close()
+
+    _run(node, body)
+
+
+def test_the_server_refuses_an_eighteenth_stream_and_a_stream_past_the_store(tmp_path):
+    # The fit's two server limits act at create only (E-W1-FIT-1): on a store at its 17 streams an
+    # 18th is refused for the count (10027) and every stream still takes writes; with one stream gone,
+    # a stream past the room left is refused for the store (10047), and one inside it is created.
+    node = _node(tmp_path)
+
+    async def body():
+        client = await local(node)
+        jetstream = client.jetstream()
+        table = _whole_store()
+        await declare_table(jetstream, table)
+        assert len(await jetstream.streams_info()) == NODE_MAX_STREAMS
+        await _refused(declare(jetstream, buffer("EXTRA", 1024, subjects=["extra.>"])), MAX_STREAMS_REACHED)
+        cap = table.buffers["REC_player"].max_bytes
+        for index in range(cap // FILL_CHARGE + 8):
+            acknowledgement = await jetstream.publish("player.record.fill", _fill("player.record.fill"))
+            assert acknowledgement.stream == "REC_player", index
+        assert (await jetstream.stream_info("REC_player")).state.bytes <= cap
+
+        freed = table.buffers["REC_host"].max_bytes
+        await jetstream.delete_stream("REC_host")
+        await _refused(declare(jetstream, buffer("EXTRA", freed + 1, subjects=["extra.>"])), STORAGE_EXCEEDED)
+        assert await declare(jetstream, buffer("EXTRA", freed, subjects=["extra.>"])) is True
+        await _refused(declare(jetstream, table.buffers["REC_host"]), MAX_STREAMS_REACHED)
         await client.close()
 
     _run(node, body)
@@ -452,49 +475,9 @@ def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declar
         [(made, my_epoch)] = created
         assert made is True and epoch_of(await jetstream.stream_info(racing)) == my_epoch
 
-        # A stream that is absent still meets the full store's refusal: the no-op covers only a stream
-        # that exists.
-        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), STORAGE_EXCEEDED)
-        await client.close()
-
-    _run(node, body)
-
-
-def test_a_stream_shrunk_by_a_resplit_stays_within_its_charge(tmp_path):
-    # The server fixes a stream's file-store block when it creates it and an update keeps it
-    # (ns:server/stream.go:1098, 1578-1607): S, created at 4 MiB and shrunk to 100,000 B, still grows
-    # in 4 MiB blocks, about 2 MB of files where its new cap's 32,000-byte block would allow 132,000.
-    # The re-split table charges it the block it was created with, so its files stay inside the
-    # table's store bound; and a table built anew with small caps, applied to a store created with
-    # large ones, fails the fence check before it changes anything (E-W1-FV-3).
-    node = _node(tmp_path)
-
-    async def body():
-        client = await local(node)
-        jetstream = client.jetstream()
-        created = ClassTable({"S": buffer("S", 4 * MIB, subjects=["s.>"]),
-                              "T": buffer("T", 4 * MIB, subjects=["t.>"])})
-        shrunk = created.resplit({"S": 100_000, "T": 8 * MIB - 100_000})
-        await declare_table(jetstream, created)
-        await apply_table(jetstream, shrunk)
-        assert (await jetstream.stream_info("S")).config.max_bytes == 100_000
-        for _ in range(6000):
-            await jetstream.publish("s.k", b"z" * 1000)
-        directory = next(path for path in node.store.rglob("S") if path.is_dir())
-        files = sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
-        assert 100_000 + 32_000 < files <= shrunk.charge("S")
-
-        for name in created.buffers:
-            await jetstream.delete_stream(name)
-        large = ClassTable({f"B{index:02}": buffer(f"B{index:02}", 128_000, subjects=[f"b{index}.>"])
-                            for index in range(19)})
-        await declare_table(jetstream, large)
-        rest = (STORE_LIMIT - 3 * 1_000) // 16
-        anew = ClassTable({name: dataclasses.replace(config, max_bytes=1_000 if index < 3 else rest)
-                           for index, (name, config) in enumerate(large.buffers.items())})
-        with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
-            await apply_table(jetstream, anew)
-        assert {(await jetstream.stream_info(name)).config.max_bytes for name in large.buffers} == {128_000}
+        # A stream that is absent still meets the full store's refusal (its 17 streams): the no-op
+        # covers only a stream that exists.
+        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), MAX_STREAMS_REACHED)
         await client.close()
 
     _run(node, body)
@@ -564,12 +547,14 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
 
 
 def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tmp_path):
-    # A reply naming a stored message repeats its subject, JSON-escaped at six bytes for `<` or `&`,
-    # so a long subject on the largest record once closed the leaf. Both servers' max_control_line
-    # (the server's default, pinned) bounds every stored subject: the longest line a Node component or
-    # Central sends is stored, one byte more closes only that client, and Central reads the largest record under each worst-escaping
-    # longest subject, and the largest document under the longest key a writer admits, every way that
-    # carries a subject back across the leaf, with the leaf kept (E-W1-TD-6).
+    # A reply naming a stored message repeats its subject, JSON-escaped at six bytes for `<`, so a long
+    # subject on the largest record once closed the leaf. Both servers' max_control_line (the server's
+    # default, pinned) bounds every stored subject: the longest line a Node component sends is stored,
+    # one byte more closes only that client, and Central reads the largest record under the
+    # worst-escaping longest subject, and the largest document under the longest key a writer admits,
+    # every way that carries a subject back across the leaf, with the leaf kept (E-W1-TD-6). Central
+    # itself stores only through `$JS.node.API.$KV`, which stores a subject 13 bytes shorter than the
+    # line it sent (E-W1-LEAF-1), so the local line is the longest.
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
     hub.start()
@@ -586,23 +571,22 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         # nats-py's line for a publish with no reply: PUB, the subject, two spaces and the size.
         longest = NODE_MAX_CONTROL_LINE - len(f"  {len(record)}") - len("player.record.")
         subjects = []
-        for connect, escaped in ((lambda: local(node), "<"), (lambda: central(hub, "serial-a"), "&")):
-            subject = "player.record." + escaped * longest
-            past = await connect()
-            await past.publish(subject + escaped, record)
+        subject = "player.record." + "<" * longest
+        past = await local(node)
+        await past.publish(subject + "<", record)
 
-            async def closed(past=past):
-                return past.is_closed
-            await until(closed, 5, f"the server closes the client past the control line ({escaped})")
-            writer = await connect()
-            await writer.publish(subject, record)
-            await writer.flush(2)
-            await writer.close()
-            subjects.append(subject)
+        async def closed():
+            return past.is_closed
+        await until(closed, 5, "the server closes the client past the control line")
+        writer = await local(node)
+        await writer.publish(subject, record)
+        await writer.flush(2)
+        await writer.close()
+        subjects.append(subject)
 
         async def stored():
             return (await jetstream.stream_info("REC_player")).state.messages == len(subjects)
-        await until(stored, 5, "both longest-subject records are stored, neither past one")
+        await until(stored, 5, "the longest-subject record is stored, not the one past it")
         # A component's KV put under a 1004-byte key, which a lowered control line once answered by
         # closing the component: the server's default line takes it and keeps the client (E-W1-TD-8).
         state = await declare_bucket(jetstream, bucket("state_host", history=1, max_bytes=MIB))
@@ -621,7 +605,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         document = await across.get_last_msg(table.stream, table.subject_prefix + key)
         assert len(document.data) == table.sizes[key]
         await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
-        delivered = await pull(central_client, "REC_player", "central", 2, timeout=2, domain=NODE_DOMAIN)
+        delivered = await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)
         assert [message.subject for message in delivered] == subjects
         for message in delivered:
             await message.ack_sync()

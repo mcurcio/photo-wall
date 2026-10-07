@@ -1,14 +1,25 @@
-"""The names both ends of a Node's leaf link derive on their own (decision 0017, C4/C5, API6).
+"""The Node's leaf link: the names both ends derive on their own, and the subject contract of the leaf
+(decision 0017, C4/C5/C18, API6).
 
-No subject grammar lives here: each component owns its subjects. Fleet's hub generator, the
-Node API library and Central's sessions read these names; nothing here crosses a wire except
-the user names, which both sides derive from the serial.
+Both ends read this module. Fleet's hub generator turns it into the hub's accounts and user
+permissions, the shipped node-bus.conf repeats it literally (the config test binds the two), and the
+Node API library and Central's sessions take their inbox prefix, numbers and fit check from it.
+Nothing here crosses a wire except the user names, which both sides derive from the serial.
+
+The leaf rule (erratum E-W1-LEAF-1): nothing crosses the leaf toward the hub except replies to
+Central, the WALL mirror's own consumer API and flow control (LEAF_EXPORTS). Central reaches into the
+Node only on LEAF_IMPORTS: the Node's JetStream API, acknowledgements, service discovery, component
+methods (`<component>.method.<name>`) and the mirror's deliveries. The hub enforces both lists on the
+Node's leaf user, the Node's own server refuses every local publish on an export, and Central may
+subscribe only to two-token-deep inboxes under CENTRAL_INBOX_PREFIX, so no Node stream can push to
+it. A Node program therefore cannot queue anything toward a stalled hub: the leaf carries only what
+Central's own requests and pulls asked for.
 
 The buffer rule (owner steer 2026-10-06, errata E-W1-BUF-2, E-W1-TD-4) needs no number here: every
 stream, bucket and mirror is a JetStream limits stream with discard old, built only by `nodeapi`;
 event buffers drop their oldest when full, sticky documents are never full. The numbers both ends
-bind are the leaf's largest message, the largest stored one, the Node's store and pending caps, and
-the bus's memory fence the store must fit (E-W1-STORE-1).
+bind are the leaf's largest message, the largest stored one, the Node's store, stream count and
+pending caps, and the bus's memory fence the store must fit (E-W1-STORE-1, E-W1-FIT-1).
 """
 from __future__ import annotations
 
@@ -67,33 +78,75 @@ NODE_BUS_GOMEMLIMIT: Final = 140 * 1024 * 1024
 # What the server holds that GOMEMLIMIT does not count (thread stacks, runtime metadata, kernel
 # memory charged to the cgroup): the low end of the measured 4-20 MiB.
 NODE_BUS_HEADROOM: Final = 4 * 1024 * 1024
-# What the fence leaves for the store's pages: every class table's store bound fits it (nodeapi).
-NODE_BUS_STORE_ROOM: Final = NODE_BUS_MEMORY_MAX - NODE_BUS_GOMEMLIMIT - NODE_BUS_HEADROOM
+# node-bus.conf's API account `max_streams`: the server refuses an 18th stream at create (10027), never
+# a write into a full one (erratum E-W1-FIT-1). With max_file_store capping the sum of every cap, it
+# bounds the store's files for any client and any class table.
+NODE_MAX_STREAMS: Final = 17
+# The most one file stream's block can be: nats-server 2.15.0 fixes a stream's block when it creates
+# it, from its cap (ns:server/stream.go:1595-1607, ns:server/filestore.go:373-393): cap // 4 + 1 rounded
+# up to 100 bytes, 32,000 at or under that, 8 MiB at or over 8 MiB, 4 MiB between. A cap is at most
+# NODE_STORE_BYTES, so no block passes 4 MiB. A discard-old stream frees a block only when its last
+# message goes, so its files reach its cap plus one block; every stream is charged this flat bound,
+# whatever cap it was created with or has since.
+FILESTORE_BLOCK_BOUND: Final = 4 * 1024 * 1024
+_FILESTORE_MAX_BLOCK = 8 * 1024 * 1024   # nats-server's largest block, which no cap here may reach
 
-# nats-server 2.15.0's file-store block size for a stream with a byte cap (ns:server/stream.go:1595-1607,
-# ns:server/filestore.go:373-393): cap // 4 + 1 rounded up to 100 bytes, then the 32,000-byte minimum
-# at or under it, the 8 MiB maximum at or over it, and 4 MiB between. So a cap under 128,000 bytes gets
-# 32,000-byte blocks and one from 128,000 up to 32 MiB gets 4 MiB blocks. No option changes it.
-FILESTORE_MIN_BLOCK: Final = 32_000
-FILESTORE_MEDIUM_BLOCK: Final = 4 * 1024 * 1024
-FILESTORE_MAX_BLOCK: Final = 8 * 1024 * 1024
-
-
-def filestore_block_bytes(max_bytes: int) -> int:
-    """The block size nats-server 2.15.0 gives a file stream capped at `max_bytes`. A discard-old
-    stream frees a block only when its last message goes, so its files reach its cap plus one block."""
-    if max_bytes <= 0:
-        raise ValueError("filestore_needs_a_byte_cap")
-    size = max_bytes // 4 + 1
-    size += -size % 100
-    if size <= FILESTORE_MIN_BLOCK:
-        return FILESTORE_MIN_BLOCK
-    return FILESTORE_MAX_BLOCK if size >= FILESTORE_MAX_BLOCK else FILESTORE_MEDIUM_BLOCK
+# The fit (E-W1-FIT-1), checked here at import so no build of this tree can ship a store past its
+# fence: every byte the store may hold (12 MiB) plus a block per stream (17 x 4 MiB) plus the heap
+# GOMEMLIMIT allows (140 MiB) plus the headroom (4 MiB) is 224 MiB, the fence, with zero slack.
+if (NODE_STORE_BYTES + NODE_MAX_STREAMS * FILESTORE_BLOCK_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
+        > NODE_BUS_MEMORY_MAX or -(-(NODE_STORE_BYTES // 4 + 1) // 100) * 100 >= _FILESTORE_MAX_BLOCK):
+    raise RuntimeError("node_bus_store_past_its_fence")
 
 
 # node-bus.conf's max_pending: what the server queues for one local client before it closes it as a
 # slow consumer. nodeapi caps every pull at half of it (E-W1-TD-3).
 NODE_MAX_PENDING: Final = 2 * 1024 * 1024
+
+# Central's inbox namespace: Central's every hub client connects with this inbox prefix, so every
+# reply to it, and only a reply to it, starts with `_CENTRAL.`.
+CENTRAL_INBOX_PREFIX: Final = "_CENTRAL"
+# A component's method subjects are `<component>.method.<name>` (C4): the one place Central sends a
+# core request into the Node, besides the APIs below.
+METHOD_TOKEN: Final = "method"
+
+# What a Node's mirror of WALL needs from the WALL account: the consumer API it creates and deletes its
+# mirror consumer through (imported under WALL_API_PREFIX), and flow control (v1 and v2 forms). The
+# consumer create is a wildcard, never the literal `CREATE.WALL`: a push consumer starts delivering
+# only to a subject some subscription names literally (ns:server/sublist.go:169-195), so no Node
+# consumer can push its stream at the hub's import of it.
+WALL_CONSUMER_SERVICES: Final = (
+    "$JS.API.CONSUMER.CREATE.*",
+    f"$JS.API.CONSUMER.CREATE.{WALL_STREAM}.>",
+    f"$JS.API.CONSUMER.DELETE.{WALL_STREAM}.*",
+)
+WALL_FLOW_CONTROL_SERVICES: Final = (f"$JS.FC.{WALL_STREAM}.>", f"$JS.FC.*.*.{WALL_STREAM}.>")
+
+# The leaf's outbound list: the only subjects a message may cross the leaf toward the hub on, the
+# Node's leaf user's publish allow-list. The hub sends it to the Node in its INFO and the Node checks
+# every message against it before it queues one on the leaf (ns:server/leafnode.go:1716-1735,
+# client.go:3811-3818). Replies to Central, the mirror's consumer API and its flow control.
+LEAF_EXPORTS: Final = (
+    f"{CENTRAL_INBOX_PREFIX}.>",
+    *(WALL_API_PREFIX + subject.removeprefix("$JS.API") for subject in WALL_CONSUMER_SERVICES),
+    *WALL_FLOW_CONTROL_SERVICES,
+)
+# The leaf's inbound list: the only subjects the hub carries to the Node, the leaf user's subscribe
+# allow-list and Central's publish allow-list. The Node announces a local subscription to the hub
+# only inside it, so subscription churn on the Node sends the hub nothing. The Node's JetStream API,
+# acknowledgements, service discovery, component methods, the mirror's deliveries and its consumer
+# create replies.
+LEAF_IMPORTS: Final = (
+    f"$JS.{NODE_DOMAIN}.API.>",
+    "$JS.ACK.>",
+    "$SRV.>",
+    f"*.{METHOD_TOKEN}.>",
+    f"{WALL_DELIVER_PREFIX}.>",
+    "$JSC.R.>",
+)
+# Central's subscribe allow-list: a wildcard inbox (`_CENTRAL.<id>.*`) only. A literal inbox, the only
+# subject a push consumer binds to, is refused at the hub (nodeapi.pull subscribes `<inbox>.*`).
+CENTRAL_SUBSCRIPTIONS: Final = (f"{CENTRAL_INBOX_PREFIX}.*.*",)
 
 # The enrolment serial's charset (central/content_catalog/catalog.py). A `:` would break a leaf
 # URL's user:password@ and a `.` would split $SYS.ACCOUNT.<name> subjects, so the account name

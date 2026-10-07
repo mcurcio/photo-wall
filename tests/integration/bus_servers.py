@@ -39,6 +39,7 @@ from nats.js.errors import NotFoundError
 
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
+    CENTRAL_INBOX_PREFIX,
     WALL_STREAM,
     WALL_WRITER_USER,
     account_id,
@@ -197,17 +198,39 @@ class BusServer:
         return "running" if code is None else f"exited {code}"
 
     def stop(self) -> None:
-        """SIGTERM and wait; the store stays."""
+        """SIGTERM and wait (a paused server is resumed first); the store stays."""
         _RUNNING.pop(id(self), None)
         process, self._process = self._process, None
         if process is None or process.poll() is not None:
             return
+        process.send_signal(signal.SIGCONT)
         process.send_signal(signal.SIGTERM)
         try:
             process.wait(timeout=START_SECONDS)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+    def pause(self) -> None:
+        """SIGSTOP: the server keeps its sockets and answers nothing, as a hub whose host or uplink
+        hangs does, until `resume`."""
+        self._signal(signal.SIGSTOP)
+
+    def resume(self) -> None:
+        self._signal(signal.SIGCONT)
+
+    def rss_bytes(self) -> int:
+        """The server process's resident memory (`ps -o rss=`)."""
+        if self._process is None:
+            raise RuntimeError(f"{self.name} is not running")
+        out = subprocess.run(["ps", "-o", "rss=", "-p", str(self._process.pid)], check=True,
+                             capture_output=True, text=True).stdout
+        return int(out.strip()) * 1024
+
+    def _signal(self, number: int) -> None:
+        if self._process is None or self._process.poll() is not None:
+            raise RuntimeError(f"{self.name} is not running")
+        self._process.send_signal(number)
 
     def wipe(self) -> None:
         """Stop, then delete the store directory."""
@@ -333,10 +356,12 @@ async def _connect(url: str, **options) -> Client:
     return await nats.connect(servers=[url], allow_reconnect=False, connect_timeout=2, **options)
 
 
-async def central(hub: BusServer, serial: str) -> Client:
-    """Central's client in the Node's hub account."""
+async def central(hub: BusServer, serial: str, **options) -> Client:
+    """Central's client in the Node's hub account, its inboxes under CENTRAL_INBOX_PREFIX (the only
+    ones the hub lets it subscribe to, E-W1-LEAF-1)."""
     user = central_user(serial)
-    return await _connect(hub.client_url, user=user, password=user)
+    return await _connect(hub.client_url, user=user, password=user, inbox_prefix=CENTRAL_INBOX_PREFIX,
+                          **options)
 
 
 async def wall_writer(hub: BusServer) -> Client:
@@ -344,9 +369,9 @@ async def wall_writer(hub: BusServer) -> Client:
     return await _connect(hub.client_url, user=WALL_WRITER_USER, password=WALL_WRITER_USER)
 
 
-async def local(node: BusServer) -> Client:
+async def local(node: BusServer, **options) -> Client:
     """A Node component's client: no credentials (no_auth_user)."""
-    return await _connect(node.client_url)
+    return await _connect(node.client_url, **options)
 
 
 async def declare_wall(writer: Client, *, first_seq: int = 1) -> None:
@@ -464,9 +489,7 @@ def leaf_connections(hub: BusServer) -> Mapping[str, int]:
 class PrefixProxy:
     """A reverse proxy in front of the hub's WebSocket listener, as the origin's ingress route is
     (W11, E3d/E4): it forwards a connection whose HTTP request path starts with `/<prefix>/`
-    unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction.
-    `stall()` stops what the Node sends upstream, as a Wi-Fi, ingress or WAN stall does, until
-    `resume()` (E-W1-FV-2)."""
+    unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction."""
 
     def __init__(self, upstream_port: int, prefix: str) -> None:
         self.upstream_port = upstream_port
@@ -474,14 +497,6 @@ class PrefixProxy:
         self.port = _free_port()
         self.paths: list[str] = []
         self._server: asyncio.base_events.Server | None = None
-        self._flowing = asyncio.Event()
-        self._flowing.set()
-
-    def stall(self) -> None:
-        self._flowing.clear()
-
-    def resume(self) -> None:
-        self._flowing.set()
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
@@ -506,15 +521,12 @@ class PrefixProxy:
             return
         upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", self.upstream_port)
         upstream_writer.write(head)
-        await asyncio.gather(_pipe(reader, upstream_writer, self._flowing), _pipe(upstream_reader, writer))
+        await asyncio.gather(_pipe(reader, upstream_writer), _pipe(upstream_reader, writer))
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                flowing: asyncio.Event | None = None) -> None:
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         while True:
-            if flowing is not None:
-                await flowing.wait()
             if not (data := await reader.read(65536)):
                 break
             writer.write(data)

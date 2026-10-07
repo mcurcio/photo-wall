@@ -12,38 +12,70 @@ stream and stay up (a store that cannot fit its fence on restart OOM-loops forev
 The shipped file binds the client port to loopback; `-a 0.0.0.0` (a command-line flag, which
 nats-server applies over the file) lets Docker publish it. Nothing else differs from the file.
 
+A second run hangs the hub (SIGSTOP) while a Node program floods every subject the hub may hold
+interest in, churns subscriptions and points push consumers across the leaf, with Central's pull
+waiting: the leaf has no pending limit toward the hub, so anything that crossed would queue in the
+bus until its fence OOM-killed it. The leaf's subject contract keeps it all on the Node (erratum
+E-W1-LEAF-1); once the hub resumes, Central's pull, conditional write and the wall mirror all work.
+
 Needs Docker and PHOTO_WALL_BUS_FENCE_SERVER, a linux-arm64 nats-server (`scripts/nats_server.py
 fetch` on an arm64 Linux host); checks.yml's `bus-fence` job runs it on ubuntu-24.04-arm.
-PHOTO_WALL_BUS_FENCE_MINUTES sets the write phase (default 5).
+PHOTO_WALL_BUS_FENCE_MINUTES sets the write phase (default 5), PHOTO_WALL_BUS_FENCE_STALL_SECONDS
+the hub's stall (default 60).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import socket
 import subprocess
 import time
 import uuid
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import nats
 import pytest
 from integration.bus_servers import HUB_STORE_BYTES, NODE_BUS_CONF, desired_documents, node_split
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
+from nats.js.errors import APIError
 
 from central.fleet.node_bus_accounts import HubListeners, hub_configuration
 from contracts.node_link import (
+    CENTRAL_INBOX_PREFIX,
+    MAX_STORED_MESSAGE,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_MEMORY_MAX,
+    NODE_DOMAIN,
+    WALL_API_PREFIX,
     WALL_STREAM,
     WALL_WRITER_USER,
+    central_user,
     node_user,
 )
-from nodeapi.buffers import CIRCULAR, buffer_kind, declare, declare_table, epoch_of, wall_config
+from nodeapi.buffers import (
+    CIRCULAR,
+    Documents,
+    buffer,
+    buffer_kind,
+    declare,
+    declare_table,
+    epoch_of,
+    sticky_bucket,
+    wall_config,
+    wall_mirror_config,
+)
+from nodeapi.documents import WRONG_LAST_SEQUENCE, DocumentWriter
+from nodeapi.pull import pull
 from scripts.nats_server import NATS_SERVER_VERSION
 
 SERVER_VARIABLE = "PHOTO_WALL_BUS_FENCE_SERVER"
 MINUTES_VARIABLE = "PHOTO_WALL_BUS_FENCE_MINUTES"
+STALL_VARIABLE = "PHOTO_WALL_BUS_FENCE_STALL_SECONDS"
+FLOOD_BODY = 200_000   # random, so nothing on the way compresses it
 IMAGE = "alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11"
 MIB = 1024 * 1024
 SERIAL = "fence-node"
@@ -139,9 +171,11 @@ def _fence_server() -> Path:
     return Path(value).resolve()
 
 
-def test_a_full_store_keeps_writing_inside_the_bus_fence_and_reloads_after_a_crash(tmp_path):
+@contextmanager
+def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
+    """A hub on Fleet's configuration and the fenced bus leafed to it, each in its own container on one
+    network: (the bus, the hub's container, the hub's and the bus's published client ports)."""
     binary = _fence_server()
-    minutes = float(os.environ.get(MINUTES_VARIABLE, "5"))
     run = uuid.uuid4().hex[:8]
     network, hub_name, bus = f"fence-{run}", f"fence-hub-{run}", _Bus(f"fence-bus-{run}")
     hub_conf = tmp_path / "hub.conf"
@@ -173,10 +207,23 @@ def test_a_full_store_keeps_writing_inside_the_bus_fence_and_reloads_after_a_cra
         hub_port, bus_port = _published(hub_name, 4222), _published(bus.name, 4222)
         _accepts(hub_port, 30, "the hub")
         _accepts(bus_port, 30, "the bus")
-        asyncio.run(_exercise(bus, hub_port, bus_port, minutes))
+        yield bus, hub_name, hub_port, bus_port
     finally:
+        subprocess.run(["docker", "kill", "--signal=CONT", hub_name], capture_output=True)
         subprocess.run(["docker", "rm", "-f", bus.name, hub_name], capture_output=True)
         subprocess.run(["docker", "network", "rm", network], capture_output=True)
+
+
+def test_a_full_store_keeps_writing_inside_the_bus_fence_and_reloads_after_a_crash(tmp_path):
+    minutes = float(os.environ.get(MINUTES_VARIABLE, "5"))
+    with _fenced_bus(tmp_path) as (bus, _, hub_port, bus_port):
+        asyncio.run(_exercise(bus, hub_port, bus_port, minutes))
+
+
+def test_a_stalled_hub_never_pushes_the_bus_past_its_fence(tmp_path):
+    seconds = float(os.environ.get(STALL_VARIABLE, "60"))
+    with _fenced_bus(tmp_path) as (bus, hub_name, hub_port, bus_port):
+        asyncio.run(_stall(bus, hub_name, hub_port, bus_port, seconds))
 
 
 async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> None:
@@ -265,3 +312,129 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
         assert (acknowledgement.stream, acknowledgement.seq) == (name, full[name][2] + 1)
     print(f"reloaded full store: {bus.sample()}")
     await node.close()
+
+
+async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds: float) -> None:
+    user = central_user(SERIAL)
+    central = await nats.connect(f"nats://127.0.0.1:{hub_port}", user=user, password=user,
+                                 inbox_prefix=CENTRAL_INBOX_PREFIX, allow_reconnect=False, connect_timeout=5)
+    wall = await nats.connect(f"nats://127.0.0.1:{hub_port}", user=WALL_WRITER_USER,
+                              password=WALL_WRITER_USER, allow_reconnect=False, connect_timeout=5)
+    refused = Counter()
+
+    async def count(error):   # the program's publishes on the leaf's exports, refused locally
+        refused[type(error).__name__] += 1
+    node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5,
+                              error_cb=count)
+    jetstream, across = node.jetstream(timeout=10), central.jetstream(domain=NODE_DOMAIN, timeout=10)
+    await declare(wall.jetstream(), wall_config())
+    await declare(jetstream, wall_mirror_config())
+    await declare(jetstream, buffer("REC_probe", 4 * MIB, subjects=["probe.record.>"]))
+    await declare(jetstream, buffer("REC_flood", 4 * MIB, subjects=["flood.>"]))
+    table = Documents.bucket("desired_probe", {"show": 64}, history=2)
+    await declare(jetstream, sticky_bucket(table))
+    await DocumentWriter(jetstream, table).put("show", b"node")
+    await wall.jetstream().publish("wall.first", b"w")
+    deadline = time.monotonic() + 60
+    while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < 1:
+        assert time.monotonic() < deadline, f"the wall mirror never linked:\n{bus.logs()}"
+        await asyncio.sleep(.5)
+
+    # A component's method reveals Central's live wildcard inbox, the flood's first target.
+    replies: list[str] = []
+
+    async def reveal(message):
+        replies.append(message.reply)
+        await message.respond(b"ok")
+    await node.subscribe("probe.method.reveal", cb=reveal)
+    await node.flush()
+    while not replies:
+        assert time.monotonic() < deadline, "no method across the leaf"
+        try:
+            await central.request("probe.method.reveal", b"", timeout=1)
+        except (nats.errors.NoRespondersError, nats.errors.TimeoutError):
+            await asyncio.sleep(.2)
+    central_reply = replies[-1]
+
+    # Central's pull waits on an empty stream; its request's reply subject is the other push target.
+    await across.add_consumer("REC_probe", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
+    waiting_request = asyncio.get_running_loop().create_future()
+
+    async def spy(message):
+        if "expires" in json.loads(message.data) and not waiting_request.done():
+            waiting_request.set_result(message.reply)
+    await node.subscribe("$JS.API.CONSUMER.MSG.NEXT.REC_probe.central", cb=spy)
+    await node.flush()
+    pulling = asyncio.create_task(pull(central, "REC_probe", "central", 50, timeout=seconds + 30,
+                                       domain=NODE_DOMAIN))
+    pull_reply = await asyncio.wait_for(waiting_request, 10)
+    print(f"before the stall: {bus.sample()}")
+
+    _docker("kill", "--signal=STOP", hub_name)
+    started = time.monotonic()
+    stop, sent = asyncio.Event(), Counter()
+    consumer_api = f"{WALL_API_PREFIX}.CONSUMER.CREATE.{WALL_STREAM}"
+    subjects = ["player.event.x", central_reply.rsplit(".", 1)[0] + ".flood", consumer_api, "$JS.FC.WALL.a.b"]
+    body = os.urandom(FLOOD_BODY)
+
+    async def flood(subject: str | None) -> None:
+        while not stop.is_set():
+            if subject is None:
+                await (await node.subscribe(node.new_inbox())).unsubscribe()
+            else:
+                await node.publish(subject, body)
+            sent[subject or "churn"] += 1
+            if sent[subject or "churn"] % 20 == 0:
+                await asyncio.sleep(0)
+    pushers = [f"push{target}{index}" for target in range(2) for index in range(5)]
+    samples = []
+    try:
+        record = os.urandom(MAX_STORED_MESSAGE - 1024)
+        for index in range(40):
+            await jetstream.publish(f"probe.record.{index}", record)
+            await jetstream.publish(f"flood.{index}", record)
+        for name in pushers:
+            await jetstream.add_consumer("REC_flood", ConsumerConfig(
+                durable_name=name, deliver_subject=(consumer_api, pull_reply)[int(name[4])],
+                ack_policy=AckPolicy.NONE, deliver_policy=DeliverPolicy.ALL))
+        floods = [asyncio.create_task(flood(subject)) for subject in [*subjects, None]]
+        while time.monotonic() - started < seconds:
+            await asyncio.sleep(SAMPLE_SECONDS)
+            try:
+                samples.append(sample := bus.sample())
+            except AssertionError as error:   # docker exec cannot start a process in a cgroup at its limit
+                raise AssertionError(f"the bus's cgroup hit its fence under a stalled hub after "
+                                     f"{time.monotonic() - started:.0f} s: {error}") from None
+            assert sample["oom_kill"] == 0 and sample["starts"] == 1, (
+                f"the bus was OOM-killed or restarted under a stalled hub: {sample} {dict(sent)}\n{bus.logs()}")
+    finally:
+        stop.set()
+        _docker("kill", "--signal=CONT", hub_name)
+    await asyncio.gather(*floods)
+    assert all(count > 100 for count in sent.values()) and len(sent) == 5, dict(sent)
+    assert refused, "the program's publishes on the leaf's exports were never refused"
+    print(f"stalled hub {seconds:.0f} s: peak {max(sample['peak_mib'] for sample in samples):.1f} MiB "
+          f"of {NODE_BUS_MEMORY_MAX // MIB}, sent {dict(sent)}")
+    bound = [name for name in pushers if (await jetstream.consumer_info("REC_flood", name)).push_bound]
+    assert bound == [], f"push consumers bound to a subject across the leaf: {bound}"
+
+    # The hub resumed: Central's pull returns, its conditional write lands, the mirror catches up.
+    got = await pulling
+    assert got and got[0].subject == "probe.record.0", [message.subject for message in got]
+    for message in got:
+        await message.ack_sync()
+    document = DocumentWriter.node_bucket(central, table)
+    _, token = await document.read("show")
+    await document.put("show", b"central", token=token)
+    with pytest.raises(APIError) as stale:
+        await document.put("show", b"stale", token=token)
+    assert stale.value.err_code == WRONG_LAST_SEQUENCE
+    acknowledgement = await wall.jetstream().publish("wall.after", b"w")
+    deadline = time.monotonic() + 30
+    while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < acknowledgement.seq:
+        assert time.monotonic() < deadline, f"the wall mirror never caught up:\n{bus.logs()}"
+        await asyncio.sleep(.2)
+    sample = bus.sample()
+    assert sample["oom_kill"] == 0 and sample["starts"] == 1, sample
+    for client in (node, central, wall):
+        await client.close()

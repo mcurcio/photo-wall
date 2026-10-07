@@ -6,7 +6,11 @@ bytes and a reload changes only what the enrolled set changed.
 
 Each Node account holds the Node's leaf user and Central's client user, both selectors on the
 trusted network rather than secrets. It has no JetStream (the Node holds its own objects), no
-export and no import except the wall-wide set: this module has no form for any other.
+export and no import except the wall-wide set: this module has no form for any other. Both users
+carry the leaf's subject contract (contracts.node_link, erratum E-W1-LEAF-1): the leaf user may send
+toward the hub only LEAF_EXPORTS and receive only LEAF_IMPORTS, and Central may send only
+LEAF_IMPORTS and subscribe only to its wildcard inboxes, so nothing a Node program does crosses the
+leaf except what Central asked for.
 """
 from __future__ import annotations
 
@@ -16,13 +20,17 @@ from dataclasses import dataclass
 from typing import Final
 
 from contracts.node_link import (
+    CENTRAL_SUBSCRIPTIONS,
     HUB_DOMAIN,
+    LEAF_EXPORTS,
+    LEAF_IMPORTS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
+    WALL_CONSUMER_SERVICES,
     WALL_DELIVER_PREFIX,
-    WALL_STREAM,
+    WALL_FLOW_CONTROL_SERVICES,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
     account_id,
@@ -33,16 +41,9 @@ from contracts.node_link import (
 FLEET_SYSTEM_USER: Final = "fleet"
 SYSTEM_ACCOUNT: Final = "SYS"
 
-# What a Node's mirror of WALL needs from the WALL account: the consumer API it creates and
-# deletes its mirror consumer through, the delivery subjects, and flow control (v1 and v2 forms).
-# Per the cross-account-subjects reference; the consumer API is imported under WALL_API_PREFIX.
-_WALL_CONSUMER_SERVICES: Final = (
-    f"$JS.API.CONSUMER.CREATE.{WALL_STREAM}",
-    f"$JS.API.CONSUMER.CREATE.{WALL_STREAM}.>",
-    f"$JS.API.CONSUMER.DELETE.{WALL_STREAM}.*",
-)
+# The WALL mirror's delivery subjects, exported as a stream; its consumer API and flow control are
+# the services contracts.node_link lists (WALL_CONSUMER_SERVICES, WALL_FLOW_CONTROL_SERVICES).
 _WALL_DELIVERY_STREAM: Final = f"{WALL_DELIVER_PREFIX}.>"
-_WALL_FLOW_CONTROL_SERVICES: Final = (f"$JS.FC.{WALL_STREAM}.>", f"$JS.FC.*.*.{WALL_STREAM}.>")
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +104,10 @@ def _user(name: str) -> dict[str, str]:
     return {"user": name, "password": name}
 
 
+def _permissions(publish: tuple[str, ...], subscribe: tuple[str, ...]) -> dict[str, object]:
+    return {"publish": {"allow": list(publish)}, "subscribe": {"allow": list(subscribe)}}
+
+
 def _wall_account() -> dict[str, object]:
     return {
         # No store limit, only "every stream has its own byte cap". An account store limit is checked
@@ -112,21 +117,24 @@ def _wall_account() -> dict[str, object]:
         "jetstream": {"max_bytes_required": True},
         "users": [_user(WALL_WRITER_USER)],
         "exports": [
-            *({"service": subject} for subject in _WALL_CONSUMER_SERVICES),
+            *({"service": subject} for subject in WALL_CONSUMER_SERVICES),
             {"stream": _WALL_DELIVERY_STREAM},
-            *({"service": subject} for subject in _WALL_FLOW_CONTROL_SERVICES),
+            *({"service": subject} for subject in WALL_FLOW_CONTROL_SERVICES),
         ],
     }
 
 
 def _node_account(serial: str) -> dict[str, object]:
     return {
-        "users": [_user(node_user(serial)), _user(central_user(serial))],
+        "users": [
+            {**_user(node_user(serial)), "permissions": _permissions(LEAF_EXPORTS, LEAF_IMPORTS)},
+            {**_user(central_user(serial)), "permissions": _permissions(LEAF_IMPORTS, CENTRAL_SUBSCRIPTIONS)},
+        ],
         "imports": [
             *({"service": {"account": WALL_ACCOUNT, "subject": subject},
-               "to": WALL_API_PREFIX + subject[len("$JS.API"):]} for subject in _WALL_CONSUMER_SERVICES),
+               "to": WALL_API_PREFIX + subject[len("$JS.API"):]} for subject in WALL_CONSUMER_SERVICES),
             {"stream": {"account": WALL_ACCOUNT, "subject": _WALL_DELIVERY_STREAM}},
             *({"service": {"account": WALL_ACCOUNT, "subject": subject}}
-              for subject in _WALL_FLOW_CONTROL_SERVICES),
+              for subject in WALL_FLOW_CONTROL_SERVICES),
         ],
     }

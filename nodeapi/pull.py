@@ -11,6 +11,12 @@ Concurrent pulls on one client then queue for the budget instead of adding up, s
 requested from the server and not yet read by the client never pass PULL_MAX_BYTES, however many
 tasks pull at once. A busy reader then slows the server's writes, never ends its connection
 (`write_timeout: retry`). nats-py 2.16.0's `fetch` sends no `max_bytes`, so this sends the request itself.
+
+A request's replies come on a wildcard inbox (`<inbox>.*`, the request sent with reply `<inbox>.r`),
+never on a literal one: a push consumer binds only to a subject some subscription names literally
+(ns:server/sublist.go:169-195), so a Node program cannot point a push consumer at Central's pull and
+stream past its byte budget across the leaf. The hub refuses Central a literal inbox
+(contracts.node_link.CENTRAL_SUBSCRIPTIONS; erratum E-W1-LEAF-1).
 """
 from __future__ import annotations
 
@@ -98,10 +104,10 @@ async def _request(client: Client, subject: str, request: dict, most: int, timeo
 
 async def _send(client: Client, subject: str, request: dict, timeout: float) -> list[Msg]:
     inbox = client.new_inbox()
-    subscription = await client.subscribe(inbox)
+    subscription = await client.subscribe(inbox + ".*")
     messages: list[Msg] = []
     try:
-        await client.publish(subject, json.dumps(request).encode(), reply=inbox)
+        await client.publish(subject, json.dumps(request).encode(), reply=inbox + ".r")
         deadline = time.monotonic() + timeout + _GRACE_SECONDS
         while len(messages) < request["batch"] and (left := deadline - time.monotonic()) > 0:
             try:
