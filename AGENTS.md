@@ -16,6 +16,7 @@ This page is the map; open an owning document only when the routing table sends 
 | `media/` | Media worker, Immich adapter, preparation | `python -m media.worker` |
 | `player/` | Single-process Player (GTK/GStreamer), cache, executor | `service.py` |
 | `contracts/` | Versioned wire models shared by every side | `models.py`, `node_*.py` |
+| `nodeapi/` | Node API library, the one NATS client: circular and sticky buffer builders, the class table, the sticky-document writer and reader, the capped pull | `buffers.py`, `documents.py`, `pull.py` |
 | `uplink/` | Stdlib-only initramfs client that locates and trusts Central | `locate.py`, `fetch.py` |
 | `appliance/` | OS base, netboot initramfs, provisioning, systemd units, OS agent | `netboot_init.py`, `os_agent.py`, `systemd/` |
 | `appliance/kernel/` | Node kernel: primitives on the stdlib, `contracts` and `uplink` alone (clock, boot store, credentials, capacity, boot-stage records, probe timing) | `capacity.py`, `boot_stage.py` |

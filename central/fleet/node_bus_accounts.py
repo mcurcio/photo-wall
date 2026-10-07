@@ -17,6 +17,7 @@ from typing import Final
 
 from contracts.node_link import (
     HUB_DOMAIN,
+    NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
@@ -77,6 +78,10 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
         # account past it is refused at the hub (by Central's client before it is sent), never carried
         # across the leaf, where the Node closes the leaf for it (a maximum payload violation).
         "max_payload": NODE_MAX_PAYLOAD,
+        # The Node's max_control_line, on every hub client: a subject Central writes into a Node is
+        # no longer than one a local client writes, so every stored subject fits the reply envelope
+        # MAX_STORED_MESSAGE leaves (E-W1-TD-6). Leaves are exempt.
+        "max_control_line": NODE_MAX_CONTROL_LINE,
         "jetstream": {
             "domain": HUB_DOMAIN,
             "store_dir": listeners.store_dir,

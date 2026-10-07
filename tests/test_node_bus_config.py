@@ -2,26 +2,32 @@
 
 The live behaviour of both is proven on real servers in tests/integration/test_node_bus_seam.py;
 this file holds the configuration properties a server run cannot show cheaply, among them the
-buffer rule (E-W1-BUF-2): every stream, bucket and mirror is a limits stream with discard old, so
-the server drops its oldest when a limit is reached, and no account has a store limit that could
-refuse a write first.
+buffer rule (E-W1-BUF-2, E-W1-TD-4): every stream, bucket and mirror is a limits stream with discard
+old, built only by the shipped `nodeapi.buffers`, circular or sticky, and no account has a store
+limit that could refuse a write first; and the numbers both ends of a leaf bind (E-W1-TD-2, -3).
 """
 from __future__ import annotations
 
 import json
 import re
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from integration.bus_servers import bucket, buffer, node_split, wall_config, wall_mirror_config
+from integration.bus_servers import desired_documents, node_split
 from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     HUB_DOMAIN,
+    MAX_STORED_MESSAGE,
     NODE_DOMAIN,
+    NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
+    NODE_MAX_PENDING,
+    NODE_STORE_BYTES,
+    REPLY_ENVELOPE,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_STREAM_BYTES,
@@ -30,9 +36,27 @@ from contracts.node_link import (
     central_user,
     node_user,
 )
+from nodeapi.buffers import (
+    CIRCULAR,
+    EPOCH_KEY,
+    KIND_KEY,
+    MAX_PUBLISH_SUBJECT,
+    STICKY,
+    ClassTable,
+    Documents,
+    bucket,
+    buffer,
+    buffer_kind,
+    epoch_origin,
+    sticky_bucket,
+    wall_config,
+    wall_mirror_config,
+)
+from nodeapi.documents import DocumentWriter
+from nodeapi.pull import PULL_MAX_BYTES
 
-NODE_BUS_CONF = Path(__file__).resolve().parents[1] / "appliance" / "bus" / "node-bus.conf"
-INTEGRATION = Path(__file__).resolve().parent / "integration"
+REPO = Path(__file__).resolve().parents[1]
+NODE_BUS_CONF = REPO / "appliance" / "bus" / "node-bus.conf"
 LISTENERS = HubListeners(
     server_name="hub", client_host="0.0.0.0", client_port=4222, websocket_host="0.0.0.0",
     websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
@@ -98,7 +122,14 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert config["host"] == "127.0.0.1"
     assert config["jetstream"]["domain"] == NODE_DOMAIN
     assert config["jetstream"]["max_memory_store"] == "0"
-    assert _bytes(config["max_payload"]) == NODE_MAX_PAYLOAD  # WALL's max_msg_size follows it
+    assert _bytes(config["jetstream"]["max_file_store"]) == NODE_STORE_BYTES  # what a class table splits
+    assert _bytes(config["max_payload"]) == NODE_MAX_PAYLOAD
+    assert _bytes(config["max_control_line"]) == NODE_MAX_CONTROL_LINE  # bounds every stored subject
+    # A busy local client is never cut off (E-W1-TD-3): a missed write deadline is retried, and the
+    # server's pending limit holds one capped pull plus as much again for the rest of the connection.
+    assert config["write_timeout"] == "retry"
+    assert _bytes(config["max_pending"]) == NODE_MAX_PENDING
+    assert PULL_MAX_BYTES * 2 <= NODE_MAX_PENDING and PULL_MAX_BYTES >= 2 * NODE_MAX_PAYLOAD
     account = config["accounts"]["API"]
     assert account["jetstream"]["max_bytes_required"] is True
     assert config["no_auth_user"] in {user["user"] for user in account["users"]}
@@ -134,6 +165,9 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     # max_payload, which the Node would otherwise answer by closing the leaf (E-W1-BUF-3).
     node = _parse_nats_conf(NODE_BUS_CONF.read_text())
     assert config["max_payload"] == NODE_MAX_PAYLOAD == _bytes(node["max_payload"])
+    # And the same longest control line, so a subject Central writes into a Node is no longer than one
+    # a local client writes: the reply envelope covers both (E-W1-TD-6).
+    assert config["max_control_line"] == NODE_MAX_CONTROL_LINE == _bytes(node["max_control_line"])
     assert config["websocket"] == {"host": "0.0.0.0", "port": 8080, "no_tls": True}
     assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422}
     assert "http" not in config
@@ -149,34 +183,112 @@ def _bytes(size: str | int) -> int:
     return int(digits) * {"KB": 1024, "MB": 1024 * 1024}[size[len(digits):].upper()]
 
 
-def test_every_harness_buffer_is_a_limits_stream_that_discards_old_and_is_built_in_one_place():
-    # Everything the harness declares comes from `buffer`: JetStream's limits retention with discard
-    # old, so the server drops the oldest when a limit is reached and never refuses for fullness.
-    configs = [*node_split().values(), wall_config(), wall_mirror_config(),
-               bucket("probe", history=1, max_bytes=1)]
+def test_a_stored_message_fits_every_reply_the_node_generates_for_it():
+    # A JSON STREAM.MSG.GET reply base64-encodes headers and payload (4/3) and adds an envelope with
+    # the subject, which no client can make longer than the control line and JSON escapes to at most
+    # six bytes per byte; the envelope keeps 1 KiB more for the reply's own fields (E-W1-TD-2, -6).
+    assert REPLY_ENVELOPE >= 6 * NODE_MAX_CONTROL_LINE + 1024
+    assert 4 * -(-MAX_STORED_MESSAGE // 3) + REPLY_ENVELOPE <= NODE_MAX_PAYLOAD
+    # A document's subject leaves its writer's control line room for an inbox and the sizes, so the
+    # server never closes the writer for it; Central's longer publish prefix is checked by its writer.
+    longest = "k" * (MAX_PUBLISH_SUBJECT - len("$KV.b."))
+    table = Documents.bucket("b", {longest: 1}, history=1)
+    with pytest.raises(ValueError, match="documents_subject_past_the_control_line"):
+        Documents.bucket("b", {longest + "k": 1}, history=1)
+    DocumentWriter(None, table)
+    with pytest.raises(ValueError, match="document_subject_past_the_control_line"):
+        DocumentWriter(None, table, publish_prefix=f"$JS.{NODE_DOMAIN}.API.$KV.b.")
+
+
+def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
+    # Everything a Node or the hub declares comes from nodeapi.buffers: JetStream's limits retention
+    # with discard old, a byte cap, a stored message that fits a leaf reply, a kind and an epoch.
+    configs = [*node_split().buffers.values(), wall_config(), wall_mirror_config(),
+               bucket("probe", history=1, max_bytes=1), buffer("PROBE", 1, subjects=["probe.>"])]
     for config in configs:
         assert config.retention == RetentionPolicy.LIMITS, config.name
         assert config.discard == DiscardPolicy.OLD, config.name
         assert config.storage == StorageType.FILE, config.name
         assert config.max_bytes and config.max_bytes > 0, config.name
-    # Latest per subject where it matters: the wall stream and every Node mirror of it.
-    assert wall_config().max_msgs_per_subject == 1
-    assert wall_mirror_config().max_msgs_per_subject == 1
-    # A wall message crosses the leaf into a Node account, where one past max_payload is a protocol error.
-    assert 0 < wall_config().max_msg_size <= NODE_MAX_PAYLOAD
-    for field in ("retention", "discard", "storage"):
+        assert 0 < config.max_msg_size <= MAX_STORED_MESSAGE, config.name
+        assert config.metadata[KIND_KEY] in (CIRCULAR, STICKY), config.name
+        # A Node stream starts where its epoch says, so a stale revision names nothing (E-W1-TD-5).
+        if config.mirror is None and config.name != "WALL":
+            assert config.first_seq == epoch_origin(config.metadata[EPOCH_KEY]), config.name
+    assert buffer("X", 1).metadata[EPOCH_KEY] != buffer("X", 1).metadata[EPOCH_KEY]  # fresh per create
+    # Sticky: per-subject history only, no count limit, the byte cap a document table's budget.
+    split = node_split().buffers
+    sticky = {name for name, config in split.items() if buffer_kind(config) == STICKY}
+    assert sticky == {"KV_desired_apps", "KV_desired_display", "KV_desired_health", "KV_desired_player", "WALL"}
+    for name in sticky - {"WALL"}:
+        table = desired_documents(name.removeprefix("KV_desired_"))
+        assert split[name].max_bytes == table.budget and split[name].max_msgs_per_subject == table.history
+        assert split[name].max_msgs == -1 and split[name].max_msg_size == table.largest
+    for config in (wall_config(), wall_mirror_config()):
+        assert (config.max_msgs_per_subject, config.max_msgs, config.max_bytes) == (1, -1, WALL_STREAM_BYTES)
+    assert {name for name, config in split.items() if buffer_kind(config) == CIRCULAR} == set(split) - sticky
+    for field in ("retention", "discard", "storage", "metadata"):
         with pytest.raises(ValueError, match="buffer_policy_is_fixed"):
             buffer("X", 1, **{field: None})
     with pytest.raises(ValueError, match="buffer_needs_a_byte_cap"):
         buffer("X", 0)
-    # No other place configures a stream or a bucket: nats-py's create_key_value hard-codes
-    # discard NEW, and a StreamConfig built elsewhere bypasses the rule.
-    for path in sorted(INTEGRATION.glob("*.py")):
-        text = path.read_text()
-        for forbidden in ("DiscardPolicy.NEW", "RetentionPolicy.WORK_QUEUE", "RetentionPolicy.INTEREST",
-                          "create_key_value(", "KeyValueConfig("):
-            assert forbidden not in text, (path.name, forbidden)
-        assert text.count("StreamConfig(") == (path.name == "bus_servers.py"), path.name
+    with pytest.raises(ValueError, match="buffer_message_past_the_leaf"):
+        buffer("X", 1, max_msg_size=MAX_STORED_MESSAGE + 1)
+    with pytest.raises(ValueError, match="documents_value_past_the_leaf"):
+        Documents.bucket("big", {"one": MAX_STORED_MESSAGE}, history=1)
+    with pytest.raises(ValueError, match="wall_documents_over_budget"):
+        Documents.wall({"a": MAX_STORED_MESSAGE - 1024, "b": MAX_STORED_MESSAGE - 1024, "c": 150 * 1024})
+    with pytest.raises(ValueError, match="sticky_bucket_needs_a_bucket_table"):
+        sticky_bucket(Documents.wall({"a": 1}))
+
+
+def test_one_class_table_holds_the_whole_store_and_a_resplit_never_raises_it():
+    # One owner declares the whole table; its caps never pass the store, so no declare meets 10047
+    # in any order, and Central's override moves bytes inside the same total (E-W1-TD-S2).
+    table = node_split()
+    assert sum(config.max_bytes for config in table.buffers.values()) <= table.total == NODE_STORE_BYTES
+    room = table.total - sum(config.max_bytes for config in table.buffers.values())
+    with pytest.raises(ValueError, match="class_table_over_total"):
+        table.resplit({"REC_player": table.buffers["REC_player"].max_bytes + room + 1})
+    moved = table.resplit({"REC_player": table.buffers["REC_player"].max_bytes - 4096,
+                           "REC_host": table.buffers["REC_host"].max_bytes + 4096 + room})
+    assert sum(config.max_bytes for config in moved.buffers.values()) == table.total
+    with pytest.raises(ValueError, match="class_table_sticky_cap"):
+        table.resplit({"KV_desired_player": 1})
+    with pytest.raises(ValueError, match="class_table_past_the_store"):
+        ClassTable(dict(table.buffers), NODE_STORE_BYTES + 1)
+    with pytest.raises(ValueError, match="class_table_over_total"):
+        ClassTable({**table.buffers, "EXTRA": buffer("EXTRA", room + 1)})
+    with pytest.raises(ValueError, match="class_table_unbuilt_buffer"):
+        ClassTable({"RAW": replace(buffer("RAW", 1), metadata=None)})
+
+
+# What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
+# stream configuration built elsewhere bypasses the buffer rule (E-W1-TD-S1). Pulls go through
+# nodeapi.pull, the only request with a byte cap (E-W1-TD-3).
+_NOWHERE = ("DiscardPolicy.NEW", "RetentionPolicy.WORK_QUEUE", "RetentionPolicy.INTEREST",
+            "create_key_value(", "KeyValueConfig(")
+_STREAM_BUILDER = "nodeapi/buffers.py"
+_PULLS = (".fetch(", "pull_subscribe")
+
+
+def test_only_nodeapi_configures_a_buffer_or_pulls_anywhere_in_the_tree():
+    listed = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others",
+                             "--exclude-standard", "--", "*.py"], check=True, capture_output=True,
+                            text=True).stdout.strip("\0").split("\0")
+    this = Path(__file__).resolve().relative_to(REPO).as_posix()
+    checked = 0
+    for path in sorted(name for name in listed if name != this and (REPO / name).is_file()):
+        text = (REPO / path).read_text(errors="replace")
+        for forbidden in _NOWHERE:
+            assert forbidden not in text, (path, forbidden)
+        if "StreamConfig(" in text:
+            assert path == _STREAM_BUILDER, (path, "StreamConfig(")
+        if re.search(r"^\s*(import nats|from nats)", text, re.MULTILINE) and path != "nodeapi/pull.py":
+            for forbidden in _PULLS:
+                assert forbidden not in text, (path, forbidden)
+        checked += 1
+    assert checked > 500 and "nodeapi/buffers.py" in listed
 
 
 def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
@@ -189,7 +301,8 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
     assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]
     # The server's store is the outer fence, reserved per stream at create: the split fits it.
-    assert sum(config.max_bytes for config in node_split().values()) <= _bytes(node["jetstream"]["max_file_store"])
+    assert sum(config.max_bytes for config in node_split().buffers.values()) <= _bytes(
+        node["jetstream"]["max_file_store"])
     assert wall_config().max_bytes == wall_mirror_config().max_bytes == WALL_STREAM_BYTES
 
 

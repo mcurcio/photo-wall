@@ -4,9 +4,10 @@ No subject grammar lives here: each component owns its subjects. Fleet's hub gen
 Node API library and Central's sessions read these names; nothing here crosses a wire except
 the user names, which both sides derive from the serial.
 
-The buffer rule (owner steer 2026-10-06, erratum E-W1-BUF-2) needs no number here: every stream,
-bucket and mirror is a JetStream limits stream with discard old, so the server drops its oldest
-and takes the write; no account on either end has a store limit that could refuse it first.
+The buffer rule (owner steer 2026-10-06, errata E-W1-BUF-2, E-W1-TD-4) needs no number here: every
+stream, bucket and mirror is a JetStream limits stream with discard old, built only by `nodeapi`;
+event buffers drop their oldest when full, sticky documents are never full. The numbers both ends
+bind are the leaf's largest message, the largest stored one, and the Node's store and pending caps.
 """
 from __future__ import annotations
 
@@ -23,12 +24,30 @@ WALL_API_PREFIX: Final = "ACC.WALL.API"      # a Node account's import prefix fo
 WALL_DELIVER_PREFIX: Final = "DELIVER.WALL"  # the mirror's delivery prefix, the same in every Node account
 WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selector, not a secret
 
-# The largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
+# L, the largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
 # the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
 # would close the leaf, so the hub refuses it first, at its own client (E-W1-BUF-3).
 NODE_MAX_PAYLOAD: Final = 256 * 1024
-# WALL's max_msg_size: every wall message crosses a leaf into a Node account.
-WALL_MESSAGE_BYTES: Final = NODE_MAX_PAYLOAD
+# The longest control line (a PUB's subject, reply and sizes) a client may send on either end of a
+# leaf: node-bus.conf's max_control_line AND the hub's (the config test binds both). The server
+# closes a client that sends a longer one; a leaf is exempt (it carries only what some client sent).
+# Every message a Node stores came through a client on one end, so no stored subject (a KV key
+# included) is longer than this (E-W1-TD-6).
+NODE_MAX_CONTROL_LINE: Final = 1024
+# What a reply naming a stored message adds besides the message: the subject, JSON-escaped at worst
+# six bytes per byte (Go's encoder writes `<` as `<`), plus 1 KiB for the reply's own fields.
+REPLY_ENVELOPE: Final = 6 * NODE_MAX_CONTROL_LINE + 1024
+# The largest message any stream, bucket or mirror stores (headers + payload; the max_msg_size every
+# nodeapi builder sets). A server reply carrying a stored message is at most 4/3 of it plus the
+# envelope: a JSON STREAM.MSG.GET base64-encodes it and names its subject, a direct get or a
+# delivery adds a few headers. (L - REPLY_ENVELOPE) * 3/4 keeps every such reply under L whatever
+# the subject, so no reply the Node generates can close the leaf (E-W1-TD-2, E-W1-TD-6).
+MAX_STORED_MESSAGE: Final = (NODE_MAX_PAYLOAD - REPLY_ENVELOPE) * 3 // 4
+# node-bus.conf's max_file_store: the whole Node store a class table may split (the config test binds it).
+NODE_STORE_BYTES: Final = 12 * 1024 * 1024
+# node-bus.conf's max_pending: what the server queues for one local client before it closes it as a
+# slow consumer. nodeapi caps every pull at half of it (E-W1-TD-3).
+NODE_MAX_PENDING: Final = 2 * 1024 * 1024
 
 # The enrolment serial's charset (central/content_catalog/catalog.py). A `:` would break a leaf
 # URL's user:password@ and a `.` would split $SYS.ACCOUNT.<name> subjects, so the account name

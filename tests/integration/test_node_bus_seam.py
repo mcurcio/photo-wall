@@ -1,8 +1,8 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
-read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2). Every stream,
-bucket and mirror is a buffer (E-W1-BUF-2): limits retention with discard old, so the server drops
-its oldest and takes the write.
+read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2); the leaf through
+a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3). Every stream,
+bucket and mirror is built by `nodeapi.buffers` (E-W1-TD-S1).
 
 The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; raw nats-py
 clients play Central and Node components. Every service, stream and subject here is the test's.
@@ -18,11 +18,9 @@ import nats.micro
 import pytest
 from integration.bus_servers import (
     BusServer,
+    PrefixProxy,
     Recorder,
-    bucket,
-    buffer,
     central,
-    central_put,
     declare_bucket,
     declare_wall,
     declare_wall_mirror,
@@ -35,16 +33,22 @@ from integration.bus_servers import (
     wall_writer,
 )
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, DiscardPolicy, RetentionPolicy
-from nats.js.errors import APIError, NoStreamResponseError, NotFoundError
+from nats.js.errors import APIError, NoStreamResponseError
 
 from contracts.node_link import (
+    MAX_STORED_MESSAGE,
     NODE_DOMAIN,
     NODE_MAX_PAYLOAD,
-    WALL_MESSAGE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
     account_id,
 )
+from nodeapi.buffers import Documents, bucket, buffer, epoch_of, sticky_bucket
+from nodeapi.documents import DocumentWriter, Token
+from nodeapi.pull import pull
+
+VALUE_TOO_LARGE = 10054   # JSStreamMessageExceedsMaximumErr: past the stream's max_msg_size
+LEAF_PREFIX = "photo-wall/bus"   # the test's path prefix; the production route is E3d/E4's
 
 SERVICE = "probe"
 ENDPOINT = "probe.echo"
@@ -108,7 +112,7 @@ async def _await_interest(client, subject: str) -> None:
 
 def test_central_calls_a_node_service_across_the_websocket_leaf(tmp_path):
     hub = hub_server(tmp_path, ["serial-a"])
-    node = node_server(tmp_path, "serial-a", hub, prefix="photo-wall/bus")
+    node = node_server(tmp_path, "serial-a", hub, prefix=LEAF_PREFIX)
     assert node.environment["PHOTO_WALL_BUS_LEAF_URL"].startswith("ws://node-")
     hub.start()
     node.start()
@@ -241,8 +245,12 @@ def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf
         with pytest.raises(nats.errors.MaxPayloadError):
             await central_client.publish("player.record.big", b"B" * (NODE_MAX_PAYLOAD + 1))
 
-        # The largest message crosses and is stored.
-        acknowledgement = await jetstream.publish("player.record.big", b"L" * NODE_MAX_PAYLOAD)
+        # The largest message crosses the leaf, and the stream refuses it (a message limit, E-W1-TD-2):
+        # the largest it stores is MAX_STORED_MESSAGE, which crosses and is stored.
+        with pytest.raises(APIError) as too_large:
+            await jetstream.publish("player.record.big", b"L" * NODE_MAX_PAYLOAD)
+        assert too_large.value.err_code == VALUE_TOO_LARGE
+        acknowledgement = await jetstream.publish("player.record.big", b"L" * MAX_STORED_MESSAGE)
         assert acknowledgement.stream == "REC_player"
 
         # Past the limit only with its headers: the client sends it, the hub refuses it and closes
@@ -349,42 +357,6 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
             server.stop()
 
 
-def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
-    """WALL is a buffer (E-W1-BUF-2): full, it takes a new subject and the largest message, the
-    server dropping the oldest subject's value each time; the WALL account has no store limit to
-    refuse first. Only a message past the largest is refused (a message limit, not fullness), and
-    at the writer's client: the hub's max_payload is WALL's max_msg_size (E-W1-BUF-3)."""
-    hub = hub_server(tmp_path, [])
-    hub.start()
-
-    async def run():
-        writer = await wall_writer(hub)
-        jetstream = writer.jetstream()
-        await declare_wall(writer)
-        value, index = b"v" * 1000, 0
-        while (full := (await jetstream.stream_info(WALL_STREAM)).state).first_seq == 1:
-            acknowledgement = await jetstream.publish(f"wall.s{index:04}", value)
-            assert acknowledgement.seq == index + 1
-            index += 1
-        # Full: the first subject's only value is gone, a hole below first_seq a reader sees.
-        assert index > 1 and full.bytes <= WALL_STREAM_BYTES
-        with pytest.raises(NotFoundError):
-            await jetstream.get_last_msg(WALL_STREAM, "wall.s0000")
-        acknowledgement = await jetstream.publish("wall.largest", b"L" * WALL_MESSAGE_BYTES)
-        assert acknowledgement.seq == full.last_seq + 1
-        after = (await jetstream.stream_info(WALL_STREAM)).state
-        assert after.first_seq > full.first_seq and after.bytes <= WALL_STREAM_BYTES
-        assert writer.max_payload == WALL_MESSAGE_BYTES
-        with pytest.raises(nats.errors.MaxPayloadError):
-            await jetstream.publish("wall.too_large", b"x" * (WALL_MESSAGE_BYTES + 1))
-        await writer.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        hub.stop()
-
-
 # E3a-2: Central's client role on a Node's objects, and the hub's lifecycle.
 
 BUCKET = "probe_desired"
@@ -400,28 +372,30 @@ class _Crash(Exception):
 async def _drain(client, stream: str, recorder: Recorder, *, crash_at: int | None = None) -> None:
     """Central's durable read of a Node stream: commit each message, then acknowledge it.
 
-    A delivered sequence past the last recorded one is a gap only for the part the stream no
-    longer holds (below its first_seq); later sequences can still arrive as redeliveries. The gap
-    row is recorded before the message that revealed it. Returns once a fetch longer than the ack
-    wait finds nothing, so every unacknowledged delivery has come back."""
+    The cursor is (epoch, seq) (E-W1-TD-5): sequences of another creation of the stream are another
+    epoch's rows, and a new creation's cursor starts at its origin. A delivered sequence past the
+    last recorded one is a gap only for the part the stream no longer holds (below its first_seq);
+    later sequences can still arrive as redeliveries. The gap row is recorded before the message
+    that revealed it. `crash_at` is a position from the origin (1 = the creation's first message).
+    Returns once a pull longer than the ack wait finds nothing, so every unacknowledged delivery
+    has come back. Pulls go through nodeapi's capped pull."""
     jetstream = client.jetstream(domain=NODE_DOMAIN)
     await jetstream.add_consumer(stream, CONSUMER)
-    subscription = await jetstream.pull_subscribe_bind(CONSUMER.durable_name, stream)
-    while True:
-        try:
-            messages = await subscription.fetch(10, timeout=IDLE_SECONDS)
-        except nats.errors.TimeoutError:
-            return
+    info = await jetstream.stream_info(stream)
+    epoch, origin = epoch_of(info), info.config.first_seq
+    while messages := await pull(client, stream, CONSUMER.durable_name, 10, timeout=IDLE_SECONDS,
+                                 domain=NODE_DOMAIN):
         for message in messages:
             sequence = message.metadata.sequence.stream
-            highest = max([0, *recorder.sequences(), *(first + count - 1 for first, count in recorder.gaps())])
+            highest = max([origin - 1, *recorder.sequences(epoch),
+                           *(first + count - 1 for first, count in recorder.gaps(epoch))])
             if sequence > highest + 1:
                 first_held = (await jetstream.stream_info(stream)).state.first_seq
                 missing = min(first_held, sequence) - highest - 1
                 if missing > 0:
-                    recorder.gap(highest + 1, missing)
-            recorder.commit(sequence, message.data)
-            if sequence == crash_at:
+                    recorder.gap(epoch, highest + 1, missing)
+            recorder.commit(Token(epoch, sequence), message.data)
+            if crash_at is not None and sequence == origin + crash_at - 1:
                 raise _Crash
             await message.ack_sync()
 
@@ -436,7 +410,8 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         await _linked(hub, 1)
         node_client = await local(node)
         central_client = await central(hub, "serial-a")
-        kv = await declare_bucket(node_client.jetstream(), bucket(BUCKET, history=2, max_bytes=64 * 1024))
+        table = Documents.bucket(BUCKET, {"scene": 64}, history=2)
+        kv = await declare_bucket(node_client.jetstream(), sticky_bucket(table))
         config = (await node_client.jetstream().stream_info(f"KV_{BUCKET}")).config
         assert (config.retention, config.discard, config.max_msgs_per_subject) == (
             RetentionPolicy.LIMITS, DiscardPolicy.OLD, 2)
@@ -444,9 +419,13 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         watcher = await kv.watch("scene")
 
         # Central reads the revision across the leaf, then writes conditionally on it.
-        revision = (await (await central_client.jetstream(domain=NODE_DOMAIN).key_value(BUCKET)).get("scene")).revision
-        written = await central_put(central_client, BUCKET, "scene", b"central", expected_revision=revision)
-        assert written > revision
+        writer = DocumentWriter.node_bucket(central_client, table)
+        value, token = await writer.read("scene")
+        assert value == b"node"
+        assert token.seq == (await (await central_client.jetstream(domain=NODE_DOMAIN).key_value(BUCKET)).get(
+            "scene")).revision
+        written = (await writer.put("scene", b"central", token=token)).seq
+        assert written > token.seq
 
         async def watcher_saw_central():
             try:
@@ -458,7 +437,7 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
 
         # A second write on the stale revision is refused by the Node's server.
         with pytest.raises(APIError) as stale:
-            await central_put(central_client, BUCKET, "scene", b"stale", expected_revision=revision)
+            await writer.put("scene", b"stale", token=token)
         assert stale.value.err_code == 10071
         entry = await kv.get("scene")
         assert (entry.value, entry.revision) == (b"central", written)
@@ -505,7 +484,9 @@ def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, 
             kv = await declare_bucket(jetstream, bucket("probe_state", history=1, max_bytes=256 * 1024))
             for index in range(200):
                 await kv.put(f"key{index}", f"state-{index}".encode())
-        assert (await jetstream.stream_info(stream)).state.last_seq == 200
+        info = await jetstream.stream_info(stream)
+        origin = info.config.first_seq
+        assert info.state.last_seq == origin + 199
 
         # Central dies mid-batch: the message it committed and the rest of its batch go unacknowledged.
         first = await central(hub, "serial-a")
@@ -518,10 +499,10 @@ def test_central_durable_consumer_acks_after_commit_and_loses_nothing(tmp_path, 
         second = await central(hub, "serial-a")
         await _drain(second, stream, recorder)
         await second.close()
-        assert sorted(set(recorder.sequences())) == list(range(1, 201))
+        assert sorted(set(recorder.sequences())) == list(range(origin, origin + 200))
         # The committed-but-unacknowledged message came back once: at least once, folded by sequence.
-        assert recorder.sequences().count(78) == 2
-        assert recorder.gaps() == []
+        assert recorder.sequences().count(origin + 77) == 2
+        assert recorder.gaps() == [] and len(recorder.epochs()) == 1
         await node_client.close()
 
     try:
@@ -557,26 +538,73 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
                 await kv.put(f"reading{index:04}", f"reading-{index:04}".encode())
         for index in range(10):
             await write(index)
+        origin = (await jetstream.stream_info(stream)).config.first_seq
         central_client = await central(hub, "serial-a")
         await _drain(central_client, stream, recorder)
         await central_client.close()
-        assert recorder.sequences() == list(range(1, 11))
+        assert recorder.sequences() == list(range(origin, origin + 10))
 
         # Central is away: the Node keeps writing, every write accepted, the oldest discarded.
         for index in range(10, 1010):
             await write(index)
         state = (await jetstream.stream_info(stream)).state
-        assert state.last_seq == 1010 and state.first_seq > 11
+        assert state.last_seq == origin + 1009 and state.first_seq > origin + 10
 
         central_client = await central(hub, "serial-a")
         await _drain(central_client, stream, recorder)
         await central_client.close()
         rows = recorder.rows()
-        assert rows[:10] == [("seq", sequence, 0) for sequence in range(1, 11)]
-        assert rows[10] == ("gap", 11, state.first_seq - 10 - 1)
-        assert recorder.gaps() == [(11, state.first_seq - 11)]
+        assert rows[:10] == [("seq", sequence, 0) for sequence in range(origin, origin + 10)]
+        assert rows[10] == ("gap", origin + 10, state.first_seq - origin - 10)
+        assert recorder.gaps() == [(origin + 10, state.first_seq - origin - 10)]
         assert recorder.sequences()[10:] == list(range(state.first_seq, state.last_seq + 1))
         await node_client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
+def test_a_drain_cursor_from_a_lost_node_store_starts_the_new_creation_fresh(tmp_path):
+    # The Node's store is lost (tmpfs, every reboot) and its stream re-created. Central's cursor is
+    # (epoch, seq): the new creation's messages are new rows from its own origin, neither folded
+    # into the old creation's sequences nor counted as a gap after them (E-W1-TD-5).
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+    recorder = Recorder(tmp_path / "record")
+
+    async def creation(count: int) -> int:
+        node_client = await local(node)
+        jetstream = node_client.jetstream()
+        await jetstream.add_stream(buffer("EVENTS", 64 * 1024, subjects=["events.>"]))
+        for index in range(count):
+            await jetstream.publish("events.reading", f"reading-{index}".encode())
+        origin = (await jetstream.stream_info("EVENTS")).config.first_seq
+        await node_client.close()
+        return origin
+
+    async def drain() -> None:
+        central_client = await central(hub, "serial-a")
+        await _drain(central_client, "EVENTS", recorder)
+        await central_client.close()
+
+    async def run():
+        await _linked(hub, 1)
+        first_origin = await creation(10)
+        await drain()
+        node.wipe()
+        node.start()
+        await _linked(hub, 1)
+        second_origin = await creation(5)
+        await drain()
+        first, second = recorder.epochs()
+        assert recorder.sequences(first) == list(range(first_origin, first_origin + 10))
+        assert recorder.sequences(second) == list(range(second_origin, second_origin + 5))
+        assert recorder.gaps() == []
 
     try:
         asyncio.run(run())
@@ -630,6 +658,83 @@ def test_a_reload_that_adds_an_account_keeps_existing_leaf_links(tmp_path):
     finally:
         for server in (node_c, node_b, node_a, hub):
             server.stop()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "nats-server 2.15.0 wires a reload-added account's service imports only on the next reload "
+    "(ns:server/server.go:1413, configureAccounts while reloading); reload_hub sends two requests. "
+    "Strict: an upstream fix turns this red, and then one request is enough (erratum E-W1-TD-S3)."))
+def test_one_reload_wires_a_new_accounts_service_imports(tmp_path):
+    hub = hub_server(tmp_path, ["serial-a"])
+    node_c = node_server(tmp_path, "serial-c", hub)
+    hub.start()
+
+    async def run():
+        writer = await wall_writer(hub)
+        await declare_wall(writer)
+        await writer.jetstream().publish("wall.timing", b"timing-1")
+        await writer.close()
+        await reload_hub(hub, ["serial-a", "serial-c"], requests=1)
+        node_c.start()
+        await _linked(hub, 1)
+        client = await local(node_c)
+        await declare_wall_mirror(client)
+        await client.close()
+        await _holds(node_c, {"wall.timing": b"timing-1"}, 10)
+
+    try:
+        asyncio.run(run())
+    finally:
+        node_c.stop()
+        hub.stop()
+
+
+def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
+    # The Node dials the origin's ingress route, never the hub's port (W11): a proxy that forwards
+    # only its path prefix stands in for it. A method, a Central read of the largest stored message
+    # and a wall mirror all cross it (E-W1-TD-S4).
+    hub = hub_server(tmp_path, ["serial-a"])
+    proxy = PrefixProxy(hub.websocket_port, LEAF_PREFIX)
+    node = node_server(tmp_path, "serial-a", hub, prefix=LEAF_PREFIX, leaf_port=proxy.port)
+    assert f":{proxy.port}/{LEAF_PREFIX}" in node.environment["PHOTO_WALL_BUS_LEAF_URL"]
+    hub.start()
+
+    async def run():
+        await proxy.start()
+        node.start()
+        try:
+            await _linked(hub, 1)
+            assert proxy.paths == [f"/{LEAF_PREFIX}/leafnode"]
+            node_client = await local(node)
+            central_client = await central(hub, "serial-a")
+            await _serve(node_client, b"node-a")
+            await _await_interest(central_client, ENDPOINT)
+            assert (await central_client.request(ENDPOINT, b"via", timeout=2)).data == b"node-a:via"
+
+            jetstream = node_client.jetstream()
+            await jetstream.add_stream(buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
+            await jetstream.publish("player.record.asrun", b"P" * MAX_STORED_MESSAGE)
+            message = await central_client.jetstream(domain=NODE_DOMAIN).get_last_msg(
+                "REC_player", "player.record.asrun")
+            assert len(message.data) == MAX_STORED_MESSAGE
+
+            writer = await wall_writer(hub)
+            await declare_wall(writer)
+            await declare_wall_mirror(node_client)
+            await writer.jetstream().publish("wall.timing", b"through-the-proxy")
+            await _holds(node, {"wall.timing": b"through-the-proxy"}, 10)
+            assert len(leaf_connections(hub)) == 1 and proxy.paths == [f"/{LEAF_PREFIX}/leafnode"]
+            for client in (writer, central_client, node_client):
+                await client.close()
+        finally:
+            node.stop()
+            await proxy.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
 
 
 class _WallCentral:

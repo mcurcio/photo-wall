@@ -82,7 +82,7 @@ select = ["E4", "E7", "E9", "F", "I", "TID251"]
 "!tests/**" = ["TID251"]
 
 [tool.importlinter]
-root_packages = ["central", "contracts", "media", "player", "appliance", "uplink"]
+root_packages = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -246,6 +246,15 @@ name = "Only the Node API library talks to NATS"
 type = "forbidden"
 source_modules = ["central", "contracts", "media", "player", "appliance", "uplink"]
 forbidden_modules = ["nats"]
+
+[[tool.importlinter.contracts]]
+# nodeapi imports contracts, the NATS client and the stdlib alone (r3 §16.2): the base and the Player
+# each bundle it, so it reaches no context of either.
+name = "The Node API library imports only contracts"
+type = "forbidden"
+source_modules = ["nodeapi"]
+forbidden_modules = ["central", "media", "player", "appliance", "uplink", "psycopg", "procrastinate",
+                     "fastapi", "httpx"]
 
 [[tool.importlinter.contracts]]
 # Retiring (r3 §16.1 B2b/B10a): the feed gains no importer; each line leaves with its importer.
