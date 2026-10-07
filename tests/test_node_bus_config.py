@@ -130,6 +130,10 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER}]}
     assert config["system_account"] == "SYS"
     assert config["jetstream"]["domain"] == HUB_DOMAIN
+    # Both ends of every leaf take the same largest message: the hub refuses one past the Node's
+    # max_payload, which the Node would otherwise answer by closing the leaf (E-W1-BUF-3).
+    node = _parse_nats_conf(NODE_BUS_CONF.read_text())
+    assert config["max_payload"] == NODE_MAX_PAYLOAD == _bytes(node["max_payload"])
     assert config["websocket"] == {"host": "0.0.0.0", "port": 8080, "no_tls": True}
     assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422}
     assert "http" not in config

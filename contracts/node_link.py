@@ -23,9 +23,11 @@ WALL_API_PREFIX: Final = "ACC.WALL.API"      # a Node account's import prefix fo
 WALL_DELIVER_PREFIX: Final = "DELIVER.WALL"  # the mirror's delivery prefix, the same in every Node account
 WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selector, not a secret
 
-NODE_MAX_PAYLOAD: Final = 256 * 1024         # node-bus.conf's max_payload (headers + payload); the config test binds it
-# WALL's max_msg_size: every wall message crosses a leaf into a Node account, where one past the
-# Node's max_payload is a protocol error.
+# The largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
+# the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
+# would close the leaf, so the hub refuses it first, at its own client (E-W1-BUF-3).
+NODE_MAX_PAYLOAD: Final = 256 * 1024
+# WALL's max_msg_size: every wall message crosses a leaf into a Node account.
 WALL_MESSAGE_BYTES: Final = NODE_MAX_PAYLOAD
 
 # The enrolment serial's charset (central/content_catalog/catalog.py). A `:` would break a leaf

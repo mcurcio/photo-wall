@@ -39,6 +39,7 @@ from nats.js.errors import APIError, NoStreamResponseError, NotFoundError
 
 from contracts.node_link import (
     NODE_DOMAIN,
+    NODE_MAX_PAYLOAD,
     WALL_MESSAGE_BYTES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
@@ -208,6 +209,66 @@ def test_two_node_accounts_in_domain_node_stay_isolated(tmp_path):
             server.stop()
 
 
+
+def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf_stays(tmp_path):
+    # A message past the Node's max_payload that crossed the leaf would close it (a maximum payload
+    # violation, the write lost). The hub takes no larger message than the Node, so it never gets
+    # there: Central's client refuses it before sending, and the hub refuses one the client let
+    # through (headers count too) by closing that client, never the leaf (E-W1-BUF-3).
+    hub = hub_server(tmp_path, ["serial-a"])
+    node = node_server(tmp_path, "serial-a", hub)
+    hub.start()
+    node.start()
+
+    async def run():
+        await _linked(hub, 1)
+        linked = leaf_connections(hub)
+        node_client = await local(node)
+        await node_client.jetstream().add_stream(buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
+        central_client = await central(hub, "serial-a")
+        assert central_client.max_payload == NODE_MAX_PAYLOAD
+        jetstream = central_client.jetstream(domain=NODE_DOMAIN)
+
+        async def stored():
+            try:
+                return await jetstream.publish("player.record.small", b"small", timeout=.5)
+            except (nats.errors.NoRespondersError, nats.errors.TimeoutError, NoStreamResponseError):
+                return None
+        assert (await _until(stored, 10, "the Node's stream interest at the hub")).stream == "REC_player"
+
+        with pytest.raises(nats.errors.MaxPayloadError):
+            await jetstream.publish("player.record.big", b"B" * (NODE_MAX_PAYLOAD + 1))
+        with pytest.raises(nats.errors.MaxPayloadError):
+            await central_client.publish("player.record.big", b"B" * (NODE_MAX_PAYLOAD + 1))
+
+        # The largest message crosses and is stored.
+        acknowledgement = await jetstream.publish("player.record.big", b"L" * NODE_MAX_PAYLOAD)
+        assert acknowledgement.stream == "REC_player"
+
+        # Past the limit only with its headers: the client sends it, the hub refuses it and closes
+        # that client; the Node never sees it.
+        before = (await node_client.jetstream().stream_info("REC_player")).state.messages
+        await central_client.publish("player.record.big", b"H" * NODE_MAX_PAYLOAD, headers={"Probe": "x" * 64})
+        async def closed():
+            return central_client.is_closed
+        await _until(closed, 5, "the hub closes the client that sent past max_payload")
+        await asyncio.sleep(.5)
+        assert (await node_client.jetstream().stream_info("REC_player")).state.messages == before
+
+        # The leaf never dropped: the same connection id.
+        assert leaf_connections(hub) == linked
+        again = await central(hub, "serial-a")
+        assert (await again.jetstream(domain=NODE_DOMAIN).publish("player.record.small", b"after")).stream == "REC_player"
+        assert leaf_connections(hub) == linked
+        await again.close()
+        await node_client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
 def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tmp_path):
     hub = hub_server(tmp_path, ["serial-a", "serial-b"])
     node_a = node_server(tmp_path, "serial-a", hub)
@@ -291,7 +352,8 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
 def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
     """WALL is a buffer (E-W1-BUF-2): full, it takes a new subject and the largest message, the
     server dropping the oldest subject's value each time; the WALL account has no store limit to
-    refuse first. Only a message past the largest is refused (a message limit, not fullness)."""
+    refuse first. Only a message past the largest is refused (a message limit, not fullness), and
+    at the writer's client: the hub's max_payload is WALL's max_msg_size (E-W1-BUF-3)."""
     hub = hub_server(tmp_path, [])
     hub.start()
 
@@ -312,9 +374,9 @@ def test_a_full_wall_takes_every_write_and_drops_its_oldest_subject(tmp_path):
         assert acknowledgement.seq == full.last_seq + 1
         after = (await jetstream.stream_info(WALL_STREAM)).state
         assert after.first_seq > full.first_seq and after.bytes <= WALL_STREAM_BYTES
-        with pytest.raises(APIError) as too_large:
+        assert writer.max_payload == WALL_MESSAGE_BYTES
+        with pytest.raises(nats.errors.MaxPayloadError):
             await jetstream.publish("wall.too_large", b"x" * (WALL_MESSAGE_BYTES + 1))
-        assert too_large.value.err_code == 10054, too_large.value
         await writer.close()
 
     try:
