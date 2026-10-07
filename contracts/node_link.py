@@ -89,8 +89,12 @@ NODE_MAX_STREAMS: Final = 17
 # it, from its cap (ns:server/stream.go:1595-1607, ns:server/filestore.go:373-393): cap // 4 + 1 rounded
 # up to 100 bytes, 32,000 at or under that, 8 MiB at or over 8 MiB, 4 MiB between. A cap is at most
 # NODE_STORE_BYTES, so no block passes 4 MiB. A discard-old stream frees a block only when its last
-# message goes, so its files reach its cap plus one block; every stream is charged this flat bound,
-# whatever cap it was created with or has since.
+# message goes, so a circular (front-discard) stream's files reach its cap plus one block; every
+# stream is charged this flat bound, whatever cap it was created with or has since. A sticky (KV)
+# stream's per-subject limit removes messages from the middle, so its files can transiently reach
+# about one block plus twice its cap until the 2-minute sync compacts them (ns:server/filestore.go:6457;
+# 22.22 MiB measured against 13.75 MiB for a 60 x 170,000 B history-1 table, 11.51 MiB after 135 s).
+# That overshoot clears by itself and is not charged in the fit; E3b revisits it (erratum E-W1-FIT-2).
 FILESTORE_BLOCK_BOUND: Final = 4 * 1024 * 1024
 _FILESTORE_MAX_BLOCK = 8 * 1024 * 1024   # nats-server's largest block, which no cap here may reach
 # node-bus.conf's API account `max_consumers`: the most consumers one stream holds; the server refuses
@@ -101,7 +105,7 @@ _FILESTORE_MAX_BLOCK = 8 * 1024 * 1024   # nats-server's largest block, which no
 NODE_MAX_CONSUMERS: Final = 12
 # What one consumer costs in the fence: its 3 state files (meta.inf, meta.sum, o.dat) on the tmpfs
 # store, one 16 KiB Pi 5 page each, plus 104 KiB of heap, the measured anon growth per consumer
-# (103.5 KiB: 272 durables on 17 streams, 2.15.0 linux-arm64, 4 KiB pages; rounded up).
+# (103.5 KiB: 272 idle durables on 17 streams, 2.15.0 linux-arm64, 4 KiB pages; rounded up).
 CONSUMER_BOUND: Final = 3 * 16 * 1024 + 104 * 1024
 # Every stream is charged its block and a full set of consumers, whatever it holds.
 STREAM_BOUND: Final = FILESTORE_BLOCK_BOUND + NODE_MAX_CONSUMERS * CONSUMER_BOUND
@@ -109,7 +113,8 @@ STREAM_BOUND: Final = FILESTORE_BLOCK_BOUND + NODE_MAX_CONSUMERS * CONSUMER_BOUN
 # The fit (E-W1-FIT-1, E-W1-CONS-2), checked here at import so no build of this tree can ship a store
 # past its fence: every byte the store may hold (12 MiB) plus, per stream, a block and 12 consumers
 # (17 x (4 MiB + 12 x 152 KiB)) plus the heap GOMEMLIMIT allows (140 MiB) plus the headroom (4 MiB) is
-# 254.28 MiB, under the 256 MiB fence by 1.72 MiB.
+# 254.28 MiB, under the 256 MiB fence by 1.72 MiB. A sticky stream's transient overshoot past its cap
+# plus one block is not charged here (E-W1-FIT-2).
 if (NODE_STORE_BYTES + NODE_MAX_STREAMS * STREAM_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
         > NODE_BUS_MEMORY_MAX or -(-(NODE_STORE_BYTES // 4 + 1) // 100) * 100 >= _FILESTORE_MAX_BLOCK):
     raise RuntimeError("node_bus_store_past_its_fence")

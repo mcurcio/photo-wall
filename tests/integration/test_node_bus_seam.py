@@ -2,8 +2,8 @@
 isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, Central's durable
 read with ack after commit and a counted gap, hub reload and hub store loss (E3a-2); the leaf through
 a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3); the leaf's
-subject contract, nothing a Node program does crossing toward a stalled hub, and the mirror's flow
-control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
+subject contract, nothing a `nodeapi` program does crossing toward a stalled hub, and the mirror's
+flow control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
 (E-W1-TD-S1).
 
 The hub runs Fleet's generated configuration, each Node the shipped `node-bus.conf`; raw nats-py
