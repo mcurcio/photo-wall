@@ -17,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from integration.bus_servers import WALL_TABLE, desired_documents, node_split
+from integration.bus_servers import WALL_TABLE, line_slices
 from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
@@ -58,12 +58,9 @@ from nodeapi.buffers import (
     MAX_TABLE_METADATA,
     STICKY,
     WALL_PREFIX,
-    ClassTable,
     KeyTable,
     Role,
     Slice,
-    bucket,
-    buffer,
     buffer_kind,
     desired_bucket,
     event_buffer,
@@ -256,9 +253,8 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
     # Everything a Node or the hub declares comes from nodeapi.buffers: JetStream's limits retention
     # with discard old in the memory store, a byte cap, a stored message that fits a leaf reply and a kind.
     hub_wall = wall_config(WALL_TABLE, first_seq=1)
-    configs = [*node_split().buffers.values(), hub_wall, wall_mirror_config(),
-               bucket("probe", history=1, max_bytes=1), buffer("PROBE", 1, subjects=["probe.>"])]
-    for config in configs:
+    split = {config.name: config for slice_ in line_slices().values() for config in slice_.buffers}
+    for config in [*split.values(), hub_wall, wall_mirror_config()]:
         assert config.retention == RetentionPolicy.LIMITS, config.name
         assert config.discard == DiscardPolicy.OLD, config.name
         assert config.storage == StorageType.MEMORY, config.name
@@ -269,35 +265,29 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
         # each create, so a configuration held across a store loss re-creates nothing old (E-W1-FV-1).
         assert EPOCH_KEY not in config.metadata, config.name
         assert config.first_seq == (1 if config is hub_wall else None), config.name
+        # No builder forwards: a republish is a server publish no permission checks, the one way a Node
+        # stream could send across the leaf what Central did not pull (E-W1-LEAF-1).
+        assert (config.republish, config.sources, config.subject_transform) == (None, None, None), config.name
     assert wall_config(WALL_TABLE, first_seq=7).first_seq == 7   # WALL's continuation is the builder's (§9.6)
-    # Sticky: per-subject history only, no count limit, the byte cap a document table's budget.
-    split = node_split().buffers
+    # Sticky (state and desired buckets): per-subject history only, no count limit, the byte cap the
+    # table's budget, the table in the stream's own metadata (E3b design §4 rule 2).
     sticky = {name for name, config in split.items() if buffer_kind(config) == STICKY}
-    assert sticky == {"KV_desired_apps", "KV_desired_display", "KV_desired_health", "KV_desired_player", "WALL"}
-    for name in sticky - {"WALL"}:
-        table = desired_documents(name.removeprefix("KV_desired_"))
+    assert sticky == {name for name in split if name.startswith(("KV_state_", "KV_desired_"))}
+    for name in sticky:
+        table = table_of(split[name])
         assert split[name].max_bytes == table.budget(f"$KV.{name.removeprefix('KV_')}.")
         assert split[name].max_msgs_per_subject == table.history
         assert split[name].max_msgs == -1 and split[name].max_msg_size == table.largest
-        # Self-describing: a writer takes the table from the stream (E3b design §4 rule 2).
-        assert (role_of(split[name]), table_of(split[name])) == (Role.DESIRED, table)
+        assert role_of(split[name]) is (Role.STATE if name.startswith("KV_state_") else Role.DESIRED)
     for config in (hub_wall, wall_mirror_config()):
         assert (config.max_msgs_per_subject, config.max_msgs, config.max_bytes) == (1, -1, WALL_STREAM_BYTES)
         assert role_of(config) is Role.WALL
     assert (table_of(hub_wall), table_of(wall_mirror_config())) == (WALL_TABLE, None)
-    assert {name for name, config in split.items() if buffer_kind(config) == CIRCULAR} == set(split) - sticky
-    for field in ("retention", "discard", "storage", "metadata"):
-        with pytest.raises(ValueError, match="buffer_policy_is_fixed"):
-            buffer("X", 1, **{field: None})
+    assert {name for name, config in split.items() if role_of(config) is Role.EVENTS} == set(split) - sticky
     with pytest.raises(ValueError, match="buffer_needs_a_byte_cap"):
-        buffer("X", 0)
-    # No buffer forwards: a republish is a server publish no permission checks, the one way a Node
-    # stream could send across the leaf what Central did not pull (E-W1-LEAF-1).
-    for field in ("republish", "sources", "mirror", "subject_transform"):
-        with pytest.raises(ValueError, match="buffer_never_forwards"):
-            buffer("X", 1, **{field: None})
+        event_buffer("host", "record", 0)
     with pytest.raises(ValueError, match="buffer_message_past_the_leaf"):
-        buffer("X", 1, max_msg_size=MAX_STORED_MESSAGE + 1)
+        event_buffer("host", "record", 1, max_msg_size=MAX_STORED_MESSAGE + 1)
     with pytest.raises(ValueError, match="key_table_value_past_the_leaf"):
         KeyTable({"one": MAX_STORED_MESSAGE})
     big = KeyTable({key: MAX_STORED_MESSAGE - 1024 for key in "abc"})   # WALL holds two
@@ -306,22 +296,23 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
         wall_config(big, first_seq=1)
 
 
-def test_one_class_table_holds_the_whole_store_within_the_servers_stream_count():
-    # One owner declares the whole table; its caps never pass the store, so no declare meets 10028
-    # in any order (E-W1-TD-S2), and it has no more streams than the server admits (E-W1-FIT-1).
-    table = node_split()
-    assert len(table.buffers) == NODE_MAX_STREAMS
-    assert sum(config.max_bytes for config in table.buffers.values()) <= table.total == NODE_STORE_BYTES
-    room = table.total - sum(config.max_bytes for config in table.buffers.values())
-    with pytest.raises(ValueError, match="class_table_past_the_store"):
-        ClassTable(dict(table.buffers), NODE_STORE_BYTES + 1)
-    with pytest.raises(ValueError, match="class_table_over_total"):
-        ClassTable({**table.buffers, "REC_host": replace(table.buffers["REC_host"],
-                                                         max_bytes=table.buffers["REC_host"].max_bytes + room + 1)})
-    with pytest.raises(ValueError, match="class_table_too_many_streams"):
-        ClassTable({**table.buffers, "EXTRA": buffer("EXTRA", 1)})
-    with pytest.raises(ValueError, match="class_table_unbuilt_buffer"):
-        ClassTable({"RAW": replace(buffer("RAW", 1), metadata=None)})
+def test_every_store_line_builds_at_its_full_bytes_and_streams_and_none_past_it():
+    # The harness's store fills every line exactly, so with the WALL mirror it is the server's 17
+    # streams (E-W1-FIT-1) inside the store, and no line's apply is refused for room by another's in
+    # any order (E3b design §7.3). One byte or one stream past a line is refused at the slice.
+    slices = line_slices()
+    assert set(slices) == set(STORE_LINES)
+    for name, slice_ in slices.items():
+        line = STORE_LINES[name]
+        assert (len(slice_.buffers), sum(config.max_bytes for config in slice_.buffers)) == (line.streams, line.max_bytes)
+        events, *keyed = slice_.buffers
+        with pytest.raises(ValueError, match="slice_past_its_line"):   # one byte
+            Slice(name, (replace(events, max_bytes=events.max_bytes + 1), *keyed))
+        with pytest.raises(ValueError, match="slice_past_its_line"):   # one stream, at the same bytes
+            Slice(name, (replace(events, max_bytes=events.max_bytes - 1), *keyed, event_buffer(name, "extra", 1)))
+    assert sum(len(slice_.buffers) for slice_ in slices.values()) + 1 == NODE_MAX_STREAMS
+    assert sum(config.max_bytes for slice_ in slices.values() for config in slice_.buffers) + WALL_STREAM_BYTES <= (
+        NODE_STORE_BYTES)
 
 
 def test_the_memory_store_fits_the_bus_fence():
@@ -342,59 +333,58 @@ def test_the_memory_store_fits_the_bus_fence():
 
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
-# stream configured or created elsewhere bypasses the buffer rule (E-W1-TD-S1). The guard bans the
-# calls and API subjects that create or change a stream, in any argument form (kwargs included), not
-# only the configuration class, outside nodeapi/buffers.py (E-W1-TD-S5). Nothing updates a stream's
-# configuration, nodeapi/buffers.py included: a per-Node override waits for E3b (E-W1-FIT-1). Pulls go
-# through nodeapi.pull, the only request with a byte budget (E-W1-TD-3).
+# stream configured, created or updated elsewhere bypasses the buffer rule (E-W1-TD-S1); `apply` is
+# the one update (E3b design §12 change 3). Pulls and consumer creates go through nodeapi.pull, the
+# only request with a byte budget (E-W1-TD-3). The guard bans the calls and API subjects in any
+# argument form (kwargs included), not only the configuration class (E-W1-TD-S5), in every `nodeapi`
+# module; outside `nodeapi` the import contract forbids nats altogether (§12 change 11).
 _NOWHERE = ("DiscardPolicy.NEW", "RetentionPolicy.WORK_QUEUE", "RetentionPolicy.INTEREST",
             "create_key_value(", "KeyValueConfig(")
-_STREAM_BUILDER = "nodeapi/buffers.py"
-_STREAM_WRITES = re.compile(r"StreamConfig\(|\badd_stream\b|STREAM\.CREATE\b")
-_STREAM_UPDATES = re.compile(r"\bupdate_stream\b|STREAM\.UPDATE\b")
-_PULLS = (".fetch(", "pull_subscribe")
+_ONLY_IN = {
+    "nodeapi/buffers.py": re.compile(r"StreamConfig\(|\badd_stream\b|STREAM\.CREATE\b|\bupdate_stream\b|STREAM\.UPDATE\b"),
+    "nodeapi/pull.py": re.compile(r"\.fetch\(|\bpull_subscribe\b|\badd_consumer\b|CONSUMER\.CREATE\b|CONSUMER\.MSG\.NEXT\b"),
+}
 
 
 def _guard_violations(path: str, text: str) -> list[tuple[str, str]]:
-    """What the buffer guard refuses in one file of the tree."""
+    """What the buffer guard refuses in one `nodeapi` module."""
     found = [(path, forbidden) for forbidden in _NOWHERE if forbidden in text]
-    if path != _STREAM_BUILDER:
-        found += [(path, match.group()) for match in _STREAM_WRITES.finditer(text)]
-    found += [(path, match.group()) for match in _STREAM_UPDATES.finditer(text)]
-    if re.search(r"^\s*(import nats|from nats)", text, re.MULTILINE) and path != "nodeapi/pull.py":
-        found += [(path, forbidden) for forbidden in _PULLS if forbidden in text]
+    for owner, calls in _ONLY_IN.items():
+        if path != owner:
+            found += [(path, match.group()) for match in calls.finditer(text)]
     return found
 
 
-def test_only_nodeapi_configures_a_buffer_or_pulls_anywhere_in_the_tree():
+def test_only_nodeapi_buffers_configures_a_stream_and_only_nodeapi_pull_pulls():
     listed = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others",
-                             "--exclude-standard", "--", "*.py"], check=True, capture_output=True,
+                             "--exclude-standard", "--", "nodeapi/*.py"], check=True, capture_output=True,
                             text=True).stdout.strip("\0").split("\0")
-    this = Path(__file__).resolve().relative_to(REPO).as_posix()
-    checked = 0
-    for path in sorted(name for name in listed if name != this and (REPO / name).is_file()):
-        assert _guard_violations(path, (REPO / path).read_text(errors="replace")) == []
-        checked += 1
-    assert checked > 500 and "nodeapi/buffers.py" in listed
+    for path in listed:
+        assert _guard_violations(path, (REPO / path).read_text()) == [], path
+    assert {"nodeapi/buffers.py", "nodeapi/pull.py", "nodeapi/node.py", "nodeapi/hub.py"} <= set(listed)
 
 
 def test_the_buffer_guard_refuses_a_stream_created_in_any_form():
-    # The evasion the re-review proved: no nats import, no StreamConfig, a discard-new KV bucket
-    # created by keyword arguments (E-W1-TD-S5). Each form is refused outside nodeapi/buffers.py.
+    # The evasion the re-review proved: no StreamConfig, a discard-new KV bucket created by keyword
+    # arguments (E-W1-TD-S5). Each form is refused in every nodeapi module but its owner.
     evasion = ("async def declare(jetstream):\n"
                "    await jetstream.add_stream(name='KV_desired_x', subjects=['$KV.desired_x.>'],\n"
                "                               max_bytes=4096, max_msgs_per_subject=1, discard='new')\n")
-    assert _guard_violations("central/fleet/rr_evasion.py", evasion) == [
-        ("central/fleet/rr_evasion.py", "add_stream")]
+    assert _guard_violations("nodeapi/node.py", evasion) == [("nodeapi/node.py", "add_stream")]
     for form in ("await js.update_stream(config=config)", "create = jetstream.add_stream",
                  "await nc.request('$JS.API.STREAM.CREATE.X', body)",
                  "await nc.request(f'$JS.{domain}.API.STREAM.UPDATE.{name}', body)",
-                 "StreamConfig(name='X')", "await js.create_key_value(bucket='x')"):
-        assert _guard_violations("central/fleet/rr_evasion.py", form), form
+                 "StreamConfig(name='X')", "await js.create_key_value(bucket='x')",
+                 "await js.add_consumer('X', config)", "await nc.request('$JS.API.CONSUMER.CREATE.X', body)",
+                 "await sub.fetch(10)", "await js.pull_subscribe('x', 'd')",
+                 "await nc.request('$JS.API.CONSUMER.MSG.NEXT.X.c', body)"):
+        assert _guard_violations("nodeapi/hub.py", form), form
     assert _guard_violations("nodeapi/buffers.py", "await jetstream.add_stream(config)") == []
-    assert _guard_violations("nodeapi/buffers.py", "await jetstream.update_stream(config)") == [
-        ("nodeapi/buffers.py", "update_stream")]
-    assert _guard_violations("central/fleet/reader.py", "await jetstream.stream_info(name)") == []
+    assert _guard_violations("nodeapi/buffers.py", "await jetstream.update_stream(config)") == []
+    assert _guard_violations("nodeapi/pull.py", "await jetstream.add_consumer(stream, config)") == []
+    assert _guard_violations("nodeapi/buffers.py", "await jetstream.add_consumer(stream, config)") == [
+        ("nodeapi/buffers.py", "add_consumer")]
+    assert _guard_violations("nodeapi/hub.py", "await jetstream.stream_info(name)") == []
 
 
 def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
@@ -407,8 +397,8 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     hub = json.loads(hub_configuration(["serial-a"], LISTENERS))
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
     assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]
-    # The server's store is the outer fence, reserved per stream at create: the split fits it.
-    assert sum(config.max_bytes for config in node_split().buffers.values()) <= _bytes(
+    # The server's store is the outer fence, reserved per stream at create: every line fits it.
+    assert sum(config.max_bytes for slice_ in line_slices().values() for config in slice_.buffers) <= _bytes(
         node["jetstream"]["max_memory_store"])
     assert wall_config(WALL_TABLE, first_seq=1).max_bytes == wall_mirror_config().max_bytes == WALL_STREAM_BYTES
 
@@ -451,7 +441,7 @@ def test_the_store_lines_fill_the_store_and_each_slice_stays_in_its_line():
     assert Slice("display", (records, state)).captures("host.record.call") is None
     refusals = {
         "slice_unknown_line": lambda: Slice("nowhere", (records, state)),
-        "slice_unbuilt_buffer": lambda: Slice("display", (records, state, buffer("RAW", 1, subjects=["raw.>"]))),
+        "slice_unbuilt_buffer": lambda: Slice("display", (records, state, wall_mirror_config())),
         "slice_outside_its_line": lambda: Slice("display", (state, event_buffer("host", "record", 1))),
         "slice_names": lambda: Slice("display", (records, records, state)),
         "slice_past_its_line": lambda: Slice("display", (event_buffer("display", "record", 1536 * kib), state)),

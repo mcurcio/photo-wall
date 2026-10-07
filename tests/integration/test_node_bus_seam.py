@@ -49,7 +49,7 @@ from contracts.node_link import (
     WALL_STREAM_BYTES,
     account_id,
 )
-from nodeapi.buffers import KeyTable, bucket, buffer, declare, desired_bucket
+from nodeapi.buffers import HEADER_ALLOWANCE, KeyTable, declare, desired_bucket, event_buffer
 from nodeapi.documents import ABSENT, Conflict, DocumentWriter
 from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import pull
@@ -174,11 +174,11 @@ def test_two_node_accounts_in_domain_node_stay_isolated(tmp_path):
         # The same stream name on both Nodes, both in domain `node`: each Central sees its own.
         for client, count in ((local_a, 3), (local_b, 5)):
             jetstream = client.jetstream()
-            await declare(jetstream, buffer("PROBE", 64 * 1024, subjects=["probe.events.>"]))
+            await declare(jetstream, event_buffer("host", "record", 64 * 1024))
             for index in range(count):
-                await jetstream.publish(f"probe.events.{index}", b"event")
-        info_a = await central_a.jetstream(domain=NODE_DOMAIN).stream_info("PROBE")
-        info_b = await central_b.jetstream(domain=NODE_DOMAIN).stream_info("PROBE")
+                await jetstream.publish(f"host.record.{index}", b"event")
+        info_a = await central_a.jetstream(domain=NODE_DOMAIN).stream_info("RECORD_host")
+        info_b = await central_b.jetstream(domain=NODE_DOMAIN).stream_info("RECORD_host")
         assert (info_a.state.messages, info_b.state.messages) == (3, 5)
 
         assert sorted(_leaf_accounts(hub)) == sorted([account_id("serial-a"), account_id("serial-b")])
@@ -209,45 +209,46 @@ def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf
         linked = leaf_connections(hub)
         node_client = await local(node)
         # Central stores into a Node only through its JetStream API (E-W1-LEAF-1): a bucket's put.
-        await declare(node_client.jetstream(), bucket("state_probe", history=1, max_bytes=1024 * 1024))
+        await declare(node_client.jetstream(), desired_bucket("player", KeyTable(
+            {"small": 64, "big": MAX_STORED_MESSAGE - HEADER_ALLOWANCE})))
         central_client = await central(hub, "serial-a")
         assert central_client.max_payload == NODE_MAX_PAYLOAD
         jetstream = central_client.jetstream(domain=NODE_DOMAIN)
 
         async def stored():
             try:
-                return await jetstream.publish("$JS.node.API.$KV.state_probe.small", b"small", timeout=.5)
+                return await jetstream.publish("$JS.node.API.$KV.desired_player.small", b"small", timeout=.5)
             except (nats.errors.NoRespondersError, nats.errors.TimeoutError, NoStreamResponseError):
                 return None
-        assert (await until(stored, 10, "the Node's stream interest at the hub")).stream == "KV_state_probe"
+        assert (await until(stored, 10, "the Node's stream interest at the hub")).stream == "KV_desired_player"
 
         with pytest.raises(nats.errors.MaxPayloadError):
-            await jetstream.publish("$JS.node.API.$KV.state_probe.big", b"B" * (NODE_MAX_PAYLOAD + 1))
+            await jetstream.publish("$JS.node.API.$KV.desired_player.big", b"B" * (NODE_MAX_PAYLOAD + 1))
         with pytest.raises(nats.errors.MaxPayloadError):
-            await central_client.publish("$JS.node.API.$KV.state_probe.big", b"B" * (NODE_MAX_PAYLOAD + 1))
+            await central_client.publish("$JS.node.API.$KV.desired_player.big", b"B" * (NODE_MAX_PAYLOAD + 1))
 
         # The largest message crosses the leaf, and the stream refuses it (a message limit, E-W1-TD-2):
         # the largest it stores is MAX_STORED_MESSAGE, which crosses and is stored.
         with pytest.raises(APIError) as too_large:
-            await jetstream.publish("$JS.node.API.$KV.state_probe.big", b"L" * NODE_MAX_PAYLOAD)
+            await jetstream.publish("$JS.node.API.$KV.desired_player.big", b"L" * NODE_MAX_PAYLOAD)
         assert too_large.value.err_code == VALUE_TOO_LARGE
-        acknowledgement = await jetstream.publish("$JS.node.API.$KV.state_probe.big", b"L" * MAX_STORED_MESSAGE)
-        assert acknowledgement.stream == "KV_state_probe"
+        acknowledgement = await jetstream.publish("$JS.node.API.$KV.desired_player.big", b"L" * MAX_STORED_MESSAGE)
+        assert acknowledgement.stream == "KV_desired_player"
 
         # Past the limit only with its headers: the client sends it, the hub refuses it and closes
         # that client; the Node never sees it.
-        before = (await node_client.jetstream().stream_info("KV_state_probe")).state.messages
-        await central_client.publish("$JS.node.API.$KV.state_probe.big", b"H" * NODE_MAX_PAYLOAD, headers={"Probe": "x" * 64})
+        before = (await node_client.jetstream().stream_info("KV_desired_player")).state.messages
+        await central_client.publish("$JS.node.API.$KV.desired_player.big", b"H" * NODE_MAX_PAYLOAD, headers={"Probe": "x" * 64})
         async def closed():
             return central_client.is_closed
         await until(closed, 5, "the hub closes the client that sent past max_payload")
         await asyncio.sleep(.5)
-        assert (await node_client.jetstream().stream_info("KV_state_probe")).state.messages == before
+        assert (await node_client.jetstream().stream_info("KV_desired_player")).state.messages == before
 
         # The leaf never dropped: the same connection id.
         assert leaf_connections(hub) == linked
         again = await central(hub, "serial-a")
-        assert (await again.jetstream(domain=NODE_DOMAIN).publish("$JS.node.API.$KV.state_probe.small", b"after")).stream == "KV_state_probe"
+        assert (await again.jetstream(domain=NODE_DOMAIN).publish("$JS.node.API.$KV.desired_player.small", b"after")).stream == "KV_desired_player"
         assert leaf_connections(hub) == linked
         await again.close()
         await node_client.close()
@@ -398,7 +399,7 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
         writer = await wall_writer(hub)
         await declare_wall(writer)
         await declare_wall_mirror(node_client)
-        await declare(jetstream, buffer("REC_player", 4 * MIB, subjects=["player.record.>"]))
+        await declare(jetstream, event_buffer("player", "record", 4 * MIB))
         await declare(jetstream, desired_bucket("player", KeyTable({"show": 64}, history=2)))
         await (await DocumentWriter.bind(node_client, f"KV_{BUCKET}", writer="node")).put("show", b"node", expect=ABSENT)
 
@@ -428,19 +429,19 @@ def test_nothing_a_node_program_does_crosses_the_leaf_while_the_hub_is_stalled(t
         for refused in ('publish to "player.record.x"', 'subscription to "player.event.>"',
                         'subscription to "_central.x"', 'publish to "player.echo"'):   # nats-py lowercases
             assert any(refused in error.lower() for error in refused_at_hub), (refused, refused_at_hub)
-        assert (await jetstream.stream_info("REC_player")).state.messages == 0
+        assert (await jetstream.stream_info("RECORD_player")).state.messages == 0
 
         # Central's pull waits on an empty stream, its request already at the Node.
         await central_client.jetstream(domain=NODE_DOMAIN).add_consumer(
-            "REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
+            "RECORD_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
         waiting_request = asyncio.get_running_loop().create_future()
 
         async def spy(message):
             if "expires" in json.loads(message.data) and not waiting_request.done():
                 waiting_request.set_result(True)
-        await node_client.subscribe("$JS.API.CONSUMER.MSG.NEXT.REC_player.central", cb=spy)
+        await node_client.subscribe("$JS.API.CONSUMER.MSG.NEXT.RECORD_player.central", cb=spy)
         await node_client.flush()
-        waiting = asyncio.create_task(pull(central_client, "REC_player", "central", 10, timeout=60,
+        waiting = asyncio.create_task(pull(central_client, "RECORD_player", "central", 10, timeout=60,
                                            domain=NODE_DOMAIN))
         await asyncio.wait_for(waiting_request, 5)
         await asyncio.sleep(.5)
@@ -614,8 +615,7 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         hub.stop()
 
 
-@pytest.mark.parametrize("source", ["stream", "bucket"])
-def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path, source):
+def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path):
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
     hub.start()
@@ -626,18 +626,11 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
         await _linked(hub, 1)
         node_client = await local(node)
         jetstream = node_client.jetstream()
-        if source == "stream":
-            stream = "OBSERVED"
-            await declare(jetstream, buffer(stream, 16 * 1024, subjects=["observed.>"]))
+        stream = "OBSERVATION_health"
+        await declare(jetstream, event_buffer("health", "observation", 16 * 1024))
 
-            async def write(index: int) -> None:
-                await jetstream.publish("observed.reading", f"reading-{index:04}".encode())
-        else:
-            stream = "KV_probe_observed"
-            kv = await declare_bucket(jetstream, bucket("probe_observed", history=1, max_bytes=16 * 1024))
-
-            async def write(index: int) -> None:
-                await kv.put(f"reading{index:04}", f"reading-{index:04}".encode())
+        async def write(index: int) -> None:
+            await jetstream.publish("health.observation.reading", f"reading-{index:04}".encode())
         for index in range(10):
             await write(index)
         origin = (await jetstream.stream_info(stream)).config.first_seq
@@ -768,10 +761,10 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
             assert (await central_client.request(ENDPOINT, b"via", timeout=2)).data == b"node-a:via"
 
             jetstream = node_client.jetstream()
-            await declare(jetstream, buffer("REC_player", 1024 * 1024, subjects=["player.record.>"]))
+            await declare(jetstream, event_buffer("player", "record", 1024 * 1024))
             await jetstream.publish("player.record.asrun", b"P" * MAX_STORED_MESSAGE)
             message = await central_client.jetstream(domain=NODE_DOMAIN).get_last_msg(
-                "REC_player", "player.record.asrun")
+                "RECORD_player", "player.record.asrun")
             assert len(message.data) == MAX_STORED_MESSAGE
 
             writer = await wall_writer(hub)

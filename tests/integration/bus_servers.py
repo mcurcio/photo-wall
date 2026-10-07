@@ -8,7 +8,7 @@ probe uses is the test's own: nothing here is a subject grammar.
 
 Every stream, KV bucket and mirror a probe declares is built by the shipped `nodeapi.buffers`
 (erratum E-W1-TD-S1): circular event buffers drop their oldest when full, sticky documents are never
-full (E-W1-TD-4). The config test fails on any other place in the tree that configures one.
+full (E-W1-TD-4). The config test fails on any other `nodeapi` module that configures one.
 
 A server counts as started only on its own word: `BusServer.start` waits for the ports file that
 pid writes and refuses unless it lists exactly the ports the harness gave it, so a server that lost
@@ -40,6 +40,7 @@ from nats.js.errors import NotFoundError
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
+    STORE_LINES,
     WALL_STREAM,
     WALL_WRITER_USER,
     account_id,
@@ -47,12 +48,12 @@ from contracts.node_link import (
     node_user,
 )
 from nodeapi.buffers import (
-    ClassTable,
     KeyTable,
-    bucket,
-    buffer,
+    Slice,
     declare,
     desired_bucket,
+    event_buffer,
+    state_bucket,
     wall_config,
     wall_mirror_config,
 )
@@ -78,43 +79,43 @@ PORT_CEILING = 32000
 
 
 async def declare_bucket(jetstream: JetStreamContext, config: StreamConfig) -> KeyValue:
-    """Declare a bucket configuration (`nodeapi.buffers.bucket`, `state_bucket` or `desired_bucket`)
-    and bind a KeyValue handle to it."""
+    """Declare a bucket configuration (`nodeapi.buffers.state_bucket` or `desired_bucket`) and bind a
+    KeyValue handle to it."""
     await declare(jetstream, config)
     return await jetstream.key_value(config.name.removeprefix("KV_"))
 
 
 def desired_documents(component: str) -> KeyTable:
-    """The harness's desired-bucket document table for one component: a show document, a layout,
-    a retention override and twenty Frame documents, two values each. The page's numbers (E3b's
-    class table owns them); its budget stays inside the page's 0.25 MiB per desired bucket."""
-    sizes = {"show": 4096, "layout": 4096, "retention": 1024, **{f"frame{index:02}": 4096 for index in range(20)}}
+    """The harness's desired-bucket document table for one component: a show document, a layout and
+    twenty Frame documents, two values each, inside 0.25 MiB. Retention is per topic in each
+    release's slice, never a document (owner answer Q2)."""
+    sizes = {"show": 4096, "layout": 4096, **{f"frame{index:02}": 4096 for index in range(20)}}
     return KeyTable(sizes, history=2)
 
 
+# The harness's state table for every line: eight keys of reported state, two values each.
+STATE_TABLE = KeyTable({f"state{index}": 4096 for index in range(8)}, history=2)
 # The harness's wall table: the wall keys its probes write through a writer.
 WALL_TABLE = KeyTable({"timing": 4096, "scene": 4096})
+_OBSERVATION_AGE = 6 * 3600.0
 
 
-def node_split() -> ClassTable:
-    """The page's starting split of the Node's store (section 6) as one class table: circular
-    records, observations and state buckets; sticky desired buckets and the wall copy. Held by the
-    harness only; E3b's class table owns the numbers. The table's caps fit the store, so it declares
-    in any order; full, each circular buffer still takes every write and no sticky one evicts."""
-    split: dict[str, StreamConfig] = {}
-    for component, cap in {"player": 4 * MIB, "apps": MIB, "display": MIB, "host": MIB // 2}.items():
-        split[f"REC_{component}"] = buffer(f"REC_{component}", cap, subjects=[f"{component}.record.>"])
-    for component in ("health", "content"):
-        split[f"OBS_{component}"] = buffer(f"OBS_{component}", MIB, subjects=[f"{component}.observation.>"],
-                                           max_age=6 * 3600)
-    for component in ("host", "apps", "content", "display", "health", "player"):
-        config = bucket(f"state_{component}", history=4, max_bytes=MIB // 4, max_value_size=4096)
-        split[config.name] = config
-    for component in ("apps", "display", "health", "player"):
-        config = desired_bucket(component, desired_documents(component))
-        split[config.name] = config
-    split[WALL_STREAM] = wall_mirror_config()
-    return ClassTable(split)
+def line_slices() -> dict[str, Slice]:
+    """One slice per store line (`contracts.node_link.STORE_LINES`) at its full bytes and streams: a
+    state bucket by STATE_TABLE, a desired bucket by `desired_documents` where the line has a third
+    stream, and the line's events (observations for health and content, kept six hours; records for
+    the rest) taking every byte the keyed buckets leave. With the WALL mirror, the store at its 17
+    streams and 11.5 of 12 MiB (E3b design §7.3)."""
+    slices = {}
+    for name, line in STORE_LINES.items():
+        keyed = [state_bucket(name, STATE_TABLE)]
+        if line.streams == 3:
+            keyed.append(desired_bucket(name, desired_documents(name)))
+        rest = line.max_bytes - sum(config.max_bytes for config in keyed)
+        events = (event_buffer(name, "observation", rest, max_age=_OBSERVATION_AGE) if name in ("health", "content")
+                  else event_buffer(name, "record", rest))
+        slices[name] = Slice(name, (events, *keyed))
+    return slices
 
 
 @dataclass
@@ -579,21 +580,6 @@ async def reload_hub(hub: BusServer, serials: Sequence[str], *, requests: int = 
                 raise RuntimeError(f"hub reload refused: {reply['error']}")
     finally:
         await fleet.close()
-
-
-def kv_bucket_bytes(bucket: str, keys: Sequence[str], history: int, max_value: int,
-                    header_bytes: int = 0) -> int:
-    """A KV bucket's byte cap that holds `history` values of `max_value` bytes for every listed
-    key, each charged at most nats-server's per-message memory-store size (subject + headers + value
-    + 16, ns:server/memstore.go:2511-2513; the file store's larger charge, harmless slack). The class
-    sizing E3b inherits; a sizing, not headroom.
-
-    The bucket is a buffer: the server drops a key's own oldest at its per-subject limit before the
-    byte cap acts (ns:server/memstore.go:337-348), so listed keys never cost another key a value;
-    an unlisted key costs the bucket its oldest message, a hole a reader sees (E-W1-BUF-2, which
-    removes E-W1-E3a-3-1's discard-NEW headroom)."""
-    header = 4 + header_bytes if header_bytes else 0
-    return sum(history * (34 + len(f"$KV.{bucket}.{key}") + max_value + header) for key in keys)
 
 
 def leaf_connections(hub: BusServer) -> Mapping[str, int]:

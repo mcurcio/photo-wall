@@ -1,18 +1,17 @@
 """The Node bus's store budget on a real server (E3a-3, API8): the server itself refuses, at create,
-a stream past the store limit, an 18th stream and one without a byte cap; with every
-buffer on the Node full at once and the store wholly reserved, each still takes a write, a circular
-one dropping its oldest and a sticky one keeping every document (the buffer rule, E-W1-BUF-2,
-E-W1-TD-4); each retention class keeps the promise the Node API page states for it. Also: one class
-table declares in any order (E-W1-TD-S2), and re-declaring on a full store is a no-op, a racing
-create included (E-W1-STORE-1, E-W1-FIT-1); no reply for a stored message is past the
-leaf (E-W1-TD-2), whatever its subject (E-W1-TD-6), and a reply that grows with a stream's state does
-close it, which nodeapi never asks (recorded, E-W1-TD-9); a busy component is never cut off by a pull,
-however many it runs at once (E-W1-TD-3, -7).
+a stream past the store limit, an 18th stream and one without a byte cap; with every store line full
+at once and the store at its 17 streams, each buffer still takes a write, a circular one dropping its
+oldest and a sticky one keeping every key (the buffer rule, E-W1-BUF-2, E-W1-TD-4); each retention
+class keeps the promise the Node API page states for it. Also: applying the full store again, or two
+applies racing, is a no-op, a racing create included (E-W1-STORE-1, E-W1-FIT-1); no reply for a stored
+message is past the leaf (E-W1-TD-2), whatever its subject (E-W1-TD-6), and a reply that grows with a
+stream's state does close it, which nodeapi never asks (recorded, E-W1-TD-9); a busy component is
+never cut off by a pull, however many it runs at once (E-W1-TD-3, -7).
 
-The Node runs the shipped `node-bus.conf`, unmodified. The split is the harness's `node_split` (the
-page's numbers; E3b's class table owns them). Only the tests that cross the leaf start the hub;
-elsewhere the Node's leaf retries in the background and nothing crosses it. Every stream, bucket
-and subject is the test's.
+The Node runs the shipped `node-bus.conf`, unmodified. The store is the harness's `line_slices`: every
+store line at its full bytes and streams (E3b design §7.3), with the WALL mirror. Only the tests that
+cross the leaf start the hub; elsewhere the Node's leaf retries in the background and nothing crosses
+it. Every stream, bucket and subject is the test's.
 """
 from __future__ import annotations
 
@@ -29,19 +28,17 @@ from integration.bus_servers import (
     central,
     declare_bucket,
     declare_wall,
-    desired_documents,
     hub_server,
-    kv_bucket_bytes,
     leaf_connections,
+    line_slices,
     local,
     node_server,
-    node_split,
     until,
     wall_value,
     wall_writer,
 )
 from nats.js.api import AckPolicy, ConsumerConfig
-from nats.js.errors import APIError, KeyNotFoundError
+from nats.js.errors import APIError
 
 from contracts.node_link import (
     MAX_STORED_MESSAGE,
@@ -50,22 +47,25 @@ from contracts.node_link import (
     NODE_MAX_PAYLOAD,
     NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
+    STORE_LINES,
     WALL_STREAM,
     WALL_STREAM_BYTES,
 )
 from nodeapi.buffers import (
     HEADER_ALLOWANCE,
     MAX_PUBLISH_SUBJECT,
-    STICKY,
     WALL_PREFIX,
-    ClassTable,
     KeyTable,
-    bucket,
-    buffer,
-    buffer_kind,
+    Role,
+    Slice,
+    apply,
     declare,
-    declare_table,
     desired_bucket,
+    event_buffer,
+    role_of,
+    state_bucket,
+    table_of,
+    wall_mirror_config,
 )
 from nodeapi.documents import ABSENT, DocumentRefused, DocumentWriter
 from nodeapi.epoch import epoch_of, stream_epoch
@@ -77,6 +77,8 @@ MAX_BYTES_REQUIRED = 10113      # JSStreamMaxBytesRequired: account API refuses 
 VALUE_TOO_LARGE = 10054         # JSStreamMessageExceedsMaximumErr: over max_value_size
 
 STORE_LIMIT = NODE_STORE_BYTES  # node-bus.conf's max_memory_store, the outer fence
+# Every store line and the WALL mirror: 11.5 of the store's 12 MiB (E3b design §7.3).
+FULL_STORE = sum(line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES
 # nats-server's per-message memory-store charge: 16 + subject + headers + payload
 # (ns:server/memstore.go:2511-2513).
 CHARGE = 16
@@ -127,20 +129,18 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
 
         # The server, not a library convention, refuses at create an uncapped stream.
         await _refused(declare(jetstream, dataclasses.replace(
-            buffer("UNCAPPED", 1, subjects=["uncapped.>"]), max_bytes=None)), MAX_BYTES_REQUIRED)
+            event_buffer("host", "uncapped", 1), max_bytes=None)), MAX_BYTES_REQUIRED)
 
-        # The page's split as one class table, its wall copy the real mirror, with the rest of the
-        # store given to one buffer: the caps reserve the whole store, with no headroom anywhere.
-        split = _whole_store()
-        await declare_table(jetstream, split)
-        split = split.buffers
+        # Every store line at its full bytes and streams, the wall copy the real mirror: the store at
+        # its 17 streams, every line's bytes reserved.
+        split = await _full_store(jetstream)
         caps = {name: config.max_bytes for name, config in split.items()}
-        assert sum(caps.values()) == STORE_LIMIT
+        assert sum(caps.values()) == FULL_STORE and len(caps) == NODE_MAX_STREAMS
         await jetstream.publish("player.record.asrun", b"as-run 1")
         before = {name: (await jetstream.stream_info(name)) for name in caps}
 
         # The fence acts at create only: one more stream does not fit (10027, the stream count).
-        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), MAX_STREAMS_REACHED)
+        await _refused(declare(jetstream, event_buffer("host", "extra", MIB)), MAX_STREAMS_REACHED)
 
         # Nothing that was there moved.
         assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(caps)
@@ -149,32 +149,33 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
             assert info.config.max_bytes == cap, name
             assert (info.state.messages, info.state.last_seq) == (
                 before[name].state.messages, before[name].state.last_seq), name
-        assert (await jetstream.get_last_msg("REC_player", "player.record.asrun")).data == b"as-run 1"
+        assert (await jetstream.get_last_msg("RECORD_player", "player.record.asrun")).data == b"as-run 1"
 
-        # Fill the whole store: every circular stream and bucket holds exactly its cap; every sticky
-        # one every document at its largest, `history` times, through its writer; WALL on the hub too,
-        # and the Node's mirror with it.
-        buckets, writers, tokens = {}, {}, {}
+        # Fill the whole store: every circular stream holds exactly its cap; every sticky one every
+        # key at its largest, `history` times (documents through their writer, state as a session
+        # puts it); WALL on the hub too, and the Node's mirror with it.
+        states, writers, tokens = {}, {}, {}
         for name, cap in caps.items():
             if name == WALL_STREAM:
                 writers[name] = await DocumentWriter.bind(writer, WALL_STREAM, writer="central")
                 assert writers[name].table == wall_table
                 tokens[name] = await _fill_documents(writers[name])
                 await _mirror_reaches(jetstream, max(token.seq for token in tokens[name].values()))
-            elif buffer_kind(split[name]) == STICKY:
+            elif role_of(split[name]) is Role.DESIRED:
                 writers[name] = await DocumentWriter.bind(client, name, writer="node")
                 tokens[name] = await _fill_documents(writers[name])
-            elif name.startswith("KV_"):
-                buckets[name] = kv = await jetstream.key_value(name.removeprefix("KV_"))
-                for index in range(cap // FILL_CHARGE):
-                    await kv.put(f"fill{index}", _fill(f"$KV.{name.removeprefix('KV_')}.fill{index}"))
+            elif role_of(split[name]) is Role.STATE:
+                states[name] = table_of(split[name])
+                for round_ in range(states[name].history):
+                    for key, size in states[name].sizes.items():
+                        await jetstream.publish(_key_subject(split[name], key), bytes([97 + round_]) * size)
             else:
                 subject = _subject(split[name])
                 for index in range(cap // FILL_CHARGE):  # the last one takes the remainder too
                     last = index == cap // FILL_CHARGE - 1
                     await jetstream.publish(subject, _fill(subject, FILL_CHARGE + cap % FILL_CHARGE * last))
             held = (await jetstream.stream_info(name)).state.bytes
-            assert held <= cap if name in writers else held == cap, name
+            assert held <= cap if name in writers or name in states else held == cap, name
         assert (await jetstream.account_info()).memory <= STORE_LIMIT
 
         # Every buffer full at once, each takes the next write at the next sequence: a circular one
@@ -193,11 +194,12 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
                     assert await wall_value(client, f"wall.{key}") == b"n" * wall_table.sizes[key]
                 assert len(await _held_keys(jetstream, name)) == len(writers[name].table.sizes), name
                 continue
-            if name in buckets:
-                revision = await buckets[name].put("one-more", b"x")
-                assert revision == full.last_seq + 1, name
-                with pytest.raises(KeyNotFoundError):
-                    await buckets[name].get("fill0")
+            if name in states:
+                key = sorted(states[name].sizes)[0]
+                acknowledgement = await jetstream.publish(_key_subject(split[name], key), b"n" * states[name].sizes[key])
+                assert acknowledgement.seq == full.last_seq + 1, name
+                assert len(await _held_keys(jetstream, name)) == len(states[name].sizes), name
+                continue
             else:
                 acknowledgement = await jetstream.publish(_subject(split[name]), _fill(_subject(split[name])))
                 assert (acknowledgement.stream, acknowledgement.seq) == (name, full.last_seq + 1)
@@ -205,10 +207,10 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
             assert after.first_seq > full.first_seq and after.bytes <= caps[name], name
 
         # The largest stored message, into a full stream of a full store.
-        full = (await jetstream.stream_info("REC_player")).state
+        full = (await jetstream.stream_info("RECORD_player")).state
         acknowledgement = await jetstream.publish("player.record.asrun", b"L" * MAX_STORED_MESSAGE)
         assert acknowledgement.seq == full.last_seq + 1
-        assert (await jetstream.stream_info("REC_player")).state.first_seq > full.first_seq
+        assert (await jetstream.stream_info("RECORD_player")).state.first_seq > full.first_seq
         assert (await jetstream.account_info()).memory <= STORE_LIMIT
         await client.close()
         await writer.close()
@@ -219,14 +221,19 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
         hub.stop()
 
 
-def _whole_store() -> ClassTable:
-    """The page's split with the rest of the store given to REC_host: the caps total the store. A
-    larger cap, not a new buffer, so the table keeps its 17 streams, the server's most
-    (E-W1-FIT-1)."""
-    split = node_split().buffers
-    rest = STORE_LIMIT - sum(config.max_bytes for config in split.values())
-    return ClassTable({**split, "REC_host": dataclasses.replace(
-        split["REC_host"], max_bytes=split["REC_host"].max_bytes + rest)})
+async def _full_store(jetstream, slices: dict[str, Slice] | None = None) -> dict:
+    """Every store line applied at its full bytes and streams (`line_slices`) and the WALL mirror:
+    the store at its 17 streams, the server's most (E-W1-FIT-1). Stream name -> configuration."""
+    slices = slices or line_slices()
+    for slice_ in slices.values():
+        await apply(jetstream, slice_)
+    await declare(jetstream, wall_mirror_config())
+    return {**{config.name: config for slice_ in slices.values() for config in slice_.buffers},
+            WALL_STREAM: wall_mirror_config()}
+
+
+def _key_subject(config, key: str) -> str:
+    return config.subjects[0].removesuffix(">") + key
 
 
 def _full_wall_table() -> KeyTable:
@@ -267,80 +274,71 @@ def _fill(subject: str, charge: int = FILL_CHARGE) -> bytes:
 async def _record(client) -> None:
     """Past its cap the oldest go, every publish is accepted, and first_seq advances by the drop."""
     jetstream = client.jetstream()
-    cap = 16 * 1024
-    await declare(jetstream, buffer("REC_probe", cap, subjects=["probe.record.>"]))
-    origin = (await jetstream.stream_info("REC_probe")).config.first_seq
-    published = 1000
+    await apply(jetstream, line_slices()["host"])
+    config = (await jetstream.stream_info("RECORD_host")).config
+    origin, published = config.first_seq, 2 * config.max_bytes // 4096
     for index in range(published):
-        acknowledgement = await jetstream.publish("probe.record.asrun", f"as-run {index:06}".encode() * 4)
+        acknowledgement = await jetstream.publish("host.record.asrun", f"as-run {index:06}".encode().ljust(4096, b"."))
         assert acknowledgement.seq == origin + index
-    state = (await jetstream.stream_info("REC_probe")).state
+    state = (await jetstream.stream_info("RECORD_host")).state
     dropped = published - state.messages
-    assert dropped > 0 and state.bytes <= cap
+    assert dropped > 0 and state.bytes <= config.max_bytes
     assert (state.first_seq, state.last_seq) == (origin + dropped, origin + published - 1)
-    config = (await jetstream.stream_info("REC_probe")).config
     assert (config.max_age or 0) == 0 and config.max_msgs_per_subject in (None, -1)
 
 
 async def _observation(client) -> None:
-    """A message older than max_age is gone; a fresh one stays."""
+    """A message older than max_age is gone; a fresh one stays. The health line with its observations
+    kept one second, not six hours."""
     jetstream = client.jetstream()
-    await declare(jetstream, buffer("OBS_probe", 16 * 1024, subjects=["probe.observation.>"], max_age=1))
-    origin = (await jetstream.stream_info("OBS_probe")).config.first_seq
+    line = line_slices()["health"]
+    observations = event_buffer("health", "observation", line.buffers[0].max_bytes, max_age=1)
+    await apply(jetstream, Slice("health", (observations, *line.buffers[1:])))
+    origin = (await jetstream.stream_info("OBSERVATION_health")).config.first_seq
     published = time.monotonic()
     for index in range(3):
-        await jetstream.publish("probe.observation.verdict", f"verdict {index}".encode())
-    assert (await jetstream.stream_info("OBS_probe")).state.messages == 3
+        await jetstream.publish("health.observation.verdict", f"verdict {index}".encode())
+    assert (await jetstream.stream_info("OBSERVATION_health")).state.messages == 3
     deadline = published + 5
-    while (state := (await jetstream.stream_info("OBS_probe")).state).messages:
+    while (state := (await jetstream.stream_info("OBSERVATION_health")).state).messages:
         assert time.monotonic() < deadline, f"aged messages still held: {state}"
         await asyncio.sleep(.1)
     assert time.monotonic() - published >= 1
     assert state.first_seq == origin + 3
-    await jetstream.publish("probe.observation.verdict", b"fresh")
-    assert (await jetstream.get_last_msg("OBS_probe", "probe.observation.verdict")).data == b"fresh"
+    await jetstream.publish("health.observation.verdict", b"fresh")
+    assert (await jetstream.get_last_msg("OBSERVATION_health", "health.observation.verdict")).data == b"fresh"
 
 
 async def _state(client) -> None:
-    """A circular bucket (reported state). Listed keys, at up to max_value bytes and ten times the
-    capacity, are always accepted and keep `history` values. A key beyond the list is accepted too:
-    the bucket has no headroom, so the first costs the bucket its oldest message, a hole in its
-    sequence. An oversized value is refused (a message limit, not fullness); every listed key keeps
-    its last good value."""
+    """A sticky state bucket (E3b design §12 change 4). Its listed keys, at up to their largest and
+    ten times the budget, are always accepted and keep `history` values: no key loses its only value.
+    A value past the table's largest message is refused (a message limit, not fullness); every key
+    keeps its last good value. The session refuses an unlisted key before sending."""
     jetstream = client.jetstream()
-    name, history, keys, max_value = "state_probe", 4, ("conditions", "position", "horizon", "verdicts"), 512
-    capacity = kv_bucket_bytes(name, keys, history, max_value)
-    kv = await declare_bucket(jetstream, bucket(
-        name, history=history, max_bytes=capacity, max_value_size=max_value))
+    line = line_slices()["display"]
+    await apply(jetstream, line)
+    [config] = [config for config in line.buffers if role_of(config) is Role.STATE]
+    table, keys = table_of(config), sorted(table_of(config).sizes)
 
-    # Sizes vary up to max_value, and each key in turn lags the others with one short value.
+    # Sizes vary up to each key's largest, and each key in turn lags the others with one short value.
     last: dict[str, bytes] = {}
     written, put = 0, 0
-    while written < 10 * capacity:
+    while written < 10 * config.max_bytes:
         key = keys[put % len(keys)]
-        size = max_value if (put // len(keys) + keys.index(key)) % (history + 1) else max_value // 3
+        size = table.sizes[key] if (put // len(keys) + keys.index(key)) % (table.history + 1) else table.sizes[key] // 3
         value = f"{put:08}".encode().ljust(size, b".")
-        await kv.put(key, value)
-        last[key], written, put = value, written + len(value), put + 1
-    for key in keys:  # end full: every key holds `history` values of max_value bytes
-        for index in range(history):
-            value = f"full {index}".encode().ljust(max_value, b"#")
-            await kv.put(key, value)
-            last[key] = value
+        await jetstream.publish(_key_subject(config, key), value)
+        last[key], written, put = value, written + size, put + 1
+    assert (await jetstream.stream_info(config.name)).state.bytes <= config.max_bytes
+    prefix = _key_subject(config, "")
+    held = (await jetstream.stream_info(config.name, subjects_filter=f"{prefix}>")).state.subjects
     for key in keys:
-        assert len(await kv.history(key)) == history, key
-
-    # A key beyond the list: the put is accepted, the bucket's oldest goes (here the first key's
-    # oldest value) and its first sequence moves past it, the hole a reader counts.
-    full = (await jetstream.stream_info(f"KV_{name}")).state
-    assert await kv.put("unlisted", b"x" * max_value) == full.last_seq + 1
-    after = (await jetstream.stream_info(f"KV_{name}")).state
-    assert after.first_seq > full.first_seq and after.bytes <= capacity
+        assert held[prefix + key] == table.history, key
     with pytest.raises(APIError) as oversized:
-        await kv.put(keys[0], b"x" * (max_value + 1))
+        await jetstream.publish(_key_subject(config, keys[0]), b"x" * (config.max_msg_size + 1))
     assert oversized.value.err_code == VALUE_TOO_LARGE, oversized.value
     for key in keys:
-        assert (await kv.get(key)).value == last[key], key
+        assert (await jetstream.get_last_msg(config.name, prefix + key)).data == last[key], key
 
 
 async def _desired(client) -> None:
@@ -349,12 +347,13 @@ async def _desired(client) -> None:
     written once stays. The writer refuses its own unlisted or oversize write before sending, so
     the stream never sees one; every listed document is held."""
     jetstream = client.jetstream()
-    table = desired_documents("apps")
-    config = desired_bucket("apps", table)
-    await declare_bucket(jetstream, config)
+    line = line_slices()["apps"]
+    await apply(jetstream, line)
+    [config] = [config for config in line.buffers if role_of(config) is Role.DESIRED]
+    table = table_of(config)
     writer = await DocumentWriter.bind(client, config.name, writer="node")
-    tokens = {"retention": await writer.put("retention", b"written-once", expect=ABSENT)}
-    keys = sorted(set(table.sizes) - {"retention"})
+    tokens = {"layout": await writer.put("layout", b"written-once", expect=ABSENT)}
+    keys = sorted(set(table.sizes) - {"layout"})
     written, put = 0, 0
     while written < 10 * config.max_bytes:
         key = keys[put % len(keys)]
@@ -367,10 +366,10 @@ async def _desired(client) -> None:
             await writer.put(unlisted, value, expect=tokens.get(unlisted, ABSENT))
     assert (await jetstream.stream_info(config.name)).state.last_seq == state.last_seq
     assert state.bytes <= config.max_bytes
-    assert (await writer.read("retention")).value == b"written-once"
+    assert (await writer.read("layout")).value == b"written-once"
     # One stream info counts every key's values: a kv.history per key holds a consumer for 5 minutes,
     # and 22 of them pass the server's per-stream consumer cap (10026, erratum E-W1-CONS-2).
-    prefix = config.subjects[0].removesuffix(">")
+    prefix = _key_subject(config, "")
     held = (await jetstream.stream_info(config.name, subjects_filter=f"{prefix}>")).state.subjects
     for key in keys:
         assert held[prefix + key] == table.history, key
@@ -391,28 +390,6 @@ def test_each_retention_class_keeps_its_promise(tmp_path, retention_class):
     _run(node, body)
 
 
-def test_one_class_table_declares_in_any_order_on_a_wholly_reserved_store(tmp_path):
-    # One owner declares the whole table; its caps total the store, so whichever buffer comes last
-    # is never the one refused (10028), and every connect's re-declare changes nothing (E-W1-TD-S2).
-    node = _node(tmp_path)
-
-    async def body():
-        client = await local(node)
-        jetstream = client.jetstream()
-        table = _whole_store()
-        await declare_table(jetstream, ClassTable(dict(reversed(list(table.buffers.items())))))
-        epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in table.buffers}
-        await declare_table(jetstream, table)   # every connect re-declares: nothing changes
-        caps = {name: config.max_bytes for name, config in table.buffers.items()}
-        assert sum(caps.values()) == STORE_LIMIT
-        for name, cap in caps.items():
-            info = await jetstream.stream_info(name)
-            assert (info.config.max_bytes, epoch_of(info)) == (cap, epochs[name]), name
-        await client.close()
-
-    _run(node, body)
-
-
 def test_the_server_refuses_an_eighteenth_stream_and_a_stream_past_the_store(tmp_path):
     # The fit's two server limits act at create only (E-W1-FIT-1): on a store at its 17 streams an
     # 18th is refused for the count (10027) and every stream still takes writes; with one stream gone,
@@ -422,80 +399,89 @@ def test_the_server_refuses_an_eighteenth_stream_and_a_stream_past_the_store(tmp
     async def body():
         client = await local(node)
         jetstream = client.jetstream()
-        table = _whole_store()
-        await declare_table(jetstream, table)
+        caps = {name: config.max_bytes for name, config in (await _full_store(jetstream)).items()}
         assert len(await jetstream.streams_info()) == NODE_MAX_STREAMS
-        await _refused(declare(jetstream, buffer("EXTRA", 1024, subjects=["extra.>"])), MAX_STREAMS_REACHED)
-        cap = table.buffers["REC_player"].max_bytes
-        for index in range(cap // FILL_CHARGE + 8):
+        await _refused(declare(jetstream, event_buffer("host", "extra", 1024)), MAX_STREAMS_REACHED)
+        for index in range(caps["RECORD_player"] // FILL_CHARGE + 8):
             acknowledgement = await jetstream.publish("player.record.fill", _fill("player.record.fill"))
-            assert acknowledgement.stream == "REC_player", index
-        assert (await jetstream.stream_info("REC_player")).state.bytes <= cap
+            assert acknowledgement.stream == "RECORD_player", index
+        assert (await jetstream.stream_info("RECORD_player")).state.bytes <= caps["RECORD_player"]
 
-        freed = table.buffers["REC_host"].max_bytes
-        await jetstream.delete_stream("REC_host")
-        await _refused(declare(jetstream, buffer("EXTRA", freed + 1, subjects=["extra.>"])), MEMORY_EXCEEDED)
-        assert await declare(jetstream, buffer("EXTRA", freed, subjects=["extra.>"])) is True
-        await _refused(declare(jetstream, table.buffers["REC_host"]), MAX_STREAMS_REACHED)
+        room = STORE_LIMIT - FULL_STORE + caps["RECORD_host"]
+        await jetstream.delete_stream("RECORD_host")
+        await _refused(declare(jetstream, event_buffer("host", "extra", room + 1)), MEMORY_EXCEEDED)
+        assert await declare(jetstream, event_buffer("host", "extra", room)) is True
+        await _refused(declare(jetstream, line_slices()["host"].buffers[0]), MAX_STREAMS_REACHED)
         await client.close()
 
     _run(node, body)
 
 
-def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declarers_race(tmp_path):
-    # Every connect re-declares, and a Node's store is wholly reserved. The server checks a create's
-    # reservation (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891),
-    # so re-adding a stream that exists, identical or not, is 10028 on a full store. nodeapi's declare
-    # looks the stream up instead, and a create that loses a race to another declarer is a no-op too
-    # (E-W1-STORE-1).
+def test_two_applies_of_the_full_store_racing_are_no_ops(tmp_path):
+    # Every attach applies its slice, and a Node's store is full. Applying the full store again, from
+    # the same build or another, or two applies at once, changes nothing and refuses nothing: no
+    # delete, purge, update or create is sent. The server checks a create's reservation
+    # (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891), so a
+    # create that loses a race on a full store is 10028, not 10058: the loser's apply is a no-op
+    # too (E-W1-STORE-1).
     node = _node(tmp_path)
 
     async def body():
         client = await local(node)
         jetstream = client.jetstream()
-        mine, theirs = _whole_store(), _whole_store()   # two declarers, each with its own build
-        await declare_table(jetstream, mine)
-        assert sum(config.max_bytes for config in mine.buffers.values()) == STORE_LIMIT
-        epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in mine.buffers}
+        mine, theirs = line_slices(), line_slices()   # two declarers, each with its own build
+        names = await _full_store(jetstream, mine)
+        epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in names}
 
-        # The store is wholly reserved: a re-declare of the same table, or of another build of it,
-        # changes nothing and refuses nothing, on every connect.
-        for table in (mine, theirs, mine):
-            for name, config in table.buffers.items():
-                assert await declare(jetstream, config) is False, name
-            await declare_table(jetstream, table)
-        assert {name: epoch_of(await jetstream.stream_info(name)) for name in mine.buffers} == epochs
-        assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(mine.buffers)
+        calls = _Changes(jetstream)
+        for slices in (mine, theirs, mine):
+            for slice_ in slices.values():
+                assert await apply(calls, slice_) == {config.name: epochs[config.name] for config in slice_.buffers}
+        await asyncio.gather(*(apply(calls, slice_) for slice_ in [*mine.values(), *theirs.values()]))
+        assert calls.sent == []
+        assert {name: epoch_of(await jetstream.stream_info(name)) for name in names} == epochs
+        assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(names)
 
         # The race's worst order, on the same full store less one stream: they look and find it
-        # absent, I create it, then their create meets the full reservation (10028, not 10058).
-        # Theirs is a no-op, not a refusal, and mine stays.
-        racing = "REC_player"
+        # absent, I create it, then their create meets the full reservation. Theirs is a no-op, not a
+        # refusal, and mine stays.
+        racing = "RECORD_player"
         await jetstream.delete_stream(racing)
         created = []
 
         async def i_create() -> None:
-            created.append((await declare(jetstream, mine.buffers[racing]),
-                            epoch_of(await jetstream.stream_info(racing))))
-        assert await declare(_LooksBefore(jetstream, i_create), theirs.buffers[racing]) is False
-        [(made, my_epoch)] = created
-        assert made is True and epoch_of(await jetstream.stream_info(racing)) == my_epoch
+            created.append((await apply(jetstream, mine["player"]))[racing])
+        assert (await apply(_LooksBefore(jetstream, racing, i_create), theirs["player"]))[racing] == created[0]
+        assert epoch_of(await jetstream.stream_info(racing)) == created[0]
 
         # A stream that is absent still meets the full store's refusal (its 17 streams): the no-op
         # covers only a stream that exists.
-        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), MAX_STREAMS_REACHED)
+        await _refused(declare(jetstream, event_buffer("host", "extra", MIB)), MAX_STREAMS_REACHED)
         await client.close()
 
     _run(node, body)
 
 
-class _LooksBefore:
-    """A declarer's JetStream whose first lookup returns only after `meanwhile` has run: another
-    declarer creates the stream between this one's look and its create. Every call goes to the real
-    server; only the order is fixed."""
+class _Changes:
+    """A JetStream that records every call that would change the store; every call goes to the real
+    server."""
 
-    def __init__(self, jetstream, meanwhile) -> None:
-        self._jetstream, self._meanwhile = jetstream, meanwhile
+    def __init__(self, jetstream) -> None:
+        self._jetstream, self.sent = jetstream, []
+
+    def __getattr__(self, name: str):
+        if name in ("add_stream", "update_stream", "delete_stream", "purge_stream"):
+            self.sent.append(name)
+        return getattr(self._jetstream, name)
+
+
+class _LooksBefore:
+    """A declarer's JetStream whose first lookup of `stream` returns only after `meanwhile` has run:
+    another declarer creates the stream between this one's look and its create. Every call goes to
+    the real server; only the order is fixed."""
+
+    def __init__(self, jetstream, stream: str, meanwhile) -> None:
+        self._jetstream, self._stream, self._meanwhile = jetstream, stream, meanwhile
 
     def __getattr__(self, name: str):
         return getattr(self._jetstream, name)
@@ -504,9 +490,11 @@ class _LooksBefore:
         try:
             return await self._jetstream.stream_info(name, *args, **kwargs)
         finally:
-            meanwhile, self._meanwhile = self._meanwhile, None
+            meanwhile = self._meanwhile if name == self._stream else None
             if meanwhile is not None:
+                self._meanwhile = None
                 await meanwhile()
+
 
 def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
     # A reply the Node generates for a stored message (a JSON get base64-encodes it, a direct get and
@@ -523,7 +511,7 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
         before = leaf_connections(hub)
         client = await local(node)
         jetstream = client.jetstream()
-        await declare(jetstream, buffer("REC_player", MIB, subjects=["player.record.>"], allow_direct=True))
+        await declare(jetstream, dataclasses.replace(event_buffer("player", "record", MIB), allow_direct=True))
         table = KeyTable({"show": MAX_STORED_MESSAGE - 512})
         await declare_bucket(jetstream, desired_bucket("player", table))
         for size in (MAX_STORED_MESSAGE + 1, NODE_MAX_PAYLOAD - 1024):
@@ -535,11 +523,11 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
         central_client = await central(hub, "serial-a")
         across = central_client.jetstream(domain=NODE_DOMAIN)
         for direct in (False, True):
-            message = await across.get_last_msg("REC_player", "player.record.asrun", direct=direct)
+            message = await across.get_last_msg("RECORD_player", "player.record.asrun", direct=direct)
             assert len(message.data) == MAX_STORED_MESSAGE, direct
         assert len((await (await across.key_value("desired_player")).get("show")).value) == table.sizes["show"]
-        await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
-        [delivered] = (await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
+        await across.add_consumer("RECORD_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
+        [delivered] = (await pull(central_client, "RECORD_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
         assert len(delivered.data) == MAX_STORED_MESSAGE
         await delivered.ack_sync()
         assert leaf_connections(hub) == before
@@ -573,7 +561,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         before = leaf_connections(hub)
         client = await local(node)
         jetstream = client.jetstream()
-        await declare(jetstream, buffer("REC_player", MIB, subjects=["player.record.>"]))
+        await declare(jetstream, event_buffer("player", "record", MIB))
         record = b"x" * MAX_STORED_MESSAGE
         # nats-py's line for a publish with no reply: PUB, the subject, two spaces and the size.
         longest = NODE_MAX_CONTROL_LINE - len(f"  {len(record)}") - len("player.record.")
@@ -592,11 +580,11 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         subjects.append(subject)
 
         async def stored():
-            return (await jetstream.stream_info("REC_player")).state.messages == len(subjects)
+            return (await jetstream.stream_info("RECORD_player")).state.messages == len(subjects)
         await until(stored, 5, "the longest-subject record is stored, not the one past it")
         # A component's KV put under a 1004-byte key, which a lowered control line once answered by
         # closing the component: the server's default line takes it and keeps the client (E-W1-TD-8).
-        state = await declare_bucket(jetstream, bucket("state_host", history=1, max_bytes=MIB))
+        state = await declare_bucket(jetstream, state_bucket("host", KeyTable({"k" * 1004: 64})))
         await state.put("k" * 1004, b"kept")
         assert (await state.get("k" * 1004)).value == b"kept" and client.is_connected
         # A key table admits only [A-Za-z0-9_-] keys, so the longest key escapes to itself.
@@ -610,11 +598,11 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
         central_client = await central(hub, "serial-a")
         across = central_client.jetstream(domain=NODE_DOMAIN)
         for subject in subjects:
-            assert len((await across.get_last_msg("REC_player", subject)).data) == MAX_STORED_MESSAGE
+            assert len((await across.get_last_msg("RECORD_player", subject)).data) == MAX_STORED_MESSAGE
         document = await across.get_last_msg(f"KV_{bucket_name}", f"$KV.{bucket_name}.{key}")
         assert len(document.data) == table.sizes[key]
-        await across.add_consumer("REC_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
-        delivered = (await pull(central_client, "REC_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
+        await across.add_consumer("RECORD_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
+        delivered = (await pull(central_client, "RECORD_player", "central", 1, timeout=2, domain=NODE_DOMAIN)).messages
         assert [message.subject for message in delivered] == subjects
         for message in delivered:
             await message.ack_sync()
@@ -639,19 +627,19 @@ def test_a_busy_component_is_never_cut_off_by_a_large_pull(tmp_path):
     async def body():
         writer = await local(node)
         jetstream = writer.jetstream()
-        await declare(jetstream, buffer("REC_player", 8 * MIB, subjects=["player.record.>"]))
+        await declare(jetstream, event_buffer("player", "record", 8 * MIB))
         for _ in range(16):
             await jetstream.publish("player.record.asrun", b"r" * MAX_STORED_MESSAGE)
         reader = await local(node)
-        await reader.jetstream().add_consumer("REC_player", ConsumerConfig(
+        await reader.jetstream().add_consumer("RECORD_player", ConsumerConfig(
             durable_name="component", ack_policy=AckPolicy.EXPLICIT))
-        pending = asyncio.ensure_future(pull(reader, "REC_player", "component", 16, timeout=8))
+        pending = asyncio.ensure_future(pull(reader, "RECORD_player", "component", 16, timeout=8))
         await asyncio.sleep(.05)   # the pull request is out
         time.sleep(3)              # the loop is busy past write_deadline ("2s")
         received = (await pending).messages
         assert received and sum(len(message.data) for message in received) <= PULL_MAX_BYTES
         while len(received) < 16:
-            more = (await pull(reader, "REC_player", "component", 16, timeout=2)).messages
+            more = (await pull(reader, "RECORD_player", "component", 16, timeout=2)).messages
             assert more, f"{len(received)} of 16 records"
             received += more
         for message in received:
@@ -671,15 +659,16 @@ def test_concurrent_pulls_on_one_busy_connection_share_one_byte_budget(tmp_path)
     # requests add up past max_pending, so the cap is the connection's: the pulls queue for one
     # budget, and the component keeps its connection and gets every record (E-W1-TD-7).
     node = _node(tmp_path)
-    streams = [f"REC_part{index}" for index in range(4)]
+    topics = [f"part{letter}" for letter in "abcd"]
+    streams = [f"{topic.upper()}_player" for topic in topics]
 
     async def body():
         writer = await local(node)
         jetstream = writer.jetstream()
-        for stream in streams:
-            await declare(jetstream, buffer(stream, 2 * MIB, subjects=[f"{stream.lower()}.>"]))
+        for topic in topics:
+            await declare(jetstream, event_buffer("player", topic, 2 * MIB))
             for _ in range(6):
-                await jetstream.publish(f"{stream.lower()}.asrun", b"r" * MAX_STORED_MESSAGE)
+                await jetstream.publish(f"player.{topic}.asrun", b"r" * MAX_STORED_MESSAGE)
         reader = await local(node)
         for stream in streams:
             await reader.jetstream().add_consumer(stream, ConsumerConfig(
@@ -720,8 +709,8 @@ def test_a_reply_that_grows_with_stream_state_closes_the_leaf_and_nodeapi_asks_n
         await until(linked, 10, "the Node's leaf link")
         client = await local(node)
         jetstream = client.jetstream()
-        await declare(jetstream, bucket("state_host", history=1, max_bytes=MIB))
-        await declare(jetstream, buffer("REC_host", 4 * MIB, subjects=["host.record.>"]))
+        await declare(jetstream, state_bucket("host", KeyTable({"pinned": 64, "hot": 64})))
+        await declare(jetstream, event_buffer("host", "record", 4 * MIB))
         await jetstream.publish("$KV.state_host.pinned", b"pinned")
         for _ in range(60_000):     # each write deletes the hot key's last value below the newest
             await client.publish("$KV.state_host.hot", b"h")
@@ -732,7 +721,7 @@ def test_a_reply_that_grows_with_stream_state_closes_the_leaf_and_nodeapi_asks_n
 
         central_client = await central(hub, "serial-a")
         across = central_client.jetstream(domain=NODE_DOMAIN)
-        for stream, details in (("KV_state_host", {"deleted_details": True}), ("REC_host", {"subjects_filter": ">"})):
+        for stream, details in (("KV_state_host", {"deleted_details": True}), ("RECORD_host", {"subjects_filter": ">"})):
             before = await until(linked, 10, "the Node's leaf link")
 
             async def epoch_read(stream=stream):

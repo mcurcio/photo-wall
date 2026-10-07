@@ -3,7 +3,8 @@
 Every Node buffer is a memory stream, so the store is heap charged to the bus's cgroup with the rest
 of the server. This runs the pinned linux-arm64 nats-server in a container fenced as the bus unit is
 (`--memory` = `--memory-swap` = NODE_BUS_MEMORY_MAX, GOMEMLIMIT = NODE_BUS_GOMEMLIMIT) with the shipped
-`node-bus.conf` and the class table `nodeapi` builds, its wall copy the real mirror of a hub's WALL.
+`node-bus.conf` and every store line `nodeapi` applies at its full bytes and streams (E3b design
+§7.3), its wall copy the real mirror of a hub's WALL.
 It gives every stream the most consumers the server admits (the next is refused, erratum
 E-W1-CONS-2), fills every buffer and keeps writing flat out for minutes, and fails on any OOM kill,
 server restart or refused write. Nothing survives a bus start, so there is no reload to prove (E3b
@@ -43,8 +44,7 @@ from integration.bus_servers import (
     HUB_STORE_BYTES,
     NODE_BUS_CONF,
     WALL_TABLE,
-    desired_documents,
-    node_split,
+    line_slices,
 )
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError
@@ -66,11 +66,12 @@ from contracts.node_link import (
 from nodeapi.buffers import (
     CIRCULAR,
     KeyTable,
-    buffer,
+    apply,
     buffer_kind,
     declare,
-    declare_table,
     desired_bucket,
+    event_buffer,
+    table_of,
     wall_config,
     wall_mirror_config,
 )
@@ -138,13 +139,13 @@ class _Bus:
 
 
 def _writes(name: str, config) -> tuple[list[str], list[bytes]]:
-    """What one writer cycles through for one Node buffer: subjects and bodies inside its table."""
-    if name.startswith("KV_desired_"):
-        table = desired_documents(name.removeprefix("KV_desired_"))
+    """What one writer cycles through for one Node buffer: subjects and bodies inside its table (every
+    key of a state or desired bucket at its largest), or two sizes of event."""
+    table = table_of(config)
+    if table is not None:
         keys = sorted(table.sizes)
-        return [f"$KV.{name.removeprefix('KV_')}.{key}" for key in keys], [b"d" * table.sizes[key] for key in keys]
-    if name.startswith("KV_"):
-        return [f"$KV.{name.removeprefix('KV_')}.key{index}" for index in range(80)], [b"s" * 900]
+        prefix = config.subjects[0].removesuffix(">")
+        return [prefix + key for key in keys], [b"k" * table.sizes[key] for key in keys]
     return [config.subjects[0].replace(">", "fill")], [b"r" * 200, b"r" * 4000]
 
 
@@ -230,14 +231,17 @@ def test_a_stalled_hub_never_pushes_the_bus_past_its_fence(tmp_path):
 
 
 async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> None:
-    table = node_split()
-    names = list(table.buffers)
+    buffers = {config.name: config for slice_ in line_slices().values() for config in slice_.buffers}
+    buffers[WALL_STREAM] = wall_mirror_config()
+    names = list(buffers)
     hub = await nats.connect(f"nats://127.0.0.1:{hub_port}", user=WALL_WRITER_USER,
                              password=WALL_WRITER_USER, allow_reconnect=False, connect_timeout=5)
     node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
     wall, jetstream = hub.jetstream(timeout=10), node.jetstream(timeout=10)
     await declare(wall, wall_config(WALL_TABLE, first_seq=1))
-    await declare_table(jetstream, table)
+    for slice_ in line_slices().values():
+        await apply(jetstream, slice_)
+    await declare(jetstream, wall_mirror_config())
     await wall.publish("wall.first", b"w")
     deadline = time.monotonic() + 60
     while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < 1:
@@ -262,7 +266,7 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     # buckets drop their oldest, desired documents replace their own values, WALL churns its mirror.
     stop, counts, errors = asyncio.Event(), Counter(), Counter()
     writers = [asyncio.create_task(_writer(jetstream, name, *_writes(name, config), stop, counts, errors))
-               for name, config in table.buffers.items() if name != WALL_STREAM]
+               for name, config in buffers.items() if name != WALL_STREAM]
     writers.append(asyncio.create_task(_writer(
         wall, WALL_STREAM, [f"wall.k{index}" for index in range(200)], [b"w" * 4000], stop, counts, errors)))
     samples = []
@@ -285,14 +289,13 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
           f"{sum(counts.values())} writes in {minutes} min, peak {peak:.1f} MiB, "
           f"anon up to {max(sample['anon_mib'] for sample in samples):.1f} MiB")
 
-    # Every buffer was full: each circular one dropped its oldest, each desired bucket holds every
-    # document `history` times, the mirror holds WALL's churn.
+    # Every buffer was full: each circular one dropped its oldest, each state and desired bucket holds
+    # every key `history` times, the mirror holds WALL's churn.
     full = await _states(jetstream, names)
-    for name, config in table.buffers.items():
+    for name, config in buffers.items():
         messages, first, _, _ = full[name]
-        if name.startswith("KV_desired_"):
-            documents = desired_documents(name.removeprefix("KV_desired_"))
-            assert messages == documents.history * len(documents.sizes), name
+        if (table := table_of(config)) is not None:
+            assert messages == table.history * len(table.sizes), name
         elif buffer_kind(config) == CIRCULAR:
             assert first > start[name][1], f"{name} never filled"
         else:
@@ -311,8 +314,8 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
     jetstream, across = node.jetstream(timeout=10), central.jetstream(domain=NODE_DOMAIN, timeout=10)
     await declare(wall.jetstream(), wall_config(WALL_TABLE, first_seq=1))
     await declare(jetstream, wall_mirror_config())
-    await declare(jetstream, buffer("REC_probe", 4 * MIB, subjects=["probe.record.>"]))
-    await declare(jetstream, buffer("REC_flood", 4 * MIB, subjects=["flood.>"]))
+    await declare(jetstream, event_buffer("player", "record", 4 * MIB))
+    await declare(jetstream, event_buffer("host", "record", 4 * MIB))
     await declare(jetstream, desired_bucket("player", KeyTable({"show": 64}, history=2)))
     await (await DocumentWriter.bind(node, "KV_desired_player", writer="node")).put("show", b"node", expect=ABSENT)
     await wall.jetstream().publish("wall.first", b"w")
@@ -322,15 +325,15 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
         await asyncio.sleep(.5)
 
     # Central's pull waits on an empty stream, its request already at the Node.
-    await across.add_consumer("REC_probe", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
+    await across.add_consumer("RECORD_player", ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT))
     waiting_request = asyncio.get_running_loop().create_future()
 
     async def spy(message):
         if "expires" in json.loads(message.data) and not waiting_request.done():
             waiting_request.set_result(True)
-    await node.subscribe("$JS.API.CONSUMER.MSG.NEXT.REC_probe.central", cb=spy)
+    await node.subscribe("$JS.API.CONSUMER.MSG.NEXT.RECORD_player.central", cb=spy)
     await node.flush()
-    pulling = asyncio.create_task(pull(central, "REC_probe", "central", 50, timeout=seconds + 30,
+    pulling = asyncio.create_task(pull(central, "RECORD_player", "central", 50, timeout=seconds + 30,
                                        domain=NODE_DOMAIN))
     await asyncio.wait_for(waiting_request, 10)
     print(f"before the stall: {bus.sample()}")
@@ -355,8 +358,8 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
     floods: list[asyncio.Task] = []
     try:
         for index in range(40):
-            await jetstream.publish(f"probe.record.{index}", record)
-        floods = [asyncio.create_task(flood(subject)) for subject in ("flood", None)]
+            await jetstream.publish(f"player.record.{index}", record)
+        floods = [asyncio.create_task(flood(subject)) for subject in ("host.record", None)]
         while time.monotonic() - started < seconds:
             await asyncio.sleep(SAMPLE_SECONDS)
             try:
@@ -371,13 +374,13 @@ async def _stall(bus: _Bus, hub_name: str, hub_port: int, bus_port: int, seconds
         _docker("kill", "--signal=CONT", hub_name)
     await asyncio.gather(*floods)
     assert all(count > 100 for count in sent.values()) and len(sent) == 2, dict(sent)
-    assert (await jetstream.stream_info("REC_flood")).state.messages > 0
+    assert (await jetstream.stream_info("RECORD_host")).state.messages > 0
     print(f"stalled hub {seconds:.0f} s: peak {max(sample['peak_mib'] for sample in samples):.1f} MiB "
           f"of {NODE_BUS_MEMORY_MAX // MIB}, sent {dict(sent)}")
 
     # The hub resumed: Central's pull returns, its conditional write lands, the mirror catches up.
     got = (await pulling).messages
-    assert got and got[0].subject == "probe.record.0", [message.subject for message in got]
+    assert got and got[0].subject == "player.record.0", [message.subject for message in got]
     for message in got:
         await message.ack_sync()
     document = await DocumentWriter.bind(central, "KV_desired_player", writer=CENTRAL_WRITER, domain=NODE_DOMAIN)

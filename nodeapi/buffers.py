@@ -4,9 +4,8 @@ The buffer rule (owner, 2026-10-06; errata E-W1-BUF-2, E-W1-TD-4) has two kinds.
 JetStream limits retention with discard old in the memory store (owner answer Q1 = start clean: every
 bus start is empty, E3b design §6), so no buffer refuses a write for being full:
 
-- **circular** (`buffer`, `bucket`): event buffers (records, observations, reported state). A byte
-  cap and any other limit; full, the server drops the oldest and takes the write, and a reader
-  sees the loss as a sequence gap.
+- **circular** (`event_buffer`): records and observations. A byte cap and an optional age; full, the
+  server drops the oldest and takes the write, and a reader sees the loss as a sequence gap.
 - **sticky** (`state_bucket`, `desired_bucket`, `wall_config`, `wall_mirror_config`): keyed data
   that must stay (state, desired documents, WALL and every Node mirror of it). Per-subject history
   only and no count limit. The byte cap is the key table's budget (keys x history x largest value),
@@ -20,21 +19,22 @@ message always fits the leaf (E-W1-TD-2). A builder carries no epoch: `declare` 
 into the metadata of every stream it creates, at the create, and a Node stream also starts at a
 sequence derived from it, so a revision or cursor read before a store loss names no message of the
 re-created stream, however long its declarer held the configuration (E-W1-TD-5, E-W1-FV-1). A
-caller never sets the policy, the storage or the metadata.
+caller never sets the policy, the storage or the metadata, and no builder takes a field that
+forwards (republish, sources, a subject transform): a republish is an internal server publish that
+no permission checks, the one way a Node stream could send across the leaf what Central did not
+pull (erratum E-W1-LEAF-1). The WALL mirror is built only by `wall_mirror_config`.
 
-No buffer forwards: `buffer` refuses republish, sources, mirror and subject transforms. A republish
-is an internal server publish that no permission checks, so it is the one way a Node stream could
-send across the leaf what Central did not pull (erratum E-W1-LEAF-1); the WALL mirror is built only
-by `wall_mirror_config`.
-
-`ClassTable` declares a Node's whole store at once: its caps never total more than the store, so
-no declare meets 10028 whatever the order (E-W1-TD-S2), and it has no more streams than the server
-admits (E-W1-FIT-1). The store's fit in the bus's memory fence is a property of the server's own caps
-(`max_memory_store`, `max_streams`, `max_consumers`), checked once in `contracts.node_link`, so it
-holds for any client and needs no per-table check. Nothing here changes a declared stream's limits.
+A component's buffers make one `Slice` inside its store line (`contracts.node_link.STORE_LINES`,
+E3b design §7.3), and the lines with the WALL mirror fit the store and the server's stream count,
+so no line's `apply` is refused for room by another's, in any order. `apply` changes a line in place
+for a new release: it prunes the line's streams the slice no longer names, purges keys a sticky
+table drops, shrinks, grows, then creates (§9.7); an update keeps the stream's epoch and values.
+The store's fit in the bus's memory fence is a property of the server's own caps (`max_memory_store`,
+`max_streams`, `max_consumers`), checked once in `contracts.node_link`.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -58,8 +58,6 @@ from nats.js.errors import APIError, NotFoundError
 from contracts.node_link import (
     MAX_STORED_MESSAGE,
     NODE_MAX_CONTROL_LINE,
-    NODE_MAX_STREAMS,
-    NODE_STORE_BYTES,
     STORE_LINES,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
@@ -87,8 +85,6 @@ STREAM_NAME_IN_USE: Final = 10058       # two declarers raced: the other one cre
 MEMORY_EXCEEDED: Final = 10028
 # The same race on a store at its stream count (node-bus.conf's max_streams), checked before the name too.
 MAX_STREAMS_REACHED: Final = 10027
-_FIXED: Final = frozenset({"retention", "discard", "storage", "metadata"})
-_FORWARDS: Final = frozenset({"republish", "sources", "mirror", "subject_transform"})
 
 
 def message_charge(subject: str, value_bytes: int, header_bytes: int = 0) -> int:
@@ -103,8 +99,6 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict,
            metadata: Mapping[str, str] | None = None) -> StreamConfig:
     # No epoch and no epoch-derived first_seq: `declare` stamps both when it creates the stream, so a
     # configuration held across a store loss never re-creates its stream as the old creation.
-    if _FIXED & fields.keys():
-        raise ValueError("buffer_policy_is_fixed")
     if max_bytes <= 0:
         raise ValueError("buffer_needs_a_byte_cap")
     size = fields.pop("max_msg_size", None)
@@ -117,28 +111,12 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict,
                         metadata={**(metadata or {}), KIND_KEY: kind}, **fields)
 
 
-def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
-    """A circular event buffer: its byte cap and any other limit the caller gives (subjects, max_age,
-    max_msgs, max_msgs_per_subject, a smaller max_msg_size). Full, the server drops the oldest and
-    takes the write; a reader sees the drop as the hole below the stream's first sequence. Never one
-    that forwards what it stores (republish, sources, mirror, a subject transform)."""
-    if _FORWARDS & fields.keys():
-        raise ValueError("buffer_never_forwards")
-    return _build(CIRCULAR, name, max_bytes, dict(fields))
-
-
 def _kv_fields(bucket_name: str, history: int, max_value_size: int | None) -> dict:
     # A KV bucket's stream as nats-py's create_key_value builds it (nats/js/client.py:1447), less its
     # hard-coded discard NEW, which refuses every put once the bucket is full.
     return dict(subjects=[f"$KV.{bucket_name}.>"], allow_rollup_hdrs=True, allow_msg_ttl=True,
                 deny_delete=True, duplicate_window=120, max_consumers=-1, max_msgs=-1,
                 max_msg_size=max_value_size, max_msgs_per_subject=history)
-
-
-def bucket(name: str, *, history: int, max_bytes: int, max_value_size: int | None = None) -> StreamConfig:
-    """A circular KV bucket (reported state): `history` values per key, a key's own oldest first;
-    an unlisted key past the byte cap costs the bucket its oldest message."""
-    return _build(CIRCULAR, f"KV_{name}", max_bytes, _kv_fields(name, history, max_value_size))
 
 
 def buffer_kind(config: StreamConfig) -> str:
@@ -185,38 +163,6 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
             raise error from None   # 10028 or 10027 for a stream that is still absent: the store is full
         return False
     return True
-
-
-@dataclass(frozen=True)
-class ClassTable:
-    """One Node store's whole declaration, by one owner. Its caps total at most `total`, itself at
-    most the store, so the server never refuses a declare of it for room (10028) in any order; it has
-    at most the streams the server admits (10027) (E-W1-FIT-1)."""
-    buffers: Mapping[str, StreamConfig]
-    total: int = NODE_STORE_BYTES
-
-    def __post_init__(self) -> None:
-        if not 0 < self.total <= NODE_STORE_BYTES:
-            raise ValueError("class_table_past_the_store")
-        buffers = dict(self.buffers)
-        for name, config in buffers.items():
-            if config.name != name:
-                raise ValueError("class_table_names")
-            if (config.metadata or {}).get(KIND_KEY) not in (CIRCULAR, STICKY):
-                raise ValueError("class_table_unbuilt_buffer")
-        object.__setattr__(self, "buffers", MappingProxyType(buffers))
-        caps = sum(config.max_bytes for config in buffers.values())
-        if caps > self.total:
-            raise ValueError("class_table_over_total")
-        if len(buffers) > NODE_MAX_STREAMS:
-            raise ValueError("class_table_too_many_streams")
-
-
-async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
-    """Create every buffer of the table that is absent."""
-    for config in table.buffers.values():
-        await declare(jetstream, config)
-
 
 
 # Self-describing Node streams (E3b design §4 rule 2, §7.2): each one built here carries its role, its
@@ -426,12 +372,64 @@ class Slice:
         return None
 
 
+def _limits(config: StreamConfig) -> tuple:
+    """What a release may change on a kept stream: its caps, its subjects and its key table."""
+    def cap(value: int | None) -> int:
+        return value if value is not None and value > 0 else -1
+    return (config.max_bytes, config.max_msg_size, cap(config.max_msgs_per_subject), cap(config.max_msgs),
+            config.max_age or 0, tuple(config.subjects or ()), (config.metadata or {}).get(TABLE_KEY))
+
+
+async def _held(jetstream: JetStreamContext) -> dict[str, StreamConfig]:
+    """Every stream on the bus, name -> configuration (a local list: a Node holds at most
+    NODE_MAX_STREAMS, so it is one page)."""
+    held: dict[str, StreamConfig] = {}
+    while True:
+        page = {info.config.name: info.config for info in await jetstream.streams_info(offset=len(held))}
+        if not page.keys() - held.keys():
+            return held
+        held.update(page)
+
+
 async def apply(jetstream: JetStreamContext, slice_: Slice) -> Mapping[str, str]:
-    """Stream -> epoch for every buffer of the slice: each absent one is created (stamped as
-    `declare` stamps it), each existing one is kept as it is (S1; S4 adds prune, purge, shrink and
-    grow)."""
-    epochs = {}
+    """Make the bus hold exactly the slice's buffers of its line; stream -> epoch for each. In this
+    order (E3b design §9.7), so a release that replaces streams on a full line and a full store is
+    never refused for room or for the stream count:
+
+    1. prune: delete every stream whose metadata namespace is the slice's line, exactly, and which
+       the slice does not name (no other line's stream is ever touched, E-E3B-CUT-4);
+    2. purge: on each kept sticky stream, the subjects of the keys its new table drops, so a shrink
+       never costs a listed key a value;
+    3. shrink: update each kept stream whose limits change and whose byte cap does not grow;
+    4. grow: update each kept stream whose byte cap grows;
+    5. create every absent stream, stamped as `declare` stamps it.
+
+    An update keeps the stream: its epoch (copied from the server), its first sequence and every
+    value it still lists; it writes the new limits and key table. Two applies of one slice racing
+    are both safe, the loser a no-op: a prune of a stream already gone, a purge of a purged key and an
+    update to the same limits change nothing, and `declare` takes a lost create race."""
+    held = await _held(jetstream)
+    wanted = {config.name: config for config in slice_.buffers}
+    for name, current in held.items():
+        if (current.metadata or {}).get(NAMESPACE_KEY) == slice_.line and name not in wanted:
+            with contextlib.suppress(NotFoundError):
+                await jetstream.delete_stream(name)
+    kept = {name: current for name, current in held.items()
+            if name in wanted and (current.metadata or {}).get(NAMESPACE_KEY) == slice_.line}
+    for name, current in kept.items():
+        old, new = table_of(current), table_of(wanted[name])
+        if old is not None and new is not None:
+            prefix = wanted[name].subjects[0].removesuffix(">")
+            for key in sorted(old.sizes.keys() - new.sizes.keys()):
+                await jetstream.purge_stream(name, subject=prefix + key)
+    updates = {name: replace(wanted[name], metadata={**wanted[name].metadata, EPOCH_KEY: current.metadata[EPOCH_KEY]},
+                             first_seq=current.first_seq)
+               for name, current in kept.items() if _limits(wanted[name]) != _limits(current)}
+    for growing in (False, True):
+        for name, update in updates.items():
+            if (update.max_bytes > kept[name].max_bytes) is growing:
+                await jetstream.update_stream(update)
     for config in slice_.buffers:
-        await declare(jetstream, config)
-        epochs[config.name] = await stream_epoch(jetstream, config.name)
-    return MappingProxyType(epochs)
+        if config.name not in kept:
+            await declare(jetstream, config)
+    return MappingProxyType({config.name: await stream_epoch(jetstream, config.name) for config in slice_.buffers})

@@ -11,26 +11,33 @@ readers' backs, leaf drops mid-drain and a Central crash mid-commit lose nothing
 invent no gap. Step 3: the bus is killed (kill -9) and starts empty (the memory store): the session
 re-attaches, the mirror re-syncs, Central writes one unknown gap per drained stream and asserts its
 documents again, every value is back and the drain continues in the new epochs. Step 4: the hub
-restarts empty; WALL comes back past every mirror and the drain resumes. Later slices extend the same
-test.
+restarts empty; WALL comes back past every mirror and the drain resumes. Step 5: every other store
+line is applied, in any order, until the store holds its 17 streams and 11.5 MiB; a health release
+that replaces a stream, drops a document and grows its state table applies on that full store, kept
+streams keep their epochs and values, and Central records an unknown gap for the pruned stream and
+drains the new one.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import json
+import random
 
 import nats.errors
 import pytest
 from integration.bus_servers import (
+    STATE_TABLE,
     BusServer,
     FileLinkStore,
     LinkStoreCrash,
     PrefixProxy,
     Projection,
     central,
+    desired_documents,
     hub_server,
     leaf_connections,
+    line_slices,
     local,
     node_server,
     until,
@@ -43,12 +50,22 @@ from nats.js.errors import NotFoundError
 from contracts.node_link import (
     CENTRAL_WRITER,
     NODE_DOMAIN,
+    NODE_MAX_STREAMS,
     STORE_LINES,
     WALL_STREAM,
+    WALL_STREAM_BYTES,
     Pipe,
     account_id,
 )
-from nodeapi.buffers import KeyTable, Slice, apply, desired_bucket, event_buffer, state_bucket
+from nodeapi.buffers import (
+    KeyTable,
+    Slice,
+    apply,
+    desired_bucket,
+    event_buffer,
+    state_bucket,
+    table_of,
+)
 from nodeapi.documents import DocumentWriter
 from nodeapi.epoch import Token, epoch_of
 from nodeapi.hub import DRAIN_BATCH, WALL_MARGIN, NodeLink, WallWriter
@@ -64,6 +81,10 @@ STATE_PREFIX = "$KV.state_display."
 DESIRED = "KV_desired_display"
 TICK = "display.record.tick"
 RELEASE = Release("1.0.0", "sha256:display-release", {"display": 1})
+MIB = 1024 * 1024
+OBSERVATIONS = "OBSERVATION_health"
+HEALTH_STATE = "KV_state_health"
+HEALTH_DESIRED = "KV_desired_health"
 WALL_TABLE = KeyTable({"timing": 256})
 
 
@@ -428,6 +449,93 @@ def test_the_node_api_tracer(tmp_path):
             await _recorded(store, emitted)
             assert store.rows("gap") == unknown and store.repeats == []
             assert len(store.actions("document_adopted")) == 1
+
+            # Step 5: the display session holds its line, full since S2, and the mirror. Every other
+            # line is applied, in any order, to the store's 17 streams and 11.5 MiB: none is refused
+            # for room (10028) or the stream count (10027) by another (E3b design §7.3).
+            slices = line_slices()
+            display = {stream: epoch_of(await jetstream.stream_info(stream)) for stream in (RECORDS, STATE, DESIRED)}
+            others = [line for line in slices if line != "display"]
+            random.shuffle(others)
+            for line in others:
+                await apply(jetstream, slices[line])
+            held = {info.config.name: info for info in await jetstream.streams_info()}
+            assert len(held) == NODE_MAX_STREAMS, others
+            assert sum(info.config.max_bytes for info in held.values()) == sum(
+                line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES == 11 * MIB + MIB // 2
+            # Central's link comes up again (E3d's supervisor) and finds the new lines: a line created
+            # after a link's reconcile is found only at the next one (erratum E-E3B-S4-1).
+            stop.set()
+            await asyncio.wait_for(running, 15)
+            stop = asyncio.Event()
+            running = asyncio.create_task(NodeLink(client, Pipe.FLEET, store, projection).run(stop))
+
+            # The health component (no session in the tracer: the test plays it) fills its line:
+            # observations past their cap, every state key and document at its largest, `history` times.
+            observations, health_state, health_desired = slices["health"].buffers
+            for _ in range(observations.max_bytes // 4000 + 8):
+                await jetstream.publish("health.observation.reading", b"o" * 4000)
+            full = (await jetstream.stream_info(OBSERVATIONS)).state
+            assert full.first_seq > held[OBSERVATIONS].state.first_seq and full.bytes <= observations.max_bytes
+            listed: dict[tuple[str, str], bytes] = {}
+            for config, table in ((health_state, STATE_TABLE), (health_desired, desired_documents("health"))):
+                prefix = config.subjects[0].removesuffix(">")
+                for round_ in range(table.history):
+                    for key, size in table.sizes.items():
+                        listed[config.name, key] = f"{key}-{round_}".encode().ljust(size, b".")
+                        await jetstream.publish(prefix + key, listed[config.name, key])
+
+            async def health_drained():
+                cursors = await store.cursors()
+                ends = {name: (await jetstream.stream_info(name)).state.last_seq for name in (OBSERVATIONS, HEALTH_STATE)}
+
+                return all(name in cursors and cursors[name].seq == end for name, end in ends.items()) and cursors
+            observed = (await until(health_drained, 20, "Central drains the health line"))[OBSERVATIONS]
+            epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in held}
+
+            # A health release replaces its observations with records at the same bytes, drops one
+            # document and grows its state table: applied on the full store, nothing refused.
+            documents = desired_documents("health")
+            release = Slice("health", (
+                event_buffer("health", "record", observations.max_bytes),
+                state_bucket("health", KeyTable({**STATE_TABLE.sizes, "grown": 1024}, STATE_TABLE.history)),
+                desired_bucket("health", KeyTable({key: size for key, size in documents.sizes.items() if key != "layout"},
+                                                  documents.history))))
+            assert release.buffers[1].max_bytes > health_state.max_bytes
+            applied = await apply(jetstream, release)
+            after = {info.config.name: info for info in await jetstream.streams_info()}
+            assert set(after) == set(held) - {OBSERVATIONS} | {"RECORD_health"}
+            assert {name: epoch_of(info) for name, info in after.items() if name != "RECORD_health"} == {
+                name: epoch for name, epoch in epochs.items() if name != OBSERVATIONS}
+            assert {name: applied[name] for name in (HEALTH_STATE, HEALTH_DESIRED)} == {
+                name: epochs[name] for name in (HEALTH_STATE, HEALTH_DESIRED)}
+            assert table_of(after[HEALTH_STATE].config) == table_of(release.buffers[1])
+            assert after[HEALTH_STATE].config.max_bytes == release.buffers[1].max_bytes
+            for (name, key), value in listed.items():
+                if (name, key) != (HEALTH_DESIRED, "layout"):
+                    prefix = after[name].config.subjects[0].removesuffix(">")
+                    assert (await jetstream.get_last_msg(name, prefix + key)).data == value, (name, key)
+            with pytest.raises(NotFoundError):
+                await jetstream.get_last_msg(HEALTH_DESIRED, "$KV.desired_health.layout")
+
+            # The health component attaches on its release (a new birth) and records: Central's next
+            # reconcile writes one unknown gap for the pruned observations, after the last one it
+            # read, and drains the new records. The display session never noticed.
+            await jetstream.publish("$KV.state_health.birth", b'{"component": "health", "version": "2.0.0"}')
+            for index in range(5):
+                await jetstream.publish("health.record.started", f"health-{index}".encode())
+
+            async def released():
+                return len(store.records("RECORD_health")) >= 5 and any(
+                    row["stream"] == OBSERVATIONS and row["count"] is None for row in store.rows("gap"))
+            await until(released, 20, "Central records the pruned stream's gap and drains the new one")
+            assert [row for row in store.rows("gap") if row["count"] is None] == [*unknown, {
+                "kind": "gap", "stream": OBSERVATIONS, "epoch": observed.epoch, "after": observed.seq, "count": None}]
+            assert [row["data"] for row in store.records("RECORD_health")] == [f"health-{index}".encode() for index in range(5)]
+            assert {stream: epoch_of(await jetstream.stream_info(stream)) for stream in display} == display
+            emit(20)
+            await _recorded(store, emitted)
+            assert store.repeats == []
             stop.set()
             await asyncio.wait_for(running, 15)
             await watch.close()

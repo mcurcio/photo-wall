@@ -12,7 +12,7 @@ over `documents` over `buffers | pull | envelope` over `epoch`, and siblings nev
 - `documents`: a desired bucket's or WALL's writer, bound to the stream's own key table and epoch:
   it refuses its own over-budget write and writes only on condition; and its read (value, writer, token).
 - `buffers`: every stream, KV bucket and mirror, circular or sticky; self-describing line streams, a
-  component's `Slice` inside its store line and `apply`; the wave-1 class table until E3b retires it.
+  component's `Slice` inside its store line, and `apply` (prune, purge, shrink, grow, create).
 - `pull`: the one way to pull from a consumer, one byte budget per connection below the server's
   pending limit; consumer liveness; the cursor reader that keeps its own (epoch, sequence).
 - `envelope`: the only place the headers are built or read (message id, schema major, writer).

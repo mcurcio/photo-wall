@@ -30,6 +30,7 @@ import contextlib
 import json
 import time
 import uuid
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -113,24 +114,39 @@ def _settled(messages: list[Msg], ending: str) -> Pulled:
     return Pulled(messages, ending == _COMPLETE)
 
 class _Budget:
-    """The bytes a client's open pull requests may still ask for: PULL_MAX_BYTES in all."""
+    """The bytes a client's open pull requests may still ask for: PULL_MAX_BYTES in all. Granted in
+    arrival order, so no request on a busy client waits forever: one that has just ended and asks
+    again queues behind every request already waiting (erratum E-E3B-S4-2)."""
 
     def __init__(self) -> None:
         self.free = PULL_MAX_BYTES
-        self.released = asyncio.Event()
+        self._waiting: deque[tuple[asyncio.Future[int], int]] = deque()
 
     async def take(self, most: int) -> int:
-        """At least PULL_ONE_BYTES and at most `most`, waiting until that much is free."""
-        while self.free < PULL_ONE_BYTES:
-            self.released.clear()
-            await self.released.wait()
-        granted = min(most, self.free)
-        self.free -= granted
-        return granted
+        """At least PULL_ONE_BYTES and at most `most`, waiting until that much is free and every
+        earlier request has its share."""
+        if not self._waiting and self.free >= PULL_ONE_BYTES:
+            return self._grant(most)
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiting.append((waiter, most))
+        try:
+            return await waiter
+        except asyncio.CancelledError:
+            if waiter.done() and not waiter.cancelled():
+                self.give(waiter.result())   # granted as it was cancelled: pass it on
+            raise
 
     def give(self, granted: int) -> None:
         self.free += granted
-        self.released.set()
+        while self._waiting and self.free >= PULL_ONE_BYTES:
+            waiter, most = self._waiting.popleft()
+            if not waiter.done():   # a cancelled waiter is skipped
+                waiter.set_result(self._grant(most))
+
+    def _grant(self, most: int) -> int:
+        granted = min(most, self.free)
+        self.free -= granted
+        return granted
 
 
 _budgets: WeakKeyDictionary[Client, _Budget] = WeakKeyDictionary()
