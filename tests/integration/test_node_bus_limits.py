@@ -52,7 +52,6 @@ from contracts.node_link import (
     WALL_STREAM_BYTES,
 )
 from nodeapi.buffers import (
-    EPOCH_KEY,
     HEADER_ALLOWANCE,
     MAX_PUBLISH_SUBJECT,
     STICKY,
@@ -432,7 +431,7 @@ def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declar
     async def body():
         client = await local(node)
         jetstream = client.jetstream()
-        mine, theirs = _whole_store(), _whole_store()   # two builds, two epochs per buffer
+        mine, theirs = _whole_store(), _whole_store()   # two declarers, each with its own build
         await declare_table(jetstream, mine)
         assert sum(config.max_bytes for config in mine.buffers.values()) == STORE_LIMIT
         epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in mine.buffers}
@@ -454,14 +453,55 @@ def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declar
         created = []
 
         async def i_create() -> None:
-            created.append(await declare(jetstream, mine.buffers[racing]))
+            created.append((await declare(jetstream, mine.buffers[racing]),
+                            epoch_of(await jetstream.stream_info(racing))))
         assert await declare(_LooksBefore(jetstream, i_create), theirs.buffers[racing]) is False
-        assert created == [True]
-        assert epoch_of(await jetstream.stream_info(racing)) == mine.buffers[racing].metadata[EPOCH_KEY]
+        [(made, my_epoch)] = created
+        assert made is True and epoch_of(await jetstream.stream_info(racing)) == my_epoch
 
         # A stream that is absent still meets the full store's refusal: the no-op covers only a stream
         # that exists.
         await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), STORAGE_EXCEEDED)
+        await client.close()
+
+    _run(node, body)
+
+
+def test_a_stream_shrunk_by_a_resplit_stays_within_its_charge(tmp_path):
+    # The server fixes a stream's file-store block when it creates it and an update keeps it
+    # (ns:server/stream.go:1098, 1578-1607): S, created at 4 MiB and shrunk to 100,000 B, still grows
+    # in 4 MiB blocks, about 2 MB of files where its new cap's 32,000-byte block would allow 132,000.
+    # The re-split table charges it the block it was created with, so its files stay inside the
+    # table's store bound; and a table built anew with small caps, applied to a store created with
+    # large ones, fails the fence check before it changes anything (E-W1-FV-3).
+    node = _node(tmp_path)
+
+    async def body():
+        client = await local(node)
+        jetstream = client.jetstream()
+        created = ClassTable({"S": buffer("S", 4 * MIB, subjects=["s.>"]),
+                              "T": buffer("T", 4 * MIB, subjects=["t.>"])})
+        shrunk = created.resplit({"S": 100_000, "T": 8 * MIB - 100_000})
+        await declare_table(jetstream, created)
+        await apply_table(jetstream, shrunk)
+        assert (await jetstream.stream_info("S")).config.max_bytes == 100_000
+        for _ in range(6000):
+            await jetstream.publish("s.k", b"z" * 1000)
+        directory = next(path for path in node.store.rglob("S") if path.is_dir())
+        files = sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+        assert 100_000 + 32_000 < files <= shrunk.charge("S")
+
+        for name in created.buffers:
+            await jetstream.delete_stream(name)
+        large = ClassTable({f"B{index:02}": buffer(f"B{index:02}", 128_000, subjects=[f"b{index}.>"])
+                            for index in range(19)})
+        await declare_table(jetstream, large)
+        rest = (STORE_LIMIT - 3 * 1_000) // 16
+        anew = ClassTable({name: dataclasses.replace(config, max_bytes=1_000 if index < 3 else rest)
+                           for index, (name, config) in enumerate(large.buffers.items())})
+        with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
+            await apply_table(jetstream, anew)
+        assert {(await jetstream.stream_info(name)).config.max_bytes for name in large.buffers} == {128_000}
         await client.close()
 
     _run(node, body)

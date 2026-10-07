@@ -193,6 +193,9 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < 1:
         assert time.monotonic() < deadline, f"the wall mirror never linked:\n{bus.logs()}"
         await asyncio.sleep(.5)
+    # Each stream's origin as the server holds it: `declare` stamps a Node stream's first_seq at the
+    # create (E-W1-FV-1), so the built configuration carries none to compare against.
+    start = await _states(jetstream, names)
 
     # Every buffer filled and written flat out, each writer inside its table: circular streams and
     # buckets drop their oldest, desired documents replace their own values, WALL churns its mirror.
@@ -230,7 +233,7 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
             documents = desired_documents(name.removeprefix("KV_desired_"))
             assert messages == documents.history * len(documents.sizes), name
         elif buffer_kind(config) == CIRCULAR:
-            assert first > config.first_seq, f"{name} never filled"
+            assert first > start[name][1], f"{name} never filled"
         else:
             assert (await jetstream.stream_info(name)).state.bytes > config.max_bytes // 2, name
     await node.close()

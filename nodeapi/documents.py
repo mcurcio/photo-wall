@@ -4,8 +4,10 @@ epoch-scoped tokens every cursor and conditional write carries (errata E-W1-TD-4
 A sticky buffer (`buffers.Documents`) never evicts a document because its only writer never sends
 past the table's budget: `DocumentWriter` refuses its own unlisted, oversize or over-headered write
 before anything leaves the client. The Node refuses nothing. The writer also keeps a manifest
-document listing every key it has written, so a reader (a Node component, or Central) finds a
-document the stream should hold and does not: `missing_documents`.
+document listing every key written, so a reader (a Node component, or Central) finds a document the
+stream should hold and does not: `missing_documents`. A table may have more than one writer (Central,
+and a Node component writing its default), so the manifest is only ever extended by a conditional
+write on the manifest as read, retried on a lost race: no writer drops another's key (E-W1-FV-4).
 
 A stream sequence (a KV revision, a drain cursor) is a position only inside one creation of its
 stream. Every token is `Token(epoch, seq)`, the epoch read from the stream's metadata; a write or
@@ -20,7 +22,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 from nats.js.api import Header
-from nats.js.errors import NotFoundError
+from nats.js.errors import APIError, NotFoundError
 
 from contracts.node_link import NODE_DOMAIN
 from nodeapi.buffers import (
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from nats.js.client import JetStreamContext
 
 _REMOVED: Final = frozenset({"DEL", "PURGE"})   # KV-Operation of a deleted or purged key
+WRONG_LAST_SEQUENCE: Final = 10071   # a conditional write whose subject moved on since it was read
 
 
 class Token(NamedTuple):
@@ -74,7 +77,9 @@ class DocumentWriter:
         # stored one, so the table's own check does not cover it.
         if any(len((self._prefix + key).encode()) > MAX_PUBLISH_SUBJECT for key in table.all_sizes()):
             raise ValueError("document_subject_past_the_control_line")
-        self._listed: tuple[str, frozenset[str]] | None = None   # (epoch, keys) of the manifest
+        # (epoch, keys) this writer has seen listed: only ever a reason to skip a manifest write, never
+        # the content of one. A listed key stays listed in its creation, since the manifest only grows.
+        self._listed: tuple[str, frozenset[str]] | None = None
 
     @classmethod
     def node_bucket(cls, central_client: Client, table: Documents) -> DocumentWriter:
@@ -123,14 +128,34 @@ class DocumentWriter:
                 return found
 
     async def _list(self, epoch: str, key: str) -> None:
-        if self._listed is None or self._listed[0] != epoch:
-            self._listed = (epoch, await listed_documents(self._jetstream, self.table.stream,
-                                                          self.table.subject_prefix))
-        if key in self._listed[1]:
+        """Add `key` to the manifest unless it is listed: a compare-and-set on the manifest's last
+        sequence (0: none yet), re-read and merged on every lost race, so a concurrent writer's keys
+        stay. What this writer saw listed in this creation is merged in too, so a manifest a bypass
+        evicted comes back whole as far as this writer knows. Only the table's keys are kept, so the
+        manifest stays inside its budgeted size."""
+        seen = self._listed[1] if self._listed is not None and self._listed[0] == epoch else frozenset()
+        if key in seen:
             return
-        keys = self._listed[1] | {key}
-        await self._jetstream.publish(self._prefix + MANIFEST_KEY, self.table.manifest(keys))
-        self._listed = (epoch, keys)
+        while True:
+            try:
+                manifest = await self._jetstream.get_last_msg(self.table.stream,
+                                                              self.table.subject_prefix + MANIFEST_KEY)
+            except NotFoundError:
+                listed, last = frozenset(), 0
+            else:
+                listed, last = frozenset(json.loads(manifest.data)) & self.table.sizes.keys(), manifest.seq
+            if key not in listed or not seen <= listed:
+                try:
+                    await self._jetstream.publish(
+                        self._prefix + MANIFEST_KEY, self.table.manifest(listed | seen | {key}),
+                        headers={Header.EXPECTED_LAST_SUBJECT_SEQUENCE.value: str(last)})
+                except APIError as error:
+                    if error.err_code != WRONG_LAST_SEQUENCE:
+                        raise
+                    continue   # another writer extended it first: re-read and merge
+                listed |= seen | {key}
+            self._listed = (epoch, listed)
+            return
 
 
 async def listed_documents(jetstream: JetStreamContext, stream: str, subject_prefix: str) -> frozenset[str]:

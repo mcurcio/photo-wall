@@ -52,9 +52,7 @@ from nodeapi.buffers import (
     bucket,
     buffer,
     buffer_kind,
-    epoch_origin,
     sticky_bucket,
-    store_bound,
     wall_config,
     wall_mirror_config,
 )
@@ -64,6 +62,7 @@ from nodeapi.pull import PULL_MAX_BYTES, PULL_ONE_BYTES
 REPO = Path(__file__).resolve().parents[1]
 NODE_BUS_CONF = REPO / "appliance" / "bus" / "node-bus.conf"
 SERVER_DEFAULT_CONTROL_LINE = 4096   # nats-server MAX_CONTROL_LINE_SIZE (ns:server/const.go:90)
+SERVER_DEFAULT_WRITE_DEADLINE = 10   # seconds, nats-server DEFAULT_FLUSH_DEADLINE (ns:server/const.go:132)
 LISTENERS = HubListeners(
     server_name="hub", client_host="0.0.0.0", client_port=4222, websocket_host="0.0.0.0",
     websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
@@ -137,6 +136,10 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     # A busy local client is never cut off (E-W1-TD-3): a missed write deadline is retried, and the
     # server's pending limit holds one capped pull plus as much again for the rest of the connection.
     assert config["write_timeout"] == "retry"
+    # The leaf has its own write deadline, at least the server's default: it would otherwise take the
+    # clients' 2 s and close on a short uplink stall, retry policy and all (E-W1-FV-2).
+    assert _seconds(config["leafnodes"]["write_deadline"]) >= SERVER_DEFAULT_WRITE_DEADLINE
+    assert _seconds(config["leafnodes"]["write_deadline"]) > _seconds(config["write_deadline"])
     assert _bytes(config["max_pending"]) == NODE_MAX_PENDING
     assert PULL_MAX_BYTES * 2 <= NODE_MAX_PENDING and PULL_MAX_BYTES >= 2 * NODE_MAX_PAYLOAD
     # A request asks at least one delivery's charge, so the largest stored message always fits one.
@@ -186,6 +189,14 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
         hub_configuration([], replace(LISTENERS, max_file_store_bytes=WALL_STREAM_BYTES - 1))
 
 
+def _seconds(duration: str) -> float:
+    """A nats-server duration in whole seconds or milliseconds ("10s", "500ms")."""
+    for suffix, scale in (("ms", .001), ("s", 1)):
+        if duration.endswith(suffix) and duration.removesuffix(suffix).isdigit():
+            return int(duration.removesuffix(suffix)) * scale
+    raise ValueError(f"unparsed duration {duration!r}")
+
+
 def _bytes(size: str | int) -> int:
     """A nats-server size: an integer, or digits with a binary suffix (conf/parse.go:326-331)."""
     if isinstance(size, int) or size.isdigit():
@@ -213,8 +224,9 @@ def test_a_stored_message_fits_every_reply_the_node_generates_for_it():
 
 def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
     # Everything a Node or the hub declares comes from nodeapi.buffers: JetStream's limits retention
-    # with discard old, a byte cap, a stored message that fits a leaf reply, a kind and an epoch.
-    configs = [*node_split().buffers.values(), wall_config(), wall_mirror_config(),
+    # with discard old, a byte cap, a stored message that fits a leaf reply and a kind.
+    hub_wall = wall_config()
+    configs = [*node_split().buffers.values(), hub_wall, wall_mirror_config(),
                bucket("probe", history=1, max_bytes=1), buffer("PROBE", 1, subjects=["probe.>"])]
     for config in configs:
         assert config.retention == RetentionPolicy.LIMITS, config.name
@@ -223,10 +235,11 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
         assert config.max_bytes and config.max_bytes > 0, config.name
         assert 0 < config.max_msg_size <= MAX_STORED_MESSAGE, config.name
         assert config.metadata[KIND_KEY] in (CIRCULAR, STICKY), config.name
-        # A Node stream starts where its epoch says, so a stale revision names nothing (E-W1-TD-5).
-        if config.mirror is None and config.name != "WALL":
-            assert config.first_seq == epoch_origin(config.metadata[EPOCH_KEY]), config.name
-    assert buffer("X", 1).metadata[EPOCH_KEY] != buffer("X", 1).metadata[EPOCH_KEY]  # fresh per create
+        # No builder carries an epoch or a first sequence drawn from one: `declare` stamps both at
+        # each create, so a configuration held across a store loss re-creates nothing old (E-W1-FV-1).
+        assert EPOCH_KEY not in config.metadata, config.name
+        assert config.first_seq == (1 if config is hub_wall else None), config.name
+    assert wall_config(first_seq=7).first_seq == 7   # WALL's continuation is the builder's (E-W1-E3a-R-4)
     # Sticky: per-subject history only, no count limit, the byte cap a document table's budget.
     split = node_split().buffers
     sticky = {name for name, config in split.items() if buffer_kind(config) == STICKY}
@@ -288,7 +301,7 @@ def test_a_class_table_whose_store_cannot_fit_the_bus_fence_fails_to_build():
         32_000, 32_000, 4 * mib, 4 * mib, 8 * mib]
     table = node_split()
     caps = {name: config.max_bytes for name, config in table.buffers.items()}
-    assert store_bound(table.buffers.values()) == sum(caps.values()) + 17 * 4 * mib <= NODE_BUS_STORE_ROOM
+    assert table.store_bound == sum(caps.values()) + 17 * 4 * mib <= NODE_BUS_STORE_ROOM
     room = table.total - sum(caps.values())
     assert room > 128_000
     # One more small buffer fits; the same one at 128,000 bytes brings a 4 MiB block and does not.
@@ -299,7 +312,32 @@ def test_a_class_table_whose_store_cannot_fit_the_bus_fence_fails_to_build():
         small.resplit({"SMALL": 128_000})
     # The whole store in the page's 17 streams fills the room exactly.
     whole = table.resplit({"REC_host": caps["REC_host"] + room})
-    assert store_bound(whole.buffers.values()) == NODE_BUS_STORE_ROOM
+    assert whole.store_bound == NODE_BUS_STORE_ROOM
+
+
+def test_a_resplit_is_charged_the_block_each_stream_was_created_with():
+    # nats-server fixes a stream's block when it creates it (ns:server/stream.go:1098, 1578-1607) and
+    # an update keeps it, so a stream created at 128,000 B and shrunk below it still grows in 4 MiB
+    # blocks. A re-split keeps charging that block: one that would pass the fence once applied to a
+    # store created by its source table fails to build (E-W1-FV-3). The live proof is
+    # test_a_stream_shrunk_by_a_resplit_stays_within_its_charge (limits).
+    mib = 1024 * 1024
+    x = ClassTable({f"B{index:02}": buffer(f"B{index:02}", 128_000, subjects=[f"b{index}.>"])
+                    for index in range(19)})
+    assert x.store_bound == 19 * (128_000 + 4 * mib) <= NODE_BUS_STORE_ROOM
+    rest = (NODE_STORE_BYTES - 3 * 1_000) // 16
+    caps = {**{f"B{index:02}": 1_000 for index in range(3)}, **{f"B{index:02}": rest for index in range(3, 19)}}
+    # Charged its current caps' blocks, Y would fit (3 small blocks, 16 large): 76.09 MiB.
+    assert sum(caps.values()) + 3 * 32_000 + 16 * 4 * mib <= NODE_BUS_STORE_ROOM
+    # Applied to a store created as X, every stream keeps its 4 MiB block: 88 MiB, past the room.
+    assert sum(caps.values()) + 19 * 4 * mib > NODE_BUS_STORE_ROOM
+    with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
+        x.resplit(caps)
+    # The block is kept along the whole line of re-splits, and a re-split back up is charged its own.
+    small = ClassTable({"S": buffer("S", 1_000), "T": buffer("T", 128_000)})
+    assert small.resplit({"T": 1_000}).resplit({"T": 2_000}).charge("T") == 2_000 + 4 * mib
+    assert small.resplit({"S": 128_000}).charge("S") == 128_000 + 4 * mib
+    assert small.charge("S") == 1_000 + 32_000
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
 # stream configured or created elsewhere bypasses the buffer rule (E-W1-TD-S1). The guard bans the

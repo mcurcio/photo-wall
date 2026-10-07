@@ -29,8 +29,14 @@ from nats.js.api import Header
 from nats.js.errors import APIError
 
 from contracts.node_link import MAX_STORED_MESSAGE, NODE_DOMAIN, WALL_STREAM
-from nodeapi.buffers import HEADER_ALLOWANCE, Documents, sticky_bucket
-from nodeapi.documents import DocumentRefused, DocumentWriter, StaleToken, missing_documents
+from nodeapi.buffers import HEADER_ALLOWANCE, Documents, epoch_of, sticky_bucket
+from nodeapi.documents import (
+    DocumentRefused,
+    DocumentWriter,
+    StaleToken,
+    listed_documents,
+    missing_documents,
+)
 
 WRONG_LAST_SEQUENCE = 10071   # JSStreamWrongLastSequenceErr: the key moved on since the token
 
@@ -158,14 +164,18 @@ def test_a_token_from_a_lost_store_is_stale_and_never_applied(tmp_path):
     # its default before Central returns; Central's conditional write on its old revision must not
     # land. Its token carries the old epoch, so its writer refuses it as stale, and even a raw
     # conditional write on the old revision misses: the new creation's sequences start elsewhere
-    # (E-W1-TD-5). Central re-reads and writes on the new token.
+    # (E-W1-TD-5). Central re-reads and writes on the new token. The Node component holds its bucket's
+    # configuration and re-declares that same object on every connect: the epoch is drawn when the
+    # stream is created, not when the configuration was built (E-W1-FV-1).
     hub, [node] = _servers(tmp_path)
 
     async def body():
         await _linked(hub, 1)
         table = desired_documents("player")
+        config = sticky_bucket(table)
         client = await local(node)
-        await declare_bucket(client.jetstream(), sticky_bucket(table))
+        await declare_bucket(client.jetstream(), config)
+        first = await client.jetstream().stream_info(table.stream)
         await client.close()
         central_client = await central(hub, "serial-a")
         writer = DocumentWriter.node_bucket(central_client, table)
@@ -175,7 +185,13 @@ def test_a_token_from_a_lost_store_is_stale_and_never_applied(tmp_path):
         node.start()
         await _linked(hub, 1)
         client = await local(node)
-        kv = await declare_bucket(client.jetstream(), sticky_bucket(table))
+        kv = await declare_bucket(client.jetstream(), config)
+        second = await client.jetstream().stream_info(table.stream)
+        assert epoch_of(second) != epoch_of(first) and second.config.first_seq != first.config.first_seq
+        # A configuration read back from a stream names its creation; declaring it is refused, so a
+        # re-create never reuses an old epoch or origin.
+        with pytest.raises(ValueError, match="declare_needs_a_built_buffer"):
+            await declare_bucket(client.jetstream(), first.config)
         node_revision = await kv.put("show", b"node: local default")
 
         with pytest.raises(StaleToken):
@@ -193,6 +209,39 @@ def test_a_token_from_a_lost_store_is_stale_and_never_applied(tmp_path):
         assert boot_two.seq == node_revision
         written = await writer.put("show", b"central: run 43", token=boot_two)
         assert (await kv.get("show")).value == b"central: run 43" and written.epoch == boot_two.epoch
+        await central_client.close()
+        await client.close()
+
+    _run(hub, [node], body)
+
+
+def test_every_writer_of_a_table_keeps_the_others_documents_in_the_manifest(tmp_path):
+    # A desired bucket has two writers: Central, and the Node component that writes its default. Each
+    # extends the manifest by a conditional write on the manifest as read, so neither drops the
+    # other's key, and a document a bypass removes later is still reported missing (E-W1-FV-4).
+    hub, [node] = _servers(tmp_path)
+
+    async def body():
+        await _linked(hub, 1)
+        table = desired_documents("player")
+        client = await local(node)
+        jetstream = client.jetstream()
+        kv = await declare_bucket(jetstream, sticky_bucket(table))
+        central_client = await central(hub, "serial-a")
+        central_writer = DocumentWriter.node_bucket(central_client, table)
+        node_writer = DocumentWriter(jetstream, table)
+
+        await central_writer.put("show", b"central: show")
+        await node_writer.put("layout", b"node: default layout")
+        await central_writer.put("frame00", b"central: frame")
+        # Concurrent first writes of new keys race on the manifest; every one is listed.
+        await asyncio.gather(*(writer.put(f"frame{index:02}", b"f") for index, writer in
+                               zip(range(1, 9), [central_writer, node_writer] * 4, strict=True)))
+        expected = {"show", "layout", "frame00", *(f"frame{index:02}" for index in range(1, 9))}
+        assert await listed_documents(jetstream, table.stream, table.subject_prefix) == expected
+
+        await kv.purge("layout")   # a bypass: no writer removes a document
+        assert await missing_documents(jetstream, table.stream, table.subject_prefix) == {"layout"}
         await central_client.close()
         await client.close()
 

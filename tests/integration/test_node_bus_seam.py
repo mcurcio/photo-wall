@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 
 import nats.errors
@@ -570,17 +571,20 @@ def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_coun
 def test_a_drain_cursor_from_a_lost_node_store_starts_the_new_creation_fresh(tmp_path):
     # The Node's store is lost (tmpfs, every reboot) and its stream re-created. Central's cursor is
     # (epoch, seq): the new creation's messages are new rows from its own origin, neither folded
-    # into the old creation's sequences nor counted as a gap after them (E-W1-TD-5).
+    # into the old creation's sequences nor counted as a gap after them (E-W1-TD-5). The component
+    # declares the one configuration it holds, before and after the loss: the create draws the
+    # epoch and the origin, not the builder (E-W1-FV-1).
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
     hub.start()
     node.start()
     recorder = Recorder(tmp_path / "record")
+    events = buffer("EVENTS", 64 * 1024, subjects=["events.>"])
 
     async def creation(count: int) -> int:
         node_client = await local(node)
         jetstream = node_client.jetstream()
-        await declare(jetstream, buffer("EVENTS", 64 * 1024, subjects=["events.>"]))
+        await declare(jetstream, events)
         for index in range(count):
             await jetstream.publish("events.reading", f"reading-{index}".encode())
         origin = (await jetstream.stream_info("EVENTS")).config.first_seq
@@ -602,6 +606,7 @@ def test_a_drain_cursor_from_a_lost_node_store_starts_the_new_creation_fresh(tmp
         second_origin = await creation(5)
         await drain()
         first, second = recorder.epochs()
+        assert first_origin != second_origin
         assert recorder.sequences(first) == list(range(first_origin, first_origin + 10))
         assert recorder.sequences(second) == list(range(second_origin, second_origin + 5))
         assert recorder.gaps() == []
@@ -725,6 +730,65 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
             await _holds(node, {"wall.timing": b"through-the-proxy"}, 10)
             assert len(leaf_connections(hub)) == 1 and proxy.paths == [f"/{LEAF_PREFIX}/leafnode"]
             for client in (writer, central_client, node_client):
+                await client.close()
+        finally:
+            node.stop()
+            await proxy.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        node.stop()
+        hub.stop()
+
+
+def test_a_short_uplink_stall_keeps_the_leaf_and_every_event(tmp_path):
+    # Wi-Fi, the ingress or the WAN stalls what the Node sends for 5 s while a component publishes
+    # 40 MB of incompressible events toward Central, more than the socket buffers on the way hold.
+    # The leaf has its own write deadline (the server's default), not the clients' 2 s, so the
+    # server's flush waits the stall out: the leaf keeps its connection and Central gets every event.
+    # With the clients' deadline the Node closed the leaf as a slow consumer and Central got a few
+    # (E-W1-FV-2).
+    hub = hub_server(tmp_path, ["serial-a"])
+    proxy = PrefixProxy(hub.websocket_port, LEAF_PREFIX)
+    node = node_server(tmp_path, "serial-a", hub, prefix=LEAF_PREFIX, leaf_port=proxy.port)
+    hub.start()
+    count, body = 200, os.urandom(200_000)   # under NODE_MAX_PAYLOAD
+
+    async def run():
+        await proxy.start()
+        node.start()
+        try:
+            await _linked(hub, 1)
+            linked = leaf_connections(hub)
+            central_client = await central(hub, "serial-a")
+            received: list[str] = []
+
+            async def on_event(message):
+                received.append(message.subject)
+            await central_client.subscribe("player.event.>", cb=on_event)
+            node_client = await local(node)
+
+            async def central_hears():   # Central's interest crosses the leaf asynchronously
+                await node_client.publish("player.event.ready", b"")
+                await asyncio.sleep(.1)
+                return "player.event.ready" in received
+            await _until(central_hears, 10, "Central's interest at the Node")
+
+            proxy.stall()
+            for index in range(count):
+                await node_client.publish(f"player.event.{index}", body)
+            await node_client.flush()
+            await asyncio.sleep(5)
+            proxy.resume()
+
+            async def all_arrived():
+                return len([subject for subject in received if subject != "player.event.ready"]) == count
+            await _until(all_arrived, 20, f"all {count} events at Central")
+            assert received[-count:] == [f"player.event.{index}" for index in range(count)]
+            assert leaf_connections(hub) == linked
+            assert "Slow Consumer" not in node.config.with_suffix(".log").read_text()
+            for client in (central_client, node_client):
                 await client.close()
         finally:
             node.stop()

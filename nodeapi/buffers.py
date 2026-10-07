@@ -16,23 +16,26 @@ being full:
   evicted by bytes or count. Nothing on the Node refuses anything.
 
 Every builder sets `max_msg_size` to at most `MAX_STORED_MESSAGE`, so a reply carrying a stored
-message always fits the leaf (E-W1-TD-2). Every builder writes a fresh epoch into the stream's
-metadata; a Node stream also starts at a sequence derived from that epoch, so a revision or cursor
-read before a store loss names no message of the re-created stream (E-W1-TD-5). A caller never sets
-the policy, the storage or the metadata.
+message always fits the leaf (E-W1-TD-2). A builder carries no epoch: `declare` writes a fresh one
+into the metadata of every stream it creates, at the create, and a Node stream also starts at a
+sequence derived from it, so a revision or cursor read before a store loss names no message of the
+re-created stream, however long its declarer held the configuration (E-W1-TD-5, E-W1-FV-1). A
+caller never sets the policy, the storage or the metadata.
 
 `ClassTable` declares a Node's whole store at once: its caps never total more than the store, so
 no declare meets 10047 whatever the order, and Central's override re-splits that total and cannot
 raise it (E-W1-TD-S2). The store is tmpfs inside the bus's memory fence, so a table whose store
 bound (caps plus one file-store block per stream) does not fit beside the server's heap fails to
-build: a store that cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1).
+build: a store that cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1). The server
+fixes a stream's block when it creates it, so a re-split keeps charging every block the stream may
+have been created with (E-W1-FV-3).
 """
 from __future__ import annotations
 
 import json
 import uuid
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -91,6 +94,8 @@ def epoch_origin(epoch: str) -> int:
 
 
 def _build(kind: str, name: str, max_bytes: int, fields: dict) -> StreamConfig:
+    # No epoch and no epoch-derived first_seq: `declare` stamps both when it creates the stream, so a
+    # configuration held across a store loss never re-creates its stream as the old creation.
     if _FIXED & fields.keys():
         raise ValueError("buffer_policy_is_fixed")
     if max_bytes <= 0:
@@ -100,12 +105,8 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict) -> StreamConfig:
         size = MAX_STORED_MESSAGE
     elif not 0 < size <= MAX_STORED_MESSAGE:
         raise ValueError("buffer_message_past_the_leaf")
-    epoch = uuid.uuid4().hex
-    if "mirror" not in fields and fields.get("first_seq") is None:
-        fields["first_seq"] = epoch_origin(epoch)
     return StreamConfig(name=name, max_bytes=max_bytes, max_msg_size=size, retention=RetentionPolicy.LIMITS,
-                        discard=DiscardPolicy.OLD, storage=StorageType.FILE,
-                        metadata={EPOCH_KEY: epoch, KIND_KEY: kind}, **fields)
+                        discard=DiscardPolicy.OLD, storage=StorageType.FILE, metadata={KIND_KEY: kind}, **fields)
 
 
 def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
@@ -224,19 +225,36 @@ async def stream_epoch(jetstream: JetStreamContext, stream: str) -> str:
     return epoch_of(await jetstream.stream_info(stream))
 
 
+def _stamped(config: StreamConfig) -> StreamConfig:
+    """`config` as one create sends it: a fresh epoch in its metadata and, on a Node stream (not a
+    mirror, no first_seq of the builder's own such as WALL's continuation), the first sequence
+    derived from that epoch."""
+    epoch = uuid.uuid4().hex
+    first_seq = config.first_seq
+    if config.mirror is None and first_seq is None:
+        first_seq = epoch_origin(epoch)
+    return replace(config, metadata={**config.metadata, EPOCH_KEY: epoch}, first_seq=first_seq)
+
+
 async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     """Create-if-absent; True when this call created it. A stream that exists keeps its
-    configuration and its epoch: only a create starts a new epoch. Re-declaring is a no-op on any
-    store, a wholly reserved one included: the stream is looked up, never re-added, since the server
-    answers an add of a stream that exists with 10047 once the reservations are near full
-    (E-W1-STORE-1). A create that loses a race to another declarer is a no-op too."""
+    configuration and its epoch: only a create starts a new epoch, drawn here at the create, so the
+    same configuration declared again after a store loss is a new creation (E-W1-FV-1). Only a
+    builder's configuration is declared: one read back from a stream carries that creation's epoch
+    and first sequence, which a re-create must never reuse. Re-declaring is a no-op on any store, a
+    wholly reserved one included: the stream is looked up, never re-added, since the server answers
+    an add of a stream that exists with 10047 once the reservations are near full (E-W1-STORE-1). A
+    create that loses a race to another declarer is a no-op too."""
+    metadata = config.metadata or {}
+    if metadata.get(KIND_KEY) not in (CIRCULAR, STICKY) or EPOCH_KEY in metadata:
+        raise ValueError("declare_needs_a_built_buffer")
     try:
         await jetstream.stream_info(config.name)
         return False
     except NotFoundError:
         pass
     try:
-        await jetstream.add_stream(config)
+        await jetstream.add_stream(_stamped(config))
     except APIError as error:
         if error.err_code not in (STREAM_NAME_IN_USE, STORAGE_EXCEEDED):
             raise
@@ -248,12 +266,10 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     return True
 
 
-def store_bound(configs: Iterable[StreamConfig]) -> int:
-    """The most the store's files can hold for these buffers: each file stream's cap plus one
-    file-store block, the dropped messages a discard-old stream keeps until their block empties.
-    The store is tmpfs, so this is RAM charged to the bus (E-W1-STORE-1)."""
-    return sum(config.max_bytes + (filestore_block_bytes(config.max_bytes)
-                                   if config.storage == StorageType.FILE else 0) for config in configs)
+def _block(config: StreamConfig) -> int:
+    """The file-store block nats-server gives `config` at its create (0 for a memory stream). It fixes
+    the block then (ns:server/stream.go:1098, 1578-1607) and no update changes it."""
+    return filestore_block_bytes(config.max_bytes) if config.storage == StorageType.FILE else 0
 
 
 @dataclass(frozen=True)
@@ -261,9 +277,16 @@ class ClassTable:
     """One Node store's whole declaration, by one owner. Its caps total at most `total`, itself at
     most the store, so the server never refuses a declare of it for room (10047) in any order. Its
     store bound fits the room the bus's memory fence leaves beside the server's heap, so a full store
-    reloads inside the fence after any restart (E-W1-STORE-1)."""
+    reloads inside the fence after any restart (E-W1-STORE-1).
+
+    `blocks` is the largest block each buffer may have been created with: the block of every cap the
+    buffer has had in this table's line of re-splits, its current one included. A stream's files
+    grow in the block of the cap it was created at, whatever cap it has since, so the bound charges
+    that largest block and a re-split that shrinks a stream into a smaller block is charged the old
+    one (E-W1-FV-3). A caller never passes it: the constructor and `resplit` keep it."""
     buffers: Mapping[str, StreamConfig]
     total: int = NODE_STORE_BYTES
+    blocks: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not 0 < self.total <= NODE_STORE_BYTES:
@@ -274,15 +297,31 @@ class ClassTable:
                 raise ValueError("class_table_names")
             if (config.metadata or {}).get(KIND_KEY) not in (CIRCULAR, STICKY):
                 raise ValueError("class_table_unbuilt_buffer")
+        if not self.blocks.keys() <= buffers.keys():
+            raise ValueError("class_table_names")
+        blocks = {name: max(self.blocks.get(name, 0), _block(config)) for name, config in buffers.items()}
+        object.__setattr__(self, "buffers", MappingProxyType(buffers))
+        object.__setattr__(self, "blocks", MappingProxyType(blocks))
         if sum(config.max_bytes for config in buffers.values()) > self.total:
             raise ValueError("class_table_over_total")
-        if store_bound(buffers.values()) > NODE_BUS_STORE_ROOM:
+        if self.store_bound > NODE_BUS_STORE_ROOM:
             raise ValueError("class_table_past_the_bus_fence")
-        object.__setattr__(self, "buffers", MappingProxyType(buffers))
+
+    def charge(self, name: str) -> int:
+        """The most one buffer's files can hold: its cap plus one block, the dropped messages a
+        discard-old stream keeps until their block empties, at the largest block it may have."""
+        return self.buffers[name].max_bytes + self.blocks[name]
+
+    @property
+    def store_bound(self) -> int:
+        """The most the store's files can hold for this table. The store is tmpfs, so this is RAM
+        charged to the bus (E-W1-STORE-1)."""
+        return sum(self.charge(name) for name in self.buffers)
 
     def resplit(self, caps: Mapping[str, int]) -> ClassTable:
-        """Central's per-Node override: new caps for circular buffers inside the same total. A sticky
-        buffer's cap is its table's budget, never an override."""
+        """Central's per-Node override: new caps for circular buffers inside the same total, every
+        buffer still charged the largest block it may have been created with. A sticky buffer's cap
+        is its table's budget, never an override."""
         buffers = dict(self.buffers)
         for name, cap in caps.items():
             if name not in buffers:
@@ -292,7 +331,7 @@ class ClassTable:
             if cap <= 0:
                 raise ValueError("buffer_needs_a_byte_cap")
             buffers[name] = replace(buffers[name], max_bytes=cap)
-        return ClassTable(buffers, self.total)
+        return ClassTable(buffers, self.total, self.blocks)
 
 
 async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
@@ -303,8 +342,13 @@ async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
 
 async def apply_table(jetstream: JetStreamContext, table: ClassTable) -> None:
     """Bring a declared store's caps to `table`'s: every shrink before any growth, so the reserved
-    total never passes the table's on the way (10047). Each stream keeps its epoch and sequence."""
+    total never passes the table's on the way (10047). Each stream keeps its epoch and sequence, and
+    its block: the table is first charged the block of each stream's live cap too, so a table not
+    re-split from the one that created the store still fails the fence check before any change
+    (`class_table_past_the_bus_fence`, E-W1-FV-3)."""
     current = {name: (await jetstream.stream_info(name)).config for name in table.buffers}
+    ClassTable(table.buffers, table.total,
+               {name: max(table.blocks[name], _block(config)) for name, config in current.items()})
     changes = sorted((table.buffers[name].max_bytes - config.max_bytes, name)
                      for name, config in current.items() if config.max_bytes != table.buffers[name].max_bytes)
     for _, name in changes:

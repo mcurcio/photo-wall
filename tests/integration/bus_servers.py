@@ -343,7 +343,9 @@ def leaf_connections(hub: BusServer) -> Mapping[str, int]:
 class PrefixProxy:
     """A reverse proxy in front of the hub's WebSocket listener, as the origin's ingress route is
     (W11, E3d/E4): it forwards a connection whose HTTP request path starts with `/<prefix>/`
-    unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction."""
+    unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction.
+    `stall()` stops what the Node sends upstream, as a Wi-Fi, ingress or WAN stall does, until
+    `resume()` (E-W1-FV-2)."""
 
     def __init__(self, upstream_port: int, prefix: str) -> None:
         self.upstream_port = upstream_port
@@ -351,6 +353,14 @@ class PrefixProxy:
         self.port = _free_port()
         self.paths: list[str] = []
         self._server: asyncio.base_events.Server | None = None
+        self._flowing = asyncio.Event()
+        self._flowing.set()
+
+    def stall(self) -> None:
+        self._flowing.clear()
+
+    def resume(self) -> None:
+        self._flowing.set()
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
@@ -375,12 +385,17 @@ class PrefixProxy:
             return
         upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", self.upstream_port)
         upstream_writer.write(head)
-        await asyncio.gather(_pipe(reader, upstream_writer), _pipe(upstream_reader, writer))
+        await asyncio.gather(_pipe(reader, upstream_writer, self._flowing), _pipe(upstream_reader, writer))
 
 
-async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                flowing: asyncio.Event | None = None) -> None:
     try:
-        while data := await reader.read(65536):
+        while True:
+            if flowing is not None:
+                await flowing.wait()
+            if not (data := await reader.read(65536)):
+                break
             writer.write(data)
             await writer.drain()
     except (ConnectionError, OSError):
