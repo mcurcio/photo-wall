@@ -22,16 +22,21 @@ sequence derived from it, so a revision or cursor read before a store loss names
 re-created stream, however long its declarer held the configuration (E-W1-TD-5, E-W1-FV-1). A
 caller never sets the policy, the storage or the metadata.
 
-No buffer forwards: `buffer` refuses republish, sources, mirror and subject transforms. A republish
-is an internal server publish that no permission checks, so it is the one way a Node stream could
-send across the leaf what Central did not pull (erratum E-W1-LEAF-1); the WALL mirror is built only
-by `wall_mirror_config`.
+No buffer forwards: `buffer` refuses republish, sources, mirror and subject transforms; the WALL
+mirror is built only by `wall_mirror_config`, and lives in the Node server's mirror account, reached
+through `wall_copy` (erratum E-W1-LEAF-2). No buffer removes a message except by its own limits: every
+builder sets deny_delete and deny_purge and refuses rollups and per-message TTLs, since a removal that
+is not a limit's writes a tombstone into a new file-store block, which the store frees only at its
+2-minute sync (ns:server/filestore.go:6239-6249, 7363-7367), past the cap plus one block the fence
+charges each stream (E-W1-LEAF-2). The Node's server refuses a local client's delete, purge and update
+of any stream too (contracts.node_link.LOCAL_PUBLISH_DENY).
 
 `ClassTable` declares a Node's whole store at once: its caps never total more than the store, so
 no declare meets 10047 whatever the order (E-W1-TD-S2). The store is tmpfs inside the bus's memory
 fence, so a table whose files (caps plus a flat 4 MiB file-store block per stream) cannot fit beside
 the server's heap, or that has more streams than the server admits, fails to build: a store that
-cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1, E-W1-FIT-1). Nothing here
+cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1, E-W1-FIT-1); it holds at most the
+one wall copy the mirror account admits. Nothing here
 changes a declared stream's limits: a per-Node override (re-splitting the store) waits for E3b's
 design, and the server's own `max_file_store` and `max_streams` bound the files of any client.
 """
@@ -57,6 +62,9 @@ from nats.js.errors import APIError, NotFoundError
 from contracts.node_link import (
     FILESTORE_BLOCK_BOUND,
     MAX_STORED_MESSAGE,
+    MIRROR_API_PREFIX,
+    MIRROR_MAX_STREAMS,
+    NODE_ACCOUNT_MAX_STREAMS,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
@@ -70,6 +78,7 @@ from contracts.node_link import (
 )
 
 if TYPE_CHECKING:
+    from nats.aio.client import Client
     from nats.js.api import StreamInfo
     from nats.js.client import JetStreamContext
 
@@ -89,7 +98,9 @@ STREAM_NAME_IN_USE: Final = 10058       # two declarers raced: the other one cre
 STORAGE_EXCEEDED: Final = 10047
 # The same race on a store at its stream count (node-bus.conf's max_streams), checked before the name too.
 MAX_STREAMS_REACHED: Final = 10027
-_FIXED: Final = frozenset({"retention", "discard", "storage", "metadata"})
+# What every builder sets and no caller may: the buffer rule, and no removal but a limit's.
+_NO_REMOVALS: Final = {"deny_delete": True, "deny_purge": True, "allow_rollup_hdrs": False, "allow_msg_ttl": False}
+_FIXED: Final = frozenset({"retention", "discard", "storage", "metadata", *_NO_REMOVALS})
 _FORWARDS: Final = frozenset({"republish", "sources", "mirror", "subject_transform"})
 
 
@@ -117,7 +128,8 @@ def _build(kind: str, name: str, max_bytes: int, fields: dict) -> StreamConfig:
     elif not 0 < size <= MAX_STORED_MESSAGE:
         raise ValueError("buffer_message_past_the_leaf")
     return StreamConfig(name=name, max_bytes=max_bytes, max_msg_size=size, retention=RetentionPolicy.LIMITS,
-                        discard=DiscardPolicy.OLD, storage=StorageType.FILE, metadata={KIND_KEY: kind}, **fields)
+                        discard=DiscardPolicy.OLD, storage=StorageType.FILE, metadata={KIND_KEY: kind},
+                        **_NO_REMOVALS, **fields)
 
 
 def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
@@ -132,9 +144,10 @@ def buffer(name: str, max_bytes: int, **fields) -> StreamConfig:
 
 def _kv_fields(bucket_name: str, history: int, max_value_size: int | None) -> dict:
     # A KV bucket's stream as nats-py's create_key_value builds it (nats/js/client.py:1447), less its
-    # hard-coded discard NEW, which refuses every put once the bucket is full.
-    return dict(subjects=[f"$KV.{bucket_name}.>"], allow_rollup_hdrs=True, allow_msg_ttl=True,
-                deny_delete=True, duplicate_window=120, max_consumers=-1, max_msgs=-1,
+    # hard-coded discard NEW, which refuses every put once the bucket is full, and less rollups (a KV
+    # purge) and per-key TTLs, which remove messages past the limits (`_NO_REMOVALS`). A KV delete is
+    # a write (a marker), and stays.
+    return dict(subjects=[f"$KV.{bucket_name}.>"], duplicate_window=120, max_consumers=-1, max_msgs=-1,
                 max_msg_size=max_value_size, max_msgs_per_subject=history)
 
 
@@ -217,10 +230,17 @@ def wall_config(*, first_seq: int = 1) -> StreamConfig:
 
 def wall_mirror_config() -> StreamConfig:
     """A Node's read-only local mirror of WALL, sticky as its origin: max_msgs_per_subject 1 and the
-    same cap (erratum E-W1-E3a-R-1)."""
+    same cap (erratum E-W1-E3a-R-1). Declared and read through `wall_copy`."""
     return _build(STICKY, WALL_STREAM, WALL_STREAM_BYTES, dict(
         max_msgs_per_subject=1, max_msgs=-1, mirror=StreamSource(
             name=WALL_STREAM, external=ExternalStream(api=WALL_API_PREFIX, deliver=WALL_DELIVER_PREFIX))))
+
+
+def wall_copy(client: Client, **options) -> JetStreamContext:
+    """A Node program's JetStream view of the wall copy: the one stream of the Node server's mirror
+    account, which the program's account imports under MIRROR_API_PREFIX (info, create, read; erratum
+    E-W1-LEAF-2)."""
+    return client.jetstream(prefix=MIRROR_API_PREFIX, **options)
 
 
 def buffer_kind(config: StreamConfig) -> str:
@@ -305,14 +325,18 @@ class ClassTable:
         caps = sum(config.max_bytes for config in buffers.values())
         if caps > self.total:
             raise ValueError("class_table_over_total")
-        if len(buffers) > NODE_MAX_STREAMS:
+        mirrors = sum(config.mirror is not None for config in buffers.values())
+        if (len(buffers) > NODE_MAX_STREAMS or mirrors > MIRROR_MAX_STREAMS
+                or len(buffers) - mirrors > NODE_ACCOUNT_MAX_STREAMS):
             raise ValueError("class_table_too_many_streams")
         if caps + len(buffers) * FILESTORE_BLOCK_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX:
             raise ValueError("class_table_past_the_bus_fence")
 
 
-async def declare_table(jetstream: JetStreamContext, table: ClassTable) -> None:
-    """Create every buffer of the table that is absent."""
+async def declare_table(client: Client, table: ClassTable, **options) -> None:
+    """Create every buffer of the table that is absent: the wall copy through `wall_copy`, the rest in
+    the program's own account. `options` go to both JetStream contexts (a timeout)."""
+    own, mirror = client.jetstream(**options), wall_copy(client, **options)
     for config in table.buffers.values():
-        await declare(jetstream, config)
+        await declare(mirror if config.mirror is not None else own, config)
 

@@ -54,6 +54,7 @@ from nodeapi.buffers import (
     declare,
     sticky_bucket,
     wall_config,
+    wall_copy,
     wall_mirror_config,
 )
 from nodeapi.documents import Token
@@ -386,14 +387,29 @@ async def declare_wall(writer: Client, *, first_seq: int = 1) -> None:
 async def declare_wall_mirror(node_client: Client) -> bool:
     """Create-if-absent on the Node: the local mirror of the hub's wall stream (`wall_mirror_config`).
     Local only: it never asks the hub, so it succeeds while the hub is away, in any order with
-    Central's WALL declare (erratum E-W1-E3a-R-4). Returns True when it created one."""
-    return await declare(node_client.jetstream(), wall_mirror_config())
+    Central's WALL declare (erratum E-W1-E3a-R-4). Through `wall_copy`: the mirror is the Node
+    server's mirror account's one stream (E-W1-LEAF-2). Returns True when it created one."""
+    return await declare(wall_copy(node_client), wall_mirror_config())
+
+
+class NodeStore:
+    """A Node program's view of its whole store: its own account's streams, and the wall copy in the
+    Node server's mirror account (E-W1-LEAF-2)."""
+
+    def __init__(self, client: Client, **options) -> None:
+        self.own, self.mirror = client.jetstream(**options), wall_copy(client, **options)
+
+    def of(self, name: str) -> JetStreamContext:
+        return self.mirror if name == WALL_STREAM else self.own
+
+    async def stream_info(self, name: str, **options):
+        return await self.of(name).stream_info(name, **options)
 
 
 async def wall_value(node_client: Client, subject: str) -> bytes | None:
     """The latest message for `subject` in the Node's local mirror, or None."""
     try:
-        message = await node_client.jetstream().get_last_msg(WALL_STREAM, subject)
+        message = await wall_copy(node_client).get_last_msg(WALL_STREAM, subject)
     except NotFoundError:
         return None
     return message.data

@@ -7,10 +7,10 @@ bytes and a reload changes only what the enrolled set changed.
 Each Node account holds the Node's leaf user and Central's client user, both selectors on the
 trusted network rather than secrets. It has no JetStream (the Node holds its own objects), no
 export and no import except the wall-wide set: this module has no form for any other. Both users
-carry the leaf's subject contract (contracts.node_link, erratum E-W1-LEAF-1): the leaf user may send
-toward the hub only LEAF_EXPORTS and receive only LEAF_IMPORTS, and Central may send only
-LEAF_IMPORTS and subscribe only to its wildcard inboxes, so nothing a Node program does crosses the
-leaf except what Central asked for.
+carry the leaf's subject contract (contracts.node_link, errata E-W1-LEAF-1, E-W1-LEAF-2): the leaf user
+may send toward the hub only LEAF_EXPORTS and receive only LEAF_IMPORTS, and Central may send only
+CENTRAL_PUBLISH and subscribe only to its wildcard inboxes. What keeps a Node program from sending
+anything across is the Node's own account split (node-bus.conf); these lists are the hub's half.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from contracts.node_link import (
+    CENTRAL_PUBLISH,
     CENTRAL_SUBSCRIPTIONS,
     HUB_DOMAIN,
     LEAF_EXPORTS,
@@ -128,7 +129,7 @@ def _node_account(serial: str) -> dict[str, object]:
     return {
         "users": [
             {**_user(node_user(serial)), "permissions": _permissions(LEAF_EXPORTS, LEAF_IMPORTS)},
-            {**_user(central_user(serial)), "permissions": _permissions(LEAF_IMPORTS, CENTRAL_SUBSCRIPTIONS)},
+            {**_user(central_user(serial)), "permissions": _permissions(CENTRAL_PUBLISH, CENTRAL_SUBSCRIPTIONS)},
         ],
         "imports": [
             *({"service": {"account": WALL_ACCOUNT, "subject": subject},

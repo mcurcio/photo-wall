@@ -13,10 +13,11 @@ tasks pull at once. A busy reader then slows the server's writes, never ends its
 (`write_timeout: retry`). nats-py 2.16.0's `fetch` sends no `max_bytes`, so this sends the request itself.
 
 A request's replies come on a wildcard inbox (`<inbox>.*`, the request sent with reply `<inbox>.r`),
-never on a literal one: a push consumer binds only to a subject some subscription names literally
-(ns:server/sublist.go:169-195), so a Node program cannot point a push consumer at Central's pull and
-stream past its byte budget across the leaf. The hub refuses Central a literal inbox
-(contracts.node_link.CENTRAL_SUBSCRIPTIONS; erratum E-W1-LEAF-1).
+the only kind the hub lets Central subscribe to (contracts.node_link.CENTRAL_SUBSCRIPTIONS). Across
+the leaf, a pull's replies come back only on the response the Node's server tracks for it, which only
+JetStream answers (contracts.node_link.NODE_PULL_SERVICE; errata E-W1-LEAF-1, E-W1-LEAF-2), so what
+crosses for a pull is at most the bytes it asked for. That route ends at the server's response
+threshold, 2 minutes: a pull across the leaf waits less.
 """
 from __future__ import annotations
 

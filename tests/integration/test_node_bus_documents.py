@@ -29,7 +29,7 @@ from nats.js.api import Header
 from nats.js.errors import APIError
 
 from contracts.node_link import MAX_STORED_MESSAGE, NODE_DOMAIN, WALL_STREAM
-from nodeapi.buffers import HEADER_ALLOWANCE, Documents, epoch_of, sticky_bucket
+from nodeapi.buffers import HEADER_ALLOWANCE, Documents, epoch_of, sticky_bucket, wall_copy
 from nodeapi.documents import (
     DocumentRefused,
     DocumentWriter,
@@ -134,7 +134,7 @@ def test_wall_documents_survive_the_largest_messages_in_the_hub_and_every_mirror
         hub_wall = writer_client.jetstream()
         assert (await hub_wall.stream_info(WALL_STREAM)).state.last_seq == last.seq
 
-        mirror = client.jetstream()
+        mirror = wall_copy(client)
 
         async def caught_up():
             return (await mirror.stream_info(WALL_STREAM)).state.last_seq >= last.seq
@@ -232,7 +232,7 @@ def test_every_writer_of_a_table_keeps_the_others_documents_in_the_manifest(tmp_
         expected = {"show", "layout", "frame00", *(f"frame{index:02}" for index in range(1, 9))}
         assert await listed_documents(jetstream, table.stream, table.subject_prefix) == expected
 
-        await kv.purge("layout")   # a bypass: no writer removes a document
+        await kv.delete("layout")   # a bypass: no writer removes a document (a purge is refused, E-W1-LEAF-2)
         assert await missing_documents(jetstream, table.stream, table.subject_prefix) == {"layout"}
         await central_client.close()
         await client.close()

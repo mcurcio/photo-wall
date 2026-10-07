@@ -77,8 +77,9 @@ jobs:
   # The Node bus inside its memory fence (tests/integration/test_bus_memory_fence.py, erratum
   # E-W1-STORE-1): the pinned linux-arm64 nats-server in a container fenced as the bus unit is
   # (MemoryMax, no swap, GOMEMLIMIT, the store on tmpfs), every buffer of the class table full and
-  # written for minutes, then a crash with the full store; and a stalled hub while a Node program
-  # floods every subject the leaf might carry (erratum E-W1-LEAF-1). Fails on any OOM kill or restart.
+  # written for minutes, then a crash with the full store; a stalled hub while a Node program floods
+  # every subject the leaf might carry and aims replies at it (errata E-W1-LEAF-1, E-W1-LEAF-2); and a
+  # program's deletes and consumers, which the server refuses (E-W1-LEAF-2). Fails on any OOM kill or restart.
   # Native arm64 (ubuntu-24.04-arm, as node-components.yml and node-pid1.yml): the Pi's architecture.
   bus-fence:
     runs-on: ubuntu-24.04-arm

@@ -5,8 +5,9 @@ this file holds the configuration properties a server run cannot show cheaply, a
 buffer rule (E-W1-BUF-2, E-W1-TD-4): every stream, bucket and mirror is a limits stream with discard
 old, built only by the shipped `nodeapi.buffers`, circular or sticky, and no account has a store
 limit that could refuse a write first; the numbers both ends of a leaf bind (E-W1-TD-2, -3); the
-leaf's subject contract as both ends configure it (E-W1-LEAF-1); and the store's fit in the bus's
-memory fence (E-W1-FIT-1).
+leaf's subject contract as both ends configure it, and the Node's three accounts that keep every
+program's traffic off the leaf (E-W1-LEAF-1, E-W1-LEAF-2); and the store's fit in the bus's memory
+fence (E-W1-FIT-1).
 """
 from __future__ import annotations
 
@@ -22,24 +23,39 @@ from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
+    CENTRAL_PUBLISH,
     CENTRAL_SUBSCRIPTIONS,
     FILESTORE_BLOCK_BOUND,
     HUB_DOMAIN,
+    LEAF_ACCOUNT,
     LEAF_EXPORTS,
     LEAF_IMPORTS,
+    LOCAL_PUBLISH_DENY,
+    LOCAL_SUBSCRIBE_DENY,
     MAX_STORED_MESSAGE,
+    MIRROR_ACCOUNT,
+    MIRROR_API_PREFIX,
+    MIRROR_MAX_STREAMS,
+    MIRROR_SERVICES,
+    NODE_ACCOUNT,
+    NODE_ACCOUNT_MAX_STREAMS,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
+    NODE_MAX_CONSUMERS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     NODE_MAX_PENDING,
     NODE_MAX_STREAMS,
+    NODE_PULL_SERVICE,
+    NODE_SERVICES,
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
+    WALL_DELIVER_PREFIX,
+    WALL_LINK_SERVICES,
     WALL_STREAM_BYTES,
     WALL_WRITER_USER,
     account_id,
@@ -144,25 +160,52 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert config["write_timeout"] == "retry"
     # The leaf has its own write deadline, at least the server's default: it would otherwise take the
     # clients' 2 s and close on a short uplink stall, retry policy and all (E-W1-FV-2). It is the
-    # uplink's stall budget only; the allow-lists bound what the leaf queues (E-W1-LEAF-1).
+    # uplink's stall budget only; the Node's accounts bound what the leaf queues (E-W1-LEAF-2).
     assert _seconds(config["leafnodes"]["write_deadline"]) >= SERVER_DEFAULT_WRITE_DEADLINE
     assert _seconds(config["leafnodes"]["write_deadline"]) > _seconds(config["write_deadline"])
     assert _bytes(config["max_pending"]) == NODE_MAX_PENDING
     assert PULL_MAX_BYTES * 2 <= NODE_MAX_PENDING and PULL_MAX_BYTES >= 2 * NODE_MAX_PAYLOAD
     # A request asks at least one delivery's charge, so the largest stored message always fits one.
     assert MAX_STORED_MESSAGE + NODE_MAX_CONTROL_LINE < PULL_ONE_BYTES <= PULL_MAX_BYTES
-    account = config["accounts"]["API"]
-    assert account["jetstream"]["max_bytes_required"] is True
-    # The server refuses an 18th stream at create: the fit's stream count (E-W1-FIT-1).
-    assert int(account["jetstream"]["max_streams"]) == NODE_MAX_STREAMS
+    accounts = config["accounts"]
+    assert set(accounts) == {NODE_ACCOUNT, LEAF_ACCOUNT, MIRROR_ACCOUNT}
+    account, leaf, mirror = accounts[NODE_ACCOUNT], accounts[LEAF_ACCOUNT], accounts[MIRROR_ACCOUNT]
+    # Both JetStream accounts: every stream capped; the server refuses a stream past their two counts,
+    # which total the fit's (E-W1-FIT-1), and a consumer past NODE_MAX_CONSUMERS on any stream.
+    for jetstream, streams in ((account["jetstream"], NODE_ACCOUNT_MAX_STREAMS),
+                               (mirror["jetstream"], MIRROR_MAX_STREAMS)):
+        assert jetstream["max_bytes_required"] is True
+        assert (int(jetstream["max_streams"]), int(jetstream["max_consumers"])) == (streams, NODE_MAX_CONSUMERS)
+    assert NODE_ACCOUNT_MAX_STREAMS + MIRROR_MAX_STREAMS == NODE_MAX_STREAMS
     assert config["no_auth_user"] in {user["user"] for user in account["users"]}
-    # A local program may publish anything except what the leaf carries to the hub, bar one reply to a
-    # request it was delivered (E-W1-LEAF-1). allow_responses drops the default allow-all, so ">".
+    # A local program answers a request it was delivered once and names no other tracked response,
+    # sees none, and deletes, purges or re-caps no stream (E-W1-LEAF-2). allow_responses drops the
+    # default allow-all, so ">".
     [user] = account["users"]
-    assert user["permissions"] == {"publish": {"allow": [">"], "deny": list(LEAF_EXPORTS)},
+    assert user["permissions"] == {"publish": {"allow": [">"], "deny": list(LOCAL_PUBLISH_DENY)},
+                                   "subscribe": {"allow": [">"], "deny": list(LOCAL_SUBSCRIBE_DENY)},
                                    "allow_responses": True}
-    assert [remote["account"] for remote in config["leafnodes"]["remotes"]] == ["API"]
+    # The leaf binds an account with no user and no stream; it reaches the Node only through what the
+    # Node's account exports to it, each answered once but the pull (E-W1-LEAF-2).
+    assert [remote["account"] for remote in config["leafnodes"]["remotes"]] == [LEAF_ACCOUNT]
     assert config["leafnodes"]["remotes"][0]["urls"] == ["$PHOTO_WALL_BUS_LEAF_URL"]
+    assert set(leaf) == {"exports", "imports"} and set(mirror) == {"jetstream", "exports", "imports"}
+    assert account["exports"] == [*({"service": subject, "accounts": [LEAF_ACCOUNT]} for subject in NODE_SERVICES),
+                                  {"service": NODE_PULL_SERVICE, "response_type": "stream",
+                                   "accounts": [LEAF_ACCOUNT]}]
+    assert leaf["imports"] == [{"service": {"account": NODE_ACCOUNT, "subject": subject}}
+                               for subject in (*NODE_SERVICES, NODE_PULL_SERVICE)]
+    # The wall copy: its account imports the WALL link from the leaf's and exports only its info,
+    # create and read to the programs', under MIRROR_API_PREFIX.
+    assert leaf["exports"] == [*({"service": subject, "accounts": [MIRROR_ACCOUNT]} for subject in WALL_LINK_SERVICES),
+                               {"stream": f"{WALL_DELIVER_PREFIX}.>", "accounts": [MIRROR_ACCOUNT]}]
+    assert mirror["imports"] == [*({"service": {"account": LEAF_ACCOUNT, "subject": subject}}
+                                   for subject in WALL_LINK_SERVICES),
+                                 {"stream": {"account": LEAF_ACCOUNT, "subject": f"{WALL_DELIVER_PREFIX}.>"}}]
+    assert mirror["exports"] == [{"service": subject, "accounts": [NODE_ACCOUNT]} for subject in MIRROR_SERVICES]
+    assert account["imports"] == [{"service": {"account": MIRROR_ACCOUNT, "subject": subject},
+                                   "to": MIRROR_API_PREFIX + subject.removeprefix("$JS.API")}
+                                  for subject in MIRROR_SERVICES]
     assert "deny_" not in text
     # Every per-Node value is the unit's environment, so the base ships one file for every Node.
     assert set(re.findall(r"\$(PHOTO_WALL_[A-Z_]+)", text)) == {
@@ -183,7 +226,10 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
             {"user": node_user(serial), "password": node_user(serial), "permissions": {
                 "publish": {"allow": list(LEAF_EXPORTS)}, "subscribe": {"allow": list(LEAF_IMPORTS)}}},
             {"user": central_user(serial), "password": central_user(serial), "permissions": {
-                "publish": {"allow": list(LEAF_IMPORTS)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
+                "publish": {"allow": list(CENTRAL_PUBLISH)}, "subscribe": {"allow": list(CENTRAL_SUBSCRIPTIONS)}}}]
+        # The leaf user's inbound list is what Central sends plus the mirror's deliveries and the
+        # replies to its requests, which come back to the Node's tracked response (`_R_.`).
+        assert set(LEAF_IMPORTS) - set(CENTRAL_PUBLISH) == {f"{WALL_DELIVER_PREFIX}.>", "_R_.>"}
         assert account["imports"] == WALL_IMPORTS
     wall = accounts[WALL_ACCOUNT]
     assert wall["jetstream"] == {"max_bytes_required": True}
@@ -259,6 +305,10 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
         # each create, so a configuration held across a store loss re-creates nothing old (E-W1-FV-1).
         assert EPOCH_KEY not in config.metadata, config.name
         assert config.first_seq == (1 if config is hub_wall else None), config.name
+        # No removal but a limit's: a user delete, a purge, a rollup or a per-message TTL writes a
+        # tombstone past the stream's cap plus one block (E-W1-LEAF-2).
+        assert (config.deny_delete, config.deny_purge, config.allow_rollup_hdrs, config.allow_msg_ttl) == (
+            True, True, False, False), config.name
     assert wall_config(first_seq=7).first_seq == 7   # WALL's continuation is the builder's (E-W1-E3a-R-4)
     # Sticky: per-subject history only, no count limit, the byte cap a document table's budget.
     split = node_split().buffers
@@ -271,7 +321,8 @@ def test_every_buffer_is_a_limits_stream_that_discards_old_built_by_nodeapi():
     for config in (wall_config(), wall_mirror_config()):
         assert (config.max_msgs_per_subject, config.max_msgs, config.max_bytes) == (1, -1, WALL_STREAM_BYTES)
     assert {name for name, config in split.items() if buffer_kind(config) == CIRCULAR} == set(split) - sticky
-    for field in ("retention", "discard", "storage", "metadata"):
+    for field in ("retention", "discard", "storage", "metadata", "deny_delete", "deny_purge",
+                  "allow_rollup_hdrs", "allow_msg_ttl"):
         with pytest.raises(ValueError, match="buffer_policy_is_fixed"):
             buffer("X", 1, **{field: None})
     with pytest.raises(ValueError, match="buffer_needs_a_byte_cap"):
@@ -305,6 +356,13 @@ def test_one_class_table_holds_the_whole_store_within_the_servers_stream_count()
                                                          max_bytes=table.buffers["REC_host"].max_bytes + room + 1)})
     with pytest.raises(ValueError, match="class_table_too_many_streams"):
         ClassTable({**table.buffers, "EXTRA": buffer("EXTRA", 1)})
+    # The server holds one wall copy, in its own account, and 16 streams in the programs' (E-W1-LEAF-2).
+    rest = {name: config for name, config in table.buffers.items() if config.mirror is None}
+    assert len(rest) == NODE_ACCOUNT_MAX_STREAMS
+    with pytest.raises(ValueError, match="class_table_too_many_streams"):
+        ClassTable({**rest, "EXTRA": buffer("EXTRA", 1)})
+    with pytest.raises(ValueError, match="class_table_too_many_streams"):
+        ClassTable({"WALL": wall_mirror_config(), "COPY": replace(wall_mirror_config(), name="COPY")})
     with pytest.raises(ValueError, match="class_table_unbuilt_buffer"):
         ClassTable({"RAW": replace(buffer("RAW", 1), metadata=None)})
 
@@ -314,7 +372,8 @@ def test_the_store_fits_the_bus_fence_for_any_class_table(monkeypatch):
     # one block, which the server fixes at create and which no cap up to the store makes larger than
     # 4 MiB. The server caps the sum of the caps (max_file_store) and the stream count (max_streams),
     # so for any client and any table the files fit beside the heap GOMEMLIMIT holds (E-W1-STORE-1,
-    # E-W1-FIT-1); contracts checks this at import. Zero slack: an 18th stream needs the owner.
+    # E-W1-FIT-1); contracts checks this at import. Zero slack: an 18th stream needs the owner. Not
+    # charged yet: each stream's up to NODE_MAX_CONSUMERS consumers (E-W1-LEAF-2, the owner's to decide).
     mib = 1024 * 1024
     assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT) == (224 * mib, 140 * mib)   # STORE1 = A, measured
     assert (NODE_STORE_BYTES, NODE_MAX_STREAMS, FILESTORE_BLOCK_BOUND, NODE_BUS_HEADROOM) == (12 * mib, 17, 4 * mib, 4 * mib)
@@ -345,8 +404,12 @@ def test_the_store_fits_the_bus_fence_for_any_class_table(monkeypatch):
 _NOWHERE = ("DiscardPolicy.NEW", "RetentionPolicy.WORK_QUEUE", "RetentionPolicy.INTEREST",
             "create_key_value(", "KeyValueConfig(")
 _STREAM_BUILDER = "nodeapi/buffers.py"
+# The leaf contract names these API subjects in permission and import lists, and sends nothing: the
+# contracts layer imports no NATS client (pyproject's import contracts). It may name them, nothing more.
+_SUBJECT_TABLE = "contracts/node_link.py"
 _STREAM_WRITES = re.compile(r"StreamConfig\(|\badd_stream\b|STREAM\.CREATE\b")
 _STREAM_UPDATES = re.compile(r"\bupdate_stream\b|STREAM\.UPDATE\b")
+_API_SUBJECTS = frozenset({"STREAM.CREATE", "STREAM.UPDATE"})
 _PULLS = (".fetch(", "pull_subscribe")
 
 
@@ -356,6 +419,8 @@ def _guard_violations(path: str, text: str) -> list[tuple[str, str]]:
     if path != _STREAM_BUILDER:
         found += [(path, match.group()) for match in _STREAM_WRITES.finditer(text)]
     found += [(path, match.group()) for match in _STREAM_UPDATES.finditer(text)]
+    if path == _SUBJECT_TABLE:
+        found = [(where, what) for where, what in found if what not in _API_SUBJECTS]
     if re.search(r"^\s*(import nats|from nats)", text, re.MULTILINE) and path != "nodeapi/pull.py":
         found += [(path, forbidden) for forbidden in _PULLS if forbidden in text]
     return found
@@ -390,6 +455,10 @@ def test_the_buffer_guard_refuses_a_stream_created_in_any_form():
     assert _guard_violations("nodeapi/buffers.py", "await jetstream.update_stream(config)") == [
         ("nodeapi/buffers.py", "update_stream")]
     assert _guard_violations("central/fleet/reader.py", "await jetstream.stream_info(name)") == []
+    # The leaf contract may name the subjects in its lists, never call what creates or changes a stream.
+    assert _guard_violations(_SUBJECT_TABLE, '"$JS.API.STREAM.CREATE.WALL", "STREAM.UPDATE.>"') == []
+    assert _guard_violations(_SUBJECT_TABLE, "await js.update_stream(config); StreamConfig(name='X')") == [
+        (_SUBJECT_TABLE, "StreamConfig("), (_SUBJECT_TABLE, "update_stream")]
 
 
 def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
@@ -397,7 +466,10 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     # oldest (ns:server/stream.go:7274, jetstream.go:2536), so it would refuse (10002) the write
     # discard-old takes. Each account only requires every stream to carry its own cap.
     node = _parse_nats_conf(NODE_BUS_CONF.read_text())
-    assert node["accounts"]["API"]["jetstream"] == {"max_bytes_required": True, "max_streams": "17"}
+    assert node["accounts"][NODE_ACCOUNT]["jetstream"] == {"max_bytes_required": True, "max_streams": "16",
+                                                           "max_consumers": "4"}
+    assert node["accounts"][MIRROR_ACCOUNT]["jetstream"] == {"max_bytes_required": True, "max_streams": "1",
+                                                             "max_consumers": "4"}
     hub = json.loads(hub_configuration(["serial-a"], LISTENERS))
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
     assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]
