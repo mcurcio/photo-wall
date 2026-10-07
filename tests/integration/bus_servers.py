@@ -9,19 +9,26 @@ probe uses is the test's own: nothing here is a subject grammar.
 Every stream, KV bucket and mirror a probe declares is built by the shipped `nodeapi.buffers`
 (erratum E-W1-TD-S1): circular event buffers drop their oldest when full, sticky documents are never
 full (E-W1-TD-4). The config test fails on any other place in the tree that configures one.
+
+A server counts as started only on its own word: `BusServer.start` waits for the ports file that
+pid writes and refuses unless it lists exactly the ports the harness gave it, so a server that lost
+a port to another process exits with its log in the error instead of passing as up. `_free_port`
+never issues a port twice in a process, and each pytest-xdist worker draws from its own slice of a
+range below every kernel's ephemeral floor, so two of a test's servers cannot be handed one port.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import random
 import shutil
 import signal
 import socket
 import subprocess
 import time
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -61,6 +68,10 @@ NATS_SERVER_VARIABLE = "PHOTO_WALL_NATS_SERVER"
 HUB_STORE_BYTES = 4 * 1024 * 1024
 START_SECONDS = 10.0
 MIB = 1024 * 1024
+# The loopback ports the harness hands out: below Linux's (32768) and macOS's (49152) ephemeral floor,
+# so no kernel-chosen port (a client socket's local end) lands in it; pytest-xdist workers split it.
+PORT_FLOOR = 20000
+PORT_CEILING = 32000
 
 
 async def declare_bucket(jetstream: JetStreamContext, config: StreamConfig) -> KeyValue:
@@ -112,29 +123,82 @@ class BusServer:
     _process: subprocess.Popen | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
-        """Start the server and wait until its client port accepts."""
+        """Start the server and wait until it has written its ports file listing exactly the ports
+        this server was given, then until its client port accepts. A server that exits first (a
+        port another process holds is fatal to nats-server) raises with its log tail; so does one
+        whose file lists other ports, or none within START_SECONDS, after it is stopped."""
         if self._process is not None and self._process.poll() is None:
             raise RuntimeError(f"{self.name} is already running")
+        ports_dir = self.config.parent / "ports"
+        shutil.rmtree(ports_dir, ignore_errors=True)
+        ports_dir.mkdir(parents=True)
         log = self.config.with_suffix(".log").open("ab")
         self._process = subprocess.Popen(
-            [str(nats_server_binary()), "-c", str(self.config)],
+            [str(nats_server_binary()), "-c", str(self.config), "--ports_file_dir", str(ports_dir)],
             env={**os.environ, **self.environment}, stdout=log, stderr=subprocess.STDOUT)
         log.close()
-        host, port = self.client_url.removeprefix("nats://").rsplit(":", 1)
+        _RUNNING[id(self)] = self
+        try:
+            self._await_own_ports(ports_dir / f"nats-server_{self._process.pid}.ports")
+        except BaseException:
+            self.stop()
+            raise
+
+    def expected_ports(self) -> dict[str, set[int]]:
+        """The ports file this server must write: its client port, and the hub's WebSocket and
+        monitor ports. nats-server 2.15 lists no leafnodes port there; the hub's leaf listener is
+        bound before the file is written and failing to bind it is fatal, so the file's presence
+        covers it."""
+        expected = {"nats": {_port_of(self.client_url)}}
+        if self.websocket_port is not None:
+            expected["websocket"] = {self.websocket_port}
+        if self.monitor_url is not None:
+            expected["monitoring"] = {_port_of(self.monitor_url)}
+        return expected
+
+    def _await_own_ports(self, path: Path) -> None:
         deadline = time.monotonic() + START_SECONDS
-        while True:
-            if self._process.poll() is not None:
-                raise RuntimeError(f"{self.name} exited {self._process.returncode}: {self.log_tail()}")
+        while not path.exists():
+            self._raise_if_exited()
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"{self.name} wrote no ports file in {START_SECONDS}s: {self.log_tail()}")
+            time.sleep(.05)
+        while True:   # the server writes the file in one call; a read can still see it half written
             try:
-                socket.create_connection((host, int(port)), timeout=.2).close()
+                listed = json.loads(path.read_text())
+                break
+            except json.JSONDecodeError:
+                self._raise_if_exited()
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(.05)
+        actual = {kind: {_port_of(url) for url in urls} for kind, urls in listed.items() if urls}
+        if actual != self.expected_ports():
+            raise RuntimeError(f"{self.name} listens on {actual}, was given {self.expected_ports()}: "
+                               f"{self.log_tail()}")
+        while True:
+            self._raise_if_exited()
+            try:
+                socket.create_connection(("127.0.0.1", _port_of(self.client_url)), timeout=.2).close()
                 return
             except OSError:
                 if time.monotonic() > deadline:
                     raise RuntimeError(f"{self.name} never accepted: {self.log_tail()}") from None
                 time.sleep(.05)
 
+    def _raise_if_exited(self) -> None:
+        if self._process is not None and self._process.poll() is not None:
+            raise RuntimeError(f"{self.name} exited {self._process.returncode}: {self.log_tail()}")
+
+    def state(self) -> str:
+        if self._process is None:
+            return "stopped"
+        code = self._process.poll()
+        return "running" if code is None else f"exited {code}"
+
     def stop(self) -> None:
         """SIGTERM and wait; the store stays."""
+        _RUNNING.pop(id(self), None)
         process, self._process = self._process, None
         if process is None or process.poll() is not None:
             return
@@ -155,6 +219,29 @@ class BusServer:
         return "\n".join(path.read_text(errors="replace").splitlines()[-lines:]) if path.exists() else ""
 
 
+# Every server started and not yet stopped, for `until`'s timeout message.
+_RUNNING: dict[int, BusServer] = {}
+
+
+async def until(check: Callable[[], Awaitable], seconds: float, what: str):
+    """Poll `check` until it returns a truthy value and return it. Past `seconds` it fails with
+    every started server's state and log tail, so a server's own error shows beside the timeout."""
+    deadline = time.monotonic() + seconds
+    while True:
+        value = await check()
+        if value:
+            return value
+        if time.monotonic() > deadline:
+            raise AssertionError(f"not within {seconds}s: {what}{servers_report()}")
+        await asyncio.sleep(.05)
+
+
+def servers_report(lines: int = 8) -> str:
+    """Each started, unstopped server's state and last log lines."""
+    return "".join(f"\n--- {server.name} ({server.state()}):\n{server.log_tail(lines)}"
+                   for server in _RUNNING.values())
+
+
 def nats_server_binary() -> Path:
     value = os.environ.get(NATS_SERVER_VARIABLE)
     if not value:
@@ -162,10 +249,44 @@ def nats_server_binary() -> Path:
     return Path(value)
 
 
+def _port_of(url: str) -> int:
+    return int(url.rsplit(":", 1)[1])
+
+
+_ISSUED: set[int] = set()
+
+
+def _port_slice() -> range:
+    """This process's share of [PORT_FLOOR, PORT_CEILING): one slice per pytest-xdist worker, so
+    workers never draw the same port; the whole range outside xdist."""
+    count = max(int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")), 1)
+    index = int(os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw"))
+    width = (PORT_CEILING - PORT_FLOOR) // count
+    return range(PORT_FLOOR + index * width, PORT_FLOOR + (index + 1) * width)
+
+
+def _draw() -> int:
+    """A port in this process's slice that nothing holds right now. May repeat an earlier draw."""
+    ports = _port_slice()
+    for _ in range(len(ports)):
+        port = random.choice(ports)
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port
+    raise RuntimeError(f"no free loopback port in {ports}")
+
+
 def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    """A free loopback port this process has never issued: a repeated draw is drawn again."""
+    for _ in range(len(_port_slice())):
+        port = _draw()
+        if port not in _ISSUED:
+            _ISSUED.add(port)
+            return port
+    raise RuntimeError(f"every port in {_port_slice()} was already issued")
 
 
 def hub_server(tmp: Path, serials: Sequence[str]) -> BusServer:

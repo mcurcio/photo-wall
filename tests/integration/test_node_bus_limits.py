@@ -36,6 +36,7 @@ from integration.bus_servers import (
     local,
     node_server,
     node_split,
+    until,
     wall_value,
     wall_writer,
 )
@@ -101,19 +102,11 @@ async def _refused(declare, code: int) -> None:
     assert refusal.value.err_code == code, refusal.value
 
 
-async def _until(check, seconds: float, what: str):
-    deadline = time.monotonic() + seconds
-    while not (value := await check()):
-        assert time.monotonic() < deadline, f"not within {seconds}s: {what}"
-        await asyncio.sleep(.05)
-    return value
-
-
 async def _mirror_reaches(jetstream, seq: int):
     async def check():
         state = (await jetstream.stream_info(WALL_STREAM)).state
         return state if state.last_seq >= seq else None
-    return await _until(check, 10, f"the wall mirror reaches {seq}")
+    return await until(check, 10, f"the wall mirror reaches {seq}")
 
 
 def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
@@ -124,7 +117,7 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
     async def body():
         async def linked():
             return len(leaf_connections(hub)) == 1
-        await _until(linked, 10, "the Node's leaf link")
+        await until(linked, 10, "the Node's leaf link")
         writer = await wall_writer(hub)
         await declare_wall(writer)
         wall = writer.jetstream()
@@ -537,7 +530,7 @@ def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
     async def body():
         async def linked():
             return len(leaf_connections(hub)) == 1
-        await _until(linked, 10, "the Node's leaf link")
+        await until(linked, 10, "the Node's leaf link")
         before = leaf_connections(hub)
         client = await local(node)
         jetstream = client.jetstream()
@@ -584,7 +577,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
     async def body():
         async def linked():
             return len(leaf_connections(hub)) == 1
-        await _until(linked, 10, "the Node's leaf link")
+        await until(linked, 10, "the Node's leaf link")
         before = leaf_connections(hub)
         client = await local(node)
         jetstream = client.jetstream()
@@ -600,7 +593,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
 
             async def closed(past=past):
                 return past.is_closed
-            await _until(closed, 5, f"the server closes the client past the control line ({escaped})")
+            await until(closed, 5, f"the server closes the client past the control line ({escaped})")
             writer = await connect()
             await writer.publish(subject, record)
             await writer.flush(2)
@@ -609,7 +602,7 @@ def test_no_reply_for_the_longest_subject_a_client_can_store_is_past_the_leaf(tm
 
         async def stored():
             return (await jetstream.stream_info("REC_player")).state.messages == len(subjects)
-        await _until(stored, 5, "both longest-subject records are stored, neither past one")
+        await until(stored, 5, "both longest-subject records are stored, neither past one")
         # A component's KV put under a 1004-byte key, which a lowered control line once answered by
         # closing the component: the server's default line takes it and keeps the client (E-W1-TD-8).
         state = await declare_bucket(jetstream, bucket("state_host", history=1, max_bytes=MIB))
@@ -731,7 +724,7 @@ def test_a_reply_that_grows_with_stream_state_closes_the_leaf_and_nodeapi_asks_n
     async def body():
         async def linked():
             return leaf_connections(hub)
-        await _until(linked, 10, "the Node's leaf link")
+        await until(linked, 10, "the Node's leaf link")
         client = await local(node)
         jetstream = client.jetstream()
         await declare(jetstream, bucket("state_host", history=1, max_bytes=MIB))
@@ -747,14 +740,14 @@ def test_a_reply_that_grows_with_stream_state_closes_the_leaf_and_nodeapi_asks_n
         central_client = await central(hub, "serial-a")
         across = central_client.jetstream(domain=NODE_DOMAIN)
         for stream, details in (("KV_state_host", {"deleted_details": True}), ("REC_host", {"subjects_filter": ">"})):
-            before = await _until(linked, 10, "the Node's leaf link")
+            before = await until(linked, 10, "the Node's leaf link")
 
             async def epoch_read(stream=stream):
                 try:
                     return await stream_epoch(across, stream)
                 except (nats.errors.NoRespondersError, nats.errors.TimeoutError):
                     return None
-            await _until(epoch_read, 10, f"nodeapi's epoch read of {stream} across the leaf")
+            await until(epoch_read, 10, f"nodeapi's epoch read of {stream} across the leaf")
             assert leaf_connections(hub) == before
             request = json.dumps(details).encode()
             assert len((await client.request(f"$JS.API.STREAM.INFO.{stream}", request, timeout=5)).data) > NODE_MAX_PAYLOAD
@@ -764,7 +757,7 @@ def test_a_reply_that_grows_with_stream_state_closes_the_leaf_and_nodeapi_asks_n
             async def relinked(before=before):
                 now = leaf_connections(hub)
                 return now and now != before
-            await _until(relinked, 10, f"the leaf closed for {stream} and relinked")
+            await until(relinked, 10, f"the leaf closed for {stream} and relinked")
         assert hub.log_tail(400).count("Leafnode connection closed: Maximum Message Payload Exceeded") >= 2
         await central_client.close()
         await client.close()

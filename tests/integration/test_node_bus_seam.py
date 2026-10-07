@@ -30,6 +30,7 @@ from integration.bus_servers import (
     local,
     node_server,
     reload_hub,
+    until,
     wall_value,
     wall_writer,
 )
@@ -59,21 +60,10 @@ def _leaf_accounts(hub: BusServer) -> list[str]:
     return list(leaf_connections(hub))
 
 
-async def _until(check, seconds: float, what: str):
-    deadline = time.monotonic() + seconds
-    while True:
-        value = await check()
-        if value:
-            return value
-        if time.monotonic() > deadline:
-            raise AssertionError(f"not within {seconds}s: {what}")
-        await asyncio.sleep(.05)
-
-
 async def _linked(hub: BusServer, count: int) -> None:
     async def check():
         return len(_leaf_accounts(hub)) == count
-    await _until(check, 10, f"{count} leaf links at the hub")
+    await until(check, 10, f"{count} leaf links at the hub")
 
 
 async def _gather(client, subject: str, seconds: float = .5) -> list[dict]:
@@ -108,7 +98,7 @@ async def _await_interest(client, subject: str) -> None:
             return await client.request(subject, b"ready", timeout=.5)
         except (nats.errors.NoRespondersError, nats.errors.TimeoutError):
             return None
-    await _until(check, 10, f"a responder on {subject}")
+    await until(check, 10, f"a responder on {subject}")
 
 
 def test_central_calls_a_node_service_across_the_websocket_leaf(tmp_path):
@@ -143,7 +133,7 @@ def test_central_calls_a_node_service_across_the_websocket_leaf(tmp_path):
             except nats.errors.NoRespondersError:
                 return time.monotonic() - started
             return None
-        assert await _until(no_responders, 5, "no responders once the Node stopped") < 1
+        assert await until(no_responders, 5, "no responders once the Node stopped") < 1
         await node_client.close()
         await central_client.close()
 
@@ -199,7 +189,7 @@ def test_two_node_accounts_in_domain_node_stay_isolated(tmp_path):
             await local_a.flush()
             await asyncio.sleep(.1)
             return heard["central-a"]
-        await _until(central_a_heard, 10, "Central A hears Node A")
+        await until(central_a_heard, 10, "Central A hears Node A")
         await asyncio.sleep(.5)
         assert heard["central-b"] == [] and heard["node-b"] == []
         assert sorted(_leaf_accounts(hub)) == sorted([account_id("serial-a"), account_id("serial-b")])
@@ -239,7 +229,7 @@ def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf
                 return await jetstream.publish("player.record.small", b"small", timeout=.5)
             except (nats.errors.NoRespondersError, nats.errors.TimeoutError, NoStreamResponseError):
                 return None
-        assert (await _until(stored, 10, "the Node's stream interest at the hub")).stream == "REC_player"
+        assert (await until(stored, 10, "the Node's stream interest at the hub")).stream == "REC_player"
 
         with pytest.raises(nats.errors.MaxPayloadError):
             await jetstream.publish("player.record.big", b"B" * (NODE_MAX_PAYLOAD + 1))
@@ -260,7 +250,7 @@ def test_a_message_past_the_nodes_max_payload_is_refused_at_the_hub_and_the_leaf
         await central_client.publish("player.record.big", b"H" * NODE_MAX_PAYLOAD, headers={"Probe": "x" * 64})
         async def closed():
             return central_client.is_closed
-        await _until(closed, 5, "the hub closes the client that sent past max_payload")
+        await until(closed, 5, "the hub closes the client that sent past max_payload")
         await asyncio.sleep(.5)
         assert (await node_client.jetstream().stream_info("REC_player")).state.messages == before
 
@@ -290,7 +280,7 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
         try:
             async def check():
                 return await wall_value(client, subject) == value
-            await _until(check, 10, f"{node.name} mirror holds {value!r} on {subject}")
+            await until(check, 10, f"{node.name} mirror holds {value!r} on {subject}")
         finally:
             await client.close()
 
@@ -342,7 +332,7 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
                 for client in (local_a, local_b):
                     async def caught_up(client=client, seq=acknowledgement.seq):
                         return (await client.jetstream().stream_info(WALL_STREAM)).state.last_seq >= seq
-                    await _until(caught_up, 10, f"mirror reaches {acknowledgement.seq}")
+                    await until(caught_up, 10, f"mirror reaches {acknowledgement.seq}")
         for client in (local_a, local_b):
             assert await wall_value(client, "wall.scene") == b"scene-the-only-value"
             assert await wall_value(client, "wall.timing") == value
@@ -434,7 +424,7 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
             except nats.errors.TimeoutError:
                 return False
             return entry is not None and (entry.value, entry.revision) == (b"central", written)
-        await _until(watcher_saw_central, 5, "the Node's watcher sees Central's value")
+        await until(watcher_saw_central, 5, "the Node's watcher sees Central's value")
 
         # A second write on the stale revision is refused by the Node's server.
         with pytest.raises(APIError) as stale:
@@ -623,7 +613,7 @@ async def _holds(node: BusServer, values: dict[str, bytes], seconds: float) -> N
     try:
         async def check():
             return all([await wall_value(client, subject) == value for subject, value in values.items()])
-        await _until(check, seconds, f"{node.name} mirror holds {values!r}")
+        await until(check, seconds, f"{node.name} mirror holds {values!r}")
     finally:
         await client.close()
 
@@ -773,7 +763,7 @@ def test_a_short_uplink_stall_keeps_the_leaf_and_every_event(tmp_path):
                 await node_client.publish("player.event.ready", b"")
                 await asyncio.sleep(.1)
                 return "player.event.ready" in received
-            await _until(central_hears, 10, "Central's interest at the Node")
+            await until(central_hears, 10, "Central's interest at the Node")
 
             proxy.stall()
             for index in range(count):
@@ -784,7 +774,7 @@ def test_a_short_uplink_stall_keeps_the_leaf_and_every_event(tmp_path):
 
             async def all_arrived():
                 return len([subject for subject in received if subject != "player.event.ready"]) == count
-            await _until(all_arrived, 20, f"all {count} events at Central")
+            await until(all_arrived, 20, f"all {count} events at Central")
             assert received[-count:] == [f"player.event.{index}" for index in range(count)]
             assert leaf_connections(hub) == linked
             assert "Slow Consumer" not in node.config.with_suffix(".log").read_text()

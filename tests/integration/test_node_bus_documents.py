@@ -9,7 +9,6 @@ is `nodeapi.documents.DocumentWriter`. Every bucket, subject and document is the
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from integration.bus_servers import (
@@ -23,6 +22,7 @@ from integration.bus_servers import (
     leaf_connections,
     local,
     node_server,
+    until,
     wall_writer,
 )
 from nats.js.api import Header
@@ -41,18 +41,10 @@ from nodeapi.documents import (
 WRONG_LAST_SEQUENCE = 10071   # JSStreamWrongLastSequenceErr: the key moved on since the token
 
 
-async def _until(check, seconds: float, what: str):
-    deadline = time.monotonic() + seconds
-    while not (value := await check()):
-        assert time.monotonic() < deadline, f"not within {seconds}s: {what}"
-        await asyncio.sleep(.05)
-    return value
-
-
 async def _linked(hub: BusServer, count: int) -> None:
     async def check():
         return len(leaf_connections(hub)) == count
-    await _until(check, 10, f"{count} leaf links at the hub")
+    await until(check, 10, f"{count} leaf links at the hub")
 
 
 def _servers(tmp_path, serials=("serial-a",)) -> tuple[BusServer, list[BusServer]]:
@@ -146,7 +138,7 @@ def test_wall_documents_survive_the_largest_messages_in_the_hub_and_every_mirror
 
         async def caught_up():
             return (await mirror.stream_info(WALL_STREAM)).state.last_seq >= last.seq
-        await _until(caught_up, 10, "the mirror reaches the last wall write")
+        await until(caught_up, 10, "the mirror reaches the last wall write")
         for jetstream in (hub_wall, mirror):
             assert await missing_documents(jetstream, WALL_STREAM, "wall.") == set()
             for key in small:
