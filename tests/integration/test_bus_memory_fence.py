@@ -4,10 +4,11 @@ Every Node buffer is a file stream on tmpfs, so the store is RAM charged to the 
 the server's heap. This runs the pinned linux-arm64 nats-server in a container fenced as the bus
 unit is (`--memory` = `--memory-swap` = NODE_BUS_MEMORY_MAX, GOMEMLIMIT = NODE_BUS_GOMEMLIMIT, the
 store on `--tmpfs`) with the shipped `node-bus.conf` and the class table `nodeapi` builds, its wall
-copy the real mirror of a hub's WALL. It fills every buffer and keeps writing flat out for minutes,
-and fails on any OOM kill, server restart or refused write. Then it kills the server with the store
-full: the restart in the same cgroup, which still holds the store's pages, must come back with every
-stream and stay up (a store that cannot fit its fence on restart OOM-loops forever).
+copy the real mirror of a hub's WALL. It gives every stream the most durable consumers the server
+admits (the next is refused, erratum E-W1-CONS-2), fills every buffer and keeps writing flat out for
+minutes, and fails on any OOM kill, server restart or refused write. Then it kills the server with the
+store full: the restart in the same cgroup, which still holds the store's pages, must come back with
+every stream and consumer and stay up (a store that cannot fit its fence on restart OOM-loops forever).
 
 The shipped file binds the client port to loopback; `-a 0.0.0.0` (a command-line flag, which
 nats-server applies over the file) lets Docker publish it. Nothing else differs from the file.
@@ -50,6 +51,7 @@ from contracts.node_link import (
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
+    NODE_MAX_CONSUMERS,
     WALL_API_PREFIX,
     WALL_STREAM,
     WALL_WRITER_USER,
@@ -81,6 +83,7 @@ MIB = 1024 * 1024
 SERIAL = "fence-node"
 SERVER = "/opt/nats/nats-server"
 CONF = "/etc/photo-wall/node-bus.conf"
+MAXIMUM_CONSUMERS = 10026   # JSMaximumConsumersLimitErr: a stream's max_consumers reached
 SAMPLE_SECONDS = 2.0
 RELOAD_SECONDS = 20.0
 # One line per server start, so a restart (an OOM kill or a crash) is counted, not missed.
@@ -243,6 +246,17 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     # Each stream's origin as the server holds it: `declare` stamps a Node stream's first_seq at the
     # create (E-W1-FV-1), so the built configuration carries none to compare against.
     start = await _states(jetstream, names)
+    # Every stream at the server's consumer cap: durable consumers keep their state files on the
+    # store's tmpfs and their heap across a restart, so the fence must hold all of them (E-W1-CONS-2).
+    for name in names:
+        for index in range(NODE_MAX_CONSUMERS + 1):
+            consumer = ConsumerConfig(durable_name=f"held{index}", ack_policy=AckPolicy.EXPLICIT)
+            if index < NODE_MAX_CONSUMERS:
+                await jetstream.add_consumer(name, consumer)
+                continue
+            with pytest.raises(APIError) as refused:
+                await jetstream.add_consumer(name, consumer)
+            assert refused.value.err_code == MAXIMUM_CONSUMERS, (name, refused.value)
 
     # Every buffer filled and written flat out, each writer inside its table: circular streams and
     # buckets drop their oldest, desired documents replace their own values, WALL churns its mirror.
@@ -303,6 +317,8 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
     node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
     jetstream = node.jetstream(timeout=10)
     assert await _states(jetstream, names) == full
+    for name in names:
+        assert (await jetstream.stream_info(name)).state.consumer_count == NODE_MAX_CONSUMERS, name
     await declare_table(jetstream, table)   # every connect re-declares: a no-op on the full store
     for name in names:
         if name == WALL_STREAM:

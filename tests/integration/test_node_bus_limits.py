@@ -365,9 +365,11 @@ async def _desired(jetstream) -> None:
     assert (await jetstream.stream_info(table.stream)).state.last_seq == state.last_seq
     assert state.bytes <= table.budget
     assert (await writer.read("retention"))[0] == b"written-once"
-    kv = await jetstream.key_value(table.stream.removeprefix("KV_"))
+    # One stream info counts every key's values: a kv.history per key holds a consumer for 5 minutes,
+    # and 22 of them pass the server's per-stream consumer cap (10026, erratum E-W1-CONS-2).
+    held = (await jetstream.stream_info(table.stream, subjects_filter=f"{table.subject_prefix}>")).state.subjects
     for key in keys:
-        assert len(await kv.history(key)) == table.history, key
+        assert held[table.subject_prefix + key] == table.history, key
     assert await missing_documents(jetstream, table.stream, table.subject_prefix) == set()
 
 

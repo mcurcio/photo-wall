@@ -23,6 +23,7 @@ from nats.js.api import DiscardPolicy, RetentionPolicy, StorageType
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_SUBSCRIPTIONS,
+    CONSUMER_BOUND,
     FILESTORE_BLOCK_BOUND,
     HUB_DOMAIN,
     LEAF_EXPORTS,
@@ -32,12 +33,14 @@ from contracts.node_link import (
     NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
     NODE_DOMAIN,
+    NODE_MAX_CONSUMERS,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
     NODE_MAX_PENDING,
     NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
     REPLY_ENVELOPE,
+    STREAM_BOUND,
     WALL_ACCOUNT,
     WALL_API_PREFIX,
     WALL_STREAM_BYTES,
@@ -155,6 +158,8 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
     assert account["jetstream"]["max_bytes_required"] is True
     # The server refuses an 18th stream at create: the fit's stream count (E-W1-FIT-1).
     assert int(account["jetstream"]["max_streams"]) == NODE_MAX_STREAMS
+    # And the 13th consumer on a stream, per stream: the fit's consumer count (E-W1-CONS-2).
+    assert int(account["jetstream"]["max_consumers"]) == NODE_MAX_CONSUMERS
     assert config["no_auth_user"] in {user["user"] for user in account["users"]}
     # A local program may publish anything except what the leaf carries to the hub, bar one reply to a
     # request it was delivered (E-W1-LEAF-1). allow_responses drops the default allow-all, so ">".
@@ -314,13 +319,17 @@ def test_the_store_fits_the_bus_fence_for_any_class_table(monkeypatch):
     # one block, which the server fixes at create and which no cap up to the store makes larger than
     # 4 MiB. The server caps the sum of the caps (max_file_store) and the stream count (max_streams),
     # so for any client and any table the files fit beside the heap GOMEMLIMIT holds (E-W1-STORE-1,
-    # E-W1-FIT-1); contracts checks this at import. Zero slack: an 18th stream needs the owner.
-    mib = 1024 * 1024
-    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT) == (224 * mib, 140 * mib)   # STORE1 = A, measured
+    # E-W1-FIT-1); contracts checks this at import. Each stream also holds at most 12 consumers
+    # (max_consumers), each 3 state files of 16 KiB Pi pages on the store plus 104 KiB of measured heap
+    # (E-W1-CONS-2). 1.72 MiB of slack: a 13th consumer per stream or an 18th stream needs the owner.
+    mib, kib = 1024 * 1024, 1024
+    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT) == (256 * mib, 140 * mib)   # owner, E-W1-CONS-2
     assert (NODE_STORE_BYTES, NODE_MAX_STREAMS, FILESTORE_BLOCK_BOUND, NODE_BUS_HEADROOM) == (12 * mib, 17, 4 * mib, 4 * mib)
-    assert 12 * mib + 17 * 4 * mib + 140 * mib + 4 * mib <= 224 * mib
-    assert (NODE_STORE_BYTES + NODE_MAX_STREAMS * FILESTORE_BLOCK_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
-            == NODE_BUS_MEMORY_MAX)
+    assert (NODE_MAX_CONSUMERS, CONSUMER_BOUND) == (12, 3 * 16 * kib + 104 * kib)
+    assert STREAM_BOUND == FILESTORE_BLOCK_BOUND + NODE_MAX_CONSUMERS * CONSUMER_BOUND
+    need = 12 * mib + 17 * (4 * mib + 12 * 152 * kib) + 140 * mib + 4 * mib
+    assert need == NODE_STORE_BYTES + NODE_MAX_STREAMS * STREAM_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM
+    assert need <= 256 * mib < need + 17 * 152 * kib   # 12 is the largest per-stream count that fits
     # The largest cap's block (ns:server/stream.go:1595-1607): cap // 4 + 1 rounded up to 100, under
     # the 8 MiB maximum, so the 4 MiB medium block.
     assert -(-(NODE_STORE_BYTES // 4 + 1) // 100) * 100 < 8 * mib
@@ -330,8 +339,11 @@ def test_the_store_fits_the_bus_fence_for_any_class_table(monkeypatch):
     whole = {**table.buffers, "REC_host": replace(table.buffers["REC_host"],
                                                   max_bytes=table.buffers["REC_host"].max_bytes + rest)}
     ClassTable(whole)
-    # A fence one byte smaller refuses it: the table charges every stream the flat block.
-    monkeypatch.setattr(buffers, "NODE_BUS_MEMORY_MAX", NODE_BUS_MEMORY_MAX - 1)
+    # A fence one byte under the identity refuses it: the table charges every stream the flat block
+    # and a full set of consumers.
+    monkeypatch.setattr(buffers, "NODE_BUS_MEMORY_MAX", need)
+    ClassTable(whole)
+    monkeypatch.setattr(buffers, "NODE_BUS_MEMORY_MAX", need - 1)
     with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
         ClassTable(whole)
 
@@ -397,7 +409,8 @@ def test_no_account_has_a_store_limit_only_the_server_fences_the_store():
     # oldest (ns:server/stream.go:7274, jetstream.go:2536), so it would refuse (10002) the write
     # discard-old takes. Each account only requires every stream to carry its own cap.
     node = _parse_nats_conf(NODE_BUS_CONF.read_text())
-    assert node["accounts"]["API"]["jetstream"] == {"max_bytes_required": True, "max_streams": "17"}
+    assert node["accounts"]["API"]["jetstream"] == {"max_bytes_required": True, "max_streams": "17",
+                                                    "max_consumers": "12"}
     hub = json.loads(hub_configuration(["serial-a"], LISTENERS))
     assert hub["accounts"][WALL_ACCOUNT]["jetstream"] == {"max_bytes_required": True}
     assert [name for name, account in hub["accounts"].items() if "jetstream" in account] == [WALL_ACCOUNT]

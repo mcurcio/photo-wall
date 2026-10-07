@@ -55,7 +55,6 @@ from nats.js.api import (
 from nats.js.errors import APIError, NotFoundError
 
 from contracts.node_link import (
-    FILESTORE_BLOCK_BOUND,
     MAX_STORED_MESSAGE,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_HEADROOM,
@@ -63,6 +62,7 @@ from contracts.node_link import (
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_STREAMS,
     NODE_STORE_BYTES,
+    STREAM_BOUND,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
     WALL_STREAM,
@@ -285,10 +285,10 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
 class ClassTable:
     """One Node store's whole declaration, by one owner. Its caps total at most `total`, itself at
     most the store, so the server never refuses a declare of it for room (10047) in any order; it has
-    at most the streams the server admits (10027). Its files (every cap plus a flat FILESTORE_BLOCK_BOUND
-    per stream, the block each may have whatever cap it was created with) fit the bus's memory fence
-    beside the server's heap, so a full store reloads inside the fence after any restart
-    (E-W1-STORE-1, E-W1-FIT-1)."""
+    at most the streams the server admits (10027). Its files (every cap plus a flat STREAM_BOUND per
+    stream: the block each may have whatever cap it was created with, and the consumers the server
+    admits on it) fit the bus's memory fence beside the server's heap, so a full store reloads inside
+    the fence after any restart (E-W1-STORE-1, E-W1-FIT-1, E-W1-CONS-2)."""
     buffers: Mapping[str, StreamConfig]
     total: int = NODE_STORE_BYTES
 
@@ -307,7 +307,7 @@ class ClassTable:
             raise ValueError("class_table_over_total")
         if len(buffers) > NODE_MAX_STREAMS:
             raise ValueError("class_table_too_many_streams")
-        if caps + len(buffers) * FILESTORE_BLOCK_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX:
+        if caps + len(buffers) * STREAM_BOUND + NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX:
             raise ValueError("class_table_past_the_bus_fence")
 
 
