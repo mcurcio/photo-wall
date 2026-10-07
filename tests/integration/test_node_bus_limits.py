@@ -3,7 +3,8 @@ a stream past the store limit, one without a byte cap and one in memory; with ev
 Node full at once and the store wholly reserved, each still takes a write, a circular one dropping
 its oldest and a sticky one keeping every document (the buffer rule, E-W1-BUF-2, E-W1-TD-4); each
 retention class keeps the promise the Node API page states for it. Also: one class table declares
-in any order and re-splits on a full store (E-W1-TD-S2); no reply for a stored message is past the
+in any order and re-splits on a full store (E-W1-TD-S2), and re-declaring on it is a no-op, a racing
+create included (E-W1-STORE-1); no reply for a stored message is past the
 leaf (E-W1-TD-2), whatever its subject (E-W1-TD-6), and a reply that grows with a stream's state does
 close it, which nodeapi never asks (recorded, E-W1-TD-9); a busy component is never cut off by a pull,
 however many it runs at once (E-W1-TD-3, -7).
@@ -51,6 +52,7 @@ from contracts.node_link import (
     WALL_STREAM_BYTES,
 )
 from nodeapi.buffers import (
+    EPOCH_KEY,
     HEADER_ALLOWANCE,
     MAX_PUBLISH_SUBJECT,
     STICKY,
@@ -138,13 +140,13 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
             buffer("MEMORY", 64 * 1024, subjects=["memory.>"]), storage=StorageType.MEMORY)),
             MEMORY_EXCEEDED)
 
-        # The page's split as one class table, its wall copy the real mirror, and one more buffer for
-        # the rest of the store: the caps reserve the whole store, with no headroom anywhere.
+        # The page's split as one class table, its wall copy the real mirror, with the rest of the
+        # store given to one buffer: the caps reserve the whole store, with no headroom anywhere.
         split = _whole_store()
         await declare_table(jetstream, split)
         split = split.buffers
         caps = {name: config.max_bytes for name, config in split.items()}
-        assert sum(caps.values()) == STORE_LIMIT and caps["REST"] > 0
+        assert sum(caps.values()) == STORE_LIMIT
         await jetstream.publish("player.record.asrun", b"as-run 1")
         before = {name: (await jetstream.stream_info(name)) for name in caps}
 
@@ -230,10 +232,12 @@ def test_with_every_node_buffer_full_each_still_takes_a_write(tmp_path):
 
 
 def _whole_store() -> ClassTable:
-    """The page's split plus a REST buffer for the rest of the store: the caps total the store."""
+    """The page's split with the rest of the store re-split to REC_host: the caps total the store.
+    Re-split, not a new buffer, so the table keeps its 17 file streams and its store bound fits the
+    bus's memory fence exactly (an 18th 4 MiB-block stream would not, E-W1-STORE-1)."""
     split = node_split()
     rest = STORE_LIMIT - sum(config.max_bytes for config in split.buffers.values())
-    return ClassTable({**split.buffers, "REST": buffer("REST", rest, subjects=["rest.>"])})
+    return split.resplit({"REC_host": split.buffers["REC_host"].max_bytes + rest})
 
 
 def _full_wall_table() -> Documents:
@@ -405,7 +409,7 @@ def test_one_class_table_declares_in_any_order_and_resplits_a_wholly_reserved_st
         caps = {name: config.max_bytes for name, config in table.buffers.items()}
         assert sum(caps.values()) == STORE_LIMIT
 
-        moved = table.resplit({"REC_player": caps["REC_player"] - MIB, "REST": caps["REST"] + MIB})
+        moved = table.resplit({"REC_player": caps["REC_player"] - MIB, "REC_host": caps["REC_host"] + MIB})
         await apply_table(jetstream, moved)
         for name, config in moved.buffers.items():
             info = await jetstream.stream_info(name)
@@ -416,6 +420,71 @@ def test_one_class_table_declares_in_any_order_and_resplits_a_wholly_reserved_st
 
     _run(node, body)
 
+
+def test_re_declaring_on_a_wholly_reserved_store_is_a_no_op_even_when_two_declarers_race(tmp_path):
+    # Every connect re-declares, and a Node's store is wholly reserved. The server checks a create's
+    # reservation (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891),
+    # so re-adding a stream that exists, identical or not, is 10047 on a full store. nodeapi's declare
+    # looks the stream up instead, and a create that loses a race to another declarer is a no-op too
+    # (E-W1-STORE-1).
+    node = _node(tmp_path)
+
+    async def body():
+        client = await local(node)
+        jetstream = client.jetstream()
+        mine, theirs = _whole_store(), _whole_store()   # two builds, two epochs per buffer
+        await declare_table(jetstream, mine)
+        assert sum(config.max_bytes for config in mine.buffers.values()) == STORE_LIMIT
+        epochs = {name: epoch_of(await jetstream.stream_info(name)) for name in mine.buffers}
+
+        # The store is wholly reserved: a re-declare of the same table, or of another build of it,
+        # changes nothing and refuses nothing, on every connect.
+        for table in (mine, theirs, mine):
+            for name, config in table.buffers.items():
+                assert await declare(jetstream, config) is False, name
+            await declare_table(jetstream, table)
+        assert {name: epoch_of(await jetstream.stream_info(name)) for name in mine.buffers} == epochs
+        assert sorted(info.config.name for info in await jetstream.streams_info()) == sorted(mine.buffers)
+
+        # The race's worst order, on the same full store less one stream: they look and find it
+        # absent, I create it, then their create meets the full reservation (10047, not 10058).
+        # Theirs is a no-op, not a refusal, and mine stays.
+        racing = "REC_player"
+        await jetstream.delete_stream(racing)
+        created = []
+
+        async def i_create() -> None:
+            created.append(await declare(jetstream, mine.buffers[racing]))
+        assert await declare(_LooksBefore(jetstream, i_create), theirs.buffers[racing]) is False
+        assert created == [True]
+        assert epoch_of(await jetstream.stream_info(racing)) == mine.buffers[racing].metadata[EPOCH_KEY]
+
+        # A stream that is absent still meets the full store's refusal: the no-op covers only a stream
+        # that exists.
+        await _refused(declare(jetstream, buffer("EXTRA", MIB, subjects=["extra.>"])), STORAGE_EXCEEDED)
+        await client.close()
+
+    _run(node, body)
+
+
+class _LooksBefore:
+    """A declarer's JetStream whose first lookup returns only after `meanwhile` has run: another
+    declarer creates the stream between this one's look and its create. Every call goes to the real
+    server; only the order is fixed."""
+
+    def __init__(self, jetstream, meanwhile) -> None:
+        self._jetstream, self._meanwhile = jetstream, meanwhile
+
+    def __getattr__(self, name: str):
+        return getattr(self._jetstream, name)
+
+    async def stream_info(self, name: str, *args, **kwargs):
+        try:
+            return await self._jetstream.stream_info(name, *args, **kwargs)
+        finally:
+            meanwhile, self._meanwhile = self._meanwhile, None
+            if meanwhile is not None:
+                await meanwhile()
 
 def test_no_reply_for_a_stored_message_is_past_the_leaf(tmp_path):
     # A reply the Node generates for a stored message (a JSON get base64-encodes it, a direct get and

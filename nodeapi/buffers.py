@@ -23,7 +23,9 @@ the policy, the storage or the metadata.
 
 `ClassTable` declares a Node's whole store at once: its caps never total more than the store, so
 no declare meets 10047 whatever the order, and Central's override re-splits that total and cannot
-raise it (E-W1-TD-S2).
+raise it (E-W1-TD-S2). The store is tmpfs inside the bus's memory fence, so a table whose store
+bound (caps plus one file-store block per stream) does not fit beside the server's heap fails to
+build: a store that cannot fit its fence would OOM-loop on every restart (E-W1-STORE-1).
 """
 from __future__ import annotations
 
@@ -42,16 +44,18 @@ from nats.js.api import (
     StreamConfig,
     StreamSource,
 )
-from nats.js.errors import BadRequestError, NotFoundError
+from nats.js.errors import APIError, NotFoundError
 
 from contracts.node_link import (
     MAX_STORED_MESSAGE,
+    NODE_BUS_STORE_ROOM,
     NODE_MAX_CONTROL_LINE,
     NODE_STORE_BYTES,
     WALL_API_PREFIX,
     WALL_DELIVER_PREFIX,
     WALL_STREAM,
     WALL_STREAM_BYTES,
+    filestore_block_bytes,
 )
 
 if TYPE_CHECKING:
@@ -69,6 +73,9 @@ HEADER_ALLOWANCE: Final = 256           # the header block a document writer may
 # prefix) and the server never closes either for a document's subject (E-W1-TD-6).
 MAX_PUBLISH_SUBJECT: Final = NODE_MAX_CONTROL_LINE // 2
 STREAM_NAME_IN_USE: Final = 10058       # two declarers raced: the other one created it
+# The same race on a store whose reservations are near full: the server checks the new stream's
+# reservation (ns:server/jetstream_api.go:1615) before it looks for the name (ns:server/stream.go:891).
+STORAGE_EXCEEDED: Final = 10047
 _FIXED: Final = frozenset({"retention", "discard", "storage", "metadata"})
 
 
@@ -219,7 +226,10 @@ async def stream_epoch(jetstream: JetStreamContext, stream: str) -> str:
 
 async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
     """Create-if-absent; True when this call created it. A stream that exists keeps its
-    configuration and its epoch: only a create starts a new epoch."""
+    configuration and its epoch: only a create starts a new epoch. Re-declaring is a no-op on any
+    store, a wholly reserved one included: the stream is looked up, never re-added, since the server
+    answers an add of a stream that exists with 10047 once the reservations are near full
+    (E-W1-STORE-1). A create that loses a race to another declarer is a no-op too."""
     try:
         await jetstream.stream_info(config.name)
         return False
@@ -227,17 +237,31 @@ async def declare(jetstream: JetStreamContext, config: StreamConfig) -> bool:
         pass
     try:
         await jetstream.add_stream(config)
-    except BadRequestError as error:
-        if error.err_code != STREAM_NAME_IN_USE:
+    except APIError as error:
+        if error.err_code not in (STREAM_NAME_IN_USE, STORAGE_EXCEEDED):
             raise
+        try:
+            await jetstream.stream_info(config.name)
+        except NotFoundError:
+            raise error from None   # 10047 for a stream that is still absent: the store is full
         return False
     return True
+
+
+def store_bound(configs: Iterable[StreamConfig]) -> int:
+    """The most the store's files can hold for these buffers: each file stream's cap plus one
+    file-store block, the dropped messages a discard-old stream keeps until their block empties.
+    The store is tmpfs, so this is RAM charged to the bus (E-W1-STORE-1)."""
+    return sum(config.max_bytes + (filestore_block_bytes(config.max_bytes)
+                                   if config.storage == StorageType.FILE else 0) for config in configs)
 
 
 @dataclass(frozen=True)
 class ClassTable:
     """One Node store's whole declaration, by one owner. Its caps total at most `total`, itself at
-    most the store, so the server never refuses a declare of it for room (10047) in any order."""
+    most the store, so the server never refuses a declare of it for room (10047) in any order. Its
+    store bound fits the room the bus's memory fence leaves beside the server's heap, so a full store
+    reloads inside the fence after any restart (E-W1-STORE-1)."""
     buffers: Mapping[str, StreamConfig]
     total: int = NODE_STORE_BYTES
 
@@ -252,6 +276,8 @@ class ClassTable:
                 raise ValueError("class_table_unbuilt_buffer")
         if sum(config.max_bytes for config in buffers.values()) > self.total:
             raise ValueError("class_table_over_total")
+        if store_bound(buffers.values()) > NODE_BUS_STORE_ROOM:
+            raise ValueError("class_table_past_the_bus_fence")
         object.__setattr__(self, "buffers", MappingProxyType(buffers))
 
     def resplit(self, caps: Mapping[str, int]) -> ClassTable:

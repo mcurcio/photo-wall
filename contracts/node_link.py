@@ -7,7 +7,8 @@ the user names, which both sides derive from the serial.
 The buffer rule (owner steer 2026-10-06, errata E-W1-BUF-2, E-W1-TD-4) needs no number here: every
 stream, bucket and mirror is a JetStream limits stream with discard old, built only by `nodeapi`;
 event buffers drop their oldest when full, sticky documents are never full. The numbers both ends
-bind are the leaf's largest message, the largest stored one, and the Node's store and pending caps.
+bind are the leaf's largest message, the largest stored one, the Node's store and pending caps, and
+the bus's memory fence the store must fit (E-W1-STORE-1).
 """
 from __future__ import annotations
 
@@ -52,6 +53,44 @@ REPLY_ENVELOPE: Final = 6 * NODE_MAX_CONTROL_LINE + 1024
 MAX_STORED_MESSAGE: Final = (NODE_MAX_PAYLOAD - REPLY_ENVELOPE) * 3 // 4
 # node-bus.conf's max_file_store: the whole Node store a class table may split (the config test binds it).
 NODE_STORE_BYTES: Final = 12 * 1024 * 1024
+
+# The bus's memory fence (owner answer STORE1 = A, erratum E-W1-STORE-1): every Node buffer is a file
+# stream whose store directory is tmpfs, so the store's pages are RAM charged to the bus's cgroup and
+# stay charged across a restart of the server in that cgroup. The bus unit (E3c) runs nats-server with
+# MemoryMax = NODE_BUS_MEMORY_MAX and Environment=GOMEMLIMIT=NODE_BUS_GOMEMLIMIT, and the memory
+# line table's bus line is NODE_BUS_MEMORY_MAX. Measured on 2.15.0 linux-arm64 with every buffer full
+# and written flat out: 224/140 MiB survived 10 minutes; without GOMEMLIMIT every fence OOM-looped.
+# The one place these numbers live: nodeapi's class table and the CI fence test read them here, and
+# the line table (E2a) and the unit (E3c) are to read them here too.
+NODE_BUS_MEMORY_MAX: Final = 224 * 1024 * 1024
+NODE_BUS_GOMEMLIMIT: Final = 140 * 1024 * 1024
+# What the server holds that GOMEMLIMIT does not count (thread stacks, runtime metadata, kernel
+# memory charged to the cgroup): the low end of the measured 4-20 MiB.
+NODE_BUS_HEADROOM: Final = 4 * 1024 * 1024
+# What the fence leaves for the store's pages: every class table's store bound fits it (nodeapi).
+NODE_BUS_STORE_ROOM: Final = NODE_BUS_MEMORY_MAX - NODE_BUS_GOMEMLIMIT - NODE_BUS_HEADROOM
+
+# nats-server 2.15.0's file-store block size for a stream with a byte cap (ns:server/stream.go:1595-1607,
+# ns:server/filestore.go:373-393): cap // 4 + 1 rounded up to 100 bytes, then the 32,000-byte minimum
+# at or under it, the 8 MiB maximum at or over it, and 4 MiB between. So a cap under 128,000 bytes gets
+# 32,000-byte blocks and one from 128,000 up to 32 MiB gets 4 MiB blocks. No option changes it.
+FILESTORE_MIN_BLOCK: Final = 32_000
+FILESTORE_MEDIUM_BLOCK: Final = 4 * 1024 * 1024
+FILESTORE_MAX_BLOCK: Final = 8 * 1024 * 1024
+
+
+def filestore_block_bytes(max_bytes: int) -> int:
+    """The block size nats-server 2.15.0 gives a file stream capped at `max_bytes`. A discard-old
+    stream frees a block only when its last message goes, so its files reach its cap plus one block."""
+    if max_bytes <= 0:
+        raise ValueError("filestore_needs_a_byte_cap")
+    size = max_bytes // 4 + 1
+    size += -size % 100
+    if size <= FILESTORE_MIN_BLOCK:
+        return FILESTORE_MIN_BLOCK
+    return FILESTORE_MAX_BLOCK if size >= FILESTORE_MAX_BLOCK else FILESTORE_MEDIUM_BLOCK
+
+
 # node-bus.conf's max_pending: what the server queues for one local client before it closes it as a
 # slow consumer. nodeapi caps every pull at half of it (E-W1-TD-3).
 NODE_MAX_PENDING: Final = 2 * 1024 * 1024

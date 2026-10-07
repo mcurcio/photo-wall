@@ -22,6 +22,10 @@ from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub
 from contracts.node_link import (
     HUB_DOMAIN,
     MAX_STORED_MESSAGE,
+    NODE_BUS_GOMEMLIMIT,
+    NODE_BUS_HEADROOM,
+    NODE_BUS_MEMORY_MAX,
+    NODE_BUS_STORE_ROOM,
     NODE_DOMAIN,
     NODE_MAX_CONTROL_LINE,
     NODE_MAX_PAYLOAD,
@@ -34,6 +38,7 @@ from contracts.node_link import (
     WALL_WRITER_USER,
     account_id,
     central_user,
+    filestore_block_bytes,
     node_user,
 )
 from nodeapi.buffers import (
@@ -49,6 +54,7 @@ from nodeapi.buffers import (
     buffer_kind,
     epoch_origin,
     sticky_bucket,
+    store_bound,
     wall_config,
     wall_mirror_config,
 )
@@ -267,6 +273,33 @@ def test_one_class_table_holds_the_whole_store_and_a_resplit_never_raises_it():
     with pytest.raises(ValueError, match="class_table_unbuilt_buffer"):
         ClassTable({"RAW": replace(buffer("RAW", 1), metadata=None)})
 
+
+
+def test_a_class_table_whose_store_cannot_fit_the_bus_fence_fails_to_build():
+    # The store is tmpfs inside the bus's cgroup. A discard-old file stream's files reach its cap plus
+    # one block, 4 MiB from a 128,000-byte cap up, beside the heap GOMEMLIMIT holds. A table past
+    # that room would OOM-loop its bus on every restart that reloads a full store, so building the
+    # table fails, Central's re-split included (E-W1-STORE-1).
+    mib = 1024 * 1024
+    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT) == (224 * mib, 140 * mib)   # STORE1 = A, measured
+    assert NODE_BUS_STORE_ROOM == NODE_BUS_MEMORY_MAX - NODE_BUS_GOMEMLIMIT - NODE_BUS_HEADROOM > NODE_STORE_BYTES
+    # ns:server/stream.go:1595-1607; 127,999 and 128,000 probed on 2.15.0 (32,000-byte blocks below).
+    assert [filestore_block_bytes(cap) for cap in (1, 127_999, 128_000, 33_554_399, 33_554_400)] == [
+        32_000, 32_000, 4 * mib, 4 * mib, 8 * mib]
+    table = node_split()
+    caps = {name: config.max_bytes for name, config in table.buffers.items()}
+    assert store_bound(table.buffers.values()) == sum(caps.values()) + 17 * 4 * mib <= NODE_BUS_STORE_ROOM
+    room = table.total - sum(caps.values())
+    assert room > 128_000
+    # One more small buffer fits; the same one at 128,000 bytes brings a 4 MiB block and does not.
+    small = ClassTable({**table.buffers, "SMALL": buffer("SMALL", 127_999)})
+    with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
+        ClassTable({**table.buffers, "LARGE": buffer("LARGE", 128_000)})
+    with pytest.raises(ValueError, match="class_table_past_the_bus_fence"):
+        small.resplit({"SMALL": 128_000})
+    # The whole store in the page's 17 streams fills the room exactly.
+    whole = table.resplit({"REC_host": caps["REC_host"] + room})
+    assert store_bound(whole.buffers.values()) == NODE_BUS_STORE_ROOM
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a
 # stream configured or created elsewhere bypasses the buffer rule (E-W1-TD-S1). The guard bans the
