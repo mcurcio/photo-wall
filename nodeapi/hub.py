@@ -23,7 +23,9 @@ shrink never leaves a listed key without its value (§9.2).
 
 The link reconciles when it comes up, when a reader is lost or its stream goes absent, when a new
 `birth` is drained, and when the bus's stream names differ from those its last reconcile listed: a
-line created after it is drained within about 2 s (erratum E-E3B-CC-1).
+line created after it is drained within about 2 s (erratum E-E3B-CC-1). `run_link` is the one way
+Central runs a NodeLink: it owns the client (Central imports no NATS type), connects as Central's
+user in the Node's account, and connects again until stopped.
 
 WallWriter keeps WALL in the hub's wall account: absent (the hub restarted empty), it is created at
 Central's mark + 1 + WALL_MARGIN and every wall document is put again. The mark is recorded after
@@ -42,16 +44,19 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol
 
+import nats
 import nats.errors
 from nats.js.errors import APIError, NotFoundError
 
 from contracts.node_link import (
+    CENTRAL_INBOX_PREFIX,
     CENTRAL_WRITER,
     METHOD_TOKEN,
     NODE_DOMAIN,
     STORE_LINES,
     WALL_STREAM,
     Pipe,
+    central_user,
 )
 from nodeapi.buffers import BIRTH_KEY, PIPE_KEY, KeyTable, Role, declare, role_of, wall_config
 from nodeapi.documents import ABSENT, Absent, Conflict, DocumentRefused, DocumentWriter
@@ -325,6 +330,39 @@ class NodeLink:
         finally:
             await subscription.unsubscribe()
         return replies
+
+
+async def run_link(url: str, serial: str, pipe: Pipe, store: LinkStore, documents: DocumentSource,
+                   stop: asyncio.Event) -> None:
+    """One Node's link on one pipe, as Central's user in the Node's hub account (central_user(serial),
+    inboxes under CENTRAL_INBOX_PREFIX): connect, retrying with the NodeLink backoff until `stop`; run
+    NodeLink(...).run(stop); connect again if the client closed; close the client on `stop`. The client
+    reconnects forever. A store error propagates (Central's process is what failed); a hub that does not
+    answer never raises out of here. Callers never see a nats type."""
+    user = central_user(serial)
+
+    async def logged(error: Exception) -> None:
+        log.debug("link %s %s: %r", pipe, serial, error)
+
+    delay = _BACKOFF[0]
+    while not stop.is_set():
+        try:
+            client = await nats.connect(
+                servers=[url], user=user, password=user, inbox_prefix=CENTRAL_INBOX_PREFIX,
+                allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=_BACKOFF[0],
+                connect_timeout=2, error_cb=logged)
+        except (OSError, nats.errors.Error, asyncio.TimeoutError) as error:
+            log.info("link %s %s: connect: %r", pipe, serial, error)
+            await _pause(stop, delay)
+            delay = min(delay * 2, _BACKOFF[1])
+            continue
+        delay = _BACKOFF[0]
+        try:
+            await NodeLink(client, pipe, store, documents).run(stop)
+        finally:
+            with contextlib.suppress(nats.errors.Error, asyncio.TimeoutError, OSError):
+                await asyncio.wait_for(client.close(), _REQUEST_SECONDS)
+        await _pause(stop, _BACKOFF[0])   # the client closed under the link: connect again
 
 
 async def _pause(stop: asyncio.Event, seconds: float) -> None:

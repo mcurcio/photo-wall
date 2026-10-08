@@ -106,6 +106,11 @@ jobs:
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
+      # Central's NodeLink tests (tests/integration/test_central_*.py) need PostgreSQL and the bus.
+      - name: Fetch the pinned nats-server
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
       - name: Prepare digest-pinned published Player wire fixtures

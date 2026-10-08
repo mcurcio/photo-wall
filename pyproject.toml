@@ -250,10 +250,20 @@ ignore_imports = ["appliance.process_identity -> appliance.app_launcher"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).
+# Indirect imports are allowed: Central and the Node contexts reach NATS only through nodeapi, which
+# is the point; a direct `import nats` outside nodeapi still fails (erratum E-E3D-CUT-1).
 name = "Only the Node API library talks to NATS"
 type = "forbidden"
 source_modules = ["central", "contracts", "media", "player", "appliance", "uplink"]
 forbidden_modules = ["nats"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+# Central is a client of each Node's bus through the hub (E3b design §7.2): it never runs a Node session.
+name = "Central uses only the hub role of the Node API library"
+type = "forbidden"
+source_modules = ["central"]
+forbidden_modules = ["nodeapi.node"]
 
 [[tool.importlinter.contracts]]
 # nodeapi imports contracts, the NATS client and the stdlib alone (r3 §16.2): the base and the Player
