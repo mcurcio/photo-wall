@@ -7,8 +7,15 @@ of the server. This runs the pinned linux-arm64 nats-server in a container fence
 §7.3), its wall copy the real mirror of a hub's WALL.
 It gives every stream the most consumers the server admits (the next is refused, erratum
 E-W1-CONS-2), fills every buffer and keeps writing flat out for minutes, and fails on any OOM kill,
-server restart or refused write. Nothing survives a bus start, so there is no reload to prove (E3b
-design §12); E3c re-adds a kill -9 inside the fence, the store coming back empty.
+server restart or refused write. Every event it writes carries the headers `nodeapi` sends, from the
+smallest event (empty payload) to 4000 B.
+
+The fit `contracts.node_link` checks at import rests on one measured number, the heap per stored byte
+at the smallest event `nodeapi` stores (MEMORY_STORE_FACTOR; E3b design §7.2, erratum E-E3B-R2-5). A
+second run fills the whole store with those events, every stream at its consumer cap, and measures
+the factor here, on the Pi's architecture. Nothing survives a bus start, so there is no reload to
+prove (E3b design §12); a third run kills the server with SIGKILL inside the fence and finds it back
+at once with an empty store that takes every line again (§11 "Bus crash, OOM or restart").
 
 The shipped file binds the client port to loopback; `-a 0.0.0.0` (a command-line flag, which
 nats-server applies over the file) lets Docker publish it. Nothing else differs from the file.
@@ -49,19 +56,22 @@ from integration.bus_servers import (
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError
 
+from appliance.boot.bus_environment import bus_environment
 from central.fleet.node_bus_accounts import HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
     CENTRAL_WRITER,
     MAX_STORED_MESSAGE,
+    MEMORY_STORE_FACTOR,
     NODE_BUS_GOMEMLIMIT,
+    NODE_BUS_HEADROOM,
     NODE_BUS_MEMORY_MAX,
+    NODE_BUS_PORT,
     NODE_DOMAIN,
     NODE_MAX_CONSUMERS,
     WALL_STREAM,
     WALL_WRITER_USER,
     central_user,
-    node_user,
 )
 from nodeapi.buffers import (
     CIRCULAR,
@@ -76,6 +86,7 @@ from nodeapi.buffers import (
     wall_mirror_config,
 )
 from nodeapi.documents import ABSENT, Conflict, DocumentWriter
+from nodeapi.envelope import event_headers
 from nodeapi.epoch import epoch_of
 from nodeapi.pull import pull
 from scripts.nats_server import NATS_SERVER_VERSION
@@ -90,6 +101,10 @@ SERVER = "/opt/nats/nats-server"
 CONF = "/etc/photo-wall/node-bus.conf"
 MAXIMUM_CONSUMERS = 10026   # JSMaximumConsumersLimitErr: a stream's max_consumers reached
 SAMPLE_SECONDS = 2.0
+SCHEMA_MAJOR = 1           # the schema major an event carries here: one digit, as every first major
+FILL_BATCH = 500           # smallest events in flight at once while a circular buffer fills
+SETTLE_SECONDS = 5.0       # after the fill, before the heap is sampled
+RESTART_SECONDS = 15.0     # a killed bus is back, empty, its lines applied and its mirror synced
 # One line per server start, so a restart (an OOM kill or a crash) is counted, not missed.
 SUPERVISOR = (f"while true; do echo start >> /tmp/starts; {SERVER} -c {CONF} -a 0.0.0.0; "
               "echo \"exited $?\" >> /tmp/exits; sleep 1; done")
@@ -138,23 +153,32 @@ class _Bus:
         return (done.stdout + done.stderr)[-6000:]
 
 
-def _writes(name: str, config) -> tuple[list[str], list[bytes]]:
+def _smallest_event(config) -> str:
+    """The subject of the smallest event `nodeapi` stores in a circular buffer: `<line>.<topic>.e`. Sent
+    with exactly the headers `nodeapi` sends with an event (`event_headers`) and an empty payload, so no
+    stored `nodeapi` event is smaller."""
+    return config.subjects[0].replace(">", "e")
+
+
+def _writes(config) -> tuple[list[str], list[bytes], bool]:
     """What one writer cycles through for one Node buffer: subjects and bodies inside its table (every
-    key of a state or desired bucket at its largest), or two sizes of event."""
+    key of a state or desired bucket at its largest), or events from the smallest to 4000 B, each with
+    an event's headers (the flag)."""
     table = table_of(config)
     if table is not None:
         keys = sorted(table.sizes)
         prefix = config.subjects[0].removesuffix(">")
-        return [prefix + key for key in keys], [b"k" * table.sizes[key] for key in keys]
-    return [config.subjects[0].replace(">", "fill")], [b"r" * 200, b"r" * 4000]
+        return [prefix + key for key in keys], [b"k" * table.sizes[key] for key in keys], False
+    return [_smallest_event(config)], [b"", b"r" * 200, b"r" * 4000], True
 
 
-async def _writer(jetstream, name: str, subjects: list[str], bodies: list[bytes], stop: asyncio.Event,
-                  counts: Counter, errors: Counter) -> None:
+async def _writer(jetstream, name: str, subjects: list[str], bodies: list[bytes], event: bool,
+                  stop: asyncio.Event, counts: Counter, errors: Counter) -> None:
     index = 0
     while not stop.is_set():
         try:
-            await jetstream.publish(subjects[index % len(subjects)], bodies[index % len(bodies)])
+            await jetstream.publish(subjects[index % len(subjects)], bodies[index % len(bodies)],
+                                    headers=event_headers(SCHEMA_MAJOR) if event else None)
             counts[name] += 1
         except Exception as error:   # every failure is the finding: nothing may refuse a write
             errors[f"{name}: {type(error).__name__}: {error}"[:160]] += 1
@@ -190,7 +214,8 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
         websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
         max_memory_store_bytes=HUB_STORE_BYTES)))
     hub_conf.chmod(0o644)
-    user = node_user(SERIAL)
+    # The environment the handoff stage writes for a Node whose boot origin is the hub's listener.
+    environment = bus_environment(f"http://{hub_name}:8080", SERIAL)
     platform = ("--platform", "linux/arm64")
     try:
         _docker("network", "create", network)
@@ -199,16 +224,15 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
         _docker("run", "-d", "--name", hub_name, "--network", network, *platform, "-p", "127.0.0.1::4222",
                 "-v", f"{binary}:{SERVER}:ro", "-v", f"{hub_conf}:/etc/photo-wall/hub.conf:ro",
                 IMAGE, SERVER, "-c", "/etc/photo-wall/hub.conf")
-        # The bus unit's fence: MemoryMax, no swap, GOMEMLIMIT; the store is the server's own heap.
+        # The bus unit's fence: MemoryMax, no swap, and its environment file (GOMEMLIMIT with it);
+        # the store is the server's own heap.
         _docker("run", "-d", "--name", bus.name, "--network", network, *platform, "--cgroupns=private",
                 f"--memory={NODE_BUS_MEMORY_MAX // MIB}m", f"--memory-swap={NODE_BUS_MEMORY_MAX // MIB}m",
-                "-p", "127.0.0.1::4222",
-                "-e", f"GOMEMLIMIT={NODE_BUS_GOMEMLIMIT // MIB}MiB",
-                "-e", f"PHOTO_WALL_BUS_NAME={user}", "-e", "PHOTO_WALL_BUS_PORT=4222",
-                "-e", f"PHOTO_WALL_BUS_LEAF_URL=ws://{user}:{user}@{hub_name}:8080/bus",
+                "-p", f"127.0.0.1::{NODE_BUS_PORT}",
+                *(item for key in sorted(environment) for item in ("-e", f"{key}={environment[key]}")),
                 "-v", f"{binary}:{SERVER}:ro", "-v", f"{NODE_BUS_CONF}:{CONF}:ro",
                 IMAGE, "sh", "-c", SUPERVISOR)
-        hub_port, bus_port = _published(hub_name, 4222), _published(bus.name, 4222)
+        hub_port, bus_port = _published(hub_name, 4222), _published(bus.name, NODE_BUS_PORT)
         _accepts(hub_port, 30, "the hub")
         _accepts(bus_port, 30, "the bus")
         yield bus, hub_name, hub_port, bus_port
@@ -230,28 +254,55 @@ def test_a_stalled_hub_never_pushes_the_bus_past_its_fence(tmp_path):
         asyncio.run(_stall(bus, hub_name, hub_port, bus_port, seconds))
 
 
-async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> None:
+def test_a_store_of_the_smallest_events_fits_the_measured_heap_factor(tmp_path):
+    with _fenced_bus(tmp_path) as (bus, _, hub_port, bus_port):
+        asyncio.run(_measure(bus, hub_port, bus_port))
+
+
+def test_a_hard_kill_restarts_the_fenced_bus_empty(tmp_path):
+    with _fenced_bus(tmp_path) as (bus, _, hub_port, bus_port):
+        asyncio.run(_kill(bus, hub_port, bus_port))
+
+
+def _buffers() -> dict:
+    """Every Node buffer: each store line's at its full bytes and streams, and the WALL mirror."""
     buffers = {config.name: config for slice_ in line_slices().values() for config in slice_.buffers}
     buffers[WALL_STREAM] = wall_mirror_config()
-    names = list(buffers)
+    return buffers
+
+
+async def _node_client(bus_port: int):
+    return await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
+
+
+async def _mirror_synced(bus: _Bus, jetstream, wall, seconds: float) -> None:
+    """Wait until the Node's WALL mirror holds the hub's last WALL message."""
+    last = (await wall.stream_info(WALL_STREAM)).state.last_seq
+    deadline = time.monotonic() + seconds
+    while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < last:
+        assert time.monotonic() < deadline, f"the wall mirror never synced:\n{bus.logs()}"
+        await asyncio.sleep(.2)
+
+
+async def _declared(bus: _Bus, hub_port: int, bus_port: int):
+    """The hub's WALL with a first value, every store line applied on the bus and its WALL mirror
+    synced: (the hub client, the Node client, the hub's and the Node's JetStream)."""
     hub = await nats.connect(f"nats://127.0.0.1:{hub_port}", user=WALL_WRITER_USER,
                              password=WALL_WRITER_USER, allow_reconnect=False, connect_timeout=5)
-    node = await nats.connect(f"nats://127.0.0.1:{bus_port}", allow_reconnect=False, connect_timeout=5)
+    node = await _node_client(bus_port)
     wall, jetstream = hub.jetstream(timeout=10), node.jetstream(timeout=10)
     await declare(wall, wall_config(WALL_TABLE, first_seq=1))
     for slice_ in line_slices().values():
         await apply(jetstream, slice_)
     await declare(jetstream, wall_mirror_config())
     await wall.publish("wall.first", b"w")
-    deadline = time.monotonic() + 60
-    while (await jetstream.stream_info(WALL_STREAM)).state.last_seq < 1:
-        assert time.monotonic() < deadline, f"the wall mirror never linked:\n{bus.logs()}"
-        await asyncio.sleep(.5)
-    # Each stream's origin as the server holds it: `declare` stamps a Node stream's first_seq at the
-    # create (E-W1-FV-1), so the built configuration carries none to compare against.
-    start = await _states(jetstream, names)
-    # Every stream at the server's consumer cap: each consumer is heap the fit charges (CONSUMER_HEAP),
-    # so the fence must hold all of them (E-W1-CONS-2).
+    await _mirror_synced(bus, jetstream, wall, 60)
+    return hub, node, wall, jetstream
+
+
+async def _hold_consumers(jetstream, names) -> None:
+    """Every stream at the server's consumer cap: each consumer is heap the fit charges
+    (CONSUMER_HEAP), so the fence must hold all of them (E-W1-CONS-2)."""
     for name in names:
         for index in range(NODE_MAX_CONSUMERS + 1):
             consumer = ConsumerConfig(durable_name=f"held{index}", ack_policy=AckPolicy.EXPLICIT)
@@ -262,13 +313,105 @@ async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> 
                 await jetstream.add_consumer(name, consumer)
             assert refused.value.err_code == MAXIMUM_CONSUMERS, (name, refused.value)
 
+
+async def _fill(jetstream, buffers) -> None:
+    """Every circular buffer full of the smallest event (its first sequence moved: it dropped its
+    oldest), and every key of every keyed bucket written `history` times at its largest."""
+    for name, config in buffers.items():
+        if (table := table_of(config)) is not None:
+            subjects, bodies, _ = _writes(config)
+            for _ in range(table.history):
+                for subject, body in zip(subjects, bodies, strict=True):
+                    await jetstream.publish(subject, body)
+        elif buffer_kind(config) == CIRCULAR:
+            subject = _smallest_event(config)
+
+            async def batch(subject: str = subject) -> None:
+                await asyncio.gather(*(jetstream.publish(subject, b"", headers=event_headers(SCHEMA_MAJOR))
+                                       for _ in range(FILL_BATCH)))
+            # The first sequence with messages stored (an empty stream's may read otherwise).
+            await batch()
+            first = (await jetstream.stream_info(name)).state.first_seq
+            while (await jetstream.stream_info(name)).state.first_seq == first:
+                await batch()
+
+
+async def _measure(bus: _Bus, hub_port: int, bus_port: int) -> None:
+    buffers = _buffers()
+    hub, node, _, jetstream = await _declared(bus, hub_port, bus_port)
+    await _hold_consumers(jetstream, list(buffers))
+    baseline = bus.sample()
+    await _fill(jetstream, buffers)
+    await asyncio.sleep(SETTLE_SECONDS)
+    full = bus.sample()
+    stored = (await jetstream.account_info()).memory
+    factor = (full["anon_mib"] - baseline["anon_mib"]) * MIB / stored
+    # The record the job keeps: the factor MEMORY_STORE_FACTOR must cover, measured on this host.
+    print(f"smallest-event store: heap factor {factor:.2f} (fit {MEMORY_STORE_FACTOR}), stored {stored} B, "
+          f"anon {baseline['anon_mib']:.1f} -> {full['anon_mib']:.1f} MiB, peak {full['peak_mib']:.1f} MiB "
+          f"(GOMEMLIMIT + headroom {(NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM) // MIB} MiB)")
+    assert full["oom_kill"] == 0 and full["starts"] == 1, (
+        f"the bus was OOM-killed or restarted under its fence: {full}\n{bus.logs()}")
+    assert factor <= MEMORY_STORE_FACTOR, f"heap per stored byte {factor:.2f} > {MEMORY_STORE_FACTOR}"
+    assert full["peak_mib"] * MIB <= NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM, full
+    await node.close()
+    await hub.close()
+
+
+async def _kill(bus: _Bus, hub_port: int, bus_port: int) -> None:
+    hub, node, wall, jetstream = await _declared(bus, hub_port, bus_port)
+    await _fill(jetstream, _buffers())
+    value = (await wall.get_last_msg(WALL_STREAM, "wall.first")).data
+    await node.close()
+    killed = time.monotonic()
+    bus.sh("kill -9 $(pidof nats-server)")
+    deadline = killed + RESTART_SECONDS
+
+    # The supervisor (the unit's Restart=always) starts it again; nothing the store held survives.
+    while (sample := bus.sample())["starts"] < 2:
+        assert time.monotonic() < deadline, f"the killed bus never restarted: {sample}\n{bus.logs()}"
+        await asyncio.sleep(.2)
+    while True:
+        try:
+            node = await _node_client(bus_port)
+            break
+        except Exception:   # Docker's published port takes a connection before the server listens
+            assert time.monotonic() < deadline, f"the restarted bus never took a client:\n{bus.logs()}"
+            await asyncio.sleep(.2)
+    jetstream = node.jetstream(timeout=10)
+    assert (await jetstream.account_info()).streams == 0, "a stream outlived a bus start"
+
+    # Every line applies again without refusal, and a re-declared mirror takes the hub's value.
+    for slice_ in line_slices().values():
+        await apply(jetstream, slice_)
+    assert await declare(jetstream, wall_mirror_config())
+    await _mirror_synced(bus, jetstream, wall, deadline - time.monotonic())
+    assert (await jetstream.get_last_msg(WALL_STREAM, "wall.first")).data == value
+    elapsed, sample = time.monotonic() - killed, bus.sample()
+    print(f"kill -9: back empty, every line applied, the mirror synced in {elapsed:.1f} s: {sample}")
+    assert sample["oom_kill"] == 0 and sample["starts"] == 2, sample
+    assert elapsed <= RESTART_SECONDS, elapsed
+    await node.close()
+    await hub.close()
+
+
+async def _exercise(bus: _Bus, hub_port: int, bus_port: int, minutes: float) -> None:
+    buffers = _buffers()
+    names = list(buffers)
+    hub, node, wall, jetstream = await _declared(bus, hub_port, bus_port)
+    # Each stream's origin as the server holds it: `declare` stamps a Node stream's first_seq at the
+    # create (E-W1-FV-1), so the built configuration carries none to compare against.
+    start = await _states(jetstream, names)
+    await _hold_consumers(jetstream, names)
+
     # Every buffer filled and written flat out, each writer inside its table: circular streams and
     # buckets drop their oldest, desired documents replace their own values, WALL churns its mirror.
     stop, counts, errors = asyncio.Event(), Counter(), Counter()
-    writers = [asyncio.create_task(_writer(jetstream, name, *_writes(name, config), stop, counts, errors))
+    writers = [asyncio.create_task(_writer(jetstream, name, *_writes(config), stop, counts, errors))
                for name, config in buffers.items() if name != WALL_STREAM]
     writers.append(asyncio.create_task(_writer(
-        wall, WALL_STREAM, [f"wall.k{index}" for index in range(200)], [b"w" * 4000], stop, counts, errors)))
+        wall, WALL_STREAM, [f"wall.k{index}" for index in range(200)], [b"w" * 4000], False, stop, counts,
+        errors)))
     samples = []
     end = time.monotonic() + minutes * 60
     try:

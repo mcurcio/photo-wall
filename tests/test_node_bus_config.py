@@ -318,18 +318,20 @@ def test_every_store_line_builds_at_its_full_bytes_and_streams_and_none_past_it(
 def test_the_memory_store_fits_the_bus_fence():
     # The store is heap (Q1 = start clean, E3b design §6). The server caps the store (max_memory_store),
     # the streams and the consumers per stream for any client, so its heap is at most the store at the
-    # measured factor for the smallest nodeapi event (X14: 4.7), plus every consumer the caps admit, plus
-    # the idle server: under GOMEMLIMIT, which with the headroom is under the unit's MemoryMax.
-    # contracts.node_link checks the same identity at import; E3c's fence job re-measures the factor.
+    # measured factor for the smallest nodeapi event (linux-arm64: up to 5.13, E-E3C-S2-1), plus every
+    # consumer the caps admit, plus the idle server: under GOMEMLIMIT, which with the headroom is under
+    # the unit's MemoryMax. contracts.node_link checks the same identity at import; the fence job's
+    # smallest-event leg measures the factor.
     mib, kib = 1024 * 1024, 1024
-    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT, NODE_BUS_HEADROOM) == (256 * mib, 140 * mib, 4 * mib)
-    assert (NODE_STORE_BYTES, MEMORY_STORE_FACTOR, NODE_MAX_STREAMS, NODE_MAX_CONSUMERS) == (12 * mib, 5, 17, 12)
+    assert (NODE_BUS_MEMORY_MAX, NODE_BUS_GOMEMLIMIT, NODE_BUS_HEADROOM) == (256 * mib, 141 * mib, 4 * mib)
+    assert (NODE_STORE_BYTES, MEMORY_STORE_FACTOR, NODE_MAX_STREAMS, NODE_MAX_CONSUMERS) == (12 * mib, 6, 17, 12)
     assert (CONSUMER_HEAP, NODE_BUS_BASELINE) == (104 * kib, 48 * mib)
     heap = (NODE_STORE_BYTES * MEMORY_STORE_FACTOR + NODE_MAX_STREAMS * NODE_MAX_CONSUMERS * CONSUMER_HEAP
             + NODE_BUS_BASELINE)
-    assert heap == 60 * mib + 21216 * kib + 48 * mib            # 128.72 MiB
-    assert heap <= NODE_BUS_GOMEMLIMIT                          # 140 MiB
-    assert NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM == 144 * mib <= NODE_BUS_MEMORY_MAX
+    assert heap == 72 * mib + 21216 * kib + 48 * mib            # 140.72 MiB
+    assert heap <= NODE_BUS_GOMEMLIMIT                          # 141 MiB
+    assert heap > NODE_BUS_GOMEMLIMIT - mib                     # the smallest whole MiB that fits
+    assert NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM == 145 * mib <= NODE_BUS_MEMORY_MAX
 
 
 # What only nodeapi.buffers may write: nats-py's create_key_value hard-codes discard NEW, and a

@@ -1,0 +1,21 @@
+[Unit]
+Description=Photo Wall Node bus (nats-server on loopback; every start is empty)
+ConditionKernelCommandLine=photowall.node=v2
+After=photo-wall-node-handoff.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pw-bus
+Group=pw-bus
+EnvironmentFile=/run/photo-wall-node/bus.env
+ExecStart=/usr/lib/photo-wall-bus/nats-server -c /usr/lib/photo-wall-bus/node-bus.conf
+Restart=always
+RestartSec=1
+# nats-server makes $TMPDIR/nats/jetstream even on the memory store (erratum E-E3B-S3-1).
+PrivateTmp=yes
+# Its own persistent slice, whose memory counters survive the restarts above (erratum E-E3C-S5-3).
+Slice=photowallbus.slice
+MemoryMax=256M
+MemorySwapMax=0
+OOMScoreAdjust=-500

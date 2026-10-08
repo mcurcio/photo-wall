@@ -25,6 +25,7 @@ import random
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import time
 import urllib.request
@@ -36,14 +37,15 @@ from typing import TYPE_CHECKING
 import nats
 import pytest
 from nats.js.errors import NotFoundError
+from systemd_environment import read_environment_file
 
+from appliance.boot.bus_environment import write_bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
     STORE_LINES,
     WALL_STREAM,
     WALL_WRITER_USER,
-    account_id,
     central_user,
     node_user,
 )
@@ -344,22 +346,26 @@ def hub_server(tmp: Path, serials: Sequence[str]) -> BusServer:
         monitor_url=f"http://127.0.0.1:{listeners.monitor_port}", listeners=listeners)
 
 
-def node_server(tmp: Path, serial: str, hub: BusServer, *, prefix: str = "bus",
-                leaf_port: int | None = None) -> BusServer:
-    """A Node on the shipped configuration file, its leaf a ws:// URL with a path prefix, to the
-    hub's WebSocket port or to `leaf_port` (a proxy in front of it)."""
+def node_server(tmp: Path, serial: str, hub: BusServer, *, leaf_port: int | None = None,
+                scheme: str = "http", host: str = "127.0.0.1", origin: str | None = None,
+                extra_environment: Mapping[str, str] | None = None) -> BusServer:
+    """A Node on the shipped configuration file whose environment is the one its handoff stage
+    writes, `write_bus_environment(…, f"{scheme}://{host}:{port}", serial)` read as systemd reads
+    the unit's EnvironmentFile, with `port` the hub's WebSocket
+    port or `leaf_port` (a proxy in front of it), so every harness Node exercises the real
+    derivation: its leaf at LEAF_PATH, ws:// for http and wss:// for https. Only
+    PHOTO_WALL_BUS_PORT is replaced, by a free port (NODE_BUS_PORT cannot be shared by servers
+    side by side); `extra_environment` adds to it (SSL_CERT_FILE, say). `origin` replaces the
+    whole boot origin (one with the scheme's default port, say)."""
     nats_server_binary()
-    directory = Path(tmp) / f"node-{account_id(serial)}"
+    directory = Path(tmp) / node_user(serial)
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "node-bus.conf"
     shutil.copyfile(NODE_BUS_CONF, config)
     port = _free_port()
-    user = node_user(serial)
-    environment = {
-        "PHOTO_WALL_BUS_NAME": f"node-{account_id(serial)}",
-        "PHOTO_WALL_BUS_PORT": str(port),
-        "PHOTO_WALL_BUS_LEAF_URL": f"ws://{user}:{user}@127.0.0.1:{leaf_port or hub.websocket_port}/{prefix}",
-    }
+    origin = origin or f"{scheme}://{host}:{leaf_port or hub.websocket_port}"
+    environment = {**read_environment_file(write_bus_environment(directory, origin, serial)),
+                   "PHOTO_WALL_BUS_PORT": str(port), **(extra_environment or {})}
     return BusServer(name=f"node {serial}", config=config,
                      client_url=f"nats://127.0.0.1:{port}", environment=environment)
 
@@ -549,11 +555,13 @@ class PrefixProxy:
     """A reverse proxy in front of the hub's WebSocket listener, as the origin's ingress route is
     (W11, E3d/E4): it forwards a connection whose HTTP request path starts with `/<prefix>/`
     unchanged, upgrade and all, and answers 404 to any other. Plain asyncio: one task per direction.
-    `drop` discards every byte in both directions for a while and `sever` cuts every link through it,
+    With `tls` it terminates TLS on its listener before it reads the request path, as an https
+    ingress does; upstream stays plain. `drop` discards every byte in both directions for a while and `sever` cuts every link through it,
     as a Wi-Fi stall and a dropped uplink do."""
 
-    def __init__(self, upstream_port: int, prefix: str) -> None:
+    def __init__(self, upstream_port: int, prefix: str, *, tls: ssl.SSLContext | None = None) -> None:
         self.upstream_port = upstream_port
+        self.tls = tls
         self.prefix = "/" + prefix.strip("/") + "/"
         self.port = _free_port()
         self.paths: list[str] = []
@@ -572,7 +580,7 @@ class PrefixProxy:
             writer.transport.abort()
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port, ssl=self.tls)
 
     async def close(self) -> None:
         if self._server is not None:

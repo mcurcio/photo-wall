@@ -42,6 +42,13 @@ WALL_API_PREFIX: Final = "ACC.WALL.API"      # a Node account's import prefix fo
 WALL_DELIVER_PREFIX: Final = "DELIVER.WALL"  # the mirror's delivery prefix, the same in every Node account
 WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selector, not a secret
 
+NODE_BUS_PORT: Final = 4222                                # the bus's client port on 127.0.0.1, on every Node
+NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node component and the local UI dial
+# The boot origin's path prefix routed to the hub's leaf listener (E3d/E4): a Node's leaf dials
+# `<origin>/photo-wall/bus/leafnode` (nats-server appends `/leafnode`), over ws for an http origin and
+# wss for https, with the origin's host and port unchanged (erratum E-E3C-CUT-5).
+LEAF_PATH: Final = "photo-wall/bus"
+
 # L, the largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
 # the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
 # would close the leaf, so the hub refuses it first, at its own client (E-W1-BUF-3).
@@ -79,7 +86,7 @@ NODE_STORE_BYTES: Final = 12 * 1024 * 1024
 # live: the CI fence test reads them here, and the line table (E2a) and the unit (E3c) are to read
 # them here too.
 NODE_BUS_MEMORY_MAX: Final = 256 * 1024 * 1024
-NODE_BUS_GOMEMLIMIT: Final = 140 * 1024 * 1024
+NODE_BUS_GOMEMLIMIT: Final = 141 * 1024 * 1024   # the smallest whole MiB the fit below holds at
 # What the server holds that GOMEMLIMIT does not count (thread stacks, runtime metadata, kernel
 # memory charged to the cgroup): the low end of the measured 4-20 MiB.
 NODE_BUS_HEADROOM: Final = 4 * 1024 * 1024
@@ -90,8 +97,10 @@ NODE_MAX_STREAMS: Final = 17
 # the next at create (10026), never a write (erratum E-W1-CONS-2).
 NODE_MAX_CONSUMERS: Final = 12
 # Heap per stored byte at the smallest nodeapi event: the memory store keeps each message as its own
-# object, so a store of small messages costs a multiple of their bytes (X14 measured 4.7 on 2.15.0).
-MEMORY_STORE_FACTOR: Final = 5
+# object, so a store of small messages costs a multiple of their bytes. Measured by the fence job's
+# smallest-event leg on 2.15.0 linux-arm64: 4.33 to 5.13 (erratum E-E3C-S2-1; X14: 4.7 on darwin),
+# rounded up.
+MEMORY_STORE_FACTOR: Final = 6
 # Heap per consumer: the measured anon growth per consumer (103.5 KiB: 272 idle consumers on 17
 # streams, 2.15.0 linux-arm64; rounded up; E-W1-CONS-2).
 CONSUMER_HEAP: Final = 104 * 1024
@@ -99,11 +108,11 @@ CONSUMER_HEAP: Final = 104 * 1024
 NODE_BUS_BASELINE: Final = 48 * 1024 * 1024
 
 # The fit (E3b design §7.2), checked here at import so no build of this tree can ship a store past its
-# fence: the store at the heap factor (60 MiB), plus 12 consumers on each of 17 streams (20.72 MiB),
-# plus the idle server (48 MiB) is 128.72 MiB, under GOMEMLIMIT (140 MiB); GOMEMLIMIT plus the
-# headroom (144 MiB) is under the fence (256 MiB). The server caps the store (max_memory_store), the
+# fence: the store at the heap factor (72 MiB), plus 12 consumers on each of 17 streams (20.72 MiB),
+# plus the idle server (48 MiB) is 140.72 MiB, under GOMEMLIMIT (141 MiB); GOMEMLIMIT plus the
+# headroom (145 MiB) is under the fence (256 MiB). The server caps the store (max_memory_store), the
 # stream count and the consumers per stream for any client, so the fit holds whatever is declared.
-# E3c's fence job re-measures the factor on linux-arm64 with small messages.
+# The fence job measures the factor on linux-arm64 with the smallest event on every run.
 if (NODE_STORE_BYTES * MEMORY_STORE_FACTOR + NODE_MAX_STREAMS * NODE_MAX_CONSUMERS * CONSUMER_HEAP
         + NODE_BUS_BASELINE > NODE_BUS_GOMEMLIMIT
         or NODE_BUS_GOMEMLIMIT + NODE_BUS_HEADROOM > NODE_BUS_MEMORY_MAX):

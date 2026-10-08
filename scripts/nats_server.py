@@ -2,23 +2,29 @@
 
 `python3 scripts/nats_server.py fetch --dest DIR` downloads the release asset for this host,
 checks it against the release's SHA256SUMS digest recorded here, extracts the `nats-server`
-binary under DIR and prints its path. A second run with the binary in place downloads nothing.
-Stdlib only, and runnable by the system python3 (CI's `node-bus` job calls it before any venv).
+binary and the release's LICENSE beside it under DIR and prints the binary's path. A second run with the binary in place downloads nothing.
+Stdlib only (with the stdlib-only `scripts.pinned_fetch`), and runnable by the system python3
+(CI's `node-bus` job calls it before any venv). The Node base package ships NODE_PLATFORM's
+binary (`scripts/build_node_base_deb.stage_vendored`).
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import os
 import platform
 import shutil
+import sys
 import tarfile
 import tempfile
-import urllib.request
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
+
+REPO: Final = Path(__file__).resolve().parents[1]
+if __package__ in (None, "") and str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.pinned_fetch import cached_pinned  # noqa: E402
 
 NATS_SERVER_VERSION: Final = "2.15.0"   # the line the bus fence was measured on (F1)
 RELEASES: Final = "https://github.com/nats-io/nats-server/releases/download"
@@ -32,6 +38,10 @@ ASSETS: Final[Mapping[tuple[str, str], tuple[str, str]]] = {
                           "e1c4e22d70bd44abfa0bcb3c16f7cf0c66f648c2e728c58924e8a1ce88913cc8"),
 }
 _MACHINES: Final = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+# The Node's platform: the base package ships this asset's binary.
+NODE_PLATFORM: Final = ("linux", "arm64")
+# The release's Apache-2.0 licence, extracted beside the binary: whatever ships the binary ships it.
+LICENSE: Final = "LICENSE"
 
 
 def asset_for(system: str, machine: str) -> tuple[str, str]:
@@ -42,29 +52,29 @@ def asset_for(system: str, machine: str) -> tuple[str, str]:
     return ASSETS[key]
 
 
-def fetch(dest: Path) -> Path:
-    """The pinned binary under `dest`, downloaded and digest-checked once."""
-    asset, sha256 = asset_for(platform.system(), platform.machine())
-    binary = Path(dest) / asset[:-len(".tar.gz")] / "nats-server"
-    if binary.is_file():
+def fetch(dest: Path, *, system: str | None = None, machine: str | None = None) -> Path:
+    """The pinned binary for (`system`, `machine`), by default this host's, under `dest`, with the
+    release's LICENSE beside it: the release archive downloaded once through `pinned_fetch` and
+    both members extracted atomically."""
+    asset, sha256 = asset_for(system or platform.system(), machine or platform.machine())
+    directory = Path(dest) / asset[:-len(".tar.gz")]
+    binary = directory / "nats-server"
+    if binary.is_file() and (directory / LICENSE).is_file():
         return binary
-    with urllib.request.urlopen(f"{RELEASES}/v{NATS_SERVER_VERSION}/{asset}", timeout=120) as response:
-        archive = response.read()
-    if hashlib.sha256(archive).hexdigest() != sha256:
-        raise ValueError("nats_server_digest")
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
-        member = tar.getmember(f"{asset[:-len('.tar.gz')]}/nats-server")
-        source = tar.extractfile(member)
-        if source is None:
-            raise ValueError("nats_server_archive")
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        # Written beside the target and renamed, so a concurrent or interrupted fetch never
-        # leaves a partial binary where the cache check would accept it.
-        handle, partial = tempfile.mkstemp(dir=binary.parent, prefix=".nats-server-")
-        with os.fdopen(handle, "wb") as out:
-            shutil.copyfileobj(source, out)
-    os.chmod(partial, 0o755)
-    os.replace(partial, binary)
+    archive = cached_pinned(f"{RELEASES}/v{NATS_SERVER_VERSION}/{asset}", sha256, Path(dest))
+    directory.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, mode="r:gz") as tar:
+        for name, mode in ((LICENSE, 0o644), ("nats-server", 0o755)):
+            source = tar.extractfile(tar.getmember(f"{directory.name}/{name}"))
+            if source is None:
+                raise ValueError("nats_server_archive")
+            # Written beside the target and renamed, so a concurrent or interrupted fetch never
+            # leaves a partial file where the cache check would accept it.
+            handle, partial = tempfile.mkstemp(dir=directory, prefix=f".{name}-")
+            with os.fdopen(handle, "wb") as out:
+                shutil.copyfileobj(source, out)
+            os.chmod(partial, mode)
+            os.replace(partial, directory / name)
     return binary
 
 

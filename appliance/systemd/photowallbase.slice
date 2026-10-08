@@ -4,5 +4,5 @@ Description=Reserved base management resources
 CPUWeight=1000
 IOWeight=1000
 MemoryMin=128M
-MemoryMax=768M
+MemoryMax=480M
 TasksMax=128

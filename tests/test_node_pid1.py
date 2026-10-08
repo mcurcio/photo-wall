@@ -29,8 +29,11 @@ from pathlib import Path
 import pytest
 from node_pid1_central_fixture import assert_phase_completed, central_fixture
 
+from appliance.kernel.capacity import LINES
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
+from contracts.node_link import NODE_BUS_GOMEMLIMIT, NODE_BUS_MEMORY_MAX, NODE_BUS_PORT, node_user
+from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from scripts.player_start_probe import (
     BOOTED,
     HOST_ACTING_UNITS,
@@ -56,6 +59,11 @@ MASKS = (
 )
 # Bound over the kernel's boot_id inside the container before systemd starts as PID 1.
 FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
+BUS_UNIT = "photo-wall-bus.service"
+BUS_SECONDS = 15
+# The bus's runtime cap for the induced OOM: above a fresh bus's peak (about 11 MiB in `success`),
+# below what the probe's fill takes.
+BUS_OOM_CAP = 24 * 1024 * 1024
 # The refused scenario's fake board (tests/node_pid1_central_inner.py): MemTotal 2097152 kB,
 # below the smallest memory class, pi5-4gb's 3584 MiB (appliance/kernel/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
@@ -276,6 +284,106 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         (work / "cold-current.json").write_text(json.dumps(before, sort_keys=True))
         print("COLD actual app-link observed", str(work), flush=True)
         return before
+
+    def _bus_answers(self, deadline):
+        """The bus's INFO and LISTEN rows, once it answers before `deadline`."""
+        while time.monotonic() < deadline:
+            result = self.container.exec(
+                "/usr/bin/python3", "/var/lib/node_pid1_bus_probe.py", "info", str(NODE_BUS_PORT),
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout)
+            time.sleep(0.5)
+        raise AssertionError("the Node bus never answered: " + str(self.work))
+
+    def _host_birth(self, deadline, *, not_epoch=None):
+        """The host component's {"birth", "base", "epoch"}, read with HostCore's shipped nats-py and
+        nodeapi, once it is there (in an epoch other than `not_epoch`) before `deadline`."""
+        last = ""
+        while time.monotonic() < deadline:
+            result = self.container.exec(
+                "/usr/bin/python3", "-I", "-B", "/var/lib/node_pid1_bus_probe.py", "birth",
+                str(NODE_BUS_PORT), timeout=30,
+            )
+            if result.returncode == 0:
+                held = json.loads(result.stdout)
+                if held["epoch"] != not_epoch:
+                    return held
+            last = result.stdout + result.stderr[-2000:]
+            time.sleep(0.5)
+        raise AssertionError(f"the host's birth never arrived: {self.work}\n{last}")
+
+    def verify_bus(self):
+        """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
+        contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
+        notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
+        and, after the kill, writes it again in the bus's new epoch with no help from Central."""
+        self.container.copy_in(
+            Path(__file__).with_name("node_pid1_bus_probe.py"), "/var/lib/node_pid1_bus_probe.py"
+        )
+        host = json.loads(self.run("cat", "/run/photo-wall-node/host.json"))
+        serial = host["serial"]
+        before = self._bus_answers(time.monotonic() + BUS_SECONDS)
+        assert before == {
+            "server_name": node_user(serial), "jetstream": True, "listen": ["127.0.0.1"]
+        }, before
+        born = self._host_birth(time.monotonic() + BUS_SECONDS)
+        assert born["birth"]["component"] == "host", born
+        assert born["birth"]["release_digest"] == host["base_tag"], born
+        assert born["base"] == {"base_tag": host["base_tag"]}, born
+        shown = unit_properties_of(self, BUS_UNIT, "MemoryMax,MainPID,NRestarts")
+        assert shown["MemoryMax"] == str(NODE_BUS_MEMORY_MAX), shown
+        assert shown["NRestarts"] == "0", shown
+        environ = self.run("cat", f"/proc/{shown['MainPID']}/environ").split("\0")
+        assert f"GOMEMLIMIT={NODE_BUS_GOMEMLIMIT // (1024 * 1024)}MiB" in environ, environ
+        others = ("photo-wall-node-player.service", "photo-wall-app-broker.service",
+                  "photo-wall-host-core.service")
+        pids = {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others}
+        assert "0" not in pids.values(), pids
+        self.run("systemctl", "kill", "--signal=SIGKILL", BUS_UNIT)
+        deadline = time.monotonic() + BUS_SECONDS
+        while True:
+            after = unit_properties_of(self, BUS_UNIT, "ActiveState,MainPID,NRestarts")
+            restarted = after["MainPID"] not in ("0", shown["MainPID"])
+            if after["NRestarts"] == "1" and after["ActiveState"] == "active" and restarted:
+                break
+            assert time.monotonic() < deadline, after
+            time.sleep(0.25)
+        again = self._bus_answers(deadline)
+        assert again == before, again
+        reborn = self._host_birth(deadline, not_epoch=born["epoch"])
+        assert {key: reborn[key] for key in ("birth", "base")} == {
+            key: born[key] for key in ("birth", "base")}, reborn
+        assert {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others} == pids
+        (self.work / "bus.json").write_text(json.dumps(
+            {"bus": before, "unit": shown, "restarted": after, "others": pids, "birth": born,
+             "reborn": reborn}, sort_keys=True))
+
+    def induce_bus_oom(self):
+        """A real OOM kill of the bus: its cap lowered at runtime to BUS_OOM_CAP and a memory stream
+        filled past it (the probe's `fill`). Returns once PID1 restarted it after a kill its journal
+        names as the OOM killer's; the unit's cap is restored before returning."""
+        shown = unit_properties_of(self, BUS_UNIT, "NRestarts")
+        self.run("systemctl", "set-property", "--runtime", BUS_UNIT, f"MemoryMax={BUS_OOM_CAP}")
+        try:
+            filled = json.loads(self.run(
+                "/usr/bin/python3", "-I", "-B", "/var/lib/node_pid1_bus_probe.py", "fill",
+                str(NODE_BUS_PORT)))
+            deadline = time.monotonic() + BUS_SECONDS
+            while True:
+                after = unit_properties_of(self, BUS_UNIT, "ActiveState,NRestarts")
+                if int(after["NRestarts"]) > int(shown["NRestarts"]) and after["ActiveState"] == "active":
+                    break
+                assert time.monotonic() < deadline, (filled, after)
+                time.sleep(0.25)
+        finally:
+            self.run("systemctl", "set-property", "--runtime", BUS_UNIT,
+                     f"MemoryMax={NODE_BUS_MEMORY_MAX}")
+        journal = self.run("journalctl", "--no-pager", "-u", BUS_UNIT)
+        assert "OOM killer" in journal, (filled, after)
+        (self.work / "bus-oom.json").write_text(json.dumps(
+            {"filled": filled, "restarted": after}, sort_keys=True))
 
     def verify_process(self, current):
         """Live PID1 observation and /proc birth ticks of the exact admitted process."""
@@ -522,6 +630,61 @@ def stage_and_complete(fixture, node, phase, reference):
     return status
 
 
+def assert_memory_lines(node):
+    """For every line with a cgroup that the boot started: PID1's MemoryMax is the line's cap,
+    and each capped slice's memory.events reads oom_kill 0 (appliance/kernel/capacity.py LINES)."""
+    checked = {}
+    for item in (entry for entry in LINES if entry.cgroup is not None):
+        shown = unit_properties_of(node, item.cgroup, "MemoryMax,ControlGroup")
+        if not shown.get("ControlGroup"):
+            continue  # not started this boot
+        assert shown["MemoryMax"] == str(item.cap_bytes), (item.name, shown)
+        events = None
+        if item.cgroup.endswith(".slice"):
+            text = node.run("cat", "/sys/fs/cgroup" + shown["ControlGroup"] + "/memory.events")
+            events = dict(row.split() for row in text.splitlines() if len(row.split()) == 2)
+            assert events["oom_kill"] == "0", (item.name, events)
+        checked[item.cgroup] = {"MemoryMax": shown["MemoryMax"], "memory.events": events}
+    (node.work / "memory-lines.json").write_text(json.dumps(checked, sort_keys=True))
+    # The base slice always runs after a completed stage: the check is never vacuous.
+    assert "photowallbase.slice" in checked, checked
+
+
+def _bus_memory_reported(fixture, node, name, until):
+    """Host Management's newest observation from this Node once `until(metrics)` holds for its
+    memory_peak:bus and oom_kill:bus rows (the bus's own slice, photowallbus.slice), written to
+    <name>.json; the last observation if it never holds within four observation intervals."""
+    deadline = time.monotonic() + 4 * HOST_OBSERVATION_INTERVAL_SECONDS
+    while True:
+        host = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/host")
+        metrics = dict(host["metrics"])
+        if "memory_peak:bus" in metrics and "oom_kill:bus" in metrics and until(metrics):
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    (node.work / f"{name}.json").write_text(json.dumps(host, sort_keys=True))
+    assert "memory_peak:bus" in metrics and "oom_kill:bus" in metrics, "no bus memory rows: " + str(host)
+    return metrics
+
+
+def assert_bus_memory_reported(fixture, node):
+    """The bus's peak and no OOM kill reach Central."""
+    metrics = _bus_memory_reported(fixture, node, "bus-memory", lambda _: True)
+    assert 0 < metrics["memory_peak:bus"] <= NODE_BUS_MEMORY_MAX, metrics
+    assert metrics["oom_kill:bus"] == 0, metrics
+    return metrics
+
+
+def assert_bus_oom_reported(fixture, node, before):
+    """After induce_bus_oom, the kill and the peak that hit the cap reach Central, though systemd
+    recreated the unit's cgroup when it restarted the bus (erratum E-E3C-S5-3)."""
+    metrics = _bus_memory_reported(fixture, node, "bus-oom-memory",
+                                   lambda shown: shown["oom_kill:bus"] >= 1)
+    assert metrics["oom_kill:bus"] >= 1, metrics
+    assert metrics["memory_peak:bus"] >= max(before["memory_peak:bus"], BUS_OOM_CAP * 3 // 4), metrics
+
+
 @pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
@@ -539,7 +702,15 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
         node = Node(image, work, phase)
         try:
             node.cold(fixture, components_dir)
+            if phase == "success":
+                node.verify_bus()
+                reported = assert_bus_memory_reported(fixture, node)
             stage_and_complete(fixture, node, phase, reference)
+            assert_memory_lines(node)
+            if phase == "success":
+                # After assert_memory_lines, whose every slice reads oom_kill 0.
+                node.induce_bus_oom()
+                assert_bus_oom_reported(fixture, node, reported)
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
@@ -599,6 +770,7 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
             old_session = {"status": caught.value.code, **json.load(caught.value)}
             assert old_session == {"status": 403, "error": "node_session_superseded"}, old_session
             stage_and_complete(fixture, second, phase, reference)
+            assert_memory_lines(second)
             final = status_of(fixture, second.work)
             (work / "reboot.json").write_text(
                 json.dumps(
