@@ -61,13 +61,14 @@ One full verify per bead (all its gates once, unpiped). The milestone gate is PR
 
 | Bead | Status | Sha | Note |
 |---|---|---|---|
-| S1 tracer 1/4: attach, record, call, recover a lost reader | open | | |
-| S2 tracer 2/4: documents and the wall, hub restart | open | | |
-| S3 tracer 3/4: start clean (memory store, kill -9), L3 deleted | open | | |
-| S4 tracer 4/4: apply on a full store; store lines replace ClassTable | open | | |
-| S5 attach waits for its declarer; the app line from held slices | open | | |
-| S6 every loss is one counted row; rollout skew and table changes | open | | |
-| D1 docs: 0017 amendments, AGENTS.md map | open | | |
+| S1 tracer 1/4: attach, record, call, recover a lost reader | landed | 6154cad | +1436 (about +1420 excluding errata); E-E3B-S1-1..3 |
+| S2 tracer 2/4: documents and the wall, hub restart | landed | c5575b8 | +244 net; E-E3B-S2-1..5 |
+| S3 tracer 3/4: start clean (memory store, kill -9), L3 deleted | landed | 4e43a35 | -99 code+tests; E-E3B-S3-1..3 |
+| S4 tracer 4/4: apply on a full store; store lines replace ClassTable | landed | d8fb3b3 | +83; E-E3B-S4-1..3 (S4-1 fixed in S6 by the names watch, E-E3B-CC-1) |
+| S5 attach waits for its declarer; the app line from held slices | landed | a634959 | +369 / -11; E-E3B-S5-1..3 |
+| S6 every loss is one counted row; rollout skew and table changes | landed | 0520b5d | +236; E-E3B-S6-1..3 |
+| D1 docs: 0017 amendments, AGENTS.md map | landed | 50f9e1c | +1 net; E-E3B-D1-1 (C14 Q3 freeze and C16 bus-start loss folded in by D2) |
+| D2 docs: record the E3b choices (C14 Q3 freeze, C16 bus start, ledger) | landed | (this commit) | docs only |
 
 ## Slice order and why
 
