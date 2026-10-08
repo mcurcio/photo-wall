@@ -35,7 +35,7 @@ from central.db import Database
 from central.fleet.leaf_bridge import LEAF_ROUTE
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
-from contracts.node_link import LEAF_PATH, Pipe, account_id
+from contracts.node_link import Pipe, account_id
 from nodeapi.buffers import KeyTable
 from nodeapi.hub import WallWriter
 from nodeapi.node import NodeSession, Release
@@ -112,8 +112,8 @@ def test_a_node_leaf_links_through_centrals_origin(database, tmp_path, monkeypat
     _enrol(database, SERIAL)
     hub = hub_server(tmp_path, [SERIAL])
     central = _Central(database, _free_port(), f"ws://127.0.0.1:{hub.websocket_port}/leafnode")
-    # The Node's leaf URL ends in "/" + LEAF_PATH, as appliance/boot/bus_environment.leaf_url builds it.
-    node = node_server(tmp_path, SERIAL, hub, leaf_port=central.port, prefix=LEAF_PATH)
+    # The Node's own code derives its leaf URL (bus_environment.leaf_url: "/" + LEAF_PATH) from this origin.
+    node = node_server(tmp_path, SERIAL, hub, leaf_port=central.port)
     session = NodeSession("display", line_slices()["display"], RELEASE, url=node.client_url, reads_wall=True)
     links = NodeLinks(Pipe.FLEET, hub.client_url, PgLinkStores(database), Projection())
     unbridged = _Central(database, _free_port(), None)

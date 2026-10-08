@@ -48,10 +48,6 @@ LEAF_PATH: Final = "photo-wall/bus"
 
 NODE_BUS_PORT: Final = 4222                                # the bus's client port on 127.0.0.1, on every Node
 NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node component and the local UI dial
-# The boot origin's path prefix routed to the hub's leaf listener (E3d/E4): a Node's leaf dials
-# `<origin>/photo-wall/bus/leafnode` (nats-server appends `/leafnode`), over ws for an http origin and
-# wss for https, with the origin's host and port unchanged (erratum E-E3C-CUT-5).
-LEAF_PATH: Final = "photo-wall/bus"
 
 # L, the largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
 # the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
