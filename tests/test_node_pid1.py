@@ -4,8 +4,11 @@ Each scenario boots the actual sealed node in a privileged arm64 systemd contain
 real HTTP Central on its own database: success (ordered stop-before-start, natural completion),
 failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
-commandable) and refused (a board below the smallest memory class: storage refuses, nothing
-after it runs, and Host Management reports the refusal with its numbers). Hardware is synthetic
+commandable), refused (a board below the smallest memory class: storage refuses, nothing
+after it runs, and Host Management reports the refusal with its numbers) and join (the Node API
+whole, E3b design §16.2: Central with its hub and the worker's bus side; the new serial's leaf
+links, a kill -9 of the bus and a reboot each end an epoch that Central records with its gap rows,
+and after a hub restart WALL is current on the Node and its leaf relinked). Hardware is synthetic
 (sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
 DRM/HDMI/PXE claim.
 
@@ -14,6 +17,7 @@ it these tests skip, unless PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 (the node-pid1 C
 they fail. Each test removes its own containers, database and archive copies.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -27,13 +31,32 @@ import uuid
 from pathlib import Path
 
 import pytest
-from node_pid1_central_fixture import assert_phase_completed, central_fixture
+from integration.bus_servers import NATS_SERVER_VARIABLE, leaf_connections
+from node_pid1_bus_probe import WALL_KEY
+from node_pid1_central_fixture import (
+    HUB_MONITOR_URL,
+    HUB_URL,
+    assert_phase_completed,
+    central_fixture,
+)
+from test_fleet_attempts import DEVICE_ID, SERIAL
 
 from appliance.kernel.capacity import LINES
+from central.fleet.node_bus_presence import bus_links_in
+from central.infra.node_link_store import PgWallMarks
+from central.node_bus_wiring import WALL_TABLE
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
-from contracts.node_link import NODE_BUS_GOMEMLIMIT, NODE_BUS_MEMORY_MAX, NODE_BUS_PORT, node_user
+from contracts.node_link import (
+    NODE_BUS_GOMEMLIMIT,
+    NODE_BUS_MEMORY_MAX,
+    NODE_BUS_PORT,
+    WALL_STREAM,
+    account_id,
+    node_user,
+)
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
+from nodeapi.hub import WallWriter
 from scripts.player_start_probe import (
     BOOTED,
     HOST_ACTING_UNITS,
@@ -45,7 +68,7 @@ from scripts.player_start_probe import (
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_NODE_PID1"
-SCENARIOS = ("success", "failure", "outage", "reboot", "refused")
+SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join")
 
 MASKS = (
     *HOST_ACTING_UNITS,
@@ -68,6 +91,13 @@ BUS_OOM_CAP = 24 * 1024 * 1024
 # below the smallest memory class, pi5-4gb's 3584 MiB (appliance/kernel/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
 SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
+# The join: a fresh leaf's first record reaches Central's database within this (a Node that dials
+# before its account exists links about 40 s later, erratum E-E3D-S2-3); a Node's WALL mirror is
+# current again about a minute after a hub outage (erratum E-E3B-FR1).
+JOIN_SECONDS = 120
+HUB_RESTART_SECONDS = 60
+HOST_STATE_STREAM = "KV_state_host"
+BIRTH_SUBJECT = "$KV.state_host.birth"
 
 
 @pytest.fixture
@@ -314,14 +344,27 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             time.sleep(0.5)
         raise AssertionError(f"the host's birth never arrived: {self.work}\n{last}")
 
-    def verify_bus(self):
-        """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
-        contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
-        notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
-        and, after the kill, writes it again in the bus's new epoch with no help from Central."""
+    def copy_bus_probe(self):
         self.container.copy_in(
             Path(__file__).with_name("node_pid1_bus_probe.py"), "/var/lib/node_pid1_bus_probe.py"
         )
+
+    def wall_value(self):
+        """The Node's WALL mirror's latest `timing` (the probe's `wall`: the mirror created when
+        absent, as a wall reader's attach does); None while it holds none or the bus is away."""
+        result = self.container.exec(
+            "/usr/bin/python3", "-I", "-B", "/var/lib/node_pid1_bus_probe.py", "wall",
+            str(NODE_BUS_PORT), timeout=30,
+        )
+        return json.loads(result.stdout)["value"] if result.returncode == 0 else None
+
+    def verify_bus(self, before_kill=None):
+        """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
+        contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
+        notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
+        and, after the kill, writes it again in the bus's new epoch with no help from Central.
+        `before_kill(born)` runs once birth is read, before the kill. Returns (born, reborn)."""
+        self.copy_bus_probe()
         host = json.loads(self.run("cat", "/run/photo-wall-node/host.json"))
         serial = host["serial"]
         before = self._bus_answers(time.monotonic() + BUS_SECONDS)
@@ -341,6 +384,8 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
                   "photo-wall-host-core.service")
         pids = {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others}
         assert "0" not in pids.values(), pids
+        if before_kill is not None:
+            before_kill(born)
         self.run("systemctl", "kill", "--signal=SIGKILL", BUS_UNIT)
         deadline = time.monotonic() + BUS_SECONDS
         while True:
@@ -359,6 +404,7 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         (self.work / "bus.json").write_text(json.dumps(
             {"bus": before, "unit": shown, "restarted": after, "others": pids, "birth": born,
              "reborn": reborn}, sort_keys=True))
+        return born, reborn
 
     def induce_bus_oom(self):
         """A real OOM kill of the bus: its cap lowered at runtime to BUS_OOM_CAP and a memory stream
@@ -685,7 +731,7 @@ def assert_bus_oom_reported(fixture, node, before):
     assert metrics["memory_peak:bus"] >= max(before["memory_peak:bus"], BUS_OOM_CAP * 3 // 4), metrics
 
 
-@pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
+@pytest.mark.parametrize("phase", [name for name in SCENARIOS if name in ("success", "failure", "outage")])
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
     # outage: a successful switch while Central drops every node exchange after accept.
@@ -866,3 +912,174 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def link_rows(db):
+    """What Central's database holds about the Node's bus: the records, gap rows and cursors its
+    NodeLinks committed, and its presence (whether Fleet's last look saw the hub hold the leaf)."""
+    with db.transaction() as conn:
+        records = conn.execute(
+            "SELECT stream,epoch,seq,subject FROM node_link_records WHERE device_id=%s "
+            "ORDER BY recorded_at,stream,seq", (DEVICE_ID,)).fetchall()
+        gaps = conn.execute(
+            "SELECT stream,epoch,after_seq,lost FROM node_link_gaps WHERE device_id=%s "
+            "ORDER BY recorded_at,stream", (DEVICE_ID,)).fetchall()
+        cursors = conn.execute(
+            "SELECT stream,pipe,epoch,seq FROM node_link_cursors WHERE device_id=%s ORDER BY stream",
+            (DEVICE_ID,)).fetchall()
+        presence = bus_links_in(conn, [DEVICE_ID])[DEVICE_ID]
+    return {"records": [dict(row) for row in records], "gaps": [dict(row) for row in gaps],
+            "cursors": [dict(row) for row in cursors], "presence": presence}
+
+
+def await_links(db, work, name, until, seconds):
+    """link_rows once `until(rows)` holds, written to <name>.json; fails past `seconds`."""
+    deadline = time.monotonic() + seconds
+    while True:
+        rows = link_rows(db)
+        if until(rows) or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    (work / f"{name}.json").write_text(json.dumps(rows, sort_keys=True, default=str))
+    assert until(rows), f"{name}: not within {seconds:.0f}s; see {work / (name + '.json')}"
+    return rows
+
+
+def born_in(epoch):
+    """Central recorded the host's birth in this epoch of its state stream."""
+    return lambda rows: any(
+        (row["stream"], row["epoch"], row["subject"]) == (HOST_STATE_STREAM, epoch, BIRTH_SUBJECT)
+        for row in rows["records"])
+
+
+def ended(cursors):
+    """Every stream Central was reading (its cursors before the epoch ended) has its one "unknown"
+    gap row (lost NULL) for the epoch it was reading."""
+    reading = {(cursor["stream"], cursor["epoch"]) for cursor in cursors}
+    return lambda rows: reading <= {
+        (gap["stream"], gap["epoch"]) for gap in rows["gaps"] if gap["lost"] is None}
+
+
+class _NoWallDocuments:
+    """Central's wall documents: none until E8 (central.node_bus_wiring)."""
+
+    async def wall_documents(self):
+        return {}
+
+
+def put_wall(db, value):
+    """Central's wall write (nodeapi.hub.WallWriter over Central's recorded mark, as E5/E8 will
+    call it): WALL_KEY = value in the hub's WALL; returns its sequence."""
+    async def put():
+        writer = await WallWriter.connect(HUB_URL, WALL_TABLE, PgWallMarks(db, _NoWallDocuments()))
+        try:
+            await writer.ensure()
+            return await writer.put(WALL_KEY, value.encode())
+        finally:
+            await writer.close()
+    return asyncio.run(put())
+
+
+def hub_streams():
+    """Every stream the hub holds, in any account (/jsz)."""
+    with urllib.request.urlopen(HUB_MONITOR_URL + "/jsz?accounts=true&streams=true", timeout=5) as response:
+        details = json.load(response).get("account_details") or []
+    return {stream["name"] for account in details for stream in account.get("stream_detail") or []}
+
+
+def await_true(check, seconds, what):
+    """Poll `check` (an OSError reads as not yet: a server still starting) until it is truthy."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            value = check()
+        except OSError:
+            value = None
+        if value:
+            return value
+        assert time.monotonic() < deadline, f"not within {seconds:.0f}s: {what}"
+        time.sleep(0.5)
+
+
+def test_node_pid1_join(node_pid1_inputs, node_host, registry, tmp_path):
+    """The Node API whole (E3b design §16.2): the real bus unit, Central's DB, Fleet's hub keeper,
+    both NodeLink supervisors and the leaf bridge at the Node's own origin.
+
+    1. A new serial enrols at boot: the hub admits it, its leaf links through Central, Central
+       records the host's birth and its presence reads linked.
+    2. kill -9 of the bus: the empty bus's new epoch is recorded (birth again) and every stream
+       Central was reading has its "unknown" gap row for the epoch that ended.
+    3. A reboot (a second kernel boot of the device): the same, for the bus's next start.
+    4. Central's wall write reaches the Node's WALL mirror; the hub restarts empty; Fleet re-creates
+       WALL past Central's mark, and within HUB_RESTART_SECONDS of the restart a wall write made
+       after it is in the Node's mirror and the restarted hub holds the Node's leaf again.
+    """
+    if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
+        pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: the join needs the hub",
+                    pytrace=False)
+    phase = "join"
+    components_dir, _, image = node_pid1_inputs
+    work = tmp_path
+    with central_fixture(registry, components_dir, {}, work / "central", node_host, max_boots=2,
+                         hub=True) as fixture:
+        db, hub = fixture["registry"].db, fixture["hub"]
+        evidence = {"serial": SERIAL, "account": account_id(SERIAL)}
+        first = Node(image, work / "boot-a", phase, uuid.uuid4())
+        try:
+            linked_a = first.cold(fixture, components_dir)
+
+            def linked(born):
+                # 1. Before the kill: the first epoch's birth is in Central's DB, the leaf linked.
+                rows = await_links(db, first.work, "links-enrolled",
+                                   lambda rows: born_in(born["epoch"])(rows) and rows["presence"]["linked"],
+                                   JOIN_SECONDS)
+                evidence["reading_at_kill"] = rows["cursors"]
+
+            born, reborn = first.verify_bus(before_kill=linked)
+            assert evidence["reading_at_kill"], "Central read no stream before the kill"
+            # 2. The kill ended every epoch Central was reading; the new one is recorded.
+            rows = await_links(db, first.work, "links-after-kill",
+                               lambda rows: born_in(reborn["epoch"])(rows)
+                               and ended(evidence["reading_at_kill"])(rows), JOIN_SECONDS)
+            evidence.update(born=born, reborn=reborn, reading_at_reboot=rows["cursors"])
+        finally:
+            # Abrupt power-off of boot A: the container and every process in it end here.
+            first.capture_and_remove(fixture, sys.exc_info()[1])
+        second = Node(image, work / "boot-b", phase, uuid.uuid4())
+        try:
+            second.cold(fixture, components_dir, previous=linked_a)
+            second.copy_bus_probe()
+            # 3. The reboot's empty bus: a new epoch recorded, the last one ended with gap rows.
+            born_b = second._host_birth(time.monotonic() + JOIN_SECONDS)
+            assert born_b["epoch"] not in (born["epoch"], reborn["epoch"]), born_b
+            await_links(db, second.work, "links-after-reboot",
+                        lambda rows: born_in(born_b["epoch"])(rows)
+                        and ended(evidence["reading_at_reboot"])(rows) and rows["presence"]["linked"],
+                        JOIN_SECONDS)
+            evidence["born_after_reboot"] = born_b
+            # 4. WALL current before and after a hub restart, the leaf relinked.
+            evidence["wall_before_seq"] = put_wall(db, "before-restart")
+            await_true(lambda: second.wall_value() == "before-restart", JOIN_SECONDS,
+                       "Central's wall write in the Node's WALL mirror")
+            hub.stop()
+            restarted = time.monotonic()
+            hub.start()
+
+            def left():
+                return HUB_RESTART_SECONDS - (time.monotonic() - restarted)
+
+            await_true(lambda: WALL_STREAM in hub_streams(), left(),
+                       "Fleet re-creates WALL on the restarted hub")
+            evidence["wall_after_seq"] = put_wall(db, "after-restart")
+            assert evidence["wall_after_seq"] > evidence["wall_before_seq"], evidence
+            await_true(lambda: second.wall_value() == "after-restart", left(),
+                       "a wall write after the hub restart in the Node's WALL mirror")
+            await_true(lambda: account_id(SERIAL) in leaf_connections(hub), left(),
+                       "the restarted hub holds the Node's leaf")
+            evidence["hub_restart_to_current_seconds"] = time.monotonic() - restarted
+            await_links(db, second.work, "links-after-hub-restart",
+                        lambda rows: rows["presence"]["linked"], max(left(), 1))
+            (work / "join.json").write_text(json.dumps(evidence, sort_keys=True, default=str))
+            print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
+        finally:
+            second.capture_and_remove(fixture, sys.exc_info()[1])

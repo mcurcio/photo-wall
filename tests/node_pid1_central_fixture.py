@@ -6,6 +6,8 @@ process/display witness injection, operator reboot, or bound withdrawal.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import ipaddress
 import json
 import secrets
@@ -21,6 +23,7 @@ from uuid import UUID, uuid4
 import uvicorn
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
+from integration.bus_servers import BusServer
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
@@ -35,11 +38,13 @@ from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import load_current_node_app_link_in
 from central.fleet.node_boot import NodeBootService, NodeDeployment
+from central.fleet.node_bus_hub import HUB_LISTENERS
 from central.fleet.node_lifecycle import OperatorAppStage
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, command_eligibility_in
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
+from central.node_bus_wiring import HUB_CONFIG_ENV, HUB_URL_ENV, build_node_bus
 from central.registry import Registry
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
@@ -57,37 +62,100 @@ from contracts.time import SystemClock
 # (POST /fixture/outage-release), never longer than OUTAGE_CAP_SECONDS.
 OUTAGE_SECONDS = 35
 OUTAGE_CAP_SECONDS = 300
+# The hub as Compose deploys it: the worker's client URL and the monitor, on the deployed listeners.
+HUB_URL = f"nats://127.0.0.1:{HUB_LISTENERS.client_port}"
+HUB_MONITOR_URL = f"http://127.0.0.1:{HUB_LISTENERS.monitor_port}"
+HUB_LEAF_URL = f"ws://127.0.0.1:{HUB_LISTENERS.websocket_port}/leafnode"
+HUB_CONFIG_SECONDS = 30
 
 
 @contextmanager
 def central_fixture(
-    registry, components_dir, extra_refs_and_archives, workdir, node_host, max_boots=1
+    registry, components_dir, extra_refs_and_archives, workdir, node_host, max_boots=1, hub=False
 ):
     """node_host: the numeric IPv4 address at which a node container reaches this host.
 
     Every URL handed to the node is built from it. A sandboxed app sees neither the container's
     /etc/hosts nor a Docker Desktop resolver, so a name here would resolve only by accident.
+
+    hub: Central has a hub, as Compose deploys it (worker_bus_and_hub): the fixture's `hub` is the
+    real hub, and Central relays every Node's leaf to it at the Node's own origin.
     """
     node_host = str(ipaddress.IPv4Address(node_host))
     # Own the listening socket before any fallible publication/cache setup.
     with socket.socket() as listener:
         listener.bind(("0.0.0.0", 0))
         listener.listen(16)
-        with _central_fixture(
-            registry,
-            components_dir,
-            extra_refs_and_archives,
-            workdir,
-            listener,
-            node_host,
-            max_boots,
-        ) as fixture:
-            yield fixture
+        with contextlib.ExitStack() as stack:
+            bus_hub = (stack.enter_context(worker_bus_and_hub(registry.db.dsn, Path(workdir) / "hub"))
+                       if hub else None)
+            with _central_fixture(
+                registry,
+                components_dir,
+                extra_refs_and_archives,
+                workdir,
+                listener,
+                node_host,
+                max_boots,
+                bus_hub,
+            ) as fixture:
+                yield fixture
+
+
+@contextmanager
+def worker_bus_and_hub(dsn, workdir):
+    """The worker's side of every Node's bus and the hub beside it, as Compose runs them (E3d S5):
+    the worker's own composition, `build_node_bus`, on its own thread and event loop over this
+    database, and a real hub on the deployed listeners started from the configuration file Fleet
+    writes, once it is there (as the Compose hub waits for it). Yields the hub. NodeBus.run is driven
+    directly: `media.worker._run_workers` adds only its signal handlers, which only the main thread
+    may install. A bus failure is raised when the context ends."""
+    workdir = Path(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+    config = workdir / "hub.json"
+    bus = build_node_bus(dsn, {HUB_URL_ENV: HUB_URL, HUB_CONFIG_ENV: str(config)})
+    hub = BusServer(name="hub", config=config, client_url=HUB_URL, environment={},
+                    websocket_port=HUB_LISTENERS.websocket_port, monitor_url=HUB_MONITOR_URL,
+                    listeners=HUB_LISTENERS)
+    loop = asyncio.new_event_loop()
+    stop = asyncio.Event()
+    failures = []
+
+    def run():
+        try:
+            loop.run_until_complete(bus.run(stop))
+        except BaseException as error:  # noqa: BLE001 - raised on the test's thread at the end
+            failures.append(error)
+
+    thread = threading.Thread(target=run, name="worker node bus", daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + HUB_CONFIG_SECONDS
+        while not config.exists():
+            if not thread.is_alive():
+                raise RuntimeError("worker_bus_ended") from (failures[0] if failures else None)
+            if time.monotonic() > deadline:
+                raise RuntimeError("worker_bus_wrote_no_hub_configuration")
+            time.sleep(0.1)
+        hub.start()
+        yield hub
+    finally:
+        if thread.is_alive():
+            loop.call_soon_threadsafe(stop.set)
+        thread.join(timeout=30)
+        hub.stop()
+        if not thread.is_alive():
+            loop.close()
+        if failures:
+            raise RuntimeError("worker_bus_failed") from failures[0]
+        if thread.is_alive():
+            raise RuntimeError("worker_bus_stop_timeout")
 
 
 @contextmanager
 def _central_fixture(
-    registry, components_dir, extra_refs_and_archives, workdir, listener, node_host, max_boots
+    registry, components_dir, extra_refs_and_archives, workdir, listener, node_host, max_boots,
+    hub
 ):
     """Yield real HTTP origins plus fixture token; caller owns random-schema registry.
 
@@ -138,6 +206,7 @@ def _central_fixture(
         mdns_enabled=False,
         node_control=NodeControlConfig("pid1-real-central-fixture"),
         node_serving_verifier=_LocalImageVerifier(),
+        hub_leaf_url=HUB_LEAF_URL if hub is not None else None,
     )
     sessions, lifecycle = app.state.node_sessions, app.state.node_lifecycle
     protocol_refusals = {}
@@ -553,6 +622,7 @@ def _central_fixture(
             "fixture_token": token,
             "app": app,
             "registry": registry,
+            "hub": hub,
         }
     finally:
         server.should_exit = True

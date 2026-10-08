@@ -1,6 +1,6 @@
-"""The Node bus as a local client and the kernel see it (E3c): run by the node-pid1 `success` leg
-inside the PID1 container (`python3 -I -B node_pid1_bus_probe.py info|birth|fill 4222`) and imported by
-the bus integration tests. Stdlib only at import.
+"""The Node bus as a local client and the kernel see it (E3c, E3e): run by the node-pid1 `success` and
+`join` legs inside the PID1 container (`python3 -I -B node_pid1_bus_probe.py info|birth|fill|wall 4222`)
+and imported by the bus integration tests. Stdlib only at import.
 
 `info` prints {"server_name", "jetstream", "listen"}: the server's own INFO line from
 127.0.0.1:<port>, and every address listening on that TCP port in /proc/net/tcp and /proc/net/tcp6.
@@ -8,6 +8,10 @@ the bus integration tests. Stdlib only at import.
 `birth` prints {"birth", "base", "epoch"}: the host component's `birth` and `base` from its state
 bucket and that bucket's epoch, read with the nats-py and `nodeapi` HostCore's launcher ships
 (HOST_CORE first on sys.path), so it also proves the package's copy imports on the Node's python3.
+
+`wall` prints {"value"}: as every wall reader does at attach, it creates the Node's WALL mirror when it
+is absent (`nodeapi.buffers.wall_mirror_config`, create only), then reads the mirror's latest value of
+the wall key WALL_KEY (None while the mirror holds none), with HostCore's shipped nats-py and nodeapi.
 
 `fill` prints {"sent", "ended"}: with the same nats-py, it fills a FILL_BYTES memory stream with
 FILL_MESSAGE-byte messages, up to FILL_PASSES times over, until the server ends the connection
@@ -30,6 +34,7 @@ FILL_SUBJECT = "probe.fill"
 FILL_BYTES = 8 * 1024 * 1024
 FILL_MESSAGE = 1024
 FILL_PASSES = 4
+WALL_KEY = "timing"   # the one key of Central's placeholder wall table (central.node_bus_wiring.WALL_TABLE)
 
 
 def server_info(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:
@@ -93,6 +98,35 @@ def host_birth(port: int) -> dict:
     return asyncio.run(read())
 
 
+def wall(port: int) -> dict:
+    """{"value": the Node's WALL mirror's latest WALL_KEY as text, or None}, the mirror created first
+    when it is absent, on the bus on 127.0.0.1:<port>, with HostCore's shipped nats-py and nodeapi."""
+    sys.path.insert(0, HOST_CORE)
+    import asyncio
+
+    import nats
+    from nats.js.errors import NotFoundError
+
+    from contracts.node_link import WALL_STREAM
+    from nodeapi.buffers import WALL_PREFIX, declare, wall_mirror_config
+
+    async def read() -> dict:
+        client = await nats.connect(servers=[f"nats://127.0.0.1:{port}"], allow_reconnect=False,
+                                    connect_timeout=2)
+        try:
+            jetstream = client.jetstream()
+            await declare(jetstream, wall_mirror_config())
+            try:
+                message = await jetstream.get_last_msg(WALL_STREAM, WALL_PREFIX + WALL_KEY)
+            except NotFoundError:
+                return {"value": None}
+            return {"value": message.data.decode()}
+        finally:
+            await client.close()
+
+    return asyncio.run(read())
+
+
 def fill(port: int) -> dict:
     """Fill a FILL_BYTES memory stream on the bus on 127.0.0.1:<port> until the server ends the
     connection or FILL_PASSES times its bytes are sent: {"sent": messages, "ended": error type or None}."""
@@ -135,6 +169,9 @@ def main(arguments: list[str]) -> None:
         return
     if command == "fill":
         print(json.dumps(fill(port), sort_keys=True))
+        return
+    if command == "wall":
+        print(json.dumps(wall(port), sort_keys=True))
         return
     if command != "info":
         raise SystemExit(f"unknown command: {command}")

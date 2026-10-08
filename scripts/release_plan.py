@@ -432,6 +432,9 @@ SUITES: Final = (
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",
                  "tests/test_fleet_attempts.py", "tests/test_fleet_rollout_gate.py",
                  "tests/test_node_boot.py", "tests/test_registry.py",
+                 # the join's hub harness and its pinned nats-server
+                 "tests/integration/bus_servers.py", "tests/systemd_environment.py",
+                 "scripts/nats_server.py",
                  "scripts/build_node_pid1_fixture.py", "scripts/build_node_components.py",
                  "scripts/node_component_inputs.py", "scripts/node_release_artifacts.py",
                  "scripts/package_release_artifacts.py",
