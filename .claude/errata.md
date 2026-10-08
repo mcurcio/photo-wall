@@ -4409,14 +4409,14 @@ CI leg `unresponsive` failed intermittently on 299766c (code identical to a twic
 - E-E3B-S6-3 (implementer, S6, 2026-10-08): CC-1's "the workarounds become its regression coverage" holds only for tracer step 5. In `test_node_bus_api_recovery.py` the show link has no reader before the Player line exists. So the link's existing "nothing attached: look again" loop (`hub.py` run, `_BACKOFF[1]`) already found the line before S6, and both S5 legs pass with the names watch disabled (measured). The CC-1 mutation probe (watch never sets `again`) is killed by `test_the_node_api_tracer` alone: "not within 20s: Central drains the health line". The recovery tests now start the link before the line and keep it running across the bus crash, but they cover other things, not CC-1.
 - E-E3B-D1-1 (implementer, D1, 2026-10-08): D1 amended 0017 C4, C5, C11, C13, C18, the Costs list, the "What this replaces" table and History (with E-E3B-CC-4's additions), plus the `bus-fence` comment in `.github/workflows/checks.yml` (comment only; E-E3B-S3-3 e). Two clauses outside the page still say less than E3b built and were left as written. C14 does not record Q3 (`WALL_STREAM_BYTES` frozen as a wire constant, design §10). C16's "a Node's store is lost at every reboot" is now true of every bus start (C5). Neither is wrong as stated. A later docs bead can fold them in. `scripts/check_docs.py` checks only relative links, and no architecture page names `nodeapi` modules, so no other page was bound.
 
-## E-E3B-R1 (2026-10-08, E3b final review F1) — WALL mirror lag grows with the hub outage
+## E-E3B-FR1 (2026-10-08, E3b final review F1) — WALL mirror lag grows with the hub outage
 The design's "about 9 s" (§9.6) and E-E3B-S2-1's 12–19 s are wrong: nats-server's source-retry backoff makes a Node's WALL mirror current 7.7 s after a 2 s outage, 33.5–39.7 s after 10–60 s, 49 s after 180 s (probes /Volumes/Dock/tmp/w2/review-0/probes). Self-recovering, not a defect. E3e's join must allow ~60 s after a realistic hub outage; E8 budgets about a minute of mirror staleness after every Central deploy.
 
-## E-E3B-R2 (2026-10-08, F2) — apply's shrink can evict another listed key
+## E-E3B-FR2 (2026-10-08, F2) — apply's shrink can evict another listed key
 "Purging first means a shrink never drops a listed key" (§9.7, X16, `nodeapi/buffers.py` apply docstring) holds only for keys a release drops. Lowering one key's largest size ({a:4096,b:4096}→{a:64,b:4096}, 4000 B stored under each) evicted b and kept a's oversize value (P11). Heals in normal operation (NodeLink table-change re-put; components re-put their state). Optional class fix for a later slice: never shrink a sticky cap below the bytes it currently stores.
 
-## E-E3B-R3 (2026-10-08, F3) — outbox drop count reported only at attach
+## E-E3B-FR3 (2026-10-08, F3) — outbox drop count reported only at attach
 `nodeapi/node.py` `_attach` puts the `outbox` state key; drops after attach never reach Central (6000-event burst: 1801 dropped, state said 0). Needs emit rates above ~1–6k/s, not shown in normal operation. Cheap class fix queued for the next run: hold `outbox` as a state key and re-put it whenever the count changes.
 
-## E-E3B-R4 (2026-10-08, F4) — design rule 3 wording
+## E-E3B-FR4 (2026-10-08, F4) — design rule 3 wording
 "Anything Central never read becomes a gap row" cannot cover an epoch Central never saw (a bus restarted twice between Central's reads). Reword: every epoch Central sees end gets one row; epochs born and ended unseen are invisible by construction.
