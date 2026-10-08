@@ -39,7 +39,7 @@ from scripts.module_closure import (
     stage_application,
     unreached_imports,
 )
-from scripts.nats_server import ASSETS, LICENSE, NODE_PLATFORM
+from scripts.nats_server import LICENSE, NATS_SERVER_VERSION, NODE_PLATFORM
 from scripts.nats_server import fetch as fetch_nats_server
 from scripts.vendored_packages import import_table as vendored_imports
 from scripts.vendored_packages import stage_wheel, wheel
@@ -105,12 +105,12 @@ def stage_tree(tree: Path, destination: Path) -> str:
         data = (tree / "appliance/systemd" / name).read_bytes()
         (unit_dir / name).write_bytes(data)
         digests.append(hashlib.sha256(data).hexdigest())
-    # The bus: its configuration byte for byte, and the pinned binary's digest (stage_vendored
-    # adds the binary), so a new nats-server pin is a new base.
+    # The bus: its configuration byte for byte, and the pinned server version (stage_vendored
+    # adds the binary), so a new nats-server version is a new base.
     bus = destination / BUS_DIRECTORY
     bus.mkdir(parents=True)
     (bus / "node-bus.conf").write_bytes((tree / BUS_CONF).read_bytes())
-    digests.extend(("nats-server", ASSETS[NODE_PLATFORM][1]))
+    digests.extend(("nats-server", NATS_SERVER_VERSION))
     wants = destination / "etc/systemd/system/multi-user.target.wants"
     wants.mkdir(parents=True)
     (wants / "photo-wall-node.target").symlink_to("/lib/systemd/system/photo-wall-node.target")

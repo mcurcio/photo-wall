@@ -1,9 +1,8 @@
 """Pinned downloads: bytes the build takes from the network only when their sha256 is the one
 recorded in the tree, cached by that digest.
 
-Stdlib only, runnable by the system python3 (CI's `node-bus` job runs `scripts/nats_server.py`
-before any venv). Consumers: `scripts/nats_server.fetch` (the base's nats-server) and, from E3c's
-S4, the vendored wheels.
+Stdlib only. Consumer: `scripts/vendored_packages.stage_wheel` (the vendored wheels, pinned by
+`uv.lock`).
 """
 from __future__ import annotations
 

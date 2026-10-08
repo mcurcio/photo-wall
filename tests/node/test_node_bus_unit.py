@@ -4,13 +4,14 @@ from the handoff stage, and nothing waits on the bus. No network, no systemd: th
 `success` leg runs the packaged binary under PID1."""
 from __future__ import annotations
 
+import urllib.request
+
 from support.repo import REPO
 from test_netboot_liveness import _parse_unit
 
 from appliance.boot.bus_environment import BUS_ENVIRONMENT
 from contracts.node_link import NODE_BUS_MEMORY_MAX
 from scripts import build_node_base_deb as base
-from scripts import pinned_fetch
 
 SYSTEMD = REPO / "appliance/systemd"
 UNIT = "photo-wall-bus.service"
@@ -54,7 +55,7 @@ def test_the_base_stages_the_bus_offline(tmp_path, monkeypatch):
     def offline(*_args, **_kwargs):
         raise AssertionError("stage_tree reached the network")
 
-    monkeypatch.setattr(pinned_fetch.urllib.request, "urlopen", offline)
+    monkeypatch.setattr(urllib.request, "urlopen", offline)
     root = tmp_path / "package"
     base.stage_tree(REPO, root)
     assert (root / base.BUS_DIRECTORY / "node-bus.conf").read_bytes() == (
@@ -66,9 +67,7 @@ def test_the_base_stages_the_bus_offline(tmp_path, monkeypatch):
     assert not (root / base.BUS_DIRECTORY / "nats-server").exists()   # stage_vendored's
 
 
-def test_a_new_nats_server_pin_is_a_new_base(tmp_path, monkeypatch):
+def test_a_new_nats_server_version_is_a_new_base(tmp_path, monkeypatch):
     original = base.stage_tree(REPO, tmp_path / "original")
-    assets = dict(base.ASSETS)
-    assets[base.NODE_PLATFORM] = (assets[base.NODE_PLATFORM][0], "0" * 64)
-    monkeypatch.setattr(base, "ASSETS", assets)
+    monkeypatch.setattr(base, "NATS_SERVER_VERSION", "0.0.0")
     assert base.stage_tree(REPO, tmp_path / "changed") != original
