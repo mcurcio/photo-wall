@@ -177,6 +177,17 @@ def test_the_shipped_node_config_is_loopback_domain_node_and_caps_every_stream()
         "PHOTO_WALL_BUS_NAME", "PHOTO_WALL_BUS_PORT", "PHOTO_WALL_BUS_LEAF_URL"}
 
 
+def test_centrals_websocket_frame_cap_carries_a_nodes_largest_frame():
+    """A Node's leaf rides Central's origin (central/fleet/leaf_bridge.py), and the Node's
+    nats-server writes all it has pending for the leaf as one WebSocket frame, bounded by
+    node-bus.conf's max_pending, plus the message that crossed it: Central's image must take a frame
+    that large (E-E3D-S3-2, E-E3D-CC1-2)."""
+    [command] = [line for line in (REPO / "Dockerfile").read_text().splitlines()
+                 if line.startswith('CMD ["uvicorn", "central.app:create_app"')]
+    argv = json.loads(command.removeprefix("CMD "))
+    assert int(argv[argv.index("--ws-max-size") + 1]) >= NODE_MAX_PENDING + NODE_MAX_PAYLOAD
+
+
 def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     config = json.loads(hub_configuration(["serial-a", "serial-b"], LISTENERS))
     accounts = config["accounts"]

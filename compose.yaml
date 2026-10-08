@@ -25,6 +25,8 @@ services:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
       PHOTO_WALL_ADMIN_TOKEN: ${PHOTO_WALL_ADMIN_TOKEN:?Run python3 scripts/configure.py first}
       PHOTO_WALL_HORIZON_SECONDS: ${PHOTO_WALL_HORIZON_SECONDS:-300}
+      # A Node's leaf arrives at Central's origin (/bus/leafnode) and is relayed to the hub.
+      PHOTO_WALL_HUB_LEAF_URL: ws://photo-wall-hub:8080/leafnode
     ports:
       - "127.0.0.1:${PHOTO_WALL_PORT:-8000}:8000"
     depends_on:
@@ -62,6 +64,9 @@ services:
       target: media-worker
     environment:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
+      # The worker keeps the hub: it writes the hub's configuration and links to every Node's bus.
+      PHOTO_WALL_HUB_URL: nats://photo-wall-hub:4222
+      PHOTO_WALL_HUB_CONFIG: /var/lib/photo-wall/hub/hub.json
     volumes:
       # 0013: the one cache volume, mounted READ-WRITE -- the worker is the
       # single writer (media variants + base/app mirror) and materializes the
@@ -70,6 +75,8 @@ services:
       # mount is what lets the boot assertions pass under read_only rootfs.
       - cache:/var/cache/photo-wall
       - connections:/etc/photo-wall/private
+      # The hub's configuration, written by the worker (the image populates the volume as `wall`).
+      - hub-config:/var/lib/photo-wall/hub
     depends_on:
       database:
         condition: service_healthy
@@ -87,7 +94,42 @@ services:
       timeout: 15s
       start_period: 30s
       retries: 3
+  # The hub every Node's leaf links to (E3b design §7.2, §9.6). It starts from the file the worker
+  # writes, with the memory store only: every hub start is empty, and the worker reloads it and
+  # re-creates WALL when it sees a new hub. Reached only on the Compose network (no LAN port); the
+  # monitor port is published on loopback for diagnostics.
+  hub:
+    image: nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+    command: ["sh", "-c", "until [ -s /var/lib/photo-wall/hub/hub.json ]; do sleep 1; done; exec nats-server -c /var/lib/photo-wall/hub/hub.json"]
+    volumes:
+      - type: volume
+        source: hub-config
+        target: /var/lib/photo-wall/hub
+        read_only: true
+    networks:
+      default:
+        aliases: [photo-wall-hub]
+    ports:
+      - "127.0.0.1:${PHOTO_WALL_HUB_MONITOR_PORT:-8222}:8222"
+    depends_on:
+      worker:
+        condition: service_started
+    restart: unless-stopped
+    read_only: true
+    # nats-server makes $TMPDIR/nats even with the memory store only (E-E3B-S3-1).
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      # The hub waits for the worker's first file, which follows the worker's migrations.
+      start_period: 120s
 volumes:
   database:
   cache:
   connections:
+  hub-config:

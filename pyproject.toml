@@ -17,6 +17,7 @@ dependencies = [
   "cryptography==44.0.3", "Pillow==12.3.0",
   "procrastinate==3.9.0", "zeroconf==0.151.3",
   "semver>=3,<4",
+  "nats-py==2.16.0",  # the Node API library's client: the worker's hub side (E3d S5)
 ]
 
 [dependency-groups]
@@ -30,7 +31,6 @@ dev = [
     "playwright==1.62.0",
     "fonttools==4.66.0",
     "brotli==1.2.0",
-    "nats-py==2.16.0",  # the E3a bus seam probes; E3b moves it to runtime
 ]
 
 [tool.hatch.build.targets.wheel]

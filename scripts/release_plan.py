@@ -326,7 +326,6 @@ NOT_SHIPPED: Final = (
     "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
     "scripts/nats_server.py",  # E3c claims it when the base ships the server
-    "nodeapi/**",  # the Node API library; E3b/E3c claim it when the base and the Player bundle it
     "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
     "scripts/node_rollout_image_check.py", "scripts/node_rollout_ci_evidence.py",
     "scripts/docker_diagnostics.py", "scripts/harness_bundle.py", "scripts/harness_failure.py",
