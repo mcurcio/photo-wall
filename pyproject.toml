@@ -17,6 +17,7 @@ dependencies = [
   "cryptography==44.0.3", "Pillow==12.3.0",
   "procrastinate==3.9.0", "zeroconf==0.151.3",
   "semver>=3,<4",
+  "nats-py==2.16.0",  # the Node API library's client: the worker's hub side (E3d S5)
 ]
 
 [dependency-groups]
@@ -30,7 +31,6 @@ dev = [
     "playwright==1.62.0",
     "fonttools==4.66.0",
     "brotli==1.2.0",
-    "nats-py==2.16.0",  # the E3a bus seam probes; E3b moves it to runtime
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -250,12 +250,20 @@ ignore_imports = ["appliance.process_identity -> appliance.app_launcher"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).
-# Indirect imports are its programs' (HostCore's session, erratum E-E3C-S4-1): only nodeapi names nats.
+# Indirect imports are allowed (errata E-E3C-S4-1, E-E3D-CUT-1): Central's and HostCore's programs reach
+# NATS only through nodeapi, which is the point; a direct `import nats` outside nodeapi still fails.
 name = "Only the Node API library talks to NATS"
 type = "forbidden"
 source_modules = ["central", "contracts", "media", "player", "appliance", "uplink"]
 forbidden_modules = ["nats"]
 allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+# Central is a client of each Node's bus through the hub (E3b design §7.2): it never runs a Node session.
+name = "Central uses only the hub role of the Node API library"
+type = "forbidden"
+source_modules = ["central"]
+forbidden_modules = ["nodeapi.node"]
 
 [[tool.importlinter.contracts]]
 # nodeapi imports contracts, the NATS client and the stdlib alone (r3 §16.2): the base and the Player

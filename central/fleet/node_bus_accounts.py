@@ -92,7 +92,10 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
         "accounts": accounts,
         "system_account": SYSTEM_ACCOUNT,
         "websocket": {"host": listeners.websocket_host, "port": listeners.websocket_port, "no_tls": True},
-        "leafnodes": {"host": listeners.leaf_host, "port": listeners.leaf_port},
+        # No S2 on any leaf: nats-server wraps a compressed leaf's bytes, WebSocket frames and all, in
+        # an S2 stream, which Central's leaf bridge (a WebSocket relay, central/fleet/leaf_bridge.py)
+        # cannot carry. The accepting side's "off" turns it off whatever a Node offers (E-E3D-S3-1).
+        "leafnodes": {"host": listeners.leaf_host, "port": listeners.leaf_port, "compression": "off"},
     }
     if listeners.monitor_port is not None:
         configuration["http"] = f"{listeners.client_host}:{listeners.monitor_port}"

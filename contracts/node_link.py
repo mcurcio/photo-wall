@@ -41,6 +41,10 @@ WALL_STREAM_BYTES: Final = 512 * 1024        # max_bytes of the hub stream AND o
 WALL_API_PREFIX: Final = "ACC.WALL.API"      # a Node account's import prefix for WALL's consumer API
 WALL_DELIVER_PREFIX: Final = "DELIVER.WALL"  # the mirror's delivery prefix, the same in every Node account
 WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selector, not a secret
+# The boot origin's path prefix routed to the hub's leaf listener (E3d/E4): a Node's leaf dials
+# `<origin>/photo-wall/bus/leafnode` (nats-server appends `/leafnode`), over ws for an http origin and
+# wss for https, with the origin's host and port unchanged (erratum E-E3C-CUT-5).
+LEAF_PATH: Final = "photo-wall/bus"
 
 NODE_BUS_PORT: Final = 4222                                # the bus's client port on 127.0.0.1, on every Node
 NODE_BUS_URL: Final = f"nats://127.0.0.1:{NODE_BUS_PORT}"  # what every Node component and the local UI dial

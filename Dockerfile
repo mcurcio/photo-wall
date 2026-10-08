@@ -89,6 +89,7 @@ COPY --link contracts /app/contracts
 COPY --link media /app/media
 COPY --link player /app/player
 COPY --link central /app/central
+COPY --link nodeapi /app/nodeapi
 COPY --link --from=console-builder /console/dist /app/central/console/dist
 
 # GHA passes an immutable retained native image; Compose can use the local target.
@@ -119,6 +120,10 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
     "$PHOTO_WALL_CACHE_ROOT/apps" \
     "$PHOTO_WALL_CACHE_ROOT/os-images" \
     "$PHOTO_WALL_CACHE_ROOT/previews"
+# The hub's configuration directory (PHOTO_WALL_HUB_CONFIG): the worker writes hub.json there and
+# the hub reads it. Owned by the runtime identity so a fresh Docker volume mounted here is populated
+# writable for `wall`; nothing in it outlives a hub start (E3b design §12).
+RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0755 /var/lib/photo-wall/hub
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 ENV PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
@@ -154,4 +159,8 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 EXPOSE 8000
-CMD ["uvicorn", "central.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "1048576"]
+# --ws-max-size bounds one WebSocket frame. A Node's leaf rides Central's origin
+# (/photo-wall/bus/leafnode), and nats-server writes everything it has pending for a connection as
+# one frame, so it is at least node-bus.conf's max_pending plus one message
+# (tests/test_node_bus_config.py; E-E3D-CC1-2).
+CMD ["uvicorn", "central.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "16777216"]

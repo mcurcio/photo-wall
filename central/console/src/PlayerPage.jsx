@@ -5,12 +5,12 @@ import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./FactLine.jsx";
 import { HostHealthSection } from "./HostHealthSection.jsx";
-import { clock, fact, words } from "./facts.js";
+import { busLinkFact, clock, fact, words } from "./facts.js";
 import {
   BOOT_FACTS_UNAVAILABLE, interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
 import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
-import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
+import { currentSessionBoot, layerEvidence, nodeUnknown, useNodeDevice } from "./nodeRead.js";
 import { AppOperationsSection, RebootSection } from "./PlayerCommands.jsx";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
 import { StageApp } from "./StageApp.jsx";
@@ -297,10 +297,10 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
 
 /**
  * One Player's home (`#/players/<device-id>`; console DDD §9, Q1 = A, §61): a header with the
- * box's identity, standing and Reboot (behind its own error boundary, so a Reboot render error
- * leaves the header standing); then Health (HostHealthSection.jsx, from the shell's fleet host
- * read, first), its node layers bottom up, its Outputs, its boot, its app (Stage app and its
- * operations) and its danger zone. Each section shows its own read time and sits behind its
+ * box's identity, standing, Node API link (facts.js `busLinkFact`, from the node read) and Reboot
+ * (behind its own error boundary, so a Reboot render error leaves the header standing); then
+ * Health (HostHealthSection.jsx, from the shell's fleet host read, first), its node layers bottom
+ * up, its Outputs, its boot, its app (Stage app and its operations) and its danger zone. Each section shows its own read time and sits behind its
  * own error boundary. Node records are read only here, for this box only (nodeRead.js),
  * never for a retired box and never while the shell's node control is not on; with node
  * control off the node sections give way to one "not shown" line (nodeControl.js). Writes stay with their aggregate: Bind goes to the Frame, Retire to
@@ -344,6 +344,13 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall, hosts = null }
         )}
         {row.serial !== null && (
           <FactLine label="Serial" fact={fact({ kind: "claimed", value: `Serial ${row.serial}`, source: "the box" })} />
+        )}
+        {!retired && (
+          <NodeRecords quiet>
+            <FactLine label="Node API link" fact={node.read === null
+              ? fact({ kind: "unknown", why: nodeUnknown(node) })
+              : busLinkFact(node.read.bus_link, node.readAt)} />
+          </NodeRecords>
         )}
         {bootFacts?.unavailable && <p className="roster__note">{`${BOOT_FACTS_UNAVAILABLE}; serials may be out of date.`}</p>}
         {row.frames.length > 0 && (
