@@ -78,7 +78,7 @@ One full verify per bead (all its gates once, unpiped). The milestone gate is th
 | S1 tracer: the bus runs on a Node from the base package | open | | |
 | S2 the fence, re-measured: smallest events and a hard kill | open | | |
 | S3 an https origin's leaf dials wss; every harness Node uses the derivation | landed | (this commit) | G-bus darwin 39 passed, 1 skipped (wss, its reason), 1 xfailed; Linux (python:3.12.11-slim-trixie + procps, linux-arm64 nats-server 2.15.0, `-k node_bus -n 4`) 40 passed, 1 xfailed, wss test green; G-unit 2 failed (the baseline's two), 4049 passed; G-static green; mutation (`leaf_url` always ws) red on Linux: the leaf never links ("unexpected EOF" at the TLS listener) |
-| S4 `nodeapi` ships in the base: HostCore writes `birth` on the host line | open | | |
+| S4 `nodeapi` ships in the base: HostCore writes `birth` on the host line | landed | 651dc48 | G-static green (lint-imports 20 kept, after E-E3C-S4-1); G-unit 2 failed (the baseline's two), the rest green at 651dc48; G-bus 41 passed, 1 skipped (wss on macOS), 1 xfailed; node-pid1 `success` green locally (birth `v99.0.0`, reborn in a new epoch after kill -9, HostCore's MainPID unchanged, no OOM in its unit); mutation (no wheel staged) red: nats imported from site-packages, not the staged tree; errata E-E3C-S4-1..3 |
 | S5 E2a lands with the bus line; the bus's memory is reported | open | | |
 
 ## Slice order and why
