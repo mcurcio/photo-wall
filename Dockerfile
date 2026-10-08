@@ -159,7 +159,8 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 EXPOSE 8000
-# --ws-max-size bounds one WebSocket frame. A Node's leaf rides Central's origin (/bus/leafnode), and
-# nats-server writes everything it has pending for a connection as one frame, so it is at least
-# node-bus.conf's max_pending plus one message (tests/test_node_bus_config.py; E-E3D-CC1-2).
+# --ws-max-size bounds one WebSocket frame. A Node's leaf rides Central's origin
+# (/photo-wall/bus/leafnode), and nats-server writes everything it has pending for a connection as
+# one frame, so it is at least node-bus.conf's max_pending plus one message
+# (tests/test_node_bus_config.py; E-E3D-CC1-2).
 CMD ["uvicorn", "central.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "16777216"]

@@ -2,7 +2,7 @@
 "Wi-Fi, ingress or WAN stall", "A Node dials before its account exists"; W11; erratum E-E3D-CUT-4).
 
 Real Central (`central.app.create_app`) under uvicorn on a loopback port, a real hub on Fleet's
-generated configuration, a real Node bus whose leaf dials Central's port at LEAF_PATH, and Central's
+generated configuration, a real Node bus whose leaf dials Central's port at "/" + LEAF_PATH, and Central's
 fleet NodeLinks over PostgreSQL. 1: the leaf links through Central, the Node's birth is recorded (Node
 to hub) and a WALL write reaches the Node's wall view (hub to Node). 2: Central stops and starts again
 on the same port; the leaf relinks and a later event is recorded. 3: a Central with no hub refuses a
@@ -112,7 +112,8 @@ def test_a_node_leaf_links_through_centrals_origin(database, tmp_path, monkeypat
     _enrol(database, SERIAL)
     hub = hub_server(tmp_path, [SERIAL])
     central = _Central(database, _free_port(), f"ws://127.0.0.1:{hub.websocket_port}/leafnode")
-    node = node_server(tmp_path, SERIAL, hub, leaf_port=central.port, prefix=LEAF_PATH.strip("/"))
+    # The Node's leaf URL ends in "/" + LEAF_PATH, as appliance/boot/bus_environment.leaf_url builds it.
+    node = node_server(tmp_path, SERIAL, hub, leaf_port=central.port, prefix=LEAF_PATH)
     session = NodeSession("display", line_slices()["display"], RELEASE, url=node.client_url, reads_wall=True)
     links = NodeLinks(Pipe.FLEET, hub.client_url, PgLinkStores(database), Projection())
     unbridged = _Central(database, _free_port(), None)

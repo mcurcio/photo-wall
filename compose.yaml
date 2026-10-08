@@ -25,7 +25,7 @@ services:
       PHOTO_WALL_DATABASE_URL: postgresql://photo_wall:${PHOTO_WALL_DB_PASSWORD}@photo-wall-database:5432/photo_wall
       PHOTO_WALL_ADMIN_TOKEN: ${PHOTO_WALL_ADMIN_TOKEN:?Run python3 scripts/configure.py first}
       PHOTO_WALL_HORIZON_SECONDS: ${PHOTO_WALL_HORIZON_SECONDS:-300}
-      # A Node's leaf arrives at Central's origin (/bus/leafnode) and is relayed to the hub.
+      # A Node's leaf arrives at Central's origin (/photo-wall/bus/leafnode) and is relayed to the hub.
       PHOTO_WALL_HUB_LEAF_URL: ws://photo-wall-hub:8080/leafnode
     ports:
       - "127.0.0.1:${PHOTO_WALL_PORT:-8000}:8000"

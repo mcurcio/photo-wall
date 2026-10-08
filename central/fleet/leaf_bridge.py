@@ -1,8 +1,8 @@
 """Central relays a Node's leaf to the hub (E3b design §3, §9.6 step 1, §11 rows "Wi-Fi, ingress or WAN
 stall", "A Node dials before its account exists"; W11; erratum E-E3D-CUT-4).
 
-A Node dials its leaf at its origin, the host and port it already boots from, plus LEAF_PATH; its
-nats-server appends /leafnode. Production has no HTTP router in front of Central, so Central's own app
+A Node dials its leaf at its origin, the host and port it already boots from, at "/" + LEAF_PATH; its
+nats-server appends /leafnode (erratum E-E3D-FIX-1: LEAF_PATH carries no slash at either end). Production has no HTTP router in front of Central, so Central's own app
 takes that WebSocket and relays it to the hub's leaf listener: no new LAN port. Every message goes
 across untouched, both ways, one at a time, until either side closes, which closes the other; a hub
 that does not accept closes the Node's socket (1011) at once and the leaf redials. Nothing here
@@ -23,7 +23,9 @@ from websockets.uri import parse_uri
 
 from contracts.node_link import LEAF_PATH
 
-LEAF_ROUTE: Final = LEAF_PATH + "/leafnode"
+if LEAF_PATH != LEAF_PATH.strip("/"):   # a route without its one leading "/" mounts but matches nothing
+    raise RuntimeError("leaf_path_slashes")
+LEAF_ROUTE: Final = f"/{LEAF_PATH}/leafnode"
 HUB_UNAVAILABLE: Final = 1011   # the close code a Node's leaf gets when the hub did not accept
 # No cap on one message from the hub: a non-browser nats-server writes everything pending for a
 # connection as ONE WebSocket frame (ns:server/websocket.go wsCollapsePtoNB), up to its max_pending
