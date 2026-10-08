@@ -941,7 +941,7 @@ The [test database](../tests/integration/compose.test-database.yml) runs the dep
 
 A test that observes a lock wait counts only its own database's waiters through `support.database.waiting_backends`; `pg_locks` is cluster-wide, so an unscoped count also sees other workers' tests. `tests/test_lock_observation_scope.py` refuses unscoped queries of `pg_locks` or `pg_stat_activity`.
 
-CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health and the served console), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
+CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health, the served console, and that the worker reached the hub and created WALL), `node-bus` and `bus-fence` ([the Node bus](#the-node-bus-and-centrals-hub)), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
 
 All CI worker builds reuse the architecture-matched native media base through
 the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
@@ -1011,8 +1011,10 @@ Node control is the one supported configuration. Set an installation-specific
 `PHOTO_WALL_NODE_AUDIENCE` and run Central with the node factory:
 
 ```sh
-uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 1048576
+uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
 ```
+
+Keep `--ws-max-size` at 16 MiB (the image's own command uses the same value): a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
 
 The ordinary `central.app:create_app` factory (still the default image and Compose
 command until the [V1 follow-up](player-fleet-implementation-map.md) switches them)
@@ -1114,3 +1116,64 @@ CI matrices and signed guard records from those enforcement results. The adapter
 and signatures do not implement that controller. No real such controller or
 qualification is established by the local tests. An unconfigured or uncertified
 node factory therefore continues to serve observations with effects closed.
+
+
+## The Node bus and Central's hub
+
+Each V2 Node runs its own NATS server, the **bus**, and dials one leaf link to Central's **hub**; Central reads every Node's streams and state through that link and records them in PostgreSQL. The shape and its reasons are [decision 0017](decisions/0017-node-redesign-r3.md) C3–C5, C13, C19 and C20. Nothing is recorded until Nodes run the bus. The join, and the hub in the node-pid1 fixture, are E3e's (in progress).
+
+**What runs where.**
+
+| Piece | Runs as | What it does |
+|---|---|---|
+| Bus | `photo-wall-bus.service` on every Node, in `photowallbus.slice` (256 MiB) | nats-server on `127.0.0.1:4222`, memory store only: every start is empty, and each writer refills what it owns. `Restart=always`; nothing waits on it |
+| Leaf | the bus's one remote | dials the origin the Node booted from, `ws://` for http or `wss://` for https, host and explicit port, path `/photo-wall/bus/leafnode` |
+| Leaf bridge | Central's HTTP app, when `PHOTO_WALL_HUB_LEAF_URL` is set | relays that WebSocket, unchanged, to the hub's leaf listener; without the variable the route refuses |
+| Hub | Compose service `hub` (production: a pod sidecar) | nats-server from the file the worker writes, memory store only; no LAN port |
+| Bus side | one task in the media worker, when `PHOTO_WALL_HUB_URL` is set | every 2 s: writes the hub configuration for the enrolled Players, reloads the hub when the file or the hub's server id changed, re-creates WALL after a hub restart, closes leaves of Players no longer enrolled, and runs one fleet and one show link per enrolled Player |
+
+**Configuration.**
+
+| Variable | Service | Compose value | Meaning |
+|---|---|---|---|
+| `PHOTO_WALL_HUB_URL` | worker | `nats://photo-wall-hub:4222` | the hub's client URL. Unset: no bus side, the worker runs as before |
+| `PHOTO_WALL_HUB_CONFIG` | worker | `/var/lib/photo-wall/hub/hub.json` | the file the worker writes and the hub starts from (the shared `hub-config` volume; the hub mounts it read-only) |
+| `PHOTO_WALL_HUB_LEAF_URL` | central | `ws://photo-wall-hub:8080/leafnode` | the hub's leaf WebSocket. Unset: no leaf bridge |
+| `PHOTO_WALL_HUB_MONITOR_PORT` | Compose | `8222` | the host port of the hub's monitor, bound to `127.0.0.1` only |
+
+`docker compose up -d --wait` starts the hub after the worker; the hub waits until the worker's first file exists, which follows the worker's migrations, so its healthcheck allows 120 s. Central's command keeps `--ws-max-size 16777216`. The hub configuration turns leaf compression off: the relay cannot carry nats-server's S2 compression, which sits below the WebSocket framing.
+
+**Checking the hub.** The monitor answers on `http://127.0.0.1:8222` (Compose):
+
+```sh
+curl -s 'http://127.0.0.1:8222/connz?auth=true' | python3 -m json.tool   # the worker's clients: fleet, central-wall, and its links in each Player's account
+curl -s 'http://127.0.0.1:8222/leafz' | python3 -m json.tool             # every Node leaf linked now, by account
+curl -s 'http://127.0.0.1:8222/jsz?accounts=true&streams=true' | python3 -m json.tool   # stream WALL
+docker compose exec -T worker cat /var/lib/photo-wall/hub/hub.json | python3 -m json.tool   # one account per enrolled Player
+docker compose logs --tail 100 worker hub
+```
+
+The Player page shows **Node API link**: linked or not linked, with its age, as Central's inference from its last look at the hub. It reads unknown when that look is older than 30 s or no hub runs. It never gates anything.
+
+**What to expect.**
+
+- **Enrol or retire a Player:** within a look (2 s) the hub's file gains or loses its account and the hub reloads. A retired Player's leaf is closed and its links stop; its records stay.
+- **Hub restart or Central deploy** (production restarts the whole pod): the hub starts empty, the worker sees a new server id, reloads it and re-creates WALL. Leaves relink in about a second; Node WALL mirrors catch up within about 60 s. A Node whose leaf dialled before its account existed gets its first WALL about 40 s later. All self-recovering.
+- **Bus restart on a Node** (crash, OOM, reboot): the bus starts empty; Central records the unread tail as one gap row with count unknown per stream, and each Node program re-puts its state.
+- **No hub reachable:** the worker logs it, keeps the file, retries every look, and keeps media and jobs running. A failure of the bus side itself ends the worker non-zero, as a media or job loop failure does.
+
+**What Central keeps.** `node_link_records` (each message once), `node_link_gaps` (counted losses; `lost` is an upper bound if two workers overlapped during a deploy), `node_link_cursors`, `node_link_documents`, `node_link_actions`, `node_bus_wall` (the WALL mark) and the presence tables `node_bus_presence` and `node_bus_hub_looks`. Records and actions grow without bound until E5 sets their retention.
+
+**On a Node.** `journalctl -u photo-wall-bus` shows the bus; `/run/photo-wall-node/bus.env` holds its environment, written by the handoff stage from the located origin and the serial. HostCore reports `oom_kill:bus` and `memory_peak:bus` from the slice, so an OOM survives the restart it causes. A bus that cannot reach its hub keeps serving its Node; leaf redials are log noise only.
+
+**Kubernetes.** The hub is a native sidecar ordered after the worker, sharing an `emptyDir` for the configuration file; the worker and Central reach it on `127.0.0.1`, and a Node's leaf arrives on Central's existing port at `/photo-wall/bus/leafnode`, so no Service port or route is added. Deployment changes go through an iac PR the owner merges.
+
+**Tests.** The bus tests start real nats-server processes; fetch the pinned binary once:
+
+```sh
+export PHOTO_WALL_NATS_SERVER="$(python3 scripts/nats_server.py fetch --dest /tmp/nats)"
+.venv/bin/python -m pytest -q tests/integration -k node_bus -n 4
+.venv/bin/python scripts/test_local.py -q -m db -n 4 --dist loadgroup   # includes tests/integration/test_central_*.py
+```
+
+`test_central_worker_hub.py` binds the deployed hub ports (4222, 8080 and 8222 on all interfaces), so it fails while a local Compose hub or anything else holds them. The memory fence (`tests/integration/test_bus_memory_fence.py`, `PHOTO_WALL_BUS_FENCE_SERVER`) needs Docker on linux-arm64; CI's `bus-fence` job runs it.
