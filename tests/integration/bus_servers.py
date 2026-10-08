@@ -346,21 +346,23 @@ def hub_server(tmp: Path, serials: Sequence[str]) -> BusServer:
 
 
 def node_server(tmp: Path, serial: str, hub: BusServer, *, leaf_port: int | None = None,
-                scheme: str = "http", host: str = "127.0.0.1",
+                scheme: str = "http", host: str = "127.0.0.1", origin: str | None = None,
                 extra_environment: Mapping[str, str] | None = None) -> BusServer:
     """A Node on the shipped configuration file whose environment is the one its handoff stage
     writes, `bus_environment(f"{scheme}://{host}:{port}", serial)` with `port` the hub's WebSocket
     port or `leaf_port` (a proxy in front of it), so every harness Node exercises the real
     derivation: its leaf at LEAF_PATH, ws:// for http and wss:// for https. Only
     PHOTO_WALL_BUS_PORT is replaced, by a free port (NODE_BUS_PORT cannot be shared by servers
-    side by side); `extra_environment` adds to it (SSL_CERT_FILE, say)."""
+    side by side); `extra_environment` adds to it (SSL_CERT_FILE, say). `origin` replaces the
+    whole boot origin (one with the scheme's default port, say)."""
     nats_server_binary()
     directory = Path(tmp) / node_user(serial)
     directory.mkdir(parents=True, exist_ok=True)
     config = directory / "node-bus.conf"
     shutil.copyfile(NODE_BUS_CONF, config)
     port = _free_port()
-    environment = {**bus_environment(f"{scheme}://{host}:{leaf_port or hub.websocket_port}", serial),
+    origin = origin or f"{scheme}://{host}:{leaf_port or hub.websocket_port}"
+    environment = {**bus_environment(origin, serial),
                    "PHOTO_WALL_BUS_PORT": str(port), **(extra_environment or {})}
     return BusServer(name=f"node {serial}", config=config,
                      client_url=f"nats://127.0.0.1:{port}", environment=environment)

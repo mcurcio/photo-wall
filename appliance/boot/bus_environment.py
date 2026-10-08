@@ -4,7 +4,8 @@
 The handoff stage writes it as photo-wall-bus.service's EnvironmentFile: systemd reads that file
 before a start's first process, so a unit's own ExecStartPre= could not write it (erratum
 E-E3C-CUT-8). The leaf dials the boot origin's host and port, ws:// for an http origin and wss://
-for https, under contracts.node_link.LEAF_PATH; one conf serves both. Stdlib, contracts and
+for https, under contracts.node_link.LEAF_PATH; one conf serves both. The port is always written:
+nats-server reads a ws/wss remote with none as port 7422, not 80/443 (E-E3C-S1-3). Stdlib, contracts and
 uplink only: boot is an island.
 """
 from __future__ import annotations
@@ -27,8 +28,9 @@ if NODE_BUS_GOMEMLIMIT % MIB:
 
 
 def leaf_url(central: str, serial: str) -> str:
-    """The leaf's URL: ws:// for an http origin, wss:// for https, the origin's host and port
-    unchanged (default port omitted, IPv6 bracketed); user and password both node_user(serial);
+    """The leaf's URL: ws:// for an http origin, wss:// for https, the origin's host (IPv6
+    bracketed) and port, always explicit (80/443 for a default-port origin: nats-server fills a
+    missing ws/wss port with its leafnode port, 7422); user and password both node_user(serial);
     path "/" + LEAF_PATH. ValueError("bus_origin_invalid") for a `central` that is no Central root,
     ValueError("node_link_serial") for an unsafe serial."""
     try:
@@ -36,8 +38,8 @@ def leaf_url(central: str, serial: str) -> str:
     except UplinkError:
         raise ValueError("bus_origin_invalid") from None
     user = node_user(serial)
-    authority = str(origin).split("://", 1)[1]
-    return f"{_LEAF_SCHEMES[origin.scheme]}://{user}:{user}@{authority}/{LEAF_PATH}"
+    host = f"[{origin.host}]" if ":" in origin.host else origin.host
+    return f"{_LEAF_SCHEMES[origin.scheme]}://{user}:{user}@{host}:{origin.port}/{LEAF_PATH}"
 
 
 def bus_environment(central: str, serial: str) -> dict[str, str]:

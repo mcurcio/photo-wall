@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import ipaddress
+import re
 import ssl
 import sys
 from pathlib import Path
@@ -56,6 +57,31 @@ def test_a_node_bus_links_to_an_https_origin_over_wss(tmp_path):
     node = node_server(tmp_path, SERIAL, hub, scheme="https", host="localhost", leaf_port=proxy.port,
                        extra_environment={"SSL_CERT_FILE": str(ca_pem)})
     _links_through(hub, proxy, node)
+
+
+@pytest.mark.parametrize(("origin", "port"), [("http://127.0.0.1", 80), ("https://127.0.0.1", 443),
+                                            ("http://127.0.0.1:80", 80)])
+def test_a_node_bus_dials_a_default_port_origin_at_that_port(tmp_path, origin, port):
+    """An origin with the scheme's default port (the production root's https origin) is dialled at
+    80 or 443: nats-server fills a ws/wss remote with no port with its leafnode port, 7422, and the
+    leaf never reaches the ingress (E-E3C-S1-3). Nothing need listen: the server logs the address
+    it dials, connected or refused (`127.0.0.1:<port>` either way)."""
+    hub = hub_server(tmp_path, [SERIAL])
+    node = node_server(tmp_path, SERIAL, hub, origin=origin)
+    log = node.config.with_suffix(".log")
+    dialled = re.compile(rf"\b127\.0\.0\.1:{port}\b")
+
+    async def run():
+        node.start()
+        try:
+            async def tried():
+                return dialled.search(log.read_text(errors="replace"))
+            await until(tried, 10, f"the Node's leaf dialling 127.0.0.1:{port}")
+            assert ":7422" not in log.read_text(errors="replace")
+        finally:
+            node.stop()
+
+    asyncio.run(run())
 
 
 def _links_through(hub: BusServer, proxy: PrefixProxy, node: BusServer) -> None:
