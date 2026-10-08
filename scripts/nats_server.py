@@ -3,22 +3,28 @@
 `python3 scripts/nats_server.py fetch --dest DIR` downloads the release asset for this host,
 checks it against the release's SHA256SUMS digest recorded here, extracts the `nats-server`
 binary under DIR and prints its path. A second run with the binary in place downloads nothing.
-Stdlib only, and runnable by the system python3 (CI's `node-bus` job calls it before any venv).
+Stdlib only (with the stdlib-only `scripts.pinned_fetch`), and runnable by the system python3
+(CI's `node-bus` job calls it before any venv). The Node base package ships NODE_PLATFORM's
+binary (`scripts/build_node_base_deb.stage_vendored`).
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
-import io
 import os
 import platform
 import shutil
+import sys
 import tarfile
 import tempfile
-import urllib.request
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
+
+REPO: Final = Path(__file__).resolve().parents[1]
+if __package__ in (None, "") and str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from scripts.pinned_fetch import cached_pinned  # noqa: E402
 
 NATS_SERVER_VERSION: Final = "2.15.0"   # the line the bus fence was measured on (F1)
 RELEASES: Final = "https://github.com/nats-io/nats-server/releases/download"
@@ -32,6 +38,8 @@ ASSETS: Final[Mapping[tuple[str, str], tuple[str, str]]] = {
                           "e1c4e22d70bd44abfa0bcb3c16f7cf0c66f648c2e728c58924e8a1ce88913cc8"),
 }
 _MACHINES: Final = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+# The Node's platform: the base package ships this asset's binary.
+NODE_PLATFORM: Final = ("linux", "arm64")
 
 
 def asset_for(system: str, machine: str) -> tuple[str, str]:
@@ -42,17 +50,15 @@ def asset_for(system: str, machine: str) -> tuple[str, str]:
     return ASSETS[key]
 
 
-def fetch(dest: Path) -> Path:
-    """The pinned binary under `dest`, downloaded and digest-checked once."""
-    asset, sha256 = asset_for(platform.system(), platform.machine())
+def fetch(dest: Path, *, system: str | None = None, machine: str | None = None) -> Path:
+    """The pinned binary for (`system`, `machine`), by default this host's, under `dest`: the
+    release archive downloaded once through `pinned_fetch` and the binary extracted atomically."""
+    asset, sha256 = asset_for(system or platform.system(), machine or platform.machine())
     binary = Path(dest) / asset[:-len(".tar.gz")] / "nats-server"
     if binary.is_file():
         return binary
-    with urllib.request.urlopen(f"{RELEASES}/v{NATS_SERVER_VERSION}/{asset}", timeout=120) as response:
-        archive = response.read()
-    if hashlib.sha256(archive).hexdigest() != sha256:
-        raise ValueError("nats_server_digest")
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+    archive = cached_pinned(f"{RELEASES}/v{NATS_SERVER_VERSION}/{asset}", sha256, Path(dest))
+    with tarfile.open(archive, mode="r:gz") as tar:
         member = tar.getmember(f"{asset[:-len('.tar.gz')]}/nats-server")
         source = tar.extractfile(member)
         if source is None:

@@ -31,6 +31,7 @@ from node_pid1_central_fixture import assert_phase_completed, central_fixture
 
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
+from contracts.node_link import NODE_BUS_GOMEMLIMIT, NODE_BUS_MEMORY_MAX, NODE_BUS_PORT, node_user
 from scripts.player_start_probe import (
     BOOTED,
     HOST_ACTING_UNITS,
@@ -56,6 +57,8 @@ MASKS = (
 )
 # Bound over the kernel's boot_id inside the container before systemd starts as PID 1.
 FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
+BUS_UNIT = "photo-wall-bus.service"
+BUS_SECONDS = 15
 # The refused scenario's fake board (tests/node_pid1_central_inner.py): MemTotal 2097152 kB,
 # below the smallest memory class, pi5-4gb's 3584 MiB (appliance/kernel/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
@@ -276,6 +279,52 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         (work / "cold-current.json").write_text(json.dumps(before, sort_keys=True))
         print("COLD actual app-link observed", str(work), flush=True)
         return before
+
+    def _bus_answers(self, deadline):
+        """The bus's INFO and LISTEN rows, once it answers before `deadline`."""
+        while time.monotonic() < deadline:
+            result = self.container.exec(
+                "/usr/bin/python3", "/var/lib/node_pid1_bus_probe.py", "info", str(NODE_BUS_PORT),
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout)
+            time.sleep(0.5)
+        raise AssertionError("the Node bus never answered: " + str(self.work))
+
+    def verify_bus(self):
+        """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
+        contracts; a kill -9 restarts it at once and neither the Player nor the broker notices."""
+        self.container.copy_in(
+            Path(__file__).with_name("node_pid1_bus_probe.py"), "/var/lib/node_pid1_bus_probe.py"
+        )
+        serial = json.loads(self.run("cat", "/run/photo-wall-node/host.json"))["serial"]
+        before = self._bus_answers(time.monotonic() + BUS_SECONDS)
+        assert before == {
+            "server_name": node_user(serial), "jetstream": True, "listen": ["127.0.0.1"]
+        }, before
+        shown = unit_properties_of(self, BUS_UNIT, "MemoryMax,MainPID,NRestarts")
+        assert shown["MemoryMax"] == str(NODE_BUS_MEMORY_MAX), shown
+        assert shown["NRestarts"] == "0", shown
+        environ = self.run("cat", f"/proc/{shown['MainPID']}/environ").split("\0")
+        assert f"GOMEMLIMIT={NODE_BUS_GOMEMLIMIT // (1024 * 1024)}MiB" in environ, environ
+        others = ("photo-wall-node-player.service", "photo-wall-app-broker.service")
+        pids = {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others}
+        assert "0" not in pids.values(), pids
+        self.run("systemctl", "kill", "--signal=SIGKILL", BUS_UNIT)
+        deadline = time.monotonic() + BUS_SECONDS
+        while True:
+            after = unit_properties_of(self, BUS_UNIT, "ActiveState,MainPID,NRestarts")
+            restarted = after["MainPID"] not in ("0", shown["MainPID"])
+            if after["NRestarts"] == "1" and after["ActiveState"] == "active" and restarted:
+                break
+            assert time.monotonic() < deadline, after
+            time.sleep(0.25)
+        again = self._bus_answers(deadline)
+        assert again == before, again
+        assert {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others} == pids
+        (self.work / "bus.json").write_text(json.dumps(
+            {"bus": before, "unit": shown, "restarted": after, "others": pids}, sort_keys=True))
 
     def verify_process(self, current):
         """Live PID1 observation and /proc birth ticks of the exact admitted process."""
@@ -539,6 +588,8 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
         node = Node(image, work, phase)
         try:
             node.cold(fixture, components_dir)
+            if phase == "success":
+                node.verify_bus()
             stage_and_complete(fixture, node, phase, reference)
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)

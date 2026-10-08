@@ -49,6 +49,7 @@ from integration.bus_servers import (
 from nats.js.api import AckPolicy, ConsumerConfig
 from nats.js.errors import APIError
 
+from appliance.boot.bus_environment import bus_environment
 from central.fleet.node_bus_accounts import HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
@@ -56,12 +57,12 @@ from contracts.node_link import (
     MAX_STORED_MESSAGE,
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_MEMORY_MAX,
+    NODE_BUS_PORT,
     NODE_DOMAIN,
     NODE_MAX_CONSUMERS,
     WALL_STREAM,
     WALL_WRITER_USER,
     central_user,
-    node_user,
 )
 from nodeapi.buffers import (
     CIRCULAR,
@@ -190,7 +191,8 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
         websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422, monitor_port=None,
         max_memory_store_bytes=HUB_STORE_BYTES)))
     hub_conf.chmod(0o644)
-    user = node_user(SERIAL)
+    # The environment the handoff stage writes for a Node whose boot origin is the hub's listener.
+    environment = bus_environment(f"http://{hub_name}:8080", SERIAL)
     platform = ("--platform", "linux/arm64")
     try:
         _docker("network", "create", network)
@@ -199,16 +201,15 @@ def _fenced_bus(tmp_path: Path) -> Iterator[tuple[_Bus, str, int, int]]:
         _docker("run", "-d", "--name", hub_name, "--network", network, *platform, "-p", "127.0.0.1::4222",
                 "-v", f"{binary}:{SERVER}:ro", "-v", f"{hub_conf}:/etc/photo-wall/hub.conf:ro",
                 IMAGE, SERVER, "-c", "/etc/photo-wall/hub.conf")
-        # The bus unit's fence: MemoryMax, no swap, GOMEMLIMIT; the store is the server's own heap.
+        # The bus unit's fence: MemoryMax, no swap, and its environment file (GOMEMLIMIT with it);
+        # the store is the server's own heap.
         _docker("run", "-d", "--name", bus.name, "--network", network, *platform, "--cgroupns=private",
                 f"--memory={NODE_BUS_MEMORY_MAX // MIB}m", f"--memory-swap={NODE_BUS_MEMORY_MAX // MIB}m",
-                "-p", "127.0.0.1::4222",
-                "-e", f"GOMEMLIMIT={NODE_BUS_GOMEMLIMIT // MIB}MiB",
-                "-e", f"PHOTO_WALL_BUS_NAME={user}", "-e", "PHOTO_WALL_BUS_PORT=4222",
-                "-e", f"PHOTO_WALL_BUS_LEAF_URL=ws://{user}:{user}@{hub_name}:8080/bus",
+                "-p", f"127.0.0.1::{NODE_BUS_PORT}",
+                *(item for key in sorted(environment) for item in ("-e", f"{key}={environment[key]}")),
                 "-v", f"{binary}:{SERVER}:ro", "-v", f"{NODE_BUS_CONF}:{CONF}:ro",
                 IMAGE, "sh", "-c", SUPERVISOR)
-        hub_port, bus_port = _published(hub_name, 4222), _published(bus.name, 4222)
+        hub_port, bus_port = _published(hub_name, 4222), _published(bus.name, NODE_BUS_PORT)
         _accepts(hub_port, 30, "the hub")
         _accepts(bus_port, 30, "the bus")
         yield bus, hub_name, hub_port, bus_port

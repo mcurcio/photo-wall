@@ -280,7 +280,9 @@ PACKAGES: Final = (
              "uplink/**", "appliance/__init__.py", "appliance/central_session/**", "appliance/feed.py",
              "appliance/feed_socket.py",
              "appliance/health/**", "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
-             "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target")),
+             "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target",
+             # The Node bus: its configuration and its pinned server (E3c).
+             "appliance/bus/**", "scripts/nats_server.py", "scripts/pinned_fetch.py")),
     Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
     Package("bootstrapper-deb", "the bootstrapper .deb", _BOOTSTRAPPER_DEB),
     # The squashfs bakes the bootstrapper .deb, so the bundle reads everything that .deb does;
@@ -291,7 +293,7 @@ PACKAGES: Final = (
              "scripts/build_node_components.py", "scripts/node_component_inputs.py",
              "scripts/node_release_artifacts.py",
              "scripts/build_app_environment.py", "scripts/build_environment_image.py",
-             "scripts/build_node_base_deb.py",
+             "scripts/build_node_base_deb.py", "scripts/nats_server.py", "scripts/pinned_fetch.py",
              "scripts/build_node_display_deb.py", "scripts/build_node_manager_deb.py",
              "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
              "scripts/node_service_probe.py",
@@ -325,7 +327,6 @@ NOT_SHIPPED: Final = (
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
-    "scripts/nats_server.py",  # E3c claims it when the base ships the server
     "nodeapi/**",  # the Node API library; E3b/E3c claim it when the base and the Player bundle it
     "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
     "scripts/node_rollout_image_check.py", "scripts/node_rollout_ci_evidence.py",

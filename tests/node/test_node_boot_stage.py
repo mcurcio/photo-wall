@@ -18,6 +18,7 @@ import pytest
 from support.repo import REPO
 
 from appliance.boot import node_bootstrap as bootstrap
+from appliance.boot.bus_environment import BUS_ENVIRONMENT, bus_environment
 from appliance.host.host_linux import LinuxHostSampler
 from appliance.kernel import boot_stage
 from appliance.kernel.boot_stage import fault_token, read_boot_report, run_stage, write_stage
@@ -236,6 +237,10 @@ def test_host_configuration_is_written_before_the_marker_and_abi_checks(tmp_path
         bootstrap.materialize_handoff(root=tmp_path)
     host = json.loads((tmp_path / "run/photo-wall-node/host.json").read_bytes())
     assert host["offer_id"] == str(selected.offer_id)
+    # The bus's environment is written before the checks too: it needs only the origin and serial.
+    lines = (tmp_path / BUS_ENVIRONMENT).read_text().splitlines()
+    assert dict(line.split("=", 1) for line in lines) == bus_environment(ROOT, selected.serial)
+    assert len(lines) == 4
 
 
 def test_a_stale_handoff_writes_no_host_configuration(tmp_path, monkeypatch):
@@ -246,6 +251,7 @@ def test_a_stale_handoff_writes_no_host_configuration(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="node_boot_handoff_stale"):
         bootstrap.materialize_handoff(root=tmp_path)
     assert not (tmp_path / "run/photo-wall-node").exists()
+    assert not (tmp_path / BUS_ENVIRONMENT).exists()
 
 
 @pytest.mark.parametrize("unit", ["photo-wall-node-handoff.service", "photo-wall-node-prepare.service"])
