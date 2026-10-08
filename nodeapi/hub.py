@@ -15,7 +15,15 @@ every key in an epoch Central has not written. Each put is conditional on Centra
 "absent" in a new epoch. A conflict re-reads the key: Central's own value (an earlier write whose
 acknowledgement was lost) gives Central its token; any other writer's value is adopted as Central's
 for that projection and logged (`document_adopted`), so Central never overwrites it until its
-projection changes again (C16).
+projection changes again (C16). A key the bucket's table does not list (rollout skew), or a value
+past its size, is refused before sending and logged (`document_refused`); every reconcile tries it
+again, so the release that lists it (a new `birth`) gets it. When a bucket's table changes in an
+epoch Central has written, every key Central owns there is put again (an adopted key is left), so a
+shrink never leaves a listed key without its value (§9.2).
+
+The link reconciles when it comes up, when a reader is lost or its stream goes absent, when a new
+`birth` is drained, and when the bus's stream names differ from those its last reconcile listed: a
+line created after it is drained within about 2 s (erratum E-E3B-CC-1).
 
 WallWriter keeps WALL in the hub's wall account: absent (the hub restarted empty), it is created at
 Central's mark + 1 + WALL_MARGIN and every wall document is put again. The mark is recorded after
@@ -46,7 +54,7 @@ from contracts.node_link import (
     Pipe,
 )
 from nodeapi.buffers import BIRTH_KEY, PIPE_KEY, KeyTable, Role, declare, role_of, wall_config
-from nodeapi.documents import ABSENT, Absent, Conflict, DocumentWriter
+from nodeapi.documents import ABSENT, Absent, Conflict, DocumentRefused, DocumentWriter
 from nodeapi.envelope import caller_headers
 from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import Batch, CursorReader, Gap, Read, StreamAbsent
@@ -79,6 +87,7 @@ class DocumentSource(Protocol):
 DRAIN_BATCH: Final = 64
 DRAIN_TIMEOUT_SECONDS: Final = 1.0
 _BACKOFF: Final = (0.1, 2.0)          # first and largest wait while the link is down
+_NAMES_SECONDS: Final = _BACKOFF[1]   # how often a running link lists the bus's stream names
 _REQUEST_SECONDS: Final = 5.0
 _DISCOVER_SECONDS: Final = .5
 _SERVICE_ERROR: Final = "Nats-Service-Error-Code"   # nats.micro's error reply header
@@ -95,6 +104,8 @@ class NodeLink:
         self._jetstream = client.jetstream(domain=NODE_DOMAIN)
         self._readers: dict[str, CursorReader] = {}
         self._state_streams: set[str] = set()
+        self._listed: frozenset[str] = frozenset()        # the names the last reconcile listed
+        self._tables: dict[str, tuple[str, str]] = {}      # desired bucket -> (epoch, table) last asserted against
 
     async def reconcile(self) -> Mapping[str, str]:
         """Stream -> epoch for every events and state stream of this pipe. A cursor whose stream is
@@ -102,7 +113,9 @@ class NodeLink:
         every desired bucket of this pipe is asserted (a no-op for one Central is current in)."""
         epochs: dict[str, str] = {}
         desired: list[str] = []
-        for name in await self._stream_names():
+        names = await self._stream_names()
+        self._listed = frozenset(names)
+        for name in names:
             try:
                 info = await self._jetstream.stream_info(name)
             except NotFoundError:
@@ -134,19 +147,33 @@ class NodeLink:
     async def assert_documents(self, stream: str) -> None:
         """Put each of Central's documents for one desired bucket whose digest differs from Central's
         own last write in the stream's current epoch, conditional on that write's token, or on
-        ABSENT when Central has none in this epoch."""
+        ABSENT when Central has none in this epoch. When the bucket's table differs from the one this
+        link last asserted against in the same epoch, a key Central owns with an unchanged digest is
+        put again too, unless its value is another writer's (adopted). A document the table refuses
+        is not sent: `document_refused` is logged and the next reconcile tries it again."""
         writer = await DocumentWriter.bind(self._client, stream, writer=CENTRAL_WRITER, domain=NODE_DOMAIN)
+        described = (writer.epoch, writer.table.encoded())
+        last = self._tables.get(stream)
+        changed = last is not None and last[0] == described[0] and last[1] != described[1]
         own = await self._store.own_tokens(stream)
         for key, value in (await self._documents.documents(stream)).items():
             digest = _digest(value)
             held = own.get(key)
             if held is not None and held[1].epoch == writer.epoch:
-                if held[0] == digest:
-                    continue
                 expect: Token | Absent = held[1]
+                if held[0] == digest:
+                    if not changed:
+                        continue
+                    found = await writer.read(key)
+                    if found is not None and found.writer != CENTRAL_WRITER:   # adopted: left as it is
+                        continue
             else:
                 expect = ABSENT
-            await self._assert_one(writer, stream, key, value, digest, expect)
+            try:
+                await self._assert_one(writer, stream, key, value, digest, expect)
+            except DocumentRefused as refused:   # rollout skew, or past a shrunk size
+                await self._store.action("document_refused", {"stream": stream, "key": key, "reason": str(refused)})
+        self._tables[stream] = described
 
     async def _assert_one(self, writer: DocumentWriter, stream: str, key: str, value: bytes, digest: str,
                           expect: Token | Absent) -> None:
@@ -171,9 +198,9 @@ class NodeLink:
 
     async def run(self, stop: asyncio.Event) -> None:
         """Reconcile, then drain every stream until `stop` or the client closes. Reconcile again when
-        a batch was `recreated`, a stream went absent, or a new `birth` revision was drained. A
-        store error propagates (Central's process is the thing that failed); a link that is down is
-        retried with backoff."""
+        a batch was `recreated`, a stream went absent, a new `birth` revision was drained, or the
+        bus's stream names changed. A store error propagates (Central's process is the thing that
+        failed); a link that is down is retried with backoff."""
         delay = _BACKOFF[0]
         try:
             while not stop.is_set() and not self._client.is_closed:
@@ -189,20 +216,33 @@ class NodeLink:
                     await _pause(stop, _BACKOFF[1])
                     continue
                 again = asyncio.Event()
-                drains = [asyncio.create_task(self._drain(stream, reader, stop, again))
+                drains = [asyncio.create_task(self._follow(stream, reader, stop, again))
                           for stream, reader in self._readers.items()]
+                looking = asyncio.create_task(self._look(stop, again))
                 try:
                     await asyncio.gather(*drains)
                 finally:
-                    for drain in drains:
-                        drain.cancel()
-                    await asyncio.gather(*drains, return_exceptions=True)
+                    for task in (*drains, looking):
+                        task.cancel()
+                    await asyncio.gather(*drains, looking, return_exceptions=True)
         finally:
             if not self._client.is_closed:
                 for reader in self._readers.values():
                     await reader.close()
 
-    async def _drain(self, stream: str, reader: CursorReader, stop: asyncio.Event, again: asyncio.Event) -> None:
+    async def _look(self, stop: asyncio.Event, again: asyncio.Event) -> None:
+        """Set `again` once the bus's stream names differ from those the last reconcile listed: a line
+        applied after it. Polled (one bounded STREAM.NAMES reply), since nothing on the Node may send
+        toward the hub (erratum E-E3B-CC-1)."""
+        while not stop.is_set() and not again.is_set():
+            await _pause(stop, _NAMES_SECONDS)
+            try:
+                if frozenset(await self._stream_names()) != self._listed:
+                    again.set()
+            except (nats.errors.Error, asyncio.TimeoutError) as error:   # the drains see the link down too
+                log.info("names: %r", error)
+
+    async def _follow(self, stream: str, reader: CursorReader, stop: asyncio.Event, again: asyncio.Event) -> None:
         """Read and commit until `stop` or `again`; each read finishes with its commit, so a reader
         never stands past what the store holds except across a store error."""
         committed, delay = reader.cursor, _BACKOFF[0]

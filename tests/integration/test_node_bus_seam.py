@@ -1,7 +1,8 @@
 """The Node bus seam on real servers (E3a): the WebSocket leaf, a method across it, same-domain
-isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket, a counted gap and hub
-reload (E3a-2; Central's drain, its consumer loss, a leaf drop, a crash mid-drain, a kill -9 of the
-Node's bus and the hub's restart with an empty store are test_node_bus_api.py's tracer); the leaf through
+isolation, the wall-wide mirror (E3a-1); a conditional write into a Node bucket and hub reload (E3a-2;
+counted gaps are test_node_bus_api_recovery.py's; Central's drain, its consumer loss, a leaf drop, a
+crash mid-drain, a kill -9 of the Node's bus and the hub's restart with an empty store are
+test_node_bus_api.py's tracer); the leaf through
 a path-prefix proxy (E-W1-TD-S4) and the upstream reload bug's tripwire (E-W1-TD-S3); the leaf's
 subject contract, nothing a `nodeapi` program does crossing toward a stalled hub, and the mirror's
 flow control crossing it (E-W1-LEAF-1). Every stream, bucket and mirror is built by `nodeapi.buffers`
@@ -23,7 +24,6 @@ import pytest
 from integration.bus_servers import (
     BusServer,
     PrefixProxy,
-    Recorder,
     central,
     declare_bucket,
     declare_wall,
@@ -37,7 +37,7 @@ from integration.bus_servers import (
     wall_value,
     wall_writer,
 )
-from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, DiscardPolicy, RetentionPolicy
+from nats.js.api import AckPolicy, ConsumerConfig, DiscardPolicy, RetentionPolicy
 from nats.js.errors import APIError, NoStreamResponseError
 
 from contracts.node_link import (
@@ -51,7 +51,6 @@ from contracts.node_link import (
 )
 from nodeapi.buffers import HEADER_ALLOWANCE, KeyTable, declare, desired_bucket, event_buffer
 from nodeapi.documents import ABSENT, Conflict, DocumentWriter
-from nodeapi.epoch import Token, epoch_of
 from nodeapi.pull import pull
 
 VALUE_TOO_LARGE = 10054   # JSStreamMessageExceedsMaximumErr: past the stream's max_msg_size
@@ -346,9 +345,6 @@ def test_one_wall_write_reaches_every_node_mirror_and_the_mirror_is_read_only(tm
 # E3a-2: Central's client role on a Node's objects, and the hub's lifecycle.
 
 BUCKET = "desired_player"   # the player line's desired bucket
-CONSUMER = ConsumerConfig(durable_name="central", ack_policy=AckPolicy.EXPLICIT, ack_wait=2,
-                          deliver_policy=DeliverPolicy.ALL)
-IDLE_SECONDS = 3.0   # longer than the ack wait, so an idle fetch means nothing is left to redeliver
 
 
 MIB = 1024 * 1024
@@ -526,34 +522,6 @@ def test_the_wall_mirror_carries_more_than_its_flow_control_window(tmp_path):
         hub.stop()
 
 
-async def _drain(client, stream: str, recorder: Recorder) -> None:
-    """Central's durable read of a Node stream: commit each message, then acknowledge it.
-
-    The cursor is (epoch, seq) (E-W1-TD-5): sequences of another creation of the stream are another
-    epoch's rows, and a new creation's cursor starts at its origin. A delivered sequence past the
-    last recorded one is a gap only for the part the stream no longer holds (below its first_seq);
-    later sequences can still arrive as redeliveries. The gap row is recorded before the message
-    that revealed it. Returns once a pull longer than the ack wait finds nothing, so every unacknowledged delivery
-    has come back. Pulls go through nodeapi's capped pull."""
-    jetstream = client.jetstream(domain=NODE_DOMAIN)
-    await jetstream.add_consumer(stream, CONSUMER)
-    info = await jetstream.stream_info(stream)
-    epoch, origin = epoch_of(info), info.config.first_seq
-    while messages := (await pull(client, stream, CONSUMER.durable_name, 10, timeout=IDLE_SECONDS,
-                                  domain=NODE_DOMAIN)).messages:
-        for message in messages:
-            sequence = message.metadata.sequence.stream
-            highest = max([origin - 1, *recorder.sequences(epoch),
-                           *(first + count - 1 for first, count in recorder.gaps(epoch))])
-            if sequence > highest + 1:
-                first_held = (await jetstream.stream_info(stream)).state.first_seq
-                missing = min(first_held, sequence) - highest - 1
-                if missing > 0:
-                    recorder.gap(epoch, highest + 1, missing)
-            recorder.commit(Token(epoch, sequence), message.data)
-            await message.ack_sync()
-
-
 def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
@@ -607,53 +575,6 @@ def test_central_conditionally_updates_a_node_bucket_across_the_leaf(tmp_path):
         await watcher.stop()
         await node_client.close()
         await central_client.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        node.stop()
-        hub.stop()
-
-
-def test_a_buffer_that_overflows_while_central_is_away_reaches_central_as_a_counted_gap(tmp_path):
-    hub = hub_server(tmp_path, ["serial-a"])
-    node = node_server(tmp_path, "serial-a", hub)
-    hub.start()
-    node.start()
-    recorder = Recorder(tmp_path / "record")
-
-    async def run():
-        await _linked(hub, 1)
-        node_client = await local(node)
-        jetstream = node_client.jetstream()
-        stream = "OBSERVATION_health"
-        await declare(jetstream, event_buffer("health", "observation", 16 * 1024))
-
-        async def write(index: int) -> None:
-            await jetstream.publish("health.observation.reading", f"reading-{index:04}".encode())
-        for index in range(10):
-            await write(index)
-        origin = (await jetstream.stream_info(stream)).config.first_seq
-        central_client = await central(hub, "serial-a")
-        await _drain(central_client, stream, recorder)
-        await central_client.close()
-        assert recorder.sequences() == list(range(origin, origin + 10))
-
-        # Central is away: the Node keeps writing, every write accepted, the oldest discarded.
-        for index in range(10, 1010):
-            await write(index)
-        state = (await jetstream.stream_info(stream)).state
-        assert state.last_seq == origin + 1009 and state.first_seq > origin + 10
-
-        central_client = await central(hub, "serial-a")
-        await _drain(central_client, stream, recorder)
-        await central_client.close()
-        rows = recorder.rows()
-        assert rows[:10] == [("seq", sequence, 0) for sequence in range(origin, origin + 10)]
-        assert rows[10] == ("gap", origin + 10, state.first_seq - origin - 10)
-        assert recorder.gaps() == [(origin + 10, state.first_seq - origin - 10)]
-        assert recorder.sequences()[10:] == list(range(state.first_seq, state.last_seq + 1))
-        await node_client.close()
 
     try:
         asyncio.run(run())

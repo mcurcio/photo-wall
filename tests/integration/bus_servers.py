@@ -408,49 +408,6 @@ async def wall_value(node_client: Client, subject: str) -> bytes | None:
     return message.data
 
 
-@dataclass
-class Recorder:
-    """Central's commit, an append-only file: one row per committed message or counted gap, each
-    under the epoch of the stream creation it was read from (a cursor is (epoch, seq), E-W1-TD-5)."""
-    path: Path
-
-    def commit(self, token: Token, payload: bytes) -> None:
-        self._append(f"seq {token.epoch} {token.seq} {payload.hex()}")
-
-    def gap(self, epoch: str, first: int, count: int) -> None:
-        self._append(f"gap {epoch} {first} {count}")
-
-    def rows(self, epoch: str | None = None) -> list[tuple[str, int, int]]:
-        """("seq", sequence, 0) and ("gap", first missing, count) rows of one epoch (all epochs when
-        None), in commit order."""
-        if not self.path.exists():
-            return []
-        rows = []
-        for line in self.path.read_text().splitlines():
-            kind, row_epoch, first, rest = line.split(" ")
-            if epoch is None or row_epoch == epoch:
-                rows.append((kind, int(first), int(rest) if kind == "gap" else 0))
-        return rows
-
-    def epochs(self) -> list[str]:
-        """Every epoch with a row, in first-commit order."""
-        if not self.path.exists():
-            return []
-        return list(dict.fromkeys(line.split(" ")[1] for line in self.path.read_text().splitlines()))
-
-    def sequences(self, epoch: str | None = None) -> list[int]:
-        return [first for kind, first, _ in self.rows(epoch) if kind == "seq"]
-
-    def gaps(self, epoch: str | None = None) -> list[tuple[int, int]]:
-        return [(first, count) for kind, first, count in self.rows(epoch) if kind == "gap"]
-
-    def _append(self, row: str) -> None:
-        with self.path.open("a") as record:
-            record.write(row + "\n")
-            record.flush()
-            os.fsync(record.fileno())
-
-
 class LinkStoreCrash(Exception):
     """Central's process dies mid-transaction: the transaction never happened."""
 

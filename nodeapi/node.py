@@ -13,7 +13,9 @@ data (§9.5, erratum E-E3B-R2-4).
 
 The handles never wait on the bus: `Events.emit` enqueues into a bounded outbox (full, it drops its
 oldest) whose events carry headers built once at the emit, so a retried publish keeps its message id
-and the server dedupes it; `State.put` keeps the latest value per key and publishes it. Both publish
+and the server dedupes it. Every attach puts state `outbox` = {"dropped": n}, the events the outbox
+dropped since the session started, so a loss on the Node reaches Central as one counted row (§11
+"outbox full"). `State.put` keeps the latest value per key and publishes it. Both publish
 only while attached, in order, retrying until the bus acknowledges. Each handled method call emits
 `<line>.record.call` naming its caller. The raw client is never exposed.
 
@@ -123,6 +125,7 @@ class NodeSession:
         self._component, self._slice, self._url = component, slice_, url
         self._lock = threading.Lock()
         self._outbox: deque[tuple[str, bytes, dict[str, str]]] = deque(maxlen=OUTBOX_MESSAGES)
+        self._dropped = 0                   # events the full outbox dropped, never published
         self._held: dict[str, bytes] = {}
         self._lines: dict[str, Slice] = {}  # line -> the slice `apply_line` handed over, applied at every attach
         self._dirty: dict[str, None] = {}   # state keys put and not yet acknowledged, in put order
@@ -284,7 +287,8 @@ class NodeSession:
             await declare(self._jetstream, wall_mirror_config())   # create only, never updated (§10)
         with self._lock:
             held = dict(self._held)
-        for key, value in {**held, BIRTH_KEY: self._birth}.items():
+            dropped = json.dumps({"dropped": self._dropped}, separators=(",", ":")).encode()
+        for key, value in {**held, OUTBOX_KEY: dropped, BIRTH_KEY: self._birth}.items():
             await self._jetstream.publish(self._state_prefix + key, value, timeout=_PUBLISH_SECONDS)
             self._done((self._state_prefix + key, value, None))   # a pending put of this value is made
         if self._service_config is not None and self._service is None:
@@ -403,6 +407,8 @@ class NodeSession:
                     self._dirty.pop(key, None)
             elif self._outbox and self._outbox[0] is item:
                 self._outbox.popleft()
+            else:   # dropped by a full outbox while its publish was in flight: published, not lost
+                self._dropped -= 1
 
     # The handles' side, on any thread.
 
@@ -422,7 +428,9 @@ class NodeSession:
         if len(payload) + header_bytes(headers) > self._configs[stream].max_msg_size:
             raise ValueError("event_too_large")
         with self._lock:
-            self._outbox.append((full, bytes(payload), headers))   # full: drops the oldest (S6 counts it)
+            if len(self._outbox) == OUTBOX_MESSAGES:   # full: the append drops the oldest
+                self._dropped += 1
+            self._outbox.append((full, bytes(payload), headers))
         self._notify()
 
     def _put(self, key: str, value: bytes) -> None:

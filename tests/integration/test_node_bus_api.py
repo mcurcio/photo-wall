@@ -463,12 +463,7 @@ def test_the_node_api_tracer(tmp_path):
             assert len(held) == NODE_MAX_STREAMS, others
             assert sum(info.config.max_bytes for info in held.values()) == sum(
                 line.max_bytes for line in STORE_LINES.values()) + WALL_STREAM_BYTES == 11 * MIB + MIB // 2
-            # Central's link comes up again (E3d's supervisor) and finds the new lines: a line created
-            # after a link's reconcile is found only at the next one (erratum E-E3B-S4-1).
-            stop.set()
-            await asyncio.wait_for(running, 15)
-            stop = asyncio.Event()
-            running = asyncio.create_task(NodeLink(client, Pipe.FLEET, store, projection).run(stop))
+            # Central's running link finds the new lines by the bus's stream names (erratum E-E3B-CC-1).
 
             # The health component (no session in the tracer: the test plays it) fills its line:
             # observations past their cap, every state key and document at its largest, `history` times.
