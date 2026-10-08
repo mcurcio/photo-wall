@@ -15,7 +15,8 @@ runs from before any line exists and finds each by the bus's stream names (errat
 Losses: an event buffer that overflows while Central's link is away is one gap row with the exact
 count, then every held event once; state written faster than the link drains is counted gap rows and
 every key's latest value; an outbox that overflows while the bus is down is state `outbox` =
-{"dropped": n} and the newest events once each. Rollout skew: a projected key the display release's
+{"dropped": n} and the newest events once each, and one that overflows while attached reaches Central
+as the same count without a reattach. Rollout skew: a projected key the display release's
 table lacks is never sent and is logged, then written once a release lists it. A table change in one
 epoch has Central put every key it owns again.
 """
@@ -514,6 +515,47 @@ def test_an_outbox_that_overflows_while_the_bus_is_down_is_counted_in_state(tmp_
             assert outbox == [{"dropped": 100}]
             assert [row["data"] for row in events] == emitted[100:]
             assert len({row["message_id"] for row in events}) == OUTBOX_MESSAGES
+
+    asyncio.run(run())
+
+
+def test_an_outbox_that_overflows_while_attached_is_counted_in_state(tmp_path):
+    display = line_slices()["display"]
+    records = display.buffers[0]
+    emitted = [f"event-{index:05}".encode() for index in range(OUTBOX_MESSAGES + 100)]
+    # The buffer holds every event the outbox keeps, so only the outbox can lose one.
+    charge = message_charge("display.record.shown", len(emitted[0]), header_bytes(event_headers(1)))
+    assert charge * OUTBOX_MESSAGES <= records.max_bytes
+
+    async def run():
+        async with _bed(tmp_path) as bed:
+            bed.link()
+            session = bed.session(display)
+            assert await asyncio.to_thread(session.wait_attached, 15)
+            epoch = {name: epoch_of(await bed.jetstream.stream_info(name)) for name in (DISPLAY_RECORDS, DISPLAY_STATE)}
+            await bed.drained(DISPLAY_STATE, "Central records the session's birth")
+            outboxes = [row for row in bed.store.records(DISPLAY_STATE) if row["subject"].endswith(".outbox")]
+            assert [json.loads(row["data"]) for row in outboxes] == [{"dropped": 0}]
+
+            # The bus hangs with its connections kept (no reattach); the session overflows its outbox.
+            bed.node.pause()
+            try:
+                for body in emitted:
+                    session.events.emit("record.shown", body, schema_major=1)
+            finally:
+                bed.node.resume()
+
+            async def counted():
+                events = [row for row in bed.store.records(DISPLAY_RECORDS) if row["epoch"] == epoch[DISPLAY_RECORDS]]
+                outbox = [json.loads(row["data"]) for row in bed.store.records(DISPLAY_STATE)
+                          if row["subject"].endswith(".outbox")]
+                return outbox[-1] if outbox[-1]["dropped"] + len(events) == len(emitted) else None
+            outbox = await until(counted, 30, "Central's newest outbox count and records add up to every event")
+            # One event may have been in flight when the outbox dropped it, then acknowledged (E-E3B-S6-2 a).
+            assert outbox["dropped"] >= 99
+            births = [row for row in bed.store.records(DISPLAY_STATE)
+                      if row["subject"].endswith(".birth") and row["epoch"] == epoch[DISPLAY_STATE]]
+            assert len(births) == 1, "the session never reattached"
 
     asyncio.run(run())
 

@@ -13,10 +13,11 @@ data (§9.5, erratum E-E3B-R2-4).
 
 The handles never wait on the bus: `Events.emit` enqueues into a bounded outbox (full, it drops its
 oldest) whose events carry headers built once at the emit, so a retried publish keeps its message id
-and the server dedupes it. Every attach puts state `outbox` = {"dropped": n}, the events the outbox
-dropped since the session started, so a loss on the Node reaches Central as one counted row (§11
-"outbox full"). `State.put` keeps the latest value per key and publishes it. Both publish
-only while attached, in order, retrying until the bus acknowledges. Each handled method call emits
+and the server dedupes it. The session holds state `outbox` = {"dropped": n}, the events the outbox
+dropped since the session started, re-held whenever n changes and published once the outbox is empty,
+so a loss on the Node reaches Central as one counted row (§11 "outbox full"; erratum E-E3B-FR3).
+`State.put` keeps the latest value per key and publishes it. Both publish only while attached, in
+order, retrying until the bus acknowledges; every attach re-puts the held state. Each handled method call emits
 `<line>.record.call` naming its caller. The raw client is never exposed.
 
 Two read-only views follow their streams through a cursor reader that starts at each key's latest
@@ -129,6 +130,7 @@ class NodeSession:
         self._held: dict[str, bytes] = {}
         self._lines: dict[str, Slice] = {}  # line -> the slice `apply_line` handed over, applied at every attach
         self._dirty: dict[str, None] = {}   # state keys put and not yet acknowledged, in put order
+        self._count_dropped(0)
         self._attached = threading.Event()
         self._stop_requested = False
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -287,8 +289,7 @@ class NodeSession:
             await declare(self._jetstream, wall_mirror_config())   # create only, never updated (§10)
         with self._lock:
             held = dict(self._held)
-            dropped = json.dumps({"dropped": self._dropped}, separators=(",", ":")).encode()
-        for key, value in {**held, OUTBOX_KEY: dropped, BIRTH_KEY: self._birth}.items():
+        for key, value in {**held, BIRTH_KEY: self._birth}.items():
             await self._jetstream.publish(self._state_prefix + key, value, timeout=_PUBLISH_SECONDS)
             self._done((self._state_prefix + key, value, None))   # a pending put of this value is made
         if self._service_config is not None and self._service is None:
@@ -393,8 +394,9 @@ class NodeSession:
 
     def _next(self) -> tuple[str, bytes, dict[str, str] | None] | None:
         with self._lock:
-            if self._dirty:
-                key = next(iter(self._dirty))
+            # The drop count waits for the outbox to empty, so an overflow costs no event throughput.
+            key = next((key for key in self._dirty if key != OUTBOX_KEY or not self._outbox), None)
+            if key is not None:
                 return self._state_prefix + key, self._held[key], None
             return self._outbox[0] if self._outbox else None
 
@@ -408,7 +410,13 @@ class NodeSession:
             elif self._outbox and self._outbox[0] is item:
                 self._outbox.popleft()
             else:   # dropped by a full outbox while its publish was in flight: published, not lost
-                self._dropped -= 1
+                self._count_dropped(-1)
+
+    def _count_dropped(self, change: int) -> None:
+        """Change the drop count and hold it as dirty state `outbox`; the caller holds the lock."""
+        self._dropped += change
+        self._held[OUTBOX_KEY] = json.dumps({"dropped": self._dropped}, separators=(",", ":")).encode()
+        self._dirty[OUTBOX_KEY] = None
 
     # The handles' side, on any thread.
 
@@ -429,7 +437,7 @@ class NodeSession:
             raise ValueError("event_too_large")
         with self._lock:
             if len(self._outbox) == OUTBOX_MESSAGES:   # full: the append drops the oldest
-                self._dropped += 1
+                self._count_dropped(1)
             self._outbox.append((full, bytes(payload), headers))
         self._notify()
 
