@@ -109,7 +109,7 @@ async def _await_interest(client, subject: str) -> None:
 def test_central_calls_a_node_service_across_the_websocket_leaf(tmp_path):
     hub = hub_server(tmp_path, ["serial-a"])
     node = node_server(tmp_path, "serial-a", hub)
-    assert node.environment["PHOTO_WALL_BUS_LEAF_URL"].startswith("ws://node-")
+    assert node.environment["PHOTO_WALL_BUS_LEAF_URL"].startswith('"ws://node-')
     hub.start()
     node.start()
 

@@ -25,8 +25,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 from integration.bus_servers import (
+    NODE_BUS_CONF,
     BusServer,
     PrefixProxy,
+    _free_port,
     _port_of,
     central,
     hub_server,
@@ -35,7 +37,9 @@ from integration.bus_servers import (
     until,
 )
 from node_pid1_bus_probe import server_info
+from systemd_environment import read_environment_file
 
+from appliance.boot.bus_environment import bus_environment, write_bus_environment
 from contracts.node_link import LEAF_PATH, NODE_DOMAIN, account_id, node_user
 
 SERIAL = "serial-origin"
@@ -78,6 +82,43 @@ def test_a_node_bus_dials_a_default_port_origin_at_that_port(tmp_path, origin, p
                 return dialled.search(log.read_text(errors="replace"))
             await until(tried, 10, f"the Node's leaf dialling 127.0.0.1:{port}")
             assert ":7422" not in log.read_text(errors="replace")
+        finally:
+            node.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("origin", "dialled"), [
+    ("http://central.invalid", "central.invalid:80"),
+    ("https://central.invalid:8443", "central.invalid:8443"),
+    ("http://127.0.0.1:8080", "127.0.0.1:8080"),
+    ("https://127.0.0.1", "127.0.0.1:443"),
+    ("http://[fd00::5]:8080", "[fd00::5]:8080"),
+    ("https://[fd00::5]", "[fd00::5]:443"),
+])
+def test_the_shipped_conf_starts_on_every_origin_shape_through_the_environment_file(
+        tmp_path, origin, dialled):
+    """Every origin shape uplink accepts (hostname, IPv4, IPv6; default and explicit port) goes
+    through write_bus_environment, is read as systemd reads the unit's EnvironmentFile, and the
+    shipped conf starts on it and dials the origin: nats-server parses a `$VAR`'s value as config,
+    so an unquoted IPv6 URL ended the urls array and the bus exited 1 on every start (E-E3C-S1-5).
+    Only the client port is replaced by a free one."""
+    environment = read_environment_file(write_bus_environment(tmp_path, origin, SERIAL))
+    assert environment == bus_environment(origin, SERIAL)
+    port = _free_port()
+    config = tmp_path / "node-bus.conf"
+    config.write_bytes(NODE_BUS_CONF.read_bytes())
+    node = BusServer(name=f"node on {origin}", config=config, client_url=f"nats://127.0.0.1:{port}",
+                     environment={**environment, "PHOTO_WALL_BUS_PORT": str(port)})
+    log = config.with_suffix(".log")
+
+    async def run():
+        node.start()
+        try:
+            async def tried():
+                return dialled in log.read_text(errors="replace")
+            await until(tried, 10, f"the Node's leaf dialling {dialled}")
+            assert server_info(port)["server_name"] == node_user(SERIAL)
         finally:
             node.stop()
 

@@ -37,8 +37,9 @@ from typing import TYPE_CHECKING
 import nats
 import pytest
 from nats.js.errors import NotFoundError
+from systemd_environment import read_environment_file
 
-from appliance.boot.bus_environment import bus_environment
+from appliance.boot.bus_environment import write_bus_environment
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
@@ -349,7 +350,8 @@ def node_server(tmp: Path, serial: str, hub: BusServer, *, leaf_port: int | None
                 scheme: str = "http", host: str = "127.0.0.1", origin: str | None = None,
                 extra_environment: Mapping[str, str] | None = None) -> BusServer:
     """A Node on the shipped configuration file whose environment is the one its handoff stage
-    writes, `bus_environment(f"{scheme}://{host}:{port}", serial)` with `port` the hub's WebSocket
+    writes, `write_bus_environment(…, f"{scheme}://{host}:{port}", serial)` read as systemd reads
+    the unit's EnvironmentFile, with `port` the hub's WebSocket
     port or `leaf_port` (a proxy in front of it), so every harness Node exercises the real
     derivation: its leaf at LEAF_PATH, ws:// for http and wss:// for https. Only
     PHOTO_WALL_BUS_PORT is replaced, by a free port (NODE_BUS_PORT cannot be shared by servers
@@ -362,7 +364,7 @@ def node_server(tmp: Path, serial: str, hub: BusServer, *, leaf_port: int | None
     shutil.copyfile(NODE_BUS_CONF, config)
     port = _free_port()
     origin = origin or f"{scheme}://{host}:{leaf_port or hub.websocket_port}"
-    environment = {**bus_environment(origin, serial),
+    environment = {**read_environment_file(write_bus_environment(directory, origin, serial)),
                    "PHOTO_WALL_BUS_PORT": str(port), **(extra_environment or {})}
     return BusServer(name=f"node {serial}", config=config,
                      client_url=f"nats://127.0.0.1:{port}", environment=environment)
