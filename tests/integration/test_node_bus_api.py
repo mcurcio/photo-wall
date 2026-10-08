@@ -49,6 +49,7 @@ from nats.js.errors import NotFoundError
 
 from contracts.node_link import (
     CENTRAL_WRITER,
+    LEAF_PATH,
     NODE_DOMAIN,
     NODE_MAX_STREAMS,
     STORE_LINES,
@@ -73,7 +74,6 @@ from nodeapi.node import MethodCall, NodeSession, Release
 from nodeapi.pull import ConsumerLost, CursorReader, Gap, Pulled, Read, StartAt, StreamAbsent, pull
 
 SERIAL = "serial-a"
-LEAF_PREFIX = "photo-wall/bus"
 KIB = 1024
 RECORDS = "RECORD_display"
 STATE = "KV_state_display"
@@ -146,8 +146,8 @@ async def _walled(session: NodeSession, value: bytes, seconds: float = 15) -> No
 
 def test_the_node_api_tracer(tmp_path):
     hub = hub_server(tmp_path, [SERIAL])
-    proxy = PrefixProxy(hub.websocket_port, LEAF_PREFIX)
-    node = node_server(tmp_path, SERIAL, hub, prefix=LEAF_PREFIX, leaf_port=proxy.port)
+    proxy = PrefixProxy(hub.websocket_port, LEAF_PATH)
+    node = node_server(tmp_path, SERIAL, hub, leaf_port=proxy.port)
     slice_ = _display_slice()
     callers: list[str] = []
 

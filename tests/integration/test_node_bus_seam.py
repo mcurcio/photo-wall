@@ -42,6 +42,7 @@ from nats.js.errors import APIError, NoStreamResponseError
 
 from contracts.node_link import (
     CENTRAL_WRITER,
+    LEAF_PATH,
     MAX_STORED_MESSAGE,
     NODE_DOMAIN,
     NODE_MAX_PAYLOAD,
@@ -54,7 +55,6 @@ from nodeapi.documents import ABSENT, Conflict, DocumentWriter
 from nodeapi.pull import pull
 
 VALUE_TOO_LARGE = 10054   # JSStreamMessageExceedsMaximumErr: past the stream's max_msg_size
-LEAF_PREFIX = "photo-wall/bus"   # the test's path prefix; the production route is E3d/E4's
 
 SERVICE = "probe"
 ENDPOINT = "probe.method.echo"   # a component's methods are `<component>.method.<name>` (C4)
@@ -108,7 +108,7 @@ async def _await_interest(client, subject: str) -> None:
 
 def test_central_calls_a_node_service_across_the_websocket_leaf(tmp_path):
     hub = hub_server(tmp_path, ["serial-a"])
-    node = node_server(tmp_path, "serial-a", hub, prefix=LEAF_PREFIX)
+    node = node_server(tmp_path, "serial-a", hub)
     assert node.environment["PHOTO_WALL_BUS_LEAF_URL"].startswith("ws://node-")
     hub.start()
     node.start()
@@ -664,9 +664,9 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
     # only its path prefix stands in for it. A method, a Central read of the largest stored message
     # and a wall mirror all cross it (E-W1-TD-S4).
     hub = hub_server(tmp_path, ["serial-a"])
-    proxy = PrefixProxy(hub.websocket_port, LEAF_PREFIX)
-    node = node_server(tmp_path, "serial-a", hub, prefix=LEAF_PREFIX, leaf_port=proxy.port)
-    assert f":{proxy.port}/{LEAF_PREFIX}" in node.environment["PHOTO_WALL_BUS_LEAF_URL"]
+    proxy = PrefixProxy(hub.websocket_port, LEAF_PATH)
+    node = node_server(tmp_path, "serial-a", hub, leaf_port=proxy.port)
+    assert f":{proxy.port}/{LEAF_PATH}" in node.environment["PHOTO_WALL_BUS_LEAF_URL"]
     hub.start()
 
     async def run():
@@ -674,7 +674,7 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
         node.start()
         try:
             await _linked(hub, 1)
-            assert proxy.paths == [f"/{LEAF_PREFIX}/leafnode"]
+            assert proxy.paths == [f"/{LEAF_PATH}/leafnode"]
             node_client = await local(node)
             central_client = await central(hub, "serial-a")
             await _serve(node_client, b"node-a")
@@ -693,7 +693,7 @@ def test_the_leaf_links_through_a_path_prefix_proxy(tmp_path):
             await declare_wall_mirror(node_client)
             await writer.jetstream().publish("wall.timing", b"through-the-proxy")
             await _holds(node, {"wall.timing": b"through-the-proxy"}, 10)
-            assert len(leaf_connections(hub)) == 1 and proxy.paths == [f"/{LEAF_PREFIX}/leafnode"]
+            assert len(leaf_connections(hub)) == 1 and proxy.paths == [f"/{LEAF_PATH}/leafnode"]
             for client in (writer, central_client, node_client):
                 await client.close()
         finally:
