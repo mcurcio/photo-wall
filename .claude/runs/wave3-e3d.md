@@ -559,7 +559,7 @@ Appended to `.claude/errata.md` with this brief: E-E3D-CUT-1 … E-E3D-CUT-9 (fu
 - **CUT-8** `NodeLink.discover` is never invoked (§9.1 shows it at every reconcile; `NodeLink.run` does not call it). Left to E5, the first method caller; presence is leaf state only.
 - **CUT-9** `Database`'s pool refuses waiters past twice its size (`central/db.py:63-69`); dozens of drains committing at once through `to_thread` would exceed it and end the worker in normal operation. The bus side gets its own `Database` and a store gate (`LINK_STORE_CONCURRENCY`).
 
-Recorded by the slices (here, not in `.claude/errata.md`):
+Recorded by the slices (full text also appended to `.claude/errata.md`):
 
 - **E-E3D-S0-1** (implementer, S0, 2026-10-08): the count can over-count by one per bus hang longer than `_PUBLISH_SECONDS` (2 s). The publisher never retries an in-flight event the full outbox dropped meanwhile (its next `_next()` takes the new head), so when that publish times out `_done` never takes it back, yet the hung server may still store it on resume: Central then records it and counts it lost. Pre-existing (E-E3B-S6-2 a); not normal operation (hang plus overflow); no change in S0. The new test's hang is the emit loop only (well under 2 s) and observed `{"dropped": 99}`: the take-back path ran.
 - **E-E3D-S0-2** (implementer, S0, 2026-10-08): `State.get("outbox")` now returns the held count (before: None), since the count is ordinary held state. No caller reads it; `State.put` still refuses the key.
