@@ -16,7 +16,7 @@ from node_pid1_bus_probe import host_state
 from support.repo import REPO
 
 from appliance.host.bus import HOST_SLICE, host_session
-from scripts.build_node_base_deb import POLICIES, stage_package
+from scripts.build_node_base_deb import BUS_DIRECTORY, POLICIES, stage_package
 from scripts.module_closure import isolated_import
 
 SERIAL = "serial-h"
@@ -83,3 +83,15 @@ def test_the_staged_host_core_imports_nats_and_nodeapi_from_its_own_directory(tm
     report = isolated_import(tmp_path / "package/usr/lib/photo-wall-host-core",
                              ["nats", "nodeapi.node", "appliance.host.bus"], policy=POLICIES["host-core"])
     assert report.imported == ("nats", "nodeapi.node", "appliance.host.bus") and not report.unavailable
+
+
+def test_the_staged_base_ships_the_bus_servers_licence_beside_it(tmp_path, tmp_path_factory):
+    # nats-server is third-party Apache-2.0 code: the base carries its licence wherever it carries the
+    # binary, as the vendored wheel's dist-info carries nats-py's (erratum E-E3C-S1-4).
+    nats_server_binary()
+    downloads = tmp_path_factory.getbasetemp().parent / "downloads"
+    stage_package(REPO, tmp_path / "package", downloads)
+    bus = tmp_path / "package" / BUS_DIRECTORY
+    assert (bus / "nats-server").is_file()
+    licence = (bus / "LICENSE").read_text()
+    assert licence.split()[:4] == ["Apache", "License", "Version", "2.0,"], licence[:200]

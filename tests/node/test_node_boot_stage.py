@@ -358,7 +358,7 @@ def test_the_runner_reuses_the_last_failed_units_read_and_sends_none_before_any(
 SLICES = {"hostcore": "photowallhostcore", "base": "photowallbase", "preparation": "photowallpreparation",
           "app": "photowallapp"}
 DISPLAY = "photowallbase.slice/photo-wall-display.service"
-BUS = "system.slice/photo-wall-bus.service"
+BUS = "photowallbus.slice"
 
 
 def _memory(tmp_path, controllers="cpu io memory pids\n", cma=True):
@@ -379,6 +379,10 @@ def _memory(tmp_path, controllers="cpu io memory pids\n", cma=True):
     (cgroup / BUS).mkdir(parents=True)
     (cgroup / BUS / "memory.peak").write_text("1005\n")
     (cgroup / BUS / "memory.events").write_text("oom 4\noom_kill 4\n")
+    # The unit's own cgroup, recreated by PID1 at the restart after each kill: never read.
+    (cgroup / BUS / "photo-wall-bus.service").mkdir()
+    (cgroup / BUS / "photo-wall-bus.service/memory.peak").write_text("7\n")
+    (cgroup / BUS / "photo-wall-bus.service/memory.events").write_text("oom 0\noom_kill 0\n")
     return LinuxHostSampler(proc, tmp_path, sys_root), cgroup
 
 
@@ -402,11 +406,12 @@ def test_the_display_peak_is_read_from_the_display_units_own_slice():
     assert DISPLAY == f"{unit['Service']['Slice'][-1]}/photo-wall-display.service"
 
 
-def test_the_bus_is_read_from_system_slice():
-    # photo-wall-bus.service names no Slice=, so systemd places it in system.slice.
+def test_the_bus_is_read_from_its_own_persistent_slice():
+    # photo-wall-bus.service's Slice= is the bus slice, whose counters outlive the unit's restarts
+    # (erratum E-E3C-S5-3), so a move back to system.slice is caught.
     from test_netboot_liveness import _parse_unit
     unit = _parse_unit((REPO / "appliance/systemd/photo-wall-bus.service").read_text())
-    assert "Slice" not in unit["Service"] and BUS == "system.slice/photo-wall-bus.service"
+    assert unit["Service"]["Slice"] == [BUS]
 
 
 @pytest.mark.parametrize("controllers", ["cpu io pids\n", None])

@@ -1,5 +1,5 @@
 """The Node bus as a local client and the kernel see it (E3c): run by the node-pid1 `success` leg
-inside the PID1 container (`python3 -I -B node_pid1_bus_probe.py info|birth 4222`) and imported by
+inside the PID1 container (`python3 -I -B node_pid1_bus_probe.py info|birth|fill 4222`) and imported by
 the bus integration tests. Stdlib only at import.
 
 `info` prints {"server_name", "jetstream", "listen"}: the server's own INFO line from
@@ -8,6 +8,10 @@ the bus integration tests. Stdlib only at import.
 `birth` prints {"birth", "base", "epoch"}: the host component's `birth` and `base` from its state
 bucket and that bucket's epoch, read with the nats-py and `nodeapi` HostCore's launcher ships
 (HOST_CORE first on sys.path), so it also proves the package's copy imports on the Node's python3.
+
+`fill` prints {"sent", "ended"}: with the same nats-py, it fills a FILL_BYTES memory stream with
+FILL_MESSAGE-byte messages, up to FILL_PASSES times over, until the server ends the connection
+(`ended`, the error's type): a bus under a lowered memory cap is OOM-killed (the `success` leg).
 """
 from __future__ import annotations
 
@@ -20,6 +24,12 @@ from pathlib import Path
 LISTEN = "0A"   # TCP_LISTEN in /proc/net/tcp's `st` column
 HOST_CORE = "/usr/lib/photo-wall-host-core"
 HOST_STATE = "KV_state_host"
+# The induced OOM's stream: 8 MiB of the store's free room beside the host line, in small messages,
+# whose heap per stored byte is the largest (erratum E-E3C-S2-1).
+FILL_SUBJECT = "probe.fill"
+FILL_BYTES = 8 * 1024 * 1024
+FILL_MESSAGE = 1024
+FILL_PASSES = 4
 
 
 def server_info(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:
@@ -83,10 +93,48 @@ def host_birth(port: int) -> dict:
     return asyncio.run(read())
 
 
+def fill(port: int) -> dict:
+    """Fill a FILL_BYTES memory stream on the bus on 127.0.0.1:<port> until the server ends the
+    connection or FILL_PASSES times its bytes are sent: {"sent": messages, "ended": error type or None}."""
+    sys.path.insert(0, HOST_CORE)
+    import asyncio
+
+    import nats
+    from nats.js.api import StorageType, StreamConfig
+
+    async def run() -> dict:
+        client = await nats.connect(servers=[f"nats://127.0.0.1:{port}"], allow_reconnect=False,
+                                    connect_timeout=2)
+        sent = 0
+        try:
+            await client.jetstream().add_stream(StreamConfig(
+                name="PROBE_FILL", subjects=[FILL_SUBJECT], storage=StorageType.MEMORY, max_bytes=FILL_BYTES))
+            payload = bytes(FILL_MESSAGE)
+            for _ in range(FILL_PASSES * FILL_BYTES // FILL_MESSAGE):
+                await client.publish(FILL_SUBJECT, payload)
+                sent += 1
+                if sent % 256 == 0:
+                    await client.flush(timeout=5)
+            await client.flush(timeout=5)
+        except Exception as error:  # noqa: BLE001 - the OOM kill ends the connection: the point
+            return {"sent": sent, "ended": type(error).__name__}
+        finally:
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001 - the server may already be gone
+                pass
+        return {"sent": sent, "ended": None}
+
+    return asyncio.run(run())
+
+
 def main(arguments: list[str]) -> None:
     command, port = arguments[0], int(arguments[1])
     if command == "birth":
         print(json.dumps(host_birth(port), sort_keys=True))
+        return
+    if command == "fill":
+        print(json.dumps(fill(port), sort_keys=True))
         return
     if command != "info":
         raise SystemExit(f"unknown command: {command}")

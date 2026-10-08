@@ -61,6 +61,9 @@ MASKS = (
 FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
 BUS_UNIT = "photo-wall-bus.service"
 BUS_SECONDS = 15
+# The bus's runtime cap for the induced OOM: above a fresh bus's peak (about 11 MiB in `success`),
+# below what the probe's fill takes.
+BUS_OOM_CAP = 24 * 1024 * 1024
 # The refused scenario's fake board (tests/node_pid1_central_inner.py): MemTotal 2097152 kB,
 # below the smallest memory class, pi5-4gb's 3584 MiB (appliance/kernel/capacity.py CLASSES).
 REFUSED_TOTAL_BYTES = 2097152 * 1024
@@ -357,6 +360,31 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             {"bus": before, "unit": shown, "restarted": after, "others": pids, "birth": born,
              "reborn": reborn}, sort_keys=True))
 
+    def induce_bus_oom(self):
+        """A real OOM kill of the bus: its cap lowered at runtime to BUS_OOM_CAP and a memory stream
+        filled past it (the probe's `fill`). Returns once PID1 restarted it after a kill its journal
+        names as the OOM killer's; the unit's cap is restored before returning."""
+        shown = unit_properties_of(self, BUS_UNIT, "NRestarts")
+        self.run("systemctl", "set-property", "--runtime", BUS_UNIT, f"MemoryMax={BUS_OOM_CAP}")
+        try:
+            filled = json.loads(self.run(
+                "/usr/bin/python3", "-I", "-B", "/var/lib/node_pid1_bus_probe.py", "fill",
+                str(NODE_BUS_PORT)))
+            deadline = time.monotonic() + BUS_SECONDS
+            while True:
+                after = unit_properties_of(self, BUS_UNIT, "ActiveState,NRestarts")
+                if int(after["NRestarts"]) > int(shown["NRestarts"]) and after["ActiveState"] == "active":
+                    break
+                assert time.monotonic() < deadline, (filled, after)
+                time.sleep(0.25)
+        finally:
+            self.run("systemctl", "set-property", "--runtime", BUS_UNIT,
+                     f"MemoryMax={NODE_BUS_MEMORY_MAX}")
+        journal = self.run("journalctl", "--no-pager", "-u", BUS_UNIT)
+        assert "OOM killer" in journal, (filled, after)
+        (self.work / "bus-oom.json").write_text(json.dumps(
+            {"filled": filled, "restarted": after}, sort_keys=True))
+
     def verify_process(self, current):
         """Live PID1 observation and /proc birth ticks of the exact admitted process."""
         self.container.copy_in(
@@ -622,20 +650,39 @@ def assert_memory_lines(node):
     assert "photowallbase.slice" in checked, checked
 
 
-def assert_bus_memory_reported(fixture, node):
-    """Host Management's newest observation from this Node carries the bus's cgroup reading:
-    memory_peak:bus (system.slice/photo-wall-bus.service) and oom_kill:bus 0."""
+def _bus_memory_reported(fixture, node, name, until):
+    """Host Management's newest observation from this Node once `until(metrics)` holds for its
+    memory_peak:bus and oom_kill:bus rows (the bus's own slice, photowallbus.slice), written to
+    <name>.json; the last observation if it never holds within four observation intervals."""
     deadline = time.monotonic() + 4 * HOST_OBSERVATION_INTERVAL_SECONDS
     while True:
         host = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/host")
         metrics = dict(host["metrics"])
-        if "memory_peak:bus" in metrics and "oom_kill:bus" in metrics:
+        if "memory_peak:bus" in metrics and "oom_kill:bus" in metrics and until(metrics):
             break
-        assert time.monotonic() < deadline, "no memory_peak:bus row reached Central: " + str(host)
+        if time.monotonic() >= deadline:
+            break
         time.sleep(1)
-    (node.work / "bus-memory.json").write_text(json.dumps(host, sort_keys=True))
+    (node.work / f"{name}.json").write_text(json.dumps(host, sort_keys=True))
+    assert "memory_peak:bus" in metrics and "oom_kill:bus" in metrics, "no bus memory rows: " + str(host)
+    return metrics
+
+
+def assert_bus_memory_reported(fixture, node):
+    """The bus's peak and no OOM kill reach Central."""
+    metrics = _bus_memory_reported(fixture, node, "bus-memory", lambda _: True)
     assert 0 < metrics["memory_peak:bus"] <= NODE_BUS_MEMORY_MAX, metrics
     assert metrics["oom_kill:bus"] == 0, metrics
+    return metrics
+
+
+def assert_bus_oom_reported(fixture, node, before):
+    """After induce_bus_oom, the kill and the peak that hit the cap reach Central, though systemd
+    recreated the unit's cgroup when it restarted the bus (erratum E-E3C-S5-3)."""
+    metrics = _bus_memory_reported(fixture, node, "bus-oom-memory",
+                                   lambda shown: shown["oom_kill:bus"] >= 1)
+    assert metrics["oom_kill:bus"] >= 1, metrics
+    assert metrics["memory_peak:bus"] >= max(before["memory_peak:bus"], BUS_OOM_CAP * 3 // 4), metrics
 
 
 @pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
@@ -657,9 +704,13 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
             node.cold(fixture, components_dir)
             if phase == "success":
                 node.verify_bus()
-                assert_bus_memory_reported(fixture, node)
+                reported = assert_bus_memory_reported(fixture, node)
             stage_and_complete(fixture, node, phase, reference)
             assert_memory_lines(node)
+            if phase == "success":
+                # After assert_memory_lines, whose every slice reads oom_kill 0.
+                node.induce_bus_oom()
+                assert_bus_oom_reported(fixture, node, reported)
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:

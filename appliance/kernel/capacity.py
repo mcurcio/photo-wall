@@ -98,23 +98,41 @@ LINES: Final[tuple[MemoryLine, ...]] = (
     MemoryLine("display-controller", 64 * MIB, "E (W4)",
                cgroup="photo-wall-display-controller.service", parent="base"),
     MemoryLine("health", 64 * MIB, "E (W4); unchanged", cgroup="photo-wall-health.service", parent="base"),
-    # No parent: the bus runs in system.slice, outside the base slice (erratum E-E3C-CUT-6).
+    # The bus's own slice, outside the base slice (E-E3C-CUT-6), and persistent, so its counters
+    # survive the bus's restarts (erratum E-E3C-S5-3); the unit is its one member.
     MemoryLine("bus", NODE_BUS_MEMORY_MAX,
                "contracts.node_link fit (E3b design §7.2); measured by checks.yml bus-fence",
-               cgroup="photo-wall-bus.service"),
+               cgroup="photowallbus.slice"),
+    MemoryLine("bus-server", NODE_BUS_MEMORY_MAX, "the slice's whole line",
+               cgroup="photo-wall-bus.service", parent="bus"),
     MemoryLine("app", 992 * MIB, "M 229; texture budget 512 (player/service.py:128)",
                peak_bytes=229 * MIB, floor_bytes=512 * MIB, cgroup="photowallapp.slice"),
     MemoryLine("preparation", PREPARATION_SLICE_BYTES, "interim, tar era: PREPARATION_SLICE_BYTES; "
                "E2c sets it to the root lines plus the process line", cgroup="photowallpreparation.slice"),
 )
 _LINES_BY_NAME: Final = {item.name: item for item in LINES}
-if len(_LINES_BY_NAME) != len(LINES):
+# Every service line sits in a slice line of this table, never in PID1's default system.slice: a
+# unit's own cgroup is recreated at each restart, so only a slice keeps a cumulative reading
+# (memory.events, memory.peak) across one (erratum E-E3C-S5-3).
+_SLICE_LINES: Final = {item.name for item in LINES if (item.cgroup or "").endswith(".slice")}
+if len(_LINES_BY_NAME) != len(LINES) or any(
+        item.cgroup is not None and item.name not in _SLICE_LINES and item.parent not in _SLICE_LINES
+        for item in LINES):
     raise ValueError("memory_line_invalid")
 
 
 def line(name: str) -> MemoryLine:
     """The line called `name`; KeyError on an unknown name."""
     return _LINES_BY_NAME[name]
+
+
+def cgroup_path(name: str) -> str:
+    """The line's cgroup directory under /sys/fs/cgroup: a slice line's slice (every program slice
+    is top-level), a member's `<its slice>/<its unit>`; KeyError on an unknown or cgroup-less line."""
+    item = line(name)
+    if item.cgroup is None:
+        raise KeyError(name)
+    return item.cgroup if item.parent is None else f"{line(item.parent).cgroup}/{item.cgroup}"
 
 
 class StorageShort(ValueError):

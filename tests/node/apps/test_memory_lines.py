@@ -11,7 +11,8 @@ from support.repo import REPO
 from test_netboot_liveness import _parse_unit
 
 from appliance.apps.process_linux import app_unit_properties
-from appliance.kernel.capacity import GIB, LINES, MIB, line
+from appliance.kernel.capacity import GIB, LINES, MIB, cgroup_path, line
+from scripts.build_node_base_deb import UNITS
 
 SYSTEMD = REPO / "appliance/systemd"
 # The unit files node-base-deb ships (scripts/release_plan.py, its systemd globs).
@@ -40,6 +41,17 @@ def test_every_node_unit_cap_is_its_line() -> None:
     for cgroup, item in by_cgroup.items():
         assert cgroup in names, f"line {item.name} names {cgroup}, which is not a node unit file"
         assert capped.get(cgroup) == [item.cap_bytes], (item, capped.get(cgroup))
+
+
+def test_every_line_unit_ships_and_sits_in_its_lines_slice() -> None:
+    # The base ships every line's file (a slice PID1 made up from a Slice= alone would carry no cap),
+    # and a member unit's Slice= is its parent line's slice, so cgroup_path is where PID1 puts it.
+    for item in (entry for entry in LINES if entry.cgroup is not None):
+        assert item.cgroup in UNITS, f"line {item.name}: node-base-deb does not ship {item.cgroup}"
+        if item.parent is not None:
+            unit = _parse_unit((SYSTEMD / item.cgroup).read_text())
+            assert unit["Service"]["Slice"] == [line(item.parent).cgroup], (item, unit["Service"].get("Slice"))
+            assert cgroup_path(item.name) == f"{line(item.parent).cgroup}/{item.cgroup}"
 
 
 def test_members_fit_inside_their_slice() -> None:

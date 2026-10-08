@@ -7,7 +7,9 @@ The default/legacy boot is unchanged. The base handoff must provide protected V2
 configuration; missing handoff refuses node effects rather than inventing authority.
 
 The package also carries the Node bus (E3c): the pinned linux-arm64 nats-server and the shipped
-`node-bus.conf` under BUS_DIRECTORY, run by photo-wall-bus.service, so the package is arm64.
+`node-bus.conf` under BUS_DIRECTORY, run by photo-wall-bus.service, so the package is arm64; the
+release's Apache-2.0 LICENSE ships beside the binary, as each vendored wheel's licences ship in its
+dist-info.
 `stage_tree` stays network-free (unit-tier tests stage it); `stage_vendored` adds the pinned bytes,
 and `stage_package` (both) is the one path to a .deb (erratum E-E3C-CUT-4).
 
@@ -37,7 +39,7 @@ from scripts.module_closure import (
     stage_application,
     unreached_imports,
 )
-from scripts.nats_server import ASSETS, NODE_PLATFORM
+from scripts.nats_server import ASSETS, LICENSE, NODE_PLATFORM
 from scripts.nats_server import fetch as fetch_nats_server
 from scripts.vendored_packages import import_table as vendored_imports
 from scripts.vendored_packages import stage_wheel, wheel
@@ -68,7 +70,7 @@ POLICIES = {
 }
 UNITS = ("photo-wall-node.target", "photo-wall-host-core.service", "photo-wall-app-broker.service",
          "photo-wall-manager-supervisor.service", "photowallbase.slice", "photowallhostcore.slice", "photowallapp.slice",
-         "photowallpreparation.slice", "photo-wall-node-handoff.service", "photo-wall-node-prepare.service", "photo-wall-node-storage.service", "photo-wall-display.service", "photo-wall-display-controller.service",
+         "photowallpreparation.slice", "photowallbus.slice", "photo-wall-node-handoff.service", "photo-wall-node-prepare.service", "photo-wall-node-storage.service", "photo-wall-display.service", "photo-wall-display-controller.service",
          "photo-wall-health.service", "photo-wall-bus.service")
 BUS_DIRECTORY: Final = "usr/lib/photo-wall-bus"   # nats-server and node-bus.conf
 BUS_CONF: Final = "appliance/bus/node-bus.conf"
@@ -151,12 +153,14 @@ def _vendored() -> list[tuple[str, str]]:
 
 
 def stage_vendored(destination: Path, downloads: Path) -> None:
-    """The pinned NODE_PLATFORM nats-server at BUS_DIRECTORY/nats-server, mode 0755, and the wheel of
-    every vendored root of every launcher in usr/lib/photo-wall-<name>, from the pinned downloads."""
+    """The pinned NODE_PLATFORM nats-server at BUS_DIRECTORY/nats-server, mode 0755, its release's
+    LICENSE at BUS_DIRECTORY/LICENSE, and the wheel of every vendored root of every launcher in
+    usr/lib/photo-wall-<name>, from the pinned downloads."""
     binary = fetch_nats_server(downloads, system=NODE_PLATFORM[0], machine=NODE_PLATFORM[1])
     target = destination / BUS_DIRECTORY / "nats-server"
     shutil.copyfile(binary, target)
     os.chmod(target, 0o755)
+    shutil.copyfile(binary.parent / LICENSE, destination / BUS_DIRECTORY / LICENSE)
     for name, distribution in _vendored():
         stage_wheel(wheel(distribution), destination / ("usr/lib/photo-wall-" + name), downloads)
 
