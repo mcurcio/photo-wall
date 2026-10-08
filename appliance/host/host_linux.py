@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from appliance.host.base_status import STATUS, read_supervisor_status
-from appliance.kernel.capacity import memory_controller_present
+from appliance.kernel.capacity import cgroup_path, memory_controller_present
 from appliance.kernel.clock import boot_id, boottime_ms  # noqa: F401
 from contracts.node_host_facts import MAX_BOOT_FAILED_UNITS, valid_fact
 from contracts.node_protocol import token
@@ -19,13 +19,15 @@ from contracts.node_protocol import token
 # set since boot or since another firmware reader last cleared them, so "occurred" not "since boot".
 _THROTTLE_FLAGS = (("under_voltage", 0), ("frequency_capped", 1), ("throttled", 2),
                    ("soft_temperature_limit", 3))
-# The cgroups HostCore measures (metric suffix, cgroup directory); HostCore's own slice and the
-# display service have no OOM-kill row (contracts/node_observation.py METRIC_FAMILIES: oom_kill: base, preparation, app).
-_SLICES = (("hostcore", "photowallhostcore.slice"), ("base", "photowallbase.slice"),
-           ("preparation", "photowallpreparation.slice"), ("app", "photowallapp.slice"),
-           # Weston's own service inside the base slice (photo-wall-display.service Slice=).
-           ("display", "photowallbase.slice/photo-wall-display.service"))
-_OOM_SLICES = ("base", "preparation", "app")
+# The cgroups HostCore measures (metric suffix = memory line, its cgroup directory from the line
+# table); HostCore's own slice and the display service have no OOM-kill row
+# (contracts/node_observation.py METRIC_FAMILIES: oom_kill: base, preparation, app, bus).
+_SLICES = tuple((name, cgroup_path(name)) for name in ("hostcore", "base", "preparation", "app", "display", "bus"))
+_OOM_SLICES = ("base", "preparation", "app", "bus")
+# An OOM-kill count is cumulative, so it reads a slice, which PID1 never recreates while it runs;
+# a unit's own cgroup is new at every restart and would read 0 after the kill (erratum E-E3C-S5-3).
+if any("/" in cgroup_path(name) or not cgroup_path(name).endswith(".slice") for name in _OOM_SLICES):
+    raise ValueError("oom_row_not_a_slice")
 
 
 def _unit_name(value: str) -> bool:

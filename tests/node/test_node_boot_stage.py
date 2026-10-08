@@ -16,8 +16,10 @@ from uuid import uuid4
 
 import pytest
 from support.repo import REPO
+from systemd_environment import read_environment_file
 
 from appliance.boot import node_bootstrap as bootstrap
+from appliance.boot.bus_environment import BUS_ENVIRONMENT, bus_environment
 from appliance.host.host_linux import LinuxHostSampler
 from appliance.kernel import boot_stage
 from appliance.kernel.boot_stage import fault_token, read_boot_report, run_stage, write_stage
@@ -236,6 +238,8 @@ def test_host_configuration_is_written_before_the_marker_and_abi_checks(tmp_path
         bootstrap.materialize_handoff(root=tmp_path)
     host = json.loads((tmp_path / "run/photo-wall-node/host.json").read_bytes())
     assert host["offer_id"] == str(selected.offer_id)
+    # The bus's environment is written before the checks too: it needs only the origin and serial.
+    assert read_environment_file(tmp_path / BUS_ENVIRONMENT) == bus_environment(ROOT, selected.serial)
 
 
 def test_a_stale_handoff_writes_no_host_configuration(tmp_path, monkeypatch):
@@ -246,6 +250,7 @@ def test_a_stale_handoff_writes_no_host_configuration(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="node_boot_handoff_stale"):
         bootstrap.materialize_handoff(root=tmp_path)
     assert not (tmp_path / "run/photo-wall-node").exists()
+    assert not (tmp_path / BUS_ENVIRONMENT).exists()
 
 
 @pytest.mark.parametrize("unit", ["photo-wall-node-handoff.service", "photo-wall-node-prepare.service"])
@@ -352,6 +357,7 @@ def test_the_runner_reuses_the_last_failed_units_read_and_sends_none_before_any(
 SLICES = {"hostcore": "photowallhostcore", "base": "photowallbase", "preparation": "photowallpreparation",
           "app": "photowallapp"}
 DISPLAY = "photowallbase.slice/photo-wall-display.service"
+BUS = "photowallbus.slice"
 
 
 def _memory(tmp_path, controllers="cpu io memory pids\n", cma=True):
@@ -369,6 +375,13 @@ def _memory(tmp_path, controllers="cpu io memory pids\n", cma=True):
     (cgroup / DISPLAY).mkdir()
     (cgroup / DISPLAY / "memory.peak").write_text("1004\n")
     (cgroup / DISPLAY / "memory.events").write_text("oom_kill 9\n")  # no row: the base slice counts it
+    (cgroup / BUS).mkdir(parents=True)
+    (cgroup / BUS / "memory.peak").write_text("1005\n")
+    (cgroup / BUS / "memory.events").write_text("oom 4\noom_kill 4\n")
+    # The unit's own cgroup, recreated by PID1 at the restart after each kill: never read.
+    (cgroup / BUS / "photo-wall-bus.service").mkdir()
+    (cgroup / BUS / "photo-wall-bus.service/memory.peak").write_text("7\n")
+    (cgroup / BUS / "photo-wall-bus.service/memory.events").write_text("oom 0\noom_kill 0\n")
     return LinuxHostSampler(proc, tmp_path, sys_root), cgroup
 
 
@@ -381,7 +394,8 @@ def test_memory_rows_with_the_controller(tmp_path):
         ("memory_peak:base", 1001, "bytes", "cgroup"), ("oom_kill:base", 1, "count", "cgroup"),
         ("memory_peak:preparation", 1002, "bytes", "cgroup"), ("oom_kill:preparation", 2, "count", "cgroup"),
         ("memory_peak:app", 1003, "bytes", "cgroup"), ("oom_kill:app", 3, "count", "cgroup"),
-        ("memory_peak:display", 1004, "bytes", "cgroup"))
+        ("memory_peak:display", 1004, "bytes", "cgroup"),
+        ("memory_peak:bus", 1005, "bytes", "cgroup"), ("oom_kill:bus", 4, "count", "cgroup"))
 
 
 def test_the_display_peak_is_read_from_the_display_units_own_slice():
@@ -391,12 +405,21 @@ def test_the_display_peak_is_read_from_the_display_units_own_slice():
     assert DISPLAY == f"{unit['Service']['Slice'][-1]}/photo-wall-display.service"
 
 
+def test_the_bus_is_read_from_its_own_persistent_slice():
+    # photo-wall-bus.service's Slice= is the bus slice, whose counters outlive the unit's restarts
+    # (erratum E-E3C-S5-3), so a move back to system.slice is caught.
+    from test_netboot_liveness import _parse_unit
+    unit = _parse_unit((REPO / "appliance/systemd/photo-wall-bus.service").read_text())
+    assert unit["Service"]["Slice"] == [BUS]
+
+
 @pytest.mark.parametrize("controllers", ["cpu io pids\n", None])
 def test_memory_rows_without_the_controller_omit_the_peaks(tmp_path, controllers):
     sampler, _ = _memory(tmp_path, controllers=controllers, cma=False)
     rows = sampler.memory_rows()
     assert rows[0] == ("memcg_present", 0, "boolean", "cgroup")
-    assert [row[0] for row in rows[1:]] == ["oom_kill:base", "oom_kill:preparation", "oom_kill:app"]
+    assert [row[0] for row in rows[1:]] == ["oom_kill:base", "oom_kill:preparation", "oom_kill:app",
+                                            "oom_kill:bus"]
 
 
 def test_memory_rows_omit_each_unreadable_or_malformed_file(tmp_path):
@@ -408,7 +431,7 @@ def test_memory_rows_omit_each_unreadable_or_malformed_file(tmp_path):
     (tmp_path / "proc/meminfo").unlink()
     names = [row[0] for row in sampler.memory_rows()]
     assert names == ["memcg_present", "memory_peak:hostcore", "memory_peak:base",
-                     "oom_kill:preparation", "oom_kill:app"]
+                     "oom_kill:preparation", "oom_kill:app", "memory_peak:bus", "oom_kill:bus"]
 
 
 def test_supervision_carries_no_per_unit_rows(monkeypatch):

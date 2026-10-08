@@ -39,6 +39,8 @@ BROWSER_TESTS = Path(__file__).parent / "browser"
 # A skip in CI (`CI` set) fails the run unless its reason starts with one of these: each is a
 # capability that the job running the test deliberately lacks, and names who runs it instead.
 CI_SKIP_ALLOWLIST = (
+    "set PHOTO_WALL_NATS_SERVER",  # checks.yml node-bus runs the bus tests
+    "set PHOTO_WALL_BUS_FENCE_SERVER",  # checks.yml bus-fence runs the bus in its memory fence
     "ffmpeg is required for real preparation integration tests",  # linux-media's image runs them
     "needs device-tree-compiler",  # no CI test job installs dtc
     "actual in.tftpd integration requires root",  # no CI test job runs as root
@@ -49,6 +51,7 @@ CI_SKIP_ALLOWLIST = (
     "real dpkg-deb build/inspection requires",  # opt-in PHOTO_WALL_IMAGE_TOOL_TESTS only
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
+    "set PHOTO_WALL_IMAGE_MOUNT_TESTS",  # node-components.yml mounts the images (docker, loop, sudo)
 )
 
 

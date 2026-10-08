@@ -15,7 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from scripts.build_app_environment import build as build_environment
-from scripts.build_node_base_deb import stage_tree as stage_base
+from scripts.build_node_base_deb import stage_package as stage_base
 from scripts.build_node_display_deb import build as build_display
 from scripts.build_node_manager_deb import stage_tree as stage_manager
 from scripts.build_player_deb import build_tree as build_player
@@ -34,7 +34,7 @@ def build(repository: Path, revision: str, output: Path) -> None:
         tree = work / "source"
         fetch_sources(repository, revision, tree)
         inputs = manifest(tree)
-        stage_base(tree, work / "base")
+        stage_base(tree, work / "base", work / "downloads")
         base_abi = json.loads((work / "base/usr/lib/photo-wall-node-base/abi.json").read_text())["base_abi"]
         base_deb = run_dpkg_deb(work / "base", output / "node-base.deb")
         native = work / "native"

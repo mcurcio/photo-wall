@@ -200,6 +200,24 @@ def test_a_failing_loop_stops_the_other():
     assert app.stopped_gracefully
 
 
+def test_a_failing_node_bus_ends_the_worker_with_its_failure():
+    from media.worker import _media_queue, _run_workers
+
+    class BrokenBus:
+        async def run(self, stop: asyncio.Event) -> None:
+            raise RuntimeError("hub_store_failed")
+
+    app = FakeMediaApp()
+
+    async def main() -> None:
+        await _run_workers(_media_queue(app, {}), FakeRuntime(), BrokenBus())
+
+    with pytest.raises(ExceptionGroup) as caught:
+        asyncio.run(asyncio.wait_for(main(), 5))
+    assert [str(e) for e in caught.value.exceptions] == ["hub_store_failed"]
+    assert app.stopped_gracefully
+
+
 class Returns(FakeRuntime):
     async def run(self) -> None:
         return None  # e.g. procrastinate ended a worker whose LISTEN connection failed

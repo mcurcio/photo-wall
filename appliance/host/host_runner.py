@@ -16,6 +16,7 @@ from uuid import UUID
 
 from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import REFUSED, NodeSession
+from appliance.host.bus import host_session
 from appliance.host.host import HostCore
 from appliance.host.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
 from appliance.host.host_storage import FileRebootJournal, RebootDelivery
@@ -215,6 +216,9 @@ def main() -> None:
                         base_tag=value["base_tag"])
     recovery = runner.recovery
     server = RecoveryServer(recovery)
+    # The host component on the Node's bus: its own thread, never waited on (appliance/host/bus.py).
+    session = host_session(value["base_tag"])
+    session.start()
     last_tick = 0.0
     try:
         while True:
@@ -231,6 +235,7 @@ def main() -> None:
                 # Fixed bounded cadence; no credential or packet logging.
             time.sleep(0.05)
     finally:
+        session.stop()
         server.close()
         store.close()
 

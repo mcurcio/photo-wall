@@ -184,6 +184,14 @@ jobs:
             --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
             --components "$RUNNER_TEMP/node-components"
 
+      # The squashfs images built from the set's archives (E2b; nothing ships them yet): two
+      # builds give one digest, each mounted image passes verify_root, each is smaller than its tar.
+      - name: Prove the environment images (reproducible, mount, verify_root)
+        env:
+          PHOTO_WALL_IMAGE_MOUNT_TESTS: "1"
+          PHOTO_WALL_NODE_COMPONENTS: ${{ runner.temp }}/node-components
+        run: .venv/bin/python -m pytest -q tests/node/apps/test_environment_image.py
+
       # The seal ships these bytes on a release; a pull request's consumers need them for a day.
       # About 1 GB, mostly the environments: the fastest zip level.
       - name: Upload exact V2 node components

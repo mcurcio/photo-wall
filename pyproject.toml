@@ -17,6 +17,7 @@ dependencies = [
   "cryptography==44.0.3", "Pillow==12.3.0",
   "procrastinate==3.9.0", "zeroconf==0.151.3",
   "semver>=3,<4",
+  "nats-py==2.16.0",  # the Node API library's client: the worker's hub side (E3d S5)
 ]
 
 [dependency-groups]
@@ -87,7 +88,7 @@ select = ["E4", "E7", "E9", "F", "I", "TID251"]
 "scripts/uplink_device_harness.py" = ["TID251"]
 
 [tool.importlinter]
-root_packages = ["central", "contracts", "media", "player", "appliance", "uplink"]
+root_packages = ["central", "contracts", "media", "player", "appliance", "uplink", "nodeapi"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
@@ -165,6 +166,14 @@ ignore_imports = [
 exhaustive_ignores = ["app_evidence", "app_executor", "app_launcher", "app_payload",
                       "app_process_proof", "app_proof_service", "linux_app_proof",
                       "online_activation", "os_agent", "provision", "process_identity"]
+
+[[tool.importlinter.contracts]]
+# E3b design §7.1: siblings (`|`) never import each other; `epoch` is the bottom.
+name = "The Node API library points down"
+type = "layers"
+containers = ["nodeapi"]
+layers = ["node | hub", "documents", "buffers | pull | envelope", "epoch"]
+exhaustive = true
 
 [[tool.importlinter.contracts]]
 name = "Boot is an island"
@@ -247,10 +256,29 @@ ignore_imports = ["appliance.process_identity -> appliance.app_launcher"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).
+# Indirect imports are allowed (errata E-E3C-S4-1, E-E3D-CUT-1): Central's and HostCore's programs reach
+# NATS only through nodeapi, which is the point; a direct `import nats` outside nodeapi still fails.
 name = "Only the Node API library talks to NATS"
 type = "forbidden"
 source_modules = ["central", "contracts", "media", "player", "appliance", "uplink"]
 forbidden_modules = ["nats"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+# Central is a client of each Node's bus through the hub (E3b design §7.2): it never runs a Node session.
+name = "Central uses only the hub role of the Node API library"
+type = "forbidden"
+source_modules = ["central"]
+forbidden_modules = ["nodeapi.node"]
+
+[[tool.importlinter.contracts]]
+# nodeapi imports contracts, the NATS client and the stdlib alone (r3 §16.2): the base and the Player
+# each bundle it, so it reaches no context of either.
+name = "The Node API library imports only contracts"
+type = "forbidden"
+source_modules = ["nodeapi"]
+forbidden_modules = ["central", "media", "player", "appliance", "uplink", "psycopg", "procrastinate",
+                     "fastapi", "httpx"]
 
 [[tool.importlinter.contracts]]
 # Retiring (r3 §16.1 B2b/B10a): the feed gains no importer; each line leaves with its importer.

@@ -10,6 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from appliance.apps.environment import verify_root
+from appliance.boot.bus_environment import write_bus_environment
 from appliance.boot.storage_mount import mount_storage
 from appliance.kernel.boot_stage import run_stage
 from appliance.kernel.capacity import STORE, admit_cold, memory_values
@@ -51,7 +52,10 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     host = {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id),
             "base_tag": offer.base.tag}
     write_atomically(directory / "host.json", json.dumps(host).encode(), mode=0o600)
-    marker = _marker(root / "usr/lib/photo-wall-node-base/abi.json", {"base_abi"})
+    # The bus needs only the origin and the serial, so it runs (and Central can reach it) even
+    # when the checks below refuse this boot's base.
+    write_bus_environment(root, central, offer.serial)
+    marker =_marker(root / "usr/lib/photo-wall-node-base/abi.json", {"base_abi"})
     if marker["base_abi"] != offer.base.base_abi:
         raise ValueError("node_measured_base_abi_mismatch")
     graphics = _marker(root / "usr/lib/photo-wall-display/abi.json", {"graphics_abi", "plugin_abi"})

@@ -14,6 +14,11 @@ name: Player node real-PID1 lifecycle scenarios
 #   refused   a board below the smallest memory class (a 2 GiB meminfo bound into the storage
 #             unit alone): storage refuses, prepare, broker and manager supervisor never run,
 #             and Central receives the refusal with its numbers in the host facts boot report
+#   join      the Node API whole (E3b design §16.2): Central with a real hub (the pinned
+#             nats-server) and the worker's bus side on its database; the new serial's leaf links
+#             through Central's origin, a kill -9 of the bus and a reboot each end an epoch that
+#             Central records with its gap rows, and after a hub restart WALL is current on the
+#             Node within 60 s (erratum E-E3B-FR1) and its leaf relinked
 #
 # Each leg boots the components node-components.yml built ONCE for the run (the builder
 # base-image.yml's squashfs bakes, scripts/build_node_components.py) and the PID1 fixture it
@@ -87,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [success, failure, outage, reboot, refused]
+        scenario: [success, failure, outage, reboot, refused, join]
     env:
       REVISION: ${{ inputs.revision || github.sha }}
     steps:
@@ -103,6 +108,13 @@ jobs:
 
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+
+      # The join's hub; the test fails, never skips, without it under PHOTO_WALL_TEST_REQUIRE_NODE_PID1.
+      - name: Fetch the pinned nats-server
+        if: matrix.scenario == 'join'
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
 
       # The fixture names its components by the absolute path they were built at, so both land
       # at the builder's paths.

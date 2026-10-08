@@ -45,6 +45,7 @@ units = [
     "photo-wall-app-broker.service",
     "photo-wall-health.service",
     "photo-wall-manager-supervisor.service",
+    "photo-wall-bus.service",
 ]
 for unit in units:
     d = Path("/etc/systemd/system") / (unit + ".d")
@@ -133,6 +134,7 @@ subprocess.run(
         "photo-wall-manager-supervisor.service",
         "photo-wall-app-broker.service",
         "photo-wall-health.service",
+        "photo-wall-bus.service",
     ],
     check=True,
 )

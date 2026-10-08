@@ -27,6 +27,7 @@ from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
+from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.rollout_gate import ServingImageVerifier
@@ -153,6 +154,7 @@ def create_app(
     node_serving_verifier: ServingImageVerifier | None = None,
     node_serving_verifier_factory=None,
     media_times: TransactionClock | None = None,
+    hub_leaf_url: str | None = None,
 ) -> FastAPI:
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     clock_injected = clock
@@ -894,6 +896,10 @@ def create_app(
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       serving_verifier=node_serving_verifier, content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
+    # A Node's leaf arrives at its origin (erratum E-E3D-CUT-4): relayed to the hub when Central has one.
+    hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
+    if hub_leaf_url:
+        mount_leaf_bridge(app, hub_leaf_url)
     # Every route is bound: refuse one that `admin` guards outside the cookie's path.
     operator_auth.require_scoped(app)
     return app
