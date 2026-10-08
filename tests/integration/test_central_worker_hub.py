@@ -5,9 +5,10 @@ The worker's own composition, `build_node_bus(dsn, env)`, runs through `media.wo
 beside an idle media loop and an idle job runtime. The hub is a real nats-server on the deployed
 listeners (`HUB_LISTENERS`), started only once the worker has written its configuration file, as the
 Compose hub waits for it. A Node on the shipped configuration links to it. The worker writes the
-file, Central's links record the Node's birth, and WallWriter creates WALL. One SIGTERM ends all
-three loops normally and leaves no Central client on the hub. Without PHOTO_WALL_HUB_URL there is
-no bus.
+file, Central's links record the Node's birth, and WallWriter creates WALL. A link the hub drops is
+back by itself. One SIGTERM ends all three loops normally and leaves no Central client on the hub.
+Without PHOTO_WALL_HUB_URL there is no bus. Hub clients come and go asynchronously, so every /connz
+check is polled, never a snapshot.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import os
 import signal
 import urllib.request
 
+import nats
 from integration.bus_servers import BusServer, line_slices, node_server, until
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -38,10 +40,30 @@ def _monitor(path: str) -> dict:
         return json.load(response)
 
 
+def _connections() -> dict[int, str]:
+    """Connection id -> the user the hub's client is authorized as (/connz)."""
+    return {connection["cid"]: connection.get("authorized_user")
+            for connection in _monitor("/connz?auth=true&limit=1024").get("connections") or []}
+
+
 def _users() -> set[str]:
     """Users the hub's clients are authorized as (/connz)."""
-    return {connection.get("authorized_user")
-            for connection in _monitor("/connz?auth=true&limit=1024").get("connections") or []}
+    return set(_connections().values())
+
+
+async def _drop(user: str) -> set[int]:
+    """Close every hub client authorized as `user` ($SYS.REQ.SERVER.<id>.KICK, as the hub drops a
+    client); the ids of the connections closed."""
+    cids = {cid for cid, name in (await asyncio.to_thread(_connections)).items() if name == user}
+    server = (await asyncio.to_thread(_monitor, "/varz"))["server_id"]
+    system = await nats.connect(servers=[HUB_URL], user=FLEET_SYSTEM_USER, password=FLEET_SYSTEM_USER,
+                                allow_reconnect=False, connect_timeout=2)
+    try:
+        for cid in cids:
+            await system.request(f"$SYS.REQ.SERVER.{server}.KICK", json.dumps({"cid": cid}).encode(), timeout=5)
+    finally:
+        await system.close()
+    return cids
 
 
 def _streams() -> set[str]:
@@ -102,15 +124,32 @@ def test_the_worker_keeps_the_hub_and_records_a_node(database, tmp_path):
             await until(lambda: _born(database), 30, "the Node's birth is recorded")
 
             async def walled():
-                return WALL_STREAM in _streams()
+                return WALL_STREAM in await asyncio.to_thread(_streams)
             await until(walled, 10, "WallWriter creates WALL")
-            assert {FLEET_SYSTEM_USER, WALL_WRITER_USER, central_user(SERIAL)} <= _users()
+
+            # Every Central client is on the hub. Polled, never one /connz snapshot: a link the hub
+            # drops reconnects by itself, so a snapshot taken during a reconnect misses it.
+            async def connected():
+                return {FLEET_SYSTEM_USER, WALL_WRITER_USER, central_user(SERIAL)} <= await asyncio.to_thread(_users)
+            await until(connected, 10, "Fleet, WallWriter and the Node's links are on the hub")
+
+            # A link the hub drops is back on new connections, with no help from the test.
+            dropped = await until(lambda: _drop(central_user(SERIAL)), 10, "the hub drops the Node's links")
+
+            async def relinked():
+                current = await asyncio.to_thread(_connections)
+                back = {cid for cid, user in current.items() if user == central_user(SERIAL)} - dropped
+                return len(back) >= len(dropped)   # both pipes' links
+            await until(relinked, 10, "the Node's dropped links reconnect")
             assert not worker.done()
         finally:
             if not worker.done():   # a worker that ended has removed its handler: SIGTERM would kill pytest
                 os.kill(os.getpid(), signal.SIGTERM)   # the worker's one handler stops all three loops
             await asyncio.wait_for(worker, 30)
-        assert not _users() & {FLEET_SYSTEM_USER, WALL_WRITER_USER, central_user(SERIAL)}
+
+        async def gone():   # the hub drops a closed client's connection on its own schedule: polled
+            return not await asyncio.to_thread(_users) & {FLEET_SYSTEM_USER, WALL_WRITER_USER, central_user(SERIAL)}
+        await until(gone, 10, "no Central client is left on the hub")
 
     try:
         asyncio.run(run())
