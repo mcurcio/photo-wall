@@ -31,6 +31,13 @@ WallWriter keeps WALL in the hub's wall account: absent (the hub restarted empty
 Central's mark + 1 + WALL_MARGIN and every wall document is put again. The mark is recorded after
 each acknowledgement, so a crash between the two loses at most the writes in flight, which the
 margin covers: no Node mirror is ever ahead of the new WALL's first sequence (X8).
+
+Central reaches the hub only through the connection-owning entries here (`run_link`, `HubAdmin`,
+`WallWriter.connect`), so it names no NATS type: every one of them connects once or raises
+`HubUnavailable` at once, and once connected reconnects forever. `HubAdmin` is Fleet's system-account
+client: the running server's identity (new at every hub start), the reload Fleet sends after it
+rewrites the hub's configuration, the accounts holding a leaf, and closing the leaf of an account the
+configuration no longer lists.
 """
 from __future__ import annotations
 
@@ -40,7 +47,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Iterator, Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -55,6 +62,7 @@ from contracts.node_link import (
     NODE_DOMAIN,
     STORE_LINES,
     WALL_STREAM,
+    WALL_WRITER_USER,
     Pipe,
     central_user,
 )
@@ -68,6 +76,14 @@ if TYPE_CHECKING:
     from nats.aio.client import Client
 
 log = logging.getLogger(__name__)
+
+
+class HubUnavailable(Exception):
+    """The hub did not answer (down, restarting, refused). Raised instead of any nats error by every
+    entry below and by WallWriter.ensure/put; a store error still propagates as itself."""
+
+
+HUB_RELOAD_REQUESTS: Final = 2   # X6: a reload-added account's service imports are wired only by the second
 
 
 class LinkStore(Protocol):
@@ -339,20 +355,12 @@ async def run_link(url: str, serial: str, pipe: Pipe, store: LinkStore, document
     NodeLink(...).run(stop); connect again if the client closed; close the client on `stop`. The client
     reconnects forever. A store error propagates (Central's process is what failed); a hub that does not
     answer never raises out of here. Callers never see a nats type."""
-    user = central_user(serial)
-
-    async def logged(error: Exception) -> None:
-        log.debug("link %s %s: %r", pipe, serial, error)
-
     delay = _BACKOFF[0]
     while not stop.is_set():
         try:
-            client = await nats.connect(
-                servers=[url], user=user, password=user, inbox_prefix=CENTRAL_INBOX_PREFIX,
-                allow_reconnect=True, max_reconnect_attempts=-1, reconnect_time_wait=_BACKOFF[0],
-                connect_timeout=2, error_cb=logged)
-        except (OSError, nats.errors.Error, asyncio.TimeoutError) as error:
-            log.info("link %s %s: connect: %r", pipe, serial, error)
+            client = await _connect(url, central_user(serial), inbox_prefix=CENTRAL_INBOX_PREFIX)
+        except HubUnavailable as error:
+            log.info("link %s %s: connect: %s", pipe, serial, error)
             await _pause(stop, delay)
             delay = min(delay * 2, _BACKOFF[1])
             continue
@@ -360,9 +368,102 @@ async def run_link(url: str, serial: str, pipe: Pipe, store: LinkStore, document
         try:
             await NodeLink(client, pipe, store, documents).run(stop)
         finally:
-            with contextlib.suppress(nats.errors.Error, asyncio.TimeoutError, OSError):
-                await asyncio.wait_for(client.close(), _REQUEST_SECONDS)
+            await _close(client)
         await _pause(stop, _BACKOFF[0])   # the client closed under the link: connect again
+
+
+async def _connect(url: str, user: str, **options: object) -> Client:
+    """A client as `user` (its password is its name: a selector, not a secret). It connects now or
+    raises HubUnavailable (two attempts), so a caller's own loop sees `stop`; once connected it
+    reconnects forever. nats-py has no option for the pair: a negative attempt count loops inside
+    `connect` while the hub is away, so the count is lifted once connected (it is read at every
+    reconnect attempt, and a successful connect reset the server's count to 0)."""
+    async def logged(error: Exception) -> None:
+        log.debug("hub %s: %r", user, error)
+
+    try:
+        client = await nats.connect(servers=[url], user=user, password=user, allow_reconnect=True,
+                                    max_reconnect_attempts=1, reconnect_time_wait=_BACKOFF[0],
+                                    connect_timeout=2, error_cb=logged, **options)
+    except (OSError, nats.errors.Error) as error:   # TimeoutError is an OSError
+        raise HubUnavailable(f"{user}: {error!r}") from error
+    client.options["max_reconnect_attempts"] = -1
+    return client
+
+
+async def _close(client: Client) -> None:
+    """Close a client, best effort: it never raises. nats-py's close can fail on a socket the hub
+    already closed (a TypeError from the transport, seen when a reload removed the account), and a
+    failed close must never end the caller, which only lets the client go."""
+    try:
+        await asyncio.wait_for(client.close(), _REQUEST_SECONDS)
+    except Exception as error:   # nothing to recover: the client is dropped either way
+        log.debug("close: %r", error)
+
+
+@contextlib.contextmanager
+def _answered() -> Iterator[None]:
+    """The hub not answering a request, as HubUnavailable. Wraps hub requests only, never a store
+    call, so a store error propagates as itself."""
+    try:
+        yield
+    except (OSError, nats.errors.Error) as error:
+        raise HubUnavailable(repr(error)) from error
+
+
+class HubAdmin:
+    """Fleet's system-account client of the hub."""
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+
+    @classmethod
+    async def connect(cls, url: str, user: str) -> HubAdmin:
+        """Connected as `user` of the system account, or HubUnavailable; reconnects forever once connected."""
+        return cls(await _connect(url, user))
+
+    async def identity(self) -> str:
+        """The running server's id ($SYS.REQ.SERVER.PING.IDZ): new at every hub start."""
+        return str((await self._ask("$SYS.REQ.SERVER.PING.IDZ"))["id"])
+
+    async def reload(self) -> None:
+        """HUB_RELOAD_REQUESTS reload requests to the running server, each answered once applied. A
+        refused reload (a configuration the server rejects) is HubUnavailable: the hub kept its last."""
+        subject = f"$SYS.REQ.SERVER.{await self.identity()}.RELOAD"
+        for _ in range(HUB_RELOAD_REQUESTS):
+            answer = await self._ask(subject)
+            if answer.get("error"):
+                raise HubUnavailable(f"reload refused: {answer['error']}")
+
+    async def linked(self) -> frozenset[str]:
+        """The account names holding a leaf ($SYS.REQ.SERVER.PING.LEAFZ)."""
+        return frozenset(leaf["account"] for leaf in await self._leafs())
+
+    async def unlink(self, accounts: Collection[str]) -> None:
+        """Close every leaf holding one of `accounts` ($SYS.REQ.SERVER.<id>.KICK). A reload that
+        removes an account keeps the leaf already linked in it (nats-server 2.15.0); once closed, the
+        Node's redial is refused while the account is absent."""
+        leafs = [leaf for leaf in await self._leafs() if leaf["account"] in accounts]
+        if not leafs:
+            return
+        subject = f"$SYS.REQ.SERVER.{await self.identity()}.KICK"
+        for leaf in leafs:
+            answer = await self._ask(subject, {"cid": leaf["id"]})
+            if answer.get("error"):   # already gone: nothing to close
+                log.info("unlink %s: %s", leaf["account"], answer["error"])
+
+    async def _leafs(self) -> list[dict]:
+        answer = await self._ask("$SYS.REQ.SERVER.PING.LEAFZ")
+        return (answer.get("data") or {}).get("leafs") or []
+
+    async def close(self) -> None:
+        await _close(self._client)
+
+    async def _ask(self, subject: str, body: Mapping[str, object] | None = None) -> dict:
+        payload = b"" if body is None else json.dumps(body).encode()
+        with _answered():
+            reply = await self._client.request(subject, payload, timeout=_REQUEST_SECONDS)
+        return json.loads(reply.data)
 
 
 async def _pause(stop: asyncio.Event, seconds: float) -> None:
@@ -395,17 +496,34 @@ class WallWriter:
         self._marks = marks
         self._writer: DocumentWriter | None = None
 
+    @classmethod
+    async def connect(cls, url: str, table: KeyTable, marks: WallMarks) -> WallWriter:
+        """A writer on its own client as WALL_WRITER_USER, or HubUnavailable; reconnects forever once
+        connected. The table is checked before the hub is dialled."""
+        wall_config(table, first_seq=1)
+        return cls(await _connect(url, WALL_WRITER_USER), table, marks)
+
+    async def close(self) -> None:
+        """Close the writer's client."""
+        await _close(self._client)
+
     async def ensure(self) -> bool:
         """Create WALL at mark + 1 + WALL_MARGIN if it is absent and put every wall document again;
         True when this call created it. Create-if-absent is race-safe with another Central."""
         jetstream = self._client.jetstream()
-        try:
-            await jetstream.stream_info(WALL_STREAM)
-            created = False
-        except NotFoundError:
+        with _answered():
+            try:
+                await jetstream.stream_info(WALL_STREAM)
+                absent = False
+            except NotFoundError:
+                absent = True
+        created = False
+        if absent:
             first = await self._marks.mark() + 1 + WALL_MARGIN
-            created = await declare(jetstream, wall_config(self._table, first_seq=first))
-        self._writer = await DocumentWriter.bind(self._client, WALL_STREAM, writer=CENTRAL_WRITER)
+            with _answered():
+                created = await declare(jetstream, wall_config(self._table, first_seq=first))
+        with _answered():
+            self._writer = await DocumentWriter.bind(self._client, WALL_STREAM, writer=CENTRAL_WRITER)
         if created:
             for key, value in (await self._marks.wall_documents()).items():
                 await self.put(key, value)
@@ -417,11 +535,12 @@ class WallWriter:
         if self._writer is None:
             raise RuntimeError("wall_writer_not_ensured")
         while True:
-            found = await self._writer.read(key)
-            try:
-                token = await self._writer.put(key, value, expect=ABSENT if found is None else found.token)
-                break
-            except Conflict:
-                continue
+            with _answered():
+                found = await self._writer.read(key)
+                try:
+                    token = await self._writer.put(key, value, expect=ABSENT if found is None else found.token)
+                    break
+                except Conflict:
+                    continue
         await self._marks.record_mark(token.seq)
         return token.seq

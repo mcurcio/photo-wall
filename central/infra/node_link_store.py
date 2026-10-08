@@ -11,12 +11,16 @@ Every call runs its SQL in a worker thread behind one gate per process (`PgLinkS
 LINK_STORE_CONCURRENCY store calls hold or wait for a pooled connection: the rest wait in the event
 loop, never in the pool's bounded queue, whose overflow would end the worker in normal operation
 (erratum E-E3D-CUT-9).
+
+`PgWallMarks` is `nodeapi.hub.WallMarks` over migration 067: the highest WALL sequence Central
+recorded, which only ever rises, so WALL re-created after an empty hub start begins past every Node
+mirror (mark + 1 + WALL_MARGIN); Central's wall documents come from the injected source (E5/E8).
 """
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from typing import Any, Final, TypeVar
+from typing import Any, Final, Protocol, TypeVar
 
 from psycopg.types.json import Jsonb
 
@@ -127,3 +131,34 @@ class PgLinkStore:
                 "SET digest=EXCLUDED.digest, epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
                 (self._device_id, stream, key, digest, token.epoch, token.seq))
         await self._stores._run(body)
+
+
+class WallDocuments(Protocol):
+    async def wall_documents(self) -> Mapping[str, bytes]: ...   # Central's wall documents (E5/E8); none until then
+
+
+class PgWallMarks:
+    """nodeapi.hub.WallMarks over node_bus_wall; wall documents from the injected source."""
+
+    def __init__(self, db: Database, documents: WallDocuments) -> None:
+        self._db = db
+        self._documents = documents
+
+    async def mark(self) -> int:
+        """The highest WALL sequence recorded; 0 with no row."""
+        def body() -> int:
+            with self._db.transaction() as conn:
+                row = conn.execute("SELECT mark FROM node_bus_wall").fetchone()
+            return 0 if row is None else int(row["mark"])
+        return await asyncio.to_thread(body)
+
+    async def record_mark(self, seq: int) -> None:
+        """Upsert GREATEST(mark, seq): a late or repeated record never lowers it."""
+        def body() -> None:
+            with self._db.transaction() as conn:
+                conn.execute("INSERT INTO node_bus_wall(mark) VALUES (%s) ON CONFLICT (singleton) DO UPDATE "
+                             "SET mark=GREATEST(node_bus_wall.mark, EXCLUDED.mark)", (seq,))
+        await asyncio.to_thread(body)
+
+    async def wall_documents(self) -> Mapping[str, bytes]:
+        return await self._documents.wall_documents()
