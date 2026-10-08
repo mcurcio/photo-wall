@@ -213,7 +213,8 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
     # a local client writes: the reply envelope covers both (E-W1-TD-6).
     assert config["max_control_line"] == NODE_MAX_CONTROL_LINE == _bytes(node["max_control_line"])
     assert config["websocket"] == {"host": "0.0.0.0", "port": 8080, "no_tls": True}
-    assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422}
+    # No leaf compression: an S2-wrapped leaf cannot cross Central's WebSocket relay (E-E3D-S3-1).
+    assert config["leafnodes"] == {"host": "127.0.0.1", "port": 7422, "compression": "off"}
     assert "http" not in config
     with pytest.raises(ValueError, match="hub_store_too_small"):
         hub_configuration([], replace(LISTENERS, max_memory_store_bytes=WALL_STREAM_BYTES - 1))

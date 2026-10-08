@@ -41,6 +41,10 @@ WALL_STREAM_BYTES: Final = 512 * 1024        # max_bytes of the hub stream AND o
 WALL_API_PREFIX: Final = "ACC.WALL.API"      # a Node account's import prefix for WALL's consumer API
 WALL_DELIVER_PREFIX: Final = "DELIVER.WALL"  # the mirror's delivery prefix, the same in every Node account
 WALL_WRITER_USER: Final = "central-wall"     # Central's user in WALL; a selector, not a secret
+# The path under a Node's origin (the host:port it boots from) that its leaf dials, as
+# ws[s]://<user>:<user>@<origin host>:<origin port>/bus; nats-server appends /leafnode (W11). Central
+# relays that WebSocket to the hub (central/fleet/leaf_bridge.py), so the leaf needs no new LAN port.
+LEAF_PATH: Final = "/bus"
 
 # L, the largest message (headers + payload) on either end of a leaf: node-bus.conf's max_payload AND
 # the hub's (the config test binds both). A message past a Node's max_payload that reached its leaf
