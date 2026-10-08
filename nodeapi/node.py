@@ -1,10 +1,15 @@
 """The Node-role session: one component's way to use its bus (E3b design §7.2 node, §9.3, §9.5).
 
 A session runs its own thread and event loop and connects forever. Every connect runs **attach**:
-apply the component's slice, re-put the state it holds plus `birth`, register its methods once as a
-`nats.micro` service named the component (subjects `<component>.method.<name>`), then mark attached.
-A session that reads the wall also creates the Node's WALL mirror at attach when it is absent. A bus
-that started empty is refilled so, by the writer that owns the data.
+apply every line this component declares (`contracts.node_link.STORE_LINES`: its own slice's line and
+any line handed to `apply_line`, such as apps' Player line from the held Player releases, §7.3), or,
+for a slice whose line another component declares, wait with backoff until every stream of the slice
+exists; then re-put the state it holds plus `birth`, register its methods once as a `nats.micro`
+service named the component (subjects `<component>.method.<name>`), and mark attached. A session that
+reads the wall also creates the Node's WALL mirror at attach when it is absent. Attach runs again on
+every reconnect and whenever a publish finds a stream of the slice absent, so `birth` is written in
+every epoch in any start order, and a bus that started empty is refilled by the writer that owns the
+data (§9.5, erratum E-E3B-R2-4).
 
 The handles never wait on the bus: `Events.emit` enqueues into a bounded outbox (full, it drops its
 oldest) whose events carry headers built once at the emit, so a retried publish keeps its message id
@@ -34,6 +39,7 @@ from typing import Final, Generic, TypeVar
 import nats
 import nats.errors
 import nats.micro
+from nats.js.errors import NoStreamResponseError, NotFoundError
 from nats.micro.service import ServiceConfig
 
 from contracts.node_link import METHOD_TOKEN, WALL_STREAM
@@ -77,6 +83,7 @@ OUTBOX_MESSAGES: Final = 4096
 SESSION_SCHEMA_MAJOR: Final = 1         # the major of the session's own events and birth
 _UNKNOWN_CALLER: Final = "unknown"
 _BACKOFF: Final = (0.1, 2.0)            # first and largest wait between attempts
+ATTACH_BACKOFF_SECONDS: Final = (0.1, 2.0)   # first and largest wait while a declarer has not applied
 _PUBLISH_SECONDS: Final = 2.0
 _WATCH_BATCH: Final = 64
 _WATCH_SECONDS: Final = 1.0
@@ -84,14 +91,13 @@ _COMPONENT = re.compile(r"[a-z]+")
 
 
 class NodeSession:
-    """One component's session on its Node's bus (its line's declarer in S1)."""
+    """One component's session on its Node's bus: its line's declarer, or a session that waits for it."""
 
     def __init__(self, component: str, slice_: Slice, release: Release, *, url: str,
                  methods: Mapping[str, MethodHandler] | None = None, reads_wall: bool = False) -> None:
         if type(component) is not str or not _COMPONENT.fullmatch(component):
             raise ValueError("session_component")
-        if slice_.store_line.declarer != component:
-            raise ValueError("session_line_declared_by_another")
+        self._declares = slice_.store_line.declarer == component
         self._methods = dict(methods or {})
         self._configs = {config.name: config for config in slice_.buffers}
         line = slice_.line
@@ -118,6 +124,7 @@ class NodeSession:
         self._lock = threading.Lock()
         self._outbox: deque[tuple[str, bytes, dict[str, str]]] = deque(maxlen=OUTBOX_MESSAGES)
         self._held: dict[str, bytes] = {}
+        self._lines: dict[str, Slice] = {}  # line -> the slice `apply_line` handed over, applied at every attach
         self._dirty: dict[str, None] = {}   # state keys put and not yet acknowledged, in put order
         self._attached = threading.Event()
         self._stop_requested = False
@@ -166,6 +173,19 @@ class NodeSession:
 
     def wait_attached(self, timeout: float) -> bool:
         return self._attached.wait(timeout)
+
+    def apply_line(self, slice_: Slice) -> None:
+        """Hold `slice_` as the slice of a line this component declares (not its own slice's line) and
+        apply it now and at every later attach; thread-safe, never blocks. apps hands over the union of
+        the held Player releases' slices during a hot-swap, then the new slice alone (§9.7)."""
+        if slice_.store_line.declarer != self._component or slice_.line == self._slice.line:
+            raise ValueError("session_does_not_declare_line")
+        with self._lock:
+            self._lines[slice_.line] = slice_
+            loop = self._loop
+        if loop is not None:
+            with contextlib.suppress(RuntimeError):   # the loop already ended
+                loop.call_soon_threadsafe(self._attach_needed.set)
 
     # The session's own loop.
 
@@ -237,7 +257,10 @@ class NodeSession:
             delay = _BACKOFF[0]
             while True:
                 try:
-                    await self._attach()
+                    if self._ready.is_set():   # attached: `apply_line` handed over a line
+                        await self._apply_lines()
+                    else:
+                        await self._attach()
                     break
                 except Exception as error:   # the bus is away or restarting: attach again
                     log.info("%s: attach: %r", self._component, error)
@@ -245,9 +268,18 @@ class NodeSession:
                     delay = min(delay * 2, _BACKOFF[1])
 
     async def _attach(self) -> None:
-        """Apply the slice, create the WALL mirror if this session reads it, re-put every held state
-        key and birth, register the methods once."""
-        await apply(self._jetstream, self._slice)
+        """Apply every line this component declares, or wait until its slice's declarer has; create
+        the WALL mirror if this session reads it, re-put every held state key and birth, register the
+        methods once."""
+        await self._apply_lines()
+        if self._declares:
+            await apply(self._jetstream, self._slice)
+        else:
+            delay = ATTACH_BACKOFF_SECONDS[0]
+            while missing := await self._missing():
+                log.debug("%s: waiting for %s's declarer: %s absent", self._component, self._slice.line, missing)
+                await self._pause(delay)
+                delay = min(delay * 2, ATTACH_BACKOFF_SECONDS[1])
         if self._reads_wall:
             await declare(self._jetstream, wall_mirror_config())   # create only, never updated (§10)
         with self._lock:
@@ -268,6 +300,21 @@ class NodeSession:
             self._service = service
         self._ready.set()
         self._attached.set()
+
+    async def _apply_lines(self) -> None:
+        with self._lock:
+            lines = list(self._lines.values())
+        for slice_ in lines:
+            await apply(self._jetstream, slice_)
+
+    async def _missing(self) -> str | None:
+        """The first stream of the slice the bus does not hold (STREAM.INFO, no options), or None."""
+        for config in self._slice.buffers:
+            try:
+                await self._jetstream.stream_info(config.name)
+            except NotFoundError:
+                return config.name
+        return None
 
     async def _watch(self, stream: str, prefix: str, view: _View, value: Callable[[Read], object]) -> None:
         """Follow `stream` into `view` from each key's latest value, while attached. The reader keeps
@@ -326,6 +373,12 @@ class NodeSession:
                 subject, payload, headers = item
                 try:
                     await self._jetstream.publish(subject, payload, headers=headers, timeout=_PUBLISH_SECONDS)
+                except NoStreamResponseError as error:   # a stream of the slice went absent: attach again
+                    log.info("%s: publish %s: %r", self._component, subject, error)
+                    self._ready.clear()
+                    self._attached.clear()
+                    self._attach_needed.set()
+                    continue
                 except Exception as error:   # kept, retried with its headers (and message id)
                     log.info("%s: publish %s: %r", self._component, subject, error)
                     await self._pause(delay)

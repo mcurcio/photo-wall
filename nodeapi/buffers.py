@@ -371,6 +371,39 @@ class Slice:
                 return config.name
         return None
 
+    def union(self, other: Slice) -> Slice:
+        """Both slices' buffers in one slice of the same line, as the line's declarer applies it while
+        two releases are held (a Player hot-swap, E3b design §7.3, §9.7). A stream both name keeps the
+        larger byte cap and, when keyed, the union of the two key tables (the largest size per key),
+        rebuilt so its cap is that table's budget and no listed key loses its only value; any other
+        difference is refused. A union past the line is refused here, before anything is applied."""
+        if other.line != self.line:
+            raise ValueError("slice_union_lines")
+        theirs = {config.name: config for config in other.buffers}
+        mine = {config.name for config in self.buffers}
+        return Slice(self.line, (*(_stream_union(config, theirs[config.name]) if config.name in theirs else config
+                                   for config in self.buffers),
+                                 *(config for config in other.buffers if config.name not in mine)))
+
+
+def _stream_union(mine: StreamConfig, theirs: StreamConfig) -> StreamConfig:
+    """One stream both slices name: the larger cap, or the union of its key tables (a sticky stream's
+    cap and largest message are its table's)."""
+    old, new = table_of(mine), table_of(theirs)
+    if old is None and new is None:
+        if replace(mine, max_bytes=0) != replace(theirs, max_bytes=0):
+            raise ValueError("slice_union_conflict")
+        return mine if mine.max_bytes >= theirs.max_bytes else theirs
+
+    def rest(config: StreamConfig) -> StreamConfig:
+        return replace(config, max_bytes=0, max_msg_size=0,
+                       metadata={key: value for key, value in config.metadata.items() if key != TABLE_KEY})
+    if old is None or new is None or old.history != new.history or rest(mine) != rest(theirs):
+        raise ValueError("slice_union_conflict")
+    sizes = {key: max(old.sizes.get(key, 0), new.sizes.get(key, 0)) for key in old.sizes.keys() | new.sizes.keys()}
+    metadata = {key: value for key, value in mine.metadata.items() if key not in (TABLE_KEY, KIND_KEY)}
+    return _keyed(mine.name.removeprefix("KV_"), KeyTable(dict(sorted(sizes.items())), old.history), metadata)
+
 
 def _limits(config: StreamConfig) -> tuple:
     """What a release may change on a kept stream: its caps, its subjects and its key table."""
