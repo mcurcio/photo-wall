@@ -191,6 +191,21 @@ out.panel = [
   players.panelAtEnrollment({ connected: false }, 160, 100).kind,
   factText(players.panelAtEnrollment(null, 160, 100)),
 ];
+// --- busLinkFact: the Node API link as Central's inference, or unknown; never throws.
+const link = (busLink, readAt) => {
+  const value = facts.busLinkFact(busLink, readAt);
+  return [value.kind, factText(value)];
+};
+out.busLink = [
+  link({ linked: true, changed_at: 100, looked_at: 290 }, 300),
+  link({ linked: false, changed_at: 280, looked_at: 290 }, 300),
+  link({ linked: true, changed_at: 100, looked_at: 290 }, 321),
+  link({ linked: null, changed_at: null, looked_at: null }, 300),
+  link({ linked: null, changed_at: null, looked_at: 290 }, 300),
+  link(undefined, 300),
+  link({ linked: true, changed_at: 100, looked_at: 290 }, null),
+  link({ linked: "yes", changed_at: "x", looked_at: {} }, 300),
+];
 console.log(JSON.stringify(out));
 """
 
@@ -423,4 +438,19 @@ def test_the_panel_at_enrollment_has_one_wording_and_its_true_truth_kind():
         "No Panel listed as connected at the Player app's last enrollment (may be stale) · recorded 1 min ago",
         "set",
         "Unknown: Central holds no Panel record from the Player app's last enrollment",
+    ]
+
+
+def test_the_node_api_link_reads_as_centrals_inference_or_unknown():
+    # Linked, not linked, stale (more than 30 s since Central's last look), no hub; then the
+    # unlabelled reads, each unknown naming what is missing.
+    assert _run()["busLink"] == [
+        ["derived", "linked for 3 min (Central's inference: Central's hub holds this Node's leaf)"],
+        ["derived", "not linked for 20 s (Central's inference: Central's hub does not hold this Node's leaf)"],
+        ["unknown", "Unknown: Central has not looked at its hub for 31 s"],
+        ["unknown", "Unknown: Central runs no hub"],
+        ["unknown", "Unknown: Central's hub has not looked for this Node yet"],
+        ["unknown", "Unknown: the Node API link is not served"],
+        ["unknown", "Unknown: Central's read time is not served"],
+        ["unknown", "Unknown: when Central last looked at its hub is not served"],
     ]

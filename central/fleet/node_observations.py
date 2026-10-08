@@ -5,6 +5,7 @@ import json
 from uuid import UUID
 
 from central.fleet.host_thresholds import thresholds_document
+from central.fleet.node_bus_presence import bus_links_in
 from central.fleet.node_commands import OUTSTANDING_REBOOT_SQL
 from central.fleet.node_display import display_outputs_in
 from central.fleet.node_sessions import (
@@ -341,6 +342,7 @@ class NodeObservations:
                 "first_received_at": item["created_at"], "offer_refusal": item["refusal"],
                 "physical_identity": "unverified"} for item in claims]
             return {"boot_claims": boot_claims, "deprecated_boot": deprecated_boot_in(conn, device_id),
+                    "bus_link": bus_links_in(conn, [device_id])[device_id],
                     "device_id": device_id, "device_generation": generation, "read_at": now,
                     "sessions": sessions, "reboot_commands": audit, "physical_output": "unknown",
                     "display_outputs": display_outputs_in(conn, device_id, generation),

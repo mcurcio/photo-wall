@@ -26,6 +26,7 @@ from central.fleet.models import (
     OfferRequest,
     PolicyWrite,
 )
+from central.fleet.node_bus_presence import bus_links_in
 from central.fleet.policy import (
     app_control_status,
     app_observation_status,
@@ -555,6 +556,7 @@ class FleetService:
                 conn, device_ids=[row["device_id"] for row in devices], read_at=read_at)
             management = management_status_in(
                 conn, [row["device_id"] for row in devices], read_at=read_at)
+            bus_links = bus_links_in(conn, [row["device_id"] for row in devices])
             overrides = {r["device_id"]: r for r in conn.execute(
                 "SELECT * FROM fleet_device_app_overrides").fetchall()}
             observations: dict[str, list[dict]] = {}
@@ -639,6 +641,7 @@ class FleetService:
                     "output": {"state": "not_currently_qualified", "source": "none",
                                "age_seconds": None},
                     "update_now": {"available": False, "reason": "command_trust_unapproved"},
+                    "bus_link": bus_links[device_id],
                 })
             release_docs = [{
                 "tag": r["tag"],
