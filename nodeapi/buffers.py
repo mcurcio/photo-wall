@@ -371,6 +371,44 @@ class Slice:
                 return config.name
         return None
 
+    def union(self, other: Slice) -> Slice:
+        """Both slices' buffers in one slice of their line, as the line's declarer applies two held
+        releases during a hot-swap (E3b design §7.3, §9.7): a stream both name takes the larger byte
+        cap and, when keyed, the union of both key tables (each key at its largest size, the larger
+        history), rebuilt so its cap is that table's budget; any other difference is refused. A union
+        past the line raises `slice_past_its_line`, so a release that cannot be held beside the
+        running one is refused before the swap starts."""
+        if self.line != other.line:
+            raise ValueError("slice_union_lines")
+        theirs = {config.name: config for config in other.buffers}
+        buffers = [config if config.name not in theirs else _united(config, theirs[config.name])
+                   for config in self.buffers]
+        names = {config.name for config in self.buffers}
+        return Slice(self.line, (*buffers, *(config for config in other.buffers if config.name not in names)))
+
+
+def _united(mine: StreamConfig, theirs: StreamConfig) -> StreamConfig:
+    """One stream both slices name, as `Slice.union` holds it; ValueError("slice_union_conflict")
+    when the two differ in anything but the byte cap or, keyed, the key table and what it sizes."""
+    mine_table, their_table = table_of(mine), table_of(theirs)
+    if mine_table is None or their_table is None:
+        if replace(mine, max_bytes=0) != replace(theirs, max_bytes=0):
+            raise ValueError("slice_union_conflict")
+        return mine if mine.max_bytes >= theirs.max_bytes else theirs
+    if _untabled(mine) != _untabled(theirs):
+        raise ValueError("slice_union_conflict")
+    sizes = dict(mine_table.sizes)
+    for key, size in their_table.sizes.items():
+        sizes[key] = max(size, sizes.get(key, 0))
+    return _keyed(mine.name.removeprefix("KV_"), KeyTable(sizes, max(mine_table.history, their_table.history)),
+                  mine.metadata)
+
+
+def _untabled(config: StreamConfig) -> StreamConfig:
+    # A keyed stream less what its key table decides: the table, its cap, largest message and history.
+    return replace(config, max_bytes=0, max_msg_size=None, max_msgs_per_subject=None,
+                   metadata={key: value for key, value in config.metadata.items() if key != TABLE_KEY})
+
 
 def _limits(config: StreamConfig) -> tuple:
     """What a release may change on a kept stream: its caps, its subjects and its key table."""

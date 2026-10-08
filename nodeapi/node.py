@@ -1,10 +1,15 @@
 """The Node-role session: one component's way to use its bus (E3b design §7.2 node, §9.3, §9.5).
 
 A session runs its own thread and event loop and connects forever. Every connect runs **attach**:
-apply the component's slice, re-put the state it holds plus `birth`, register its methods once as a
-`nats.micro` service named the component (subjects `<component>.method.<name>`), then mark attached.
+apply the component's slice when the component declares its line (§7.3), or else wait, with backoff,
+until every stream of the slice exists (the Player's line is declared by apps, and the two start in
+no set order); then re-put the state it holds plus `birth`, register its methods once as a
+`nats.micro` service named the component (subjects `<component>.method.<name>`), and mark attached.
 A session that reads the wall also creates the Node's WALL mirror at attach when it is absent. A bus
-that started empty is refilled so, by the writer that owns the data.
+that started empty is refilled so, by the writer that owns the data. Attach runs again on every
+reconnect and whenever a publish finds a stream of the slice absent, so `birth` is in every epoch.
+A declarer of another line (apps, of the Player's) holds that line's slice through `apply_line` and
+applies it at once and after every attach.
 
 The handles never wait on the bus: `Events.emit` enqueues into a bounded outbox (full, it drops its
 oldest) whose events carry headers built once at the emit, so a retried publish keeps its message id
@@ -34,6 +39,7 @@ from typing import Final, Generic, TypeVar
 import nats
 import nats.errors
 import nats.micro
+from nats.js.errors import NoStreamResponseError, NotFoundError
 from nats.micro.service import ServiceConfig
 
 from contracts.node_link import METHOD_TOKEN, WALL_STREAM
@@ -76,22 +82,27 @@ class Release:
 OUTBOX_MESSAGES: Final = 4096
 SESSION_SCHEMA_MAJOR: Final = 1         # the major of the session's own events and birth
 _UNKNOWN_CALLER: Final = "unknown"
-_BACKOFF: Final = (0.1, 2.0)            # first and largest wait between attempts
+ATTACH_BACKOFF_SECONDS: Final = (0.1, 2.0)   # first and largest wait while a declarer has not applied
+_BACKOFF: Final = ATTACH_BACKOFF_SECONDS     # and between the session's other attempts
 _PUBLISH_SECONDS: Final = 2.0
 _WATCH_BATCH: Final = 64
 _WATCH_SECONDS: Final = 1.0
 _COMPONENT = re.compile(r"[a-z]+")
 
 
+class _Undeclared(Exception):
+    """A stream of a non-declaring session's slice is absent: its declarer has not applied it yet."""
+
+
 class NodeSession:
-    """One component's session on its Node's bus (its line's declarer in S1)."""
+    """One component's session on its Node's bus, its line's declarer or not."""
 
     def __init__(self, component: str, slice_: Slice, release: Release, *, url: str,
                  methods: Mapping[str, MethodHandler] | None = None, reads_wall: bool = False) -> None:
         if type(component) is not str or not _COMPONENT.fullmatch(component):
             raise ValueError("session_component")
-        if slice_.store_line.declarer != component:
-            raise ValueError("session_line_declared_by_another")
+        self._declares = slice_.store_line.declarer == component
+        self._lines: dict[str, Slice] = {}   # line -> the newest slice `apply_line` holds for it
         self._methods = dict(methods or {})
         self._configs = {config.name: config for config in slice_.buffers}
         line = slice_.line
@@ -167,6 +178,20 @@ class NodeSession:
     def wait_attached(self, timeout: float) -> bool:
         return self._attached.wait(timeout)
 
+    def apply_line(self, slice_: Slice) -> None:
+        """Hold `slice_` for a line this component declares beside its own (apps: the Player's
+        line, from the held Player releases' slices; their `Slice.union` during a hot-swap) and
+        apply it now and after every later attach; the newest slice per line wins. Thread-safe;
+        never waits on the bus."""
+        if slice_.store_line.declarer != self._component or slice_.line == self._slice.line:
+            raise ValueError("session_does_not_declare_line")
+        with self._lock:
+            self._lines[slice_.line] = slice_
+            loop = self._loop
+        if loop is not None:
+            with contextlib.suppress(RuntimeError):   # the loop already ended
+                loop.call_soon_threadsafe(self._lines_needed.set)
+
     # The session's own loop.
 
     async def _main(self) -> None:
@@ -174,6 +199,7 @@ class NodeSession:
         self._wake = asyncio.Event()
         self._ready = asyncio.Event()          # attached on the current connection
         self._attach_needed = asyncio.Event()
+        self._lines_needed = asyncio.Event()
         self._service = None
         with self._lock:
             self._loop = asyncio.get_running_loop()
@@ -185,7 +211,8 @@ class NodeSession:
         self._client, self._jetstream = client, client.jetstream()
         self._attach_needed.set()
         self._wake.set()
-        tasks = [asyncio.create_task(self._attacher()), asyncio.create_task(self._publisher())]
+        tasks = [asyncio.create_task(self._attacher()), asyncio.create_task(self._publisher()),
+                 asyncio.create_task(self._line_applier())]
         if self._desired is not None:
             tasks.append(asyncio.create_task(self._watch(
                 self._desired_stream, self._desired_prefix, self._desired,
@@ -239,15 +266,25 @@ class NodeSession:
                 try:
                     await self._attach()
                     break
+                except _Undeclared as absent:
+                    log.debug("%s: attach waits for %s", self._component, absent)
                 except Exception as error:   # the bus is away or restarting: attach again
                     log.info("%s: attach: %r", self._component, error)
-                    await self._pause(delay)
-                    delay = min(delay * 2, _BACKOFF[1])
+                await self._pause(delay)
+                delay = min(delay * 2, ATTACH_BACKOFF_SECONDS[1])
 
     async def _attach(self) -> None:
-        """Apply the slice, create the WALL mirror if this session reads it, re-put every held state
-        key and birth, register the methods once."""
-        await apply(self._jetstream, self._slice)
+        """Apply the slice (a declarer) or find every stream of it (STREAM.INFO, no options), create
+        the WALL mirror if this session reads it, re-put every held state key and birth, register the
+        methods once; then the held lines are applied."""
+        if self._declares:
+            await apply(self._jetstream, self._slice)
+        else:
+            for config in self._slice.buffers:
+                try:
+                    await self._jetstream.stream_info(config.name)
+                except NotFoundError:
+                    raise _Undeclared(config.name) from None
         if self._reads_wall:
             await declare(self._jetstream, wall_mirror_config())   # create only, never updated (§10)
         with self._lock:
@@ -268,6 +305,28 @@ class NodeSession:
             self._service = service
         self._ready.set()
         self._attached.set()
+        self._lines_needed.set()
+
+    async def _line_applier(self) -> None:
+        """Apply every line `apply_line` holds, while attached: after each attach and each
+        `apply_line`, one apply at a time, so the newest slice per line is the last applied."""
+        delay = _BACKOFF[0]
+        while True:
+            await self._lines_needed.wait()
+            await self._ready.wait()
+            self._lines_needed.clear()
+            with self._lock:
+                lines = list(self._lines.values())
+            try:
+                for slice_ in lines:
+                    await apply(self._jetstream, slice_)
+            except Exception as error:   # the bus is away or restarting: apply again once attached
+                log.info("%s: apply line: %r", self._component, error)
+                self._lines_needed.set()
+                await self._pause(delay)
+                delay = min(delay * 2, _BACKOFF[1])
+                continue
+            delay = _BACKOFF[0]
 
     async def _watch(self, stream: str, prefix: str, view: _View, value: Callable[[Read], object]) -> None:
         """Follow `stream` into `view` from each key's latest value, while attached. The reader keeps
@@ -326,6 +385,12 @@ class NodeSession:
                 subject, payload, headers = item
                 try:
                     await self._jetstream.publish(subject, payload, headers=headers, timeout=_PUBLISH_SECONDS)
+                except NoStreamResponseError as error:   # its stream is absent: kept; attach again first
+                    log.info("%s: publish %s: %r", self._component, subject, error)
+                    self._ready.clear()
+                    self._attached.clear()
+                    self._attach_needed.set()
+                    continue
                 except Exception as error:   # kept, retried with its headers (and message id)
                     log.info("%s: publish %s: %r", self._component, subject, error)
                     await self._pause(delay)
