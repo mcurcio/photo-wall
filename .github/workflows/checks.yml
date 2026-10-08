@@ -79,11 +79,14 @@ jobs:
   # bus unit is (MemoryMax, no swap, GOMEMLIMIT, the memory store), every stream at its consumer cap
   # (E-W1-CONS-2) and every store line full and written for minutes; and a stalled hub while a Node
   # program floods every subject the leaf might carry (erratum E-W1-LEAF-1). Fails on any OOM kill or
-  # restart. The kill -9 leg, the store coming back empty, returns with E3c (E3b design §15).
+  # restart. Two more legs (E3b design §15): a store full of the smallest nodeapi event, every stream
+  # at its consumer cap, whose measured heap factor (printed) must stay within contracts'
+  # MEMORY_STORE_FACTOR (E-E3C-S2-1); and a kill -9 inside the fence, the bus back within 15 s with
+  # an empty store that takes every line and re-syncs its WALL mirror.
   # Native arm64 (ubuntu-24.04-arm, as node-components.yml and node-pid1.yml): the Pi's architecture.
   bus-fence:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ./.github/actions/python-uv
