@@ -13,6 +13,7 @@ from appliance.apps.environment import verify_root
 from appliance.apps.lifecycle_storage import primitive, running_from
 from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
 from appliance.kernel.boot_store import BootStore
+from appliance.kernel.capacity import line
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
@@ -68,7 +69,7 @@ def app_unit_properties(root: Path) -> tuple[str, ...]:
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictSUIDSGID=yes",
         "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-        "MemoryMax=2G", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
+        f"MemoryMax={line('app').cap_bytes}", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
         "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
         "BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client /run/photo-wall-display/wayland-0:/run/photo-wall-wayland/wayland-0 /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",

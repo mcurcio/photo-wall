@@ -29,9 +29,11 @@ from pathlib import Path
 import pytest
 from node_pid1_central_fixture import assert_phase_completed, central_fixture
 
+from appliance.kernel.capacity import LINES
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
 from contracts.node_link import NODE_BUS_GOMEMLIMIT, NODE_BUS_MEMORY_MAX, NODE_BUS_PORT, node_user
+from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from scripts.player_start_probe import (
     BOOTED,
     HOST_ACTING_UNITS,
@@ -600,6 +602,42 @@ def stage_and_complete(fixture, node, phase, reference):
     return status
 
 
+def assert_memory_lines(node):
+    """For every line with a cgroup that the boot started: PID1's MemoryMax is the line's cap,
+    and each capped slice's memory.events reads oom_kill 0 (appliance/kernel/capacity.py LINES)."""
+    checked = {}
+    for item in (entry for entry in LINES if entry.cgroup is not None):
+        shown = unit_properties_of(node, item.cgroup, "MemoryMax,ControlGroup")
+        if not shown.get("ControlGroup"):
+            continue  # not started this boot
+        assert shown["MemoryMax"] == str(item.cap_bytes), (item.name, shown)
+        events = None
+        if item.cgroup.endswith(".slice"):
+            text = node.run("cat", "/sys/fs/cgroup" + shown["ControlGroup"] + "/memory.events")
+            events = dict(row.split() for row in text.splitlines() if len(row.split()) == 2)
+            assert events["oom_kill"] == "0", (item.name, events)
+        checked[item.cgroup] = {"MemoryMax": shown["MemoryMax"], "memory.events": events}
+    (node.work / "memory-lines.json").write_text(json.dumps(checked, sort_keys=True))
+    # The base slice always runs after a completed stage: the check is never vacuous.
+    assert "photowallbase.slice" in checked, checked
+
+
+def assert_bus_memory_reported(fixture, node):
+    """Host Management's newest observation from this Node carries the bus's cgroup reading:
+    memory_peak:bus (system.slice/photo-wall-bus.service) and oom_kill:bus 0."""
+    deadline = time.monotonic() + 4 * HOST_OBSERVATION_INTERVAL_SECONDS
+    while True:
+        host = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/host")
+        metrics = dict(host["metrics"])
+        if "memory_peak:bus" in metrics and "oom_kill:bus" in metrics:
+            break
+        assert time.monotonic() < deadline, "no memory_peak:bus row reached Central: " + str(host)
+        time.sleep(1)
+    (node.work / "bus-memory.json").write_text(json.dumps(host, sort_keys=True))
+    assert 0 < metrics["memory_peak:bus"] <= NODE_BUS_MEMORY_MAX, metrics
+    assert metrics["oom_kill:bus"] == 0, metrics
+
+
 @pytest.mark.parametrize("phase", [name for name in SCENARIOS if name not in ("reboot", "refused")])
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
     components_dir, fixture_targets, image = node_pid1_inputs
@@ -619,7 +657,9 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
             node.cold(fixture, components_dir)
             if phase == "success":
                 node.verify_bus()
+                assert_bus_memory_reported(fixture, node)
             stage_and_complete(fixture, node, phase, reference)
+            assert_memory_lines(node)
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
@@ -679,6 +719,7 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
             old_session = {"status": caught.value.code, **json.load(caught.value)}
             assert old_session == {"status": 403, "error": "node_session_superseded"}, old_session
             stage_and_complete(fixture, second, phase, reference)
+            assert_memory_lines(second)
             final = status_of(fixture, second.work)
             (work / "reboot.json").write_text(
                 json.dumps(

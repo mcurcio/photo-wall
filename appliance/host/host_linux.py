@@ -20,12 +20,15 @@ from contracts.node_protocol import token
 _THROTTLE_FLAGS = (("under_voltage", 0), ("frequency_capped", 1), ("throttled", 2),
                    ("soft_temperature_limit", 3))
 # The cgroups HostCore measures (metric suffix, cgroup directory); HostCore's own slice and the
-# display service have no OOM-kill row (contracts/node_observation.py METRIC_FAMILIES: oom_kill: base, preparation, app).
+# display service have no OOM-kill row (contracts/node_observation.py METRIC_FAMILIES:
+# oom_kill: base, preparation, app, bus).
 _SLICES = (("hostcore", "photowallhostcore.slice"), ("base", "photowallbase.slice"),
            ("preparation", "photowallpreparation.slice"), ("app", "photowallapp.slice"),
            # Weston's own service inside the base slice (photo-wall-display.service Slice=).
-           ("display", "photowallbase.slice/photo-wall-display.service"))
-_OOM_SLICES = ("base", "preparation", "app")
+           ("display", "photowallbase.slice/photo-wall-display.service"),
+           # The bus runs in system.slice (photo-wall-bus.service has no Slice=; erratum E-E3C-CUT-6).
+           ("bus", "system.slice/photo-wall-bus.service"))
+_OOM_SLICES = ("base", "preparation", "app", "bus")
 
 
 def _unit_name(value: str) -> bool:
