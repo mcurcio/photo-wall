@@ -292,23 +292,48 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             time.sleep(0.5)
         raise AssertionError("the Node bus never answered: " + str(self.work))
 
+    def _host_birth(self, deadline, *, not_epoch=None):
+        """The host component's {"birth", "base", "epoch"}, read with HostCore's shipped nats-py and
+        nodeapi, once it is there (in an epoch other than `not_epoch`) before `deadline`."""
+        last = ""
+        while time.monotonic() < deadline:
+            result = self.container.exec(
+                "/usr/bin/python3", "-I", "-B", "/var/lib/node_pid1_bus_probe.py", "birth",
+                str(NODE_BUS_PORT), timeout=30,
+            )
+            if result.returncode == 0:
+                held = json.loads(result.stdout)
+                if held["epoch"] != not_epoch:
+                    return held
+            last = result.stdout + result.stderr[-2000:]
+            time.sleep(0.5)
+        raise AssertionError(f"the host's birth never arrived: {self.work}\n{last}")
+
     def verify_bus(self):
         """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
-        contracts; a kill -9 restarts it at once and neither the Player nor the broker notices."""
+        contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
+        notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
+        and, after the kill, writes it again in the bus's new epoch with no help from Central."""
         self.container.copy_in(
             Path(__file__).with_name("node_pid1_bus_probe.py"), "/var/lib/node_pid1_bus_probe.py"
         )
-        serial = json.loads(self.run("cat", "/run/photo-wall-node/host.json"))["serial"]
+        host = json.loads(self.run("cat", "/run/photo-wall-node/host.json"))
+        serial = host["serial"]
         before = self._bus_answers(time.monotonic() + BUS_SECONDS)
         assert before == {
             "server_name": node_user(serial), "jetstream": True, "listen": ["127.0.0.1"]
         }, before
+        born = self._host_birth(time.monotonic() + BUS_SECONDS)
+        assert born["birth"]["component"] == "host", born
+        assert born["birth"]["release_digest"] == host["base_tag"], born
+        assert born["base"] == {"base_tag": host["base_tag"]}, born
         shown = unit_properties_of(self, BUS_UNIT, "MemoryMax,MainPID,NRestarts")
         assert shown["MemoryMax"] == str(NODE_BUS_MEMORY_MAX), shown
         assert shown["NRestarts"] == "0", shown
         environ = self.run("cat", f"/proc/{shown['MainPID']}/environ").split("\0")
         assert f"GOMEMLIMIT={NODE_BUS_GOMEMLIMIT // (1024 * 1024)}MiB" in environ, environ
-        others = ("photo-wall-node-player.service", "photo-wall-app-broker.service")
+        others = ("photo-wall-node-player.service", "photo-wall-app-broker.service",
+                  "photo-wall-host-core.service")
         pids = {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others}
         assert "0" not in pids.values(), pids
         self.run("systemctl", "kill", "--signal=SIGKILL", BUS_UNIT)
@@ -322,9 +347,13 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             time.sleep(0.25)
         again = self._bus_answers(deadline)
         assert again == before, again
+        reborn = self._host_birth(deadline, not_epoch=born["epoch"])
+        assert {key: reborn[key] for key in ("birth", "base")} == {
+            key: born[key] for key in ("birth", "base")}, reborn
         assert {unit: unit_properties_of(self, unit, "MainPID")["MainPID"] for unit in others} == pids
         (self.work / "bus.json").write_text(json.dumps(
-            {"bus": before, "unit": shown, "restarted": after, "others": pids}, sort_keys=True))
+            {"bus": before, "unit": shown, "restarted": after, "others": pids, "birth": born,
+             "reborn": reborn}, sort_keys=True))
 
     def verify_process(self, current):
         """Live PID1 observation and /proc birth ticks of the exact admitted process."""

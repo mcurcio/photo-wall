@@ -1,9 +1,13 @@
-"""The Node bus as a local client and the kernel see it (E3c): stdlib only, run by the node-pid1
-`success` leg inside the PID1 container (`python3 node_pid1_bus_probe.py info 4222`) and imported
-by the bus integration tests.
+"""The Node bus as a local client and the kernel see it (E3c): run by the node-pid1 `success` leg
+inside the PID1 container (`python3 -I -B node_pid1_bus_probe.py info|birth 4222`) and imported by
+the bus integration tests. Stdlib only at import.
 
 `info` prints {"server_name", "jetstream", "listen"}: the server's own INFO line from
 127.0.0.1:<port>, and every address listening on that TCP port in /proc/net/tcp and /proc/net/tcp6.
+
+`birth` prints {"birth", "base", "epoch"}: the host component's `birth` and `base` from its state
+bucket and that bucket's epoch, read with the nats-py and `nodeapi` HostCore's launcher ships
+(HOST_CORE first on sys.path), so it also proves the package's copy imports on the Node's python3.
 """
 from __future__ import annotations
 
@@ -14,6 +18,8 @@ import sys
 from pathlib import Path
 
 LISTEN = "0A"   # TCP_LISTEN in /proc/net/tcp's `st` column
+HOST_CORE = "/usr/lib/photo-wall-host-core"
+HOST_STATE = "KV_state_host"
 
 
 def server_info(port: int, host: str = "127.0.0.1", timeout: float = 5.0) -> dict:
@@ -48,8 +54,40 @@ def listen_addresses(port: int, proc: Path = Path("/proc/net")) -> list[str]:
     return sorted(found)
 
 
+async def host_state(client) -> dict:
+    """{"birth", "base", "epoch"} of the host's state bucket through a connected nats-py `client`;
+    raises nats.js.errors.NotFoundError while the bucket or a key is absent."""
+    from nodeapi.epoch import stream_epoch
+
+    jetstream = client.jetstream()
+    bucket = await jetstream.key_value(HOST_STATE.removeprefix("KV_"))
+    values = {key: json.loads((await bucket.get(key)).value) for key in ("birth", "base")}
+    return {**values, "epoch": await stream_epoch(jetstream, HOST_STATE)}
+
+
+def host_birth(port: int) -> dict:
+    """host_state of the bus on 127.0.0.1:<port>, with HostCore's shipped nats-py and nodeapi."""
+    sys.path.insert(0, HOST_CORE)
+    import asyncio
+
+    import nats
+
+    async def read() -> dict:
+        client = await nats.connect(servers=[f"nats://127.0.0.1:{port}"], allow_reconnect=False,
+                                    connect_timeout=2)
+        try:
+            return await host_state(client)
+        finally:
+            await client.close()
+
+    return asyncio.run(read())
+
+
 def main(arguments: list[str]) -> None:
     command, port = arguments[0], int(arguments[1])
+    if command == "birth":
+        print(json.dumps(host_birth(port), sort_keys=True))
+        return
     if command != "info":
         raise SystemExit(f"unknown command: {command}")
     info = server_info(port)

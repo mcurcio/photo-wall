@@ -10,6 +10,11 @@ The package also carries the Node bus (E3c): the pinned linux-arm64 nats-server 
 `node-bus.conf` under BUS_DIRECTORY, run by photo-wall-bus.service, so the package is arm64.
 `stage_tree` stays network-free (unit-tier tests stage it); `stage_vendored` adds the pinned bytes,
 and `stage_package` (both) is the one path to a .deb (erratum E-E3C-CUT-4).
+
+A launcher whose policy declares a vendored root (`scripts/vendored_packages.py`: nats-py, which
+Debian does not package, erratum E-E3C-CUT-3) gets that wheel staged in its own directory beside its
+closure, by `stage_vendored`: HostCore runs the host component's `nodeapi` session (E-E3C-CUT-2). A
+declared root no code reaches is refused, as the other .deb builders refuse one.
 """
 from __future__ import annotations
 
@@ -25,9 +30,17 @@ from typing import Final
 
 from scripts.build_player_deb import control_file, fetch_tree, run_dpkg_deb
 from scripts.debian_packages import packages
-from scripts.module_closure import ClosurePolicy, closure_for, stage_application
+from scripts.module_closure import (
+    ClosureError,
+    ClosurePolicy,
+    closure_for,
+    stage_application,
+    unreached_imports,
+)
 from scripts.nats_server import ASSETS, NODE_PLATFORM
 from scripts.nats_server import fetch as fetch_nats_server
+from scripts.vendored_packages import import_table as vendored_imports
+from scripts.vendored_packages import stage_wheel, wheel
 
 POLICIES = {
     "root-import": ClosurePolicy("root-import", ("appliance.apps.root_import",),
@@ -44,7 +57,8 @@ POLICIES = {
                                 "appliance.health", "appliance.node.manager",
                                 "appliance.node.manager_desired", "appliance.node.manager_launcher",
                                 "appliance.node.manager_observation", "appliance.node.manager_runner"),
-                               MappingProxyType({})),
+                               MappingProxyType({}),
+                               MappingProxyType({"nats": vendored_imports()["nats"]})),
     "app-broker": ClosurePolicy("app-broker", ("appliance.apps.broker_runner",),
                                 ("player", "central", "media", "gi", "appliance.host"), MappingProxyType({})),
     "manager-supervisor": ClosurePolicy("manager-supervisor", ("appliance.node.manager_launcher",),
@@ -76,8 +90,13 @@ def stage_tree(tree: Path, destination: Path) -> str:
     digests = ["debian-depends", json.dumps(dependencies, separators=(",", ":"))]
     for name, policy in POLICIES.items():
         closure = closure_for(policy, repo=tree)
+        if unreached := unreached_imports(closure, policy):
+            raise ClosureError(f"{name} declares imports no code reaches: {', '.join(unreached)}")
         stage_application(closure, policy, repo=tree, into=destination / ("usr/lib/photo-wall-" + name))
         digests.append(closure.digest)
+    # Each vendored wheel's pinned digest (stage_vendored adds its files), so a new pin is a new base.
+    for name, distribution in _vendored():
+        digests.extend(("vendored", name, distribution, wheel(distribution).sha256))
     unit_dir = destination / "lib/systemd/system"
     unit_dir.mkdir(parents=True)
     for name in UNITS:
@@ -125,12 +144,21 @@ def stage_tree(tree: Path, destination: Path) -> str:
     return version
 
 
+def _vendored() -> list[tuple[str, str]]:
+    """(launcher name, distribution) for every vendored wheel a launcher ships, sorted."""
+    return sorted({(name, distribution) for name, policy in POLICIES.items()
+                   for distribution in policy.vendored.values()})
+
+
 def stage_vendored(destination: Path, downloads: Path) -> None:
-    """The pinned NODE_PLATFORM nats-server at BUS_DIRECTORY/nats-server, mode 0755."""
+    """The pinned NODE_PLATFORM nats-server at BUS_DIRECTORY/nats-server, mode 0755, and the wheel of
+    every vendored root of every launcher in usr/lib/photo-wall-<name>, from the pinned downloads."""
     binary = fetch_nats_server(downloads, system=NODE_PLATFORM[0], machine=NODE_PLATFORM[1])
     target = destination / BUS_DIRECTORY / "nats-server"
     shutil.copyfile(binary, target)
     os.chmod(target, 0o755)
+    for name, distribution in _vendored():
+        stage_wheel(wheel(distribution), destination / ("usr/lib/photo-wall-" + name), downloads)
 
 
 def stage_package(tree: Path, destination: Path, downloads: Path) -> str:
