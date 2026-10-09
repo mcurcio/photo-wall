@@ -449,10 +449,13 @@ class DeviceRoot:
         # staged read-only under WORK so root_checks() can run them from the container.
         tools = self.work / "tools" / "scripts"
         tools.mkdir(parents=True, exist_ok=True)
-        for name in ("device_root_checks.py", "debian_packages.py",
-                     "packaged_os_agent_probe.py"):
-            target = tools / name
-            target.write_bytes((ROOT / "scripts" / name).read_bytes())
+        for name in ("scripts/device_root_checks.py", "scripts/debian_packages.py",
+                     "scripts/packaged_os_agent_probe.py",
+                     # The pin the declaration reads at import (decision 0019, rule 1).
+                     "debian-packaging/snapshot.list"):
+            target = tools.parent / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / name).read_bytes())
             target.chmod(0o644)
         (self.work / "bootstrapper.deb").write_bytes(bootstrapper_deb.read_bytes())
         (self.work / "bootstrapper.deb").chmod(0o644)
