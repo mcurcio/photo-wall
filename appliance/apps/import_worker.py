@@ -12,8 +12,11 @@ from contracts.strict_json import loads_object
 
 
 class RootImportWorker:
-    def __init__(self, store):
+    def __init__(self, store, *, base_abi: str, graphics_abi: str, plugin_abi: str):
+        """`store` is the broker's; the ABI is the broker's measured one (its cold configuration),
+        handed to the worker in every request (errata E-E2C-DR-1)."""
         self.store = store
+        self.abi = dict(base_abi=base_abi, graphics_abi=graphics_abi, plugin_abi=plugin_abi)
 
     def quiescent(self) -> bool:
         prior = self.store.read("import-worker")
@@ -57,15 +60,17 @@ class RootImportWorker:
                 return  # Charged before spawn: never repeat an ambiguous worker.
             if rows["ActiveState"] not in ("inactive", "failed") or rows["MainPID"] != "0":
                 raise ValueError("root_import_prior_active")
-        self.store.write("import-request", {"command": encode_stage_command(command).decode()})
+        self.store.write("import-request", {"command": encode_stage_command(command).decode(), **self.abi})
         record = {"command_sha256": command.command_sha256, "unit": unit, "phase": "intent", "identity": None}
         self.store.write("import-worker", record)
         properties = ("Slice=photowallpreparation.slice", "User=root", "MemorySwapMax=0",
             "CPUQuota=25%", "TasksMax=16", "IOWeight=10", "NoNewPrivileges=yes", "PrivateDevices=yes",
-            "PrivateTmp=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet=CAP_DAC_READ_SEARCH",
+            "PrivateTmp=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN",
             "RuntimeDirectory=photo-wall-root-import", "RuntimeDirectoryMode=0700", "RuntimeDirectoryPreserve=yes",
-            "ReadWritePaths=/run/photo-wall-node-storage/app-roots /run/photo-wall-root-import",
-            "ReadOnlyPaths=/run/photo-wall-node-storage/preparation", "Restart=no", "RuntimeMaxSec=600")
+            # One bind over the whole store: adoption is a rename from AppManager's downloads into
+            # the image pool, which a second bind would make EXDEV (errata E-E2C-CUT-5).
+            "ReadWritePaths=/run/photo-wall-node-storage /run/photo-wall-root-import",
+            "Restart=no", "RuntimeMaxSec=600")
         args = ["/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + unit, "--service-type=exec"]
         for value in properties:
             args.extend(("--property", value))

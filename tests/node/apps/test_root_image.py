@@ -16,6 +16,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from node.test_node_linux_adapters import fixture_archive
@@ -23,12 +24,13 @@ from support.image_mount import FakeImageMounter
 from support.repo import REPO
 
 from appliance.apps import environment
-from appliance.apps.environment import mounted_root, stage_archive, stage_image
+from appliance.apps.environment import mounted_root, stage_image
 from appliance.kernel import image_mount
 from appliance.kernel.image_mount import IMAGE_MOUNT_OPTIONS, NO_IMAGE, SystemdImageMounter
 from scripts import build_node_base_deb as base
 from scripts.build_environment_image import EnvironmentImage
 from scripts.build_node_components import reproducible_image
+from scripts.sealed_archive import stage_archive
 
 ABI = {"base_abi": "base-v2", "graphics_abi": "graphics-v2", "plugin_abi": "plugins-v2"}
 IMAGE_BYTES = b"a squashfs image stands here " * 64
@@ -39,7 +41,8 @@ def world(tmp_path, monkeypatch):
     """A sealed tree (what the image's mount shows), the image's ref, and an empty store."""
     monkeypatch.setattr(environment, "ROOT_UID", os.getuid())
     monkeypatch.setattr(environment, "ROOT_GID", os.getgid())
-    archive, tar_reference = fixture_archive(tmp_path / "build")
+    # The Player's package name: the broker's launch check also checks the package kind.
+    archive, tar_reference = fixture_archive(tmp_path / "build", deb_name="photo-wall-player")
     built = tmp_path / "built"
     built.mkdir()
     tree = stage_archive(archive, built, tar_reference, **ABI, owner_uid=os.getuid())
@@ -332,3 +335,182 @@ def test_a_refused_mount_fails_and_an_invisible_one_is_not_visible(tmp_path, mon
                         lambda argv, **_: subprocess.CompletedProcess(argv, 0, b"", b""))
     with pytest.raises(ValueError, match="^image_mount_not_visible$"):
         mounter.mount(IMAGE, WHERE)
+
+
+# The online path (E2c B2): the import worker stages against the broker's measured ABI, the
+# broker's launch check is the staged predicate, AppManager skips a held image, and no Node
+# module parses tar.
+
+def _command(target, old=None):
+    """A stage command for `target`, its fallback the old root, as the broker hands it over."""
+    from contracts.node_lifecycle import StageCommandV2, stage_digest
+    from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
+    broker = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker", uuid4())
+    old = old or replace(target, environment_sha256="a" * 64)
+    command = StageCommandV2(uuid4(), uuid4(), "0" * 64, broker, uuid4(), uuid4(),
+                             NodeProcessIdentity(100, 200, uuid4()), 1, old, target, old)
+    return replace(command, command_sha256=stage_digest(command))
+
+
+def _staged_old(world):
+    """The running (old) root, staged from its own image: the online command's fallback."""
+    data = b"the old root's image " * 64
+    old = replace(world.reference, environment_sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data))
+    world.mounter.trees[old.environment_sha256] = world.mounter.trees[world.sha]
+    incoming = world.images.parent / "downloads" / old.environment_sha256
+    incoming.write_bytes(data)
+    world.stage(incoming, old)
+    return old
+
+
+def test_the_online_stage_adopts_the_download_root_owned_and_read_only(world, monkeypatch):
+    """B2 AC3: the import worker's staging seals the download root:root 0444 in the pool."""
+    from appliance.apps import root_import
+    store = world.roots.parent
+    owners = []
+    monkeypatch.setattr(environment, "ROOT_GID", os.getgid() + 1)  # forces the fchown
+    monkeypatch.setattr(environment.os, "fchown", lambda fd, uid, gid: owners.append((uid, gid)))
+    download = store / "preparation/downloads" / world.sha
+    download.parent.mkdir(parents=True)
+    download.write_bytes(IMAGE_BYTES)
+    download.chmod(0o600)
+    command = _command(world.reference, _staged_old(world))
+    root_import.stage_roots(command, ABI, mounter=world.mounter, store=store, images=world.images)
+    assert owners[-1] == (environment.ROOT_UID, environment.ROOT_GID)
+    info = world.pool.stat()
+    assert info.st_mode & 0o777 == 0o444 and info.st_uid == environment.ROOT_UID
+    assert not download.exists() and world.staged() == world.roots / world.sha
+
+
+def test_the_import_worker_stages_against_the_requests_abi_never_the_references(world, monkeypatch):
+    """B2 AC5: the measured ABI comes from the request; a request without it is refused."""
+    from appliance.apps import root_import
+    from contracts.node_lifecycle import encode_stage_command
+    command = _command(world.reference)
+    with pytest.raises(ValueError, match="^environment_abi_mismatch$"):
+        root_import.stage_roots(command, {**ABI, "base_abi": "base-v3"}, mounter=world.mounter,
+                                store=world.roots.parent, images=world.images)
+    assert world.mounter.mount_calls == [] and list(world.images.iterdir()) == []
+    raw = encode_stage_command(command).decode()
+    assert root_import.parse_request({"command": raw, **ABI})[1] == ABI
+    for request in ({"command": raw}, {"command": raw, **ABI, "extra": "x"},
+                    {"command": raw, **ABI, "base_abi": "../escape"}):
+        with pytest.raises(ValueError):
+            root_import.parse_request(request)
+
+
+def test_the_broker_hands_the_import_worker_its_measured_abi(monkeypatch):
+    from appliance.apps import import_worker
+    written = {}
+    store = SimpleNamespace(read=lambda name: None, write=lambda name, value: written.setdefault(name, value))
+    worker = import_worker.RootImportWorker(store, **ABI)
+    monkeypatch.setattr(worker, "ready", lambda command: False)
+    monkeypatch.setattr(import_worker.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(import_worker, "systemctl_show", lambda unit: {"ActiveState": "inactive", "MainPID": "0"})
+    from test_node_boot import environment as reference
+    command = _command(reference("b"))
+    worker.advance(command)
+    assert {key: written["import-request"][key] for key in ABI} == ABI
+
+
+def test_the_import_worker_has_one_bind_over_the_store(monkeypatch):
+    """B2 AC1's unit half: a separate preparation bind would make adoption EXDEV (CUT-5)."""
+    from appliance.apps import import_worker
+    source = Path(import_worker.__file__).read_text()
+    assert '"ReadWritePaths=/run/photo-wall-node-storage /run/photo-wall-root-import"' in source
+    assert "ReadOnlyPaths=" not in source
+    assert '"CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN"' in source
+
+
+@pytest.fixture
+def driver(world):
+    from appliance.apps.process_linux import SystemdAppProcessDriver
+    return SystemdAppProcessDriver(world.roots, None, **ABI, images=world.images, mounter=world.mounter)
+
+
+def test_the_launch_check_accepts_a_staged_root_without_walking_its_tree(world, driver, monkeypatch):
+    """B2 AC2: C3 as amended; the release check only (no inventory)."""
+    world.stage(world.incoming())
+    monkeypatch.setattr(environment, "inventory", lambda *a: pytest.fail("the launch walked the tree"))
+    assert driver.verify(world.reference) is True
+
+
+@pytest.mark.parametrize("fault", ["plain directory", "writable loop", "other abi"])
+def test_the_launch_check_refuses_a_root_that_is_not_staged_for_this_node(world, driver, fault):
+    """B2 AC2: a plain directory `verify_root` would pass, a writable loop, a measured ABI that
+    differs from the ref's."""
+    if fault == "plain directory":
+        tree = world.mounter.trees[world.sha]
+        import shutil
+        shutil.copytree(tree, world.roots / world.sha, symlinks=True)
+        environment.verify_root(world.roots / world.sha, world.reference, **ABI, owner_uid=os.getuid())
+        with pytest.raises(ValueError, match="^root_image_not_staged$"):
+            driver.verify(world.reference)
+        return
+    world.stage(world.incoming())
+    if fault == "writable loop":
+        where = world.roots / world.sha
+        world.mounter.mounts[where] = replace(world.mounter.mounts[where], read_only=False)
+        with pytest.raises(ValueError, match="^root_image_not_staged$"):
+            driver.verify(world.reference)
+    else:
+        driver.abi = {**ABI, "base_abi": "base-v3"}
+        with pytest.raises(ValueError, match="^environment_abi_mismatch$"):
+            driver.verify(world.reference)
+
+
+def test_no_node_module_parses_tar():
+    """B2 AC4: the Node stages images; tar extraction is build-side (scripts/sealed_archive.py)."""
+    import ast
+    found = []
+    for package in ("appliance/apps", "appliance/boot"):
+        for path in sorted((REPO / package).rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                         else [node.module] if isinstance(node, ast.ImportFrom) else [])
+                found.extend(str(path.relative_to(REPO)) for name in names if name and name.split(".")[0] == "tarfile")
+    assert found == []
+
+
+def test_a_pooled_image_stages_with_no_incoming_file(world):
+    """B2 AC6, Base half: AppManager downloaded nothing; the held, mounted image is staged."""
+    world.stage(world.incoming())
+    assert world.stage(world.roots.parent / "downloads" / world.sha) == world.roots / world.sha
+    assert len(world.mounter.mount_calls) == 1 and len(world.hashes) == 1
+
+
+def test_app_manager_downloads_nothing_for_a_pooled_target(world, tmp_path, monkeypatch):
+    """B2 AC6 (Q1 = R): a stage command whose target's image the pool holds downloads nothing."""
+    from appliance.node import manager_desired
+    from appliance.node.manager_desired import DesiredPreparation
+    from contracts.node_lifecycle import encode_stage_command
+    world.stage(world.incoming())
+    monkeypatch.setattr(manager_desired, "ROOT_IMAGES", world.images)
+    fetched = []
+    monkeypatch.setattr(manager_desired, "DownloadPreparer",
+                        lambda *a, **k: SimpleNamespace(prepare=lambda reference: fetched.append(reference)))
+    command = _command(world.reference)
+    desired = json.dumps({"scope": "preparation_read_only",
+                          "commands": [json.loads(encode_stage_command(command))]}).encode()
+    grant = SimpleNamespace(producer=command.producer, offer_id=command.offer_id)
+    rows = {}
+    preparation = DesiredPreparation.__new__(DesiredPreparation)
+    preparation.directory = tmp_path / "preparation"
+    (preparation.directory / "downloads").mkdir(parents=True)
+    preparation.config = {"central": "http://central.test", **ABI}
+    preparation.store = SimpleNamespace(read=rows.get, write=rows.__setitem__)
+    preparation.session = SimpleNamespace(ensure=lambda: grant, claim=None,
+                                          request=lambda method, path, body=None: (200, desired))
+    preparation.observation = SimpleNamespace(flush=lambda: None, sample=lambda *a, **k: None)
+    preparation.poll()
+    assert fetched == [] and rows["prepared"]["archives"] == []
+    monkeypatch.setattr(manager_desired, "ROOT_IMAGES", tmp_path / "empty-pool")
+    rows.clear()
+    preparation.poll()
+    assert fetched == [world.reference]
+
+
+def test_app_manager_sees_the_image_pool_read_only():
+    from appliance.node import manager_launcher
+    source = Path(manager_launcher.__file__).read_text()
+    assert '"BindReadOnlyPaths=/run/photo-wall-node-storage/root-images:/run/photo-wall-root-images"' in source

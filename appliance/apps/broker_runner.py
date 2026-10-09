@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from appliance.apps.broker import AppEffectBroker, ColdStart
+from appliance.apps.import_worker import RootImportWorker
 from appliance.apps.lifecycle_storage import FileEffectJournal, primitive, running_from
 from appliance.apps.online_runner import OnlineRunner
 from appliance.apps.probe import (
@@ -213,8 +214,8 @@ def main() -> None:
     environment = AppEnvironmentRefV2(**value["environment"])
     store = BootStore(Path("/run/photo-wall-app-broker"), boot_id=kernel_boot_id,
                       policy={"offer_id": value["offer_id"], "environment": value["environment"]})
-    driver = SystemdAppProcessDriver(Path("/run/photo-wall-node-storage/app-roots"), store,
-                                     **{key: value[key] for key in ("base_abi", "graphics_abi", "plugin_abi")})
+    measured = {key: value[key] for key in ("base_abi", "graphics_abi", "plugin_abi")}
+    driver = SystemdAppProcessDriver(Path("/run/photo-wall-node-storage/app-roots"), store, **measured)
     broker = AppEffectBroker(boot_id=kernel_boot_id, offer_id=UUID(value["offer_id"]),
                             authorized_environment=environment,
                             journal=FileEffectJournal(store), driver=driver)
@@ -229,7 +230,8 @@ def main() -> None:
     session = NodeSession(store, NodeHTTP(endpoint["central"], timeout=0.5), owner="app_effect_broker",
                           serial=endpoint["serial"], offer_id=UUID(value["offer_id"]),
                           kernel_boot_id=kernel_boot_id)
-    online = OnlineRunner(store, driver, session, RecoveryClient())
+    online = OnlineRunner(store, driver, session, RecoveryClient(),
+                          worker=RootImportWorker(store, **measured))
     feed = Feed(FEED_CAPACITY)
     probes = ProbeThread(feed)
     links = BrokerLinkService(driver, session, Path("/run/photo-wall-app-proof/app-link.sock"),

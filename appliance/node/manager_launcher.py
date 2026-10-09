@@ -67,6 +67,7 @@ class SystemdManagerLauncher:
             "BindPaths=/run/photo-wall-node-storage/preparation:/run/photo-wall-preparation",
             "LoadCredential=node-config:/run/photo-wall-node/manager-client.json",
             "BindReadOnlyPaths=/etc/resolv.conf:/etc/resolv.conf",
+            "BindReadOnlyPaths=/run/photo-wall-node-storage/root-images:/run/photo-wall-root-images",
             "UnsetEnvironment=PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD GI_TYPELIB_PATH GST_PLUGIN_PATH",
         )
         args = ["/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + UNIT, "--service-type=exec"]

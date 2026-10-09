@@ -5,7 +5,7 @@
 **Branch:** `claude/e2c-image-mount`, checkout `/Volumes/Dock/Home/Code/photo-wall/.claude/worktrees/pr-49-next-steps-b71722`. One milestone (E2c), four beads, landed in order.
 **Rules:** `~/.claude/skills/implementation-workflow/SKILL.md` (binding). Owner rules: UX over security; a finding is a defect only in normal operation or when the Node cannot recover by itself; integration tests of functional requirements; make the failure class impossible; retiring code (`appliance/node/`) gains no new code; 4 GB Pi 5 supported; no CI leg over about 4 minutes; never compare clocks across systems.
 **Not in scope:** E4 (the next tracer); eviction of superseded images (E5 Content); EROFS; Central's cache file names; the Pi bench run (owed evidence, below).
-**Open owner question:** Q1 (§2.10). B1 does not depend on it and may start; B2's page carries both answers.
+**Owner question Q1 (§2.10): resolved 2026-10-09, "Fix it" = Recommendation R** (an owner-approved exception to "retiring code gains no new code"; it leaves with AppManager in E5).
 
 ---
 
@@ -189,7 +189,9 @@ B at its strongest (an image laid out for `RootImage=`, plus the same digest-onl
 | A18 | `/sys/dev/block/<maj:min>/loop/backing_file` read inside a `ProtectSystem=strict` sandbox names the host path of the pool image | A14's probe read it back from a sandbox | B1 (stager), B2 (broker, import worker) |
 | A19 | squashfs's compressed-block caching (kernel 6.4+) adds at most a reclaimable second copy of read blocks, charged to the reader | Not probed; on 16 KiB-page Pi kernels it may be off | Pi `memory_peak:preparation` and `:app` (owed) |
 
-### 2.10 Owner question
+### 2.10 Owner question (resolved)
+
+**Resolved 2026-10-09: the owner answered "Fix it", Recommendation R.** One read-only bind of the image pool into AppManager's sandbox (`manager_launcher.py`) and the `or pooled(reference)` skip beside the `old_environment` skip (`manager_desired.py`), with `pooled` a pure function in `apps/environment.py`. An owner-approved exception to "retiring code gains no new code"; it leaves with AppManager in E5. B2 implements it; the "status quo" columns below are history.
 
 **Q1. May retiring AppManager skip downloading a target whose image the pool already holds?** AppManager downloads every target that is not the command's `old_environment` (`appliance/node/manager_desired.py:67-75`) and cannot see the pool. So an online switch back to an image the Node already holds (rollback A→B→A, or retrying a failed target, both in one boot) admits a fresh 288 MiB download beside three resident images: 638 MiB used of a 768 MiB store, `StorageShort`. The tar era refused the same way (`admit_preparation` 2 × size + OVERHEAD), so this is inherited, not new.
 
@@ -433,3 +435,4 @@ Order: B1 → B2 → B3, then B4 (docs) in parallel with B3 once B2 has landed. 
 
 - 2026-10-08, cut: frame, four beads, errata CUT-1..11.
 - 2026-10-08, design review (4 lenses, 15 findings, 11 suspicions): all 15 findings upheld and the design changed (DR-1..12): the measured ABI is bound into the staged predicate; per-file verification leaves the Node, which removes the `.verified` mark, the fadvise and the crash window (finding "costs milliseconds" refined by measurement: 84 ms and 16 MiB on the dev Mac for the 3.5 MB manifest, still below the broker's current full walk); seal before publish; `read_only` from mountinfo field 6 and the loop's sysfs `ro`; determinism moved into the build; `node_service_probe` and its fixtures deleted; HostCore isolation kept; store residue 32 and process line 192 (content line 0.54 GiB); app slice evidence; the time AC binds growth over a measured baseline because four legs already exceed 4 minutes on main; the rollback refusal became owner question Q1 (the fix needs one line in retiring code). Suspicions adopted: broker as a named propagation consumer (A17), manager mount points (A16), `backing_file` read from sandboxes (A18), loop reuse (covered by the sysfs check), mknod range 0..255, B1 budget 120 min, design B restated at its strongest (its image-layout disqualifier). Suspicions made moot: `.verified` semantics and unmount EBUSY (no mark, no unmount). Not probed: squashfs compressed-block caching (A19, Pi owed).
+- 2026-10-09, Q1 answered by the owner: "Fix it" (Recommendation R). B2 implements the residency skip as an owner-approved exception to the retiring-code rule; B3 AC3's status-quo clause (a re-download of a resident image refused) no longer applies.

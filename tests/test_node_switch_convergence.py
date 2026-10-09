@@ -76,8 +76,8 @@ def test_late_first_post_and_outage_after_accept_converge_and_report(registry, t
     driver = Driver(RunningApp(command.old_environment, command.old_process, command.old_app_epoch, uuid4()))
     prepared = tmp_path / "prepared.json"
     runner = OnlineRunner(store, driver, session, SimpleNamespace(arm=lambda o: o.receipt, advance=lambda *a: None),
+                          worker=SimpleNamespace(advance=lambda command: None, ready=lambda command: True),
                           prepared=prepared)
-    runner.worker = SimpleNamespace(advance=lambda command: None, ready=lambda command: True)
 
     runner.tick()  # Central reachable: the stage is accepted while preparation is still running.
     assert runner.broker.record["phase"] == "preparing" and driver.stop_calls == 0
