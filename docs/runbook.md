@@ -582,7 +582,7 @@ Host Management posts one observation every 15 s, and Central stores at most one
 | **memory controller absent: memory limits not enforced** (Storage, Memory limits) | The kernel's memory controller is off, so no memory limit on the box is enforced; the Player still runs (the base mounts its store regardless). The Pi 5's device tree turns it off; the boot command line must turn it back on with `cgroup_enable=memory` ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)). Usually the staged boot tree predates the release that added the token. Owner: the boot tree you staged and its `cmdline.txt`. A warning (notice band), never an incident | Stage `boot/` from a current release (releases from the 4 GB tracer on carry the token; trees staged earlier do not) and check nothing in your staging, such as iac `cmdline_extra`, removes it or adds `cgroup_disable=memory` after it. Reboot the Player |
 | **boot preparation refused at prepare: needs 2.1 GB, room 1.8 GB** (Software) | The deployment this boot was offered does not fit the node store, or the memory left above the 512 MiB emergency headroom. Owner: the prepare step (cold admission) | Select a smaller deployment, or use a board of a larger memory class. A reboot takes the boot selection current then |
 | **boot preparation failed at handoff / storage / prepare (fault)** (Software) | That step stopped with a fault token: `os:<ERRNO>` for an operating-system error, a named code such as `node_measured_base_abi_mismatch`, or `unexpected:<type>`. Without a parenthesis no fault was recorded. Owner: that step's unit, `photo-wall-node-<step>.service`. Alarm, one incident; its failed unit is not repeated under Base units | Note the fault from the Player page; reboot once. A fault that survives a fresh boot is a defect: report it with the fault and the release |
-| **boot preparation running: prepare** (Software) | The step is still running on this boot; prepare fetches and expands the offered roots, so it runs longest. A step killed or timed out is not shown as running: its unit fails and the item reads "failed at … (unit failed, no exit record)" | Wait. If it never moves on, the step is hung; reboot the Player |
+| **boot preparation running: prepare** (Software) | The step is still running on this boot; prepare fetches the offered root images and mounts them, so it runs longest. A step killed or timed out is not shown as running: its unit fails and the item reads "failed at … (unit failed, no exit record)" | Wait. If it never moves on, the step is hung; reboot the Player |
 | **boot preparation failed at handoff / storage / prepare (unit failed, no exit record)** (Software) | The step's unit (`photo-wall-node-<step>.service`) failed but the step wrote no exit record: it was killed before its exit write (an out-of-memory victim, or its start timeout's SIGTERM), or the record write itself failed. Alarm, one incident; the unit is not repeated under Base units | Check Out of memory on the Player page (a base or preparation kill points at memory); reboot once. A repeat on a fresh boot is a defect: report it with the step, the release and the board's memory size |
 | **Unknown: failed units not read** (Software, Base units) | Host Management has not read PID1's failed-unit list on this run (`systemctl` was slow or missing). Once read, a later failed read keeps the last reading, so this never hides a failure it already saw, and never reads as "no base unit failed". No band | Nothing; if it persists, check `systemctl` on the box |
 | **base unit failed on this boot: photo-wall-app-broker.service** (Software), or **base units failed on this boot: a · b and N more** | A base service failed. A crash-looping base service stops after 10 starts in 10 minutes and stays failed: the box never reboots itself for it. Owner: the named unit. A boot preparation unit is left out here only when Boot preparation reports its step stopped; otherwise it is listed like any base unit. Alarm, one incident per Player | Reboot the Player from its page. A unit that fails again on a fresh boot is a defect: report it with the unit name and the release |
@@ -1070,6 +1070,53 @@ existing D17 all-serving/rollback certification and a real injected serving-imag
 verifier; there is no environment-variable bypass. The automated node scenarios and
 their limits are listed in [validation](validation.md).
 
+
+### Node storage: release images and memory lines
+
+Each release root on a Node is a squashfs image in the image pool, mounted read-only by PID1 at its root directory; the design is in the [Player architecture](player-architecture.md#release-roots-as-images-e2c) and the memory lines in the [Player node domain model](player-node-domain-model.md#memory-classes-and-the-node-store-2026-10-03).
+
+**Where things are on a Node.**
+
+| Path | Holds |
+|---|---|
+| `/run/photo-wall-node-storage/root-images/<sha>.squashfs` | One image per staged root, root:root 0444 |
+| `/run/photo-wall-node-storage/root-images/.cold-staging/` | The prepare step's downloads in flight (removed at the next prepare) |
+| `/run/photo-wall-node-storage/preparation/downloads/<sha>` | AppManager's online download, before the import worker adopts it |
+| `/run/photo-wall-node-storage/app-roots/<sha>`, `manager-roots/<sha>` | The mount points; the Player runs from `<sha>/rootfs` |
+
+**Is a root mounted read-only?** Do not trust `findmnt` OPTIONS: a squashfs superblock always says `ro`, even under a writable mount. Read the mount's own line and its loop device:
+
+```sh
+grep ' /run/photo-wall-node-storage/app-roots/' /proc/self/mountinfo   # field 3 is maj:min, field 6 must contain ro, fstype squashfs
+cat /sys/dev/block/<maj:min>/ro                                          # must be 1
+cat /sys/dev/block/<maj:min>/loop/backing_file                           # must be .../root-images/<sha>.squashfs
+systemctl list-units --type=mount | grep photo                         # the transient mount units
+```
+
+**Memory readings.** On the Player page's Every reported metric:
+
+- `memory_peak:preparation` is the preparation slice's peak. Images are page cache charged to the slice that wrote them, so the peak includes reclaimable cache and sits near the images held plus the preparing process. It is not by itself a problem.
+- `oom_kill:preparation` above 0 is the signal that the preparation line (960 MiB) is too low: an online stage or the cold prepare step was killed. Report it with the release and the board's memory size.
+- `memory_peak:app` and `oom_kill:app` cover the Player, whose file pages (its libraries, read from the image) now count against the app slice. Refaults show on the box, not in a metric: `cat /sys/fs/cgroup/photowallapp.slice/memory.events`, where rising `high` or `max` counts mean the Player's working set is pressing its line. These are clean file pages, so they slow the Player rather than kill it.
+
+**Staging faults.** These appear as a prepare-step fault on the Player page (cold path) or in the import worker's journal (online path, below).
+
+| Fault | Meaning | What to do |
+|---|---|---|
+| `environment_abi_mismatch` | The release was built for another base, graphics or plugin ABI than this Node measured; refused before any download or mount, and again at every launch | Select a release built for this base |
+| `root_image_digest_mismatch` | The pool file's sha256 is not the release's; the file was unlinked | Retry; a repeat points at Central's cached bytes |
+| `root_image_ownership` | A pool or incoming file is not a sealed regular file (owner, mode, link count or size); it was unlinked | Retry; a repeat is a defect |
+| `root_image_missing` | The fetched file was not where the stager expected it | Retry; a repeat is a defect |
+| `root_image_adopt_cross_device` | Moving the download into the pool would cross mounts (a unit's binds are wrong); nothing is copied | A base defect: report it with the release |
+| `image_mount_failed` | PID1 refused the mount (no loop device, no squashfs support, a timeout) | Reboot once; a repeat is a kernel or base defect |
+| `image_mount_not_visible` | PID1 mounted it but the stager's sandbox does not see it (mount propagation) | A base defect: report it |
+| `image_mount_conflict` | Something else is mounted at the root directory (another image, another type, or a writable mount); it is never unmounted | Reboot; a repeat is a defect |
+| `root_image_not_staged` | At launch, the root is not a read-only squashfs mount of its sealed pool image | Reboot; a repeat is a defect |
+| `environment_reference_mismatch`, `environment_provenance_mismatch`, `environment_entrypoint_missing` and the other `environment_*` checks | The image is mounted but does not match the ref Central paired it with; the image and mount stay, and a corrected ref for the same digest stages without a download | Report it with the release: a Central or release fault |
+
+**A refused online stage stalls without a report.** When staging refuses inside the import worker, the worker exits without its result, the broker raises `root_import_outcome_unknown` on every tick, and the operation stays `preparing` on the Node while the console shows it staged. The fault is only in the worker's journal: `journalctl -u 'photo-wall-root-import-*'`. Stage again from the console, or reboot the Player. The owner accepted this as a cost of E2c (2026-10-09); it is fixed when the effect protocol is rebuilt ([0017](decisions/0017-node-redesign-r3.md#costs)).
+
+Superseded images stay in the pool until the next reboot. A third distinct app image in one boot is refused as an App Manager storage refusal with both numbers; reboot the Player to clear the pool.
 
 ### Optional read-only Kubernetes node verifier
 
