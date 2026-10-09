@@ -247,6 +247,8 @@ Every row below was re-checked against source while writing this document.
 
 ## 2. The answer in one picture
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The diagram's "one row per box; one Player page each" no longer holds: Hardware and Software are the Fleet domains, each with a Pi page, and Screens carries the Frame's live state.
+
 ```mermaid
 graph TD
   subgraph SHARED["Shared layer (one admin token, one snapshot)"]
@@ -1128,6 +1130,8 @@ Two independent shape choices were each drafted twice: the console's overall sha
 (A vs B) and where Commissioning lives (Shape 1 vs Shape 2).
 
 ### 8a. Overall shape — Workspaces vs Wall-First (chosen: B)
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Wall-first becomes setup-first: the console opens on Screens once a Frame exists, and the Wall is where a Frame is placed, bound and calibrated.
 
 **Shape A — Domain-Workspaces:** four peer workspaces (Equipment, Wall, Content,
 Schedule) behind a left rail. **Shape B — Wall-First Canvas** (chosen): the
