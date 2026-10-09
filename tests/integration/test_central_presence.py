@@ -4,8 +4,8 @@ Deferrals "Presence for the console"; 0017 Open item "Presence", leaf state only
 S2's bed with one enrolled Node: `FleetHub` writes the hub's configuration, a real nats-server hub
 starts from it, and the Node is a real bus on the shipped configuration whose leaf dials the hub.
 Central's read is `FleetService.status()` with an injected read clock, and its `bus_link` is rendered
-by the console's own `busLinkFact` (facts.js, under Node); the Player page's own source, the node
-device read, serves the same value (erratum E-E3D-S4-1). 1: the leaf links: linked, the look recent,
+by the console's own `busLinkFact` (facts.js, under Node); the Hardware pages' source, the fleet
+host read, serves the same value (erratum E-CDS-FIX-10). 1: the leaf links: linked, the look recent,
 the fact derived "linked". 2: the Node bus crashes: not linked with a later changed_at; it restarts:
 linked again. 3: FleetHub stops: a read 31 s after its last look renders unknown.
 """
@@ -92,7 +92,13 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
                      PgWallMarks(database, _WallDocuments()), [])
     clock = _ReadClock()
     service = FleetService(database, clock)
-    player_page = NodeObservations(NodeSessions(database, clock, NodeControlConfig("presence-test")))
+    hosts = NodeObservations(NodeSessions(database, clock, NodeControlConfig("presence-test")))
+
+    def hardware_read() -> dict:
+        """The fleet host read, the Hardware pages' one source of the link (E-CDS-FIX-10)."""
+        document = hosts.fleet_hosts()
+        [device] = [device for device in document["devices"] if device["device_id"] == DEVICE]
+        return {"read_at": document["read_at"], "bus_link": device["bus_link"]}
 
     async def read() -> tuple[float, dict]:
         status = await asyncio.to_thread(service.status)
@@ -122,7 +128,7 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
             assert read_at - bus_link["looked_at"] <= 2 * HUB_LOOK_SECONDS + 1
             kind, text = _rendered(bus_link, read_at)
             assert kind == "derived" and text.startswith("linked for "), text
-            page = (await asyncio.to_thread(player_page.status, DEVICE))["bus_link"]
+            page = (await asyncio.to_thread(hardware_read))["bus_link"]
             assert page["looked_at"] >= bus_link["looked_at"]
             assert (page["linked"], page["changed_at"]) == (True, bus_link["changed_at"])
 
@@ -144,7 +150,7 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
             read_at, stale = await read()
             assert read_at == clock.at and stale["looked_at"] == last["looked_at"]
             assert _rendered(stale, read_at) == ["unknown", "Unknown: Central has not looked at its hub for 31 s"]
-            page = await asyncio.to_thread(player_page.status, DEVICE)
+            page = await asyncio.to_thread(hardware_read)
             assert (page["read_at"], page["bus_link"]) == (read_at, stale)
         finally:
             stop.set()
