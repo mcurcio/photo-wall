@@ -158,6 +158,8 @@ def pytest_sessionfinish(session, exitstatus):
         return
     collector = session.config.stash[COLLECTOR]
     results = collector.results
+    if not results:  # a run of no operator check (the catalog walker alone) has no evidence to record
+        return
     checks = []
     for name, assertions in CHECKS.items():
         result = results.get(name, {})

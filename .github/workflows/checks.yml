@@ -172,6 +172,7 @@ jobs:
               uv sync --frozen --no-install-project --python /usr/bin/python3.12
               /tmp/photo-wall-browser-venv/bin/python scripts/test_local.py -q \
                 -p no:cacheprovider tests/browser -n 4 --browser chromium --durations=25 \
+                --ignore tests/browser/test_console_catalog_browser.py \
                 --tracing retain-on-failure --output /evidence --tb=short'
       # The xdist controller writes it from every worker's reports (tests/browser/conftest.py).
       - name: Require passed operator browser evidence
@@ -190,6 +191,57 @@ jobs:
         with:
           name: operator-browser-${{ github.sha }}
           path: ${{ runner.temp }}/operator-browser
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The console catalog walked: every Storybook story in both colour schemes renders clean, passes
+  # axe and matches its baseline screenshot (tests/browser/test_console_catalog_browser.py). Own
+  # leg, so the operator browser leg above does not wait on it; no database. Baselines are valid
+  # only in this image: `python3 scripts/catalog_baselines.py` rewrites them there and reads the
+  # image reference from this file.
+  console-catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: python-uv
+        uses: ./.github/actions/python-uv
+      - uses: ./.github/actions/console-bundle
+      - name: Build the catalog
+        run: npm --prefix central/console run build-storybook
+      - name: Walk the catalog in the pinned browser image
+        env:
+          UV_VERSION: ${{ steps.python-uv.outputs.uv-version }}
+        run: |
+          install -d "$RUNNER_TEMP/console-catalog"
+          docker run --rm --init --ipc=host --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --volume "$RUNNER_TEMP/console-catalog:/evidence" --workdir /work \
+            --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env CI --env TMPDIR=/evidence \
+            --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
+            --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
+            --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/work \
+            mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d \
+            sh -ec 'python -m pip install "uv==$UV_VERSION"
+              uv sync --frozen --no-install-project --python /usr/bin/python3.12
+              /tmp/photo-wall-browser-venv/bin/python -m pytest -q \
+                -p no:cacheprovider tests/browser/test_console_catalog_browser.py -n 4 \
+                --browser chromium --durations=10 --tracing retain-on-failure \
+                --output /evidence/traces --tb=short'
+      - name: Make catalog evidence readable
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/console-catalog" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/console-catalog"
+          fi
+      - name: Retain failed screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: console-catalog-${{ github.sha }}
+          path: ${{ runner.temp }}/console-catalog
           if-no-files-found: ignore
           retention-days: 7
 
