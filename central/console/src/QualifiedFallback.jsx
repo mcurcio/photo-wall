@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
 import { fact } from "./facts.js";
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import {
   beginOffer,
   beginRequest,

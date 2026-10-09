@@ -33,7 +33,7 @@ import { formatRoute } from "./routes.js";
  * @typedef {{state: HostState, items: HostItem[],
  *            worst: {fact: import("./facts.js").Fact, severity: HostSeverity, item: HostItem}|null,
  *            severity: HostSeverity}} HostHealth
- * @typedef {{key: string, deviceId: string, name: string, frames: string[], playerHref: string,
+ * @typedef {{key: string, deviceId: string, name: string, frames: string[], hardwareHref: string,
  *            severity: "alarm"|"unknown", text: string}} HostIncident
  */
 
@@ -237,7 +237,7 @@ export const HOST_CATALOG = Object.freeze({
 
 /**
  * The metric families HostCore posts that no console item shows (contracts/node_observation.py
- * METRIC_FAMILIES): they reach Central and read raw on Player › Health's "Every reported
+ * METRIC_FAMILIES): they reach Central and read raw on the Hardware Pi page's Health "Every reported
  * metric" and in G12. `metrics_dropped` is appended by `valid_metrics` alone.
  */
 export const NOT_SHOWN = Object.freeze([
@@ -568,9 +568,8 @@ export function judgeHost(hosts, deviceId) {
   return Object.freeze({ row, health, facts: factItems(row, hosts.read, absent, health) });
 }
 
-// The Players table's groups and the Bound rows' tiers, in order (console DDD §52, §61, G2).
+// The Hardware list's groups, in order (console DDD §52, §61, G2).
 const GROUP_ORDER = Object.freeze({ bound: 0, spare: 1, retired: 2 });
-const TIER_ORDER = Object.freeze({ alarm: 0, notice: 1, unknown: 2, ok: 3 });
 
 /**
  * A spare's box (G2): read with Central's thresholds withheld, so no threshold judgement can
@@ -594,10 +593,11 @@ function unbanded(judgedBox) {
 }
 
 /**
- * The Players table's rows, in order (console DDD §52, §61, rule G2): the ONE place a box's
- * standing decides whether its host values are judged.
- *   bound    a Bound Player: judged (`judgeHost`), tiered by its severity, worst first, then
- *            by name. Only these rows are tiered, so "worst first" names a box in trouble.
+ * The Hardware list's rows, by group then name (console DDD §52, §61, rule G2): the ONE place a
+ * box's standing decides whether its host values are judged. It judges; the list orders a
+ * group worst first by the tiers it hands over (patterns/entity-list.tsx).
+ *   bound    a Bound Player: judged (`judgeHost`), tiered by its severity. Only these rows are
+ *            tiered, so "worst first" names a box in trouble.
  *   spare    an Unbound Player or a box seen at boot and never enrolled: its values read with
  *            Central's thresholds withheld (`describeSpare`), so no band, no tier and no
  *            threshold words (a spare is never alarmed, G2; its silence reads as a plain
@@ -623,9 +623,7 @@ export function playersTable(rows, hosts) {
     const judgedBox = judgeHost(hosts, row.deviceId);
     return Object.freeze({ row, group, tier: judgedBox.health.severity, health: judgedBox.health,
       facts: judgedBox.facts });
-  }).sort((a, b) => (GROUP_ORDER[a.group] - GROUP_ORDER[b.group])
-    || (a.tier === null || b.tier === null ? 0 : TIER_ORDER[a.tier] - TIER_ORDER[b.tier])
-    || byName(a, b));
+  }).sort((a, b) => (GROUP_ORDER[a.group] - GROUP_ORDER[b.group]) || byName(a, b));
 }
 
 /** "Frame lobby-left", "Frames a, b". */
@@ -649,7 +647,7 @@ export function hostWords(entry, { brief = false } = {}) {
 
 /**
  * The incidents of one box's classification (§62): exactly the classifier's alarm items, so
- * Needs attention, the Players table and the chip cannot disagree. Silent and Refused carry one
+ * Needs attention, the Hardware list and the chip cannot disagree. Silent and Refused carry one
  * alarm item (the receipt), because the classifier bands nothing else outside `reporting`; a
  * Reporting row's alarms are its threshold items (a now flag, the temperature alarm, App
  * Manager's storage refusal) and its boot items (a stopped boot stage, a failed base unit).
@@ -680,7 +678,7 @@ export function hostIncidents(snapshot, read, bootFacts = null) {
     for (const entry of incidentItems(health)) {
       incidents.push(Object.freeze({
         key: `player:${row.deviceId}:${entry.name}`, deviceId: row.deviceId, name: row.name, frames,
-        playerHref: formatRoute({ section: "players", id: row.deviceId }),
+        hardwareHref: formatRoute({ section: "hardware", id: row.deviceId }),
         severity: entry.band === "alarm" ? "alarm" : "unknown",
         text: `${row.name} (${framesWord(frames)}) — ${hostWords(entry)}`,
       }));

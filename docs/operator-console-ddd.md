@@ -76,6 +76,8 @@ flowchart LR
 
 ## 4. The proposed shape
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Pass 1's "Q1 = A, one home per box" no longer holds: the console is cut by feature domain (Part I), and a Pi has a Hardware page and a Software page, not one home. The rule that every other mention is a link to the owning home stands as H1.
+
 Each navigation group is one bounded context. Each aggregate gets one home page. Every other mention of it is a link to that home.
 
 ```mermaid
@@ -223,6 +225,8 @@ flowchart LR
 # Part B: pass 1 (feature layer, for delivery)
 
 ## 9. Screens and read models
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The per-box Player page is replaced by the Hardware and Software Pi pages (Part I).
 
 **Before → after (navigation).** Navigation groups are unlabelled lists in `Shell.jsx`; pass 1 adds no group headings and renames nothing outside the fleet.
 
@@ -1849,6 +1853,8 @@ Three shapes were drafted in parallel and walked through five operator journeys 
 
 ## 48. The proposed shape
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The tree's Fleet home with one Player page per box, and the Wall-first landing, give way to the domain sidebar of Part I; Screens opens the console once a Frame exists.
+
 ```mermaid
 flowchart TB
   subgraph WORK["Worklist: link only"]
@@ -1927,6 +1933,8 @@ WORKLIST
 
 ## 50. Homes and the attention list: contracts
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The Fleet home's per-box contract is replaced by the Hardware and Software domains (Part I).
+
 | Home | Owns | Daily face | One-time or rare (same home) | Reads | Never |
 |---|---|---|---|---|---|
 | **Wall** | Frame, Binding, Calibration (Registry) | Read-only plan; its To finish list (or, with no Frames, the first step); tiles; Frame › Status | Edit layout; Binding (bind, bind a different Output, Identify, unbind); Calibration | Snapshot | Host detail beyond one chip; Show authoring |
@@ -1950,6 +1958,8 @@ Binding stays the one two-sided relationship (rule 1): the Frame's Binding facet
 | **Diagnose** (future) | What exactly is the box doing? | Player › Diagnostics (reserved, §53) |
 
 ## 52. Host health (batch A) and node metrics (batch B)
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Host health is the Hardware domain's, shown on the Hardware Pi page, not on a per-box Player page (Part I).
 
 **Home: Fleet.** The host is part of the box, and Fleet owns the box. Everything else links to it.
 
@@ -2758,6 +2768,26 @@ W1 is also high-tier, for regression.
 - Part F (batch 5), where S1 adds the `planned` fact to Status.
 
 **Not planned:** a Set up section (Q12); thresholds or basis prose held in the console or served as text; an address used as identity; a node-reported base digest.
+
+# Part I: the console by domain (0018)
+
+**Status:** approved 2026-10-09. This part holds the domain table; [decision 0018](decisions/0018-console-by-domain-and-design-system.md) holds the owner's words, the answers, the design-system layers and rules, the migration and the costs. Sections that milestones 2 and 3 change in detail are marked superseded above and rewritten when they land. The layouts are a starting point to be re-evaluated as capabilities grow.
+
+## 70. The domain table
+
+Each domain is a bounded context; a Frame or Pi appears in each domain that shows it with only that domain's facts. The sidebar is this table: Show running (Screens, Now) · Show creating (Scenes, Schedule, Sources) · Wall · Fleet (Hardware, Software) · Needs attention.
+
+| Domain | The one question | Facts it owns | Actions it owns |
+|---|---|---|---|
+| **Wall setup** | Is every Frame placed, bound to an Output and calibrated? | placement, Binding, calibration, Frame profile, setup state, free Outputs | Edit layout, Bind, Unbind, Identify Panel, Calibrate |
+| **Screens** | What is each Frame presenting now, and why? | live health, the Run on top, Why, what Display Host reports | none |
+| **Now** | Which Runs are active, and is media flowing? | Runs and Activations, media pipeline | Show now, finish and cancel a Run |
+| **Show creating** | What will the show be? | Scenes, Programs, Sources | create, edit, delete |
+| **Hardware** | Is every Pi powered, healthy and linked? | host samples and facts, Node API link, Host Management sessions, standing, reboot history | Reboot, Retire |
+| **Software** | Is every Pi running the selected release, and did the last change take? | boot offer and steps, base, kernel, Player app, app operations, qualification, boot selection, effect gate | Stage app, Qualified fallback, Select, Update the wall |
+| **Needs attention** | What lost something it had? | none (links only) | none |
+
+Rule 1 of §5 becomes H1: a fact is judged, explained and acted on only in its owning domain, and elsewhere is a read-only link naming it. For the answers, the five design-system layers and rules S1 to S3, and the migration, see [decision 0018](decisions/0018-console-by-domain-and-design-system.md).
 
 # History
 

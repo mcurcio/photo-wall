@@ -115,6 +115,21 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
     assert '--env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI' in selections['browser']
 
 
+def test_the_console_catalog_walk_is_its_own_leg_in_the_browser_image_the_script_pins():
+    """The walker leaves the operator browser leg for its own, needing no database, in the same
+    pinned image the baseline script reads, so baselines are made where they are checked."""
+    workflow = (WORKFLOWS / 'checks.yml').read_text()
+    walk, browser = _job(workflow, 'console-catalog'), _job(workflow, 'browser')
+    walker = 'tests/browser/test_console_catalog_browser.py'
+    assert f'--ignore {walker}' in browser and walk.count(walker) == 1
+    assert f'{walker} -n 4 \\\n                --browser chromium' in walk
+    assert 'run build-storybook' in walk and 'needs:' not in walk
+    assert 'compose.test-database.yml' not in walk and 'PHOTO_WALL_CATALOG_UPDATE' not in walk
+    pinned = re.findall(r'mcr.microsoft.com/playwright/python:\S+', walk + browser)
+    assert len(set(pinned)) == 1 and 'catalog_baselines' in workflow
+    assert re.search(r'timeout-minutes: [1-8]\n', walk)
+
+
 def test_the_wall_scenario_keeps_every_immich_adapter_check_in_a_parallel_job():
     """The scenario jobs start a set-up fixture only; the full adapter run is its own job."""
     workflow = (WORKFLOWS / 'software-e2e.yml').read_text()

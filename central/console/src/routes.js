@@ -17,14 +17,17 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
  *   #/wall/frames/<id>             {section: "wall", id, facet: "status"}: a Frame route with
  *                                  no facet opens Status (§61); never formatted
- *   #/players/<device-id>          {section: "players", id} one Player's page
+ *   #/hardware                     {section: "hardware"} every Pi's health and link
+ *   #/hardware?pi=<device-id>      {section: "hardware", pi} the list focused on one Pi (H2:
+ *                                  focus lives only in the address)
+ *   #/hardware/<device-id>         {section: "hardware", id} one Pi's Hardware page
+ *   #/players/<device-id>          {section: "players", id} one Pi's Software and screens page
+ *                                  (no list: `#/players` alone is not a route)
  *   #/releases/update/<tag>        {section: "releases", flow: "update", id} Update the wall
  *   #/releases/update/<tag>/try/<player-id>  … with the operator's tried Player (Part E §25a)
  *   #/releases/update/<tag>[/try/<player-id>]/skip/<player-id>[/<player-id>…]  … and the
  *                                  Players the operator skipped in Keep's plan (Part E §25a)
- *   #/<section>                    {section} for every section
- *   #/equipment                    {section: "players"}: the retired Equipment page's
- *                                  bookmark (console DDD §9); never formatted
+ *   #/<section>                    {section} for every section but "players"
  *   #/wall/frames/<id>/commissioning  {section: "wall", id, facet: "calibration"}: the
  *                                  renamed facet's old bookmark (console DDD §19); never
  *                                  formatted
@@ -39,12 +42,14 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"players"|"releases"|"attention"} Section
+ * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"attention"} Section
  * @typedef {"new"|"edit"|"show"|"update"} Flow
  * @typedef {"status"|"binding"|"calibration"} Facet
  * @typedef {"layout"} Mode
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
- *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[]}} Route
+ *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[],
+ *            pi?: string}} Route
+ *   `pi` is the Pi a Hardware list is focused on (its device id).
  *   `tried` is the Player an Update the wall journey tries the release on, `skipped` the Players
  *   it must never reboot, in the order the operator skipped them, none repeated (its URL holds
  *   only the operator's choices, never progress: Part E §25a). An empty `skipped` is the same
@@ -83,13 +88,11 @@ export const SECTIONS = Object.freeze([
   "scenes",
   "schedule",
   "sources",
+  "hardware",
   "players",
   "releases",
   "attention",
 ]);
-
-// Old section names that parse to a current one, so their bookmarks keep working.
-const ALIASES = Object.freeze({ equipment: "players" });
 
 /** The Inspector's facet keys, in its tab order (Inspector.jsx FACETS). */
 export const FACETS = Object.freeze(["status", "binding", "calibration"]);
@@ -107,7 +110,10 @@ const WALL_MODES = new Set(["layout"]);
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "facet", "mode", "initialTarget", "tried", "skipped"];
+const KEYS = ["section", "id", "flow", "step", "facet", "mode", "initialTarget", "tried", "skipped", "pi"];
+
+// The sections that are only ever one instance's page: no route names the section alone.
+const INSTANCE_ONLY = new Set(["players"]);
 
 /**
  * Parse a location hash (with or without its leading "#") into a Route, or null.
@@ -137,17 +143,14 @@ export function parseRoute(hash) {
   if (parts.some((part) => part === "")) {
     return null;
   }
-  const [named, ...rest] = parts;
-  if (Object.hasOwn(ALIASES, named)) {
-    return rest.length === 0 && query === "" ? { section: ALIASES[named] } : null;
-  }
-  const section = named;
+  const [section, ...rest] = parts;
   if (!SECTIONS.includes(section)) {
     return null;
   }
   if (rest.length === 0) {
-    if (query !== "") return null;
-    return { section };
+    if (INSTANCE_ONLY.has(section)) return null;
+    if (query === "") return { section };
+    return section === "hardware" ? focusRoute(section, query) : null;
   }
   if (query !== "" && !(section === "scenes" && rest.length === 2 && rest[0] === "new")) {
     return null;
@@ -162,7 +165,7 @@ export function parseRoute(hash) {
     const facet = Object.hasOwn(FACET_ALIASES, rest[2]) ? FACET_ALIASES[rest[2]] : rest[2];
     if (FACETS.includes(facet)) return { section, id: rest[1], facet };
   }
-  if (section === "players" && rest.length === 1) {
+  if ((section === "players" || section === "hardware") && rest.length === 1) {
     return { section, id: rest[0] };
   }
   if (section === "releases" && rest[0] === "update" && rest.length >= 2) {
@@ -186,6 +189,14 @@ export function parseRoute(hash) {
   return null;
 }
 
+/** A list focused on one Pi (`?pi=<device-id>`, exactly one non-empty `pi`), or null. */
+function focusRoute(section, query) {
+  const params = new URLSearchParams(query);
+  const pis = params.getAll("pi");
+  if ([...params].length !== 1 || pis.length !== 1 || pis[0] === "") return null;
+  return { section, pi: pis[0] };
+}
+
 /** An Update the wall route from its tag and the segments after it, or null. */
 function updateRoute(id, tail) {
   const route = { section: "releases", flow: "update", id };
@@ -207,7 +218,7 @@ function updateRoute(id, tail) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, facet, mode, initialTarget, tried, skipped } = route ?? {};
+  const { section, id, flow, step, facet, mode, initialTarget, tried, skipped, pi } = route ?? {};
   if (initialTarget !== undefined &&
       (section !== "scenes" || flow !== "new" || facet !== undefined ||
         !FRAME_ID_PATTERN.test(initialTarget))) {
@@ -232,9 +243,9 @@ export function formatRoute(route) {
   }
   const path =
     "#/" + parts.map((part) => encodeURIComponent(typeof part === "string" ? part : "")).join("/");
-  const hash = initialTarget === undefined
-    ? path
-    : `${path}?target=${encodeURIComponent(initialTarget)}`;
+  const query = initialTarget !== undefined ? `target=${encodeURIComponent(initialTarget)}`
+    : pi !== undefined ? `pi=${encodeURIComponent(typeof pi === "string" ? pi : "")}` : null;
+  const hash = query === null ? path : `${path}?${query}`;
   const parsed = parseRoute(hash);
   if (parsed === null || !sameRoute(parsed, route)) {
     throw new Error(`not a console route: ${JSON.stringify(route)}`);

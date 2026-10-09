@@ -495,8 +495,6 @@ export function playerSerial(snapshot, bootFacts, playerId) {
   return (player && bootFacts?.devices?.get(player.device_id)?.serial) || null;
 }
 
-export const BOOT_FACTS_UNAVAILABLE = "Boot records unavailable";
-
 /**
  * The one Output wording (chooser, Player page and dialogs): handle · output id ·
  * state label.

@@ -94,7 +94,8 @@ def posture_offenders(sources):
 
 def _console_sources():
     return {str(path.relative_to(SRC)): path.read_text()
-            for path in sorted([*SRC.rglob("*.js"), *SRC.rglob("*.jsx")])}
+            for path in sorted([*SRC.rglob("*.js"), *SRC.rglob("*.jsx"), *SRC.rglob("*.ts"),
+                                *SRC.rglob("*.tsx")]) if "node_modules" not in path.parts}
 
 
 def test_the_console_holds_the_v2_posture():
@@ -113,8 +114,8 @@ def test_mutation_probe_a_re_added_v1_fleet_call_fails_the_scan():
 
 def test_mutation_probe_a_re_added_maintenance_request_string_fails_the_scan():
     sources = _console_sources()
-    sources["PlayersPage.jsx"] += '\nconst NOTE = "Cancel maintenance request";\n'
-    assert posture_offenders(sources) == [("PlayersPage.jsx", "maintenance request")]
+    sources["pages/hardware-page.tsx"] += '\nconst NOTE = "Cancel maintenance request";\n'
+    assert posture_offenders(sources) == [("pages/hardware-page.tsx", "maintenance request")]
 
 
 def test_the_scan_reads_jsx_text_and_literals_but_not_comments():

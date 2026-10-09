@@ -1,7 +1,8 @@
 """The console's look (pass C §5): token contrast, the font file, and the build config.
 
-No browser: the contrast pairs are computed from the token blocks in index.css with the
-WCAG 2.2 relative-luminance formula, the font is read with fontTools, and the Vite config
+No browser: the contrast pairs are computed from the design tokens (design/tokens.css: the
+dark `@theme` block and its `@variant light` override) with the WCAG 2.2 relative-luminance
+formula, the status tints the legacy stylesheet (index.css) mixes are read from it, the font is read with fontTools, and the Vite config
 is read as text. The browser half is tests/browser/test_console_look_browser.py.
 """
 
@@ -12,13 +13,15 @@ import pytest
 from fontTools.ttLib import TTFont
 
 CONSOLE = Path(__file__).resolve().parents[1] / "central" / "console"
+TOKENS = CONSOLE / "src" / "design" / "tokens.css"
 CSS = CONSOLE / "src" / "index.css"
 FONT = CONSOLE / "src" / "fonts" / "ConsoleSans.woff2"
 VITE_CONFIG = CONSOLE / "vite.config.js"
 
 SCHEMES = ("light", "dark")
-STATUSES = ("ok", "todo", "alarm", "warn")
-CHIP_MIX = 0.12  # a chip's status colour over --bg-raised (§5)
+STATUSES = ("ok", "todo", "notice", "alarm", "unknown")
+CHIP_MIX = 0.12  # a chip's status colour over --color-surface-raised (§5)
+TRUTH_KINDS = ("set", "reported", "claimed", "derived", "planned", "unknown")  # facts.js
 TEXT, NON_TEXT = 4.5, 3.0  # WCAG 1.4.3 (AA) and 1.4.11
 
 
@@ -29,27 +32,26 @@ def _declarations(block: str) -> dict[str, str]:
 
 
 def _tokens() -> dict[str, dict[str, str]]:
-    """Both schemes' custom properties, resolved to values.
+    """Both schemes' colour tokens, resolved to values, keyed without `--color-`.
 
-    index.css has one `:root` block for one scheme and one
-    `@media (prefers-color-scheme: X) { :root {…} }` override for the other.
+    tokens.css has one `@theme` block for the dark scheme and one `:root { @variant light
+    {…} }` override for the light one.
     """
-    css = re.sub(r"/\*.*?\*/", "", CSS.read_text(), flags=re.S)
-    media = re.search(
-        r"@media\s*\(prefers-color-scheme:\s*(light|dark)\)\s*\{\s*:root\s*\{(.*?)\}\s*\}",
-        css, flags=re.S,
-    )
-    assert media, "index.css has no prefers-color-scheme override of :root"
-    base_css = css[: media.start()] + css[media.end():]
-    base = re.search(r"(?m)^:root\s*\{(.*?)\}", base_css, flags=re.S)
-    assert base, "index.css has no base :root token block"
-    override_scheme = media.group(1)
-    base_scheme = "dark" if override_scheme == "light" else "light"
-    base_tokens = _declarations(base.group(1))
+    css = re.sub(r"/\*.*?\*/", "", TOKENS.read_text(), flags=re.S)
+    theme = re.search(r"@theme\b[^{]*\{(.*?)\}", css, flags=re.S)
+    assert theme, "tokens.css has no @theme block"
+    light = re.search(r"@variant\s+light\s*\{(.*?)\}", css, flags=re.S)
+    assert light, "tokens.css has no light override"
+    dark = _declarations(theme.group(1))
     return {
-        base_scheme: _resolve(base_tokens),
-        override_scheme: _resolve({**base_tokens, **_declarations(media.group(2))}),
+        "dark": _colours(_resolve(dark)),
+        "light": _colours(_resolve({**dark, **_declarations(light.group(1))})),
     }
+
+
+def _colours(tokens: dict[str, str]) -> dict[str, str]:
+    return {f"--{name[len('--color-'):]}": value for name, value in tokens.items()
+            if name.startswith("--color-") and value != "initial"}
 
 
 def _resolve(tokens: dict[str, str]) -> dict[str, str]:
@@ -90,16 +92,17 @@ def _mix(colour, base, weight):
 
 def _status_tints() -> set[float]:
     """Every weight at which index.css tints a surface with a status colour
-    (`color-mix(in srgb, var(--warn) 15%, …)`): the status text on it must read."""
+    (`color-mix(in srgb, var(--color-notice) 15%, …)`): the status text on it must read."""
     css = CSS.read_text()
     weights = re.findall(
-        r"color-mix\(in srgb,\s*var\(--(?:" + "|".join(STATUSES) + r")\)\s*(\d+)%", css)
+        r"color-mix\(in srgb,\s*var\(--color-(?:" + "|".join(STATUSES) + r")\)\s*(\d+)%", css)
     return {int(weight) / 100 for weight in weights}
 
 
 def _accent_tint(tokens: dict[str, str]) -> float:
-    """The weight of `--accent-tint` (`color-mix(in srgb, var(--accent) N%, transparent)`)."""
-    match = re.fullmatch(r"color-mix\(in srgb,\s*var\(--accent\)\s*(\d+)%,\s*transparent\)",
+    """The weight of `--accent-tint` (`color-mix(in srgb, var(--color-accent) N%,
+    transparent)`)."""
+    match = re.fullmatch(r"color-mix\(in srgb,\s*var\(--color-accent\)\s*(\d+)%,\s*transparent\)",
                          tokens["--accent-tint"].strip())
     assert match, tokens["--accent-tint"]
     return int(match.group(1)) / 100
@@ -109,9 +112,9 @@ def _pairs(tokens: dict[str, str]):
     """Every (description, foreground, background, minimum) pair §5 names."""
     c = {name[2:]: _rgb(v) for name, v in tokens.items() if v.startswith("#")}
     # Composite pairs: a tint over transparent shows the surface under it, so its colour
-    # is the tint mixed over that surface (--bg or --bg-raised).
+    # is the tint mixed over that surface (--surface or --surface-raised).
     accent_tint = _accent_tint(tokens)
-    for surface in ("bg", "bg-raised"):
+    for surface in ("surface", "surface-raised"):
         tint = _mix(c["accent"], c[surface], accent_tint)
         yield f"--accent text on --accent-tint over --{surface}", c["accent"], tint, TEXT
         for status in STATUSES:
@@ -119,34 +122,34 @@ def _pairs(tokens: dict[str, str]):
             for weight in sorted(_status_tints()):
                 yield (f"--{status} text on its {weight:.0%} tint over --{surface}", c[status],
                        _mix(c[status], c[surface], weight), TEXT)
-    surfaces = ("bg", "bg-raised", "input-bg")
-    for text in ("fg", "fg-muted", "fg-subtle", "fg-label"):
+    surfaces = ("surface", "surface-raised", "surface-input")
+    for text in ("text", "muted", "label", *(f"truth-{kind}" for kind in TRUTH_KINDS)):
         for surface in surfaces:
             yield f"--{text} on --{surface}", c[text], c[surface], TEXT
     yield "--on-accent on --accent", c["on-accent"], c["accent"], TEXT
     yield "--on-alarm on --alarm", c["on-alarm"], c["alarm"], TEXT
     for status in STATUSES:
-        chip = _mix(c[status], c["bg-raised"], CHIP_MIX)
-        yield f"--fg on the --{status} chip", c["fg"], chip, TEXT
-        yield f"--{status} border on --bg-raised", c[status], c["bg-raised"], NON_TEXT
+        chip = _mix(c[status], c["surface-raised"], CHIP_MIX)
+        yield f"--text on the --{status} chip", c["text"], chip, TEXT
+        yield f"--{status} border on --surface-raised", c[status], c["surface-raised"], NON_TEXT
         # Status colours are also used as text today (reasons, errors, health labels).
-        for surface in ("bg", "bg-raised"):
+        for surface in ("surface", "surface-raised"):
             yield f"--{status} text on --{surface}", c[status], c[surface], TEXT
     for surface in surfaces:
-        yield f"--input-ring on --{surface}", c["input-ring"], c[surface], NON_TEXT
-    for surface in ("bg", "bg-raised"):
+        yield f"--line-input on --{surface}", c["line-input"], c[surface], NON_TEXT
+    for surface in ("surface", "surface-raised"):
         yield f"--focus on --{surface}", c["focus"], c[surface], NON_TEXT
         yield f"--accent text on --{surface}", c["accent"], c[surface], TEXT
 
 
-def test_both_schemes_define_the_pass_c_tokens():
+def test_both_schemes_define_the_semantic_tokens():
     tokens = _tokens()
     assert set(tokens) == set(SCHEMES)
     required = {
-        "--bg", "--bg-raised", "--bg-sunken", "--fg", "--fg-muted", "--fg-subtle",
-        "--fg-label", "--border", "--input-bg", "--input-ring", "--accent", "--accent-soft",
-        "--accent-tint", "--on-accent", "--focus", "--on-alarm", "--shadow",
-        *(f"--{status}" for status in STATUSES),
+        "--surface", "--surface-raised", "--surface-sunken", "--surface-input", "--text",
+        "--muted", "--label", "--line", "--line-input", "--accent", "--accent-tint",
+        "--on-accent", "--focus", "--on-alarm", "--shadow",
+        *(f"--{status}" for status in STATUSES), *(f"--truth-{kind}" for kind in TRUTH_KINDS),
     }
     for scheme in SCHEMES:
         assert required <= set(tokens[scheme]), (scheme, required - set(tokens[scheme]))

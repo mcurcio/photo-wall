@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from "react";
 import { BindingFacet } from "./BindingFacet.jsx";
 import { CalibrationFacet } from "./CalibrationFacet.jsx";
 import { frameHealth } from "./health.js";
-import { HostChip } from "./HostChip.jsx";
+import { HostHealthLink } from "./domain/host-health-link.tsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { StatusFacet } from "./StatusFacet.jsx";
 
@@ -38,7 +38,7 @@ import { StatusFacet } from "./StatusFacet.jsx";
  * a frame", so the Inspector column keeps its place in the layout.
  *
  * `bootFacts` (bootFacts.js, App-level) is passed through to the Binding facet. `hosts` (the
- * shell's fleet host read) feeds the Status facet's host chip (HostChip.jsx), handed to
+ * shell's fleet host read) feeds the Status facet's host chip (domain/host-health-link.tsx), handed to
  * StatusFacet.jsx as an element, so the facet imports no fleet host module (R4).
  *
  * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string|null, facet: Facet,
@@ -144,7 +144,7 @@ export function Inspector({
           <StatusFacet
             snapshot={snapshot}
             frameId={frameId}
-            hostChip={<HostChip snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
+            hostChip={<HostHealthLink snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
           />
         )}
       </div>

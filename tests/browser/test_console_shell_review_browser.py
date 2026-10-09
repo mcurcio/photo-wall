@@ -20,7 +20,7 @@ from console_tasks import (
     current_hash,
     edit_layout,
     go,
-    open_player,
+    open_pi,
     player_name,
     show_now,
     visit,
@@ -114,7 +114,7 @@ def test_a_poll_401_under_an_open_confirmation_signs_in_by_mouse_and_keeps_it(pa
     handle = player_id[-6:]
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, paused_at=registry.clock.utc())
-        player = open_player(page, player_name(registry, player_id))
+        player = open_pi(page, player_name(registry, player_id))
         player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Retire player {handle}?", exact=True)
         typed = dialog.get_by_label(f"Type {handle} to confirm", exact=True)
@@ -265,10 +265,10 @@ def test_a_route_typed_before_the_first_snapshot_is_never_replaced(page, registr
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         # A fresh load at a known route: the landing route never applies.
-        page.goto(origin + "/console#/players")
-        expect(_heading(page, "players")).to_be_visible()
+        page.goto(origin + "/console#/hardware")
+        expect(_heading(page, "hardware")).to_be_visible()
         page.wait_for_timeout(300)
-        assert current_hash(page) == "#/players"
+        assert current_hash(page) == "#/hardware"
         visit(page, "#/nope")
         expect(_heading(page, "wall")).to_be_visible()
         assert current_hash(page) == "#/wall"
@@ -286,7 +286,7 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         # Plain selection on Surface A remembers A.
         page.get_by_role("button", name="Frame a1", exact=True).click()
         expect(surface).to_have_value("A")
-        go(page, "players")
+        go(page, "hardware")
 
         visit(page, "#/wall/frames/b1/binding")
         expect(page.get_by_role("region", name="Frame b1 inspector", exact=True)).to_be_visible()
@@ -294,7 +294,7 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         expect(page.get_by_role("button", name="Frame b1", exact=True)).to_be_visible()
         # Back to a1's route: its Surface again.
         page.go_back()
-        expect(_heading(page, "players")).to_be_visible()
+        expect(_heading(page, "hardware")).to_be_visible()
         page.go_back()
         expect(page.get_by_role("region", name="Frame a1 inspector", exact=True)).to_be_visible()
         expect(surface).to_have_value("A")

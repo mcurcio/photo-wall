@@ -29,8 +29,12 @@
     ]
   },
   "fleet": {
+    "hardware": [
+      "#/hardware",
+      "#/hardware?pi=device-0000000000000000000000000000000000000000000000000000000000000000",
+      "#/hardware/device-0000000000000000000000000000000000000000000000000000000000000000"
+    ],
     "players": [
-      "#/players",
       "#/players/device-0000000000000000000000000000000000000000000000000000000000000000"
     ],
     "releases": ["#/releases", "#/releases/update/v0.15.0", "#/releases/update/v0.15.0/try/sample-player",

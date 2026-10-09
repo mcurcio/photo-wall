@@ -5,9 +5,9 @@ production create_app on an ephemeral loopback listener, the disposable-schema
 `registry` fixture, and the autouse `page_errors` guard). Equipment is seeded
 directly through the registry (as the `installation`/`enroll` fixtures do) so the
 console renders real inventory: unbound Players, real Frame generations, and a
-real returning-Pi reassociation. The boxes are on Players (console DDD pass 1): a list
-with one row per box and a Player page per box, where Bind, Identify, Retire and Unbind
-all start.
+real returning-Pi reassociation. The boxes are on Hardware (Console by Domain E1 U1): a list
+with one row per Pi and a Hardware page per Pi, where Retire starts; each Pi's Software and
+screens page holds its Outputs, where Bind, Identify and Unbind all start.
 
 This is the redesign's OWN /console binding coverage. It does NOT touch or
 inherit the legacy tests/browser/test_operator_browser.py (which asserts the old
@@ -22,7 +22,16 @@ import os
 import re
 
 import pytest
-from console_tasks import connect, go, open_frame, open_player, player_name, visible_page
+from console_tasks import (
+    connect,
+    go,
+    hardware_list,
+    open_frame,
+    open_pi,
+    open_player,
+    player_name,
+    visible_page,
+)
 from operator_harness import (
     RequestGate,
     assert_fits_width,
@@ -108,14 +117,14 @@ def _disconnect_output(registry, player_id, output_id):
                      "WHERE player_id=%s AND output_id=%s", (player_id, output_id))
 
 
-def test_an_enrolled_player_appears_on_the_players_list(page, registry):
+def test_an_enrolled_player_appears_on_the_hardware_list(page, registry):
     # A freshly enrolled Player is unbound and not retired: one row on the list, by name.
     identity, _, _ = enroll(registry, count=2)
     name = player_name(registry, identity["player_id"])
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "players")
+        connect(page, origin, "hardware")
 
-        players = page.get_by_role("table", name="Players", exact=True)
+        players = hardware_list(page).get_by_role("table", name="Not driving a Frame", exact=True)
         row = players.get_by_role("row").filter(
             has=page.get_by_role("link", name=name, exact=True))
         expect(row).to_have_count(1)
@@ -238,9 +247,9 @@ def test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output(page, 
         inspector = open_frame(page, "wall-r", "binding")
         expect(_option(inspector, player_id)).to_be_visible()
 
-        # Retire the unbound Player from its page (a deliberate, labelled action),
+        # Retire the unbound Player from its Hardware page (a deliberate, labelled action),
         # typing its handle to confirm (slice 2 §7).
-        player = open_player(page, name)
+        player = open_pi(page, name)
         player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         _type_handle_and_retire(page, player_id)
 
@@ -277,7 +286,7 @@ def test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login(p
         # console stays on the sign-in screen: NO connected content rendered.
         expect(page.get_by_label("Operator token")).to_have_value("")
         expect(page.get_by_role("button", name="Sign in", exact=True)).to_be_visible()
-        expect(page.get_by_role("table", name="Players", exact=True)).to_have_count(0)
+        expect(page.get_by_role("region", name="Pis", exact=True)).to_have_count(0)
 
         # Recovery: the CORRECT token signs in and the real inventory renders,
         # and the rejection message is gone.
@@ -487,7 +496,7 @@ def test_retire_is_enabled_only_by_typing_the_handle(page, registry):
     name = player_name(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        player = open_player(page, name)
+        player = open_pi(page, name)
         opener = player.get_by_role("button", name=f"Retire player {player_id}", exact=True)
         opener.click()
         dialog = _dialog(page)
@@ -663,12 +672,12 @@ def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, re
         expect(page.get_by_role("region", name="Boot", exact=True)).not_to_contain_text("Legacy netboot")
 
 
-def test_the_players_list_names_boxes_by_their_distinct_serial_handles(page, registry):
+def test_the_hardware_list_names_boxes_by_their_distinct_serial_handles(page, registry):
     first_player = _netbooted_player(registry, SERIAL)
     second_player = _netbooted_player(registry, "10000000c0ffee93")
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "players")
-        players = page.get_by_role("table", name="Players", exact=True)
+        connect(page, origin, "hardware")
+        players = hardware_list(page)
         first = players.get_by_role("link", name="Player …ffee42", exact=True)
         second = players.get_by_role("link", name="Player …ffee93", exact=True)
         expect(first).to_be_visible()
@@ -680,11 +689,13 @@ def test_the_players_list_names_boxes_by_their_distinct_serial_handles(page, reg
         expect(page.get_by_role("heading", level=2, name="Player …ffee42", exact=True)
                ).to_be_visible()
         expect(player).to_contain_text(f"Serial {SERIAL}")
-        player.get_by_text("Identifiers", exact=True).click()
-        expect(player).to_contain_text(f"Registry Player {first_player}")
         expect(player.get_by_role("button", name=f"Retire player {first_player}", exact=True)
                ).to_be_visible()
         expect(player.get_by_text(second_player, exact=False)).to_have_count(0)
+        page.get_by_role("link", name="Software and screens", exact=True).click()
+        player = visible_page(page)
+        player.get_by_text("Identifiers", exact=True).click()
+        expect(player).to_contain_text(f"Registry Player {first_player}")
 
 
 def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry):
@@ -694,14 +705,14 @@ def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry)
     page.route(NETBOOT, lambda route: route.fulfill(
         status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "players")
-        listing = page.get_by_role("region", name="Players list", exact=True)
+        connect(page, origin, "hardware")
+        listing = hardware_list(page)
         expect(listing).to_contain_text("Boot records unavailable")
         # Named by its device id, never by a guessed serial.
         expect(listing.get_by_role("link", name=name, exact=True)).to_be_visible()
         expect(listing.get_by_text(re.compile(r"Player …"))).to_have_count(0)
         # The existing action remains available even when serial enrichment fails.
-        player = open_player(page, name)
+        player = open_pi(page, name)
         expect(player.get_by_role("button", name=f"Retire player {player_id}", exact=True)
                ).to_be_visible()
 
@@ -749,8 +760,8 @@ def test_a_401_from_the_boot_facts_read_does_not_log_the_operator_out(page, regi
     with operator_server(registry.db, registry.clock) as origin:
         with page.expect_response(NETBOOT):
             sign_in(page, origin)
-        go(page, "players")
-        listing = page.get_by_role("region", name="Players list", exact=True)
+        go(page, "hardware")
+        listing = hardware_list(page)
         expect(listing).to_contain_text("Boot records unavailable")
         # The session is untouched: a refresh still authenticates and applies.
         page.get_by_role("button", name="Refresh", exact=True).click()
@@ -835,6 +846,12 @@ def test_the_player_page_lists_each_output_with_its_state_and_offers_no_retire_w
                ).to_have_count(0)
         expect(_danger(page).get_by_role("button", name=f"Unbind all outputs of {player_id}",
                                          exact=True)).to_be_visible()
+        # Nor on its Hardware page: a Bound Pi's Danger zone links to each Frame's Binding.
+        open_pi(page, name)
+        expect(_danger(page).get_by_role("button", name=f"Retire player {player_id}", exact=True)
+               ).to_have_count(0)
+        expect(_danger(page).get_by_role("link", name="Frame lobby-left", exact=True)).to_have_attribute(
+            "href", "#/wall/frames/lobby-left/binding")
 
 
 def test_output_first_bind_opens_the_frame(page, registry):
@@ -953,7 +970,7 @@ def test_a_dialog_survives_a_poll_that_changes_its_players_standing(page, regist
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         connect(page, origin)
-        player = open_player(page, name)
+        player = open_pi(page, name)
         _danger(page).get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog = _dialog(page)
         dialog.get_by_label(f"Type {handle} to confirm", exact=True).fill(handle)
@@ -970,11 +987,12 @@ def test_a_dialog_survives_a_poll_that_changes_its_players_standing(page, regist
         assert registry.inventory().players[0].retired_at is None
 
 
-def test_the_players_list_says_when_there_are_no_players(page, registry):
+def test_the_hardware_list_says_when_there_are_no_pis(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "players")
-        expect(page.get_by_role("region", name="Players list", exact=True)).to_contain_text(
-            "No Players yet. Power on one Pi on this network; it appears here.")
+        connect(page, origin, "hardware")
+        expect(hardware_list(page)).to_contain_text(
+            "No Pis yet. Power on one Pi on this network; it appears here.")
+        expect(hardware_list(page).get_by_role("table")).to_have_count(0)
 
 
 def test_a_free_output_says_when_there_are_no_unbound_frames(page, registry):
@@ -985,7 +1003,7 @@ def test_a_free_output_says_when_there_are_no_unbound_frames(page, registry):
         expect(player).to_contain_text("No unbound frames. Draw one on the plan first.")
 
 
-def test_the_players_pages_never_scroll_sideways_at_390_px(page, registry):
+def test_the_fleet_pages_never_scroll_sideways_at_390_px(page, registry):
     long_id = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
     identity, _, _ = enroll(registry, count=2)
     _two_bound(registry)
@@ -994,10 +1012,12 @@ def test_the_players_pages_never_scroll_sideways_at_390_px(page, registry):
         width_mm=400, height_mm=300, profile=LANDSCAPE))
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "players")
-        expect(page.get_by_role("table", name="Players", exact=True)).to_be_visible()
-        assert_fits_width(page, "Players list")
+        connect(page, origin, "hardware")
+        expect(hardware_list(page).get_by_role("table").first).to_be_visible()
+        assert_fits_width(page, "Hardware list")
+        open_pi(page, player_name(registry, identity["player_id"]))
+        assert_fits_width(page, "Hardware Pi page")
         player = open_player(page, player_name(registry, identity["player_id"]))
         expect(player.get_by_role("combobox").first).to_be_visible()
         player.get_by_text("Identifiers", exact=True).click()
-        assert_fits_width(page, "Player page")
+        assert_fits_width(page, "Software and screens page")

@@ -1,21 +1,21 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
 import { deprecatedBootFact } from "./bootFacts.js";
-import { retireRequest, unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
+import { unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
-import { FactLine } from "./FactLine.jsx";
-import { HostHealthSection } from "./HostHealthSection.jsx";
-import { busLinkFact, clock, fact, words } from "./facts.js";
+import { FactLine } from "./domain/fact-line.tsx";
+import { PiHeader } from "./domain/pi-header.tsx";
+import { clock, fact, words } from "./facts.js";
 import {
-  BOOT_FACTS_UNAVAILABLE, interruptionFor, isBound, outputLabel, outputStates,
+  interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
 import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
-import { currentSessionBoot, layerEvidence, nodeUnknown, useNodeDevice } from "./nodeRead.js";
-import { AppOperationsSection, RebootSection } from "./PlayerCommands.jsx";
+import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
+import { AppOperationsSection } from "./PlayerCommands.jsx";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
 import { StageApp } from "./StageApp.jsx";
 import {
-  enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice, RETIRED_NOT_READ,
+  BOOT_FACTS_UNAVAILABLE, enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice, RETIRED_NOT_READ,
 } from "./players.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { formatRoute, isPlainClick, routeIdName } from "./routes.js";
@@ -49,14 +49,17 @@ function ReadTime({ what, at, failed }) {
   );
 }
 
-/** The five layer rows (§9 Layers) and the closing Panel line. */
+/**
+ * The software layer rows (§9 Layers, L1 to L2) and the closing Panel line. Host Management's
+ * row (L0) lives on the Pi's Hardware page, in Link and sessions.
+ */
 function LayersSection({ node, snapshot, playerId, retired }) {
-  const rows = layerEvidence({ nodeDevice: node, snapshot, playerId });
+  const rows = layerEvidence({ nodeDevice: node, snapshot, playerId }).filter((row) => row.key !== "host");
   const shown = retired ? rows.filter((row) => row.key === "app") : rows;
   return (
     <>
       {retired ? (
-        <p className="player__read-time">{`${RETIRED_NOT_READ} (Host Management, App Manager, App Effect Broker, Display Host)`}</p>
+        <p className="player__read-time">{`${RETIRED_NOT_READ} (App Manager, App Effect Broker, Display Host)`}</p>
       ) : (
         <ReadTime what="Node read" at={node.readAt} failed={node.error !== null && node.read !== null} />
       )}
@@ -296,22 +299,20 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
 }
 
 /**
- * One Player's home (`#/players/<device-id>`; console DDD §9, Q1 = A, §61): a header with the
- * box's identity, standing, Node API link (facts.js `busLinkFact`, from the node read) and Reboot
- * (behind its own error boundary, so a Reboot render error leaves the header standing); then
- * Health (HostHealthSection.jsx, from the shell's fleet host read, first), its node layers bottom
- * up, its Outputs, its boot, its app (Stage app and its operations) and its danger zone. Each section shows its own read time and sits behind its
- * own error boundary. Node records are read only here, for this box only (nodeRead.js),
- * never for a retired box and never while the shell's node control is not on; with node
- * control off the node sections give way to one "not shown" line (nodeControl.js). Writes stay with their aggregate: Bind goes to the Frame, Retire to
- * the Registry, Reboot and Stage app to the fleet.
+ * One Pi's Software and screens page (`#/players/<device-id>`; console by domain § Fleet): the
+ * Pi header (linking to the Pi's Hardware page, which holds Reboot, Health, its Node API link
+ * and Retire), its Enrollment, its software layers bottom up (L1 to L2), its Outputs, its boot,
+ * its app (Stage app and its operations) and Unbind all. It keeps what belongs to Software and
+ * Screens until their own pages land. Each section shows its own read time and sits behind its
+ * own error boundary. Node records are read only on a Pi's pages, for that box only
+ * (nodeRead.js), never for a retired box and never while the shell's node control is not on;
+ * with node control off the node sections give way to one "not shown" line (nodeControl.js).
+ * Writes stay with their aggregate: Bind goes to the Frame, Stage app to the fleet.
  *
  * @param {{deviceId: string, snapshot: object, bootFacts: object|null,
- *          wall: import("./wallState.js").WallMemory,
- *          hosts?: import("./fleetHosts.js").FleetHosts|null}} props the shell's fleet host
- *   read, null while it is skipped (node control not on): Health is then not shown
+ *          wall: import("./wallState.js").WallMemory}} props
  */
-export function PlayerPage({ deviceId, snapshot, bootFacts, wall, hosts = null }) {
+export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
   const row = playersByDevice(snapshot, bootFacts).find((candidate) => candidate.deviceId === deviceId)
     ?? null;
   const retired = row?.standing === "retired";
@@ -325,69 +326,42 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall, hosts = null }
     return (
       <div className="player">
         <p className="page__empty">
-          {`${routeIdName("Player", deviceId, { start: true })} is not known to Central.`}
+          {`${routeIdName("Pi", deviceId, { start: true })} is not known to Central.`}
           {bootFacts?.loaded ? "" : " Boot records are not read yet."}
         </p>
-        <p><a href={formatRoute({ section: "players" })}>All Players</a></p>
+        <p><a href={formatRoute({ section: "hardware" })}>All Pis</a></p>
       </div>
     );
   }
   const player = row.player;
   return (
     <div className="player">
-      <header className="player__header">
-        <p><a href={formatRoute({ section: "players" })}>All Players</a></p>
-        <h2 ref={nameRef} className="player__name" tabIndex={-1}>{row.name}</h2>
-        <FactLine label="Standing" fact={fact({ kind: "set", value: row.standingLabel })} />
-        {player !== null && (
-          <FactLine label="Enrollment" fact={enrolledFact(player, snapshot?.inventory?.read_at)} />
-        )}
-        {row.serial !== null && (
-          <FactLine label="Serial" fact={fact({ kind: "claimed", value: `Serial ${row.serial}`, source: "the box" })} />
-        )}
-        {!retired && (
-          <NodeRecords quiet>
-            <FactLine label="Node API link" fact={node.read === null
-              ? fact({ kind: "unknown", why: nodeUnknown(node) })
-              : busLinkFact(node.read.bus_link, node.readAt)} />
-          </NodeRecords>
-        )}
-        {bootFacts?.unavailable && <p className="roster__note">{`${BOOT_FACTS_UNAVAILABLE}; serials may be out of date.`}</p>}
-        {row.frames.length > 0 && (
-          <p className="player__frames">
-            {"Bound Frames: "}
-            {row.frames.map((entry, index) => (
-              <React.Fragment key={entry.frameId}>
-                {index > 0 && ", "}
-                <FrameLink frameId={entry.frameId} wall={wall} />
-              </React.Fragment>
-            ))}
-          </p>
-        )}
-        <details className="player__details">
-          <summary>Identifiers</summary>
-          <ul>
-            <li>{`Device ${row.deviceId}`}</li>
-            {player !== null && <li>{`Registry Player ${player.id} · authority epoch ${player.authority_epoch}`}</li>}
-          </ul>
-        </details>
-        {!retired && (
-          <NodeRecords quiet>
-            <SectionBoundary title="Reboot" resetKey={node.readAt}>
-              <RebootSection key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
-                playerId={player?.id ?? null} />
-            </SectionBoundary>
-          </NodeRecords>
-        )}
-      </header>
-
-      {!retired && hosts !== null && (
-        <NodeRecords quiet>
-          <SectionBoundary title="Health" resetKey={hosts.read?.read_at}>
-            <HostHealthSection hosts={hosts} deviceId={deviceId} />
-          </SectionBoundary>
-        </NodeRecords>
-      )}
+      <div className="player__header">
+        <PiHeader row={row} on="software" headingRef={nameRef}>
+          {player !== null && (
+            <FactLine label="Enrollment" fact={enrolledFact(player, snapshot?.inventory?.read_at)} />
+          )}
+          {bootFacts?.unavailable && <p className="roster__note">{`${BOOT_FACTS_UNAVAILABLE}; serials may be out of date.`}</p>}
+          {row.frames.length > 0 && (
+            <p className="player__frames">
+              {"Bound Frames: "}
+              {row.frames.map((entry, index) => (
+                <React.Fragment key={entry.frameId}>
+                  {index > 0 && ", "}
+                  <FrameLink frameId={entry.frameId} wall={wall} />
+                </React.Fragment>
+              ))}
+            </p>
+          )}
+          <details className="player__details">
+            <summary>Identifiers</summary>
+            <ul>
+              <li>{`Device ${row.deviceId}`}</li>
+              {player !== null && <li>{`Registry Player ${player.id} · authority epoch ${player.authority_epoch}`}</li>}
+            </ul>
+          </details>
+        </PiHeader>
+      </div>
 
       <NodeRecords>
         <SectionBoundary title="Layers" resetKey={node.readAt}>
@@ -419,25 +393,15 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall, hosts = null }
         )}
       </NodeRecords>
 
-      {player !== null && (row.standing === "unbound" || row.standing === "bound") && (
+      {player !== null && row.standing === "bound" && (
         <SectionBoundary title="Danger zone">
-          {row.standing === "unbound" ? (
-            <button
-              type="button"
-              className="roster__action"
-              onClick={(event) => openDialog(event, retireRequest(snapshot, bootFacts, player.id))}
-            >
-              Retire player<span className="visually-hidden">{` ${player.id}`}</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="roster__action"
-              onClick={(event) => openDialog(event, unbindAllRequest(snapshot, bootFacts, player.id))}
-            >
-              Unbind all outputs<span className="visually-hidden">{` of ${player.id}`}</span>
-            </button>
-          )}
+          <button
+            type="button"
+            className="roster__action"
+            onClick={(event) => openDialog(event, unbindAllRequest(snapshot, bootFacts, player.id))}
+          >
+            Unbind all outputs<span className="visually-hidden">{` of ${player.id}`}</span>
+          </button>
         </SectionBoundary>
       )}
       {confirmation("roster__status-line")}

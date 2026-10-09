@@ -278,7 +278,7 @@ def test_without_node_control_releases_shows_one_line_and_reads_nothing(page, re
         page.on("request", lambda request: reads.append(request.url) if RELEASE_READ in request.url else None)
         connect(page, origin, "releases")
         expect(page.get_by_text(NOT_SHOWN)).to_have_count(1)
-        go(page, "players")
+        go(page, "hardware")
         go(page, "releases")
         expect(page.get_by_text(NOT_SHOWN)).to_have_count(1)
         assert reads == []

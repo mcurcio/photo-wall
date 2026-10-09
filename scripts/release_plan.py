@@ -341,6 +341,7 @@ NOT_SHIPPED: Final = (
     "scripts/build_node_pid1_fixture.py",  # the node-pid1 scenarios' fixture; never shipped
     "scripts/run_display_harness.py",  # node-pid1's display-harness job runner; never shipped
     ".github/workflows/node-pid1.yml",
+    "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
 )
 
 

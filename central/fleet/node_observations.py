@@ -235,6 +235,7 @@ class NodeObservations:
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             read_at = self.sessions.clock.utc()
             rows = conn.execute(_FLEET_HOSTS_SQL, {"day": int(read_at) // 86400}).fetchall()
+            bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
         devices = []
         for row in rows:
             host = None
@@ -268,7 +269,8 @@ class NodeObservations:
                             "intake_full": (row["intake_used"] or 0) >= OBSERVATION_DAILY_CAP,
                             "preparation_intake_full":
                                 (row["preparation_intake_used"] or 0) >= PREPARATION_DAILY_CAP,
-                            "boot": boot, "facts": facts, "preparation": preparation})
+                            "boot": boot, "facts": facts, "preparation": preparation,
+                            "bus_link": bus_links[row["device_id"]]})
         return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
 
     def status(self, device_id: str) -> dict:
@@ -342,7 +344,6 @@ class NodeObservations:
                 "first_received_at": item["created_at"], "offer_refusal": item["refusal"],
                 "physical_identity": "unverified"} for item in claims]
             return {"boot_claims": boot_claims, "deprecated_boot": deprecated_boot_in(conn, device_id),
-                    "bus_link": bus_links_in(conn, [device_id])[device_id],
                     "device_id": device_id, "device_generation": generation, "read_at": now,
                     "sessions": sessions, "reboot_commands": audit, "physical_output": "unknown",
                     "display_outputs": display_outputs_in(conn, device_id, generation),

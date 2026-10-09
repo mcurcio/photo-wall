@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { useConfirm } from "./ConfirmAction.jsx";
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import { clock, fact } from "./facts.js";
 import { effectGateFact, NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import {
