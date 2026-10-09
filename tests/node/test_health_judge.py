@@ -1,4 +1,5 @@
-"""Health judge: the fault catalogue, the K rule at construction, and the app_unresponsive rules."""
+"""Health judge: the fault catalogue, the K rule at construction, the app_unresponsive rules and
+the software_renderer rule."""
 from types import MappingProxyType
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from appliance.health.judge import (
     APP_UNRESPONSIVE,
     MAX_OUTPUTS,
     RING_CAPACITY,
+    SOFTWARE_RENDERER,
     HealthJudge,
     OutputVerdict,
     Presented,
@@ -56,9 +58,12 @@ def states(judge, now):
 # -- catalogue -----------------------------------------------------------------------------
 
 
-def test_the_catalogue_has_the_one_m1_row():
-    assert dict(FAULTS) == {APP_UNRESPONSIVE: Fault(
-        APP_UNRESPONSIVE, True, "Photos paused — the player stopped responding", 5000, 10000)}
+def test_the_catalogue_has_the_m1_row_and_the_degraded_renderer_row():
+    assert dict(FAULTS) == {
+        APP_UNRESPONSIVE: Fault(
+            APP_UNRESPONSIVE, True, "Photos paused — the player stopped responding", 5000, 10000),
+        SOFTWARE_RENDERER: Fault(
+            SOFTWARE_RENDERER, False, "Photos are drawn without the graphics processor", 0, 0)}
     with pytest.raises(TypeError):
         FAULTS["other"] = FAULTS[APP_UNRESPONSIVE]
 
@@ -271,6 +276,49 @@ def test_the_judge_clock_never_runs_backwards():
     assert states(judge, 0) == [(APP_UNRESPONSIVE, "pending")]
     with pytest.raises(ValueError, match="^judge_clock$"):
         judge.verdict(1.5)
+
+
+# -- software_renderer: degraded, never a tint ---------------------------------------------
+
+LLVMPIPE = "llvmpipe (LLVM 19.1.7, 128 bits)"  # the Pi's Player before the render-node grant
+V3D = "V3D 7.1.10.2"
+
+
+def renderer(name, run=RUN):
+    return fact("app_renderer", run, renderer=name)
+
+
+@pytest.mark.parametrize("name", [LLVMPIPE, "softpipe", "Software Rasterizer",
+                                  "zink Vulkan 1.3(llvmpipe (LLVM 19.1.7, 128 bits))"])
+def test_a_software_renderer_raises_the_degraded_condition_at_once(name):
+    judge = HealthJudge(**timing())
+    judge.observe(renderer(name), 0)
+    assert states(judge, 0) == [(SOFTWARE_RENDERER, "raised")]
+    assert [(t.code, t.state, t.reason) for t in judge.transitions()] == [
+        (SOFTWARE_RENDERER, "raised", "software_renderer")]
+
+
+def test_a_gpu_renderer_is_no_condition_and_clears_a_software_one():
+    judge = HealthJudge(**timing())
+    judge.observe(renderer(V3D), 0)
+    assert judge.verdict(0).conditions == () and judge.transitions() == ()
+    judge.observe(renderer(LLVMPIPE), 10)
+    judge.observe(renderer(LLVMPIPE, NEXT_RUN), 20)  # a respawned run, still in software
+    assert [(c.code, c.run, c.state) for c in judge.verdict(20).conditions] == [
+        (SOFTWARE_RENDERER, NEXT_RUN, "raised")]
+    judge.forget(30)  # a feed gap keeps it, like any raised condition
+    judge.observe(renderer(V3D, NEXT_RUN), 40)
+    assert judge.verdict(40).conditions == ()
+    assert [(t.state, t.reason) for t in judge.transitions()] == [
+        ("raised", "software_renderer"), ("raised", "run_changed"), ("cleared", "gpu_renderer")]
+
+
+def test_software_rendering_is_shown_on_each_output_but_never_tints():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output()], 0)
+    judge.observe(renderer(LLVMPIPE), 0)
+    assert underlays(judge, 0) == [("Virtual-1", "live", (SOFTWARE_RENDERER,))]
+    assert cards(judge, 0) == [("Virtual-1", False, ("", ""))]
 
 
 # -- per Output: the display snapshot, underlay and the overlay projection -----------------

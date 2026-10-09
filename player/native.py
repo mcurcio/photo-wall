@@ -142,6 +142,13 @@ def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
     return tuple(reversed(layers))
 
 
+def _gl_text(value: object) -> str | None:
+    """A `glGetString` result as text (PyOpenGL answers bytes); None if the context had none."""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    return (value.strip() or None) if isinstance(value, str) else None
+
+
 def diagnostic_text(output_id: str, player_id: str | None = None,
                     serial: str | None = None,
                     central_link_state: Literal["connecting", "reachable", "retrying"] = "connecting",
@@ -296,6 +303,7 @@ class NativeRenderer:
             raise ValueError("positive native resource limits required")
         self._owner = threading.get_ident()
         self._closed = False
+        self.gl_renderer: str | None = None  # GL_RENDERER of the first realized GL context
         self._serial_label = serial
         self.decoder_limit, self.texture_budget = decoder_limit, texture_budget
         self.prepare_timeout = prepare_timeout
@@ -953,6 +961,8 @@ class NativeRenderer:
         if area.get_error() is not None:
             surface.failure = "decode"
             return True
+        if self.gl_renderer is None:  # reported on the probe channel: the judge flags software rendering
+            self.gl_renderer = _gl_text(gl.glGetString(gl.GL_RENDERER))
         gtk_framebuffer = int(gl.glGetIntegerv(gl.GL_FRAMEBUFFER_BINDING))
         width = max(1, area.get_allocated_width()*area.get_scale_factor())
         height = max(1, area.get_allocated_height()*area.get_scale_factor())

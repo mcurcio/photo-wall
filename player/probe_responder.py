@@ -6,6 +6,10 @@ queue ran. The responder takes its own one-slot lane of the control dispatcher,
 so a queued probe never holds a control slot. At most one answer callback is
 queued; a newer nonce overwrites the pending one, and nothing is answered when
 the probe lane refuses. The channel carries no command authority.
+
+Once per channel, after an answer, it also reports the GL renderer the Player
+draws with (`renderer`, as soon as the renderer knows it): the health judge
+raises `software_renderer` when that is not the GPU.
 """
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from contracts.node_app_link import (
     NodeProbeV2,
     encode_node_probe_answer,
     encode_node_probe_open,
+    encode_node_renderer,
     parse_node_app_link_result,
     parse_node_probe_channel_message,
 )
@@ -47,9 +52,12 @@ class ProbeResponder:
     def __init__(self, dispatcher: Dispatcher, *,
                  on_relink: Callable[[], None], path: Path = DEFAULT_NODE_LINK_SOCKET,
                  connector: Callable[[Path], socket.socket] = _root_socket,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 gl_renderer: Callable[[], str | None] = lambda: None) -> None:
         # Own one-slot lane: a queued probe can never take one of the control slots.
         self.dispatcher, self.on_relink = dispatcher.lane(1), on_relink
+        self.gl_renderer = gl_renderer  # read on the main thread, where the renderer lives
+        self._renderer_sent = False  # this channel already carried the renderer
         self.path, self.connector, self.sleep = path, connector, sleep
         self._lock = threading.Lock()
         self._connection: socket.socket | None = None
@@ -90,7 +98,7 @@ class ProbeResponder:
             if connection.send(opening) != len(opening):
                 raise ValueError("probe_open_short")
             with self._lock:
-                self._connection = connection
+                self._connection, self._renderer_sent = connection, False
             while True:
                 raw = connection.recv(MAX_NODE_LINK_BYTES + 1)
                 if not raw:
@@ -144,8 +152,12 @@ class ProbeResponder:
                 return
             try:
                 self._connection.send(encode_node_probe_answer(nonce), socket.MSG_DONTWAIT)
-            except OSError:
-                pass    # EAGAIN or a closing channel: drop; the next probe asks again
+                renderer = None if self._renderer_sent else self.gl_renderer()
+                if renderer:
+                    self._connection.send(encode_node_renderer(renderer), socket.MSG_DONTWAIT)
+                    self._renderer_sent = True
+            except (OSError, ValueError):
+                pass    # EAGAIN, a closing channel or an unreportable name: the next probe tries again
 
 
 __all__ = ["RETRY_DELAYS", "Dispatcher", "ProbeResponder"]

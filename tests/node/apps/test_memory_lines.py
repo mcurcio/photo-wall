@@ -88,7 +88,7 @@ def test_every_memory_min_is_within_its_line() -> None:
 
 
 def test_the_transient_player_unit_cap_is_the_app_line() -> None:
-    caps = [p for p in app_unit_properties(Path("/r")) if p.startswith("MemoryMax=")]
+    caps = [p for p in app_unit_properties(Path("/r"), ()) if p.startswith("MemoryMax=")]
     assert caps == [f"MemoryMax={line('app').cap_bytes}"], caps
 
 
