@@ -260,7 +260,8 @@ PACKAGES: Final = (
     _image("central-image", "the Central service image (ghcr.io .../central)", "central"),
     _image("media-worker-image", "the media worker service image (ghcr.io .../media-worker), "
            "FROM the media OS base service-base.yml prepares", "media-worker",
-           "scripts/service_base.py", ".github/workflows/service-base.yml"),
+           "scripts/service_base.py", "scripts/registry_pull.py", "scripts/docker_diagnostics.py",
+           ".github/workflows/service-base.yml"),
     Package("player-deb", "the Player .deb", _PLAYER_DEB),
     # The one source package (decision 0019): node-components.yml's `debs` job builds every
     # binary package of debian/control in the pinned build container and the local repo beside
@@ -343,7 +344,7 @@ NOT_SHIPPED: Final = (
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
     "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
     "scripts/node_rollout_image_check.py", "scripts/node_rollout_ci_evidence.py",
-    "scripts/docker_diagnostics.py", "scripts/harness_bundle.py", "scripts/harness_failure.py",
+    "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
     "scripts/provenance_models.py", "scripts/published_player_wire.py",
     "scripts/packaged_os_agent_probe.py",
@@ -422,7 +423,8 @@ SUITES: Final = (
                  "scripts/container_build.py", "scripts/docker_diagnostics.py",
                  "scripts/harness_bundle.py", "scripts/harness_failure.py",
                  "scripts/immich_actions.py", "scripts/immich_fixture.py",
-                 "scripts/provenance_models.py", "scripts/runtime_provenance.py",
+                 "scripts/provenance_models.py", "scripts/registry_pull.py",
+                 "scripts/runtime_provenance.py",
                  "tests/tls_fixture.py", ".github/workflows/netboot-e2e.yml",
                  "central/__init__.py", "central/app.py", "central/db.py", "central/fleet/**",
                  "central/catalog.py", "central/execution_outcomes.py", "central/media_ports.py",

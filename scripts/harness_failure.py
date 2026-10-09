@@ -61,6 +61,7 @@ _CODES = (
     "player_volume_leak", "player_wheel_mismatch", "players_not_registered",
     "permission_not_reported", "permission_recovery_timeout", "player_rejoin_timeout",
     "portrait_not_secured", "readiness_commit_proof", "refresh_pending",
+    "registry_pull_failed", "registry_pull_unavailable",
     "rejoin_not_stateless", "release_not_centrally_accepted", "restart_run_changed",
     "revision_requires_core_images", "run_ended_before_faults_completed",
     "runtime_mutation_not_denied", "runtime_provenance_invalid", "runtime_upload_not_denied", "secured_assignment_changed",

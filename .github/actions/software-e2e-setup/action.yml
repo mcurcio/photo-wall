@@ -1,8 +1,8 @@
 name: Software e2e setup
 description: >-
-  The setup every software-e2e job shares, after its media OS guard and checkout: the Immich
-  fixture images prefetched in the background, the pinned CPython and uv, the locked harness
-  environment, registry access, the build cache and the media worker image, and on request the
+  The setup every software-e2e job shares, after its media OS guard and checkout: the pinned
+  CPython and uv, the locked harness environment, registry access, the Immich fixture images
+  prefetched in the background, the build cache and the media worker image, and on request the
   central image. One definition, so the parallel e2e jobs cannot drift apart.
 
 inputs:
@@ -25,15 +25,6 @@ outputs:
 runs:
   using: composite
   steps:
-    # Overlap the fixture's largest pulls with this setup and the image builds; the fixture's
-    # own (retried) pull joins any still in flight.
-    - name: Prefetch the Immich fixture images in the background
-      shell: bash
-      run: |
-        FIXTURE_DB_PASSWORD=unused FIXTURE_IMAGE=unused nohup docker compose \
-          -f tests/integration/compose.immich.yml pull --quiet immich database redis \
-          > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
-
     - uses: ./.github/actions/python-uv
 
     - name: Install the locked harness environment
@@ -45,6 +36,15 @@ runs:
       env:
         REGISTRY_TOKEN: ${{ github.token }}
       run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+    # The job's one pull of the Immich fixture images, signed in and through the fixture's
+    # retrying pull, overlapping the image builds below. The fixture's own pull later skips
+    # every image already present and joins any still in flight in the daemon.
+    - name: Prefetch the Immich fixture images in the background
+      shell: bash
+      run: |
+        nohup .venv/bin/python -m scripts.immich_fixture prefetch \
+          > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
 
     - name: Set up the container build cache
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e

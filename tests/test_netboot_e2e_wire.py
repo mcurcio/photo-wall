@@ -388,9 +388,9 @@ class _Commands:
 
 
 def test_the_device_root_is_built_at_the_pin_once_then_reimported(monkeypatch, tmp_path):
-    """The one declaration builds the root: exactly mmdebstrap_argv over the device set (both
-    the bootstrapper's and the Player's packages), as root, to a tar that is kept; a second
-    run only re-imports it."""
+    """The one declaration builds the root: exactly mmdebstrap_argv over the device set (the
+    base OS's, the bootstrapper's and the Player's packages), as root, to a tar that is kept; a
+    second run only re-imports it."""
     commands = _Commands()
     monkeypatch.setattr(tracer.subprocess, "run", commands)
     cache = tmp_path / "cache"
@@ -398,7 +398,7 @@ def test_the_device_root_is_built_at_the_pin_once_then_reimported(monkeypatch, t
         assert device_root_image(arch="arm64", tag="device-root:test", cache=cache) == (
             "device-root:test")
     expected = list(mmdebstrap_argv(arch="arm64", target="-", consumers=DEVICE_CONSUMERS))
-    assert DEVICE_CONSUMERS == ("bootstrapper", "player")
+    assert DEVICE_CONSUMERS == ("base-os", "bootstrapper", "player")
     [build, *imports] = commands.calls
     assert build[0] == "build" and build[1][len(build[1]) - len(expected):] == expected
     assert build[1][:len(build[1]) - len(expected)] in ([], ["sudo", "-n"])

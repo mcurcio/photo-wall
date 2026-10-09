@@ -139,8 +139,12 @@ def test_the_wall_scenario_keeps_every_immich_adapter_check_in_a_parallel_job():
     assert 'scripts.immich_fixture run' in adapter
     assert '--setup-only' not in adapter and '--keep' not in adapter
     setup = (ACTIONS / 'software-e2e-setup/action.yml').read_text()
-    assert setup.index('Prefetch the Immich fixture images') < setup.index(
-        'Build or restore the central image')
+    # One signed-in, retrying pull of the fixture images per job, overlapping the image builds.
+    prefetch = setup.index('Prefetch the Immich fixture images')
+    assert setup.index('uv sync --frozen') < setup.index('docker login ghcr.io') < prefetch
+    assert prefetch < setup.index('Build or restore the central image')
+    assert '.venv/bin/python -m scripts.immich_fixture prefetch' in setup
+    assert not re.search(r'docker (compose .*)?pull', setup)
 
 
 def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():

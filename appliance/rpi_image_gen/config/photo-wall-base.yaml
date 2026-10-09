@@ -9,8 +9,8 @@
 # minbase, systemd, the device set and the photo-wall-bootstrapper `.deb`
 # (scripts/build_bootstrapper_deb.py: the bootstrapper's computed module
 # closure under /usr/lib/photo-wall-bootstrapper and its systemd unit). The
-# device set is every Debian package the bootstrapper and the Player need,
-# rendered from the one declaration, scripts/debian_packages.py: provisioning
+# device set is every Debian package the base OS itself, the bootstrapper and
+# the Player need, rendered from the one declaration, scripts/debian_packages.py: provisioning
 # installs the Player `.deb` with dpkg alone, so the base must carry its
 # Depends. No application code and no origin: 0009 rule #1 is "the base OS
 # carries no application and no origin." Kernel/initramfs/PXE-TFTP staging are
@@ -69,6 +69,11 @@ layer:
   # photo-wall-bootstrapper `.deb`, after the declaration's "bootstrap" stage
   # (the CA bundle) is in place. See layer/photo-wall-device.yaml.
   app: photo-wall-device
+  # Our own OS configuration, set in the OS itself (layer/photo-wall-os.yaml):
+  # the binfmt units masked (the Pi kernel has no binfmt_misc) and a C.UTF-8
+  # default locale. The Node's name is stage 1's (photo-wall-<serial> at boot);
+  # the image bakes only a neutral one (device/photo-wall-device-none.yaml).
+  os: photo-wall-os
   # rpi-image-gen's own SSH server layer (layer/net-misc/openssh-server.yaml at
   # the pinned commit): Debian's openssh-server, enabled for boot, with the
   # host keys Debian's postinst made at build time removed and a fresh set made

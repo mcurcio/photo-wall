@@ -104,6 +104,7 @@ def check(images: list[str], revision: str, output: Path):
     from contracts.node_rollout import canonical, image_digest, validate_qualification
     from scripts.node_rollout_ci_evidence import report_result
     from scripts.published_player_wire import prepare
+    from scripts.registry_pull import pull_image
 
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("qualification_revision_invalid")
@@ -136,7 +137,7 @@ def check(images: list[str], revision: str, output: Path):
                     raise TimeoutError("qualification_database_unavailable")
                 time.sleep(.25)
             for number, reference in enumerate(sorted(set(images))):
-                _run("docker", "pull", "--platform", "linux/amd64", reference)
+                pull_image(reference, platform="linux/amd64")
                 inspected = json.loads(_run("docker", "image", "inspect", reference, capture_output=True).stdout)[0]
                 if reference not in inspected["RepoDigests"] or inspected["Architecture"] != "amd64" or inspected["Os"] != "linux":
                     raise ValueError("qualification_image_identity_changed")

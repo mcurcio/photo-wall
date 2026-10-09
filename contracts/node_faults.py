@@ -51,6 +51,10 @@ def _catalogue(*rows: Fault) -> Mapping[str, Fault]:
 FAULTS: Mapping[str, Fault] = _catalogue(
     Fault("app_unresponsive", True, "Photos paused — the player stopped responding",
           raise_window_ms=5000, clear_hold_ms=10000),
+    # Degraded, not a fault: content still shows (0015), so no tint. A reported fact, not a
+    # window: raised when the run reports a software renderer, cleared when one reports the GPU.
+    Fault("software_renderer", False, "Photos are drawn without the graphics processor",
+          raise_window_ms=0, clear_hold_ms=0),
 )
 
 

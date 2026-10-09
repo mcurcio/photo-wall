@@ -88,7 +88,8 @@ jobs:
       # to each step as SOURCE_DATE_EPOCH. The initrd's CA list is the base's,
       # so it is as old as this pin: the bundle assembly warns (never fails)
       # once it is over 90 days old (decision 0014, Q3 = A). DEVICE_PACKAGES is
-      # the device set (the bootstrapper's and the Player's packages): the
+      # the device set (the base OS's own, the bootstrapper's and the Player's
+      # packages, scripts/debian_packages.py DEVICE_CONSUMERS): the
       # rpi-image-gen layer installs it and the base check requires it.
       # DEBIAN_SOURCES is the pin's apt sources, one signed-by line each: the
       # base is built from them and keeps them (layer/photo-wall-debian.yaml),
@@ -100,7 +101,7 @@ jobs:
           epoch=$(python3 scripts/debian_packages.py epoch)
           echo "DEBIAN_SNAPSHOT_EPOCH=$epoch" >> "$GITHUB_ENV"
           device_packages="$RUNNER_TEMP/device.list"
-          python3 scripts/debian_packages.py packages bootstrapper player > "$device_packages"
+          python3 scripts/debian_packages.py packages base-os bootstrapper player > "$device_packages"
           echo "DEVICE_PACKAGES=$device_packages" >> "$GITHUB_ENV"
           debian_sources="$RUNNER_TEMP/photo-wall-debian.list"
           python3 scripts/debian_packages.py sources > "$debian_sources"
@@ -466,15 +467,16 @@ jobs:
           fi
 
           # Only what scripts/device_root_checks.py reads: the systemd manager
-          # config, the apt sources, the dpkg database, sshd's config and the
-          # logins' authorized keys; plus the closure
-          # manifest. An extract path the image lacks is skipped, not an error;
+          # config, the apt sources, the dpkg database, sshd's config, the
+          # logins' authorized keys, the hostname, the hosts database and the
+          # default locale; plus the closure manifest. An extract path the image lacks is skipped, not an error;
           # xattrs are not needed and an unprivileged extract cannot set them.
           extract="$RUNNER_TEMP/photo-wall-base-extract"
           rm -rf "$extract"
           unsquashfs -no-xattrs -d "$extract" "$squashfs" \
             etc/systemd usr/lib/systemd/system.conf.d lib/systemd/system.conf.d \
             etc/apt etc/passwd etc/ssh home root/.ssh var/lib/dpkg/status \
+            etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf \
             "$bootstrapper_dir/closure.json" \
             "$bootstrapper_dir/base-abi.txt" >/dev/null
           manifest="$extract/$bootstrapper_dir/closure.json"
@@ -499,7 +501,9 @@ jobs:
           # watchdog override, time daemon or resolver writer; the image's
           # apt sources are exactly the declaration's pin; the agent's SSH
           # login admits exactly the repo key, by key only, with the server
-          # and its per-boot host-key generator enabled.
+          # and its per-boot host-key generator enabled; the binfmt units are
+          # masked, no build hostname is baked in, the hosts database has
+          # myhostname and the default locale sets LANG.
           dpkg-deb -f "$PLAYER_DEB" Depends > "$RUNNER_TEMP/player-depends.list"
           printf '%s\n' photo-wall-bootstrapper > "$RUNNER_TEMP/bootstrapper-package.list"
           if python3 scripts/device_root_checks.py --root "$extract" \
@@ -507,7 +511,8 @@ jobs:
               --require-installed "$RUNNER_TEMP/player-depends.list" \
               --require-installed "$RUNNER_TEMP/bootstrapper-package.list" \
               --pinned-sources \
-              --agent-key appliance/rpi_image_gen/photo_wall_agent.pub; then
+              --agent-key appliance/rpi_image_gen/photo_wall_agent.pub \
+              --base-os; then
             echo "OK: device_root_checks passed"
           else
             violation "device_root_checks refused the image (lines above)"
