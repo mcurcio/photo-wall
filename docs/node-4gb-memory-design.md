@@ -1,6 +1,6 @@
 # 4 GB Raspberry Pi 5 as a legal V2 Player: memory, boot-failure reporting, image-format roots
 
-Status: approved design; the tracer (T1-T6) is implemented. Where this document and the code
+Status: approved design; the tracer (T1-T6) is implemented. Its store and preparation-slice numbers are superseded by E2c (images held once, [memory classes](player-node-domain-model.md#memory-classes-and-the-node-store-2026-10-03)). Where this document and the code
 disagree, the code has a bug unless an entry in the [errata log](../.claude/errata.md) (`E-T*`,
 `E-FX*`) records a ruling; the rulings made during delivery are folded in below and listed in
 the history.

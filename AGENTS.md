@@ -20,11 +20,11 @@ This page is the map; open an owning document only when the routing table sends 
 | `nodeapi/` | Node API library, the one NATS client ([0017](docs/decisions/0017-node-redesign-r3.md) C4, C5, C13, C18): the Node-role session (attach, event outbox, state with `birth`, methods, desired and wall views); Central's per-pipe NodeLink and WallWriter, with the connection-owning `run_link`, `HubAdmin` and `HubUnavailable` Central's worker runs; the document writer and reader; circular and sticky buffers, a component's `Slice` in its store line, and `apply`; the pull budget and cursor reader; the envelope headers; stream epochs and tokens | `node.py`, `hub.py`, `documents.py`, `buffers.py`, `pull.py`, `envelope.py`, `epoch.py` |
 | `uplink/` | Stdlib-only initramfs client that locates and trusts Central | `locate.py`, `fetch.py` |
 | `appliance/` | OS base, netboot initramfs, provisioning, systemd units, OS agent | `netboot_init.py`, `os_agent.py`, `systemd/` |
-| `appliance/kernel/` | Node kernel: primitives on the stdlib, `contracts` and `uplink` alone (clock, boot store, credentials, capacity, boot-stage records, probe timing) | `capacity.py`, `boot_stage.py` |
+| `appliance/kernel/` | Node kernel: primitives on the stdlib, `contracts` and `uplink` alone (clock, boot store, credentials, capacity and the memory line table, boot-stage records, read-only image mounts through PID1, probe timing) | `capacity.py`, `boot_stage.py`, `image_mount.py` |
 | `appliance/host/` | HostCore: host metrics and facts, operator reboot, local recovery deadlines; `birth` on the bus's host line | `host_runner.py`, `bus.py` |
 | `appliance/boot/` | The Node's one-shot boot stages: storage, handoff (writes the bus environment), prepare | `node_bootstrap.py`, `bus_environment.py` |
 | `appliance/bus/` | The Node bus unit: nats-server conf, systemd unit and its persistent slice ([0017](docs/decisions/0017-node-redesign-r3.md) C19) | `photo-wall-bus.service`, `node-bus.conf` |
-| `appliance/apps/` | App lifecycle: effect broker, progress probe, app process, stop, root import | `broker_runner.py`, `online_runner.py`, `root_import.py` |
+| `appliance/apps/` | App lifecycle: effect broker, progress probe, app process, stop, root import; release roots staged as images (`stage_image`, `mounted_root`, the release check) | `broker_runner.py`, `online_runner.py`, `root_import.py`, `environment.py` |
 | `appliance/health/` | Health judge: Node facts to one verdict and the overlay instruction | `runner.py`, `judge.py` |
 | `appliance/node/` | *Retiring:* AppManager, preparer, app link, recovery; gains no new code | `manager_runner.py` |
 | `appliance/central_session/` | *Retiring:* the Node's Central session and HTTP, imported only by the listed workers | `session.py` |
