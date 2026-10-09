@@ -101,13 +101,23 @@ systemd's, not a poll or a retry in either process:
   while Weston's `RuntimeDirectory` (`/run/photo-wall-display`) is absent, so no
   `RuntimeDirectoryPreserve=` is needed. The directory leaves with the incarnation
   that made it, and no reader can open a dead incarnation's sockets.
+- The public Wayland socket is not in that directory. Weston binds it at
+  `/run/photo-wall-display-wayland/wayland-0` (`--socket=` takes the absolute path),
+  in a directory the base's tmpfiles.d creates as `pw-display:pw-display 0750`. It
+  outlives every incarnation, so an app in group `pw-display` binds the directory,
+  never a socket file a restart replaces, and never sees `control.sock` or
+  `ingress.sock`. Weston's umask under `PAMName=login` is 0002, so the socket is
+  group-writable. [`appliance/display_host/paths.py`](../appliance/display_host/paths.py)
+  is the one home of these paths; a unit test pins them to the packaged units and
+  tmpfiles.d.
 
 Any other consumer of `/run/photo-wall-display` must follow the same rule: start
 after the display unit is ready, and end with the Weston incarnation it connected
 to. The app broker's `After=` now orders it on READY=1. The Player's transient unit
-is not ordered or bound to the display unit yet, and the broker does not relaunch
-it when a new Weston incarnation starts. Until then, a Weston restart leaves the
-Player exited.
+must bind `WAYLAND_DIRECTORY` read-only at the same path, set `WAYLAND_DISPLAY` to
+`WAYLAND_SOCKET`, and carry `BindsTo=` and `After=` the display unit. The broker
+must also relaunch the Player once for each new Weston incarnation. Until both
+land, a Weston restart leaves the Player exited.
 
 The node-pid1 scenarios start the controller alone, so Weston comes up only
 through the units' own dependencies. Every scenario then checks that `control.sock`

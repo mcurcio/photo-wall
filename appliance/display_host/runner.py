@@ -22,6 +22,7 @@ from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.kernel.unix_credentials import receive_credential_packet
 
+from .paths import DISPLAY_UNIT, RUNTIME
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel
@@ -182,7 +183,7 @@ class Controller:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runtime", type=Path, default=Path("/run/photo-wall-display"))
+    parser.add_argument("--runtime", type=Path, default=RUNTIME)
     parser.add_argument(
         "--config", type=Path, help="base-owned systemd credential JSON; optional runtime path"
     )
@@ -197,7 +198,7 @@ def main() -> None:
             if not args.runtime.is_absolute():
                 raise ValueError("display_runtime_absolute")
     os.umask(0o077)
-    peer = _unit("photo-wall-display.service")
+    peer = _unit(DISPLAY_UNIT)
     with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
         channel.connect(str(args.runtime / "control.sock"))
         backend = WestonBackend(

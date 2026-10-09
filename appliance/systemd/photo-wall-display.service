@@ -38,9 +38,11 @@ RuntimeDirectory=photo-wall-display
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/photo-wall-display
 Environment=PHOTO_WALL_CONTROLLER_UID=10005
+# The public Wayland socket lives in its own tmpfiles.d directory (pw-display:pw-display 0750),
+# which outlives Weston, apart from the private control and ingress sockets.
 # env restates XDG_RUNTIME_DIR because pam_systemd (PAMName=login) replaces it with /run/user/<uid>;
 # env execs Weston, so the main PID (NotifyAccess=main) is Weston's.
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --modules=systemd-notify.so --socket=wayland-0 --idle-time=0
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --modules=systemd-notify.so --socket=/run/photo-wall-display-wayland/wayland-0 --idle-time=0
 Restart=always
 RestartSec=2
 Slice=photowallbase.slice
@@ -59,5 +61,5 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
-ReadWritePaths=/run/photo-wall-display
+ReadWritePaths=/run/photo-wall-display /run/photo-wall-display-wayland
 InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor

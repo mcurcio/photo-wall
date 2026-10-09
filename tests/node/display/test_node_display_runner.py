@@ -273,3 +273,27 @@ def test_the_base_declares_the_display_feed_directory_and_group(tmp_path):
     assert any(line.startswith("ReadWritePaths=")
                and "/run/photo-wall-display-feed" in line.split("=", 1)[1].split()
                for line in lines)
+
+
+def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare(tmp_path):
+    """appliance.display_host.paths is the one home the broker and the controller read; the
+    packaged units and tmpfiles.d must say the same, so a unit edit cannot strand a reader."""
+    from appliance.display_host import paths
+    from scripts.build_node_base_deb import stage_tree
+
+    root = tmp_path / "package"
+    stage_tree(REPO, root)
+    units = root / "lib/systemd/system"
+    display = (units / paths.DISPLAY_UNIT).read_text().splitlines()
+    (execstart,) = [line for line in display if line.startswith("ExecStart=")]
+    arguments = execstart.split()
+    assert f"XDG_RUNTIME_DIR={paths.RUNTIME}" in arguments
+    assert f"--socket={paths.WAYLAND_SOCKET}" in arguments
+    assert f"RuntimeDirectory={paths.RUNTIME.name}" in display
+    (writable,) = [line for line in display if line.startswith("ReadWritePaths=")]
+    assert {str(paths.RUNTIME), str(paths.WAYLAND_DIRECTORY)} <= set(writable.split("=", 1)[1].split())
+    tmpfiles = (root / "usr/lib/tmpfiles.d/photo-wall-node.conf").read_text().splitlines()
+    assert f"d {paths.WAYLAND_DIRECTORY} 0750 pw-display pw-display -" in tmpfiles
+    controller = (units / "photo-wall-display-controller.service").read_text().splitlines()
+    assert f"BindsTo={paths.DISPLAY_UNIT}" in controller
+    assert f"After={paths.DISPLAY_UNIT}" in controller
