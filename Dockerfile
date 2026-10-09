@@ -71,9 +71,9 @@ RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
 # workspace pre-build. This is the fix for the published central image 500ing on
 # `GET /`: previously dist/ only reached the image when a caller happened to have
 # pre-built it into the build context (checks.yml did; the publish path did not).
-# Digest-pinned to match the python base's rigor (node:20-bookworm-slim,
-# multi-arch index digest resolved 2026-09).
-FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS console-builder
+# Digest-pinned to match the python base's rigor (node:22-bookworm-slim, the console's
+# .nvmrc major; multi-arch index digest resolved 2026-10-09).
+FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS console-builder
 WORKDIR /console
 COPY central/console/package.json central/console/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci

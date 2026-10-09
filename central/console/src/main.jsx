@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 
 import App from "./App.jsx";
+import "./styles.css";
 import { SnapshotProvider } from "./useSnapshot.js";
 
 // Plane A (the read snapshot) is held once, near the top of the tree, by

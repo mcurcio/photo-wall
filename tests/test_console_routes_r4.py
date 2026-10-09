@@ -30,6 +30,12 @@ reads (`import … from "x"`, `import "x"`, `export … from "x"`, `import("x")`
 as Vite reads it) or a package; anything else (`import.meta.glob`, a computed `import()`) is
 an error, not a skip. The self-tests below give both small synthetic sources.
 
+S1 (console design system) by the same scan and bundler, over every module of the catalog
+layers: imports point down only, `pages -> domain -> patterns -> ui -> design`, and the
+design, primitive and pattern layers import no console module outside the layers (no
+model: `facts`, `health`, `hostHealth`, `join`, `players`, `routes`). TypeScript's type-only
+imports count too. The legacy modules at the top of src/ may import any layer.
+
 The round trip runs routes.js itself under Node (a pure module, no React), which the console
 build already requires.
 """
@@ -46,6 +52,7 @@ from test_console_flow import _require_node
 CONSOLE = Path(__file__).parents[1] / "central/console"
 SRC = CONSOLE / "src"
 ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
+SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
           "neutral": "neutralRoutes.jsx"}
@@ -191,13 +198,27 @@ _IMPORT_BARE = re.compile(r"import\s*" + _STR)
 _IMPORT_CALL = re.compile(r"import\s*\(\s*" + _STR + r"\s*\)")
 _EXPORT_FROM = re.compile(r"export\s*(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*" + _STR)
 _EXPORT_LOCAL = re.compile(
-    r"export\s+(?:default|const|let|var|function|class|async)\b|export\s*\{[^}]*\}(?!\s*from\b)")
+    r"export\s+(?:default|const|let|var|function|class|async|type|interface|enum|abstract)\b"
+    r"|export\s*\{[^}]*\}(?!\s*from\b)")
 _KEYWORD = re.compile(r"\b(import|export)\b")
 _PACKAGE = re.compile(r"(?:@[\w.-]+/)?[\w.-]+(?:/[\w./-]+)?")
 
 
-def _specifiers(text, name="<source>"):
+def _type_only(statement):
+    """Whether an import or re-export statement carries types alone (`import type …`, or
+    every named binding marked `type`): TypeScript erases it, so the bundler never sees it."""
+    if re.match(r"(?:import|export)\s+type\b(?!\s*(?:,|from\b))", statement):
+        return True
+    names = re.search(r"\{([^}]*)\}", statement)
+    if names is None or re.match(r"import\s*[\w$]+\s*,", statement):
+        return False
+    bindings = [part.strip() for part in names.group(1).split(",") if part.strip()]
+    return bool(bindings) and all(re.match(r"type\s", part) for part in bindings)
+
+
+def _specifiers(text, name="<source>", *, values_only=False):
     """Every module specifier `text` imports or re-exports, statically or dynamically.
+    With `values_only`, the type-only statements (`_type_only`) are left out.
 
     Raises ScanError for an `import`/`export` in code that is none of the forms read here.
     """
@@ -223,28 +244,35 @@ def _specifiers(text, name="<source>"):
                 continue
         if match is None:
             raise ScanError(f"{name}:{line}: an {keyword.group()} the scan cannot read")
+        if values_only and _type_only(match.group()):
+            continue
         found.append(next(group for group in match.group("d", "s", "t") if group is not None))
     return found
 
 
-def _imports(path, root=CONSOLE):
-    """The console modules `path` imports, resolved to files; packages are left out.
+def _imports(path, root=CONSOLE, *, values_only=False):
+    """The console modules `path` imports, resolved to files; packages are left out. With
+    `values_only`, the type-only imports are left out too (the bundler's view).
 
     Relative specifiers resolve against `path`, root-relative ones ("/src/…") against the
-    Vite `root`, with Vite's extensions and index files. Anything unresolved is a ScanError.
+    Vite `root`, the catalog layers' alias ("@/…", tsconfig.json `paths`) against its `src/`,
+    with Vite's extensions and index files. Anything unresolved is a ScanError.
     """
     resolved = set()
-    for specifier in _specifiers(path.read_text(), path.name):
+    for specifier in _specifiers(path.read_text(), path.name, values_only=values_only):
         if specifier.startswith(("./", "../")):
             base = (path.parent / specifier).resolve()
+        elif specifier.startswith("@/"):
+            base = (root / "src" / specifier[2:]).resolve()
         elif specifier.startswith("/"):
             base = (root / specifier.lstrip("/")).resolve()
         elif _PACKAGE.fullmatch(specifier) and not specifier.startswith("."):
             continue  # a package (react, react-dom/client)
         else:
             raise ScanError(f"{path.name}: cannot resolve {specifier!r}")
-        candidates = [base, *(base.with_name(base.name + ext) for ext in (".js", ".jsx", ".json")),
-                      base / "index.js", base / "index.jsx"]
+        candidates = [base, *(base.with_name(base.name + ext) for ext in SOURCE_SUFFIXES),
+                      base.with_name(base.name + ".json"),
+                      *(base / f"index{ext}" for ext in SOURCE_SUFFIXES)]
         found = next((candidate for candidate in candidates if candidate.is_file()), None)
         if found is None:
             raise ScanError(f"{path.name}: cannot resolve {specifier!r}")
@@ -282,16 +310,19 @@ def bundler_graph(entries, root, workdir):
 
 def module_graph(entries, root, workdir):
     """The bundler's graph (`bundler_graph`), cross-checked module by module against the
-    import scan (`_imports`): any disagreement is a ScanError."""
+    import scan (`_imports`): any disagreement is a ScanError. A TypeScript module's
+    type-only imports, which the bundler erases, join the graph from the scan, so a layer
+    rule holds for types too."""
     graph = bundler_graph(entries, root, workdir)
-    for module, imports in graph.items():
-        if module.suffix in {".js", ".jsx"}:
-            scanned = _imports(module, root)
+    for module, imports in list(graph.items()):
+        if module.suffix in SOURCE_SUFFIXES:
+            scanned = _imports(module, root, values_only=True)
             if scanned != imports:
                 raise ScanError(
                     f"{module.name}: the scan and the bundler disagree: only the scan sees "
                     f"{sorted(p.name for p in scanned - imports)}, only the bundler sees "
                     f"{sorted(p.name for p in imports - scanned)}")
+            graph[module] = _imports(module, root)
     return graph
 
 
@@ -320,7 +351,7 @@ def scan_closure(path, root=CONSOLE):
         if module in seen:
             continue
         seen.add(module)
-        if module.suffix in {".js", ".jsx"}:
+        if module.suffix in SOURCE_SUFFIXES:
             stack.extend(_imports(module, root) - seen)
     return {module.name for module in seen}
 
@@ -442,7 +473,7 @@ def test_the_cross_check_agrees_where_the_scan_reads_every_import(tmp_path):
 
 def test_the_import_scan_reads_every_console_module():
     # Fail closed over the real sources too: every module lexes and resolves.
-    for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]:
+    for module in [path for path in SRC.rglob("*") if path.suffix in SOURCE_SUFFIXES]:
         _imports(module)
 
 
@@ -690,3 +721,99 @@ def test_routes_parse_format_and_round_trip():
     assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"
+
+
+# --- S1: the catalog layers' imports point down only (console design system).
+
+# Top to bottom; a layer imports its own and the layers below it.
+LAYERS = ("pages", "domain", "patterns", "ui", "design")
+# Layers that know no Photo Wall concept: they import no console module outside the layers.
+MODEL_FREE = {"patterns", "ui", "design"}
+MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
+
+
+def _layer(module, src=SRC):
+    """The catalog layer `module` belongs to, or None for any other console module."""
+    try:
+        parts = module.resolve().relative_to(src.resolve()).parts
+    except ValueError:
+        return None
+    return parts[0] if len(parts) > 1 and parts[0] in LAYERS else None
+
+
+def layer_violations(graph, src=SRC):
+    """Every (module, import) edge of `graph` that breaks S1, as names relative to `src`."""
+    found = []
+    for module, imports in graph.items():
+        layer = _layer(module, src)
+        if layer is None:
+            continue  # a legacy module may import any layer
+        for imported in imports:
+            target = _layer(imported, src)
+            if target is None:
+                broken = layer in MODEL_FREE
+            else:
+                broken = LAYERS.index(target) < LAYERS.index(layer)
+            if broken:
+                found.append((str(module.resolve().relative_to(src.resolve())),
+                              str(imported.resolve().relative_to(src.resolve()))))
+    return sorted(found)
+
+
+def _layer_modules(src=SRC):
+    return sorted(path for layer in LAYERS if (src / layer).is_dir()
+                  for path in (src / layer).rglob("*") if path.suffix in SOURCE_SUFFIXES)
+
+
+@pytest.fixture(scope="module")
+def layer_graph(tmp_path_factory):
+    """Every catalog module's imports, its type-only ones included."""
+    _require_esbuild()
+    return module_graph(_layer_modules(), CONSOLE, tmp_path_factory.mktemp("layers"))
+
+
+def test_catalog_imports_point_down_only(layer_graph):
+    assert {"button.tsx", "dialog.tsx", "table.tsx", "tokens.ts"} <= {
+        module.name for module in layer_graph}  # the walk reached the catalog
+    assert layer_violations(layer_graph) == []
+
+
+def test_primitives_and_patterns_import_no_console_model(layer_graph):
+    reached = {imported.name for module, imports in layer_graph.items()
+               if _layer(module) in MODEL_FREE for imported in imports}
+    assert not reached & MODELS, sorted(reached & MODELS)
+
+
+def test_a_layer_rule_break_is_found(tmp_path):
+    # Guards the check: an upward import, a primitive's type-only import of a model, and an
+    # alias import upward are each a violation; a downward import and a domain component
+    # reading a model are not.
+    _require_esbuild()
+    _write(tmp_path, {
+        "tsconfig.json": '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}',
+        "src/facts.js": "export const f = 1;\n",
+        "src/design/tokens.ts": "export type Severity = 'ok';\nexport const S = 1;\n",
+        "src/ui/chip.tsx": 'import type { Severity } from "../design/tokens";\n'
+                           'import { Page } from "../pages/Page";\n'
+                           'export const Chip = (s: Severity) => Page(s);\n',
+        "src/ui/fact.tsx": 'import { type F } from "../facts.js";\nexport const x = 1 as unknown as F;\n',
+        "src/patterns/list.tsx": 'import { D } from "@/domain/D";\nexport const L = D;\n',
+        "src/domain/D.tsx": 'import { f } from "../facts.js";\nimport { S } from "../design/tokens";\n'
+                            "export const D = f + S;\n",
+        "src/pages/Page.tsx": 'import { D } from "../domain/D";\nexport const Page = (x: unknown) => [x, D];\n',
+    })
+    src = tmp_path / "src"
+    graph = module_graph(_layer_modules(src), tmp_path, tmp_path)
+    assert layer_violations(graph, src) == [
+        ("patterns/list.tsx", "domain/D.tsx"),
+        ("ui/chip.tsx", "pages/Page.tsx"),
+        ("ui/fact.tsx", "facts.js"),
+    ]
+
+
+def test_the_truth_kinds_token_list_is_the_fact_models():
+    # tokens.ts names a tone per truth kind; facts.js owns the kinds (S1 keeps the two apart).
+    tokens = re.search(r"TRUTH_KINDS = \[([^\]]*)\]", (SRC / "design/tokens.ts").read_text())
+    kinds = re.search(r"const KINDS = new Set\(\[([^\]]*)\]\)", (SRC / "facts.js").read_text())
+    assert tokens and kinds
+    assert re.findall(r'"(\w+)"', tokens.group(1)) == re.findall(r'"(\w+)"', kinds.group(1))

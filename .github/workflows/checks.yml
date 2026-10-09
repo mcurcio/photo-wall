@@ -38,6 +38,11 @@ jobs:
       - run: .venv/bin/python -m ruff check .
       - run: .venv/bin/lint-imports
       - run: python scripts/check_docs.py
+      # The console's static checks (console design system S2, S3, types) and its catalog.
+      - uses: ./.github/actions/console-bundle
+      - run: npm --prefix central/console run typecheck
+      - run: npm --prefix central/console run lint
+      - run: npm --prefix central/console run build-storybook
 
   unit:
     runs-on: ubuntu-24.04

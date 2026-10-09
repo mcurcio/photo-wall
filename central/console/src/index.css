@@ -1,89 +1,23 @@
-/* Look and feel (pass C, docs/operator-console-ux-pass2-flow.md §5). Values are
-   re-expressed from the photo library's published theme; no code, markup or asset
-   is copied. Dark is written first; the light block overrides the same tokens, so
-   every rule, SVG fills included, follows the operator's colour scheme.
-   tests/test_console_look.py parses both blocks and checks every contrast pair.
-   Only an alarm uses --alarm; a to-do is --todo. Older names keep their meaning:
-   --fg-subtle is now --fg-muted (no text below 4.5:1), --accent-soft is --accent
-   (strokes and tints), and --shadow is the card shadow's colour. */
-@font-face {
-  /* The Google Sans variable font, subset and renamed (OFL; fonts/README.md). The
-     two overrides are the photo library's, so the line boxes match. */
-  font-family: "Console Sans";
-  src: url("./fonts/ConsoleSans.woff2") format("woff2");
-  font-weight: 400 700;
-  font-style: normal;
-  font-display: swap;
-  size-adjust: 106.25%;
-  ascent-override: 106.25%;
-}
-
+/* The legacy stylesheet (pass C, docs/operator-console-ux-pass2-flow.md §5), in the
+   `legacy` cascade layer beneath Tailwind's utilities (styles.css), so a catalog primitive
+   wins over these element rules. Every colour, radius and the font come from the design
+   tokens (design/tokens.css); this file defines none. It shrinks as page groups move to the
+   catalog and is deleted at the design system's end condition. */
 :root {
-  --bg: #0a0a0a;
-  --bg-raised: #171717;
-  --bg-sunken: #101116;
-  --fg: #dbdbdb;
-  --fg-muted: #9ca3af;
-  --fg-subtle: var(--fg-muted);
-  --fg-label: #d1d5db;
-  --border: #262626;
-  --input-bg: #1f2937;
-  --input-ring: #737373;
-  --accent: #accbfa;
-  --accent-soft: var(--accent);
-  --accent-tint: color-mix(in srgb, var(--accent) 10%, transparent);
-  --on-accent: #000000;
-  --focus: var(--accent);
-  --ok: #48ed98;
-  --todo: #7ab7ff;
-  --alarm: #f67d7d;
-  --on-alarm: #000000;
-  --warn: #ffd198;
-  --shadow: rgba(0, 0, 0, 0.5);
-
-  /* Shape and layout. The sidebar numbers are for the navigation shell (bead 1b).
-     A custom property cannot appear in a media query, so a query repeats the
-     breakpoint's value. */
-  --radius-button: 12px;
-  --radius-input: 8px;
-  --radius-card: 16px;
-  --radius-pill: 999px;
+  /* Shape and layout of the navigation shell (bead 1b). A custom property cannot appear
+     in a media query, so a query repeats the breakpoint's value. */
   --sidebar-width: 16rem;
   --header-height: calc(4.5rem + 4px);
   --breakpoint-sidebar: 850px;
-  --font-sans: "Console Sans", system-ui, sans-serif;
 
   /* The font's licence ships beside it: this reference makes the build emit
      OFL.txt into dist/assets/. The property is never used, so never fetched. */
   --font-licence: url("./fonts/OFL.txt");
 
   font-family: var(--font-sans);
-  letter-spacing: 0.1px;
-  color: var(--fg);
-  background: var(--bg);
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #ffffff;
-    --bg-raised: #fafafa;
-    --bg-sunken: #f5f5f5;
-    --fg: #3d3d3d;
-    --fg-muted: #4b5563;
-    --fg-label: #5f6672;
-    --border: #d4d4d4;
-    --input-bg: #f3f4f6;
-    --input-ring: #737373;
-    --accent: #4250af;
-    --on-accent: #ffffff;
-    --ok: #07702a;
-    --todo: #0a4e8e;
-    --alarm: #b91c1c;
-    --on-alarm: #ffffff;
-    --warn: #805700;
-    --shadow: rgba(0, 0, 0, 0.1);
-  }
+  letter-spacing: var(--tracking-console);
+  color: var(--color-text);
+  background: var(--color-surface);
 }
 
 * {
@@ -93,8 +27,8 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--color-surface);
+  color: var(--color-text);
 }
 
 /* A form control never grows past its container (a select widens to its
@@ -107,7 +41,7 @@ label {
 }
 
 :focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }
 
@@ -122,16 +56,16 @@ label {
   font: inherit;
   font-size: 14px;
   font-weight: 500;
-  color: var(--accent);
-  background: var(--accent-tint);
-  border: 1px solid var(--accent);
+  color: var(--color-accent);
+  background: var(--color-accent-tint);
+  border: 1px solid var(--color-accent);
   border-radius: var(--radius-button);
   cursor: pointer;
 }
 
 :where(button[type="submit"]) {
-  color: var(--on-accent);
-  background: var(--accent);
+  color: var(--color-on-accent);
+  background: var(--color-accent);
 }
 
 :where(.record__actions button:not([type="submit"])) {
@@ -140,13 +74,13 @@ label {
 }
 
 :where(.record__actions button:not([type="submit"]):hover) {
-  background: var(--accent-tint);
+  background: var(--color-accent-tint);
 }
 
 :where(.confirm__confirm) {
-  color: var(--on-alarm);
-  background: var(--alarm);
-  border-color: var(--alarm);
+  color: var(--color-on-alarm);
+  background: var(--color-alarm);
+  border-color: var(--color-alarm);
 }
 
 :where(button:disabled) {
@@ -159,19 +93,19 @@ label {
   padding: 8px 12px;
   font: inherit;
   font-size: 14px;
-  color: var(--fg);
-  background: var(--input-bg);
+  color: var(--color-text);
+  background: var(--color-surface-input);
   border: 0;
   border-radius: var(--radius-input);
-  box-shadow: inset 0 0 0 1px var(--input-ring);
+  box-shadow: inset 0 0 0 1px var(--color-line-input);
 }
 
 :where(input:not([type="checkbox"], [type="radio"], [type="range"]), select, textarea):focus {
-  box-shadow: inset 0 0 0 1px var(--accent);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
 :where(input[type="checkbox"], input[type="radio"]) {
-  accent-color: var(--accent);
+  accent-color: var(--color-accent);
 }
 
 /* The labels of text fields. */
@@ -181,7 +115,7 @@ label {
 .plan__new-frame-field,
 .calib__control,
 .confirm__typed {
-  color: var(--fg-label);
+  color: var(--color-label);
   font-weight: 500;
 }
 
@@ -192,10 +126,10 @@ label {
 .roster__group,
 .showrunner__region,
 .confirm {
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
-  box-shadow: 0 1px 3px var(--shadow);
+  box-shadow: 0 1px 3px var(--color-shadow);
 }
 
 /* Layout (pass 2 §6). Narrow screens: one column, the Inspector after the plan
@@ -240,7 +174,7 @@ label {
 }
 
 .console__body {
-  color: var(--fg-muted);
+  color: var(--color-muted);
   line-height: 1.5;
 }
 
@@ -251,7 +185,7 @@ label {
   flex-direction: column;
   gap: 4px;
   font-size: 13px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .console__statusbar {
@@ -260,7 +194,7 @@ label {
   align-items: center;
   gap: 10px;
   font-size: 13px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   margin-bottom: 16px;
 }
 
@@ -292,7 +226,7 @@ label {
   gap: 12px;
   height: 100%;
   padding: 0 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: 6px;
   font-size: 13px;
   overflow: hidden;
@@ -315,10 +249,10 @@ label {
   right: 0;
   z-index: 10;
   padding: 8px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
   border-radius: 6px;
-  box-shadow: 0 8px 24px var(--shadow);
+  box-shadow: 0 8px 24px var(--color-shadow);
 }
 
 .attention__list,
@@ -332,14 +266,14 @@ label {
   display: inline-block;
   margin: 6px 6px 0;
   font-size: 13px;
-  color: var(--accent);
+  color: var(--color-accent);
 }
 
 /* The Needs attention page: the same list, full width, one row per entry. */
 .attention-page__list .attention__item {
   padding: 10px 12px;
   font-size: 14px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-line);
 }
 
 .attention-page__link {
@@ -370,7 +304,7 @@ label {
 .attention__more {
   padding: 4px 6px;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .console__guidance {
@@ -431,7 +365,7 @@ label {
 .plan__svg {
   width: 100%;
   height: auto;
-  background: var(--bg-sunken);
+  background: var(--color-surface-sunken);
   border-radius: 4px;
   touch-action: none;
 }
@@ -441,14 +375,14 @@ label {
 }
 
 .plan__empty-hint {
-  fill: var(--fg-subtle);
+  fill: var(--color-muted);
   font-size: 19px;
   pointer-events: none;
 }
 
 .plan__draft {
-  fill: color-mix(in srgb, var(--accent-soft) 15%, transparent);
-  stroke: var(--accent-soft);
+  fill: color-mix(in srgb, var(--color-accent) 15%, transparent);
+  stroke: var(--color-accent);
   stroke-width: 2;
   stroke-dasharray: 6 4;
   pointer-events: none;
@@ -457,7 +391,7 @@ label {
 .plan__new-frame {
   margin-top: 12px;
   padding: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: 6px;
   display: flex;
   flex-wrap: wrap;
@@ -488,23 +422,23 @@ label {
 
 .plan__new-frame-error {
   flex-basis: 100%;
-  color: var(--alarm);
+  color: var(--color-alarm);
   margin: 0;
 }
 
 .plan__rect {
-  fill: color-mix(in srgb, var(--accent) 25%, transparent);
-  stroke: var(--accent-soft);
+  fill: color-mix(in srgb, var(--color-accent) 25%, transparent);
+  stroke: var(--color-accent);
   stroke-width: 2;
 }
 
 .plan__rect--selected {
-  fill: color-mix(in srgb, var(--accent) 50%, transparent);
-  stroke: var(--accent-soft);
+  fill: color-mix(in srgb, var(--color-accent) 50%, transparent);
+  stroke: var(--color-accent);
 }
 
 .plan__label {
-  fill: var(--fg);
+  fill: var(--color-text);
   font-size: 14px;
   pointer-events: none;
 }
@@ -514,38 +448,38 @@ label {
 }
 
 .plan__dot {
-  stroke: var(--bg-sunken);
+  stroke: var(--color-surface-sunken);
   stroke-width: 1;
 }
 
 .plan__chip {
-  fill: var(--fg);
+  fill: var(--color-text);
   font-size: 11px;
 }
 
 .plan__chip--idle {
-  fill: var(--fg-subtle);
+  fill: var(--color-muted);
 }
 
 .plan__phase {
-  fill: var(--fg-muted);
+  fill: var(--color-muted);
   font-size: 10px;
 }
 
 /* Health severity (health.js): one modifier per severity, shared by every
    surface. Only an alarm uses the alarm colour; a to-do is not an alarm. */
 .health--ok {
-  --status: var(--ok);
+  --status: var(--color-ok);
 }
 
 .health--todo,
 .health--notice,
 .health--unknown {
-  --status: var(--todo);
+  --status: var(--color-todo);
 }
 
 .health--alarm {
-  --status: var(--alarm);
+  --status: var(--color-alarm);
 }
 
 .health--ok,
@@ -566,9 +500,9 @@ label {
 .showrunner__badge,
 .run-control__frame,
 .card__chip {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--status, var(--border)) 12%, var(--bg-raised));
-  border: 1px solid var(--status, var(--border));
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--status, var(--color-line)) 12%, var(--color-surface-raised));
+  border: 1px solid var(--status, var(--color-line));
   border-radius: var(--radius-pill);
 }
 
@@ -632,9 +566,9 @@ label {
 
 .tray__item {
   padding: 6px 12px;
-  background: var(--bg-raised);
-  color: var(--fg);
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border: 1px solid var(--color-line);
   border-radius: 4px;
   cursor: pointer;
 }
@@ -653,14 +587,14 @@ label {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-line);
   padding: 8px 8px 0;
 }
 
 .inspector__tab {
   padding: 8px 14px;
   background: transparent;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   border: 1px solid transparent;
   border-bottom: 0;
   border-radius: 4px 4px 0 0;
@@ -668,20 +602,20 @@ label {
 }
 
 .inspector__tab--active {
-  background: var(--bg-raised);
-  color: var(--fg);
-  border-color: var(--border);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border-color: var(--color-line);
 }
 
 .inspector__body {
   padding: 16px;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 .inspector__empty {
   margin: 0;
   padding: 16px;
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 .facet__title {
@@ -692,7 +626,7 @@ label {
 .facet__subtitle {
   font-size: 13px;
   margin: 16px 0 6px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .facet__fields {
@@ -707,25 +641,25 @@ label {
 }
 
 .facet__field dt {
-  color: var(--fg-muted);
+  color: var(--color-muted);
   min-width: 72px;
 }
 
 .facet__field dd {
   margin: 0;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 .facet__empty {
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 .facet__content-path {
   margin-top: 16px;
   padding: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
-  background: var(--bg-raised);
+  background: var(--color-surface-raised);
 }
 
 .facet__content-path .facet__subtitle {
@@ -743,14 +677,14 @@ label {
 .facet__content-path .record__actions a {
   display: inline-block;
   padding: 8px 12px;
-  color: var(--accent);
-  border: 1px solid var(--accent);
+  color: var(--color-accent);
+  border: 1px solid var(--color-accent);
   border-radius: var(--radius-button);
   text-decoration: none;
 }
 
 .facet__content-path .record__actions a:hover {
-  background: var(--accent-tint);
+  background: var(--color-accent-tint);
 }
 
 .facet__why {
@@ -760,44 +694,44 @@ label {
 
 .facet__note {
   margin: 0 0 8px;
-  color: var(--fg-subtle);
+  color: var(--color-muted);
   font-size: 0.85em;
 }
 
 .facet__error {
   margin: 8px 0 0;
-  color: var(--alarm);
+  color: var(--color-alarm);
   font-weight: 600;
 }
 
 .facet__draft-status {
   margin: 6px 0 0;
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 .calib__svg {
   touch-action: none;
   display: block;
-  background: var(--bg-sunken);
+  background: var(--color-surface-sunken);
   border-radius: 6px;
 }
 
 .calib__frame {
-  fill: var(--bg-raised);
-  stroke: var(--border);
+  fill: var(--color-surface-raised);
+  stroke: var(--color-line);
   stroke-width: 1;
 }
 
 .calib__crop {
-  fill: color-mix(in srgb, var(--accent-soft) 12%, transparent);
-  stroke: var(--accent-soft);
+  fill: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  stroke: var(--color-accent);
   stroke-width: 1;
   stroke-dasharray: 4 3;
 }
 
 .calib__quad {
-  fill: color-mix(in srgb, var(--ok) 10%, transparent);
-  stroke: var(--ok);
+  fill: color-mix(in srgb, var(--color-ok) 10%, transparent);
+  stroke: var(--color-ok);
   stroke-width: 1.5;
 }
 
@@ -806,11 +740,11 @@ label {
 }
 
 .calib__handle--corner {
-  fill: var(--ok);
+  fill: var(--color-ok);
 }
 
 .calib__handle--crop {
-  fill: var(--accent-soft);
+  fill: var(--color-accent);
 }
 
 .calib__controls {
@@ -825,7 +759,7 @@ label {
   flex-direction: column;
   gap: 2px;
   font-size: 0.8em;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .calib__control input,
@@ -842,23 +776,23 @@ label {
 
 .calib__countdown {
   margin: 8px 0 0;
-  color: var(--ok);
+  color: var(--color-ok);
   font-weight: 600;
 }
 
 .calib__lease-banner {
   margin: 8px 0 0;
-  color: var(--warn);
+  color: var(--color-notice);
   font-weight: 600;
 }
 
 .console__auth-error {
   margin: 0 0 16px;
   padding: 12px 16px;
-  border: 1px solid var(--alarm);
+  border: 1px solid var(--color-alarm);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--alarm) 15%, transparent);
-  color: var(--fg);
+  background: color-mix(in srgb, var(--color-alarm) 15%, transparent);
+  color: var(--color-text);
 }
 
 /* Players list and Player page (console DDD §9): one card per box, and on a box's
@@ -878,7 +812,7 @@ label {
 .roster__note {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .roster__group {
@@ -895,7 +829,7 @@ label {
   padding: 0;
   background: none;
   border: none;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   font: inherit;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -915,7 +849,7 @@ label {
 .roster__card {
   min-width: 0;
   padding: 8px 0 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-line);
 }
 
 .roster__player {
@@ -926,7 +860,7 @@ label {
 .roster__boot {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .roster__boot:empty {
@@ -943,7 +877,7 @@ label {
 
 .roster__output--no-display .roster__output-label,
 .roster__output--retired .roster__output-label {
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 .roster__bind {
@@ -967,18 +901,18 @@ label {
 .roster__notice {
   flex-basis: 100%;
   margin: 0;
-  color: var(--ok);
+  color: var(--color-ok);
 }
 
 .roster__action {
   margin-top: 8px;
-  color: var(--warn);
-  border-color: var(--warn);
+  color: var(--color-notice);
+  border-color: var(--color-notice);
 }
 
 .roster__empty {
   margin: 0;
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 /* The Players table (console DDD §61): one rendering, worst first. At phone width
@@ -999,13 +933,13 @@ label {
   padding: 8px 12px 8px 0;
   text-align: left;
   vertical-align: top;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-line);
 }
 
 .players__table thead th {
   font-size: 12px;
   font-weight: 600;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   white-space: nowrap;
 }
 
@@ -1018,23 +952,23 @@ label {
 }
 
 .players__row--alarm > th {
-  box-shadow: inset 3px 0 var(--alarm);
+  box-shadow: inset 3px 0 var(--color-alarm);
   padding-left: 8px;
 }
 
 .players__row--notice > th {
-  box-shadow: inset 3px 0 var(--warn);
+  box-shadow: inset 3px 0 var(--color-notice);
   padding-left: 8px;
 }
 
 .players__item--alarm,
 .players__item--notice {
   padding-left: 6px;
-  border-left: 2px solid var(--alarm);
+  border-left: 2px solid var(--color-alarm);
 }
 
 .players__item--notice {
-  border-left-color: var(--warn);
+  border-left-color: var(--color-notice);
 }
 
 .players__frames {
@@ -1047,7 +981,7 @@ label {
 .players__chip {
   padding: 1px 8px;
   white-space: nowrap;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-pill);
 }
 
@@ -1062,7 +996,7 @@ label {
 .roster__alert {
   flex-basis: 100%;
   margin: 0;
-  color: var(--alarm);
+  color: var(--color-alarm);
   font-weight: 600;
 }
 
@@ -1082,20 +1016,20 @@ label {
 .facet__review {
   margin: 12px 0;
   padding: 12px 16px;
-  border: 1px solid var(--warn);
+  border: 1px solid var(--color-notice);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--warn) 15%, transparent);
+  background: color-mix(in srgb, var(--color-notice) 15%, transparent);
 }
 
 .facet__review-text {
   margin: 0 0 8px;
-  color: var(--warn);
+  color: var(--color-notice);
   font-weight: 600;
 }
 
 .facet__conflict {
   margin: 12px 0 0;
-  color: var(--alarm);
+  color: var(--color-alarm);
   font-weight: 600;
 }
 
@@ -1147,7 +1081,7 @@ label {
 }
 
 .record dt {
-  color: var(--fg-muted);
+  color: var(--color-muted);
   font-size: 12px;
 }
 
@@ -1167,14 +1101,14 @@ label {
 .showrunner__region fieldset {
   min-width: 0;
   margin: 8px 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: 6px;
 }
 
 .showrunner__region-title {
   margin: 0;
   font-size: 16px;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 /* The output chooser (slice 2 §6): one radio per free Output, liveness beneath. */
@@ -1187,7 +1121,7 @@ label {
 
 .chooser__title {
   margin: 0;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .chooser__label {
@@ -1202,12 +1136,12 @@ label {
   display: block;
   padding-left: 22px;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .chooser__empty {
   margin: 0;
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 .chooser__status:empty,
@@ -1223,7 +1157,7 @@ label {
   width: min(32rem, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
   padding: 16px 20px;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 .confirm::backdrop {
@@ -1252,7 +1186,7 @@ label {
 
 .confirm__alert {
   margin: 12px 0 0;
-  color: var(--alarm);
+  color: var(--color-alarm);
   font-weight: 600;
 }
 
@@ -1270,14 +1204,14 @@ label {
 
 .confirm__progress {
   margin: 8px 0 0;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 /* Boot facts (slice 2 §5): serial and netboot outcome beside a Player. */
 .chooser__note {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   overflow-wrap: anywhere;
 }
 
@@ -1285,7 +1219,7 @@ label {
 .plan__new-frame-hint {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   overflow-wrap: anywhere;
 }
 
@@ -1313,11 +1247,11 @@ label {
 }
 
 .field__hint {
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .field__reason {
-  color: var(--warn);
+  color: var(--color-notice);
   font-weight: 600;
 }
 
@@ -1329,14 +1263,14 @@ label {
 .problems {
   margin: 8px 0;
   padding: 8px 12px;
-  border: 1px solid var(--warn);
+  border: 1px solid var(--color-notice);
   border-radius: 8px;
   overflow-wrap: anywhere;
 }
 
 .problems__title {
   margin: 0 0 4px;
-  color: var(--warn);
+  color: var(--color-notice);
   font-weight: 600;
 }
 
@@ -1356,7 +1290,7 @@ label {
 .target-picker__surface-name {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -1398,7 +1332,7 @@ label {
 .run-control__note,
 .program-scheduling__program-hint,
 .precedence__limit {
-  color: var(--fg-muted);
+  color: var(--color-muted);
   font-size: 12px;
 }
 
@@ -1429,7 +1363,7 @@ label {
 }
 
 .program-scheduling__zone {
-  color: var(--fg-label);
+  color: var(--color-label);
   font-weight: 500;
 }
 
@@ -1441,7 +1375,7 @@ label {
 
 .program-scheduling__multi-note {
   margin: 0 0 8px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .program-scheduling__weekdays {
@@ -1538,7 +1472,7 @@ label {
 .flow__draft-note {
   flex-basis: 100%;
   margin: 0;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .scene-flow__editing {
@@ -1556,7 +1490,7 @@ label {
 }
 
 .scene-flow__chosen-label {
-  color: var(--fg-label);
+  color: var(--color-label);
   font-weight: 500;
 }
 
@@ -1569,8 +1503,8 @@ label {
   align-items: flex-start;
   margin: 0;
   padding: 12px 16px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--border);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-input);
   overflow-wrap: anywhere;
 }
@@ -1580,13 +1514,13 @@ label {
 }
 
 .notice--warn {
-  border-color: var(--warn);
+  border-color: var(--color-notice);
 }
 
 /* The flow kit (flow design §6): step form, stepper, Advanced, summary card. */
 :where(.button--primary) {
-  color: var(--on-accent);
-  background: var(--accent);
+  color: var(--color-on-accent);
+  background: var(--color-accent);
 }
 
 .flow__form {
@@ -1621,7 +1555,7 @@ label {
   gap: 8px;
   justify-content: flex-end;
   padding: 12px 0 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-line);
 }
 
 .flow__back {
@@ -1649,24 +1583,24 @@ label {
 }
 
 .stepper__link {
-  color: var(--fg);
+  color: var(--color-text);
   background: transparent;
   border: 1px solid transparent;
 }
 
 .stepper__link:hover {
-  background: var(--accent-tint);
+  background: var(--color-accent-tint);
 }
 
 .stepper__text {
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 .stepper__item--current .stepper__text {
-  color: var(--accent);
+  color: var(--color-accent);
   font-weight: 600;
-  background: var(--accent-tint);
-  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--color-accent-tint);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
 }
 
 .stepper__mark {
@@ -1685,16 +1619,16 @@ label {
 }
 
 .stepper__item--done .stepper__mark {
-  color: var(--on-accent);
-  background: var(--accent);
-  border-color: var(--accent);
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .stepper__compact {
   display: none;
   margin: 0;
   font-weight: 600;
-  color: var(--fg-label);
+  color: var(--color-label);
 }
 
 .advanced {
@@ -1713,13 +1647,13 @@ label {
   gap: 4px;
   align-items: center;
   padding: 6px 12px 6px 6px;
-  color: var(--accent);
+  color: var(--color-accent);
   background: transparent;
   border-color: transparent;
 }
 
 .advanced__toggle:hover {
-  background: var(--accent-tint);
+  background: var(--color-accent-tint);
 }
 
 .advanced__toggle .icon {
@@ -1734,14 +1668,14 @@ label {
 
 .advanced__summary {
   font-size: 13px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   overflow-wrap: anywhere;
 }
 
 .advanced__panel {
   margin: 4px 0 0;
   padding: 4px 0 0 16px;
-  border-left: 2px solid var(--border);
+  border-left: 2px solid var(--color-line);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1756,10 +1690,10 @@ label {
   gap: 12px;
   min-width: 0;
   padding: 16px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
-  box-shadow: 0 1px 3px var(--shadow);
+  box-shadow: 0 1px 3px var(--color-shadow);
   overflow-wrap: anywhere;
 }
 
@@ -1803,12 +1737,12 @@ label {
 .review__change {
   margin: 0;
   padding: 10px 12px 10px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-line);
   overflow-wrap: anywhere;
 }
 
 .review__key {
-  color: var(--fg-label);
+  color: var(--color-label);
   font-weight: 500;
 }
 
@@ -1824,11 +1758,11 @@ label {
 }
 
 .review__change-button:hover {
-  background: var(--accent-tint);
+  background: var(--color-accent-tint);
 }
 
 .review__missing {
-  color: var(--warn);
+  color: var(--color-notice);
   font-weight: 600;
 }
 
@@ -1847,7 +1781,7 @@ label {
 
 .choices__legend {
   padding: 0 4px;
-  color: var(--fg-label);
+  color: var(--color-label);
   font-weight: 500;
 }
 
@@ -1865,7 +1799,7 @@ label {
 .problems__link {
   padding: 0;
   font: inherit;
-  color: var(--fg);
+  color: var(--color-text);
   text-align: left;
   text-decoration: underline;
   background: transparent;
@@ -1878,9 +1812,9 @@ label {
   padding: 1px 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--fg);
-  background: color-mix(in srgb, var(--warn) 12%, var(--bg-raised));
-  border: 1px solid var(--warn);
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-notice) 12%, var(--color-surface-raised));
+  border: 1px solid var(--color-notice);
   border-radius: var(--radius-pill);
 }
 
@@ -1900,8 +1834,8 @@ label {
     z-index: 1;
     margin: 0 -16px;
     padding: 12px 16px;
-    background: var(--bg-raised);
-    box-shadow: 0 -2px 8px var(--shadow);
+    background: var(--color-surface-raised);
+    box-shadow: 0 -2px 8px var(--color-shadow);
   }
 
   .review {
@@ -1928,7 +1862,7 @@ label {
 .media-pipeline__source {
   min-width: 0;
   padding: 8px 0 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-line);
 }
 
 .why-chain__title {
@@ -1947,11 +1881,11 @@ label {
 }
 
 .why-chain__step--skip {
-  color: var(--fg-subtle);
+  color: var(--color-muted);
 }
 
 .why-chain__step[aria-current="step"] {
-  color: var(--warn);
+  color: var(--color-notice);
 }
 
 .why-chain__step-title {
@@ -1998,8 +1932,8 @@ label {
 
 .shell__header {
   padding: 0 24px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-line);
 }
 
 .shell__bar {
@@ -2015,7 +1949,7 @@ label {
 .drawer__close {
   display: inline-flex;
   padding: 8px;
-  color: var(--fg);
+  color: var(--color-text);
   background: transparent;
   border-color: transparent;
   border-radius: var(--radius-pill);
@@ -2023,7 +1957,7 @@ label {
 
 .shell__menu:hover,
 .drawer__close:hover {
-  background: var(--bg-sunken);
+  background: var(--color-surface-sunken);
 }
 
 .shell__menu {
@@ -2033,7 +1967,7 @@ label {
 .shell__wordmark {
   font-size: 20px;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 .shell__status {
@@ -2096,7 +2030,7 @@ label {
   margin: 0;
   padding: 0 0 12px;
   list-style: none;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--color-line);
 }
 
 .nav__group:last-child {
@@ -2109,28 +2043,28 @@ label {
   padding: 12px 20px 12px 17px;
   font-size: 14px;
   font-weight: 500;
-  color: var(--fg);
+  color: var(--color-text);
   text-decoration: none;
   border-left: 3px solid transparent;
   border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
 }
 
 .nav__link:hover {
-  background: var(--bg-sunken);
+  background: var(--color-surface-sunken);
 }
 
 .nav__link[aria-current="page"] {
   font-weight: 600;
-  color: var(--accent);
-  background: var(--accent-tint);
-  border-left-color: var(--accent);
+  color: var(--color-accent);
+  background: var(--color-accent-tint);
+  border-left-color: var(--color-accent);
 }
 
 .page__title {
   margin: 0 0 20px;
   font-size: 24px;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 .page__content {
@@ -2143,7 +2077,7 @@ label {
 .page__loading,
 .page__empty {
   margin: 0;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 /* A region whose title repeats its page's heading keeps it for assistive
@@ -2173,11 +2107,11 @@ label {
   max-height: none;
   margin: 0;
   padding: 0 16px 16px 0;
-  color: var(--fg);
-  background: var(--bg);
+  color: var(--color-text);
+  background: var(--color-surface);
   border: 0;
   border-radius: 0 var(--radius-card) var(--radius-card) 0;
-  box-shadow: 0 8px 24px var(--shadow);
+  box-shadow: 0 8px 24px var(--color-shadow);
 }
 
 .drawer[open] {
@@ -2256,8 +2190,8 @@ label {
   margin: 0;
   padding: 0;
   overflow: auto;
-  color: var(--fg);
-  background: var(--bg);
+  color: var(--color-text);
+  background: var(--color-surface);
   border: 0;
 }
 
@@ -2278,22 +2212,22 @@ label {
   gap: 16px;
   width: min(100%, 24rem);
   padding: 24px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
-  box-shadow: 0 1px 3px var(--shadow);
+  box-shadow: 0 1px 3px var(--color-shadow);
 }
 
 .signin__title {
   margin: 0;
   font-size: 22px;
   font-weight: 600;
-  color: var(--fg);
+  color: var(--color-text);
 }
 
 .signin__kept {
   margin: 0;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 
 /* The Sources section (console DDD §37): Source cards, then the Source flow, Library →
@@ -2328,9 +2262,9 @@ label {
   list-style: none;
   max-height: 16rem;
   overflow-y: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
-  background: var(--bg-raised);
+  background: var(--color-surface-raised);
 }
 
 .tag-picker__option {
@@ -2340,8 +2274,8 @@ label {
 
 .tag-picker__option--active,
 .tag-picker__option:hover {
-  background: var(--bg);
-  outline: 2px solid var(--accent, currentColor);
+  background: var(--color-surface);
+  outline: 2px solid var(--color-accent, currentColor);
   outline-offset: -2px;
 }
 
@@ -2363,7 +2297,7 @@ label {
   align-items: center;
   gap: 4px;
   padding: 2px 4px 2px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: 999px;
 }
 
@@ -2390,8 +2324,8 @@ label {
   height: 96px;
   object-fit: cover;
   border-radius: 4px;
-  background: var(--bg);
-  color: var(--fg-muted);
+  background: var(--color-surface);
+  color: var(--color-muted);
   font-size: 0.75em;
   text-align: center;
 }
@@ -2401,9 +2335,9 @@ label {
   gap: 8px;
   margin-top: 12px;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
-  background: var(--bg-raised);
+  background: var(--color-surface-raised);
 }
 
 .source-preview h3,
@@ -2412,7 +2346,7 @@ label {
 }
 
 .source-preview__note {
-  color: var(--fg-muted);
+  color: var(--color-muted);
   font-size: 0.9em;
 }
 
@@ -2482,7 +2416,7 @@ label {
 .why-frames__item {
   min-width: 0;
   padding: 8px 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--color-line);
 }
 
 .why-frames__head {
@@ -2502,7 +2436,7 @@ label {
 .why-frames__panel {
   margin: 4px 0 0;
   padding: 0 0 0 16px;
-  border-left: 2px solid var(--border);
+  border-left: 2px solid var(--color-line);
 }
 
 /* Node control off (Part E §25): the one banner above every page; and a Player's
@@ -2510,14 +2444,14 @@ label {
 .node-banner {
   margin: 0 0 16px;
   padding: 12px 16px;
-  border: 1px solid var(--warn);
+  border: 1px solid var(--color-notice);
   border-left-width: 4px;
   border-radius: 6px;
 }
 .node-banner p { margin: 0; }
 .player__warning {
   padding-left: 12px;
-  border-left: 4px solid var(--warn);
+  border-left: 4px solid var(--color-notice);
 }
 
 /* The Player page (console DDD §9): one section per aggregate part, each with its own
@@ -2540,26 +2474,26 @@ label {
 .player__section {
   min-width: 0;
   padding: 12px 16px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
   border-radius: var(--radius-card);
 }
 .player__section-title {
   margin: 0 0 8px;
   font-size: 0.9rem;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 .player__section-failed {
   margin: 0;
-  color: var(--alarm);
+  color: var(--color-alarm);
   font-weight: 600;
 }
 .player__read-time {
   margin: 0 0 6px;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 .player__layers {
   margin: 8px 0;
@@ -2575,7 +2509,7 @@ label {
 }
 .player__details {
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
   overflow-wrap: anywhere;
 }
 .player__reboot {
@@ -2589,7 +2523,7 @@ label {
   display: grid;
   gap: 4px;
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 .player__commands {
   margin: 8px 0;
@@ -2613,8 +2547,8 @@ label {
   overflow-wrap: anywhere;
 }
 .fact__label {
-  color: var(--fg-muted);
+  color: var(--color-muted);
 }
 .fact--unknown {
-  color: var(--fg-subtle);
+  color: var(--color-truth-unknown);
 }
