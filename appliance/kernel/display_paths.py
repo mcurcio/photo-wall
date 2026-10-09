@@ -1,6 +1,7 @@
 """The display stack's paths: one home for what the base units, the controller and the app
-broker share. tests/node/display/test_node_display_runner.py pins them to the units and the
-base's tmpfiles.d; docs/display-host-backend.md#units-and-weston-incarnations explains them."""
+broker share. They live in the kernel, like probe timing, because App lifecycle may not import
+Display. tests/node/display/test_node_display_runner.py pins them to the units and the base's
+tmpfiles.d; docs/display-host-backend.md#units-and-weston-incarnations explains them."""
 
 from __future__ import annotations
 

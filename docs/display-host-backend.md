@@ -107,17 +107,24 @@ systemd's, not a poll or a retry in either process:
   outlives every incarnation, so an app in group `pw-display` binds the directory,
   never a socket file a restart replaces, and never sees `control.sock` or
   `ingress.sock`. Weston's umask under `PAMName=login` is 0002, so the socket is
-  group-writable. [`appliance/display_host/paths.py`](../appliance/display_host/paths.py)
+  group-writable. [`appliance/kernel/display_paths.py`](../appliance/kernel/display_paths.py)
   is the one home of these paths; a unit test pins them to the packaged units and
   tmpfiles.d.
 
 Any other consumer of `/run/photo-wall-display` must follow the same rule: start
 after the display unit is ready, and end with the Weston incarnation it connected
-to. The app broker's `After=` now orders it on READY=1. The Player's transient unit
-must bind `WAYLAND_DIRECTORY` read-only at the same path, set `WAYLAND_DISPLAY` to
-`WAYLAND_SOCKET`, and carry `BindsTo=` and `After=` the display unit. The broker
-must also relaunch the Player once for each new Weston incarnation. Until both
-land, a Weston restart leaves the Player exited.
+to. The app broker's `After=` orders it on READY=1. The Player's transient unit
+binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
+`WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
+([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
+READY=1 and it stops with that Weston. Each launch records the display's
+`InvocationID`; when the broker finds the Player absent while a newer incarnation
+runs, it starts the same environment again, once for that incarnation
+([`AppEffectBroker.reconcile`](../appliance/apps/broker.py)). The node-pid1 success
+scenario crashes Weston under a linked Player and requires a new Player to link.
+This covers the cold-started Player; after an online switch the switch's own
+record governs, and a Weston restart still leaves that Player exited until the
+next boot.
 
 The node-pid1 scenarios start the controller alone, so Weston comes up only
 through the units' own dependencies. Every scenario then checks that `control.sock`

@@ -16,32 +16,33 @@ from appliance.apps.lifecycle_storage import primitive, running_from
 from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.capacity import ROOT_IMAGES, line
+from appliance.kernel.display_paths import DISPLAY_UNIT, WAYLAND_DIRECTORY, WAYLAND_SOCKET
 from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
 
 UNIT = "photo-wall-node-player.service"
-PW_DISPLAY_GID = 10005  # the compositor's group: the Player connects to its Wayland socket
-# Weston's client socket (photo-wall-display.service: XDG_RUNTIME_DIR + --socket), pinned by a
-# test against the unit. Bound as the socket file: its directory is the display unit's 0700
-# RuntimeDirectory, which also holds the shell's control and ingress sockets.
-DISPLAY_SOCKET = "/run/photo-wall-display/wayland-0"
+# pw-display's fixed id (the base's sysusers.d, scripts/build_node_base_deb.py): the Player joins
+# it to traverse WAYLAND_DIRECTORY (0750) and connect to the socket.
+PW_DISPLAY_GID = 10005
+APP_PROPERTIES = ("LoadState", "ActiveState", "SubState", "MainPID", "InvocationID", "ControlGroup",
+                  "RootDirectory")
+DISPLAY_PROPERTIES = ("ActiveState", "InvocationID")
 
 
-def systemctl_show(unit: str) -> dict[str, str]:
-    result = subprocess.run(["/usr/bin/systemctl", "show", unit,
-                             "--property=LoadState,ActiveState,SubState,MainPID,InvocationID,ControlGroup,RootDirectory"],
+def systemctl_show(unit: str, properties: tuple[str, ...] = APP_PROPERTIES) -> dict[str, str]:
+    result = subprocess.run(["/usr/bin/systemctl", "show", unit, "--property=" + ",".join(properties)],
                             capture_output=True, text=True, timeout=5, check=True,
                             env={"PATH": "/usr/bin", "LANG": "C"})
     if len(result.stdout) > 16384:
         raise ValueError("process_observation_bound")
     rows = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    if set(rows) != {"LoadState", "ActiveState", "SubState", "MainPID", "InvocationID", "ControlGroup", "RootDirectory"}:
+    if set(rows) != set(properties):
         raise ValueError("process_observation_invalid")
     if rows["InvocationID"]:
         rows["InvocationID"] = str(UUID(rows["InvocationID"]))
-    elif rows["MainPID"] != "0":
+    elif rows.get("MainPID", "0") != "0":
         raise ValueError("process_invocation_missing")
     return rows
 
@@ -72,6 +73,13 @@ def process_root_matches(proc: Path, pid: int, root: Path) -> bool:
 def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str, ...]:
     """Single production sandbox definition, also exercised by real PID1 probes.
 
+    The Player runs bound to one Weston incarnation (`BindsTo=` + `After=` the display unit):
+    its start waits for Weston's READY=1, and it stops when that Weston does; the broker starts
+    it again for the next incarnation (`AppEffectBroker.reconcile`). It reaches Weston through
+    WAYLAND_DIRECTORY, bound in whole at the same path (the directory outlives every Weston, so
+    the bind never holds a stale socket), with WAYLAND_DISPLAY the socket's absolute path; its
+    XDG_RUNTIME_DIR stays its own private tmpfs.
+
     Deny-by-default devices (`PrivateDevices=yes`): the only device nodes in the Player's `/dev`
     are `devices` (`player_device_grants`), each bound in read-only (a read-only mount never
     stops a device node opening read-write), allowed by the cgroup device policy and opened
@@ -82,6 +90,7 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
     if devices:
         grants += ("BindReadOnlyPaths=" + " ".join(device.path for device in devices),)
     return (
+        f"BindsTo={DISPLAY_UNIT}", f"After={DISPLAY_UNIT}",
         f"RootDirectory={root}", "User=10004", "Group=10004", f"SupplementaryGroups={groups}", "Slice=photowallapp.slice",
         "ProtectSystem=strict", "ProtectHome=yes", "PrivateDevices=yes", "PrivateTmp=yes",
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictSUIDSGID=yes",
@@ -89,11 +98,11 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         f"MemoryMax={line('app').cap_bytes}", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
         "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
-        f"BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client {DISPLAY_SOCKET}:/run/photo-wall-wayland/wayland-0 /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
+        f"BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client {WAYLAND_DIRECTORY} /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         *grants,
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",
         f"TimeoutStopSec={STOP_TIMEOUT_SECONDS}", "Delegate=no",
-        "Environment=HOME=/tmp XDG_RUNTIME_DIR=/run/photo-wall-wayland WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland PHOTO_WALL_DISPLAY_HOST=1 PYTHONNOUSERSITE=1 GST_REGISTRY=/tmp/gst-registry.bin",
+        f"Environment=HOME=/tmp XDG_RUNTIME_DIR=/run/photo-wall-wayland WAYLAND_DISPLAY={WAYLAND_SOCKET} GDK_BACKEND=wayland PHOTO_WALL_DISPLAY_HOST=1 PYTHONNOUSERSITE=1 GST_REGISTRY=/tmp/gst-registry.bin",
         "UnsetEnvironment=PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD GI_TYPELIB_PATH GST_PLUGIN_PATH GST_PLUGIN_PATH_1_0 GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0",
     )
 
@@ -116,6 +125,16 @@ class SystemdAppProcessDriver:
         # image digest proved its tree at staging, so no walk here.
         mounted_root(self.roots, environment, images=self.images, mounter=self.mounter, **self.abi)
         return True
+
+    def display_incarnation(self) -> str | None:
+        """The running Weston's InvocationID; None unless the display unit is active."""
+        rows = systemctl_show(DISPLAY_UNIT, DISPLAY_PROPERTIES)
+        return (rows["InvocationID"] or None) if rows["ActiveState"] == "active" else None
+
+    def launched_display(self) -> str | None:
+        """The Weston incarnation recorded when the current launch was spawned."""
+        launch = self.store.read("launch")
+        return None if launch is None else launch.get("display")
 
     def select(self, environment: AppEnvironmentRefV2) -> None:
         self.verify(environment)
@@ -307,8 +326,10 @@ class SystemdAppProcessDriver:
         previous = self.store.read("launch")
         self._await_unit_unloaded(previous)
         epoch = previous["epoch"] + 1 if previous else 1
+        # Read before the spawn: a Weston that restarts in between costs one spare relaunch,
+        # never a missed one.
         launch = {"environment": primitive(environment), "operation_id": str(operation_id),
-                  "epoch": epoch, "running": None}
+                  "epoch": epoch, "running": None, "display": self.display_incarnation()}
         self.store.write("launch", launch)
         root = self.roots / environment.environment_sha256 / "rootfs"
         # All paths visible to the process are inside RootDirectory except these exact

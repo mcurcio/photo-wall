@@ -151,6 +151,41 @@ def test_broker_retry_and_repeated_exit_reconciliation_are_idempotent():
     assert broker.reconcile().phase == "exited"
 
 
+def test_an_app_absent_under_a_new_display_incarnation_starts_again_once():
+    """The Player is bound to one Weston: it is started again once per new incarnation."""
+    driver, journal = RecordingAppDriver(), MemoryEffectJournal()
+    broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
+                             authorized_environment=env(), journal=journal, driver=driver)
+    broker.cold_start(ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env()))
+    driver.running, driver.display = None, None  # Weston stopped and took the Player with it
+    assert broker.reconcile().phase == "exited"
+    driver.display = "weston-2"
+    relaunched = broker.reconcile()
+    assert (relaunched.phase, relaunched.running) == ("running", driver.running)
+    assert relaunched.running.operation_id == UUID(int=3)
+    driver.running = None  # the relaunched app exits under the same Weston: no loop
+    assert broker.reconcile().phase == "exited" and broker.reconcile().phase == "exited"
+    assert driver.calls.count("start_simulated_process") == 2
+
+
+def test_a_failed_relaunch_is_unknown_and_never_retried():
+    class FailingDriver(RecordingAppDriver):
+        def start(self, environment, operation_id):
+            if self.calls.count("start_simulated_process"):
+                self.calls.append("start_simulated_process")
+                raise OSError("spawn failed")
+            return super().start(environment, operation_id)
+    driver, journal = FailingDriver(), MemoryEffectJournal()
+    broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
+                             authorized_environment=env(), journal=journal, driver=driver)
+    broker.cold_start(ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env()))
+    driver.running, driver.display = None, "weston-2"
+    assert broker.reconcile().fault == "relaunch_outcome_unknown"
+    driver.display = "weston-3"
+    assert broker.reconcile().phase == "effect_unknown"
+    assert driver.calls.count("start_simulated_process") == 2
+
+
 def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor():
     class LostDriver(RecordingAppDriver):
         def start(self, environment, operation_id):

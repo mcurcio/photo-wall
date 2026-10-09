@@ -20,9 +20,9 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
+from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME
 from appliance.kernel.unix_credentials import receive_credential_packet
 
-from .paths import DISPLAY_UNIT, RUNTIME
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel

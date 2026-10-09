@@ -276,9 +276,9 @@ def test_the_base_declares_the_display_feed_directory_and_group(tmp_path):
 
 
 def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare(tmp_path):
-    """appliance.display_host.paths is the one home the broker and the controller read; the
+    """appliance.kernel.display_paths is the one home the broker and the controller read; the
     packaged units and tmpfiles.d must say the same, so a unit edit cannot strand a reader."""
-    from appliance.display_host import paths
+    from appliance.kernel import display_paths as paths
     from scripts.build_node_base_deb import stage_tree
 
     root = tmp_path / "package"
