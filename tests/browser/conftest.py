@@ -31,7 +31,7 @@ CHECKS = {
     "test_connect_with_a_rejected_token_shows_not_accepted_and_returns_to_login": (
         "authentication_rejection", "authentication_success", "authentication_recovery",
     ),
-    "test_an_enrolled_player_appears_on_the_players_list": ("two_players_three_outputs",),
+    "test_an_enrolled_player_appears_on_the_hardware_list": ("two_players_three_outputs",),
     "test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output": (
         "equipment_replacement_retirement",
     ),
