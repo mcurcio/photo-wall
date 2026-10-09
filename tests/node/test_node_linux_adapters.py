@@ -18,7 +18,6 @@ from appliance.apps.environment import (
     canonical_bytes,
     capacity,
     inventory,
-    stage_archive,
     verify_root,
 )
 from appliance.host.host import HostCore, RebootRequest
@@ -29,6 +28,7 @@ from contracts.node_commands import reboot_digest
 from contracts.node_protocol import NodeProducerV2
 from scripts.build_app_environment import materialize
 from scripts.build_node_base_deb import stage_tree
+from scripts.sealed_archive import stage_archive
 
 # A fixed replacement identity: a parameter value must be the same in every collection (xdist
 # workers each collect, and must agree).
@@ -96,7 +96,7 @@ def test_reboot_unknown_effect_cannot_repeat_after_service_restart(tmp_path):
     recovered.close()
 
 
-def fixture_archive(directory: Path, extra=None):
+def fixture_archive(directory: Path, extra=None, *, deb_name: str = "player"):
     source = directory / "source"
     root = source / "rootfs"
     root.mkdir(parents=True)
@@ -108,7 +108,7 @@ def fixture_archive(directory: Path, extra=None):
     python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
     lock, snapshot = b'{"packages":[]}', b'{"snapshot":"fixture"}'
-    reference = AppEnvironmentRefV2("0" * 64, 1, "a" * 64, "player", "1.0", "amd64",
+    reference = AppEnvironmentRefV2("0" * 64, 1, "a" * 64, deb_name, "1.0", "amd64",
                                     hashlib.sha256(lock).hexdigest(), hashlib.sha256(snapshot).hexdigest(),
                                     "/entry", "base-v2", "graphics-v2", "plugins-v2")
     fields = asdict(reference)
@@ -219,18 +219,18 @@ def test_manager_no_fallback_exhausts_primary_once():
 
 
 def test_stream_mutation_after_path_stat_never_publishes(tmp_path, monkeypatch):
-    from appliance.apps import environment
+    from scripts import sealed_archive
     archive, reference = fixture_archive(tmp_path)
     roots = tmp_path / "roots"
     roots.mkdir()
-    original = environment.os.open
+    original = sealed_archive.os.open
     def mutate_before_open(path, *args, **kwargs):
         if path == archive:
             data = bytearray(archive.read_bytes())
             data[-1] = 1
             archive.write_bytes(data)
         return original(path, *args, **kwargs)
-    monkeypatch.setattr(environment.os, "open", mutate_before_open)
+    monkeypatch.setattr(sealed_archive.os, "open", mutate_before_open)
     with pytest.raises(ValueError, match="digest_mismatch"):
         stage_archive(archive, roots, reference, base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
     assert not list(roots.iterdir())
@@ -271,33 +271,31 @@ def test_inventory_rejects_real_xattrs_but_accepts_unsupported_fs(tmp_path, monk
 
 
 def test_diskless_budget_deduplicates_exact_roots_and_refuses_small_memory(tmp_path):
-    from appliance.kernel.capacity import GIB, OVERHEAD, admit_cold, cold_peak
+    from appliance.kernel.capacity import GIB, MIB, admit_cold, cold_peak
     _, reference = fixture_archive(tmp_path)
-    reference = replace(reference, size_bytes=GIB)
-    assert cold_peak([reference, reference]) == 2 * GIB + OVERHEAD
-    assert admit_cold([reference, reference], total=8 * GIB, available=7 * GIB, free=4 * GIB) == 2 * GIB + OVERHEAD
-    # A 4 GB board is a class of its own (store 2560 MiB); below it, the class refuses.
-    assert admit_cold([reference], total=4 * GIB, available=3 * GIB, free=4 * GIB) == 2 * GIB + OVERHEAD
+    reference = replace(reference, size_bytes=300 * MIB)
+    # Each distinct image is held once: no unpack beside it, no second copy.
+    assert cold_peak([reference, reference, None]) == 300 * MIB
+    assert admit_cold([reference, reference], total=8 * GIB, available=7 * GIB, free=4 * GIB) == 300 * MIB
+    # A 4 GB board is a class of its own (store 768 MiB); below it, the class refuses.
+    assert admit_cold([reference], total=4 * GIB, available=3 * GIB, free=4 * GIB) == 300 * MIB
     with pytest.raises(ValueError, match="node_memory_class"):
         admit_cold([reference], total=3 * GIB, available=3 * GIB, free=4 * GIB)
     with pytest.raises(ValueError, match="capacity"):
-        admit_cold([reference], total=8 * GIB, available=7 * GIB, free=2 * GIB)
+        admit_cold([reference], total=8 * GIB, available=7 * GIB, free=200 * MIB)
 
 
 def test_online_capacity_counts_only_incremental_available_memory():
-    from appliance.kernel.capacity import GIB, OVERHEAD, admit_preparation
-    size = 984207360
-    # Approximate actual 8GiB class: old root + manager roots consume storage;
-    # app/kernel resident memory already reduces MemAvailable independently.
-    used = 960908679 + 300 * 1024**2
-    assert admit_preparation(size, total=8 * GIB, available=3 * GIB,
-        free=4 * GIB-used, used=used) == size * 2 + OVERHEAD
+    from appliance.kernel.capacity import GIB, MIB, admit_preparation
+    size = 288 * MIB
+    # Cold app and manager images already on the store; the app's resident pages reduce
+    # MemAvailable independently, so only the target's image is incremental.
+    used = 350 * MIB
+    assert admit_preparation(size, total=8 * GIB, available=GIB, free=4 * GIB - used, used=used) == size
     with pytest.raises(ValueError, match="capacity"):
-        admit_preparation(size, total=8 * GIB, available=2 * GIB,
-            free=4 * GIB-used, used=used)
+        admit_preparation(size, total=8 * GIB, available=700 * MIB, free=4 * GIB - used, used=used)
     with pytest.raises(ValueError, match="capacity"):
-        admit_preparation(size, total=8 * GIB, available=6 * GIB,
-            free=4 * GIB, used=3 * GIB)
+        admit_preparation(size, total=8 * GIB, available=6 * GIB, free=4 * GIB, used=638 * MIB)
 
 
 def test_systemd_adapter_normalizes_real_invocation_and_refuses_malformed(monkeypatch):

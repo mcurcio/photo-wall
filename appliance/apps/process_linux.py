@@ -9,11 +9,12 @@ from pathlib import Path
 from uuid import UUID
 
 from appliance.apps.broker import RunningApp
-from appliance.apps.environment import verify_root
+from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
 from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
 from appliance.kernel.boot_store import BootStore
-from appliance.kernel.capacity import line
+from appliance.kernel.capacity import ROOT_IMAGES, line
+from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
@@ -82,16 +83,20 @@ def app_unit_properties(root: Path) -> tuple[str, ...]:
 class SystemdAppProcessDriver:
     def __init__(self, roots: Path, store: BootStore, *, base_abi: str,
                  graphics_abi: str, plugin_abi: str, proc: Path = Path("/proc"),
-                 cgroups: Path = Path("/sys/fs/cgroup")):
+                 cgroups: Path = Path("/sys/fs/cgroup"), images: Path = ROOT_IMAGES,
+                 mounter: ImageMounter | None = None):
         self.roots, self.store, self.proc = roots, store, proc
-        self.cgroups = cgroups
+        self.cgroups, self.images = cgroups, images
+        self.mounter = mounter if mounter is not None else SystemdImageMounter()
         self.stops = StopObserver(self)
         self.abi = dict(base_abi=base_abi, graphics_abi=graphics_abi, plugin_abi=plugin_abi)
 
     def verify(self, environment: AppEnvironmentRefV2) -> bool:
         if environment.deb_name != "photo-wall-player":
             raise ValueError("app_package_kind_mismatch")
-        verify_root(self.roots / environment.environment_sha256, environment, **self.abi)
+        # C3 as amended (errata E-E2C-DR-2): the root is staged for this Node's measured ABI; the
+        # image digest proved its tree at staging, so no walk here.
+        mounted_root(self.roots, environment, images=self.images, mounter=self.mounter, **self.abi)
         return True
 
     def select(self, environment: AppEnvironmentRefV2) -> None:

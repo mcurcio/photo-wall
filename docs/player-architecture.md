@@ -2,7 +2,7 @@
 
 This page describes the V2 Player node as it exists at v0.17.0 (`origin/main` 860465cd). It owns the cross-layer view: which processes run on the Pi, who supervises each, what each layer guarantees, how strongly that guarantee is enforced, and what each liveness signal actually measures. It describes; it does not propose. Each policy stays in its owning document, linked from [Where to read more](#where-to-read-more). Where an owning document and the code disagree, the code is described here and the disagreement is listed under [Observed gaps](#observed-gaps).
 
-**Superseded** wherever Central is assumed in charge: see [0016](decisions/0016-central-and-node-relationship.md) and the node redesign ([0017](decisions/0017-node-redesign-r3.md)). This page still describes the code as built; module paths name the E1 layout (`appliance/{kernel,host,boot,apps}/`).
+**Superseded** wherever Central is assumed in charge: see [0016](decisions/0016-central-and-node-relationship.md) and the node redesign ([0017](decisions/0017-node-redesign-r3.md)). This page still describes the code as built; module paths name the E1 layout (`appliance/{kernel,host,boot,apps}/`). [Release roots as images](#release-roots-as-images-e2c) describes E2c as built (2026-10-09): release roots are squashfs images that PID1 mounts read-only.
 
 ## Overview
 
@@ -67,7 +67,7 @@ Facts behind the diagram:
 - **Units.** All unit files are in [`appliance/systemd/`](../appliance/systemd/); [`scripts/build_node_base_deb.py:36-38`](../scripts/build_node_base_deb.py) lists those the node base ships, enables `photo-wall-node.target`, and adds `ConditionKernelCommandLine=!photowall.node=v2` to the V1 units (`photo-wall-provision`, `photo-wall-player`, `photo-wall-os-agent`, `photo-wall-weston`) so they do not run on a node (`:68-70`).
 - **Restart policies.** HostCore `Restart=always`, `RestartSec=2`, no start limit set. Broker and manager supervisor `Restart=on-failure`, `RestartSec=2`, `StartLimitBurst=10` per 10 min. Weston and the display controller `Restart=always`, `RestartSec=2`, `StartLimitBurst=10` per 10 min. No node unit sets `WatchdogSec=` or `Type=notify`; the only `WatchdogSec` (300) is the V1 [`player.service:18`](../appliance/systemd/player.service), which a node does not run.
 - **The Player unit** is started by the broker with `systemd-run --quiet --collect --unit=photo-wall-node-player.service --service-type=exec` ([`process_linux.py:264`](../appliance/apps/process_linux.py)) and the properties of `app_unit_properties` ([`process_linux.py:62-77`](../appliance/apps/process_linux.py)): `Slice=photowallapp.slice`, `MemoryMax=2G`, `TasksMax=128`, `CPUQuota=200%`, `RuntimeMaxSec=infinity`, `Restart=no`, `KillMode=control-group`, `TimeoutStopSec=30`, a sealed `RootDirectory`, and no `WatchdogSec`. The broker's `reconcile` records an exited Player as `phase="exited"` and reports it; it does not start it again ([`broker.py:127-144`](../appliance/apps/broker.py)). A Player is started only by a cold start from the boot offer (`broker.py:116`) or a Central-authorized online switch (`online_broker.py:191`).
-- **The root-import worker** is a transient `photo-wall-root-import-<operation>.service` the broker starts during an online switch, in `photowallpreparation.slice` with `CPUQuota=25%`, `Restart=no`, `RuntimeMaxSec=600` ([`import_worker.py:46`](../appliance/apps/import_worker.py), `:62-67`).
+- **The root-import worker** is a transient `photo-wall-root-import-<operation>.service` the broker starts during an online switch, in `photowallpreparation.slice` with `CPUQuota=25%`, `Restart=no`, `RuntimeMaxSec=600`, one read-write bind over the whole node store and `CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_CHOWN`, so it can seal AppManager's download and rename it into the image pool ([`import_worker.py`](../appliance/apps/import_worker.py) `advance`; [Release roots as images](#release-roots-as-images-e2c)).
 - **The diagnostic client** is forked by the shell inside Weston's service (`/usr/lib/photo-wall-display/diagnostic-client`, [`shell.c:839-850`](../appliance/display_host/native/shell.c)); the shell reaps it on its 200 ms timer (`:858-859`).
 - **The node-storage stage** is not in the target's `Wants=`; `photo-wall-node-prepare.service` pulls it in with `Requires=`.
 - **The manager unit** is started the same way with `CPUQuota=25%`, `Restart=no` ([`manager_launcher.py:58-75`](../appliance/node/manager_launcher.py)). Its supervisor polls every 2 s and spends a boot-scoped attempt budget across the pinned primary and fallback roots ([player node domain model](player-node-domain-model.md#recovery-of-appmanager-itself)).
@@ -93,7 +93,8 @@ sequenceDiagram
     S1->>C: GET boot-offer base artifact, verify digest
     S1->>PID1: mount base, write handoff and watchdog drop-in, switch root
     PID1->>BS: node-storage, node-handoff, node-prepare (stage records)
-    BS->>C: prepare downloads manager and app roots (900 s window)
+    BS->>C: prepare fetches the manager and app images by digest (900 s window)
+    BS->>PID1: mount each image read-only at its root directory
     PID1->>SH: start Weston with shell, curtain on every Output
     PID1->>DC: start controller
     PID1->>BR: start broker (requires node-prepare)
@@ -112,8 +113,69 @@ sequenceDiagram
 ```
 
 - **Stage 1.** [`appliance/netboot_init.py`](../appliance/netboot_init.py) (module docstring, phases 0–7) with the trust and locate client in [`uplink/`](../uplink/). The boot offer is `POST /v2/node/boot-offers` (`netboot_init.py:667`), the base is `/v2/node/boot-offers/{id}/artifacts/base` (`:690`), and the handoff is written at `:724`. Every failure prints one `FAILED phase=<n>` console line and exits into `photowall_restart` ([`photowall-netboot:41`](../appliance/netboot_initramfs/scripts/photowall-netboot)).
-- **Boot stages.** [`appliance/boot/node_bootstrap.py`](../appliance/boot/node_bootstrap.py) runs `storage`, `handoff` (`materialize_handoff`, which writes the per-owner configurations into `/run/photo-wall-node/`) and `prepare` (`prepare_roots`, inside `DOWNLOAD_WINDOW_SECONDS` = 900 of the unit's `TimeoutStartSec=1200`). Each stage records `running`, `done`, `refused` or `failed` in `/run/photo-wall-boot-stage/` ([`boot_stage.py`](../appliance/kernel/boot_stage.py)); HostCore is the only reader. The download and retry rules are in [`preparer.py`](../appliance/node/preparer.py) and the [4 GB node memory design](node-4gb-memory-design.md).
+- **Boot stages.** [`appliance/boot/node_bootstrap.py`](../appliance/boot/node_bootstrap.py) runs `storage`, `handoff` (`materialize_handoff`, which writes the per-owner configurations into `/run/photo-wall-node/`) and `prepare` (`prepare_roots`, inside `DOWNLOAD_WINDOW_SECONDS` = 900 of the unit's `TimeoutStartSec=1200`). Each stage records `running`, `done`, `refused` or `failed` in `/run/photo-wall-boot-stage/` ([`boot_stage.py`](../appliance/kernel/boot_stage.py)); HostCore is the only reader. The download and retry rules are in [`preparer.py`](../appliance/node/preparer.py) and the [Player node domain model](player-node-domain-model.md#memory-classes-and-the-node-store-2026-10-03); `prepare_roots` stages each fetched image as [below](#release-roots-as-images-e2c).
 - **Display handoff.** Central issues `candidate`, `handoff`, `withdraw` and `revision` decisions as responses to the controller's `POST /v2/node/display` ([`service.py:138-196`](../appliance/display_host/service.py)). The shell accepts a handoff only with a buffer presented within the last `LEASE_MS` and an unexpired lease ([`shell.c:715-731`](../appliance/display_host/native/shell.c)), and reports `handoff_presented` only on a later presented commit (`:529-533`). Policy: [display host backend](display-host-backend.md#authority-and-presentation-evidence).
+
+## Release roots as images (E2c)
+
+Each release root (the app environment and the manager root) ships as one reproducible squashfs image whose sha256 is the release's `environment_sha256`. The Node fetches the image by digest, checks it, and asks PID1 to mount it read-only at the path where the unpacked root used to sit. Nothing is unpacked and nothing is copied, so the Node holds each root's bytes once (app about 288 MiB, manager about 62 MiB). Every launcher keeps `RootDirectory=<root directory>/<sha>/rootfs`.
+
+```mermaid
+flowchart LR
+    PREP[prepare one-shot<br/>cold path] -->|fetch by digest| CS[(root-images/.cold-staging)]
+    MGR[AppManager<br/>online path] -->|fetch by digest| DL[(preparation/downloads)]
+    PREP --> ST{{stage_image}}
+    IMP[import worker<br/>online path] --> ST
+    CS -->|seal, rename| POOL[(image pool<br/>root-images/&lt;sha&gt;.squashfs)]
+    DL -->|seal, rename| POOL
+    ST -->|re-hash by descriptor| POOL
+    ST -->|systemd-mount| PID1[[PID1 transient mount unit]]
+    PID1 -->|loop, ro,nodev,nosuid| RD[(root directories<br/>app-roots/&lt;sha&gt;, manager-roots/&lt;sha&gt;)]
+    BR[broker launch check<br/>mounted_root] --> RD
+```
+
+| Term | As built |
+|---|---|
+| **Image pool** | `/run/photo-wall-node-storage/root-images/` (`capacity.ROOT_IMAGES`), root-owned 0755, created by the storage stage. Each image is `<sha>.squashfs`, root:root 0444, one link. HostCore's unit makes it inaccessible, as it does the root directories. |
+| **Root directories** | `app-roots/` and `manager-roots/` on the store: one mount point per staged root, created by PID1 when it mounts. |
+| **Mount unit** | A transient `.mount` unit that `systemd-mount --collect` asks PID1 for, loop-backed, options `ro,nodev,nosuid` ([`image_mount.py`](../appliance/kernel/image_mount.py) `SystemdImageMounter`). The mount lives in the host namespace. A second request for a mounted path reads the existing mount instead of asking again. A mount of another image, another type, or a writable one at that path is `image_mount_conflict` and is never unmounted. Nothing on the Node unmounts a root: the store is RAM, and shutdown unmounts it. |
+| **Read-only** | The mountinfo per-mount options (field 6) contain `ro` **and** the loop device's `/sys/dev/block/<maj:min>/ro` is `1`. `findmnt` OPTIONS are not enough: a squashfs superblock is always `ro`, even under a writable mount. |
+| **Release check** | `verify_release` ([`environment.py`](../appliance/apps/environment.py)): what the image digest does not prove. The manifest's `reference` matches the ref, the ref's base, graphics and plugin ABI equal the Node's **measured** ABI, the two provenance files hash to the ref's values, and the entry point and `usr/bin/python3` resolve to executable files through the manifest. It reads three small files, not the tree. |
+| **Staged** | `mounted_root`: the mount at `<root directory>/<sha>` is a read-only squashfs backed by the sealed pool file `<sha>.squashfs` of the ref's size, **and** the release check passes. It is recomputed at every use and never recorded. A directory's existence never counts, because an empty mount point survives an unmount. |
+
+**One staging function.** `stage_image` is the only code that writes the image pool or asks for a mount. The cold path (`prepare_roots` in [`node_bootstrap.py`](../appliance/boot/node_bootstrap.py)) and the online path ([`root_import.py`](../appliance/apps/root_import.py), inside the import worker) call it with the same arguments, the measured ABI included. The broker hands the import worker its own measured ABI in the import request. In order, it:
+
+1. refuses a ref whose ABI differs from the measured one (`environment_abi_mismatch`), before any I/O;
+2. returns at once when the root is already staged, unlinking a duplicate incoming file;
+3. **seals** the incoming file by descriptor (`fchown` to root, `fchmod` 0444) and only then **adopts** it into the pool with one `os.rename`, never a copy (`root_image_adopt_cross_device` if the rename would cross mounts). An incoming file whose digest the pool already holds is unlinked;
+4. re-hashes the pool file by descriptor; a pool file that fails this check or its owner, mode or link checks is unlinked (`root_image_digest_mismatch`, `root_image_ownership`), so the next attempt starts clean;
+5. asks PID1 for the mount and reads it back in its own namespace (`image_mount_failed`, `image_mount_not_visible`, `image_mount_conflict`);
+6. runs the release check. Its refusal leaves the image and the mount in place, and a corrected ref for the same digest then stages without a download.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Absent
+    Absent --> Refused: ref ABI differs from measured
+    Absent --> Fetched: download, size and sha256 match
+    Fetched --> Pooled: seal by descriptor, then rename into the pool
+    Pooled --> Absent: owner, mode or re-hash refused (pool file unlinked)
+    Pooled --> Mounted: PID1 mount read back read-only
+    Pooled --> Refused: mount refused, not visible, or conflict
+    Mounted --> Staged: release check passes
+    Mounted --> Unpaired: release check fails (image and mount stay)
+    Unpaired --> Staged: a corrected ref for the same digest
+    Staged --> [*]: shutdown unmounts (the store is RAM)
+```
+
+A stager killed at any point leaves nothing a launch accepts: a file gets a pool name only after it is sealed, a mount is asked for only after the re-hash passed, and the release check runs at every use. A file killed between seal and rename is adopted by the next `stage_image`.
+
+**The launch check.** Before `systemd-run`, the broker's `SystemdAppProcessDriver.verify` ([`process_linux.py`](../appliance/apps/process_linux.py)) calls `mounted_root` with the measured ABI and refuses `root_image_not_staged` or the release check's refusal. It does not walk the tree. Per-file verification of a release (`verify_root`, every file re-hashed against the manifest) runs at build time, over the mounted shipped image in node-components' image test, and in the retiring AppManager's launch of its own root. The Node trusts the release digest for the tree.
+
+**Three sandboxes see PID1's mounts.** The prepare one-shot and the import worker read their own mounts back; the broker, whose namespace exists before any online target is mounted, sees each later mount through systemd's slave propagation from the shared host `/run`. The cold mounts exist before the broker starts (`photo-wall-node-prepare.service` is `Before=` the broker).
+
+**Online targets.** AppManager downloads a target into `preparation/downloads/<sha>` and skips one whose image the pool already holds (`pooled`, through a read-only bind of the pool), so a rollback or a retry within one boot downloads nothing. The import worker then stages it into the pool by rename across its one store bind. Superseded images stay until reboot; eviction belongs to the Content epic ([0017](decisions/0017-node-redesign-r3.md) C10).
+
+**Build side.** `scripts/build_node_components.py` builds each image twice and refuses unequal digests (`node_components_image_not_reproducible`), and refuses an image larger than its memory line (`node_components_image_over_line`). The sealed tar is a build intermediate only ([`sealed_archive.py`](../scripts/sealed_archive.py)). The memory lines the images and the preparation slice fit are in the [Player node domain model](player-node-domain-model.md#memory-classes-and-the-node-store-2026-10-03); reading them on a Node is in the [runbook](runbook.md#node-storage-release-images-and-memory-lines).
 
 ## Inside the Player app
 
@@ -203,6 +265,7 @@ Facts only; no remedy is implied. "Code" means read from the source at 860465cd.
 | G8 | Why readiness stopped is inferred, not confirmed: that the Player's GTK thread redrew continuously, that idle hand-offs therefore did not run (G3), and that continued tagged commits kept the lease and the Output's content (G4). The redraw mechanism is also unestablished. One candidate: GDK paint (`GDK_PRIORITY_REDRAW`) and the 33 ms and 1 s timeouts outrank the default-idle priority of `GLib.idle_add`, so a main loop that is always ready to paint never reaches idle sources. No Pi-side profile or stack sample confirms this or any other cause. The candidate mechanism was reproduced on real GLib off the Pi (a saturated 33 ms tick plus paint left control dispatch unanswered); `player/mainloop.py` now runs handoffs above tick and paint and the Player redraws only on change ([Player service](module-player-service.md)). A late loop raises the `main_loop_late` health fault and leaves readiness as Central last accepted it. That fault has no production reader on a V2 node, so a loop that is saturated but still running shows only as `player-silent` after 31.5 s and nothing restarts it. Surfacing it is deferred follow-up work (E-G8-13); the structural fix is what prevents the starvation. | No profile exists; off-Pi reproduction | Suspected on the Pi; mechanism fixed |
 | G10 | [Player service module](module-player-service.md) line 13 says the Player's liveness deadline is `player.service` with `WatchdogSec=300`. That is the V1 unit; the node base disables it with `ConditionKernelCommandLine=!photowall.node=v2`, and the node Player has no watchdog (G1, G2). | [`build_node_base_deb.py:68-71`](../scripts/build_node_base_deb.py) | Code vs doc |
 | G11 | The [execution contract](execution-contract.md#netboot-stage-1-boot-data-the-clock-record-and-liveness) line 134 names "the provisioning unit reboots after 10 exits in 10 minutes" as a stage-2 failure exit. `photo-wall-provision.service` is V1-only and disabled on a node the same way; no node unit sets a `StartLimitAction`. | [`build_node_base_deb.py:68-71`](../scripts/build_node_base_deb.py); [`appliance/systemd/`](../appliance/systemd/) | Code vs doc |
+| G12 | A refused online stage stalls without a report. When `stage_image` refuses inside the import worker (a digest mismatch, a transient PID1 mount failure, a release-check refusal), the worker exits before writing its result; the broker raises `root_import_outcome_unknown` on every tick, reports nothing, and the operation stays `preparing` while Central shows `staged`. The fault is only in the worker's journal. A new stage from Central or a reboot clears it. The tar era behaved the same way. | [`import_worker.py`](../appliance/apps/import_worker.py) `advance`; [`root_import.py`](../appliance/apps/root_import.py) | Code; accepted by the owner as a cost of E2c (2026-10-09), fixed in E5 ([0017](decisions/0017-node-redesign-r3.md#costs)) |
 | G9 | Nothing on the node measures the Player main loop's progress. The broker sees only the process (pid, start ticks, cgroup); the shell sees only presented commits; the Player's own self-check runs on the thread that would be stuck. | [`process_linux.py:98-126`](../appliance/apps/process_linux.py); [`shell.c:856-872`](../appliance/display_host/native/shell.c) | Code |
 
 ## Where to read more

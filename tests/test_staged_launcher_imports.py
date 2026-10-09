@@ -25,7 +25,9 @@ from scripts.module_closure import Closure, ClosurePolicy, closure_for
 REPO: Final = Path(__file__).resolve().parents[1]
 SCANNED: Final = ("tests", "scripts")
 STAGED_PREFIX: Final = "/usr/lib/photo-wall-"
-MIN_SITES: Final = 10
+# A floor, so a scanner gone blind fails: 7 since E2c deleted the three unrun container probes
+# (scripts/node_service_probe.py and its two fixtures, errata E-E2C-DR-10).
+MIN_SITES: Final = 7
 
 
 @dataclass(frozen=True, slots=True)

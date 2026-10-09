@@ -30,6 +30,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
+from scripts.build_environment_image import IMAGE_SUFFIX, SQUASHFS_OPTIONS
 from scripts.build_player_deb import control_file, fetch_tree, run_dpkg_deb
 from scripts.debian_packages import packages
 from scripts.module_closure import (
@@ -111,6 +112,9 @@ def stage_tree(tree: Path, destination: Path) -> str:
     bus.mkdir(parents=True)
     (bus / "node-bus.conf").write_bytes((tree / BUS_CONF).read_bytes())
     digests.extend(("nats-server", NATS_SERVER_VERSION))
+    # The release roots' image format (E2c): the base mounts these images, so a new format (or new
+    # mksquashfs options) is a new base_abi and every release ref sealed for the old one refuses.
+    digests.extend(("image-format", IMAGE_SUFFIX, *SQUASHFS_OPTIONS))
     wants = destination / "etc/systemd/system/multi-user.target.wants"
     wants.mkdir(parents=True)
     (wants / "photo-wall-node.target").symlink_to("/lib/systemd/system/photo-wall-node.target")

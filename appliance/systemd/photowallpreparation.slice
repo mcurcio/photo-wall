@@ -4,6 +4,6 @@ Description=Bounded background application preparation
 CPUWeight=10
 IOWeight=10
 CPUQuota=25%
-MemoryMax=4G
+MemoryMax=960M
 MemorySwapMax=0
 TasksMax=32

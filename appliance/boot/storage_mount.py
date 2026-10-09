@@ -43,7 +43,7 @@ def mount_storage(*, controllers: Path = CONTROLLERS, meminfo: Path = MEMINFO) -
     if match is None or match[match.index("-") + 1] != "tmpfs":
         raise ValueError("node_storage_mount_type")
     require_mounted_size(STORE, store_bytes)
-    for name, mode, owner in (("app-roots", 0o755, 0), ("manager-roots", 0o755, 0), ("downloads", 0o700, 0), ("preparation", 0o700, 10003)):
+    for name, mode, owner in (("app-roots", 0o755, 0), ("manager-roots", 0o755, 0), ("root-images", 0o755, 0), ("downloads", 0o700, 0), ("preparation", 0o700, 10003)):
         path = STORE / name
         path.mkdir(mode=mode, exist_ok=True)
         if path.is_symlink():

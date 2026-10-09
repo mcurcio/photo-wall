@@ -213,11 +213,32 @@ class OnlineEffectBroker:
         self._event("fallback_starting" if fallback else "starting_new", running=running)
         self._event("fallback_running" if fallback else "running", running=running)
 
+    def _controlled(self, command: StageCommandV2) -> bool:
+        """The started app proved control for this operation (the proof `service` hands the host)."""
+        proof = self.store.read("local-app-control")
+        return proof is not None and proof.get("operation_id") == str(command.operation_id)
+
+    def _settle(self, record, command: StageCommandV2) -> None:
+        """A switch completes when its app proves control, not when its unit was first seen
+        active. Until then the app's exit is the switch's own failure: a target that dies
+        falls back, and a fallback that dies is reported (the host's deadline then recovers).
+        Never a silent wait for the recovery deadline's reboot."""
+        if self._controlled(command) or not self.driver.absent_and_quiescent():
+            return
+        if record["phase"] == "running":
+            self._event("target_failed", fault="target_exited_before_control")
+            self._start(command, command.fallback, fallback=True)
+        else:
+            self._event("effect_unknown", fault="fallback_exited_before_control")
+
     def reconcile(self) -> None:
         record = self.record
-        if record is None or record["phase"] in ("preparing", "running", "fallback_running"):
+        if record is None or record["phase"] == "preparing":
             return
         command = parse_stage_command(record["command"].encode())
+        if record["phase"] in ("running", "fallback_running"):
+            self._settle(record, command)
+            return
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
             request = stop_request_from(record["stop_request"])
             self._arm_recovery(RecoveryObligation.parse(record["recovery"]))

@@ -1,11 +1,13 @@
 """Build the real-PID1 lifecycle scenarios' fixture from one node component set.
 
-Input: a scripts/build_node_components.py output (components.json, app.deb, app.tar,
-manager-primary.tar, node-base.deb, node-display.deb). Output, a new directory:
+Input: a scripts/build_node_components.py output (components.json, app.deb, app.squashfs,
+manager-primary.squashfs, node-base.deb, node-display.deb). Output, a new directory:
 
-  targets/{success,failure}.{deb,tar} and -reference.json
-      Nonrelease stage targets sealed for the same ABI: `success` is the component's own
-      Player at a higher version; `failure` is that Player with an entrypoint that exits.
+  targets/{success,failure}.{deb,squashfs} and -reference.json
+      Nonrelease stage targets sealed for the same ABI and shipped as images (E2c), as releases
+      are: `success` is the component's own Player at a higher version; `failure` is that Player
+      with an entrypoint that exits. Each reference carries its image's sha256 and size; the
+      sealed tar is a private intermediate, never kept.
   fixture.json
       {"components": <dir>, "image": <sha256 image ID>} for tests/test_node_pid1.py
       (PHOTO_WALL_NODE_PID1_FIXTURE names this output directory).
@@ -24,10 +26,11 @@ import secrets
 import shutil
 import subprocess
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from scripts.build_app_environment import build as build_environment
+from scripts.build_environment_image import IMAGE_SUFFIX, image_from_archive, tools_image
 from scripts.container_build import daemon_image_build
 from scripts.debian_packages import PIN
 from scripts.node_build_inputs import BUILDER_IMAGE
@@ -112,13 +115,17 @@ def build(components: Path, output: Path, *, base_image: str | None = None) -> d
     targets.mkdir(parents=True)
     with tempfile.TemporaryDirectory(prefix="node-pid1-fixture-", dir=output) as temporary:
         work = Path(temporary)
+        tools = tools_image(architecture="arm64")
         for role in ROLES:
             deb = derive_target(base_image, components / "app.deb", work, role)
             shutil.move(deb, targets / (role + ".deb"))
             sealed = work / (role + "-environment")
             ref = build_environment(targets / (role + ".deb"), sealed, builder_image=BUILDER_IMAGE,
                                     architecture="arm64", **abi)
-            shutil.move(sealed / (ref.environment_sha256 + ".tar"), targets / (role + ".tar"))
+            image = image_from_archive(sealed / (ref.environment_sha256 + ".tar"), ref,
+                                       work / (role + "-image"), **abi, tools=tools)
+            shutil.move(image.path, targets / (role + IMAGE_SUFFIX))
+            ref = replace(ref, environment_sha256=image.sha256, size_bytes=image.size_bytes)
             (targets / (role + "-reference.json")).write_text(
                 json.dumps(asdict(ref), sort_keys=True))
         image_work = work / "image"

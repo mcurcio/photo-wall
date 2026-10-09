@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from uuid import UUID
 
+from appliance.apps.environment import pooled
 from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import NodeSession
 from appliance.kernel.boot_store import BootStore
@@ -16,6 +18,10 @@ from appliance.node.preparer import DownloadPreparer
 from contracts.node_lifecycle import parse_stage_command
 from contracts.strict_json import loads_object
 from uplink.files import write_atomically
+
+_DIGEST = re.compile("[0-9a-f]{64}")
+# The image pool, bound read-only into this sandbox (manager_launcher.py; Q1 = R, leaves in E5).
+ROOT_IMAGES = Path("/run/photo-wall-root-images")
 
 
 class DesiredPreparation:
@@ -65,12 +71,12 @@ class DesiredPreparation:
         self.observation.sample("preparing", command=command)
         archives = []
         for kind, reference in (("target", command.target), ("fallback", command.fallback)):
-            if reference == command.old_environment:
-                continue  # Base independently verifies its exact retained old root.
+            if reference == command.old_environment or pooled(reference, ROOT_IMAGES):
+                continue  # Base stages a held image with no download (stage_image re-checks it).
             url = self.config["central"].rstrip("/") + f"/v2/node/app-attempts/{command.operation_id}/artifacts/{kind}"
             preparer = DownloadPreparer(self.directory / "downloads", url=url,
                 **{key: self.config[key] for key in ("base_abi", "graphics_abi", "plugin_abi")},
-                claim=self.session.claim, retain_root=False)
+                claim=self.session.claim)
             try:
                 preparer.prepare(reference)
             except StorageShort as short:
@@ -86,6 +92,6 @@ class DesiredPreparation:
         self.observation.sample("verified", command=command)
         # Keep only artifacts required by the one current prepared operation. An
         # importer holding an older inode still hashes its own exact stream.
-        for archive in (self.directory / "downloads").glob("*.tar"):
-            if archive.stem not in archives:
-                archive.unlink()
+        for download in (self.directory / "downloads").iterdir():
+            if _DIGEST.fullmatch(download.name) and download.name not in archives:
+                download.unlink()

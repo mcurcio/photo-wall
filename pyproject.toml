@@ -185,7 +185,6 @@ forbidden_modules = ["appliance.apps", "appliance.health", "appliance.display_ho
 ignore_imports = [
   # Boot's only edges out: the retiring prepare verb's apps.environment (r3 §10); E6 removes them.
   "appliance.boot.node_bootstrap -> appliance.apps.environment",
-  "appliance.node.preparer -> appliance.apps.environment",
 ]
 
 [[tool.importlinter.contracts]]

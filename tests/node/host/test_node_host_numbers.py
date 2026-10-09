@@ -15,7 +15,6 @@ from appliance.host.host_linux import LinuxHostSampler
 from appliance.kernel.capacity import (
     EMERGENCY_HEADROOM,
     GIB,
-    OVERHEAD,
     StorageShort,
     admit_preparation,
     device_class,
@@ -156,21 +155,21 @@ def test_each_name_is_emitted_once_and_the_largest_sample_fits_the_contract(tmp_
 
 def _old_admit(size, *, total, available, free, used):
     """The decision before N1 (capacity.py at batch 3), kept as the reference; the store cap is
-    the device class's since the 4 GB tracer (T1)."""
-    incremental = 2 * size + OVERHEAD
+    the device class's since the 4 GB tracer (T1), and an image is counted once since E2c."""
+    incremental = size
     return not (used + incremental > device_class(total).store_bytes
                 or incremental > min(free, available - EMERGENCY_HEADROOM))
 
 
-@pytest.mark.parametrize("size", [128, 200 * MIB, 984207360, GIB, 2 * GIB])
+@pytest.mark.parametrize("size", [128, 200 * MIB, 288 * MIB, 984207360, GIB, 2 * GIB])
 @pytest.mark.parametrize("total,available", [(4045 * MIB, 600 * MIB), (4045 * MIB, 3 * GIB),
                                              (8 * GIB, 600 * MIB), (8 * GIB, 2 * GIB),
                                              (8 * GIB, 3 * GIB), (8 * GIB, 7 * GIB), (16 * GIB, 12 * GIB)])
 @pytest.mark.parametrize("free,used", [(4 * GIB, 0), (4 * GIB - 1261 * MIB, 1261 * MIB),
-                                       (GIB, 3 * GIB), (100 * MIB, 0), (8 * GIB, 5 * GIB)])
+                                       (GIB, 3 * GIB), (100 * MIB, 0), (8 * GIB, 5 * GIB), (4 * GIB, 350 * MIB)])
 def test_admit_preparation_refuses_exactly_when_preparation_room_is_short(size, total, available, free, used):
     room = preparation_room(total=total, available=available, free=free, used=used)
-    required = 2 * size + OVERHEAD
+    required = size
     admitted = _old_admit(size, total=total, available=available, free=free, used=used)
     assert admitted == (required <= room)
     if admitted:
@@ -197,7 +196,8 @@ def test_a_storage_refusal_reaches_the_wire_as_a_refused_sample_with_both_number
     kernel_boot_id, offer_id = uuid4(), uuid4()
     manager = NodeProducerV2("site", "device-" + "a" * 64, 1, kernel_boot_id, "app_manager", uuid4())
     broker = replace(manager, owner="app_effect_broker", incarnation_id=uuid4())
-    old, target = environment("a"), environment("b")
+    # Today's app image size: more than the 88 MiB room below (an image is counted once, E2c).
+    old, target = environment("a"), replace(environment("b"), size_bytes=288 * MIB)
     command = StageCommandV2(uuid4(), uuid4(), "0" * 64, broker, uuid4(), offer_id,
                              NodeProcessIdentity(100, 200, uuid4()), 1, old, target, old)
     command = replace(command, command_sha256=stage_digest(command))
@@ -228,7 +228,7 @@ def test_a_storage_refusal_reaches_the_wire_as_a_refused_sample_with_both_number
     refused = posted[-1]
     assert [sample.state for sample in posted] == ["preparing", "refused"]
     assert refused.fault == "node_storage_capacity" and refused.operation_id == command.operation_id
-    assert (refused.available_bytes, refused.required_bytes) == (88 * MIB, 2 * target.size_bytes + OVERHEAD)
+    assert (refused.available_bytes, refused.required_bytes) == (88 * MIB, target.size_bytes)
     # Nothing is recorded as prepared, so the next poll retries, as after any other failure.
     assert preparation.store.read("prepared") is None
     preparation.poll()

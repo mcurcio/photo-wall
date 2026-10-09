@@ -16,12 +16,13 @@ from appliance.kernel.capacity import (
     CLASSES,
     GIB,
     MIB,
-    OVERHEAD,
-    PREPARATION_SLICE_BYTES,
+    STORE_BYTES,
     DeviceClass,
     StorageShort,
     admit_cold,
+    admit_preparation,
     device_class,
+    line,
     memory_controller_present,
     memory_total,
     preparation_room,
@@ -49,10 +50,13 @@ def _meminfo(tmp_path, total_kb: int) -> Path:
 
 # --- the device class ---------------------------------------------------------------------
 
-def test_classes_are_the_interim_4gb_and_8gb_classes_in_ascending_order():
-    assert CLASSES == (DeviceClass("pi5-4gb", 3584 * MIB, 2560 * MIB),
-                       DeviceClass("pi5-8gb", 7168 * MIB, 3840 * MIB))
-    for name in ("MIN_MEMORY", "RESERVE", "MAX_STORE", "storage_budget"):
+def test_classes_are_the_4gb_and_8gb_classes_in_ascending_order_with_the_image_store():
+    # The store holds the image lines and its residue (E2c): 320 + 320 + 96 + 32 MiB.
+    assert STORE_BYTES == 768 * MIB
+    assert CLASSES == (DeviceClass("pi5-4gb", 3584 * MIB, STORE_BYTES),
+                       DeviceClass("pi5-8gb", 7168 * MIB, STORE_BYTES))
+    for name in ("MIN_MEMORY", "RESERVE", "MAX_STORE", "storage_budget", "OVERHEAD",
+                 "PREPARATION_SLICE_BYTES", "PREPARATION_PROCESS_BYTES"):
         assert not hasattr(capacity, name), name
 
 
@@ -104,24 +108,43 @@ def test_memory_controller_present_reads_cgroup_controllers_and_is_false_on_erro
     assert not memory_controller_present(tmp_path / "absent")
 
 
-def test_cold_admission_on_a_4gb_board_uses_its_class_store_and_refuses_with_numbers():
-    reference = SimpleNamespace(environment_sha256="a" * 64, size_bytes=GIB)
-    # 4 GB: store 2560 MiB holds a 1 GiB root twice plus overhead (tar era: MemAvailable admission).
-    assert admit_cold([reference], total=4045 * MIB, available=3 * GIB, free=4 * GIB) == 2 * GIB + OVERHEAD
-    big = SimpleNamespace(environment_sha256="b" * 64, size_bytes=1200 * MIB)
+def _image(digest: str, size: int) -> SimpleNamespace:
+    return SimpleNamespace(environment_sha256=digest * 64, size_bytes=size)
+
+
+def test_cold_admission_on_a_4gb_board_counts_each_image_once_and_refuses_with_numbers():
+    app, manager = _image("a", 288 * MIB), _image("b", 62 * MIB)
+    # Today's images: bytes are counted once (no unpack, no second copy).
+    assert admit_cold([app, manager, app], total=4045 * MIB, available=3 * GIB, free=4 * GIB) == 350 * MIB
+    assert admit_cold([app, manager], total=4045 * MIB, available=3 * GIB, free=4 * GIB,
+                      resident=frozenset({"a" * 64})) == 62 * MIB
+    big = _image("c", 720 * MIB)
     with pytest.raises(StorageShort, match="^node_storage_capacity$") as refused:
-        admit_cold([big], total=4045 * MIB, available=3 * GIB, free=4 * GIB)
-    assert (refused.value.required, refused.value.room) == (2400 * MIB + OVERHEAD, 2560 * MIB)
+        admit_cold([big, manager], total=4045 * MIB, available=3 * GIB, free=4 * GIB)
+    assert (refused.value.required, refused.value.room) == (782 * MIB, 768 * MIB)
     with pytest.raises(StorageShort) as short:
-        admit_cold([reference], total=8 * GIB, available=GIB, free=4 * GIB)
-    assert (short.value.required, short.value.room) == (2 * GIB + OVERHEAD, 512 * MIB)
+        admit_cold([app, manager], total=8 * GIB, available=800 * MIB, free=4 * GIB)
+    assert (short.value.required, short.value.room) == (350 * MIB, 288 * MIB)
     with pytest.raises(StorageShort, match="^node_memory_class$"):
-        admit_cold([reference], total=3 * GIB, available=3 * GIB, free=4 * GIB)
+        admit_cold([app], total=3 * GIB, available=3 * GIB, free=4 * GIB)
 
 
 def test_preparation_room_is_bounded_by_the_class_store():
-    assert preparation_room(total=4045 * MIB, available=8 * GIB, free=8 * GIB, used=GIB) == 1536 * MIB
-    assert preparation_room(total=8 * GIB, available=8 * GIB, free=8 * GIB, used=GIB) == 2816 * MIB
+    assert preparation_room(total=4045 * MIB, available=8 * GIB, free=8 * GIB, used=350 * MIB) == 418 * MIB
+    assert preparation_room(total=8 * GIB, available=8 * GIB, free=8 * GIB, used=0) == STORE_BYTES
+
+
+def test_online_admission_on_4gb_admits_one_target_beside_the_cold_images_and_refuses_a_third_app():
+    roomy = {"total": 4045 * MIB, "available": 3 * GIB, "free": 4 * GIB}
+    # Today's sizes: cold app 288 + manager 62 resident; an online target of 288 is admitted.
+    assert admit_preparation(288 * MIB, **roomy, used=350 * MIB) == 288 * MIB
+    # A third distinct app image in one boot is refused with both numbers (eviction is E5).
+    with pytest.raises(StorageShort, match="^node_storage_capacity$") as refused:
+        admit_preparation(288 * MIB, **roomy, used=638 * MIB)
+    assert (refused.value.required, refused.value.room) == (288 * MIB, 130 * MIB)
+    # At the line caps: app 320 + manager 96 resident plus one 16 KiB store file, a 320 target fits.
+    at_caps = line("app-image").cap_bytes + line("manager-image").cap_bytes + 16 * 1024
+    assert admit_preparation(line("app-image-rollback").cap_bytes, **roomy, used=at_caps) == 320 * MIB
 
 
 # --- the store mount ----------------------------------------------------------------------
@@ -162,9 +185,9 @@ def test_storage_mounts_the_class_store_and_checks_its_size_with_or_without_memc
     storage_mount.mount_storage(controllers=path, meminfo=_meminfo(tmp_path, 4045 * 1024))
     [mount] = calls["mount"]
     assert mount[:3] == ["/usr/bin/mount", "-t", "tmpfs"] and mount[-1] == str(store)
-    assert f"size={2560 * MIB}" in mount[mount.index("-o") + 1].split(",")
-    assert calls["sized"] == [(store, 2560 * MIB)]
-    assert {child.name for child in store.iterdir()} == {"app-roots", "manager-roots", "downloads", "preparation"}
+    assert f"size={768 * MIB}" in mount[mount.index("-o") + 1].split(",")
+    assert calls["sized"] == [(store, 768 * MIB)]
+    assert {child.name for child in store.iterdir()} == {"app-roots", "manager-roots", "root-images", "downloads", "preparation"}
     absent = "memory controller absent: memory limits not enforced" in caplog.text
     assert absent == (controllers is None or "memory" not in controllers.split())
 
@@ -195,9 +218,10 @@ def _bytes(value: str) -> int:
     return int(value[:-1]) * SIZES[value[-1]] if value[-1] in SIZES else int(value)
 
 
-def test_the_preparation_slice_cap_is_the_largest_store_plus_the_process():
-    assert PREPARATION_SLICE_BYTES == 4096 * MIB
-    assert _bytes(_unit("photowallpreparation.slice")["Slice"]["MemoryMax"][-1]) == PREPARATION_SLICE_BYTES
+def test_the_preparation_slice_cap_is_its_members_sum():
+    members = sum(item.cap_bytes for item in capacity.LINES if item.parent == "preparation")
+    assert line("preparation").cap_bytes == members == 960 * MIB
+    assert _bytes(_unit("photowallpreparation.slice")["Slice"]["MemoryMax"][-1]) == line("preparation").cap_bytes
 
 
 def test_preparation_transients_inherit_the_slice_cap_and_the_app_manager_scores_300(monkeypatch, tmp_path):

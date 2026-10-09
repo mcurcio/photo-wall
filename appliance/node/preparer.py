@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
 
-from appliance.apps.environment import stage_archive
 from appliance.kernel.capacity import admit_preparation, memory_values
 from contracts.app_environment import AppEnvironmentRefV2
 from uplink.causes import Cause, UplinkError
@@ -95,12 +94,12 @@ def _failure(error: UplinkError) -> DownloadFailed:
 class DownloadPreparer:
     def __init__(self, directory: Path, *, url: str, base_abi: str,
                  graphics_abi: str, plugin_abi: str, reserve_bytes: int = 256 * 1024**2,
-                 claim=None, retain_root: bool = True, retry_until: float | None = None,
+                 claim=None, retry_until: float | None = None,
                  transport: Transport | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  monotonic: Callable[[], float] = time.monotonic):
         self.directory, self.url, self.reserve_bytes = directory, urlsplit(url), reserve_bytes
-        self.claim, self.retain_root, self.retry_until = claim, retain_root, retry_until
+        self.claim, self.retry_until = claim, retry_until
         self.abi = dict(base_abi=base_abi, graphics_abi=graphics_abi, plugin_abi=plugin_abi)
         if self.url.scheme not in ("http", "https") or not self.url.hostname or self.url.username or self.url.password or self.url.fragment or self.url.query:
             raise ValueError("preparation_url_invalid")
@@ -118,31 +117,20 @@ class DownloadPreparer:
         disk = shutil.disk_usage(self.directory)
         total, available = memory_values()
         admit_preparation(environment.size_bytes, total=total, available=available, free=disk.free, used=disk.used)
-        archive = self.directory / (environment.environment_sha256 + ".tar")
-        if not archive.exists():
-            self._download(environment, archive)
-        roots = self.directory / "verified"
-        roots.mkdir(exist_ok=True, mode=0o700)
-        verified = stage_archive(archive, roots, environment, **self.abi, owner_uid=os.getuid())
-        if not self.retain_root:
-            shutil.rmtree(verified)  # Base importer rehashes the retained archive; no double expanded roots.
+        # Named by its digest alone: the stager (stage_image, or the online import worker)
+        # re-hashes it by descriptor before anything uses it.
+        download = self.directory / environment.environment_sha256
+        if not download.exists():
+            self._download(environment, download)
         return True
 
     def _clear_debris(self) -> None:
-        """A killed attempt's `.partial` download and `verified/.stage-*` extraction, so that
-        admission does not count them against the store. Retained `.tar` archives and verified
-        roots are complete and stay (the caller owns their lifetime)."""
+        """A killed attempt's `.partial` download, so that admission does not count it against
+        the store. Complete downloads are digest-checked and stay (the caller owns them)."""
         for partial in self.directory.glob("*.partial"):
             partial.unlink(missing_ok=True)
-        roots = self.directory / "verified"
-        if roots.is_dir() and not roots.is_symlink():
-            for work in roots.glob(".stage-*"):
-                if work.is_symlink() or not work.is_dir():
-                    work.unlink(missing_ok=True)
-                else:
-                    shutil.rmtree(work)
 
-    def _download(self, environment: AppEnvironmentRefV2, archive: Path) -> None:
+    def _download(self, environment: AppEnvironmentRefV2, download: Path) -> None:
         """Attempts until one succeeds, a failure is terminal, or the next attempt could not get
         its status line before `retry_until`. Every attempt's deadline is within the window."""
         while True:
@@ -151,7 +139,7 @@ class DownloadPreparer:
             if self.retry_until is not None:
                 deadline = min(deadline, self.retry_until)
             try:
-                self._attempt(environment, archive, deadline)
+                self._attempt(environment, download, deadline)
                 return
             except DownloadFailed as failure:
                 if failure.retry_after is None or self.retry_until is None:
@@ -168,7 +156,7 @@ class DownloadPreparer:
             self._transport = HttpTransport(trust=trust)  # type: ignore[arg-type]
         return self._transport
 
-    def _attempt(self, environment: AppEnvironmentRefV2, archive: Path, deadline: float) -> None:
+    def _attempt(self, environment: AppEnvironmentRefV2, download: Path, deadline: float) -> None:
         partial = self.directory / (environment.environment_sha256 + ".partial")
         partial.unlink(missing_ok=True)
         headers = {}
@@ -183,7 +171,7 @@ class DownloadPreparer:
                     self._write(body, environment, partial)
             except UplinkError as error:
                 raise _failure(error) from error
-            os.replace(partial, archive)
+            os.replace(partial, download)
         finally:
             partial.unlink(missing_ok=True)
 

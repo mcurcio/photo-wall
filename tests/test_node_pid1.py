@@ -82,6 +82,7 @@ MASKS = (
 )
 # Bound over the kernel's boot_id inside the container before systemd starts as PID 1.
 FIXTURE_BOOT_ID = "/var/tmp/fixture-boot-id"
+NODE_STORE = "/run/photo-wall-node-storage"
 BUS_UNIT = "photo-wall-bus.service"
 BUS_SECONDS = 15
 # The bus's runtime cap for the induced OOM: above a fresh bus's peak (about 11 MiB in `success`),
@@ -464,14 +465,20 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             "systemctl", "stop", "photo-wall-node-player.service", "photo-wall-node-manager.service"
         )
         components = json.loads((components_dir / "components.json").read_text())
+        # Every root is an image (E2c): staged by the predicate the Node itself uses, and its
+        # pool image re-hashed.
         verify_script = """import json,pathlib,sys
 sys.path.insert(0,'/usr/lib/photo-wall-node-bootstrap')
-from appliance.apps.environment import verify_root
+from appliance.apps.environment import IMAGE_SUFFIX,file_sha256,mounted_root
+from appliance.kernel.image_mount import SystemdImageMounter
 from contracts.app_environment import AppEnvironmentRefV2
 value=json.loads(sys.argv[1]);refs=json.loads(sys.argv[2]);count=0
+store=pathlib.Path('/run/photo-wall-node-storage');images=store/'root-images'
 for kind,ref in refs:
- path=pathlib.Path('/run/photo-wall-node-storage')/kind/ref['environment_sha256']
- verify_root(path,AppEnvironmentRefV2(**ref),**value['abi']);count+=1
+ ref=AppEnvironmentRefV2(**ref);sha=ref.environment_sha256
+ mounted_root(store/kind,ref,images=images,mounter=SystemdImageMounter(),**value['abi'])
+ assert file_sha256(images/(sha+IMAGE_SUFFIX))==sha,sha
+ count+=1
 print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
         refs = [
             ("app-roots", components["app_environment"]),
@@ -487,6 +494,54 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
             timeout=180,
         )
         (self.work / "runtime-root-verification.json").write_text(verified)
+
+    def _assert_image_mounts(self, roots, evidence):
+        """Each `<kind>/<sha>` root is a read-only squashfs loop mount of its pool image (E2c), read
+        independently of the Node's own predicate: mountinfo's per-mount options (field 6) say
+        `ro`, the loop's sysfs `ro` is 1 and its backing file is the pool image."""
+        script = """import json,pathlib,sys
+want=json.loads(sys.argv[1]);store=sys.argv[2];found={}
+for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
+ f=line.split();found[f[4]]=f
+out={}
+for kind,sha in want:
+ f=found[store+'/'+kind+'/'+sha];sys_dir=pathlib.Path('/sys/dev/block')/f[2]
+ out[kind+'/'+sha]={'fstype':f[f.index('-',6)+1],'mount_options':f[5].split(','),
+  'loop_ro':(sys_dir/'ro').read_text().strip(),
+  'backing_file':(sys_dir/'loop/backing_file').read_text().strip()}
+print(json.dumps(out,sort_keys=True))"""
+        mounts = json.loads(self.run("/usr/bin/python3", "-c", script, json.dumps(roots), NODE_STORE))
+        (self.work / evidence).write_text(json.dumps(mounts, sort_keys=True))
+        for kind, sha in roots:
+            mount = mounts[kind + "/" + sha]
+            assert mount["fstype"] == "squashfs" and "ro" in mount["mount_options"], mounts
+            assert mount["loop_ro"] == "1", mounts
+            assert mount["backing_file"] == f"{NODE_STORE}/root-images/{sha}.squashfs", mounts
+
+    def _assert_player_root(self, sha):
+        root = self.run("systemctl", "show", "photo-wall-node-player.service", "-p",
+                        "RootDirectory", "--value").strip()
+        assert root == f"{NODE_STORE}/app-roots/{sha}/rootfs", root
+
+    def verify_image_mounts(self, components_dir):
+        """The cold roots are image mounts; the Player runs with RootDirectory= the app root's
+        rootfs."""
+        components = json.loads((components_dir / "components.json").read_text())
+        app = components["app_environment"]["environment_sha256"]
+        self._assert_image_mounts(
+            [("app-roots", app), ("manager-roots", components["manager_primary"]["environment_sha256"])],
+            "image-mounts.json")
+        self._assert_player_root(app)
+
+    def verify_target_mount(self, reference):
+        """After an online switch (E2c B2): the target root is an image mount of its pool image,
+        the broker (a propagation consumer, A17) launched the Player over it, and AppManager's
+        download was adopted by rename, so preparation/downloads/ holds nothing."""
+        sha = reference["environment_sha256"]
+        self._assert_image_mounts([("app-roots", sha)], "target-image-mount.json")
+        self._assert_player_root(sha)
+        left = self.run("find", f"{NODE_STORE}/preparation/downloads", "-mindepth", "1").split()
+        assert left == [], left
 
     def capture_and_remove(self, fixture, primary_error):
         """Capture diagnostics, then remove only this owned container and prove it absent."""
@@ -685,12 +740,19 @@ def assert_memory_lines(node):
         if not shown.get("ControlGroup"):
             continue  # not started this boot
         assert shown["MemoryMax"] == str(item.cap_bytes), (item.name, shown)
-        events = None
+        reading = {"MemoryMax": shown["MemoryMax"], "memory.events": None}
         if item.cgroup.endswith(".slice"):
-            text = node.run("cat", "/sys/fs/cgroup" + shown["ControlGroup"] + "/memory.events")
+            directory = "/sys/fs/cgroup" + shown["ControlGroup"]
+            text = node.run("cat", directory + "/memory.events")
             events = dict(row.split() for row in text.splitlines() if len(row.split()) == 2)
             assert events["oom_kill"] == "0", (item.name, events)
-        checked[item.cgroup] = {"MemoryMax": shown["MemoryMax"], "memory.events": events}
+            # The evidence a line is re-derived from (E2c B3 AC5): the slice's peak, and its
+            # anonymous, tmpfs and page-cache bytes (images are file pages, DR-9).
+            stat = dict(row.split() for row in node.run("cat", directory + "/memory.stat").splitlines()
+                        if len(row.split()) == 2)
+            reading.update({"memory.events": events, "memory.peak": node.run("cat", directory + "/memory.peak").strip(),
+                            "memory.stat": {key: stat.get(key) for key in ("anon", "shmem", "file")}})
+        checked[item.cgroup] = reading
     (node.work / "memory-lines.json").write_text(json.dumps(checked, sort_keys=True))
     # The base slice always runs after a completed stage: the check is never vacuous.
     assert "photowallbase.slice" in checked, checked
@@ -741,7 +803,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
     with central_fixture(
         registry,
         components_dir,
-        {phase: (reference, fixture_targets / (role + ".tar"))},
+        {phase: (reference, fixture_targets / (role + ".squashfs"))},
         work / "central",
         node_host,
     ) as fixture:
@@ -749,9 +811,12 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
         try:
             node.cold(fixture, components_dir)
             if phase == "success":
+                node.verify_image_mounts(components_dir)
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
             stage_and_complete(fixture, node, phase, reference)
+            if phase == "success":
+                node.verify_target_mount(reference)
             assert_memory_lines(node)
             if phase == "success":
                 # After assert_memory_lines, whose every slice reads oom_kill 0.
@@ -776,7 +841,7 @@ def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
     with central_fixture(
         registry,
         components_dir,
-        {phase: (reference, fixture_targets / "success.tar")},
+        {phase: (reference, fixture_targets / "success.squashfs")},
         work / "central",
         node_host,
         max_boots=2,
