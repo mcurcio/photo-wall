@@ -469,8 +469,8 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
         def quit(self):
             pass
 
-    glib = types.SimpleNamespace(MainLoop=Loop, timeout_add=lambda *_: None,
-                                 idle_add=lambda *_: None)
+    glib = types.SimpleNamespace(MainLoop=Loop, timeout_add=lambda *_, **_kw: None,
+                                 idle_add=lambda *_, **_kw: None)
     repository = types.ModuleType("gi.repository")
     repository.GLib = glib
     gi = types.ModuleType("gi")

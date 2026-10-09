@@ -22,7 +22,13 @@ from contracts.models import (
 )
 from contracts.time import Clock, TimeMapping
 from player.cache import Cache, CacheCapacityError, CacheError
-from player.rendering import LocalLayer, OutputComposition, PresentationResult, Renderer
+from player.rendering import (
+    PRESENTATION_FRESHNESS,
+    LocalLayer,
+    OutputComposition,
+    PresentationResult,
+    Renderer,
+)
 
 
 class AuthorityError(ValueError):
@@ -714,7 +720,7 @@ class Executor:
         if drawn is None or completed is None or not math.isfinite(completed):
             return None
         age = self.clock.monotonic() - completed
-        if (not 0 <= age <= .5 or drawn.binding != candidate.binding
+        if (not 0 <= age <= PRESENTATION_FRESHNESS or drawn.binding != candidate.binding
                 or drawn.calibration != candidate.calibration or drawn.fallback != candidate.fallback
                 or len(drawn.layers) != len(candidate.layers)):
             return None

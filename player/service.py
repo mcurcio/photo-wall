@@ -19,7 +19,7 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Awaitable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -56,6 +56,7 @@ from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError
+from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
@@ -85,6 +86,10 @@ BACKOFF = SESSION_BACKOFF
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
 LOCAL_PROOF_RETRY = 5.0
+# How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
+# main_loop_late health fault instead of waiting on a starved loop in silence (G8). Readiness
+# is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
+DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -98,6 +103,11 @@ class Unauthorized(ServiceError):
 
 class StaleFeedback(ServiceError):
     pass
+
+
+class MainLoopLate(ServiceError):
+    """The GLib loop is late: a dispatch missed DISPATCH_DEADLINE (its callback abandoned
+    unless already running), or an earlier abandoned one is still unreached."""
 
 
 class PlayerConfig(Model):
@@ -328,38 +338,6 @@ class Download:
     layer: Layer
 
 
-class GLibDispatcher:
-    """At most `slots` queued callbacks on GLib's default-idle queue; caller awaits each, never blocks GLib."""
-
-    def __init__(self, glib, slots: int = 4):
-        self.glib = glib
-        self._slots = threading.BoundedSemaphore(slots)
-
-    def lane(self, slots: int) -> GLibDispatcher:
-        """A sibling on the same GLib idle queue and priority with its own slots: it never takes ours."""
-        return GLibDispatcher(self.glib, slots)
-
-    def __call__(self, callback: Callable) -> Future:
-        future = Future()
-        if not self._slots.acquire(blocking=False):
-            future.set_exception(ServiceError("dispatch_capacity"))
-            return future
-
-        def run():
-            try:
-                if future.set_running_or_notify_cancel():
-                    try:
-                        future.set_result(callback())
-                    except Exception as error:
-                        future.set_exception(error)
-            finally:
-                self._slots.release()
-            return False
-
-        self.glib.idle_add(run)
-        return future
-
-
 class _ChunkBridge:
     def __init__(self, authorized: Callable[[], bool]):
         self.queue = queue.Queue(maxsize=4)
@@ -467,11 +445,23 @@ class PlayerService:
         self._identify_key: tuple[str, int] | None = None
         self._identify_output: str | None = None
         self._identify_deadline: float | None = None
+        # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
+        # every dispatch is MainLoopLate at once, and run() does not pet the watchdog.
+        self._late_posts = LatePosts()
 
     def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
             LOG.warning("player fault: %s", code if detail is None else f"{code} {detail}")
         self.last_fault, self.last_fault_detail = code, detail
+
+    def _main_loop_late(self) -> None:
+        """The GLib loop missed a dispatch deadline: raise the health fault, never touch
+        readiness. Central keeps the last readiness it accepted, so committed groups stand; it
+        commits no new group once that report is older than readiness_seconds, and a long
+        stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
+        withdraw prepared playback)."""
+        self.fault("main_loop_late")
+        self._write_health(False, "main_loop_late")
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -510,7 +500,48 @@ class PlayerService:
             raise RuntimeError("Player control requires the renderer thread")
 
     async def dispatch(self, callback):
-        return await asyncio.wrap_future(self.dispatcher(callback))
+        """Run `callback` on the GLib thread. MainLoopLate when it has not started within
+        DISPATCH_DEADLINE (it is abandoned then and never runs), and at once while an abandoned
+        one is unreached: a late loop is never a capacity refusal and never fills the
+        dispatcher's slots (E-G8-7). A callback that started before the deadline cannot be
+        abandoned, so its outcome is awaited and returned, never MainLoopLate: its effects
+        landed (E-G8-10). One that never returns blocks the GLib thread: on a V2 node its
+        probes go unanswered and the broker's probe kill ends that Player; under the V1 unit
+        the watchdog, no longer petted, does."""
+        source, abandon = self._late_posts.post(self.dispatcher, callback)
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+
+        def settle(done) -> None:
+            def deliver() -> None:
+                if waiter.done():
+                    return
+                if done.cancelled():
+                    waiter.cancel()
+                elif done.exception() is not None:
+                    waiter.set_exception(done.exception())
+                else:
+                    waiter.set_result(done.result())
+            with contextlib.suppress(RuntimeError):     # this loop already closed
+                loop.call_soon_threadsafe(deliver)
+
+        source.add_done_callback(settle)
+        try:
+            finished, _ = await asyncio.wait((waiter,), timeout=DISPATCH_DEADLINE)
+            if not finished:
+                if abandon():
+                    raise MainLoopLate("main_loop_late")
+                await asyncio.wait((waiter,))       # already running: it completes
+        finally:
+            if not waiter.done():
+                abandon()
+                waiter.cancel()
+        try:
+            return waiter.result()
+        except LoopLate as error:
+            raise MainLoopLate("main_loop_late") from error
+        except DispatchRefused as error:
+            raise ServiceError(str(error)) from error
 
     async def _mark_central_retrying(self) -> None:
         """Best-effort UI update; never let a diagnostic dispatch replace a cycle error."""
@@ -645,7 +676,17 @@ class PlayerService:
                     self.executor = self.executor_factory(registered.player_id, self.cache,
                         self.renderer, self.clock, self.mapping)
 
-                await self.dispatch(create)
+                # A late loop never discards the registration: an abandoned create() never
+                # ran, so it is posted again until the loop runs it (main waited the same way).
+                while True:
+                    try:
+                        await self.dispatch(create)
+                        break
+                    except MainLoopLate:
+                        self._main_loop_late()
+                        if self._stop.is_set():
+                            raise
+                        await asyncio.sleep(REPORT_INTERVAL)
             except Exception as error:
                 if self.cache is not None:
                     await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
@@ -939,7 +980,7 @@ class PlayerService:
         if healthy and not self.boot_id:
             healthy, reason = False, "identity"
         if (reason not in {"healthy", "executor", "identity", "configuration", "clock",
-                           "renderer_capacity", "disconnected"}
+                           "renderer_capacity", "disconnected", "main_loop_late"}
                 or (reason == "healthy") != bool(healthy)):
             raise ValueError("inconsistent health reason")
         body = dict(boot_id=self.boot_id, sampled_monotonic=self.clock.monotonic(),
@@ -1103,16 +1144,31 @@ class PlayerService:
                 if error.cause is Cause.REDIRECT:
                     raise               # ends the cycle: run() locates again (0014)
                 self._uplink_fault("clock_probe", error)
+            except MainLoopLate:
+                self._main_loop_late()
             except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
+    async def _poll_after_stale(self) -> None:
+        """Central refused feedback as stale: fetch state; a late loop applies it next turn."""
+        try:
+            await self.poll_state()
+        except MainLoopLate:
+            self._main_loop_late()
+
     async def _control_loop(self):
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
-            await self.poll_state()
-            readiness, observations = await self.dispatch(self._feedback)
-            healthy, reason = await self.dispatch(self._health_status)
+            try:
+                await self.poll_state()
+                readiness, observations = await self.dispatch(self._feedback)
+                healthy, reason = await self.dispatch(self._health_status)
+            except MainLoopLate:
+                # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
+                self._main_loop_late()
+                await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
+                continue
             # The signed-release boot-health trial has been retired (0009):
             # every boot is ticketless, so there is no per-boot release to
             # report against and no watchdog to disarm.
@@ -1121,7 +1177,7 @@ class PlayerService:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self.poll_state()
+                    await self._poll_after_stale()
             for observation in observations:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
@@ -1143,7 +1199,7 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self.poll_state()
+                    await self._poll_after_stale()
 
     async def _websocket_loop(self):
         async with self.link.websocket(self.session, "/v1/player/session",
@@ -1153,7 +1209,12 @@ class PlayerService:
                 if body.pop("type", None) != "state":
                     raise ServiceError("message_type")
                 state = State.model_validate(body)
-                result = await self.dispatch(lambda: self._apply_state(state))
+                try:
+                    result = await self.dispatch(lambda: self._apply_state(state))
+                except MainLoopLate:
+                    # Never started, so never applied; the next delivery or poll carries it.
+                    self._main_loop_late()
+                    continue
                 await self._ack_control(state, result)
             raise ServiceError("session_closed")
 
@@ -1274,9 +1335,13 @@ class PlayerService:
                     if proof_task is None:
                         proof_task = asyncio.create_task(self._local_app_proof_loop())
                     await self.hello_protocol()
-                    # Reconnection reconciles authority before any download work.
-                    await self.probe_time()
-                    await self.poll_state()
+                    # Reconnection reconciles authority before any download work. A late GLib
+                    # loop does not end the session here: its loops raise main_loop_late.
+                    for step in (self.probe_time, self.poll_state):
+                        try:
+                            await step()
+                        except MainLoopLate:
+                            self._main_loop_late()
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
@@ -1317,7 +1382,10 @@ class PlayerService:
                         self._offered = False
                         self._jobs = ()
                     self._write_health(False)
-                    watchdog.pet()      # one completed cycle, whatever its outcome (M5)
+                    # One completed cycle, whatever its outcome (M5), unless the GLib loop has
+                    # not reached an abandoned dispatch: a stuck loop is the watchdog's to end.
+                    if not self._late_posts.late:
+                        watchdog.pet()
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)
@@ -1460,7 +1528,7 @@ def main():
                 serial=display_serial(read_pi_serial()))
         except Exception:
             native_fault = "native_initialization"
-    dispatcher = GLibDispatcher(GLib)
+    dispatcher = MainLoopDispatcher(GLib)
     service = PlayerService(
         config,
         identity,
@@ -1498,9 +1566,9 @@ def main():
 
     signal.signal(signal.SIGTERM, finish)
     signal.signal(signal.SIGINT, finish)
-    GLib.timeout_add(33, tick)
+    Tick(GLib, 33, tick)
     service.start()
-    # Probes are answered on the same GLib queue as control dispatch (own one-slot lane), never here.
+    # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink).start()
     watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
     with contextlib.suppress(KeyboardInterrupt):

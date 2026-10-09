@@ -17,7 +17,10 @@ from typing import Any, Literal
 
 from contracts.models import AppliedCalibration
 from player.geometry import cover_rect, homography, inverse
+from player.mainloop import Tick, watch_bus
 from player.rendering import (
+    PRESENTATION_FRESHNESS,
+    REDRAW_RENEWAL,
     CapacityResult,
     LocalLayer,
     OutputComposition,
@@ -99,6 +102,35 @@ def _fingerprint(composition: OutputComposition) -> tuple:
             tuple((local.layer, local.path) for local in composition.layers))
 
 
+def _renewal_due(ack: _Draw | None, now: float) -> bool:
+    """Nothing acknowledged yet, or the last draw is REDRAW_RENEWAL old: paint again."""
+    return ack is None or now - ack.completed_at >= REDRAW_RENEWAL
+
+
+def _trial_key(frames, composition: OutputComposition, grant) -> object:
+    """The active calibration trial's identity, so a trial edit or expiry is a change."""
+    if frames is None:
+        return None
+    try:
+        trial = frames.trial(composition, grant)
+    except Exception:
+        return object()     # unreadable here: always redraw, and _render reports it
+    if trial is None:
+        return None
+    candidate = trial.candidate
+    return (candidate.trial_id, candidate.generation, candidate.sequence,
+            candidate.candidate_sha256)
+
+
+def _shown(composition: OutputComposition, generations: tuple, sample_serials: tuple,
+           frames, grant) -> tuple:
+    """Everything that changes a surface's pixels (G8 render on change, E-G8-3): layers,
+    decoder generations, alpha, each video's newest sample and the calibration trial."""
+    return (_fingerprint(composition), generations,
+            tuple(local.alpha for local in composition.layers), sample_serials,
+            _trial_key(frames, composition, grant))
+
+
 def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
     layers = []
     for local in reversed(composition.layers):
@@ -164,6 +196,9 @@ class _Draw:
     completed_at: float = 0
     applied_calibration: AppliedCalibration | None = None
     primitives: tuple | None = None
+    # What this draw shows (_shown): the one record present() compares against, so "a draw
+    # is owed" is just "the newest draw, pending or else acknowledged, shows something else".
+    shown: tuple | None = None
 
 
 @dataclass
@@ -279,7 +314,8 @@ class NativeRenderer:
             if "Wayland" not in type(display).__name__:
                 raise RuntimeError("node_display_requires_wayland")
             self._frames = WaylandFrames(display)
-            self._frame_timer = self.GLib.timeout_add(1000, self._renew_display_frames)
+            self._frame_timer = Tick(self.GLib, int(REDRAW_RENEWAL*1000),
+                                     self._renew_display_frames)
         diagnostic_style = self.Gtk.CssProvider()
         diagnostic_style.load_from_data(b"""
             .photo-wall-diagnostic {
@@ -400,8 +436,11 @@ class NativeRenderer:
             return False
         # Static photos need real tagged buffer commits too. GTK still owns the
         # paint/commit; no timer or frame callback manufactures display evidence.
+        # A surface present() renewed within REDRAW_RENEWAL needs no second paint.
+        now = time.monotonic()
         for surface in self._surfaces.values():
-            surface.area.queue_render()
+            if _renewal_due(surface.acknowledged, now):
+                surface.area.queue_render()
         return True
 
     def _window_realized(self, window, surface) -> None:
@@ -492,7 +531,7 @@ class NativeRenderer:
             return Gst.PadProbeReturn.OK
         sink.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, event_probe)
         decoder.bus = pipeline.get_bus()
-        decoder.bus.add_signal_watch()
+        watch_bus(decoder.bus)
         decoder.bus_handler = decoder.bus.connect("message", self._bus_message, decoder)
         if pipeline.set_state(Gst.State.PAUSED) == Gst.StateChangeReturn.FAILURE:
             self._destroy_decoder(decoder)
@@ -658,6 +697,9 @@ class NativeRenderer:
         if frames is not None:
             grant = frames.grant(composition.binding.output_id, composition)
             if grant is None or not grant.admitted or not grant.matches(composition):
+                # Nothing drawn before admission stands: a cleared acknowledgment makes the
+                # first present() after admission draw. A pending draw needs no reset here:
+                # _render drops it while its grant is not admitted.
                 surface.acknowledged = None
                 surface.area.queue_render()
                 return PresentationResult("pending")
@@ -682,12 +724,26 @@ class NativeRenderer:
                     return PresentationResult("failed", "decode")
                 decoder.playing = playing
         generations = self._generations(composition)
-        self._serial += 1
-        surface.pending = _Draw(self._serial, composition, generations)
-        surface.area.queue_render()
+        # Render on change: a new draw only when what it shows changed (layers, decoder
+        # generations, alpha, a new video sample, a trial edit) or the last one is due for
+        # renewal. A static photo is not redrawn every tick (G8).
+        shown = _shown(composition, generations,
+                       tuple(self._decoders[key].sample_serial for key, _, _ in generations),
+                       frames, grant if frames is not None else None)
+        # The newest draw is the pending one, else the acknowledged one: whatever _render
+        # dropped or drew, present() reads it from those two and nothing else.
         ack = surface.acknowledged
+        newest = surface.pending or ack
+        now = time.monotonic()
+        if newest is None or newest.shown != shown or _renewal_due(ack, now):
+            self._serial += 1
+            surface.pending = _Draw(self._serial, composition, generations, shown=shown)
+            surface.area.queue_render()
+        # Presented stays keyed on layers and generations only: a playing video's newer sample
+        # or a crossfade step never makes the composition already drawn read as pending.
         if (ack and _fingerprint(ack.composition) == _fingerprint(composition)
-                and ack.generations == generations and time.monotonic()-ack.completed_at < .5):
+                and ack.generations == generations
+                and now-ack.completed_at < PRESENTATION_FRESHNESS):
             return PresentationResult("presented", composition=ack.composition,
                                       presented_at=ack.completed_at,
                                       applied_calibration=ack.applied_calibration if getattr(self, "_frames", None) else None)
@@ -1035,7 +1091,7 @@ class NativeRenderer:
     def close(self) -> None:
         self._thread()
         if getattr(self, "_frame_timer", None) is not None:
-            self.GLib.source_remove(self._frame_timer)
+            self._frame_timer.stop()
             self._frame_timer = None
         if getattr(self, "_frames", None) is not None:
             self._frames.close()

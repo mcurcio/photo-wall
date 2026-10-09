@@ -1,5 +1,6 @@
 """Control-service authority and network bounds; simulated renderer is not Pi evidence."""
 
+import ast
 import asyncio
 import base64
 import contextlib
@@ -9,10 +10,14 @@ import inspect
 import json
 import logging
 import math
+import re
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import typing
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -28,27 +33,30 @@ from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response as Http11Response
 
+import player.service as service_module
 from central.db import ProcessTransactionClock
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
+from player.mainloop import CONTROL, DispatchRefused, LoopLate, MainLoopDispatcher
 from player.output_discovery import (
     CONFIGURED_OUTPUT_IDS,
     discover_outputs,
     output_app_id,
     weston_ini,
 )
-from player.rendering import CapacityResult, RecordingRenderer
+from player.rendering import CapacityResult, PrepareResult, PresentationResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
     BootContext,
-    GLibDispatcher,
     IdentifyOutput,
+    MainLoopLate,
     PlayerConfig,
     PlayerService,
     ServiceError,
+    StaleFeedback,
     State,
     Unauthorized,
     _ChunkBridge,
@@ -1269,12 +1277,13 @@ def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
     class GLib:
         callbacks = []
         @classmethod
-        def idle_add(cls, callback):
+        def idle_add(cls, callback, *, priority):
+            assert priority == CONTROL
             cls.callbacks.append(callback)
-    dispatcher = GLibDispatcher(GLib)
+    dispatcher = MainLoopDispatcher(GLib)
     seen = []
     futures = [dispatcher(lambda n=n: seen.append(n)) for n in range(4)]
-    assert isinstance(dispatcher(lambda: None).exception(), ServiceError)
+    assert isinstance(dispatcher(lambda: None).exception(), DispatchRefused)
     futures[1].cancel()
     for callback in GLib.callbacks:
         callback()
@@ -1282,6 +1291,323 @@ def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
     fifth = dispatcher(lambda: seen.append(4))
     GLib.callbacks[-1]()
     assert fifth.done() and seen == [0, 2, 3, 4]
+
+
+def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
+        tmp_path, monkeypatch):
+    """G8, E-G8-8 decision: the GLib loop stops running dispatches (a starved control queue).
+    The Player raises main_loop_late on its health channel and posts nothing on readiness, so
+    the readiness Central holds (prepared included) stands; a late report with prepared=()
+    would cancel the wall's coordinated groups. The late callbacks never run, and when the loop
+    recovers its next report is the executor's next sequence with nothing withdrawn."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    class StarvedGLib:
+        callbacks = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            cls.callbacks.append(callback)
+
+    def readiness_posts(server):
+        return [json.loads(request.content) for request in server.requests
+                if request.url.path == "/v1/player/readiness"]
+
+    async def turn(service, server, count):
+        posted = len(readiness_posts(server))
+
+        async def poll():
+            try:
+                await PlayerService.poll_state(service)
+            finally:
+                if len(readiness_posts(server)) >= posted + count:
+                    service._stop.set()
+        monkeypatch.setattr(service, "poll_state", poll)
+        service._stop.clear()
+        await asyncio.wait_for(service._control_loop(), 5)
+        return readiness_posts(server)[posted:]
+
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            service.health_path = tmp_path / "health.json"
+            service.boot_id = "00000000-1111-2222-3333-444444444444"
+            service._feedback()
+            assert await service.download(service._jobs[0])
+            service.tick_main()
+            live = (await turn(service, server, 1))[-1]
+            assert live["secured"] == ["picture"] and not live["failures"]
+
+            # The production dispatcher (4 slots), through more late cycles than it has slots.
+            service.dispatcher = MainLoopDispatcher(StarvedGLib)
+            monkeypatch.delattr(service, "poll_state")      # the real poll, no stop hook
+            late_cycles = []
+            raise_late = service._main_loop_late
+
+            def counted():
+                raise_late()
+                late_cycles.append(True)
+                if len(late_cycles) >= 8:
+                    service._stop.set()
+            monkeypatch.setattr(service, "_main_loop_late", counted)
+            posted = len(readiness_posts(server))
+            service._stop.clear()
+            await asyncio.wait_for(service._control_loop(), 5)
+            assert len(late_cycles) >= 8
+            assert readiness_posts(server)[posted:] == []   # readiness untouched
+            assert len(StarvedGLib.callbacks) <= 4      # one abandoned post holds the line
+            assert service.last_fault == "main_loop_late"
+            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
+            # The loop runs again: nothing it missed runs late, and reporting resumes.
+            ran = []
+            monkeypatch.setattr(service, "_apply_state", lambda state: ran.append(state))
+            for callback in StarvedGLib.callbacks:
+                callback()
+            assert ran == []
+            service.dispatcher = immediate
+            monkeypatch.undo()
+            recovered = (await turn(service, server, 1))[0]
+            assert recovered["sequence"] == live["sequence"] + 1     # no gap, nothing in between
+            assert recovered["failures"] == [] and recovered["secured"] == live["secured"]
+            assert json.loads(service.health_path.read_text())["health_reason"] == "healthy"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restart(
+        tmp_path, monkeypatch):
+    """E-G8-7, through run() with the time loop live and the production dispatcher: a GLib
+    loop that stops running dispatches never turns into a dispatch_capacity refusal. The
+    Player keeps raising main_loop_late (and posts no readiness) across many deadlines and
+    across a session that ends meanwhile (its reconnect's cycle-start dispatches are late, not
+    fatal: it re-locates once and that session holds), and run() pets the watchdog not once until the loop runs again, so WatchdogSec
+    restarts a Player whose loop stays stuck."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    pets = []
+    monkeypatch.setattr(service_module.watchdog, "pet", lambda: pets.append(True))
+
+    class GLib:
+        blocked, queued = False, []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            cls.queued.append(callback) if cls.blocked else callback()
+
+    async def check():
+        clock = ManualClock(100)
+        server = Server(clock)
+        posts, fail_state = [], []
+
+        def handle(request):
+            if request.url.path == "/v1/player/state" and fail_state and not fail_state[0]:
+                fail_state[0] = True
+                return httpx.Response(503, json={"error": "fixture_outage"})
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            if request.url.path == "/v1/player/readiness":
+                posts.append(json.loads(request.content))
+            return result
+
+        find = finding("http://central")
+        locates = []
+
+        async def counted_find():
+            locates.append(True)
+            return await find()
+
+        service, _ = await finder_rig(counted_find, handle)
+        service.dispatcher = MainLoopDispatcher(GLib)
+        faults = []
+        record = service.fault
+        monkeypatch.setattr(service, "fault",
+                            lambda code, **kw: (faults.append(code), record(code, **kw)))
+
+        def late_count():
+            return faults.count("main_loop_late")
+
+        async def until(predicate):
+            while not predicate():
+                await asyncio.sleep(.005)
+
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(until(lambda: posts and pets), 5)
+            GLib.blocked = True
+            blocked_at, petted = len(posts), len(pets)
+            await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
+            fail_state.append(False)        # the session ends while the loop is blocked
+            await asyncio.wait_for(until(lambda: fail_state[0]), 5)
+            ended_at, located_at = late_count(), len(locates)
+            await asyncio.wait_for(until(lambda: late_count() >= ended_at + 6), 5)
+            # The reconnect's late cycle-start dispatches keep its session: one re-locate,
+            # then the session holds (a late start that ended it would re-locate every cycle).
+            assert len(locates) <= located_at + 1
+            assert service._located
+            assert len(posts) == blocked_at         # no readiness while the loop is late
+            assert "dispatch_capacity" not in faults
+            assert len(pets) == petted              # no pet while the loop is stuck
+            assert len(GLib.queued) <= 4
+            # The loop runs again: the abandoned posts drain, reporting and petting resume.
+            GLib.blocked = False
+            for callback in GLib.queued:
+                callback()
+            await asyncio.wait_for(
+                until(lambda: len(pets) > petted and len(posts) > blocked_at), 5)
+            assert all(not report["failures"] for report in posts)
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 5)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
+    """Central refuses readiness as stale (409) and the state poll that follows misses the
+    dispatch deadline: the Player raises main_loop_late and the control loop carries on (the
+    next turn polls again); a late loop never ends the session here."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        polls, stale = [], []
+        request = service.request
+
+        async def refusing(method, path, **kwargs):
+            if path == "/v1/player/readiness" and len(stale) < 2:
+                stale.append(True)
+                raise StaleFeedback("state_changed")
+            return await request(method, path, **kwargs)
+        monkeypatch.setattr(service, "request", refusing)
+
+        async def poll():
+            polls.append(True)
+            if len(polls) % 2 == 0:             # the poll after each stale refusal is late
+                raise MainLoopLate("main_loop_late")
+            if len(polls) >= 5:
+                service._stop.set()
+        monkeypatch.setattr(service, "poll_state", poll)
+        try:
+            await asyncio.wait_for(service._control_loop(), 5)
+            assert len(stale) == 2 and len(polls) >= 5
+            assert service.last_fault == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkeypatch):
+    """The time loop names a missed dispatch deadline main_loop_late; MainLoopLate is a
+    ServiceError, so without its own branch it would read as a clock_probe failure."""
+    async def check():
+        service, _ = await rig(tmp_path)
+        service.health_path = tmp_path / "health.json"
+
+        async def late():
+            service._stop.set()
+            raise MainLoopLate("main_loop_late")
+        monkeypatch.setattr(service, "probe_time", late)
+        try:
+            await asyncio.wait_for(service._time_loop(), 5)
+            assert service.last_fault == "main_loop_late"
+            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_first_enrollment_on_a_late_loop_keeps_its_registration(tmp_path, monkeypatch):
+    """The executor's create() dispatch misses its deadline at first enrollment: the abandoned
+    post never ran, so it is posted again until the loop runs it. The registration stands (one
+    register, no re-enrollment that would supersede this boot), as main's unbounded wait did."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    late = [2]
+
+    def dispatcher(callback):
+        if late[0]:
+            late[0] -= 1
+            refused = Future()
+            refused.set_exception(LoopLate("main_loop_late"))
+            return refused
+        return immediate(callback)
+
+    async def check():
+        service, server = await finder_rig(finding("http://central"))
+        service.dispatcher = dispatcher
+        try:
+            await service.locate_central()
+            await service.enroll()
+            registers = [request for request in server.requests
+                         if request.url.path == "/v1/enrollment/register"]
+            assert len(registers) == 1 and late == [0]
+            assert service.executor is not None and service.cache is not None
+            assert service.registration is not None
+            assert service.last_fault == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_full_dispatcher_is_a_capacity_refusal_not_a_late_loop(tmp_path):
+    """Only a refusal for a late loop reads as main_loop_late; a full dispatcher on a loop that
+    is not late stays the session-ending dispatch_capacity it always was."""
+    async def check():
+        service, _ = await rig(tmp_path)
+        try:
+            def full(callback):
+                refused = Future()
+                refused.set_exception(DispatchRefused("dispatch_capacity"))
+                return refused
+            service.dispatcher = full
+            with pytest.raises(ServiceError) as raised:
+                await service.dispatch(lambda: None)
+            assert str(raised.value) == "dispatch_capacity"
+            assert not isinstance(raised.value, MainLoopLate)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def _player_failure_codes() -> set[str]:
+    """Every readiness failure code player/ can emit: Failure(code=...) literals, every
+    literal assigned to an assignment's `failure`, and the renderer's result codes."""
+    def literals(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, ast.IfExp):
+            return literals(node.body) | literals(node.orelse)
+        return set()
+    codes = {code for result in (PrepareResult, PresentationResult)
+             for code in typing.get_args(typing.get_type_hints(result)["code"])} - {"none"}
+    for path in (Path(__file__).resolve().parents[1] / "player").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Failure":
+                codes |= {code for keyword in node.keywords if keyword.arg == "code"
+                          for code in literals(keyword.value)}
+            elif isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Attribute) and target.attr == "failure"
+                    and getattr(target.value, "id", None) == "assignment"
+                    for target in node.targets):
+                codes |= literals(node.value)
+    return codes
+
+
+def test_every_player_failure_code_has_console_recovery_wording():
+    """A code the console does not know falls back to the generic wording silently, so the
+    operator would never read a new code's recovery. (main_loop_late is a health fault, never a
+    readiness failure code: E-G8-8 decision.)"""
+    source = (Path(__file__).resolve().parents[1] / "central/console/src/readinessRecovery.js"
+              ).read_text()
+    table = source[source.index("const RECOVERY"):source.index("});")]
+    known = set(re.findall(r"^  ([a-z_]+):", table, re.MULTILINE))
+    codes = _player_failure_codes()
+    assert {"clock", "capacity", "decode", "download", "integrity"} <= codes
+    assert "main_loop_late" not in codes
+    assert codes - known == set()
 
 
 def test_health_has_boot_authority_and_no_secrets(tmp_path):
@@ -1480,6 +1806,108 @@ def test_websocket_has_explicit_bounds_and_rejects_oversized_state(tmp_path):
             assert options["proxy"] is options["compression"] is None
             assert options["additional_headers"]["Authorization"] == "Bearer " + "1" * 32
         finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_state_delivered_while_the_loop_is_late_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """G8: a websocket delivery whose dispatch misses the deadline is not applied and does
+    not end the session; the next delivery, once the loop runs again, is applied."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
+
+    class GLib:
+        queued = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            cls.queued.append(callback)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        applied = []
+        monkeypatch.setattr(service, "_apply_state", lambda state: applied.append(state))
+        message = json.dumps({"type": "state", **server.state.model_dump(mode="json")})
+
+        class Socket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def __aiter__(self):
+                yield message               # its dispatch is abandoned at the deadline
+                for callback in GLib.queued:
+                    callback()              # the loop runs again
+                service.dispatcher = immediate
+                yield message
+
+        service.link.websocket_connect = lambda uri, **options: Socket()
+        service.dispatcher = MainLoopDispatcher(GLib)
+        try:
+            with pytest.raises(ServiceError, match="session_closed"):
+                await asyncio.wait_for(service._websocket_loop(), 5)
+            assert len(applied) == 1 and service.last_fault == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_state_applied_across_the_deadline_is_acknowledged_not_reported_late(
+        tmp_path, monkeypatch):
+    """E-G8-10: GLib reaches a delivery's dispatch before DISPATCH_DEADLINE and the apply ends
+    after it. The callback ran, so its outcome is the answer: the state is applied once and
+    acknowledged, and nothing reads main_loop_late (a late report would withdraw `prepared`)."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .1)
+
+    class GLib:
+        """A GLib thread that reaches each post at 20 ms."""
+        threads = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            thread = threading.Timer(.02, callback)
+            cls.threads.append(thread)
+            thread.start()
+
+    async def check():
+        service, server = await rig(tmp_path)
+        applied, acked, faults = [], [], []
+        record = service.fault
+        monkeypatch.setattr(service, "fault",
+                            lambda code, **kw: (faults.append(code), record(code, **kw)))
+
+        def slow_apply(state):
+            time.sleep(.3)                  # starts at 20 ms, ends past the 100 ms deadline
+            applied.append(state)
+            return "applied"
+
+        async def ack(state, result):
+            acked.append(result)
+        monkeypatch.setattr(service, "_apply_state", slow_apply)
+        monkeypatch.setattr(service, "_ack_control", ack)
+        message = json.dumps({"type": "state", **server.state.model_dump(mode="json")})
+
+        class Socket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def __aiter__(self):
+                yield message
+
+        service.link.websocket_connect = lambda uri, **options: Socket()
+        service.dispatcher = MainLoopDispatcher(GLib)
+        try:
+            with pytest.raises(ServiceError, match="session_closed"):
+                await asyncio.wait_for(service._websocket_loop(), 5)
+            assert len(applied) == 1 and acked == ["applied"]
+            assert "main_loop_late" not in faults and not service._late_posts.late
+        finally:
+            for thread in GLib.threads:
+                thread.join()
             await close(service)
     asyncio.run(check())
 
