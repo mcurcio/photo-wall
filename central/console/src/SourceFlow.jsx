@@ -14,7 +14,8 @@ import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { editedId, editKey } from "./flow/instance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { learnPaths, readTagsById } from "./libraryTags.js";
-import { codeWords, mediaNow, sourceState } from "./mediaHealth.js";
+import { SourceProblem } from "./domain/source-problem.tsx";
+import { mediaNow, sourceProblem, sourceState } from "./mediaHealth.js";
 import {
   buildSourceSpec,
   connectionAnnounced,
@@ -33,8 +34,11 @@ import { refreshFact, refusalIssue, TAG_GONE } from "./sourceWords.js";
 import { LibraryStep, NameStep, NarrowStep, SourceReview, TagsStep } from "./SourceSteps.jsx";
 import { namedSource, sourceName } from "./sourceNames.js";
 import { sourceRefreshPath } from "./mediaApi.js";
+import { Alert } from "./ui/alert.tsx";
 import { useCardMutation } from "./useCardMutation.js";
 import { usePreview } from "./usePreview.js";
+import { sourceRefreshFailed, sourceRefreshResult } from "./useSourceRefresh.js";
+import { useTagListStatus } from "./useTagListStatus.js";
 
 const EMPTY = [];
 const PREVIEWED = new Set(["tags", "narrow", "review"]);
@@ -198,13 +202,11 @@ export function SourceFlow({ snapshot, route, navigate, markDraft, handOffs }) {
     sourceRef,
     () => apiWrite(sourceRefreshPath(sourceRef), { method: "POST" }),
     (result) => {
-      if (result.ok && result.status === 202) {
-        return "Refresh requested. Check Status for the worker's latest result.";
-      }
-      if (result.status === 0 || result.status >= 500) {
-        return "The refresh request outcome is unknown. Check the Source status before retrying.";
-      }
-      return `Refresh request failed: ${result.error ? codeWords(result.error) : `HTTP ${result.status}`}.`;
+      // The one receipt (useSourceRefresh.js); a card points at its own Status instead.
+      const receipt = sourceRefreshResult(result);
+      return receipt.kind === "requested"
+        ? { ...receipt, message: "Refresh requested. Check Status for the worker's latest result." }
+        : receipt;
     },
   ), [sourceRefresh]);
 
@@ -368,10 +370,13 @@ function useSavedTagPaths(sources, connections, reported) {
  * those live in the flow's preview (§37; card tiles are deferred, §44).
  *
  * @param {{sources: ReadonlyArray<object>, onRefresh: (sourceRef: string) => void,
- *          refreshingSources: Set<string>, refreshFeedback: Record<string, string|null>}} props
+ *          refreshingSources: Set<string>, refreshFeedback: Record<string, {kind: string, message: string}|null>}} props
  */
 function SourceCards({ sources, now, connections, reported, onRefresh, refreshingSources, refreshFeedback, onEdit, onDelete, busy }) {
   const paths = useSavedTagPaths(sources, connections, reported);
+  const tagLists = useTagListStatus(sources
+    .filter((source) => sourceProblem(source, now) !== null)
+    .map((source) => source.spec?.connection_ref));
   if (sources.length === 0) {
     return <p className="showrunner__empty">No Sources yet.</p>;
   }
@@ -383,26 +388,32 @@ function SourceCards({ sources, now, connections, reported, onRefresh, refreshin
         const feedback = Object.hasOwn(refreshFeedback, source.source_ref)
           ? refreshFeedback[source.source_ref] : null;
         const gone = (source.spec?.tags ?? []).some((tag) => Object.hasOwn(paths, tag) && paths[tag] === null);
+        const problem = sourceProblem(source, now, tagLists[source.spec?.connection_ref] ?? null);
         return <li key={source.source_ref} className="card-grid__item">
           <SummaryCard
             title={sourceName(source)}
             lines={[
-              { label: "Status", value: state.label },
+              // A failing Source is one error alert: what failed, why, the fix, its last
+              // good refresh, so its refresh and issue are not said again below.
+              { label: "Status", value: problem !== null ? <SourceProblem problem={problem} /> : state.label },
               // An ok Source's Status already states its refresh (sourceState's one fact).
-              ...(state.state === "never-refreshed" || state.state === "ok" ? [] : [{
+              ...(problem !== null || state.state === "never-refreshed" || state.state === "ok" ? [] : [{
                 label: "Refreshed",
                 value: source.last_success == null ? "No successful refresh"
                   : source.status === "ok" ? factText(refreshFact(source, now, connections))
                     : "The last refresh failed (see Status)",
               }]),
-              ...(source.diagnostics?.length
-                ? [{ label: source.status === "ok" ? "Partial refresh" : "Issue",
-                    value: sourceIssue(source, now) }]
+              // Every Source whose status is not ok is a problem above, so codes here are
+              // a successful refresh's skipped items.
+              ...(problem === null && source.diagnostics?.length
+                ? [{ label: "Partial refresh", value: partialRefresh(source, now) }]
                 : []),
               ...(feedback
                 ? [{
                     label: "Refresh request",
-                    value: <span role="status" aria-live="polite">{feedback}</span>,
+                    value: sourceRefreshFailed(feedback)
+                      ? <Alert severity="alarm" title={feedback.message} />
+                      : <span role="status" aria-live="polite">{feedback.message}</span>,
                   }]
                 : []),
               { label: "Selects", value: selectionWords(source.spec, paths) },
@@ -429,14 +440,14 @@ function SourceCards({ sources, now, connections, reported, onRefresh, refreshin
   );
 }
 
-function sourceIssue(source, now) {
+/** A successful refresh's skipped items: how many, and why (each distinct code once). */
+function partialRefresh(source, now) {
   const diagnostics = source.diagnostics ?? [];
   // One sentence per distinct code, then per distinct sentence (two codes may share a row).
   const details = [...new Set([...new Set(diagnostics.map((entry) => entry.code))]
     .slice(0, 3)
     .map(refusalIssue))]
     .join(" · ");
-  if (source.status !== "ok") return details;
   const state = sourceState(source, now, false);
   const affected = Number(source.counts?.pending ?? 0) + Number(source.counts?.rejected ?? 0);
   const count = Number.isFinite(affected) && affected > 0 ? affected : diagnostics.length;

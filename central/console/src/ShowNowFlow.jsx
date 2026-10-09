@@ -13,7 +13,8 @@ import { useFlowDraft } from "./flow/useFlowDraft.js";
 import { useFlowInstance, useFlowRefs } from "./flow/useFlowInstance.js";
 import { useFlowWrite } from "./flow/useFlowWrite.js";
 import { useSceneHandOver } from "./flow/useSceneHandOver.js";
-import { mediaNow, sourceState } from "./mediaHealth.js";
+import { SourceProblem } from "./domain/source-problem.tsx";
+import { mediaNow, sourceProblem, sourceState } from "./mediaHealth.js";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   activationAnswer,
@@ -40,7 +41,9 @@ import {
 } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips } from "./TargetPicker.jsx";
-import { sourceRefreshMessage, useSourceRefresh } from "./useSourceRefresh.js";
+import { Alert } from "./ui/alert.tsx";
+import { sourceRefreshFailed, sourceRefreshMessage, useSourceRefresh } from "./useSourceRefresh.js";
+import { useTagListStatus } from "./useTagListStatus.js";
 
 const EMPTY = {};
 
@@ -432,6 +435,9 @@ function SourceFreshness({ snapshot, refs, authoredMedia, refresh }) {
     const source = sources.find((candidate) => candidate.source_ref === ref) ?? null;
     return { ref, source, state: source === null ? null : sourceState(source, now, false) };
   });
+  const tagLists = useTagListStatus(rows
+    .filter(({ source }) => source !== null && sourceProblem(source, now) !== null)
+    .map(({ source }) => source.spec?.connection_ref));
   const needsAttention = rows.some(({ state }) => state === null || state.severity !== "ok");
   return (
     <section
@@ -448,9 +454,13 @@ function SourceFreshness({ snapshot, refs, authoredMedia, refresh }) {
           {rows.map(({ ref, source, state }) => {
             const feedback = refresh.feedback[ref] ?? null;
             const message = sourceRefreshMessage(feedback, source, state);
+            const problem = source === null ? null
+              : sourceProblem(source, now, tagLists[source.spec?.connection_ref] ?? null);
             return (
               <li key={ref}>
-                <span>{sourceName(source ?? ref)}: {state?.label ?? "Current Source status is unavailable."}</span>
+                {problem !== null
+                  ? <SourceProblem problem={problem} name={sourceName(source)} />
+                  : <span>{sourceName(source ?? ref)}: {state?.label ?? "Current Source status is unavailable."}</span>}
                 {state !== null && state.state !== "ok" && (
                   <button
                     type="button"
@@ -461,7 +471,9 @@ function SourceFreshness({ snapshot, refs, authoredMedia, refresh }) {
                     {refresh.pending === ref ? "Requesting refresh…" : "Refresh Source"}
                   </button>
                 )}
-                {message !== null && <p role="status">{message}</p>}
+                {message !== null && (sourceRefreshFailed(feedback)
+                  ? <Alert severity="alarm" title={message} />
+                  : <p role="status">{message}</p>)}
               </li>
             );
           })}

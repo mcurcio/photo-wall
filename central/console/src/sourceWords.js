@@ -276,6 +276,49 @@ export const SOURCE_REFUSALS = Object.freeze({
 });
 
 /**
+ * The connection's stored tag list was refused for its key (`library_tags` status
+ * `permission`): the picker cannot list tags, so a Source saved meanwhile has none. Names the
+ * permission the media docs list for the tag list (docs/module-media.md, `GET /tags`).
+ */
+export const TAGS_KEY_MISSING =
+  "Photo Wall's library key is missing the tag.read permission, so tags can't be picked until " +
+  "it is added (the setup guide's library key step).";
+
+/**
+ * What a refused Source alert says: its title (what failed) and its lines (why, and the one
+ * fix). `source_limit` names the filters the Source actually has, so "too large" is never
+ * a mystery, and when the connection's stored tag list is refused for its key
+ * ({@link TAGS_KEY_MISSING}) says why tags could not narrow it. Any other code says its
+ * row's state and, where it differs, the row's sentence.
+ *
+ * @param {string|null|undefined} code the Source-level refusal code
+ * @param {string|null|undefined} status the Source's status, said only when there is no code
+ * @param {string[]} filters the Source's filters in words (mediaHealth.js `sourceFilters`)
+ * @param {string|null} tagListStatus the connection's stored tag-list status, when read
+ * @returns {{title: string, lines: string[]}}
+ */
+export function refusalProblem(code, status, filters, tagListStatus = null) {
+  if (code === "source_limit") {
+    const why = filters.length === 0
+      ? "It has no tags and no dates, so it asks for your whole photo library"
+      : `Its only filters are ${filters.join(", ")}, and that still matches too much`;
+    const keyMissing = tagListStatus === "permission";
+    return {
+      title: "Photo Wall refused this Source as too large, so it selects nothing",
+      lines: [
+        `${why}: over Photo Wall's current size limits for one Source (at most 1,000 matches).`,
+        ...(keyMissing
+          ? [TAGS_KEY_MISSING, "Until then, narrow it with dates: edit it in Sources."]
+          : ["Narrow it with tags or dates: edit it in Sources."]),
+      ],
+    };
+  }
+  const title = refusalState(code, status);
+  const issue = code ? refusalIssue(code) : null;
+  return { title, lines: issue && issue !== title ? [issue] : [] };
+}
+
+/**
  * A failing Source's state words from its refusal code; with no code, or a code the table
  * does not hold, a neutral "Refresh failed (…)" that blames no one.
  *

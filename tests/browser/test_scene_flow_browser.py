@@ -53,7 +53,7 @@ from test_registry import ADMIN
 from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
-from media.models import RefreshResult
+from media.models import Diagnostic, MediaError, RefreshResult
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -157,6 +157,55 @@ def test_refresh_source_from_scene_photos_preserves_draft_and_reports_request(
         answers = form.get_by_label("Your answers", exact=True)
         expect(answers).to_contain_text("holiday")
         expect(answers).to_contain_text(VALID_FRAME)
+
+
+def test_a_refresh_refused_as_too_large_is_an_error_alert_that_says_why_and_the_fix(
+    page, registry,
+):
+    """The owner's case (2026-10-09): a Source saved with no tags (the library key could
+    not list them) is refused by the worker's size limit on refresh. The readiness shows an
+    error alert, not plain text, saying what failed, why (no tags, no dates: the whole
+    library), that the key lacks `tag.read`, and the fix; the finished refresh does not
+    repeat it. Mutation probe: render SceneSteps.jsx's status line instead of SourceProblem."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    repository = MediaRepository(registry.db, registry.clock, queue=queue,
+                                 times=ProcessTransactionClock(registry.clock))
+    repository.record_library_tags("fixture-library", None,
+                                   MediaError("upstream_permission", "permission"))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        readiness = form.get_by_role("region", name="Source media status")
+        with page.expect_response(
+            lambda response: response.url.endswith("/refresh")
+            and response.request.method == "POST"
+        ) as response:
+            readiness.get_by_role("button", name="Refresh Source", exact=True).click()
+        assert response.value.status == 202
+        lease = repository.begin_requested_refresh(SOURCE)
+        assert lease is not None
+        assert repository.publish_refresh(lease, RefreshResult(
+            snapshot=CatalogSnapshot(source_ref=SOURCE, refreshed_at=registry.clock.utc(),
+                                     status="incompatible"),
+            diagnostics=(Diagnostic(code="source_limit"),),
+        ))
+        drive_poll(page)
+        expect(readiness.get_by_role("status")).to_have_text(
+            "Refresh finished, and the Source still failed.")
+        alert = readiness.get_by_role("alert")
+        expect(alert).to_contain_text(
+            "Photo Wall refused this Source as too large, so it selects nothing")
+        expect(alert).to_contain_text(
+            "It has no tags and no dates, so it asks for your whole photo library: over Photo "
+            "Wall's current size limits for one Source (at most 1,000 matches).")
+        expect(alert).to_contain_text(
+            "Photo Wall's library key is missing the tag.read permission, so tags can't be "
+            "picked until it is added (the setup guide's library key step).")
+        expect(alert).to_contain_text("Until then, narrow it with dates: edit it in Sources.")
+        expect(alert).to_contain_text("Never refreshed successfully.")
+        assert alert.get_attribute("data-severity") == "alarm"
 
 
 def test_completed_source_refresh_reloads_authored_candidates_once(page, registry):

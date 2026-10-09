@@ -4,7 +4,8 @@ import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from
 import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import {
-  datedWords, favouritesWords, kindsWords, refreshFact, refusalState, tagCountWords,
+  datedWords, favouritesWords, kindsWords, refreshFact, refusalIssue, refusalProblem,
+  refusalState, tagCountWords,
 } from "./sourceWords.js";
 import { captureDay, clockTime } from "./timeWords.js";
 
@@ -138,6 +139,48 @@ export function sourceFilters(spec, tagPaths = null) {
   ].filter((part) => part !== null);
 }
 
+/** "never refreshed successfully", or "last good refresh 2 h ago". */
+function good(source, now) {
+  return source.last_success == null
+    ? "never refreshed successfully"
+    : `last good refresh ${age(ageAt(now, source.last_success))} ago`;
+}
+
+/**
+ * A failed refresh's Source-level code (per-item codes carry an asset id), else the first.
+ *
+ * @param {object} source a `/v1/operator/media` `sources` row
+ * @returns {string|undefined}
+ */
+function refusalCode(source) {
+  const diagnostics = source.diagnostics ?? [];
+  return (diagnostics.find((entry) => entry?.code && !entry.asset_id) ?? diagnostics[0])?.code;
+}
+
+/**
+ * A failing Source's problem, for an error alert (sourceWords.js `refusalProblem`): what
+ * failed, why (its filters, and a tag list refused for the key), the one fix, then when it
+ * last refreshed successfully. Null for any Source that is not failing.
+ *
+ * @param {object} source a `/v1/operator/media` `sources` row
+ * @param {number} now `media.read_at`
+ * @param {string|null} [tagListStatus] its connection's stored tag-list status, when read
+ * @returns {{title: string, lines: string[]}|null}
+ */
+export function sourceProblem(source, now, tagListStatus = null) {
+  if (source == null || sourceState(source, now, false).state !== "failing") return null;
+  const code = refusalCode(source);
+  const problem = refusalProblem(code, source.status, sourceFilters(source.spec), tagListStatus);
+  // The refresh's other codes (at most three in all, as a Source card lists them), each once.
+  const others = [...new Set((source.diagnostics ?? []).map((entry) => entry?.code))]
+    .filter((other) => other && other !== code).slice(0, 2).map(refusalIssue);
+  const last = good(source, now);
+  return {
+    ...problem,
+    lines: [...new Set([...problem.lines, ...others]), `${last[0].toUpperCase()}${last.slice(1)}.`],
+  };
+}
+
 /**
  * One Source's state, first match (§14): awaiting its first refresh
  * (`next_refresh = 0`, 005_media_jobs.sql), failing, overdue past
@@ -164,17 +207,11 @@ export function sourceState(source, now, includeFilters = true, connections = []
     return said("never-refreshed", "todo", "Awaiting refresh");
   }
   if (source.status !== "ok") {
-    const good = source.last_success == null
-      ? "never refreshed successfully"
-      : `last good refresh ${age(ageAt(now, source.last_success))} ago`;
     // One closed table names each refusal's owner and words (sourceWords.js
     // SOURCE_REFUSALS, §39 R21): Photo Wall's own refusals never read as the library's
-    // fault, and a code it does not hold reads neutrally. A failed refresh records one
-    // Source-level code; per-item codes carry an asset id.
-    const diagnostics = source.diagnostics ?? [];
-    const code = (diagnostics.find((entry) => entry?.code && !entry.asset_id) ?? diagnostics[0])?.code;
-    const failure = refusalState(code, source.status);
-    return said("failing", "alarm", `${failure} · ${good}`);
+    // fault, and a code it does not hold reads neutrally.
+    const failure = refusalState(refusalCode(source), source.status);
+    return said("failing", "alarm", `${failure} · ${good(source, now)}`);
   }
   if (!source.next_refresh) {
     return said("never-refreshed", "todo", "Awaiting refresh");

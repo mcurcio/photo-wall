@@ -47,7 +47,13 @@ from test_operator_showrunner_browser import (
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from contracts.time import ManualClock
-from media.models import SourcePreview, SourcePreviewResult, SourceSpec, StoredPreviewMember
+from media.models import (
+    MediaError,
+    SourcePreview,
+    SourcePreviewResult,
+    SourceSpec,
+    StoredPreviewMember,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -246,35 +252,56 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
         connect(page, origin)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
-        expect(card).to_contain_text("No successful refresh")
-        # The supported-version list is Photo Wall's, so its Status names Photo Wall's release.
-        expect(card).to_contain_text(
+        # A failed refresh is the card's error alert. The supported-version list is Photo
+        # Wall's, so it names Photo Wall's release.
+        alert = card.get_by_role("alert")
+        expect(alert).to_contain_text(
             "This Photo Wall release doesn't support your photo library's version · check the supported "
-            "versions · never refreshed successfully")
+            "versions")
+        expect(alert).to_contain_text("Never refreshed successfully.")
         expect(card).not_to_contain_text("Your photo library is unsupported")
         expect(card).not_to_contain_text("Awaiting refresh")
 
 
-def test_a_source_over_the_workers_ceiling_names_photo_walls_limit_not_the_library(page, registry):
+def test_a_source_over_the_workers_ceiling_is_an_error_alert_that_says_why_and_the_fix(page, registry):
     """A refresh over the worker's 1,000-match ceiling refuses the Source (`source_limit`,
-    status incompatible): the card says it is Photo Wall's limit, never that the library is
-    unsupported. Mutation probe: drop the `source_limit` row in sourceWords.js `SOURCE_REFUSALS`."""
+    status incompatible): the card shows an error alert (not plain text) that names Photo
+    Wall's current limit (never the library as unsupported), says why (no tags and no dates,
+    so the whole library) and, while the connection's stored tag list is refused for its key,
+    that the key lacks `tag.read`. Mutation probes: drop the `source_limit` branch of
+    sourceWords.js `refusalProblem`; render SourceFlow.jsx's Status as `state.label`."""
     _seed(registry)
     _set_source(registry, "all-photos:1", status="incompatible",
                 next_refresh=registry.clock.utc() + 30,
                 refresh_completed_revision=0, refresh_requested_revision=1,
                 diagnostics=[{"code": "source_limit"}])
+    _set_source(registry, "dated:1", status="incompatible",
+                next_refresh=registry.clock.utc() + 30,
+                refresh_completed_revision=0, refresh_requested_revision=1,
+                diagnostics=[{"code": "source_limit"}],
+                spec={"captured_from": DEC_12_2024 - 86400 * 365})
+    MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)
+                    ).record_library_tags("fixture-library", None,
+                                          MediaError("upstream_permission", "permission"))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
-        expect(card).to_contain_text(
-            "Over Photo Wall's current size limits for one Source (at most 1,000 matches) · narrow it "
-            "with tags or dates")
-        expect(card).to_contain_text(
-            "Photo Wall currently refuses a Source this large (at most 1,000 matches, within its size "
-            "limits); saved like this it selects nothing. Narrow it with tags or dates.")
+        alert = card.get_by_role("alert")
+        expect(alert).to_contain_text(
+            "Photo Wall refused this Source as too large, so it selects nothing")
+        expect(alert).to_contain_text(
+            "It has no tags and no dates, so it asks for your whole photo library: over Photo "
+            "Wall's current size limits for one Source (at most 1,000 matches).")
+        expect(alert).to_contain_text(
+            "Photo Wall's library key is missing the tag.read permission, so tags can't be "
+            "picked until it is added")
+        expect(alert).to_contain_text("Until then, narrow it with dates: edit it in Sources.")
+        expect(alert).to_contain_text("Never refreshed successfully.")
+        assert alert.get_attribute("data-severity") == "alarm"
         expect(card).not_to_contain_text("unsupported")
+        dated = _sources(page).get_by_role("article", name="dated").get_by_role("alert")
+        expect(dated).to_contain_text("Its only filters are dated from ")
 
 
 def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_details(page, registry):
@@ -340,14 +367,15 @@ def test_card_refresh_reports_accepted_request_and_blocks_duplicate_clicks(page,
 
 
 @pytest.mark.parametrize(
-    ("response", "expected"),
+    ("response", "role", "expected"),
     [
-        ((409, '{"error":"source_not_found"}'), "Refresh request failed: source not found."),
-        ((503, '{"error":"internal"}'),
+        # A refused request is an error alert; an unknown outcome is not (yet) a failure.
+        ((409, '{"error":"source_not_found"}'), "alert", "Refresh request failed: source not found."),
+        ((503, '{"error":"internal"}'), "status",
          "The refresh request outcome is unknown. Check the Source status before retrying."),
     ],
 )
-def test_card_refresh_reports_refused_or_unknown_request(page, registry, response, expected):
+def test_card_refresh_reports_refused_or_unknown_request(page, registry, response, role, expected):
     _seed(registry)
     _seed_source(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -361,7 +389,8 @@ def test_card_refresh_reports_refused_or_unknown_request(page, registry, respons
             lambda route: route.fulfill(status=status, content_type="application/json", body=body),
         )
         card.get_by_role("button", name="Refresh holiday", exact=True).click()
-        expect(card.get_by_role("status")).to_have_text(expected)
+        # An alert's text leads with its severity's mark (hidden from its accessible name).
+        expect(card.get_by_role(role)).to_contain_text(expected)
 
 
 def test_card_refresh_reports_unknown_transport_outcome(page, registry):
