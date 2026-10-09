@@ -38,17 +38,21 @@ presentation_code = custom_target('presentation-code', input: presentation_xml,
   command: [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 # The private overlay client is Python (overlay/), spawned by the shell at
 # display_dir/diagnostic-client. Debian's interpreter by absolute path: a builder image's PATH
-# python3 cannot see Debian's pywayland. Its bindings are generated here.
+# python3 cannot see Debian's pywayland. Its bindings are generated here, into the overlay
+# package as the package installs it (debian/photo-wall-node-display.install puts the context's
+# Python, overlay/*.py included, at its import path under display_dir, decision 0019); the
+# launcher and the display harness import it as the top-level `overlay` through the link below.
 python = find_program('/usr/bin/python3')
+overlay_dir = display_dir / 'appliance' / 'display_host' / 'overlay'
 core_xml = dependency('wayland-scanner', native: true).get_variable(pkgconfig: 'pkgdatadir') / 'wayland.xml'
 viewporter_xml = protocols_dir / 'stable/viewporter/viewporter.xml'
 single_pixel_xml = protocols_dir / 'staging/single-pixel-buffer/single-pixel-buffer-v1.xml'
 custom_target('overlay-protocol',
   input: [core_xml, presentation_xml, viewporter_xml, single_pixel_xml, xml], output: 'protocol',
   command: [python, '-m', 'pywayland.scanner', '-o', '@OUTPUT@', '-i', '@INPUT@'],
-  install: true, install_dir: display_dir / 'overlay')
-install_data('overlay/__init__.py', 'overlay/instruction.py', 'overlay/render.py',
-  'overlay/paint.py', 'overlay/health.py', 'overlay/client.py', install_dir: display_dir / 'overlay')
+  install: true, install_dir: overlay_dir)
+install_symlink('overlay', pointing_to: 'appliance' / 'display_host' / 'overlay',
+  install_dir: display_dir)
 install_data('overlay/diagnostic-client', install_dir: display_dir, install_mode: 'rwxr-xr-x')
 # The client library the Player loads in the app root (photo-wall-frame-client).
 shared_library('photo-wall-frame-client', 'native/frame-client.c', client_header,

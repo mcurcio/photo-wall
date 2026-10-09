@@ -1,6 +1,7 @@
 """The local repo debian-packaging/build-repo.sh builds (decision 0019, data flow step 1), proved
 on the built artifact: every binary package of debian/control at its own content-derived
-version, the pinned nats-server, and an apt that resolves and installs the whole set through it.
+version, the two pinned third-party packages it carries on purpose (upstream's nats-server and
+python3-nats, built from the pinned nats-py sdist), and an apt that resolves and installs the whole set through it.
 
 PHOTO_WALL_LOCAL_REPO names a build-repo.sh output directory (node-components.yml's `debs` job
 sets it). The install runs in the build container build-repo.sh loaded, photo-wall-debian-builder,
@@ -21,6 +22,11 @@ REPO = Path(__file__).resolve().parents[2]
 BUILT = os.environ.get("PHOTO_WALL_LOCAL_REPO")
 BUILDER_IMAGE = "photo-wall-debian-builder"
 CONTENT_VERSION = re.compile(r"0\+[0-9a-f]{12}")
+# The pinned third-party packages the repo carries beside debian/control's, at their versions;
+# each one's binding to its pin is tests/debs/test_pins.py's.
+NATS_PY = nats_server.read_pin((REPO / "debian-packaging/python-nats/upstream.env").read_text())
+THIRD_PARTY = {"nats-server": nats_server.NATS_SERVER_VERSION,
+               "python3-nats": f"{NATS_PY['NATS_PY_VERSION']}-1"}
 
 pytestmark = pytest.mark.skipif(not BUILT, reason="set PHOTO_WALL_LOCAL_REPO to a "
                                                   "debian-packaging/build-repo.sh output directory")
@@ -59,7 +65,7 @@ def _index() -> dict[str, dict[str, str]]:
 
 def test_the_repo_holds_every_declared_package_at_its_own_content_version():
     index = _index()
-    ours = {name: entry["Version"] for name, entry in index.items() if name != "nats-server"}
+    ours = {name: entry["Version"] for name, entry in index.items() if name not in THIRD_PARTY}
     assert sorted(ours) == sorted(_declared())
     assert [name for name, version in ours.items() if not CONTENT_VERSION.fullmatch(version)] == []
     assert len(set(ours.values())) == len(ours), "each package has its own version"
@@ -77,6 +83,11 @@ def test_the_repo_carries_upstreams_nats_server_deb_at_the_pinned_digest():
     entry = _index()["nats-server"]
     assert (entry["Version"], entry["Architecture"]) == (pin["NATS_SERVER_VERSION"], "arm64")
     assert entry["SHA256"] == pin["NATS_SERVER_ARM64_DEB_SHA256"]
+
+
+def test_the_repo_carries_python3_nats_at_the_pinned_version():
+    entry = _index()["python3-nats"]
+    assert (entry["Version"], entry["Architecture"]) == (THIRD_PARTY["python3-nats"], "all")
 
 
 def test_every_indexed_file_is_the_bytes_the_index_names():

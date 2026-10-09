@@ -1,0 +1,29 @@
+Description: Build with setuptools instead of uv_build
+ Upstream builds with uv_build, which Debian trixie does not package. The same
+ wheel layout (the nats package from src/, with its py.typed marker) comes
+ from setuptools, which trixie ships.
+Author: Photo Wall <noreply@example.invalid>
+Forwarded: not-needed
+
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [build-system]
+-requires = ["uv_build>=0.9.28,<0.10.0"]
+-build-backend = "uv_build"
++requires = ["setuptools>=77"]
++build-backend = "setuptools.build_meta"
+
+ [project]
+ name = "nats-py"
+@@ -46,5 +46,8 @@
+     "pytest-xdist>=3.0.0",
+ ]
+
+-[tool.uv.build-backend]
+-module-name = "nats"
++[tool.setuptools.packages.find]
++where = ["src"]
++
++[tool.setuptools.package-data]
++nats = ["py.typed"]

@@ -17,11 +17,13 @@ name: V2 node components
 # SOURCE_DATE_EPOCH.
 #
 # The `debs` job is step 1 of decision 0019: the one source package (debian/) built by
-# dpkg-buildpackage in the pinned build container, and the local repo beside upstream's
-# nats-server .deb (debian-packaging/build-repo.sh), built twice (the two indexes, which name every
-# .deb's sha256, must agree) and proved by installing the whole set through it
-# (tests/debs/test_local_repo.py) and by the display and frame client's installed files and ABI
-# identity (tests/debs/test_display_packages.py). It uploads the repo as
+# dpkg-buildpackage in the pinned build container (its import check refusing any Depends that
+# drifts from the imports, scripts/import_check.py), and the local repo beside upstream's
+# nats-server .deb and python3-nats (debian-packaging/build-repo.sh), built twice (the two indexes,
+# which name every .deb's sha256, must agree) and proved by installing the whole set through it
+# (tests/debs/test_local_repo.py), by the display and frame client's installed files and ABI
+# identity (tests/debs/test_display_packages.py) and by each Python context importing from its
+# runtime directories alone (tests/debs/test_context_packages.py). It uploads the repo as
 # photo-wall-node-debs-<revision>, which the `build` job takes the display (node-display.deb,
 # byte for byte) and the frame client (inside app.deb) from.
 #
@@ -108,10 +110,10 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
-      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI)
+      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports)
         env:
           PHOTO_WALL_LOCAL_REPO: ${{ runner.temp }}/node-debs
-        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py
+        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py tests/debs/test_context_packages.py
 
       - name: Upload the local repo
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

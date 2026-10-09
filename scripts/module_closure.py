@@ -108,11 +108,16 @@ def first_party_packages(repo: Path) -> tuple[str, ...]:
     return tuple(sorted(path.parent.name for path in repo.glob("*/__init__.py")))
 
 
-class _Finder(modulefinder.ModuleFinder):
+class Finder(modulefinder.ModuleFinder):
     """modulefinder that scans first-party code only and remembers which module's code first
     reached each module, so an error names the importer and not just the import. A module
     outside `first_party` is still found and loaded (so it is judged as an import of the
-    first-party code that reached it), but its own imports are not followed."""
+    first-party code that reached it), but its own imports are not followed.
+
+    `edges` holds every direct import a first-party module's code makes, found or not, as
+    (importer, imported) dotted names: the absolute name of each import statement (a relative
+    one resolved against the importer), each ancestor package of it (importing `a.b.c` imports
+    `a` and `a.b`), and each `from` name that is a module found under it."""
 
     def __init__(self, path: list[str], first_party: frozenset[str],
                  namespaces: Mapping[str, str] = MappingProxyType({})) -> None:
@@ -120,6 +125,7 @@ class _Finder(modulefinder.ModuleFinder):
         self.first_party = first_party | frozenset(namespaces)
         self.namespaces = namespaces          # top-level PEP 420 package -> its one directory
         self.importer: dict[str, str] = {}
+        self.edges: set[tuple[str, str]] = set()
         self._scanning: list[str] = []
 
     def find_module(self, name, path, parent=None):
@@ -147,6 +153,24 @@ class _Finder(modulefinder.ModuleFinder):
             super().scan_code(co, m)
         finally:
             self._scanning.pop()
+
+    def _safe_import_hook(self, name, caller, fromlist, level=-1):
+        # Every import statement of scanned (first-party) code passes here; `caller` is None for
+        # `from . import x`, which modulefinder hands on as an absolute import of the parent.
+        importer = self._scanning[-1] if self._scanning else None
+        super()._safe_import_hook(name, caller, fromlist, level)
+        if importer is None:
+            return
+        if level > 0:
+            try:
+                parent = self.determine_parent(caller, level)
+            except (ImportError, KeyError):
+                return
+            name = f"{parent.__name__}.{name}" if name else parent.__name__
+        parts = name.split(".")
+        self.edges.update((importer, ".".join(parts[:end])) for end in range(1, len(parts) + 1))
+        self.edges.update((importer, f"{name}.{sub}") for sub in fromlist or ()
+                          if f"{name}.{sub}" in self.modules)
 
     def importers(self, name: str) -> str:
         if name in self.badmodules:
@@ -185,7 +209,7 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
                 repo, entry):
             raise ClosureError(f"forbidden entry {entry} names no module under {repo}")
     declared, reached_third_party = frozenset(third_party), set()
-    finder = _Finder([str(repo), *search_path()], first_party)
+    finder = Finder([str(repo), *search_path()], first_party)
     for root in roots:
         try:
             finder.import_hook(root)
@@ -244,7 +268,7 @@ def first_party_files(roots: Sequence[str], *, repo: Path,
     count as first-party packages. Raises ClosureError for a root or a first-party module that
     does not exist."""
     first_party = frozenset(first_party_packages(repo)) | frozenset(namespaces)
-    finder = _Finder([str(repo), *search_path()], first_party,
+    finder = Finder([str(repo), *search_path()], first_party,
                      MappingProxyType({name: str(repo / name) for name in namespaces}))
     for root in roots:
         try:

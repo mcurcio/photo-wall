@@ -1,0 +1,19 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: nats-py
+Source: https://github.com/nats-io/nats.py
+
+Files: *
+Copyright: The NATS Authors
+License: Apache-2.0
+
+Files: debian/*
+Copyright: Photo Wall
+License: Apache-2.0
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License"); you may not
+ use this file except in compliance with the License. You may obtain a copy of
+ the License at https://www.apache.org/licenses/LICENSE-2.0
+ .
+ On Debian systems, the full text of the Apache License, Version 2.0 is in
+ /usr/share/common-licenses/Apache-2.0.

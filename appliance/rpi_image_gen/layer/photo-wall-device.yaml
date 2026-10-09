@@ -7,7 +7,8 @@
 #  .github/workflows/base-image.yml from the Debian declaration
 #  (`python3 scripts/debian_packages.py packages base-os bootstrapper player`) into
 #  the file `IGconf_app_device_packages` names: the declaration is the one
-#  place a package is named, so this layer names none. The `.deb`
+#  place a package is named, so this layer names none but one OS dependency
+#  Debian's pywayland fails to declare (the display's hook below). The `.deb`
 #  (`scripts/build_bootstrapper_deb.py`, "ALL our custom code ships as a
 #  portable .deb" -- the image-build tool owns none of it) is built before
 #  rpi-image-gen runs and named by `IGconf_app_bootstrapper_deb`. One
@@ -27,7 +28,7 @@
 #  must already be here (base-image.yml checks the built image with
 #  scripts/device_root_checks.py). No application code and no origin -- 0009
 #  rule #1.
-# X-Env-Layer-Version: 3.1.0
+# X-Env-Layer-Version: 3.2.0
 # X-Env-Layer-Requires: systemd-min,ca-certificates
 #
 # X-Env-VarPrefix: app
@@ -77,6 +78,11 @@ mmdebstrap:
       fi
       if [ -n "${IGconf_app_node_display_deb:-}" ]; then
         install -m 0644 "$IGconf_app_node_display_deb" "$1/tmp/photo-wall-node-display.deb"
-        chroot "$1" apt-get install -y --no-install-recommends /tmp/photo-wall-node-display.deb
+        # python3-cffi-backend: an OS dependency of Debian's python3-pywayland (trixie
+        # 0.4.18-4), which imports it without declaring it; the display's overlay client runs
+        # on pywayland. It goes into the OS here, never into a Photo Wall package (decision
+        # 0019, R4; erratum E-0019-P2A-3).
+        chroot "$1" apt-get install -y --no-install-recommends python3-cffi-backend \
+          /tmp/photo-wall-node-display.deb
         rm -f "$1/tmp/photo-wall-node-display.deb"
       fi
