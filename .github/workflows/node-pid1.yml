@@ -104,6 +104,8 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
         with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
           use: false
 
       - name: Expose the GHA cache service to the build
