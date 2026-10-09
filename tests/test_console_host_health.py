@@ -57,8 +57,8 @@ const snapshot = { inventory: { read_at: 1000, frames: [{ id: "lobby-left", play
             { player_id: "p-b", output_id: "HDMI-A-1", observation: { connected: true } }] } };
 const silentBoth = read([row({ host: sample(880, [temp(95)]) }),
                          row({ device_id: "device-b", host: sample(880, [temp(95)]) })]);
-out.incidents = hostIncidents(snapshot, silentBoth).map(({ key, text, frames, playerHref }) =>
-  ({ key, text, frames, playerHref }));
+out.incidents = hostIncidents(snapshot, silentBoth).map(({ key, text, frames, hardwareHref }) =>
+  ({ key, text, frames, hardwareHref }));
 out.noRead = hostIncidents(snapshot, null);
 out.reporting = hostIncidents(snapshot, read([row({ host: sample(990, [temp(95)]) })]));
 
@@ -235,7 +235,7 @@ def test_silence_refusal_and_previous_boot():
 def test_incidents_name_the_bound_player_and_link_it():
     out = _run()
     assert out["incidents"] == [{
-        "key": "player:device-a:host", "frames": ["lobby-left"], "playerHref": "#/players/device-a",
+        "key": "player:device-a:host", "frames": ["lobby-left"], "hardwareHref": "#/hardware/device-a",
         "text": "Player device-a (Frame lobby-left) — Host Management silent · last reported 2 min ago"}]
     assert out["noRead"] == []
     # A Reporting 95 °C is a threshold incident (A1), not silence.
@@ -376,20 +376,22 @@ console.log(JSON.stringify({ judged: view(playersTable(rows, hosts)), skipped: v
 """
 
 
-def test_the_players_table_tiers_only_bound_players_and_puts_spares_then_retired_last():
+def test_the_hardware_table_tiers_only_bound_players_and_puts_spares_then_retired_last():
     _require_node()
     result = subprocess.run(["node", "--input-type=module", "-e", TABLE_SCRIPT, str(SRC / "hostHealth.js"),
                              str(SRC / "facts.js")],
                             capture_output=True, text=True, timeout=60, check=False)
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    # Bound rows worst first (alarm before ok); spares unbanded and untiered below them, though
-    # one is silent (its silence reads as a plain receipt age) and one warm; retired last and
-    # not judged at all (G2: a spare is never alarmed; a retired box is never "Unknown: not read").
+    # Bound rows tiered (the Hardware list orders them worst first by these tiers:
+    # patterns/entity-list.tsx, tests/browser/test_hardware_browser.py), by name; spares
+    # unbanded and untiered below them, though one is silent (its silence reads as a plain
+    # receipt age) and one warm; retired last and not judged at all (G2: a spare is never
+    # alarmed; a retired box is never "Unknown: not read").
     assert out["judged"] == [
+        ["a-ok", "bound", "ok", [], "reported", True],
         ["b-hot", "bound", "alarm", ["soc_temperature"], "reported", True],
         ["z-silent", "bound", "alarm", ["host"], "derived", True],
-        ["a-ok", "bound", "ok", [], "reported", True],
         ["c-spare-silent", "spare", None, [], "reported", False],
         ["d-spare-warm", "spare", None, [], "reported", False],
         ["r-retired", "retired", None, None, None, None]]

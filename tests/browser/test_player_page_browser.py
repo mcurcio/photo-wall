@@ -1,12 +1,12 @@
-"""The Players list and the Player page against real node records (console DDD §9-§10,
-beads B1 to B3).
+"""The Hardware list, a Pi's Hardware page and its Software and screens page against real node
+records (console DDD §9-§10, beads B1 to B3; Console by Domain E1 U1).
 
 The CI-gated fleet browser suite (R11): the production app on the loopback harness with node
 management mounted (`operator_server(..., node_control=...)`), real node sessions, host
 samples, manager preparation and broker evidence recorded through Central's own owner
 services, and a real Registry Player enrolled on the same device. It proves the device-keyed
 join, the node read (only on an open Player page), the facts' labels and their Unknowns, the
-per-section error boundary and the retired `#/equipment` bookmark;
+per-section error boundary and the retired `#/equipment` and `#/players` bookmarks (no aliases);
 and (B2) Reboot Player against Central's real reboot owner behind an open effect gate: the
 frozen request, its retry, its window, late responses and the app operations' named states,
 and (R0) the one send rule: a dialog frozen at an older read sends nothing once the newest read
@@ -35,7 +35,7 @@ from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
-from console_tasks import connect, current_hash, go, open_player
+from console_tasks import connect, current_hash, go, hardware_list, open_pi, open_player
 from operator_harness import answer_first, drive_poll, operator_server, report_readiness
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
@@ -155,26 +155,40 @@ def _status_reads(page):
 
 
 def _layer(page, layer):
+    """One software layer's rows on the Software and screens page."""
     return page.get_by_role("region", name="Layers", exact=True).get_by_role(
         "group", name=layer, exact=True)
 
 
-def test_the_tracer_reaches_a_player_page_from_the_list_with_standing_and_host_age(page, registry):
+def _host(page):
+    """Host Management's session rows: Link and sessions, on the Pi's Hardware page."""
+    return page.get_by_role("region", name="Link and sessions", exact=True).get_by_role(
+        "group", name="Host Management", exact=True)
+
+
+def _software(page, name=NAME):
+    """From a Pi's Hardware page, follow the Pi header to its Software and screens page."""
+    page.get_by_role("link", name="Software and screens", exact=True).click()
+    expect(page.get_by_role("heading", level=1, name="Software and screens", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
+
+
+def test_the_tracer_reaches_a_pi_page_from_the_list_with_standing_and_host_age(page, registry):
     box = Box(registry)
     box.host_sample()
     registry.clock.advance(4)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sent = _node_reads(page)
-        connect(page, origin, "players")
-        row = page.get_by_role("table", name="Players", exact=True).get_by_role("row").filter(
-            has=page.get_by_role("link", name=NAME, exact=True))
+        connect(page, origin, "hardware")
+        row = hardware_list(page).get_by_role("table", name="Not driving a Frame", exact=True).get_by_role(
+            "row").filter(has=page.get_by_role("link", name=NAME, exact=True))
         expect(row).to_contain_text("Standing: Unbound")
         page.wait_for_timeout(200)
-        assert sent == [], "the Players list read node records"
+        assert sent == [], "the Hardware list read node records"
 
-        player = open_player(page, NAME)
-        expect(player).to_contain_text("Standing: Unbound")
-        expect(_layer(page, "Host Management")).to_contain_text(
+        pi = open_pi(page, NAME)
+        expect(pi).to_contain_text("Standing: Unbound")
+        expect(_host(page)).to_contain_text(
             "Last reported: Host Management last reported 4 s ago")
         assert any(url.endswith(f"/v1/operator/node/devices/{DEVICE_ID}") for url in sent)
         # Leaving the page stops its node read.
@@ -195,10 +209,10 @@ def test_five_layers_and_a_silent_app_with_a_reporting_host_shows_both_ages(page
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
         player = open_player(page, NAME)
+        # Host Management (L0) lives on the Pi's Hardware page; the software layers stay here.
         layers = page.get_by_role("region", name="Layers", exact=True).get_by_role("listitem")
-        expect(layers).to_have_count(5)
-        expect(_layer(page, "Host Management")).to_contain_text(
-            "Host Management last reported 0 s ago")
+        expect(layers).to_have_count(4)
+        expect(_layer(page, "Host Management")).to_have_count(0)
         expect(_layer(page, "App Manager")).to_contain_text(
             "App Manager last reported 2 min ago · preparation verified")
         broker = _layer(page, "App Effect Broker")
@@ -233,8 +247,8 @@ def test_a_missing_field_reads_unknown_naming_it(page, registry):
     page.route(DEVICE_READ, without_host_sample)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
-        open_player(page, NAME)
-        expect(_layer(page, "Host Management")).to_contain_text(
+        open_pi(page, NAME)
+        expect(_host(page)).to_contain_text(
             "Last reported: Unknown: host_observation.received_at not served")
 
 
@@ -254,12 +268,11 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         expect(page.get_by_role("region", name="Boot", exact=True).get_by_role("alert")).to_have_text(
             "This section could not be shown. The rest of the page is current.")
         # The other sections, the page and the console stay up.
-        expect(_layer(page, "Host Management")).to_contain_text("Host Management last reported")
+        expect(_layer(page, "App Manager")).to_contain_text("Last reported")
         expect(player).to_contain_text("Standing: Unbound")
         expect(page.get_by_role("region", name="Outputs", exact=True)).to_contain_text("HDMI-A-1")
-        go(page, "players")
-        expect(page.get_by_role("table", name="Players", exact=True).get_by_role(
-            "link", name=NAME, exact=True)).to_be_visible()
+        go(page, "hardware")
+        expect(hardware_list(page).get_by_role("link", name=NAME, exact=True)).to_be_visible()
 
 
 def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_works(page, registry):
@@ -282,11 +295,17 @@ def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_wo
         banner = page.get_by_role("region", name="Node control", exact=True)
         expect(banner).to_have_text(BANNER)
         expect(banner).to_have_count(1)
-        player = open_player(page, name)
+        pi = open_pi(page, name)
         expect(banner).to_have_count(1)
-        # In place of the node sections, exactly one line.
+        # In place of each page's node sections, exactly one line.
+        expect(pi.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
+        for section in ("Health", "Link and sessions", "Reboot"):
+            expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
+        expect(pi).not_to_contain_text("Unknown: node management")
+        _software(page, name)
+        player = page.locator("main > section:not([hidden])")
         expect(player.get_by_text(NOT_SHOWN, exact=True)).to_have_count(1)
-        for section in ("Health", "Layers", "Boot", "Reboot", "App"):
+        for section in ("Layers", "Boot", "App"):
             expect(page.get_by_role("region", name=section, exact=True)).to_have_count(0)
         expect(player).not_to_contain_text("Unknown: node management")
         # Identify, Bind, Unbind and Retire still work.
@@ -305,11 +324,13 @@ def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_wo
         expect(dialog.get_by_role("status")).to_have_text("1 of 1 unbound")
         assert registry.inventory().frames[0].player_id is None
         dialog.get_by_role("button", name="Close", exact=True).click()
-        player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
+        # Retire lives on the Pi's Hardware page.
+        pi = open_pi(page, name)
+        pi.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
         dialog.get_by_role("button", name="Confirm retire", exact=True).click()
-        expect(player).to_contain_text("Standing: Retired")
+        expect(pi).to_contain_text("Standing: Retired")
         page.wait_for_timeout(300)
         assert sent == [], "a node read was sent to a Central without node control"
         assert host_reads == [], "the shell read fleet hosts from a Central without node control"
@@ -324,13 +345,16 @@ def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_st
         connect(page, origin)
         expect(page.get_by_role("heading", level=1)).to_be_visible()
         expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
-        go(page, "players")
+        go(page, "hardware")
         page.wait_for_timeout(200)
         shell_reads = len(status)
         assert shell_reads >= 1, "the shell did not read node status"
         with page.expect_response(DEVICE_READ):
-            open_player(page, NAME)
-        expect(_layer(page, "Host Management")).to_contain_text("Host Management last reported")
+            open_pi(page, NAME)
+        expect(_host(page)).to_contain_text("Host Management last reported")
+        with page.expect_response(DEVICE_READ):
+            _software(page)
+        expect(_layer(page, "App Manager")).to_contain_text("Last reported")
         # A second device read (5 s cadence) sends no status read of the page's own.
         with page.expect_response(DEVICE_READ, timeout=10_000):
             pass
@@ -361,7 +385,7 @@ def test_the_boot_section_holds_node_records_and_the_one_deprecated_path_line(pa
         expect(boot).to_contain_text(
             "A Pi boots by node path when its kernel command line carries photowall.node=v2.")
         expect(boot).not_to_contain_text("deprecated")
-        expect(boot.locator("p.fact")).to_have_count(2)
+        expect(boot.locator("p[data-truth]")).to_have_count(2)
         deprecated["on"] = True
         warning = boot.get_by_role("note")
         expect(warning).to_have_text(
@@ -370,7 +394,7 @@ def test_the_boot_section_holds_node_records_and_the_one_deprecated_path_line(pa
             "Select and Stage do not reach it", timeout=10_000)
         expect(warning).to_have_count(1)
         expect(boot).not_to_contain_text("A Pi boots by node path")
-        expect(boot.locator("p.fact")).to_have_count(3)
+        expect(boot.locator("p[data-truth]")).to_have_count(3)
 
 
 def test_a_failed_device_read_keeps_its_rows_marked_refresh_failed(page, registry):
@@ -378,20 +402,20 @@ def test_a_failed_device_read_keeps_its_rows_marked_refresh_failed(page, registr
     box.host_sample()
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin, paused_at=registry.clock.utc())
-        open_player(page, NAME)
-        host = _layer(page, "Host Management")
+        open_pi(page, NAME)
+        host = _host(page)
         expect(host).to_contain_text("Host Management last reported 0 s ago")
         page.route(DEVICE_READ, lambda route: route.fulfill(
             status=500, content_type="application/json", body='{"error": "boom"}'))
         with page.expect_response(DEVICE_READ):
             drive_poll(page)
-        layers = page.get_by_role("region", name="Layers", exact=True)
-        expect(layers).to_contain_text("refresh failed")
+        link = page.get_by_role("region", name="Link and sessions", exact=True)
+        expect(link).to_contain_text("refresh failed")
         expect(host).to_contain_text("Host Management last reported 0 s ago")
 
 
 def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, registry):
-    """H1 (§61): Reboot sits in the header behind its own boundary."""
+    """Reboot, on the Pi's Hardware page, sits behind its own boundary."""
     box = Box(registry)
     box.host_sample()
 
@@ -403,9 +427,9 @@ def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, regis
     page.route(DEVICE_READ, drifted)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
-        player = open_player(page, NAME)
-        header = player.locator(".player__header")
-        expect(header.get_by_role("region", name="Reboot", exact=True).get_by_role("alert")).to_have_text(
+        pi = open_pi(page, NAME)
+        header = pi.locator("header")
+        expect(pi.get_by_role("region", name="Reboot", exact=True).get_by_role("alert")).to_have_text(
             "This section could not be shown. The rest of the page is current.")
         expect(header.get_by_role("heading", level=2, name=NAME, exact=True)).to_be_visible()
         expect(header).to_contain_text("Standing: Unbound")
@@ -413,25 +437,26 @@ def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, regis
             "Host Management: Host Management last reported")
 
 
-def test_health_is_first_from_the_fleet_host_read_and_layers_keep_only_the_receipt(page, registry):
-    """H1 (§61): Health, from Central's real fleet host read, is the first section; its raw
-    disclosure holds the sample's lines, which left Layers; Layers keeps Host Management's
-    "Last reported" and its session line."""
+def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_receipt(page, registry):
+    """The Pi's Hardware page: Reboot, Health (from Central's real fleet host read), then Link
+    and sessions; Health's raw disclosure holds the sample's lines; Link and sessions keeps
+    Host Management's "Last reported" and its session line."""
     box = Box(registry)
     box.host_sample()
     registry.clock.advance(2)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
-        player = open_player(page, NAME)
-        expect(player.locator(".player > section.player__section").first).to_have_attribute("aria-label", "Health")
+        pi = open_pi(page, NAME)
+        sections = pi.locator("section[aria-label]").evaluate_all("(all) => all.map((s) => s.ariaLabel)")
+        assert sections == ["Reboot", "Health", "Link and sessions", "Danger zone"], sections
         health = page.get_by_role("region", name="Health", exact=True)
         expect(health).to_contain_text("Host Management: Host Management last reported 2 s ago")
-        health.get_by_text("Every reported metric", exact=True).click()
+        health.get_by_role("button", name="Every reported metric", exact=True).click()
         expect(health.get_by_role("list", name="Every reported metric", exact=True)).to_contain_text(
             "uptime: 1 seconds (host sampler)")
-        host = _layer(page, "Host Management")
+        host = _host(page)
         expect(host).to_contain_text("Last reported: Host Management last reported 2 s ago")
-        host.get_by_text("Host Management details", exact=True).click()
+        host.get_by_role("button", name="Host Management details", exact=True).click()
         expect(host).to_contain_text("Session ")
         expect(host).not_to_contain_text("uptime")
         expect(host).not_to_contain_text("visible pixels")
@@ -442,14 +467,16 @@ def test_a_box_seen_only_at_boot_is_listed_not_enrolled(page, registry):
     box.host_sample()
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sent = _node_reads(page)
-        connect(page, origin, "players")
-        row = page.get_by_role("table", name="Players", exact=True).get_by_role("row").filter(
-            has=page.get_by_role("link", name=NAME, exact=True))
+        connect(page, origin, "hardware")
+        row = hardware_list(page).get_by_role("table", name="Not driving a Frame", exact=True).get_by_role(
+            "row").filter(has=page.get_by_role("link", name=NAME, exact=True))
         expect(row).to_contain_text("Standing: Not enrolled")
         page.wait_for_timeout(200)
         assert sent == []
-        player = open_player(page, NAME)
-        expect(_layer(page, "Host Management")).to_contain_text("Host Management last reported")
+        open_pi(page, NAME)
+        expect(_host(page)).to_contain_text("Host Management last reported")
+        _software(page)
+        player = page.locator("main > section:not([hidden])")
         expect(_layer(page, "Player app")).to_contain_text("Unknown: this box has not enrolled")
         expect(player).to_contain_text("Not enrolled: the Player app has reported no Outputs.")
 
@@ -461,25 +488,31 @@ def test_a_retired_player_page_reads_no_node_records(page, registry):
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sent = _node_reads(page)
         connect(page, origin)
-        visit_hash = f"#/players/{DEVICE_ID}"
-        page.evaluate("(route) => { window.location.hash = route; }", visit_hash)
-        player = page.locator("main > section:not([hidden])")
-        expect(player).to_contain_text("Standing: Retired")
-        expect(player).to_contain_text("Not read: Player retired")
+        for visit_hash in (f"#/hardware/{DEVICE_ID}", f"#/players/{DEVICE_ID}"):
+            page.evaluate("(route) => { window.location.hash = route; }", visit_hash)
+            player = page.locator("main > section:not([hidden])")
+            expect(player).to_contain_text("Standing: Retired")
+            expect(player).to_contain_text("Not read: Player retired")
+            expect(player.get_by_role("button", name=re.compile("^Retire player"))).to_have_count(0)
         page.wait_for_timeout(300)
         assert sent == []
 
 
-def test_the_equipment_bookmark_lands_on_players(page, registry):
+def test_the_retired_list_bookmarks_land_on_the_wall(page, registry):
+    # No aliases (owner rule): the Equipment and Players lists' bookmarks are unknown routes,
+    # which land where every unknown route does; the sidebar's Fleet group is Hardware.
     enroll(registry, count=1)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        page.goto(origin + "/console#/equipment")
-        expect(page.get_by_role("heading", level=1, name="Players", exact=True)).to_be_visible()
-        expect(page.get_by_role("table", name="Players", exact=True)).to_be_visible()
-        assert current_hash(page) == "#/players"
+        for bookmark in ("#/equipment", "#/players"):
+            page.goto(origin + "/console" + bookmark)
+            expect(page.get_by_role("heading", level=1, name="Wall", exact=True)).to_be_visible()
+            assert current_hash(page) == "#/wall"
         nav = page.get_by_role("navigation", name="Sections", exact=True)
-        expect(nav.get_by_role("link", name="Equipment", exact=True)).to_have_count(0)
+        for gone in ("Equipment", "Players", "Software and screens"):
+            expect(nav.get_by_role("link", name=gone, exact=True)).to_have_count(0)
+        expect(nav.get_by_role("list", name="Fleet", exact=True).get_by_role("link")).to_have_text(
+            ["Hardware", "Releases"])
 
 
 # --- B2: Reboot Player and the app operations (console DDD §10).
@@ -586,8 +619,8 @@ def _call_send_directly(dialog_button):
 
 
 def _reboot(page):
-    """Reboot, in the Player page's header (console DDD §61)."""
-    return page.locator(".player__header").get_by_role("region", name="Reboot", exact=True)
+    """Reboot, on the Pi's Hardware page (Console by Domain § Fleet)."""
+    return page.get_by_role("region", name="Reboot", exact=True)
 
 
 def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page, registry):
@@ -600,7 +633,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
     with _gated_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
         expect(dialog).to_contain_text("Frame lobby: no live Run")
@@ -637,7 +670,7 @@ def test_a_lost_answer_is_retried_with_the_identical_body_inside_the_window(page
         sent = _reboot_posts(page)
         _lose_first_response(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
@@ -656,7 +689,7 @@ def test_a_double_click_on_reboot_player_sends_one_post(page, registry):
     with _gated_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True).get_by_role(
             "button", name="Reboot Player", exact=True).dblclick()
@@ -675,7 +708,7 @@ def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_i
         _lose_first_response(page)
         held = _HeldDeviceRead(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog")
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
@@ -711,7 +744,7 @@ def test_a_closed_gate_disables_reboot_with_its_reason(page, registry):
     with _gated_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_be_disabled()
         expect(_reboot(page)).to_contain_text(
             "Reboot unavailable: Effect gate closed · Central's reason: no deployment certification has opened it")
@@ -746,13 +779,14 @@ def test_rejected_reboots_and_app_operations_show_their_named_states(page, regis
     page.route(APP_READ, rejected_stage)
     with _gated_server(registry) as origin:
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
         expect(history).to_contain_text("Rejected by Host Management")
         expect(history).to_contain_text(
             'Host Management reported a "rejected" response (reboot scope or expiry) · first received 0 s ago')
         # Rejected is a settled answer, so a new request may be made.
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_be_enabled()
+        _software(page)
         app = page.get_by_role("region", name="App", exact=True).get_by_role(
             "list", name="App operations", exact=True)
         expect(app).to_contain_text("Rejected by App Effect Broker")
@@ -773,7 +807,7 @@ def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_
     with _gated_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
         send = dialog.get_by_role("button", name="Reboot Player", exact=True)
@@ -803,7 +837,7 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
         sent = _reboot_posts(page)
         held = _HeldDeviceRead(page)
         connect(page, origin)
-        open_player(page, NAME)
+        open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
         held.freeze()  # the other page's commit lands after this page's newest read

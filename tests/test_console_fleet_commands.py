@@ -385,22 +385,24 @@ def test_send_reboot_is_the_only_poster_of_reboots():
     assert "rebootRefusal(request, node.latest(), control.latest().gate)" in source[start:at]
 
 
-def test_the_player_header_reboots_only_through_send_reboot():
-    # H1 (console DDD §61): Reboot moved into the Player page's header unchanged. The only
+def test_the_hardware_pi_page_reboots_only_through_send_reboot():
+    # H1 (console by domain § Fleet): Reboot lives on the Pi's Hardware page unchanged. The only
     # callers of `sendReboot` are the reboot dialog (PlayerCommands.jsx) and the Update the
-    # wall journey; the Player page and its Health section send nothing themselves.
+    # wall journey; the Pi pages and the Health section send nothing themselves.
     call = re.compile(r"\bsendReboot\(")
-    callers = sorted(module.name for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
+    modules = [*SRC.rglob("*.js"), *SRC.rglob("*.jsx"), *SRC.rglob("*.ts"), *SRC.rglob("*.tsx")]
+    callers = sorted(module.name for module in modules
                      if module.name != "fleetCommands.js" and call.search(module.read_text()))
     assert callers == ["PlayerCommands.jsx", "UpdateWallPage.jsx"]
     commands = (SRC / "PlayerCommands.jsx").read_text()
     assert len(call.findall(commands)) == 1
     dialog = commands.index("function RebootDialog(")
     assert dialog < call.search(commands).start() < commands.index("\n}\n", dialog)
-    for page in ("PlayerPage.jsx", "HostHealthSection.jsx"):
+    for page in ("PlayerPage.jsx", "pages/hardware-pi-page.tsx", "domain/host-health.tsx"):
         source = (SRC / page).read_text()
         assert "fleetCommands.js" not in source and "apiWrite" not in source, page
-    assert "<RebootSection " in (SRC / "PlayerPage.jsx").read_text()
+    assert "<RebootSection " in (SRC / "pages/hardware-pi-page.tsx").read_text()
+    assert "RebootSection" not in (SRC / "PlayerPage.jsx").read_text()
 
 
 def test_a_requested_label_says_when_central_is_not_offering_it_now():

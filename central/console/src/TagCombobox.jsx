@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { fact } from "./facts.js";
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import { Field } from "./Field.jsx";
 import {
   chooseTag, MAX_TAGS, pickerAnnouncement, readTags, tagListFact, TAGS_PENDING, TAGS_UNREAD,

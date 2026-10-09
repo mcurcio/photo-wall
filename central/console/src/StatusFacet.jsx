@@ -1,6 +1,6 @@
 import React from "react";
 
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 import { explainPrecedence, isBound, plannedFor } from "./join.js";
 import { PrecedenceExplanation } from "./PrecedenceExplanation.jsx";
@@ -21,7 +21,7 @@ import { formatRoute, sceneCreationRoute } from "./routes.js";
  *     (every line says "priority N"), and the limit line, rendered by the shared
  *     PrecedenceExplanation.jsx that the Show side's Runs "Why" panel renders too.
  *
- * `hostChip` is the Frame's host chip (HostChip.jsx, console DDD §61), rendered under the
+ * `hostChip` is the Frame's host chip (domain/host-health-link.tsx, console DDD §61), rendered under the
  * title. The Wall's Inspector passes it in, so this facet imports no fleet host module and
  * its closure stays as R4 expects.
  *

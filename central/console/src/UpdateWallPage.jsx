@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { useConfirm } from "./ConfirmAction.jsx";
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import { fact, words } from "./facts.js";
 import {
   appOperationState,

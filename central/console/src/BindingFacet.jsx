@@ -2,7 +2,7 @@ import React, { useEffect, useId, useRef, useState } from "react";
 
 import { unbindRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import {
   BOOT_FACTS_UNAVAILABLE,
   bindableOutputs,

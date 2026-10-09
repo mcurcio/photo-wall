@@ -84,6 +84,11 @@ def _sidebar_link(page, section):
 
 def _expect_on(page, section):
     expect(_heading(page, section)).to_be_visible()
+    if section == "players":
+        # One Pi's Software and screens page has no sidebar link (fleetRoutes.jsx): none is current.
+        expect(page.get_by_role("navigation", name="Sections", exact=True).locator(
+            "[aria-current=page]")).to_have_count(0)
+        return
     expect(_sidebar_link(page, section)).to_have_attribute("aria-current", "page")
 
 
@@ -179,7 +184,7 @@ def test_the_sidebar_groups_wall_show_fleet_and_needs_attention_in_a_fixed_order
         expect(nav.get_by_role("list")).to_have_count(4)
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
-                              ("Fleet", ["Players", "Releases"]),
+                              ("Fleet", ["Hardware", "Releases"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
@@ -284,7 +289,7 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
             re.compile(r"^Frame first: "))
         expect(badge).to_have_accessible_name("Frame first: Enrolled 0 s ago, no report yet")
-        for section in ("wall", "attention", "players", "schedule"):
+        for section in ("wall", "attention", "hardware", "schedule"):
             go(page, section)
             count = len(reads)
             drive_poll(page)

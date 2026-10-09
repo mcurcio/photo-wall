@@ -20,3 +20,9 @@ export type Severity = (typeof SEVERITIES)[number];
 export const TRUTH_KINDS = ["set", "reported", "claimed", "derived", "planned", "unknown"] as const;
 
 export type TruthKind = (typeof TRUTH_KINDS)[number];
+
+/**
+ * The severities worst first: the one order a "worst first" list sorts by. `unknown` (not
+ * read) ranks below a judged notice and above work to finish and ok.
+ */
+export const WORST_FIRST: readonly Severity[] = ["alarm", "notice", "unknown", "todo", "ok"];

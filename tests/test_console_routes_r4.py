@@ -43,6 +43,7 @@ build already requires.
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -70,7 +71,8 @@ SHARED_WITH_SHOW = {
     "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Status facet and the Now page's Why
     "equipmentApi.js",  # the equipment reads and writes
     "sendOutcome.js",  # the one outcome pattern: UNKNOWN_MESSAGE, CHANGED_MESSAGE, held requests
-    "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
+    "fact-line.tsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
+    "hosts-read.ts",  # the fleet host read's shape (a type): the host link and the Hardware pages
     "framesApi.js",
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
@@ -86,7 +88,7 @@ WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.
 # G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
 # Wall's To finish list and model, the one host classifier they read, and the Status host chip.
 G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "WallUnfinished.jsx",
-                   "unfinished.js", "hostHealth.js", "HostChip.jsx"]
+                   "unfinished.js", "hostHealth.js", "domain/host-health-link.tsx"]
 # The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
 SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
 # sceneTargets.js is not listed: since S1 join.js reads a Run's origin from showState.js, which
@@ -360,7 +362,7 @@ def g1_forbidden(names):
     """Of module `names`, those a G1 list module must never reach: page and write modules."""
     return {name for name in names
             if name in WRITE_MODULES or name in SHELL_PAGES or name in TABLES.values()
-            or name.endswith("Page.jsx")}
+            or name.endswith("Page.jsx") or name.endswith("-page.tsx")}
 
 
 @pytest.fixture(scope="module")
@@ -485,10 +487,16 @@ def _shell_own(graph):
     return reachable(graph, "main.jsx", stop=set(TABLES.values()))
 
 
+def _catalog(graph):
+    """The design system's model-free members (design tokens, primitives, patterns): they know no
+    Photo Wall concept (S1), so they hold no display control and every side shares them."""
+    return {module.name for module in graph if _layer(module) in MODEL_FREE}
+
+
 def _wall_only(graph):
-    """The Wall-only closure: what the Wall table reaches, but the shell's own modules and
-    those declared shared with the Show side."""
-    return reachable(graph, TABLES["wall"]) - _shell_own(graph) - SHARED_WITH_SHOW - {
+    """The Wall-only closure: what the Wall table reaches, but the shell's own modules, the
+    catalog's model-free members and those declared shared with the Show side."""
+    return reachable(graph, TABLES["wall"]) - _shell_own(graph) - _catalog(graph) - SHARED_WITH_SHOW - {
         TABLES["wall"]}
 
 
@@ -516,8 +524,8 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     wall = reachable(graph, TABLES["wall"]) - _shell_own(graph)
     shown = (reachable(graph, TABLES["show"]) | reachable(graph, TABLES["fleet"])
              | reachable(graph, TABLES["neutral"]))
-    assert wall & shown == SHARED_WITH_SHOW
-    assert not SHARED_WITH_SHOW & DISPLAY_CONTROLS
+    assert wall & shown - _catalog(graph) == SHARED_WITH_SHOW
+    assert not (SHARED_WITH_SHOW | _catalog(graph)) & DISPLAY_CONTROLS
 
 
 @pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
@@ -541,9 +549,9 @@ def test_the_wall_routes_do_reach_display_controls(graph):
 @pytest.mark.parametrize("name", G1_LIST_MODULES)
 def test_g1_list_modules_reach_no_page_and_no_write_module(graph, name):
     modules = reachable(graph, name)
-    assert name in modules and len(modules) > 1  # the walk reached past the module itself
+    assert Path(name).name in modules and len(modules) > 1  # the walk reached past the module itself
     # The Needs attention page is itself a page; what it reaches must not be one.
-    reached = modules - {name}
+    reached = modules - {Path(name).name}
     assert not g1_forbidden(reached), sorted(g1_forbidden(reached))
 
 
@@ -551,8 +559,9 @@ def test_g1_list_modules_are_in_the_graph_and_the_homes_do_reach_writes(graph):
     # Positive controls: every listed module is one the console builds (a renamed file cannot
     # drop out of the check silently), and the homes the lists link to own the writes.
     names = {module.name for module in graph}
-    assert set(G1_LIST_MODULES) <= names
+    assert {Path(name).name for name in G1_LIST_MODULES} <= names
     assert "apiWrite.js" in reachable(graph, "PlayerPage.jsx")
+    assert "apiWrite.js" in reachable(graph, "pages/hardware-pi-page.tsx")
     assert "framesApi.js" in reachable(graph, "LayoutEditor.jsx")
 
 
@@ -561,14 +570,12 @@ def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
     # polling hook again (as batch 4 first did) puts the write primitive in the closure of
     # Needs attention, and the check names it.
     src = tmp_path / "src"
-    src.mkdir()
-    for module in SRC.iterdir():
-        if module.is_file():
-            (src / module.name).write_bytes(module.read_bytes())
+    shutil.copytree(SRC, src)
     assert not g1_forbidden(scan_closure(src / "AttentionList.jsx", tmp_path))
     classifier = src / "hostHealth.js"
     classifier.write_text('import { useFleetHosts } from "./fleetHosts.js";\n' + classifier.read_text())
-    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js", "HostChip.jsx"):
+    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js",
+                 "domain/host-health-link.tsx"):
         assert "apiWrite.js" in g1_forbidden(scan_closure(src / name, tmp_path)), name
 
 
@@ -584,7 +591,7 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -627,8 +634,12 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "attention")
 ] + [
+    {"section": "hardware", "id": "device-" + "a" * 64},
+    {"section": "hardware", "id": "a/b ç?#%"},
+    {"section": "hardware", "pi": "device-" + "a" * 64},
+    {"section": "hardware", "pi": "a/b ç?#%&=+"},
     {"section": "players", "id": "device-" + "a" * 64},
     {"section": "players", "id": "a/b ç?#%"},
     {"section": "now", "flow": "show", "step": "review"},
@@ -665,6 +676,11 @@ INVALID_HASHES = [
     "#/releases/update/v1/try/p/x", "#/releases/v1", "#/releases/update/v1?target=x",
     "#/releases/update/v1/skip", "#/releases/update/v1/try/p/skip", "#/releases/update/v1/skip/a/a",
     "#/releases/update/v1/skip/a?target=x",
+    # No aliases and no Players list: the retired Equipment and Players pages' bookmarks are gone.
+    "#/players", "#/equipment", "#/players?pi=x",
+    # A focus is one non-empty `pi` on the Hardware list alone (design rule H2).
+    "#/hardware?pi=", "#/hardware?pi=a&pi=b", "#/hardware?pi=a&other=b", "#/hardware?other=x",
+    "#/hardware/x?pi=y", "#/hardware/a/b", "#/now?pi=x", "#/releases?pi=x",
 ]
 INVALID_ROUTES = [
     {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
@@ -681,6 +697,9 @@ INVALID_ROUTES = [
     {"section": "players", "id": "x", "skipped": ["p"]},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": ["a", "a"]},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": [""]},
+    {"section": "players"}, {"section": "hardware", "id": "x", "pi": "y"}, {"section": "now", "pi": "x"},
+    {"section": "hardware", "pi": ""},
+    {"section": "scenes", "flow": "new", "step": "kind", "initialTarget": "x", "pi": "y"},
 ]
 
 
@@ -707,8 +726,8 @@ def test_routes_parse_format_and_round_trip():
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
     # The landing route is always the Wall, with no Frames and with five (console DDD §48).
     assert out["landing"] == [{"section": "wall"}] * 3
-    # The retired Equipment page's bookmark lands on the Players list, and is never formatted.
-    assert out["equipment"] == {"section": "players"}
+    # No aliases (owner rule): the retired Equipment page's bookmark parses to nothing.
+    assert out["equipment"] is None
     # The renamed facet's old bookmark opens Calibration, and is never formatted (§19).
     assert out["commissioning"] == {"section": "wall", "id": "x", "facet": "calibration"}
     assert out["commissioningRoute"] == "refused"
