@@ -225,7 +225,8 @@ _DEB_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
                      ".github/workflows/base-image.yml", ".github/workflows/node-components.yml",
                      "scripts/build_player.py",
                      "scripts/build_player_deb.py", "scripts/module_closure.py",
-                     "scripts/debian_packages.py", "scripts/device_root_checks.py")
+                     "scripts/debian_packages.py", "debian-packaging/snapshot.list",
+                     "scripts/device_root_checks.py")
 _PLAYER_DEB: Final = (*_DEB_BUILD, "player/**", "contracts/**", "uplink/**",
                       "appliance/systemd/player.service", "appliance/systemd/weston.service",
                       "appliance/systemd/weston.ini")
@@ -261,6 +262,12 @@ PACKAGES: Final = (
            "FROM the media OS base service-base.yml prepares", "media-worker",
            "scripts/service_base.py", ".github/workflows/service-base.yml"),
     Package("player-deb", "the Player .deb", _PLAYER_DEB),
+    # The one source package (decision 0019): node-components.yml's `debs` job builds every
+    # binary package of debian/control in the pinned build container and the local repo beside
+    # upstream's nats-server .deb (debian-packaging/build-repo.sh).
+    Package("node-debs", "the Node's Debian packages from the one source package, and their "
+            "local repo", (*_PROJECT, ".github/workflows/node-components.yml", "debian/**",
+                           "debian-packaging/**")),
     Package("node-manager-deb", "the exact versioned AppManager .deb",
             (*_DEB_BUILD, "scripts/build_node_manager_deb.py", "appliance/__init__.py",
              "appliance/node/__init__.py", "appliance/node/manager.py", "appliance/node/manager_runner.py",
@@ -282,7 +289,8 @@ PACKAGES: Final = (
              "appliance/health/**", "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
              "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target",
              # The Node bus: its configuration and its pinned server (E3c).
-             "appliance/bus/**", "scripts/nats_server.py", "scripts/pinned_fetch.py",
+             "appliance/bus/**", "scripts/nats_server.py", "debian-packaging/nats-server.env",
+             "scripts/pinned_fetch.py",
              # HostCore's nodeapi session and its vendored nats-py wheel (E3c S4).
              "nodeapi/**", "scripts/vendored_packages.py")),
     Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
@@ -295,7 +303,8 @@ PACKAGES: Final = (
              "scripts/build_node_components.py", "scripts/node_component_inputs.py",
              "scripts/node_release_artifacts.py",
              "scripts/build_app_environment.py", "scripts/build_environment_image.py",
-             "scripts/sealed_archive.py", "scripts/build_node_base_deb.py", "scripts/nats_server.py", "scripts/pinned_fetch.py",
+             "scripts/sealed_archive.py", "scripts/build_node_base_deb.py", "scripts/nats_server.py",
+             "debian-packaging/nats-server.env", "scripts/pinned_fetch.py",
              "scripts/vendored_packages.py", "nodeapi/**",
              "scripts/build_node_display_deb.py", "scripts/build_node_manager_deb.py",
              "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
@@ -401,7 +410,7 @@ SUITES: Final = (
     Suite("checks", always=True),
     Suite("e2e", always=True),
     Suite("base-image", packages=("base-bundle", "bootstrapper-deb", "player-deb",
-                                  "player-payload")),
+                                  "player-payload", "node-debs")),
     # The tracer serves the Player .deb from a real Central: its content-serving layers, and the
     # rest of what its harness imports (tests/test_release_plan.py computes that closure).
     Suite("netboot-e2e", packages=("bootstrapper-deb", "player-deb"),
@@ -424,7 +433,7 @@ SUITES: Final = (
     # its own builder, harness, the test modules the harness borrows from, and workflow; and the
     # display harness job's runner and fixture (the job builds appliance/display_host itself).
     Suite("node-pid1", packages=("node-base-deb", "node-manager-deb", "node-display-deb",
-                                 "player-environment"),
+                                 "player-environment", "node-debs"),
           paths=("tests/test_node_pid1.py", "tests/node_pid1_*", "tests/node/apps/test_environment_image.py",
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",
                  "tests/native_player_mainloop_harness.py", "tests/native_display_media.py",
@@ -435,7 +444,7 @@ SUITES: Final = (
                  "tests/test_node_boot.py", "tests/test_registry.py",
                  # the join's hub harness and its pinned nats-server
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
-                 "scripts/nats_server.py",
+                 "scripts/nats_server.py", "debian-packaging/nats-server.env",
                  "scripts/build_node_pid1_fixture.py", "scripts/build_node_components.py",
                  "scripts/node_component_inputs.py", "scripts/node_release_artifacts.py",
                  "scripts/package_release_artifacts.py",

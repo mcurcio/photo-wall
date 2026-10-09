@@ -1,0 +1,8 @@
+# The Debian snapshot pin (decision 0019, rule 1): the one place it is written. Every Debian
+# package a Photo Wall build installs comes from these two sources, the archive and its security
+# suite at one snapshot.debian.org instant, each verified against the Debian archive keyring (a
+# snapshot's Release file is past its Valid-Until by design). A pin bump edits both timestamps.
+# Read as it is by the build container (debian-packaging/builder/Dockerfile) and by
+# scripts/debian_packages.py, which refuses any other content.
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] https://snapshot.debian.org/archive/debian/20260904T000000Z trixie main contrib non-free non-free-firmware
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260904T000000Z trixie-security main contrib non-free non-free-firmware

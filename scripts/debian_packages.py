@@ -2,15 +2,17 @@
 """The Debian declaration: every Debian package a Photo Wall build installs, and the one snapshot
 it comes from (decision 0014, Project 2 design §2.9).
 
-This module is the only place a Debian package name or mirror is written. Every consumer is
-rendered from it: the base's device set and apt sources (rpi-image-gen, from `packages` and
-`sources`), the initrd build root and the CI device root (`mmdebstrap_argv`), each `.deb`'s
-`Depends` (`packages`), and each closure policy's third-party table (`import_table`, read by
-`scripts/module_closure.py`). `validate` runs at import, so no build can use a declaration that
-breaks an invariant.
+This module is the only place a Debian package name is written for the builders it serves. The
+snapshot pin is written once, in debian-packaging/snapshot.list (decision 0019, rule 1), which `PIN`
+is read from at import: the file must be exactly the two sources `DebianPin.sources()` renders,
+so it cannot carry a second mirror. Every consumer is rendered from this module: the base's
+device set and apt sources (rpi-image-gen, from `packages` and `sources`), the initrd build root
+and the CI device root (`mmdebstrap_argv`), each `.deb`'s `Depends` (`packages`), and each
+closure policy's third-party table (`import_table`, read by `scripts/module_closure.py`).
+`validate` runs at import, so no build can use a declaration that breaks an invariant.
 
-A pin bump is one edit to `PIN.snapshot`: every cache keyed on this file misses and every root
-rebuilds at the new timestamp.
+A pin bump is one edit to debian-packaging/snapshot.list: every cache keyed on that file misses and
+every root rebuilds at the new timestamp.
 
 Build tooling: stdlib only and imports nothing first-party, so every build step (the runner's
 system python3 included) can run it.
@@ -25,6 +27,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
@@ -114,8 +117,29 @@ class DebianPackage:
     stage: Stage = "apt"
 
 
-PIN: Final = DebianPin("trixie", "20260904T000000Z",
-                       ("main", "contrib", "non-free", "non-free-firmware"))
+# The pin's one home (decision 0019, rule 1), read by the build container as it is.
+SNAPSHOT_LIST: Final = Path(__file__).resolve().parents[1] / "debian-packaging/snapshot.list"
+_SNAPSHOT_LINE: Final = re.compile(
+    rf"deb \[[^]]*\] {re.escape(_SNAPSHOT_ARCHIVE)}/debian/(\S+) (\S+) (\S+(?: \S+)*)")
+
+
+def read_pin(text: str) -> DebianPin:
+    """The pin a snapshot.list states. DeclarationError unless its lines, `#` comments and blank
+    lines aside, are exactly the two sources `DebianPin.sources()` renders for the suite,
+    snapshot and components its first line names: no other mirror, option or suite."""
+    lines = [line.strip() for line in text.splitlines()
+             if line.strip() and not line.strip().startswith("#")]
+    found = _SNAPSHOT_LINE.fullmatch(lines[0]) if lines else None
+    if found is None:
+        raise DeclarationError(f"{SNAPSHOT_LIST.name}: the first source is not a snapshot of the "
+                               "Debian archive")
+    pin = DebianPin(found[2], found[1], tuple(found[3].split()))
+    if lines != [source.line() for source in pin.sources()]:
+        raise DeclarationError(f"{SNAPSHOT_LIST.name} is not exactly the pin's two sources")
+    return pin
+
+
+PIN: Final = read_pin(SNAPSHOT_LIST.read_text())
 # Unpinned: archive.raspberrypi.com has no snapshot service.
 RASPBERRY_PI: Final = AptSource("http://archive.raspberrypi.com/debian", "trixie", ("main",),
                                 trusted=True)

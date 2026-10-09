@@ -16,6 +16,12 @@ name: V2 node components
 # is reproducible (SOURCE_DATE_EPOCH) and a sealed environment's digest names its image ID,
 # which BuildKit derives from the layers and the pin's SOURCE_DATE_EPOCH.
 #
+# The `debs` job is step 1 of decision 0019: the one source package (debian/) built by
+# dpkg-buildpackage in the pinned build container, and the local repo beside upstream's
+# nats-server .deb (debian-packaging/build-repo.sh), built twice (the two indexes, which name every
+# .deb's sha256, must agree) and proved by installing the whole set through it
+# (tests/debs/test_local_repo.py). It uploads the repo as photo-wall-node-debs-<revision>.
+#
 # Above that, the whole output is cached: the set is a function of its inputs alone and names
 # no commit (scripts/node_component_inputs.py), so the key is the digest of the very input
 # manifest the build records, computed by the same code before building. A hit restores the set
@@ -42,6 +48,71 @@ defaults:
     shell: bash
 
 jobs:
+  debs:
+    runs-on: ubuntu-24.04-arm
+    # The container's layers come from the BuildKit cache; each build of the tree is about a
+    # minute, the install proof under one.
+    timeout-minutes: 20
+    env:
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - name: Set up the container build cache
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          use: false
+
+      # build-repo.sh runs `docker buildx build` itself, which reads the GHA cache service's URL
+      # and token from the ACTIONS_* environment that only actions see: this exports it.
+      - name: Expose the GHA cache service to the build
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
+      - name: Resolve the build container's cache scope
+        id: cache
+        uses: ./.github/actions/buildkit-cache
+        with:
+          name: node-{role}
+          architecture: arm64
+
+      - name: Build the Debian packages and the local repo, twice
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.cache.outputs.to }}
+        run: |
+          set -eu
+          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs"
+          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs-again"
+          # Content-derived versions are only as good as the bytes behind them.
+          if ! cmp "$RUNNER_TEMP/node-debs/Packages" "$RUNNER_TEMP/node-debs-again/Packages"; then
+            diff "$RUNNER_TEMP/node-debs/Packages" "$RUNNER_TEMP/node-debs-again/Packages" || true
+            echo "::error::two builds of $REVISION gave different packages"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/python-uv
+
+      - name: Install the locked environment
+        run: uv sync --frozen
+
+      - name: Prove the local repo (every package, the pins, an apt install of the whole set)
+        env:
+          PHOTO_WALL_LOCAL_REPO: ${{ runner.temp }}/node-debs
+        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py
+
+      - name: Upload the local repo
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-debs/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
+
   build:
     runs-on: ubuntu-24.04-arm
     # Cold about 9 min (components 6, fixture 3); with the BuildKit caches warm, a few minutes;

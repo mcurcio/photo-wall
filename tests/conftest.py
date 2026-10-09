@@ -52,6 +52,7 @@ CI_SKIP_ALLOWLIST = (
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
     "set PHOTO_WALL_IMAGE_MOUNT_TESTS",  # node-components.yml mounts the images (docker, loop, sudo)
+    "set PHOTO_WALL_LOCAL_REPO",  # node-components.yml's debs job proves the repo it builds
 )
 
 

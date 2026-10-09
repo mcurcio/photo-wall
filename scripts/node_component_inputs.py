@@ -48,10 +48,12 @@ SCHEMA: Final = 1
 ENTRY_MODULES: Final = ("scripts.build_node_components", "scripts.build_node_pid1_fixture",
                         "scripts.node_component_inputs")
 # What those processes read by path rather than import: the locked environment they run in,
-# the workflow and setup that run them, and the fixture's C head (build_node_pid1_fixture's
-# FIXTURE_HEAD; tests/test_node_component_inputs.py fails if a read is missing here).
+# the workflow and setup that run them, the fixture's C head (build_node_pid1_fixture's
+# FIXTURE_HEAD; tests/test_node_component_inputs.py fails if a read is missing here), and the two
+# pins their imports read at import (scripts/debian_packages.py, scripts/nats_server.py).
 WORKING_FILES: Final = ("uv.lock", ".github/workflows/node-components.yml",
-                        ".github/actions/python-uv/action.yml", "tests/node_pid1_fixture_head.c")
+                        ".github/actions/python-uv/action.yml", "tests/node_pid1_fixture_head.c",
+                        "debian-packaging/snapshot.list", "debian-packaging/nats-server.env")
 
 
 def tree_sources(tree: Path) -> tuple[str, ...]:

@@ -1,5 +1,8 @@
 """The pinned nats-server: one version for the hub, the Node base and CI.
 
+The version is read from debian-packaging/nats-server.env, its one home (decision 0019), which also
+gives the Node's photo-wall-node package its `nats-server (= version)` Depends.
+
 `python3 scripts/nats_server.py fetch --dest DIR` downloads NATS_SERVER_VERSION's release asset
 for this host, extracts the `nats-server` binary and the release's LICENSE beside it under DIR and
 prints the binary's path. A second run with the binary in place downloads nothing.
@@ -19,7 +22,16 @@ import urllib.request
 from pathlib import Path
 from typing import Final
 
-NATS_SERVER_VERSION: Final = "2.15.0"   # the line the bus fence was measured on (F1)
+PIN_FILE: Final = Path(__file__).resolve().parents[1] / "debian-packaging/nats-server.env"
+
+
+def read_pin(text: str) -> dict[str, str]:
+    """The NAME=value lines of a pin file (`#` comments and blank lines aside)."""
+    return dict(line.split("=", 1) for line in map(str.strip, text.splitlines())
+                if line and not line.startswith("#"))
+
+
+NATS_SERVER_VERSION: Final = read_pin(PIN_FILE.read_text())["NATS_SERVER_VERSION"]
 RELEASES: Final = "https://github.com/nats-io/nats-server/releases/download"
 # (platform.system().lower(), normalized machine) this script fetches for.
 PLATFORMS: Final = frozenset({("linux", "amd64"), ("linux", "arm64"), ("darwin", "arm64")})

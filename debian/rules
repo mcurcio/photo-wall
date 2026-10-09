@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+# The Photo Wall source package (docs/decisions/0019-debian-packaging-with-debhelper.md).
+
+# The nats-server pin's one home: photo-wall-node Depends on upstream's .deb at exactly it.
+include debian-packaging/nats-server.env
+
+%:
+	dh $@
+
+# No -dbgsym packages: the local repo holds exactly debian/control's binary packages.
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+# Every binary package at its own content-derived version (0019 Q1).
+override_dh_gencontrol:
+	debian/content-versions -Vnats:Version=$(NATS_SERVER_VERSION)

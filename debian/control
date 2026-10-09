@@ -1,0 +1,129 @@
+Source: photo-wall
+Section: misc
+Priority: optional
+Maintainer: Photo Wall <noreply@example.invalid>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/mcurcio/photo-wall
+
+# Every binary package of decision 0019's package table. Each owns one directory,
+# /usr/lib/photo-wall/<name>/ (<name> is the package name without `photo-wall-`), and gets its
+# own content-derived version, 0+<12 hex> (debian/content-versions). A sibling is named at its
+# exact version as `<sibling> (= ${pw-version:<sibling>})`. Third-party Depends are added by the
+# slice that fills the package, and only the computed import check may change them after.
+
+Package: photo-wall-common
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall wire contracts and Node API
+ The contracts and nodeapi import roots every Node program shares.
+
+Package: photo-wall-uplink
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall uplink: locating and trusting Central
+ The stdlib-only uplink import root, shared by stage 1 and the Node's programs.
+
+Package: photo-wall-node-kernel
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall Node kernel
+ The Node's primitives (appliance.kernel): clock, boot store, credentials,
+ capacity and the memory line table, boot-stage records, image mounts.
+
+Package: photo-wall-node-central-session
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall Node's Central session (retiring)
+ The appliance.central_session context.
+
+Package: photo-wall-node-host
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall HostCore
+ The appliance.host context: host metrics and facts, operator reboot, local
+ recovery deadlines.
+
+Package: photo-wall-node-display
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Photo Wall display host
+ The appliance.display_host context, the Weston shell, the diagnostic client
+ and the display's ABI identity (abi.json).
+
+Package: photo-wall-node-health
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall health judge
+ The appliance.health context: Node facts to one verdict and the overlay
+ instruction.
+
+Package: photo-wall-node-apps
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall app lifecycle
+ The appliance.apps context: effect broker, progress probe, app process, stop,
+ root import and release images.
+
+Package: photo-wall-node-boot
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall Node boot stages
+ The appliance.boot context: storage, handoff and prepare.
+
+Package: photo-wall-node-manager
+Architecture: all
+Depends: ${misc:Depends}
+Description: Photo Wall AppManager context (retiring)
+ The appliance.node context.
+
+Package: photo-wall-frame-client
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Photo Wall frame client library
+ The native Wayland frame client the Player loads in the app root.
+
+Package: photo-wall-player
+Architecture: all
+Depends: photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-frame-client (= ${pw-version:photo-wall-frame-client}),
+ ${misc:Depends}
+Description: Photo Wall Player
+ The Player and its launcher: the app root's program.
+
+Package: photo-wall-app-manager
+Architecture: all
+Depends: photo-wall-node-manager (= ${pw-version:photo-wall-node-manager}),
+ ${misc:Depends}
+Description: Photo Wall AppManager launcher
+ The manager root's program.
+
+Package: photo-wall-node
+Architecture: all
+Depends: photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ photo-wall-node-host (= ${pw-version:photo-wall-node-host}),
+ photo-wall-node-display (= ${pw-version:photo-wall-node-display}),
+ photo-wall-node-health (= ${pw-version:photo-wall-node-health}),
+ photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
+ photo-wall-node-boot (= ${pw-version:photo-wall-node-boot}),
+ photo-wall-node-manager (= ${pw-version:photo-wall-node-manager}),
+ nats-server (= ${nats:Version}),
+ systemd,
+ udev,
+ ${misc:Depends}
+Description: Photo Wall Node composition
+ The base's units, slices and target, system users, runtime directories, the
+ bus configuration, the launchers and the base ABI identity (abi.json).
+
+Package: photo-wall-netboot-init
+Architecture: all
+Depends: photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ ${misc:Depends}
+Description: Photo Wall stage 1 in the initramfs
+ An initramfs-tools hook that copies stage 1 and photo-wall-uplink into the
+ netboot initramfs.

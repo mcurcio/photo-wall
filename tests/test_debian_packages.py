@@ -24,6 +24,7 @@ from scripts.debian_packages import (
     main,
     mmdebstrap_argv,
     packages,
+    read_pin,
     validate,
 )
 
@@ -141,6 +142,35 @@ def test_the_pin_names_its_two_sources_each_signed_by_the_debian_keyring():
     assert archive.signed_by == security.signed_by == DEBIAN_KEYRING
     assert tuple(source.line() for source in PIN.sources()) == SNAPSHOT_LINES
     assert debian_packages.RASPBERRY_PI.line() == RASPBERRY_PI_LINE
+
+
+def test_the_pin_is_read_from_its_one_home_the_snapshot_list():
+    """debian-packaging/snapshot.list is the pin (decision 0019, rule 1): the build container copies it
+    as it is, and the declaration reads PIN from it."""
+    text = (REPO / "debian-packaging/snapshot.list").read_text()
+    assert debian_packages.SNAPSHOT_LIST == REPO / "debian-packaging/snapshot.list"
+    assert read_pin(text) == PIN
+    assert [line for line in text.splitlines() if not line.startswith("#")] == list(SNAPSHOT_LINES)
+
+
+def test_a_bumped_snapshot_list_is_a_new_pin():
+    bumped = "\n".join(SNAPSHOT_LINES).replace("20260904T000000Z", "20261001T000000Z")
+    assert read_pin(bumped) == replace(PIN, snapshot="20261001T000000Z")
+
+
+@pytest.mark.parametrize("text", [
+    "",                                                                   # no source
+    "# only a comment\n",
+    SNAPSHOT_LINES[0],                                                    # the security suite missing
+    "\n".join((SNAPSHOT_LINES[0], SNAPSHOT_LINES[1].replace("20260904", "20260905"))),  # two instants
+    "\n".join((*SNAPSHOT_LINES, RASPBERRY_PI_LINE)),                       # a second mirror
+    "\n".join(line.replace(" check-valid-until=no", "") for line in SNAPSHOT_LINES),  # an option
+    "\n".join(line.replace("https://snapshot.debian.org", "https://deb.debian.org")
+              for line in SNAPSHOT_LINES),                                # not the snapshot
+])
+def test_a_snapshot_list_that_is_not_exactly_the_pin_is_refused(text):
+    with pytest.raises(DeclarationError):
+        read_pin(text)
 
 
 # --- AC3: the lists every consumer renders --------------------------------------------------
