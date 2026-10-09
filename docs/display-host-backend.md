@@ -140,6 +140,26 @@ Primary implementation references: [Weston 14 shell APIs](https://gitlab.freedes
 [Wayland server protocol logger](https://gitlab.freedesktop.org/wayland/wayland/-/blob/1.23.1/src/wayland-server-core.h),
 and [presentation feedback protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/stable/presentation-time/presentation-time.xml).
 
+## The health layer's buffers
+
+The overlay client (`overlay/client.py`) keeps its health surface mapped over the whole
+Output at all times. With the tint off, and for the first map before any instruction, the
+surface shows a fully transparent solid buffer from `wp_single_pixel_buffer_manager_v1`
+(rgba 0), scaled to the Output by `wp_viewporter`. With the tint on it shows one
+whole-Output ARGB8888 `wl_shm` buffer. Every health commit sets the viewport destination to
+the Output size, so the solid buffer covers the Output and the ARGB buffer maps 1:1. The
+solid buffer holds no pixels and is not counted against the client's buffer and memory caps.
+A compositor that does not offer both globals ends the client, so the shell's fallback tint
+shows; there is no second drawing path.
+
+Why not a small `wl_shm` buffer: Weston 14's DRM backend treats a small ARGB8888 shm buffer
+as a cursor-plane candidate and builds that plane's mask as `1 << plane_idx` in 32 bits. The
+Pi 5's vc4 exposes 56 KMS planes and the HDMI-A-1 cursor plane has index 50, so the mask
+wraps to an overlay plane and `drm_output_find_plane_for_view` aborts Weston on
+`assert(fb)`. Weston returns before the plane search for a solid buffer. Weston 15 removes
+that assertion (upstream commit d3ead778) but still builds 32-bit plane masks, so a plane
+index of 32 or more still aliases another plane. A real pointer cursor can still reach the
+same path on Weston 14. CI cannot see this: its headless Weston has no DRM planes.
 
 ## Frame-scoped replacement and explicit withdrawal
 
