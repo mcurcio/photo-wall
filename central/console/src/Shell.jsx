@@ -344,7 +344,7 @@ export function Shell({ hidden = false }) {
   );
 
   return (
-    <div className="shell" hidden={hidden} inert={hidden ? "" : undefined}>
+    <div className="shell" hidden={hidden} inert={hidden}>
       <button type="button" className="skip-link" onClick={() => mainRef.current?.focus()}>
         Skip to content
       </button>
