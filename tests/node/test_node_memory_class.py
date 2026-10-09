@@ -250,7 +250,7 @@ def test_preparation_transients_inherit_the_slice_cap_and_the_app_manager_scores
 
 def test_the_app_unit_scores_500_for_the_global_oom_killer():
     from appliance.apps.process_linux import app_unit_properties
-    properties = app_unit_properties(Path("/root"))
+    properties = app_unit_properties(Path("/root"), ())
     assert [p for p in properties if p.startswith("OOMScoreAdjust=")] == ["OOMScoreAdjust=500"]
 
 

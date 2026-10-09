@@ -172,7 +172,11 @@ def parse_node_app_link_result(raw: bytes) -> str:
 # Progress-probe channel. The Player opens it on the app-link socket and speaks
 # first (`probe_open`); the broker then sends `probe` and `relink`, and the
 # Player answers each probe it got to on its control queue (`probe_answer`).
-# Every packet is {"schema": 2, "kind": ...} and carries no other authority.
+# Once per channel the Player also reports its GL renderer (`renderer`), a fact
+# for the health judge. Every packet is {"schema": 2, "kind": ...} and carries
+# no other authority.
+
+MAX_RENDERER = 128  # GL_RENDERER is a short driver name ("V3D 7.1.10.2", "llvmpipe (LLVM 19.1.7, 128 bits)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +188,18 @@ class NodeProbeV2:
             digest(self.nonce)
         except ValueError as exc:
             raise ValueError("probe_channel_message") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class NodeRendererV2:
+    """The Player's GL renderer string (`GL_RENDERER` of its own GL context)."""
+
+    renderer: str
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.renderer, str) or not 0 < len(self.renderer) <= MAX_RENDERER
+                or not self.renderer.isprintable()):
+            raise ValueError("probe_channel_message")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +233,18 @@ def encode_node_probe_answer(nonce: str) -> bytes:
 
 def parse_node_probe_answer(raw: bytes) -> str:
     return NodeProbeV2(_probe_packet(raw, kind="probe_answer", fields=frozenset({"nonce"}))["nonce"]).nonce
+
+
+def encode_node_renderer(renderer: str) -> bytes:
+    return _json({"schema": 2, "kind": "renderer", "renderer": NodeRendererV2(renderer).renderer})
+
+
+def parse_node_probe_reply(raw: bytes) -> NodeProbeV2 | NodeRendererV2:
+    """A Player → broker packet on an open probe channel: an answer or the renderer."""
+    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
+    if value is not None and value.get("kind") == "renderer":
+        return NodeRendererV2(_probe_packet(raw, kind="renderer", fields=frozenset({"renderer"}))["renderer"])
+    return NodeProbeV2(parse_node_probe_answer(raw))
 
 
 def encode_node_relink() -> bytes:

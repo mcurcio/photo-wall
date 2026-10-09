@@ -5,10 +5,12 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
 
 from appliance.apps.broker import RunningApp
+from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
 from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
@@ -20,6 +22,11 @@ from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
 
 UNIT = "photo-wall-node-player.service"
+PW_DISPLAY_GID = 10005  # the compositor's group: the Player connects to its Wayland socket
+# Weston's client socket (photo-wall-display.service: XDG_RUNTIME_DIR + --socket), pinned by a
+# test against the unit. Bound as the socket file: its directory is the display unit's 0700
+# RuntimeDirectory, which also holds the shell's control and ingress sockets.
+DISPLAY_SOCKET = "/run/photo-wall-display/wayland-0"
 
 
 def systemctl_show(unit: str) -> dict[str, str]:
@@ -62,17 +69,28 @@ def process_root_matches(proc: Path, pid: int, root: Path) -> bool:
             os.close(descriptor)
 
 
-def app_unit_properties(root: Path) -> tuple[str, ...]:
-    """Single production sandbox definition, also exercised by real PID1 probes."""
+def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str, ...]:
+    """Single production sandbox definition, also exercised by real PID1 probes.
+
+    Deny-by-default devices (`PrivateDevices=yes`): the only device nodes in the Player's `/dev`
+    are `devices` (`player_device_grants`), each bound in read-only (a read-only mount never
+    stops a device node opening read-write), allowed by the cgroup device policy and opened
+    through its group. Raw DRM/KMS (`card*`) can never be among them (`DeviceGrant`).
+    """
+    groups = " ".join(str(gid) for gid in sorted({PW_DISPLAY_GID, *(d.gid for d in devices)}))
+    grants = tuple(f"DeviceAllow={device.path} rw" for device in devices)
+    if devices:
+        grants += ("BindReadOnlyPaths=" + " ".join(device.path for device in devices),)
     return (
-        f"RootDirectory={root}", "User=10004", "Group=10004", "SupplementaryGroups=10005", "Slice=photowallapp.slice",
+        f"RootDirectory={root}", "User=10004", "Group=10004", f"SupplementaryGroups={groups}", "Slice=photowallapp.slice",
         "ProtectSystem=strict", "ProtectHome=yes", "PrivateDevices=yes", "PrivateTmp=yes",
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictSUIDSGID=yes",
         "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         f"MemoryMax={line('app').cap_bytes}", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
         "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
-        "BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client /run/photo-wall-display/wayland-0:/run/photo-wall-wayland/wayland-0 /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
+        f"BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client {DISPLAY_SOCKET}:/run/photo-wall-wayland/wayland-0 /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
+        *grants,
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",
         f"TimeoutStopSec={STOP_TIMEOUT_SECONDS}", "Delegate=no",
         "Environment=HOME=/tmp XDG_RUNTIME_DIR=/run/photo-wall-wayland WAYLAND_DISPLAY=wayland-0 GDK_BACKEND=wayland PHOTO_WALL_DISPLAY_HOST=1 PYTHONNOUSERSITE=1 GST_REGISTRY=/tmp/gst-registry.bin",
@@ -84,8 +102,8 @@ class SystemdAppProcessDriver:
     def __init__(self, roots: Path, store: BootStore, *, base_abi: str,
                  graphics_abi: str, plugin_abi: str, proc: Path = Path("/proc"),
                  cgroups: Path = Path("/sys/fs/cgroup"), images: Path = ROOT_IMAGES,
-                 mounter: ImageMounter | None = None):
-        self.roots, self.store, self.proc = roots, store, proc
+                 mounter: ImageMounter | None = None, sysfs: Path = Path("/sys")):
+        self.roots, self.store, self.proc, self.sysfs = roots, store, proc, sysfs
         self.cgroups, self.images = cgroups, images
         self.mounter = mounter if mounter is not None else SystemdImageMounter()
         self.stops = StopObserver(self)
@@ -294,8 +312,9 @@ class SystemdAppProcessDriver:
         self.store.write("launch", launch)
         root = self.roots / environment.environment_sha256 / "rootfs"
         # All paths visible to the process are inside RootDirectory except these exact
-        # base-selected read-only IPC/config binds. No host /usr, libraries or plugins.
-        properties = app_unit_properties(root)
+        # base-selected read-only IPC/config binds and this Node's granted device nodes.
+        # No host /usr, libraries or plugins.
+        properties = app_unit_properties(root, player_device_grants(self.sysfs))
         command = ["/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + UNIT, "--service-type=exec"]
         for prop in properties:
             command.extend(("--property", prop))

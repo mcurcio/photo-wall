@@ -1438,6 +1438,8 @@ class PlayerService:
 class UnavailableRenderer:
     """Registration remains possible without falsely acknowledging native output."""
 
+    gl_renderer = None  # no GL context: nothing to report
+
     def prepare(self, layer):
         return PrepareResult("failed", "capacity")
 
@@ -1569,7 +1571,8 @@ def main():
     Tick(GLib, 33, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink).start()
+    ProbeResponder(dispatcher, on_relink=service.request_relink,
+                   gl_renderer=lambda: renderer.gl_renderer).start()
     watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
     with contextlib.suppress(KeyboardInterrupt):
         loop.run()
