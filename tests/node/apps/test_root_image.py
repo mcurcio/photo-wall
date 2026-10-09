@@ -184,6 +184,28 @@ def test_the_incoming_file_is_sealed_before_it_gets_a_pool_name(world, monkeypat
     assert order == ["fchown", "fchmod", "rename"]
 
 
+@pytest.mark.parametrize("link", ["symlink", "hard link"])
+def test_a_linked_incoming_file_is_refused_and_never_chowned_or_chmoded(world, monkeypatch, tmp_path, link):
+    """The import worker holds CAP_CHOWN and CAP_DAC_OVERRIDE and seals in a directory AppManager
+    writes, before any hash check: a planted link must never make the seal change another file."""
+    victim = tmp_path / "victim"
+    victim.write_bytes(IMAGE_BYTES)  # the incoming file's size, so only the link guard refuses
+    victim.chmod(0o600)
+    incoming = world.roots.parent / "downloads" / world.sha
+    if link == "symlink":
+        incoming.symlink_to(victim)
+    else:
+        os.link(victim, incoming)
+    monkeypatch.setattr(environment, "ROOT_GID", os.getgid() + 1)  # a seal would fchown
+    sealed = []
+    monkeypatch.setattr(environment.os, "fchown", lambda *a: sealed.append("fchown"))
+    monkeypatch.setattr(environment.os, "fchmod", lambda *a: sealed.append("fchmod"))
+    with pytest.raises(ValueError, match="^root_image_ownership$"):
+        world.stage(incoming)
+    assert sealed == [] and victim.stat().st_mode & 0o777 == 0o600
+    assert list(world.images.iterdir()) == [] and world.mounter.mount_calls == []
+
+
 def test_staging_a_staged_root_again_mounts_nothing_reads_nothing_and_drops_the_duplicate(world):
     world.stage(world.incoming())
     duplicate = world.incoming()
@@ -370,6 +392,19 @@ def test_a_refused_mount_fails_and_an_invisible_one_is_not_visible(tmp_path, mon
         mounter.mount(IMAGE, WHERE)
 
 
+@pytest.mark.parametrize("fault", [subprocess.TimeoutExpired("systemd-mount", 60),
+                                   OSError(errno.ENOENT, "No such file or directory")],
+                         ids=["pid1-never-answers", "not-runnable"])
+def test_a_mount_request_that_cannot_complete_is_a_mount_failure(tmp_path, monkeypatch, fault):
+    mounter = host(tmp_path, options=None)
+
+    def systemd_mount(argv, **_):
+        raise fault
+    monkeypatch.setattr(image_mount.subprocess, "run", systemd_mount)
+    with pytest.raises(ValueError, match="^image_mount_failed$"):
+        mounter.mount(IMAGE, WHERE)
+
+
 # The online path (E2c B2): the import worker stages against the broker's measured ABI, the
 # broker's launch check is the staged predicate, AppManager skips a held image, and no Node
 # module parses tar.
@@ -512,17 +547,15 @@ def test_a_pooled_image_stages_with_no_incoming_file(world):
     assert len(world.mounter.mount_calls) == 1 and len(world.hashes) == 1
 
 
-def test_app_manager_downloads_nothing_for_a_pooled_target(world, tmp_path, monkeypatch):
-    """B2 AC6 (Q1 = R): a stage command whose target's image the pool holds downloads nothing."""
+def _app_manager(world, tmp_path, monkeypatch, command):
+    """AppManager's preparation poll over `command`, with a recording download stand-in."""
     from appliance.node import manager_desired
     from appliance.node.manager_desired import DesiredPreparation
     from contracts.node_lifecycle import encode_stage_command
-    world.stage(world.incoming())
     monkeypatch.setattr(manager_desired, "ROOT_IMAGES", world.images)
     fetched = []
     monkeypatch.setattr(manager_desired, "DownloadPreparer",
                         lambda *a, **k: SimpleNamespace(prepare=lambda reference: fetched.append(reference)))
-    command = _command(world.reference)
     desired = json.dumps({"scope": "preparation_read_only",
                           "commands": [json.loads(encode_stage_command(command))]}).encode()
     grant = SimpleNamespace(producer=command.producer, offer_id=command.offer_id)
@@ -535,12 +568,32 @@ def test_app_manager_downloads_nothing_for_a_pooled_target(world, tmp_path, monk
     preparation.session = SimpleNamespace(ensure=lambda: grant, claim=None,
                                           request=lambda method, path, body=None: (200, desired))
     preparation.observation = SimpleNamespace(flush=lambda: None, sample=lambda *a, **k: None)
-    preparation.poll()
-    assert fetched == [] and rows["prepared"]["archives"] == []
-    monkeypatch.setattr(manager_desired, "ROOT_IMAGES", tmp_path / "empty-pool")
-    rows.clear()
-    preparation.poll()
-    assert fetched == [world.reference]
+    return SimpleNamespace(poll=preparation.poll, fetched=fetched, rows=rows,
+                           downloads=preparation.directory / "downloads", module=manager_desired)
+
+
+def test_app_manager_downloads_nothing_for_a_pooled_target(world, tmp_path, monkeypatch):
+    """B2 AC6 (Q1 = R): a stage command whose target's image the pool holds downloads nothing."""
+    world.stage(world.incoming())
+    manager = _app_manager(world, tmp_path, monkeypatch, _command(world.reference))
+    manager.poll()
+    assert manager.fetched == [] and manager.rows["prepared"]["archives"] == []
+    monkeypatch.setattr(manager.module, "ROOT_IMAGES", tmp_path / "empty-pool")
+    manager.rows.clear()
+    manager.poll()
+    assert manager.fetched == [world.reference]
+
+
+def test_app_manager_keeps_the_current_downloads_and_drops_only_stale_complete_ones(world, tmp_path, monkeypatch):
+    """After a prepare, a complete download (a bare digest) the operation does not need is
+    unlinked; the operation's own download and the preparer's `.partial` files stay."""
+    manager = _app_manager(world, tmp_path, monkeypatch, _command(world.reference))
+    stale, partial = "e" * 64, "f" * 64 + ".partial"
+    for name in (world.sha, stale, partial):
+        (manager.downloads / name).write_bytes(b"x")
+    manager.poll()
+    assert manager.rows["prepared"]["archives"] == [world.sha]
+    assert sorted(p.name for p in manager.downloads.iterdir()) == sorted([world.sha, partial])
 
 
 def test_app_manager_sees_the_image_pool_read_only():
