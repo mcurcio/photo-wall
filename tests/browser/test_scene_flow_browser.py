@@ -80,7 +80,7 @@ def _steps(page):
             registry, SOURCE, status="unavailable", next_refresh=now + 30,
             refresh_completed_revision=0, refresh_requested_revision=1,
             diagnostics=[{"code": "upstream_unavailable"}],
-        ), "Your photo library is unreachable", "last refresh failed"),
+        ), "Immich is unreachable", "last refresh failed"),
         ("empty", lambda registry, now: _set_source(
             registry, SOURCE, status="ok", next_refresh=now + 30, last_success=now,
             counts={"valid": 0, "discovered": 0, "pending": 0, "rejected": 0},
@@ -196,13 +196,13 @@ def test_a_refresh_refused_as_too_large_is_an_error_alert_that_says_why_and_the_
             "Refresh finished, and the Source still failed.")
         alert = readiness.get_by_role("alert")
         expect(alert).to_contain_text(
-            "Photo Wall refused this Source as too large, so it selects nothing")
+            "Photo Wall refused this Source as too large (its current limit is at most 1,000 "
+            "matches), so it selects nothing")
         expect(alert).to_contain_text(
-            "It has no tags and no dates, so it asks for your whole photo library: over Photo "
-            "Wall's current size limits for one Source (at most 1,000 matches).")
+            "It has no tags and no dates, so it asks for your whole Immich library.")
         expect(alert).to_contain_text(
-            "Photo Wall's library key is missing the tag.read permission, so tags can't be "
-            "picked until it is added (the setup guide's library key step).")
+            "Immich refused the tag list: Photo Wall's Immich key is missing the tag.read "
+            "permission, so tags can't be picked until it is added")
         expect(alert).to_contain_text("Until then, narrow it with dates: edit it in Sources.")
         expect(alert).to_contain_text("Never refreshed successfully.")
         assert alert.get_attribute("data-severity") == "alarm"

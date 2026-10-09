@@ -62,7 +62,7 @@ pytestmark = pytest.mark.skipif(
 
 NEW_SOURCE = "spring"
 NOTHING_MATCHES = "nothing matching"
-CANT_REACH = "Photo Wall can't reach your photo library right now."
+CANT_REACH = "Photo Wall can't reach Immich right now."
 INTRO = ("Photo Wall selects media that lives in your photo library. It never uploads, edits "
          "or deletes anything there.")
 # Two answers' polls apart, with the 400 ms settle: what a panel waits at most for one answer.
@@ -256,7 +256,7 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
         # Wall's, so it names Photo Wall's release.
         alert = card.get_by_role("alert")
         expect(alert).to_contain_text(
-            "This Photo Wall release doesn't support your photo library's version · check the supported "
+            "This Photo Wall release doesn't support your Immich version · check the supported "
             "versions")
         expect(alert).to_contain_text("Never refreshed successfully.")
         expect(card).not_to_contain_text("Your photo library is unsupported")
@@ -289,13 +289,13 @@ def test_a_source_over_the_workers_ceiling_is_an_error_alert_that_says_why_and_t
         card = _sources(page).get_by_role("article", name="all-photos")
         alert = card.get_by_role("alert")
         expect(alert).to_contain_text(
-            "Photo Wall refused this Source as too large, so it selects nothing")
+            "Photo Wall refused this Source as too large (its current limit is at most 1,000 "
+            "matches), so it selects nothing")
         expect(alert).to_contain_text(
-            "It has no tags and no dates, so it asks for your whole photo library: over Photo "
-            "Wall's current size limits for one Source (at most 1,000 matches).")
+            "It has no tags and no dates, so it asks for your whole Immich library.")
         expect(alert).to_contain_text(
-            "Photo Wall's library key is missing the tag.read permission, so tags can't be "
-            "picked until it is added")
+            "Immich refused the tag list: Photo Wall's Immich key is missing the tag.read "
+            "permission, so tags can't be picked until it is added")
         expect(alert).to_contain_text("Until then, narrow it with dates: edit it in Sources.")
         expect(alert).to_contain_text("Never refreshed successfully.")
         assert alert.get_attribute("data-severity") == "alarm"
@@ -332,8 +332,8 @@ def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_det
             " · 3 items pending or rejected"
         )).to_be_visible()
         expect(mixed.get_by_text(
-            "Refresh succeeded with 3 items pending or rejected: Your photo library sent an item "
-            "Photo Wall can't read · Your photo library's item details are still settling. Usable "
+            "Refresh succeeded with 3 items pending or rejected: Immich sent an item "
+            "Photo Wall can't read · Immich's item details are still settling. Usable "
             "items remain available."
         )).to_be_visible()
         clean = _sources(page).get_by_role("article", name="clean")
@@ -527,7 +527,7 @@ def test_a_failure_with_no_earlier_answer_reads_unknown_never_nothing_matches(pa
         start_source(page)
         status = _panel(page).get_by_role("status")
         expect(status).to_have_text(
-            "Unknown: Photo Wall can't reach your photo library right now; retrying", timeout=ANSWER_WAIT)
+            "Unknown: Photo Wall can't reach Immich right now; retrying", timeout=ANSWER_WAIT)
         expect(status.locator("[data-truth=unknown]")).to_have_count(1)
         expect(status).not_to_contain_text(NOTHING_MATCHES)
 
@@ -542,7 +542,7 @@ def test_a_stopped_worker_retries_in_its_own_words_never_as_the_library_unreacha
         start_source(page)
         status = _panel(page).get_by_role("status")
         expect(status).to_have_text(
-            "Unknown: The media worker hasn't answered this preview · check that it is running · retrying",
+            "Unknown: Photo Wall's media worker hasn't answered this preview · check that it is running · retrying",
             timeout=ANSWER_WAIT)
         expect(status).not_to_contain_text("can't reach your photo library")
 
@@ -554,7 +554,7 @@ def test_a_key_the_library_refuses_says_which_permissions_to_add(page, registry)
         _Library(page, answers={"preview-1": _failed("preview-1", "upstream_permission")})
         start_source(page)
         expect(_panel(page).get_by_role("status")).to_have_text(
-            "Your library connection's key isn't allowed to list tags or show previews. Add the "
+            "Immich refused Photo Wall's key: it isn't allowed to list tags or show previews. Add the "
             "permissions in the setup guide's library key step.", timeout=ANSWER_WAIT)
 
 
@@ -751,7 +751,7 @@ def test_a_source_card_says_when_a_tag_it_uses_is_gone(page, registry):
         pets = _sources(page).get_by_role("article", name="pets", exact=True)
         gone = _sources(page).get_by_role("article", name="gone", exact=True)
         expect(pets).to_contain_text("Selects media tagged Pets (and nested tags) · photos and videos")
-        expect(gone).to_contain_text("A tag this Source uses no longer exists in your library.")
+        expect(gone).to_contain_text("A tag this Source uses no longer exists in Immich.")
         expect(pets).not_to_contain_text("no longer exists")
         expect(gone.get_by_role("img")).to_have_count(0)  # no thumbnails on cards (§44)
 

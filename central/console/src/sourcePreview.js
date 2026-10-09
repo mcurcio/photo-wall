@@ -2,6 +2,7 @@ import { fact, words as codeWords } from "./facts.js";
 import {
   libraryName,
   LIBRARY,
+  LIBRARY_PROVIDER,
   OVER_LIMIT,
   previewHandling,
   refusalIssue,
@@ -72,10 +73,11 @@ export function failurePhase(code) {
 
 export { libraryName };
 
-export const CANT_REACH = "Photo Wall can't reach your photo library right now.";
+// The library's own refusals name it (sourceWords.js: who refused, owner 2026-10-09).
+export const CANT_REACH = `Photo Wall can't reach ${LIBRARY_PROVIDER} right now.`;
 export const KEY_NOT_ALLOWED =
-  "Your library connection's key isn't allowed to list tags or show previews. Add the " +
-  "permissions in the setup guide's library key step.";
+  `${LIBRARY_PROVIDER} refused Photo Wall's key: it isn't allowed to list tags or show ` +
+  "previews. Add the permissions in the setup guide's library key step.";
 export const LOOKING = "Looking…";
 export const STILL_LOOKING = "Still looking. Photo Wall will keep trying.";
 export const UPDATING = "Updating…";
@@ -108,7 +110,7 @@ export function previewFacts(preview, connections = []) {
     if (row === null || row.owner === LIBRARY) {
       // The library's transient answer (or no code): only then "can't reach your photo library".
       if (shown) notes.push(CANT_REACH);
-      else facts.push(fact({ kind: "unknown", why: "Photo Wall can't reach your photo library right now; retrying" }));
+      else facts.push(fact({ kind: "unknown", why: `Photo Wall can't reach ${LIBRARY_PROVIDER} right now; retrying` }));
     } else if (shown) {
       notes.push(`${row.state} · retrying.`);
     } else {

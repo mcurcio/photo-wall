@@ -7,12 +7,14 @@ const meta = {
   component: SourceProblem,
   args: {
     problem: {
-      title: "Photo Wall refused this Source as too large, so it selects nothing",
+      title:
+        "Photo Wall refused this Source as too large (its current limit is at most 1,000 " +
+        "matches), so it selects nothing",
       lines: [
-        "It has no tags and no dates, so it asks for your whole photo library: over Photo Wall's " +
-          "current size limits for one Source (at most 1,000 matches).",
-        "Photo Wall's library key is missing the tag.read permission, so tags can't be picked " +
-          "until it is added (the setup guide's library key step).",
+        "It has no tags and no dates, so it asks for your whole Immich library.",
+        "Immich refused the tag list: Photo Wall's Immich key is missing the tag.read " +
+          "permission, so tags can't be picked until it is added (the setup guide's library " +
+          "key step).",
         "Until then, narrow it with dates: edit it in Sources.",
         "Never refreshed successfully.",
       ],
