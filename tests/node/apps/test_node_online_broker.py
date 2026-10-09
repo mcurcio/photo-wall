@@ -199,6 +199,34 @@ def test_target_failure_selects_only_frozen_accepted_fallback(setup):
     assert driver.stop_calls == 1
 
 
+def test_a_target_that_dies_after_it_was_seen_running_falls_back_before_control(setup):
+    broker, driver, command, _ = setup
+    broker.execute()
+    assert broker.record["phase"] == "running"
+    driver.running = None  # the entry exited after start() observed its unit active
+    broker.service()
+    assert driver.starts == [command.target, command.fallback]
+    assert phases(broker)[-3:] == ["target_failed", "fallback_starting", "fallback_running"]
+    events = [parse_app_effect_event(raw.encode()) for raw in broker.record["pending"]]
+    assert events[-3].fault == "target_exited_before_control"
+    # The fallback dying before it proves control is reported, never a silent wait.
+    driver.running = None
+    broker.service()
+    assert broker.record["phase"] == "effect_unknown" and len(driver.starts) == 2
+    assert events[-1].phase == "fallback_running"
+    assert parse_app_effect_event(broker.record["pending"][-1].encode()).fault == "fallback_exited_before_control"
+
+
+def test_an_app_that_proved_control_is_no_longer_the_switchs_to_fail(setup):
+    broker, driver, command, _ = setup
+    broker.execute()
+    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
+                                             "progress": {"kind": "stopped"}})
+    driver.running = None
+    broker.reconcile()
+    assert broker.record["phase"] == "running" and driver.starts == [command.target]
+
+
 def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):
     broker, driver, _, _ = setup
     driver.unknown_stop = True
