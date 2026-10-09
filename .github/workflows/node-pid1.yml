@@ -28,10 +28,12 @@ name: Player node real-PID1 lifecycle scenarios
 # container is --privileged with systemd as PID 1, as base-image.yml's start probes run.
 # Hardware stays synthetic (sysfs Virtual-1, headless Weston): no DRM, HDMI or PXE claim.
 #
-# The `display-harness` job needs no components: scripts/run_display_harness.py builds the
-# current appliance/display_host in a pinned arm64 container and runs tests/native_display_smoke.py
-# against a real headless Weston (slate, private-role refusal, handoff, trial overlay events),
-# reading output pixels back through Weston's weston_capture_v1; then
+# The `display-harness` job needs no components, only the run's local repo (node-components.yml's
+# `debs` job, the photo-wall-node-debs-<revision> artifact): scripts/run_display_harness.py
+# installs the built photo-wall-node-display and photo-wall-frame-client from it into an arm64
+# image FROM the pinned Debian build container and runs tests/native_display_smoke.py against a
+# real headless Weston (slate, private-role refusal, handoff, trial overlay events), reading
+# output pixels back through Weston's weston_capture_v1; then
 # tests/native_player_mainloop_harness.py holds the Player's main-loop policy to real GLib, GDK
 # and GL (control dispatch on a saturated loop; a static photo is not redrawn every tick).
 #
@@ -68,9 +70,14 @@ jobs:
       pid1-fixture: true
 
   display-harness:
+    needs: components
+    if: ${{ !cancelled() && needs.components.result != 'failure' }}
     runs-on: ubuntu-24.04-arm
-    # The harness image's cold build about 5 min, the run under 1 min.
+    # The build container from its BuildKit cache and the harness image's install about 2 min,
+    # the run under 1 min.
     timeout-minutes: 20
+    env:
+      REVISION: ${{ inputs.revision || github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -82,8 +89,35 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ env.REVISION }}
+          path: ${{ runner.temp }}/node-debs
+
+      # The harness image is FROM the build container, which debian-packaging/build-container.sh
+      # loads from the `debs` job's BuildKit cache (read only).
+      - name: Set up the container build cache
+        id: buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          use: false
+
+      - name: Expose the GHA cache service to the build
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
+      - name: Resolve the build container's cache scope
+        id: cache
+        uses: ./.github/actions/buildkit-cache
+        with:
+          name: node-{role}
+          architecture: arm64
+
       - name: Run the native display harness
-        run: .venv/bin/python scripts/run_display_harness.py
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
+        run: .venv/bin/python scripts/run_display_harness.py --debs "$RUNNER_TEMP/node-debs"
 
   scenario:
     needs: components

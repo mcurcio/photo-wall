@@ -276,8 +276,11 @@ PACKAGES: Final = (
              "appliance/kernel/**", "appliance/apps/__init__.py", "appliance/apps/environment.py",
              "appliance/central_session/**",
              "contracts/**", "uplink/**")),
-    Package("node-display-deb", "the isolated native Weston display .deb",
-            (*_DEB_BUILD, "scripts/build_node_display_deb.py", "scripts/node_build_inputs.py", "appliance/display_host/**")),
+    # photo-wall-node-display from the one source package, built by debhelper's Meson build
+    # system (decision 0019 P1), shipped byte for byte as node-display.deb.
+    Package("node-display-deb", "the native Weston display .deb from the local repo",
+            (*_PROJECT, "debian/**", "debian-packaging/**", "appliance/display_host/**",
+             ".github/workflows/node-components.yml")),
     Package("player-environment", "the sealed Debian V2 Player environment",
             (*_PLAYER_DEB, "scripts/build_app_environment.py", "scripts/node_build_inputs.py", "appliance/apps/environment.py",
              "scripts/build_environment_image.py", "scripts/sealed_archive.py")),
@@ -306,7 +309,7 @@ PACKAGES: Final = (
              "scripts/sealed_archive.py", "scripts/build_node_base_deb.py", "scripts/nats_server.py",
              "debian-packaging/nats-server.env", "scripts/pinned_fetch.py",
              "scripts/vendored_packages.py", "nodeapi/**",
-             "scripts/build_node_display_deb.py", "scripts/build_node_manager_deb.py",
+             "debian/**", "debian-packaging/**", "scripts/build_node_manager_deb.py",
              "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
              "scripts/eeprom_update.py", "scripts/player_start_probe.py",

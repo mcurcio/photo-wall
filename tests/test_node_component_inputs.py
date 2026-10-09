@@ -14,7 +14,6 @@ import pytest
 
 from scripts import build_app_environment as environment
 from scripts import build_node_base_deb as base
-from scripts import build_node_display_deb as display
 from scripts import build_node_manager_deb as manager
 from scripts import build_node_pid1_fixture as fixture
 from scripts import build_player_deb as player
@@ -102,7 +101,6 @@ def reads(tmp_path_factory, fetched):
     for name in ("node-base.deb", "node-display.deb"):
         (components / name).write_bytes(name.encode())
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(display, "docker_build", _docker)
         patch.setattr(environment, "docker_build", _docker)
         patch.setattr(player, "run_dpkg_deb", lambda root, output: output)
         patch.setattr(fixture, "inspect", lambda _image: {"Id": IMAGE})
@@ -111,9 +109,6 @@ def reads(tmp_path_factory, fetched):
         try:
             base.stage_tree(tree, work / "base")
             manager.stage_tree(tree, work / "manager")
-            with pytest.raises(_DockerReached):
-                display.build(tree, work / "native", builder_image=BUILDER_IMAGE,
-                              architecture="arm64")
             (work / "player").mkdir()
             deb = player.build_tree(tree, work / "player", by_content=True,
                                     architecture="arm64", native_client=client)
@@ -150,7 +145,6 @@ def test_every_file_the_component_builders_read_is_in_the_key(reads, sources):
     assert {"appliance/systemd/player.service", "appliance/systemd/photo-wall-node.target",
             "player/service.py", "appliance/node/manager_runner.py", "pyproject.toml",
             "scripts/debian_packages.py"} <= reads["tree"]
-    assert any(name.startswith(display.SOURCE_DIR + "/") for name in reads["tree"])
     assert {"tests/node_pid1_fixture_head.c", "scripts/build_app_environment.py",
             "appliance/apps/environment.py"} <= reads["repo"]
 
@@ -201,36 +195,53 @@ def _edit(path: Path) -> None:
     path.write_bytes(path.read_bytes() + b"\n# edited\n")
 
 
-def test_the_key_is_stable_and_ignores_what_no_builder_reads(repository):
+@pytest.fixture
+def debs(tmp_path):
+    """A local repo as the key reads it: its index alone."""
+    debs = tmp_path / "debs"
+    debs.mkdir()
+    (debs / "Packages").write_text("Package: photo-wall-node-display\nVersion: 0+000000000000\n")
+    return debs
+
+
+def test_the_key_is_stable_and_ignores_what_no_builder_reads(repository, debs):
     repository, first = repository
-    key = inputs.key(repository, first, repository)
-    assert key == inputs.key(repository, first, repository)
+    key = inputs.key(repository, first, debs, repository)
+    assert key == inputs.key(repository, first, debs, repository)
     console = next((repository / "central/console").rglob("*.jsx"))
     _edit(console)
     _edit(repository / "docs/README.md")
     _edit(repository / "central/app.py")
     unrelated = _commit(repository, "unrelated")
-    assert inputs.key(repository, unrelated, repository) == key
+    assert inputs.key(repository, unrelated, debs, repository) == key
 
 
 @pytest.mark.parametrize("edited", ["player/service.py", "appliance/node/manager_runner.py",
                                     "appliance/systemd/photo-wall-node.target",
                                     "scripts/debian_packages.py", "pyproject.toml"])
-def test_a_committed_component_input_changes_the_key(repository, edited):
+def test_a_committed_component_input_changes_the_key(repository, debs, edited):
     repository, first = repository
-    key = inputs.key(repository, first, repository)
+    key = inputs.key(repository, first, debs, repository)
     _edit(repository / edited)
-    assert inputs.key(repository, _commit(repository, "component"), repository) != key
+    assert inputs.key(repository, _commit(repository, "component"), debs, repository) != key
 
 
 @pytest.mark.parametrize("edited", ["scripts/build_player_deb.py", "scripts/node_build_inputs.py",
                                     "uv.lock", ".github/workflows/node-components.yml",
                                     "tests/node_pid1_fixture_head.c", "player/output_discovery.py"])
-def test_a_builder_input_changes_the_key(repository, edited):
+def test_a_builder_input_changes_the_key(repository, debs, edited):
     repository, first = repository
-    key = inputs.key(repository, first, repository)
+    key = inputs.key(repository, first, debs, repository)
     _edit(repository / edited)
-    assert inputs.key(repository, first, repository) != key
+    assert inputs.key(repository, first, debs, repository) != key
+
+
+def test_the_local_repo_changes_the_key(repository, debs):
+    """The display and frame client come from the local repo: a new index is a new key."""
+    repository, first = repository
+    key = inputs.key(repository, first, debs, repository)
+    _edit(debs / "Packages")
+    assert inputs.key(repository, first, debs, repository) != key
 
 
 # --- outputs without a revision, and the stamp --------------------------------------------------
@@ -285,16 +296,16 @@ def _components(path: Path, inputs_sha256: str) -> Path:
     return path
 
 
-def test_stamp_binds_only_outputs_whose_inputs_match_the_revision(repository, tmp_path):
+def test_stamp_binds_only_outputs_whose_inputs_match_the_revision(repository, debs, tmp_path):
     repository, first = repository
-    key = inputs.key(repository, first, repository)
+    key = inputs.key(repository, first, debs, repository)
     stale = _components(tmp_path / "stale", "f" * 64)
     with pytest.raises(ValueError, match="node_component_inputs_mismatch"):
-        inputs.stamp(stale, repository, first)
+        inputs.stamp(stale, repository, first, debs)
     assert not (stale / STAMP).exists()
     current = _components(tmp_path / "current", key)
-    inputs.stamp(current, repository, first)
+    inputs.stamp(current, repository, first, debs)
     assert json.loads((current / STAMP).read_text()) == {
         "schema": 1, "revision": first, "inputs_sha256": key}
     with pytest.raises(ValueError, match="node_component_stamp_exists"):
-        inputs.stamp(current, repository, first)
+        inputs.stamp(current, repository, first, debs)

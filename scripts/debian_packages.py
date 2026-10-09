@@ -31,7 +31,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
-Consumer = Literal["bootstrapper", "player", "initrd-build", "node-display", "node-display-build", "node-base", "node-manager"]
+Consumer = Literal["bootstrapper", "player", "initrd-build", "node-base", "node-manager"]
 Archive = Literal["debian", "raspberrypi"]
 # When a package lands in a root. Every root fetches the pin over https, and apt inside a root
 # cannot do that until the CA bundle is there, so:
@@ -150,8 +150,6 @@ _PLAYER: Final[frozenset[Consumer]] = frozenset({"player"})
 _INITRD_BUILD: Final[frozenset[Consumer]] = frozenset({"initrd-build"})
 _NODE_MANAGER: Final[frozenset[Consumer]] = frozenset({"node-manager"})
 _NODE_BASE: Final[frozenset[Consumer]] = frozenset({"node-base"})
-_DISPLAY: Final[frozenset[Consumer]] = frozenset({"node-display"})
-_DISPLAY_BUILD: Final[frozenset[Consumer]] = frozenset({"node-display-build"})
 _RENDER_STACK: Final = "the render stack, loaded through gi and GStreamer, not imported by name"
 _PI_BOOT: Final = "the Pi 5 kernel, DTBs and bootloader image (unpinned archive)"
 
@@ -177,7 +175,7 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("gstreamer1.0-libav", _PLAYER, why=_RENDER_STACK),
     DebianPackage("libgl1-mesa-dri", _PLAYER, why=_RENDER_STACK),
     DebianPackage("libegl1", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("weston", _PLAYER | _DISPLAY, why=_RENDER_STACK),
+    DebianPackage("weston", _PLAYER, why=_RENDER_STACK),
     # The base's device layer is metadata-only (appliance/rpi_image_gen/device/
     # photo-wall-device-none.yaml), so nothing else brings udev: without it there is no render
     # or input group and player.service fails at spawn, 216/GROUP.
@@ -194,24 +192,8 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("libpam-systemd", _NODE_BASE,
                   why="base Weston logind seat session and PAM systemd registration"),
     DebianPackage("mount", _NODE_BASE, why="bounded diskless node storage tmpfs mount"),
-    DebianPackage("libweston-14-0", _DISPLAY, why="base display compositor ABI"),
-    DebianPackage("libjansson4", _DISPLAY, why="bounded native display JSON protocol"),
-    DebianPackage("libcairo2", _DISPLAY, why="base diagnostic rendering"),
-    # The private overlay client (appliance/display_host/overlay) is Python: pywayland at run time
-    # and, through its scanner, at build time; cffi's backend because trixie's python3-pywayland
-    # (0.4.18-4) imports it without declaring it.
-    DebianPackage("python3-pywayland", _DISPLAY | _DISPLAY_BUILD, imports=("pywayland",)),
-    DebianPackage("python3-cffi-backend", _DISPLAY | _DISPLAY_BUILD, imports=("_cffi_backend",)),
-    DebianPackage("python3-cairo", _DISPLAY, imports=("cairo",)),
-    DebianPackage("libwayland-client0", _DISPLAY | _PLAYER, why="private base diagnostic Wayland client"),
-    DebianPackage("libweston-14-dev", _DISPLAY_BUILD, why="base display shell compiler headers"),
-    DebianPackage("libwayland-dev", _DISPLAY_BUILD, why="base display Wayland protocol compiler headers"),
-    DebianPackage("libjansson-dev", _DISPLAY_BUILD, why="base display JSON compiler headers"),
-    DebianPackage("wayland-protocols", _DISPLAY_BUILD, why="xdg-shell protocol source"),
-    DebianPackage("build-essential", _DISPLAY_BUILD, why="base native display compiler"),
-    DebianPackage("meson", _DISPLAY_BUILD, why="base native display build graph"),
-    DebianPackage("ninja-build", _DISPLAY_BUILD, why="base native display build executor"),
-    DebianPackage("pkg-config", _DISPLAY_BUILD, why="base native display ABI discovery"),
+    # The display and the frame client's Depends live in debian/control (decision 0019).
+    DebianPackage("libwayland-client0", _PLAYER, why="the frame client library the Player loads"),
     DebianPackage("initramfs-tools", _INITRD_BUILD, why="mkinitramfs"),
     DebianPackage("gnupg", _INITRD_BUILD, why="apt key handling"),
     DebianPackage("kmod", _INITRD_BUILD, why="depmod"),

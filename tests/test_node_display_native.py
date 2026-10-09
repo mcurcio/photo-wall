@@ -212,11 +212,9 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
                 "PHOTO_WALL_GTK_PROBE=" + os.environ.get("PHOTO_WALL_GTK_PROBE", "0"),
                 "-e", "PHOTO_WALL_BROWSER_PROBE=" + str(int(browser)),
                 "-e", "PHOTO_WALL_CURRENT_PLAYER=" + os.environ.get("PHOTO_WALL_CURRENT_PLAYER", "0"),
-                "-e", "PHOTO_WALL_BUILD_CURRENT_NATIVE=" + os.environ.get("PHOTO_WALL_BUILD_CURRENT_NATIVE", "0"),
                 "-e", "PHOTO_WALL_MEDIA_PROBE=" + os.environ.get("PHOTO_WALL_MEDIA_PROBE", "0"),
-                *(["--mount", f"type=bind,src={os.environ['PHOTO_WALL_DISPLAY_ARTIFACT_DIR']}/photo-wall-node-display_arm64.deb,dst=/node-display.deb,readonly",
-                   "--mount", f"type=bind,src={os.environ['PHOTO_WALL_DISPLAY_ARTIFACT_DIR']}/libphoto-wall-frame-client.so,dst=/client.so,readonly"]
-                  if os.environ.get("PHOTO_WALL_DISPLAY_ARTIFACT_DIR") else []),
+                *(["--mount", f"type=bind,src={os.environ['PHOTO_WALL_LOCAL_REPO']},dst=/node-debs,readonly"]
+                  if os.environ.get("PHOTO_WALL_LOCAL_REPO") else []),
                 "--entrypoint",
                 "/usr/bin/python3",
                 "--mount",

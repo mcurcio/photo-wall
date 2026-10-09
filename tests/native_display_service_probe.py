@@ -29,31 +29,29 @@ def trace_request(self, method, path, *args, **kwargs):
     return status, raw
 NodeHTTP.request = trace_request
 
-subprocess.run(["dpkg", "-i", "/node-display.deb"], check=True, stdout=subprocess.DEVNULL)
-Path("/usr/lib/photo-wall-client").mkdir(exist_ok=True)
-subprocess.run(["cp", "/client.so", "/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"], check=True)
-current_native = os.environ.get("PHOTO_WALL_BUILD_CURRENT_NATIVE") == "1"
-if current_native:
-    subprocess.run(["meson", "setup", "/tmp/current-native", "/repo/appliance/display_host", "--prefix=/usr", "--libdir=lib"], check=True)
-    subprocess.run(["meson", "compile", "-C", "/tmp/current-native"], check=True)
-    subprocess.run(["meson", "install", "-C", "/tmp/current-native"], check=True)
-protocol_build = "/tmp/current-native" if current_native else "/build"
-native_source = "/repo/appliance/display_host/native" if current_native else "/source/native"
+# The built display and frame client, from a local repo mounted at /node-debs (decision 0019).
+if Path("/node-debs/Packages").exists():
+    subprocess.run(["sh", "-c", "dpkg -i /node-debs/photo-wall-node-display_*.deb "
+                    "/node-debs/photo-wall-frame-client_*.deb"], check=True, stdout=subprocess.DEVNULL)
+CLIENT = "/usr/lib/photo-wall/frame-client"
+native_source = "/repo/appliance/display_host/native"
 if os.environ.get("PHOTO_WALL_GTK_PROBE") != "1":
     xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
     subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
     subprocess.run(["wayland-scanner", "private-code", xml, "/tmp/xdg-shell.c"], check=True)
+    protocol = native_source + "/photo-wall-frame-v1.xml"
+    subprocess.run(["wayland-scanner", "client-header", protocol, "/tmp/photo-wall-frame-client.h"], check=True)
+    subprocess.run(["wayland-scanner", "private-code", protocol, "/tmp/photo-wall-frame-protocol.c"], check=True)
     subprocess.run(
         [
             "cc",
             "-I/tmp",
-            "-I" + protocol_build,
             "-I" + native_source,
             "/repo/tests/native_display_probe.c",
             "/tmp/xdg-shell.c",
-            protocol_build + "/photo-wall-frame-protocol.c",
-            "-L/usr/lib/photo-wall-client",
-            "-Wl,-rpath,/usr/lib/photo-wall-client",
+            "/tmp/photo-wall-frame-protocol.c",
+            "-L" + CLIENT,
+            "-Wl,-rpath," + CLIENT,
             "-lphoto-wall-frame-client",
             "-lwayland-client",
             "-ljansson",
@@ -81,7 +79,7 @@ weston = subprocess.Popen(
         "weston",
         "--backend=headless-backend.so",
         "--renderer=pixman",
-        "--shell=/usr/lib/photo-wall-display/photo-wall-shell.so",
+        "--shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so",
         "--width=640",
         "--height=480",
         "--idle-time=0",

@@ -2,7 +2,19 @@ Source: photo-wall
 Section: misc
 Priority: optional
 Maintainer: Photo Wall <noreply@example.invalid>
-Build-Depends: debhelper-compat (= 13)
+Build-Depends: debhelper-compat (= 13),
+ meson,
+ ninja-build,
+ pkgconf,
+ libweston-14-dev,
+ libwayland-dev,
+ libjansson-dev,
+ wayland-protocols,
+ python3,
+ python3-pywayland,
+ python3-cffi-backend,
+ python3-cairo,
+ weston
 Standards-Version: 4.7.2
 Rules-Requires-Root: no
 Homepage: https://github.com/mcurcio/photo-wall
@@ -12,6 +24,11 @@ Homepage: https://github.com/mcurcio/photo-wall
 # own content-derived version, 0+<12 hex> (debian/content-versions). A sibling is named at its
 # exact version as `<sibling> (= ${pw-version:<sibling>})`. Third-party Depends are added by the
 # slice that fills the package, and only the computed import check may change them after.
+#
+# appliance/display_host is built by debhelper's Meson build system (debian/rules). Its
+# Build-Depends end with the display's runtime Depends that no build tool needs (python3-cairo,
+# weston): debian/graphics-abi binds the resolved version of every package the display and the
+# frame client Depend on, so the build root holds each of them.
 
 Package: photo-wall-common
 Architecture: all
@@ -45,9 +62,17 @@ Description: Photo Wall HostCore
  The appliance.host context: host metrics and facts, operator reboot, local
  recovery deadlines.
 
+# The display's overlay client is Python on pywayland and pycairo; python3-cffi-backend because
+# trixie's python3-pywayland (0.4.18-4) imports it without declaring it.
 Package: photo-wall-node-display
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: weston,
+ python3,
+ python3-pywayland,
+ python3-cffi-backend,
+ python3-cairo,
+ ${shlibs:Depends},
+ ${misc:Depends}
 Description: Photo Wall display host
  The appliance.display_host context, the Weston shell, the diagnostic client
  and the display's ABI identity (abi.json).

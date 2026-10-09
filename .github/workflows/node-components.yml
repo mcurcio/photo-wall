@@ -10,17 +10,20 @@ name: V2 node components
 # (ubuntu-24.04-arm): the components and the fixture image are arm64.
 #
 # The component builds run on a docker-container builder with a GHA BuildKit cache per role
-# (the buildkit-cache action; scripts/node_build_inputs.py): the display build, and each sealed
+# (the buildkit-cache action; scripts/node_build_inputs.py): the build container, and each sealed
 # environment's dependency layer, are reused across commits; only what changed rebuilds. A hit
-# reuses exactly the layer a cold build recorded, so the cache changes no byte: node-display.deb
-# is reproducible (SOURCE_DATE_EPOCH) and a sealed environment's digest names its image ID,
-# which BuildKit derives from the layers and the pin's SOURCE_DATE_EPOCH.
+# reuses exactly the layer a cold build recorded, so the cache changes no byte: a sealed
+# environment's digest names its image ID, which BuildKit derives from the layers and the pin's
+# SOURCE_DATE_EPOCH.
 #
 # The `debs` job is step 1 of decision 0019: the one source package (debian/) built by
 # dpkg-buildpackage in the pinned build container, and the local repo beside upstream's
 # nats-server .deb (debian-packaging/build-repo.sh), built twice (the two indexes, which name every
 # .deb's sha256, must agree) and proved by installing the whole set through it
-# (tests/debs/test_local_repo.py). It uploads the repo as photo-wall-node-debs-<revision>.
+# (tests/debs/test_local_repo.py) and by the display and frame client's installed files and ABI
+# identity (tests/debs/test_display_packages.py). It uploads the repo as
+# photo-wall-node-debs-<revision>, which the `build` job takes the display (node-display.deb,
+# byte for byte) and the frame client (inside app.deb) from.
 #
 # Above that, the whole output is cached: the set is a function of its inputs alone and names
 # no commit (scripts/node_component_inputs.py), so the key is the digest of the very input
@@ -100,10 +103,10 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
-      - name: Prove the local repo (every package, the pins, an apt install of the whole set)
+      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI)
         env:
           PHOTO_WALL_LOCAL_REPO: ${{ runner.temp }}/node-debs
-        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py
+        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py
 
       - name: Upload the local repo
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -114,8 +117,9 @@ jobs:
           retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
 
   build:
+    needs: debs
     runs-on: ubuntu-24.04-arm
-    # Cold about 9 min (components 6, fixture 3); with the BuildKit caches warm, a few minutes;
+    # Cold about 8 min (components 5, fixture 3); with the BuildKit caches warm, a few minutes;
     # on a whole-output hit, the restore and the stamp.
     timeout-minutes: 40
     env:
@@ -131,12 +135,27 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-debs
+
+      # The display's abi.json and the frame client library, as the two packages install them.
+      - name: Unpack the display and frame client packages
+        run: |
+          set -eu
+          for package in photo-wall-node-display photo-wall-frame-client; do
+            deb=$(sed -n "/^Package: $package\$/,/^\$/s/^Filename: //p" "$RUNNER_TEMP/node-debs/Packages")
+            dpkg-deb -x "$RUNNER_TEMP/node-debs/$deb" "$RUNNER_TEMP/display-root"
+          done
+
       - name: Compute the component input digest
         id: inputs
         run: |
           set -eu
           digest=$(.venv/bin/python -m scripts.node_component_inputs key \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION")
+            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" --debs "$RUNNER_TEMP/node-debs")
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # Exact keys only, never a prefix fallback: a set built from other inputs is not this one.
@@ -206,10 +225,12 @@ jobs:
           export SOURCE_DATE_EPOCH
           .venv/bin/python -m scripts.build_node_components \
             --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
+            --debs "$RUNNER_TEMP/node-debs" --display-root "$RUNNER_TEMP/display-root" \
             --output "$RUNNER_TEMP/node-components"
 
       # The targets are the app repacked: their environments read the app's cache (the same
-      # dependency layer) and write none, so the app's scope keeps the app's own index.
+      # dependency layer) and write none, so the app's scope keeps the app's own index. The
+      # fixture image is FROM the build container, loaded from the `debs` job's cache.
       - name: Build the stage targets and the PID1 fixture image
         if: steps.cached.outputs.hit != 'true' && inputs.pid1-fixture
         env:
@@ -217,9 +238,12 @@ jobs:
           PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
         run: |
           set -eu
+          builder=$(debian-packaging/build-container.sh --revision "$REVISION")
+          base_image=$(docker image inspect --format '{{.Id}}' "$builder")
           fixture="$RUNNER_TEMP/node-pid1-fixture"
           .venv/bin/python -m scripts.build_node_pid1_fixture \
-            --components "$RUNNER_TEMP/node-components" --output "$fixture"
+            --components "$RUNNER_TEMP/node-components" --base-image "$base_image" \
+            --output "$fixture"
           image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' \
             "$fixture/fixture.json")
           docker save "$image" -o "$fixture/image.tar"
@@ -253,7 +277,22 @@ jobs:
         run: |
           .venv/bin/python -m scripts.node_component_inputs stamp \
             --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --components "$RUNNER_TEMP/node-components"
+            --debs "$RUNNER_TEMP/node-debs" --components "$RUNNER_TEMP/node-components"
+
+      # A restored set too: the display it ships is this run's package, and its ABI the package's.
+      - name: Prove the set ships the local repo's display and its ABI
+        run: |
+          set -eu
+          deb=$(sed -n '/^Package: photo-wall-node-display$/,/^$/s/^Filename: //p' "$RUNNER_TEMP/node-debs/Packages")
+          cmp "$RUNNER_TEMP/node-debs/$deb" "$RUNNER_TEMP/node-components/node-display.deb"
+          python3 - "$RUNNER_TEMP/display-root/usr/lib/photo-wall/node-display/abi.json" \
+            "$RUNNER_TEMP/node-components/components.json" <<'PYCODE'
+          import json, sys
+          packaged = json.load(open(sys.argv[1]))
+          shipped = json.load(open(sys.argv[2]))["abi"]
+          if {name: shipped[name] for name in packaged} != packaged:
+              raise SystemExit(f"components.json abi {shipped} is not the display's {packaged}")
+          PYCODE
 
       # The shipped squashfs images (E2c; the build already refused two builds with different
       # digests): each is its ref's digest and size, has the contract's format, and, mounted

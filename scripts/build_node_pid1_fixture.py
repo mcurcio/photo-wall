@@ -12,10 +12,12 @@ manager-primary.squashfs, node-base.deb, node-display.deb). Output, a new direct
       {"components": <dir>, "image": <sha256 image ID>} for tests/test_node_pid1.py
       (PHOTO_WALL_NODE_PID1_FIXTURE names this output directory).
 
-The arm64 image is FROM the native display build image (the build image of node-display.deb,
-which carries the pinned Weston stack and a compiler), installs exactly the supplied base and
-display packages, and compiles the checked-in headless fixture head. The image is identified
-by its immutable local ID only; the temporary FROM alias is removed after the build.
+The arm64 image is FROM `--base-image`, the pinned Debian build container's image ID
+(photo-wall-debian-builder, loaded by debian-packaging/build-container.sh: the build root of
+node-display.deb, which carries the pinned Weston stack and a compiler), installs exactly the
+supplied base and display packages, and compiles the checked-in headless fixture head. The
+image is identified by its immutable local ID only; the temporary FROM alias is removed after
+the build.
 """
 
 from __future__ import annotations
@@ -51,12 +53,6 @@ RUN cc -shared -fPIC -Wall -Wextra -Werror $(pkg-config --cflags libweston-14) \
 RUN mkdir -p /etc/photo-wall /var/lib/node-fixture-drm/card0-Virtual-1 \\
  && printf 'connected\\n' > /var/lib/node-fixture-drm/card0-Virtual-1/status
 """
-
-
-def native_build_image(components: Path) -> str:
-    """The node-display.deb build image ID recorded by scripts/build_node_components.py."""
-    provenance = json.loads((components / "build-provenance.json").read_text())
-    return provenance["native"]["built_image"]
 
 
 def inspect(image: str) -> dict:
@@ -102,11 +98,10 @@ def build_image(base_image: str, components: Path, work: Path) -> str:
         subprocess.run(["docker", "rmi", alias], check=False, capture_output=True)
 
 
-def build(components: Path, output: Path, *, base_image: str | None = None) -> dict:
+def build(components: Path, output: Path, *, base_image: str) -> dict:
     components = components.resolve(strict=True)
     if output.exists():
         raise ValueError("node_pid1_fixture_output_exists")
-    base_image = base_image or native_build_image(components)
     inspected = inspect(base_image)
     if inspected["Id"] != base_image or inspected["Architecture"] != "arm64":
         raise ValueError("node_pid1_base_image_identity_or_architecture")
@@ -141,8 +136,9 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--components", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--base-image", help="exact arm64 native display build image ID "
-                        "(default: the one the components' build-provenance.json records)")
+    parser.add_argument("--base-image", required=True,
+                        help="exact arm64 image ID of photo-wall-debian-builder "
+                             "(debian-packaging/build-container.sh)")
     args = parser.parse_args()
     print(json.dumps(build(args.components, args.output, base_image=args.base_image),
                      sort_keys=True))

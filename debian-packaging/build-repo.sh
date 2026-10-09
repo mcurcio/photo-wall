@@ -6,8 +6,8 @@
 # Everything comes from the committed tree at REV (default HEAD), never the working copy, so an
 # uncommitted edit cannot reach a package:
 #
-#   1. the pinned build container (debian-packaging/builder/Dockerfile, target `builder`), loaded as
-#      photo-wall-debian-builder, built from REV's debian-packaging/ and debian/control;
+#   1. the pinned build container, photo-wall-debian-builder, loaded by
+#      debian-packaging/build-container.sh from REV's debian-packaging/ and debian/control;
 #   2. `dpkg-buildpackage -b` over REV's whole tree in that container, with no network: every
 #      binary package of debian/control, each at its content-derived version;
 #   3. the local repo: upstream's arm64 nats-server .deb at the pin
@@ -18,15 +18,11 @@
 # `deb [trusted=yes] file:<DIR> ./`. The packages are arm64 (the Node's architecture) whatever
 # the host is.
 #
-# The container is built by `docker buildx build` on the builder PHOTO_WALL_NODE_BUILDER names
-# (Docker's default builder when unset), reading and writing the BuildKit caches
-# PHOTO_WALL_NODE_BUILD_CACHE_FROM and _TO name, with `{role}` replaced by `debian-builder`: the
-# node build cache policy of scripts/node_build_inputs.py, which changes no byte.
+# The container's builder and BuildKit caches are build-container.sh's (PHOTO_WALL_NODE_BUILDER,
+# PHOTO_WALL_NODE_BUILD_CACHE_FROM and _TO).
 set -euo pipefail
 
 ARCHITECTURE=arm64
-BUILDER_IMAGE=photo-wall-debian-builder
-ROLE=debian-builder
 
 usage() {
 	echo "usage: $0 --output DIR [--revision REV]" >&2
@@ -52,19 +48,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 commit=$(git -C "$root" rev-parse --verify "$revision^{commit}")
 
 # 1. The build container, from REV's own Dockerfile, pin and control file.
-set -- --builder "${PHOTO_WALL_NODE_BUILDER:-default}" --load --platform "linux/$ARCHITECTURE"
-for pair in "cache-from:${PHOTO_WALL_NODE_BUILD_CACHE_FROM:-}" "cache-to:${PHOTO_WALL_NODE_BUILD_CACHE_TO:-}"; do
-	value=${pair#*:}
-	[ -n "$value" ] || continue
-	if [ -z "${PHOTO_WALL_NODE_BUILDER:-}" ]; then
-		echo "build-repo: a BuildKit cache needs PHOTO_WALL_NODE_BUILDER" >&2
-		exit 1
-	fi
-	set -- "$@" "--${pair%%:*}" "$(printf '%s' "$value" | sed "s/{role}/$ROLE/g")"
-done
-git -C "$root" archive --format=tar "$commit" debian-packaging debian/control |
-	docker buildx build "$@" --target builder --tag "$BUILDER_IMAGE" \
-		--file debian-packaging/builder/Dockerfile -
+BUILDER_IMAGE=$("$root/debian-packaging/build-container.sh" --revision "$commit")
 
 mkdir -p "$output"
 output=$(cd "$output" && pwd)

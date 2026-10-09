@@ -1,7 +1,7 @@
 [Unit]
 Description=Photo Wall base-owned Weston display policy
 ConditionKernelCommandLine=photowall.node=v2
-ConditionPathExists=/usr/lib/photo-wall-display/photo-wall-shell.so
+ConditionPathExists=/usr/lib/photo-wall/node-display/photo-wall-shell.so
 After=systemd-user-sessions.service systemd-logind.service
 Wants=systemd-logind.service
 Conflicts=photo-wall-weston.service getty@tty1.service
@@ -29,7 +29,7 @@ RuntimeDirectory=photo-wall-display
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/photo-wall-display
 Environment=PHOTO_WALL_CONTROLLER_UID=10005
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --socket=wayland-0 --idle-time=0
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so --socket=wayland-0 --idle-time=0
 Restart=always
 RestartSec=2
 Slice=photowallbase.slice

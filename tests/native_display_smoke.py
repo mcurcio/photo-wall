@@ -1,11 +1,13 @@
 """Manual native compositor fixture, run only inside a disposable Linux container.
 
-Mount tests at /smoke and appliance/display_host at /current-source, both read-only.
-Requires the pinned native build image's compiler, Weston14, Cairo and Wayland deps,
-plus pywayland (scripts/run_display_harness.py builds that image and runs this file).
-This executes a real headless compositor, not a recorded callback simulator. It
-uses fixture controller authority and does not qualify systemd, GTK or HDMI.
-Output pixels are read back through Weston's own weston_capture_v1 (enabled by --debug).
+The display under test is the built one: photo-wall-node-display and photo-wall-frame-client
+installed from the local repo (decision 0019; scripts/run_display_harness.py builds that image,
+FROM the pinned Debian build container, and runs this file). Mount tests at /smoke and
+appliance/display_host/native at /current-native, both read-only: only the private protocol's XML
+and the client library's header are read there, to build the test probe against the installed
+library. This executes a real headless compositor, not a recorded callback simulator. It uses
+fixture controller authority and does not qualify systemd, GTK or HDMI. Output pixels are read
+back through Weston's own weston_capture_v1 (enabled by --debug).
 """
 
 import json
@@ -20,28 +22,31 @@ import sys
 import time
 import uuid
 
-subprocess.run(
-    ["meson", "setup", "/tmp/native-build", "/current-source", "--prefix=/usr", "--libdir=lib"],
-    check=True,
-)
-subprocess.run(["meson", "compile", "-C", "/tmp/native-build"], check=True)
-subprocess.run(["meson", "install", "-C", "/tmp/native-build"], check=True)
+DISPLAY = "/usr/lib/photo-wall/node-display"
+CLIENT = "/usr/lib/photo-wall/frame-client"
+PROTOCOL_XML = "/current-native/photo-wall-frame-v1.xml"
 # The private client the shell spawns becomes B5's overlay client plus a health layer per Output.
-SPAWNED = "/usr/lib/photo-wall-display/diagnostic-client"
+SPAWNED = DISPLAY + "/diagnostic-client"
 shutil.copyfile("/smoke/display_harness_health_client.py", SPAWNED)
 os.chmod(SPAWNED, 0o755)
 HEALTH_MODE = "/tmp/pw-health-client-mode"  # display_harness_health_client.py MODE_FILE
-# The production client's health drawing (overlay/render.py card_rect) and its fake judge.
-sys.path.append("/current-source")
+# The production client's health drawing (overlay/render.py card_rect), as installed, and its
+# fake judge.
+sys.path.append(DISPLAY)
 from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
 from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
 from overlay.render import card_rect  # noqa: E402
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
+# The probe's protocol code, generated as the library's own build does.
 xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
 subprocess.run(["wayland-scanner", "private-code", xml, "/tmp/xdg-shell.c"], check=True)
+subprocess.run(["wayland-scanner", "client-header", PROTOCOL_XML,
+                "/tmp/photo-wall-frame-client.h"], check=True)
+subprocess.run(["wayland-scanner", "private-code", PROTOCOL_XML,
+                "/tmp/photo-wall-frame-protocol.c"], check=True)
 subprocess.run(
     [
         "cc",
@@ -49,13 +54,12 @@ subprocess.run(
         "-Wextra",
         "-Werror",
         "-I/tmp",
-        "-I/tmp/native-build",
-        "-I/current-source/native",
+        "-I/current-native",
         "/smoke/native_display_probe.c",
         "/tmp/xdg-shell.c",
-        "/tmp/native-build/photo-wall-frame-protocol.c",
-        "-L/usr/lib/photo-wall-client",
-        "-Wl,-rpath,/usr/lib/photo-wall-client",
+        "/tmp/photo-wall-frame-protocol.c",
+        "-L" + CLIENT,
+        "-Wl,-rpath," + CLIENT,
         "-lphoto-wall-frame-client",
         "-lwayland-client",
         "-ljansson",
@@ -75,7 +79,7 @@ subprocess.run(
         "-i",
         "/usr/share/wayland/wayland.xml",
         "/usr/share/libweston-14/protocols/weston-output-capture.xml",
-        "/current-source/native/photo-wall-frame-v1.xml",
+        PROTOCOL_XML,
         "-o",
         str(GENERATED / "pw_protocols"),
     ],
@@ -156,7 +160,7 @@ p = subprocess.Popen(
         "weston",
         "--backend=headless-backend.so",
         "--renderer=pixman",
-        "--shell=/usr/lib/photo-wall-display/photo-wall-shell.so",
+        "--shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so",
         "--width=640",
         "--height=480",
         "--idle-time=0",

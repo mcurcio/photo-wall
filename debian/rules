@@ -4,8 +4,15 @@
 # The nats-server pin's one home: photo-wall-node Depends on upstream's .deb at exactly it.
 include debian-packaging/nats-server.env
 
+# Meson is the source package's one build system: appliance/display_host builds the display
+# (photo-wall-node-display) and the frame client (photo-wall-frame-client).
 %:
-	dh $@
+	dh $@ --buildsystem=meson --sourcedirectory=appliance/display_host
+
+# The display's ABI identity, written into its tree once both trees are final (stripped, their
+# shlibs resolved) and before debian/content-versions hashes them.
+execute_after_dh_shlibdeps:
+	debian/graphics-abi
 
 # No -dbgsym packages: the local repo holds exactly debian/control's binary packages.
 override_dh_strip:

@@ -4,6 +4,12 @@ The set is a function of its inputs alone (scripts/node_component_inputs.py): it
 `fetch_sources`'s tree, records the inputs manifest and digest in build-provenance.json, and
 carries no revision -- node-components.yml stamps that separately, after a build or a restore.
 
+The display and the frame client come from the local repo (decision 0019 P1,
+debian-packaging/build-repo.sh), never from a build here: `--debs` is that repo, whose
+photo-wall-node-display .deb ships as node-display.deb, byte for byte, and `--display-root` is
+the two packages' trees unpacked (node-components.yml runs `dpkg-deb -x`), read for the
+display's abi.json and the client library the app root carries.
+
 Each release root ships as its squashfs image (E2c), `<role>.squashfs`, never a tar: the sealed
 tar is built in a private temporary directory, the image is built from it twice and the two
 digests must agree (`node_components_image_not_reproducible`), and the role's ref in
@@ -32,13 +38,18 @@ from scripts.build_environment_image import (
     tools_image,
 )
 from scripts.build_node_base_deb import stage_package as stage_base
-from scripts.build_node_display_deb import build as build_display
 from scripts.build_node_manager_deb import stage_tree as stage_manager
 from scripts.build_player_deb import build_tree as build_player
 from scripts.build_player_deb import run_dpkg_deb
 from scripts.node_build_inputs import BUILDER_IMAGE
 from scripts.node_component_inputs import ARCHITECTURE, digest, fetch_sources, manifest
 from scripts.node_release_artifacts import COMPONENTS_SCHEMA
+
+DISPLAY_PACKAGE = "photo-wall-node-display"
+CLIENT_PACKAGE = "photo-wall-frame-client"
+# The two packages' frozen paths (decision 0019 P1), in a `--display-root`.
+DISPLAY_ABI = "usr/lib/photo-wall/node-display/abi.json"
+FRAME_CLIENT = "usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
 
 
 def reproducible_image(archive: Path, reference: AppEnvironmentRefV2, work: Path, *, role: str, abi: dict,
@@ -63,7 +74,23 @@ def check_image_lines(sizes: Mapping[str, int]) -> None:
             raise ValueError("node_components_image_over_line")
 
 
-def build(repository: Path, revision: str, output: Path) -> None:
+def repo_deb(debs: Path, package: str) -> Path:
+    """The one .deb of `package` the local repo's index, `debs`/Packages, names."""
+    found = [line.partition(":")[2].strip()
+             for stanza in (debs / "Packages").read_text().split("\n\n")
+             if f"Package: {package}" in stanza.splitlines()
+             for line in stanza.splitlines() if line.startswith("Filename:")]
+    if len(found) != 1:
+        raise ValueError("node_components_repo_package_not_unique")
+    return debs / found[0]
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build(repository: Path, revision: str, output: Path, *, debs: Path,
+          display_root: Path) -> None:
     if output.exists():
         raise ValueError("node_components_output_exists")
     output.mkdir(parents=True)
@@ -71,20 +98,20 @@ def build(repository: Path, revision: str, output: Path) -> None:
         work = Path(temporary)
         tree = work / "source"
         fetch_sources(repository, revision, tree)
-        inputs = manifest(tree)
+        inputs = manifest(tree, debs)
         stage_base(tree, work / "base", work / "downloads")
         base_abi = json.loads((work / "base/usr/lib/photo-wall-node-base/abi.json").read_text())["base_abi"]
         base_deb = run_dpkg_deb(work / "base", output / "node-base.deb")
-        native = work / "native"
-        display_deb = build_display(tree, native, builder_image=BUILDER_IMAGE, architecture=ARCHITECTURE)
+        display_deb = repo_deb(debs, DISPLAY_PACKAGE)
         shutil.copyfile(display_deb, output / "node-display.deb")
-        abi = {"base_abi": base_abi, **json.loads((native / "display-abi.json").read_text())}
+        graphics = json.loads((display_root / DISPLAY_ABI).read_text())
+        abi = {"base_abi": base_abi, **graphics}
         stage_manager(tree, work / "manager")
         manager_deb = run_dpkg_deb(work / "manager", output / "manager-primary.deb")
         player_dir = work / "player"
         player_dir.mkdir()
         player_deb = build_player(tree, player_dir, by_content=True, architecture=ARCHITECTURE,
-                                  native_client=native / "libphoto-wall-frame-client.so")
+                                  native_client=display_root / FRAME_CLIENT)
         shutil.copyfile(player_deb, output / "app.deb")
         refs = {}
         tools = tools_image(architecture=ARCHITECTURE)
@@ -97,10 +124,11 @@ def build(repository: Path, revision: str, output: Path) -> None:
             shutil.move(image.path, output / (role + IMAGE_SUFFIX))
             refs[role] = asdict(replace(ref, environment_sha256=image.sha256, size_bytes=image.size_bytes))
         provenance = {"schema": COMPONENTS_SCHEMA, "architecture": ARCHITECTURE, "abi": abi,
-                      "native": json.loads((native / "display-build-source.json").read_text()),
-                      "native_package_lock": (native / "display-build-packages.tsv").read_text(),
+                      "native": {"display_deb_sha256": _sha256(display_deb),
+                                 "frame_client_deb_sha256": _sha256(repo_deb(debs, CLIENT_PACKAGE)),
+                                 "abi": graphics},
                       "inputs": inputs, "inputs_sha256": digest(inputs),
-                      "node_base_deb_sha256": hashlib.sha256(base_deb.read_bytes()).hexdigest()}
+                      "node_base_deb_sha256": _sha256(base_deb)}
         (output / "build-provenance.json").write_text(json.dumps(provenance, sort_keys=True))
         (output / "components.json").write_text(json.dumps({"schema": COMPONENTS_SCHEMA, "abi": abi,
             "app_environment": refs["app"], "manager_primary": refs["manager-primary"],
@@ -112,8 +140,13 @@ def main() -> None:
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--revision", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--debs", type=Path, required=True,
+                        help="the local repo (debian-packaging/build-repo.sh --output)")
+    parser.add_argument("--display-root", type=Path, required=True,
+                        help="the display and frame-client .debs unpacked (dpkg-deb -x)")
     args = parser.parse_args()
-    build(args.repository, args.revision, args.output)
+    build(args.repository, args.revision, args.output, debs=args.debs,
+          display_root=args.display_root)
 
 
 if __name__ == "__main__":

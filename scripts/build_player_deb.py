@@ -294,7 +294,7 @@ def stage_tree(deb_root: Path, *, closure: Closure, tree: Path, systemd_source: 
         machine = {"arm64": 183, "amd64": 62}.get(architecture)
         if machine is None or len(blob) < 64 or blob[:6] != b"\x7fELF\x02\x01" or int.from_bytes(blob[18:20], "little") != machine:
             raise BuildError("native_client_elf_architecture")
-        client = deb_root / "usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+        client = deb_root / "usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
         client.parent.mkdir(parents=True)
         client.write_bytes(blob)
         client.chmod(0o644)

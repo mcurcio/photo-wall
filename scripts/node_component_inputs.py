@@ -8,7 +8,9 @@ first-party). A builder that reads anything else finds nothing there and fails, 
 undeclared input cannot reach the outputs. `manifest` digests that tree with everything else the
 outputs derive from: the first-party modules the build and fixture processes import from the
 working tree (their computed closure), the files they read by path (`WORKING_FILES`), the
-builder image, architecture, Debian snapshot, SOURCE_DATE_EPOCH and Python version. The build
+local repo the display and frame client come from (the sha256 of its index, `--debs`/Packages,
+which names every .deb's sha256: debian-packaging/build-repo.sh), the builder image,
+architecture, Debian snapshot, SOURCE_DATE_EPOCH and Python version. The build
 records the manifest and its digest in build-provenance.json; node-components.yml computes the
 same digest (`key`) BEFORE building, as its cache key, and after a build or a restore `stamp`
 recomputes it, refuses outputs that record another, and writes the revision stamp
@@ -32,7 +34,6 @@ from pathlib import Path
 from typing import Any, Final
 
 from scripts import build_node_base_deb as base
-from scripts import build_node_display_deb as display
 from scripts import build_node_manager_deb as manager
 from scripts import build_player_deb as player
 from scripts.debian_packages import PIN
@@ -60,7 +61,7 @@ def tree_sources(tree: Path) -> tuple[str, ...]:
     """Every path of a fetched `tree` the component builders read."""
     return tuple(sorted({*(f"{name}/__init__.py" for name in first_party_packages(tree)),
                          *base.sources(tree), *manager.sources(tree),
-                         *display.sources(tree), *player.sources(tree)}))
+                         *player.sources(tree)}))
 
 
 def fetch_sources(repository: Path, revision: str, into: Path) -> None:
@@ -84,10 +85,11 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def manifest(tree: Path, repo: Path = REPO) -> dict[str, Any]:
+def manifest(tree: Path, debs: Path, repo: Path = REPO) -> dict[str, Any]:
     """Everything the component set (and its PID1 fixture) derives from, `tree` being a
-    `fetch_sources` result."""
+    `fetch_sources` result and `debs` the local repo."""
     return {"schema": SCHEMA, "architecture": ARCHITECTURE, "builder_image": BUILDER_IMAGE,
+            "debs": _sha256(debs / "Packages"),
             "debian_snapshot": PIN.snapshot, "source_date_epoch": PIN.epoch,
             "python": "%d.%d" % sys.version_info[:2],
             "tree": {path.relative_to(tree).as_posix(): _sha256(path)
@@ -100,19 +102,20 @@ def digest(value: Mapping[str, Any]) -> str:
                           ).hexdigest()
 
 
-def key(repository: Path, revision: str, repo: Path = REPO) -> str:
-    """The digest of the manifest a build of `revision` would record."""
+def key(repository: Path, revision: str, debs: Path, repo: Path = REPO) -> str:
+    """The digest of the manifest a build of `revision` over the local repo `debs` would
+    record."""
     with tempfile.TemporaryDirectory(prefix="node-component-key-") as temporary:
         tree = Path(temporary) / "source"
         fetch_sources(repository, revision, tree)
-        return digest(manifest(tree, repo))
+        return digest(manifest(tree, debs, repo))
 
 
-def stamp(components: Path, repository: Path, revision: str) -> None:
+def stamp(components: Path, repository: Path, revision: str, debs: Path) -> None:
     """Bind built or restored `components` to `revision`: only when the inputs they record are
     the ones `revision` gives."""
     recorded = json.loads((components / "build-provenance.json").read_bytes()).get("inputs_sha256")
-    if recorded != key(repository, revision):
+    if recorded != key(repository, revision, debs):
         raise ValueError("node_component_inputs_mismatch")
     write_stamp(components, revision=revision, inputs_sha256=recorded)
 
@@ -122,14 +125,16 @@ def main() -> None:
     parser.add_argument("command", choices=("key", "stamp"))
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--revision", required=True)
+    parser.add_argument("--debs", type=Path, required=True,
+                        help="the local repo (debian-packaging/build-repo.sh --output)")
     parser.add_argument("--components", type=Path, help="stamp: the component set directory")
     args = parser.parse_args()
     if args.command == "key":
-        print(key(args.repository, args.revision))
+        print(key(args.repository, args.revision, args.debs))
     elif args.components is None:
         parser.error("stamp needs --components")
     else:
-        stamp(args.components, args.repository, args.revision)
+        stamp(args.components, args.repository, args.revision, args.debs)
 
 
 if __name__ == "__main__":

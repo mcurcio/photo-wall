@@ -188,21 +188,19 @@ jobs:
           name: photo-wall-node-components-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-node-components
 
-      # Cache A's node input: the two node .debs the squashfs bakes, named by what builds them
-      # rather than by bytes a build might not repeat. node-base.deb is pure staging under the
-      # pin's SOURCE_DATE_EPOCH, so its bytes are its inputs; node-display.deb is compiled, so
-      # it is named by the inputs its builder records (inputs_sha256 in build-provenance.json).
-      # A stale hit cannot pass silently: the node ABI check below requires the cached
-      # squashfs's installed ABI to equal these components'.
+      # Cache A's node input: the bytes of the two node .debs the squashfs bakes. node-base.deb
+      # is pure staging under the pin's SOURCE_DATE_EPOCH and node-display.deb is the local
+      # repo's (debian-packaging/build-repo.sh, whose two builds must agree), so each one's bytes
+      # are its inputs. A stale hit cannot pass silently: the node ABI check below requires the
+      # cached squashfs's installed ABI to equal these components'.
       - name: Compute the node component input digest
         id: node-components
         run: |
           set -eu
           components="$RUNNER_TEMP/photo-wall-node-components"
           base=$(sha256sum < "$components/node-base.deb" | cut -d' ' -f1)
-          display=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["native"]["inputs_sha256"])' \
-            "$components/build-provenance.json")
-          digest=$(printf 'node-base.deb %s\nnode-display inputs %s\n' "$base" "$display" \
+          display=$(sha256sum < "$components/node-display.deb" | cut -d' ' -f1)
+          digest=$(printf 'node-base.deb %s\nnode-display.deb %s\n' "$base" "$display" \
             | sha256sum | cut -d' ' -f1)
           echo "inputs_digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -877,7 +875,7 @@ jobs:
           components = json.loads((work / "photo-wall-node-components/components.json").read_text())
           squashfs = work / "photo-wall-base-bundle/photo-wall-base.squashfs"
           installed = {}
-          for name in ("usr/lib/photo-wall-node-base/abi.json", "usr/lib/photo-wall-display/abi.json"):
+          for name in ("usr/lib/photo-wall-node-base/abi.json", "usr/lib/photo-wall/node-display/abi.json"):
               installed.update(json.loads(subprocess.check_output(["unsquashfs", "-cat", str(squashfs), name])))
           if installed != components["abi"]:
               raise SystemExit("installed node ABI does not match exact component roots")

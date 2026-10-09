@@ -149,7 +149,7 @@ def test_cold_staging_stays_inside_the_image_pool_bind(tmp_path, monkeypatch, un
         assert image == images / ".cold-staging" / image.parent.name / environment.environment_sha256
         assert measured == abi
         staged.append((image.parent.name, roots.name))
-        bridge = roots / environment.environment_sha256 / "rootfs/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+        bridge = roots / environment.environment_sha256 / "rootfs/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
         bridge.parent.mkdir(parents=True)
         bridge.write_bytes(b"fixture-bridge")
         return roots / environment.environment_sha256

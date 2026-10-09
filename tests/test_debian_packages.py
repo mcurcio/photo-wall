@@ -361,7 +361,6 @@ def test_no_deb_builder_writes_a_depends_list():
     builders = sorted((REPO / "scripts").glob("build_*_deb.py"))
     assert [path.name for path in builders] == ["build_bootstrapper_deb.py",
                                                 "build_node_base_deb.py",
-                                                "build_node_display_deb.py",
                                                 "build_node_manager_deb.py",
                                                 "build_player_deb.py"]
     for path in builders:

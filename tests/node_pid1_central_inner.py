@@ -61,7 +61,7 @@ TTYReset=no
 TTYVHangup=no
 TTYVTDisallocate=no
 ExecStart=
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=headless --no-outputs --renderer=pixman --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --modules=/usr/lib/photo-wall-fixture-head.so --socket=wayland-0 --idle-time=0 --width=640 --height=480 --no-config
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=headless --no-outputs --renderer=pixman --shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so --modules=/usr/lib/photo-wall-fixture-head.so --socket=wayland-0 --idle-time=0 --width=640 --height=480 --no-config
 """)
 # The real Player's normal DRM discovery reads synthetic hardware metadata. The
 # compositor's matching Virtual-1 head is real headless Weston, never a DRM claim.
