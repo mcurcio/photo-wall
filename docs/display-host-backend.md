@@ -23,7 +23,7 @@ The shell and its Cairo diagnostic client run from the base, independently of ap
 files or imports. The sealed Player receives only the public Wayland socket.
 
 The diagnostic client is launched by the shell at the fixed base path
-`/usr/lib/photo-wall-display/diagnostic-client`. A private socketpair is passed as
+`/usr/lib/photo-wall/node-display/diagnostic-client`. A private socketpair is passed as
 `WAYLAND_SOCKET`; the compositor retains that exact `wl_client` as the capability
 to bind the diagnostic protocol. A public client with the same app ID, UID, or
 claimed PID cannot obtain that role. Client failure restores a compositor-owned
