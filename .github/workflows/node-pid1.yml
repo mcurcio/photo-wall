@@ -84,6 +84,9 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
 
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
       - uses: ./.github/actions/python-uv
 
       - name: Install the locked environment
@@ -136,6 +139,9 @@ jobs:
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
+
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
 
       - uses: ./.github/actions/python-uv
 

@@ -339,6 +339,9 @@ NOT_SHIPPED: Final = (
     ".github/actions/console-bundle/action.yml",
     # The software e2e jobs' shared setup; it builds test images only.
     ".github/actions/software-e2e-setup/action.yml",
+    # CI's route for Docker Hub pulls (a pull-through mirror): digest pins are unchanged, so no
+    # byte changes; the suites whose jobs use it list it, so a change to it runs them.
+    ".github/actions/docker-hub-mirror/action.yml",
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
@@ -426,6 +429,7 @@ SUITES: Final = (
                  "scripts/provenance_models.py", "scripts/registry_pull.py",
                  "scripts/runtime_provenance.py",
                  "tests/tls_fixture.py", ".github/workflows/netboot-e2e.yml",
+                 ".github/actions/docker-hub-mirror/action.yml",
                  "central/__init__.py", "central/app.py", "central/db.py", "central/fleet/**",
                  "central/catalog.py", "central/execution_outcomes.py", "central/media_ports.py",
                  "central/planner.py", "central/runtime.py", "media/__init__.py",
@@ -456,6 +460,7 @@ SUITES: Final = (
                  "scripts/container_build.py", "scripts/player_start_probe.py",
                  "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",
                  "scripts/build_boot_data.py", ".github/workflows/node-pid1.yml",
+                 ".github/actions/docker-hub-mirror/action.yml",
                  "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
                  "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),
 )
