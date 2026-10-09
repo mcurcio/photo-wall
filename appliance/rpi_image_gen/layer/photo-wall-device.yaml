@@ -2,10 +2,10 @@
 # X-Env-Layer-Name: photo-wall-device
 # X-Env-Layer-Category: app
 # X-Env-Layer-Desc: Installs the Photo Wall device set and the bootstrapper
-#  `.deb` into the base. The device set is every Debian package the
-#  bootstrapper and the Player need, rendered by
+#  `.deb` into the base. The device set is every Debian package the base OS
+#  itself, the bootstrapper and the Player need, rendered by
 #  .github/workflows/base-image.yml from the Debian declaration
-#  (`python3 scripts/debian_packages.py packages bootstrapper player`) into
+#  (`python3 scripts/debian_packages.py packages base-os bootstrapper player`) into
 #  the file `IGconf_app_device_packages` names: the declaration is the one
 #  place a package is named, so this layer names none. The `.deb`
 #  (`scripts/build_bootstrapper_deb.py`, "ALL our custom code ships as a

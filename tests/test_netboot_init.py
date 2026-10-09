@@ -29,14 +29,17 @@ from appliance.netboot_init import (
     NETBOOT_BASE_PATH,
     SERIAL_HEADER,
     STAGE1_SEND_SECONDS,
+    STAGE2_HOSTNAME,
     STAGE2_RESOLVER,
     NetbootError,
     NetbootOps,
     compare_trust_bundles,
     fetch_verified,
+    hand_over_hostname,
     hand_over_resolver,
     main,
     netboot,
+    node_hostname,
     parse_digest_header,
 )
 from contracts.clock_record import ClockRecord, ClockState
@@ -650,6 +653,55 @@ def test_a_resolver_write_failure_is_the_failed_line_and_no_hand_over(tmp_path):
     assert failed(cmdline(), tmp_path, OSError, ops=FileForEtc(tmp_path), keeper=keeper) == (
         "FAILED phase=7 error=NotADirectoryError")
     assert not keeper.handed_over
+
+
+# --- phase 7: the Node is named photo-wall-<serial> (owner, 2026-10-09) ------------------------
+
+@pytest.mark.parametrize("serial, name", [
+    ("161a5de075628d0c", "photo-wall-75628d0c"),   # the test Pi: its TFTP directory's 8 hex
+    (SERIAL, "photo-wall-abcd1234"),
+    ("10000000ABCD1234", "photo-wall-abcd1234"),
+    ("abcd1234", "photo-wall-abcd1234"),
+    (None, None),
+    ("", None),
+    ("1234567", None),                               # too short to be a Pi serial
+    ("10000000abcd123z", None),                      # not hex: no name to make
+    ("10000000abc-1234", None),
+])
+def test_the_name_is_the_serials_last_eight_hex_digits(serial, name):
+    assert node_hostname(serial) == name
+
+
+def test_the_named_boot_writes_etc_hostname_before_the_watchdog(tmp_path):
+    events = Events()
+    log = run(cmdline(), tmp_path, ops=Ops(tmp_path, events), keeper=FakeKeeper(events))
+    written = tmp_path / "root" / STAGE2_HOSTNAME
+    assert written.read_text() == "photo-wall-abcd1234\n"
+    assert stat.S_IMODE(written.stat().st_mode) == 0o644
+    lines = [line for line in log.lines if line.startswith("phase 7/7")]
+    assert "phase 7/7 mount + handoff: hostname=photo-wall-abcd1234" in lines
+    assert lines[-1].startswith("phase 7/7 mount + handoff: success")
+    assert events[-1] == "hand_over"
+
+
+def test_the_name_replaces_the_bases_symlink_without_following_it(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.write_text("localhost\n")
+    root = tmp_path / "root"
+    (root / "etc").mkdir(parents=True)
+    (root / STAGE2_HOSTNAME).symlink_to(target)
+    assert hand_over_hostname(root, "161a5de075628d0c") == "hostname=photo-wall-75628d0c"
+    written = root / STAGE2_HOSTNAME
+    assert not written.is_symlink() and written.read_text() == "photo-wall-75628d0c\n"
+    assert target.read_text() == "localhost\n"
+
+
+def test_without_a_pi_serial_the_bases_name_stays_and_the_boot_goes_on(tmp_path):
+    keeper = FakeKeeper()
+    log = run(cmdline(), tmp_path, keeper=keeper, serial_reader=lambda: None)
+    assert not (tmp_path / "root" / STAGE2_HOSTNAME).exists()
+    assert "phase 7/7 mount + handoff: hostname=unchanged (no Pi serial)" in log.lines
+    assert keeper.handed_over
 
 
 # --- phase 7: the kernel modules travel to stage 2 ------------------------------------------

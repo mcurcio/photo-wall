@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
-Consumer = Literal["bootstrapper", "player", "initrd-build", "node-display", "node-display-build", "node-base", "node-manager"]
+Consumer = Literal["base-os", "bootstrapper", "player", "initrd-build", "node-display", "node-display-build", "node-base", "node-manager"]
 Archive = Literal["debian", "raspberrypi"]
 # When a package lands in a root. Every root fetches the pin over https, and apt inside a root
 # cannot do that until the CA bundle is there, so:
@@ -38,7 +38,10 @@ Archive = Literal["debian", "raspberrypi"]
 #                the device layer's requirements to this stage);
 #   "apt"        anything else: apt inside the root may install it once "bootstrap" is there.
 Stage = Literal["bootstrap", "apt"]
-DEVICE_CONSUMERS: Final[tuple[Consumer, ...]] = ("bootstrapper", "player")
+# "base-os" is the base OS's own set: rpi-image-gen installs it straight into the OS with the
+# rest of the device set, and no .deb names it in its Depends (owner, 2026-10-09: OS
+# dependencies go into the OS, never through a Photo Wall package).
+DEVICE_CONSUMERS: Final[tuple[Consumer, ...]] = ("base-os", "bootstrapper", "player")
 
 SNAPSHOT_FORMAT: Final = "%Y%m%dT%H%M%SZ"
 _PACKAGE_NAME: Final = re.compile(r"[a-z0-9][a-z0-9+.-]+")   # Debian Policy §5.6.1
@@ -122,7 +125,9 @@ RASPBERRY_PI: Final = AptSource("http://archive.raspberrypi.com/debian", "trixie
 
 _EVERY_STAGE: Final[frozenset[Consumer]] = frozenset({"bootstrapper", "player", "initrd-build"})
 _DEVICE: Final[frozenset[Consumer]] = frozenset(DEVICE_CONSUMERS)
+_DEVICE_APPS: Final[frozenset[Consumer]] = frozenset({"bootstrapper", "player"})
 _PLAYER: Final[frozenset[Consumer]] = frozenset({"player"})
+_BASE_OS: Final[frozenset[Consumer]] = frozenset({"base-os"})
 _INITRD_BUILD: Final[frozenset[Consumer]] = frozenset({"initrd-build"})
 _NODE_MANAGER: Final[frozenset[Consumer]] = frozenset({"node-manager"})
 _NODE_BASE: Final[frozenset[Consumer]] = frozenset({"node-base"})
@@ -137,12 +142,12 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("ca-certificates", _EVERY_STAGE | _NODE_BASE | _NODE_MANAGER,
                   why="Trust.public() reads the Debian bundle (R5); apt over https in the build "
                       "root", stage="bootstrap"),
-    DebianPackage("python3-zeroconf", _DEVICE, imports=("zeroconf",)),
+    DebianPackage("python3-zeroconf", _DEVICE_APPS, imports=("zeroconf",)),
     DebianPackage("python3-gi", _PLAYER, imports=("gi",)),
     DebianPackage("python3-opengl", _PLAYER, imports=("OpenGL",)),
-    DebianPackage("python3-cryptography", _DEVICE, imports=("cryptography",)),
+    DebianPackage("python3-cryptography", _DEVICE_APPS, imports=("cryptography",)),
     DebianPackage("python3-httpx", _PLAYER, imports=("httpx",)),
-    DebianPackage("python3-pydantic", _DEVICE, imports=("pydantic",)),
+    DebianPackage("python3-pydantic", _DEVICE_APPS, imports=("pydantic",)),
     DebianPackage("python3-websockets", _PLAYER, imports=("websockets",)),
     DebianPackage("python3-gst-1.0", _PLAYER, why=_RENDER_STACK),
     DebianPackage("gir1.2-gtk-3.0", _PLAYER, why=_RENDER_STACK),
@@ -165,6 +170,10 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("passwd", _PLAYER,
                   why="the Player postinst runs useradd/usermod (Debian Policy: a maintainer "
                       "script's non-essential tool is a Depends)"),
+    DebianPackage("libnss-myhostname", _BASE_OS,
+                  why="resolves the Node's own name, photo-wall-<serial>, which stage 1 sets at "
+                      "every boot and no /etc/hosts line names (sudo, and anything else that "
+                      "looks its host up)"),
     DebianPackage("systemd", _NODE_BASE, why="isolated base unit manager"),
     DebianPackage("login", _NODE_BASE, why="base Weston PAMName=login session configuration"),
     DebianPackage("libpam-systemd", _NODE_BASE,
@@ -262,6 +271,7 @@ def packages(*consumers: Consumer, archive: Archive = "debian",
       packages("bootstrapper")             the bootstrapper .deb's Depends
       packages("player")                   the Player .deb's Depends
       packages(*DEVICE_CONSUMERS)          the device set the base installs
+      packages("base-os")                  the base OS's own packages (no .deb's Depends)
       packages(*DEVICE_CONSUMERS, stage="bootstrap")   the base's rpi-image-gen layer requirements
       packages("initrd-build")             the initrd build root's --include
       packages("initrd-build", archive="raspberrypi")   its kernel/firmware/eeprom install"""

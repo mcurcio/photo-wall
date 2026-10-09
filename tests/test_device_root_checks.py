@@ -10,9 +10,12 @@ from support.repo import REPO
 
 from scripts.debian_packages import PIN
 from scripts.device_root_checks import (
+    BUILD_HOSTNAME,
+    MASKED_UNITS,
     SSH_UNITS,
     InstalledPackage,
     agent_ssh,
+    base_os,
     foreign_sources,
     main,
     missing_packages,
@@ -407,3 +410,98 @@ def test_the_base_enables_rpi_image_gens_ssh_layer_with_the_one_key_and_ci_check
                 and "PRIVATE KEY" in path.read_text(errors="replace")]
     workflow = (REPO / ".github/workflows/base-image.yml").read_text()
     assert "--agent-key appliance/rpi_image_gen/photo_wall_agent.pub" in workflow
+
+
+# --- base OS configuration (rpi_image_gen/layer/photo-wall-os.yaml) ----------------------------
+
+def base_os_root(root: Path) -> Path:
+    """What the photo-wall-os layer, the device layer's neutral hostname and libnss-myhostname's
+    postinst leave in the base; trixie ships etc/default/locale as a link to ../locale.conf."""
+    system = root / "etc/systemd/system"
+    system.mkdir(parents=True)
+    for unit in MASKED_UNITS:
+        (system / unit).symlink_to("/dev/null")
+    write(root, "etc/hostname", "localhost\n")
+    write(root, "etc/nsswitch.conf", "passwd:         files\nhosts:          files myhostname dns\n")
+    write(root, "etc/locale.conf", "LANG=C.UTF-8\n")
+    (root / "etc/default").mkdir()
+    (root / "etc/default/locale").symlink_to("../locale.conf")
+    return root
+
+
+def test_the_layers_output_is_a_configured_base_os(tmp_path):
+    assert base_os(base_os_root(tmp_path)) == []
+
+
+def _unmask_binfmt(root):
+    (root / "etc/systemd/system/systemd-binfmt.service").unlink()
+
+
+def _mask_elsewhere(root):
+    unit = root / "etc/systemd/system/proc-sys-fs-binfmt_misc.mount"
+    unit.unlink()
+    unit.symlink_to("/usr/lib/systemd/system/proc-sys-fs-binfmt_misc.mount")
+
+
+@pytest.mark.parametrize("break_it, refused", [
+    (_unmask_binfmt, "not masked: systemd-binfmt.service"),
+    (_mask_elsewhere, "not masked: proc-sys-fs-binfmt_misc.mount"),
+    (lambda root: write(root, "etc/hostname", f"{BUILD_HOSTNAME}\n"),
+     f"baked hostname: {BUILD_HOSTNAME}"),
+    (lambda root: write(root, "etc/nsswitch.conf", "hosts:          files dns\n"),
+     "hosts database: no myhostname in etc/nsswitch.conf"),
+    (lambda root: write(root, "etc/nsswitch.conf", "hosts: files dns # myhostname\n"),
+     "hosts database: no myhostname in etc/nsswitch.conf"),
+    # The test Pi's v0.22.1 image: the link with nothing at its end, so pam_env warns.
+    (lambda root: (root / "etc/locale.conf").unlink(),
+     "default locale: etc/default/locale sets no LANG"),
+    (lambda root: write(root, "etc/locale.conf", "LANGUAGE=C\n"),
+     "default locale: etc/default/locale sets no LANG"),
+])
+def test_an_unconfigured_base_os_is_refused(tmp_path, break_it, refused):
+    root = base_os_root(tmp_path)
+    break_it(root)
+    assert base_os(root) == [refused]
+
+
+def test_no_hostname_file_is_not_a_baked_one(tmp_path):
+    root = base_os_root(tmp_path)
+    (root / "etc/hostname").unlink()
+    assert base_os(root) == []
+
+
+def test_main_checks_the_base_os_only_when_asked(tmp_path, capsys):
+    root = debian_root(tmp_path)
+    assert main(["--root", str(root)]) == 0
+    assert main(["--root", str(root), "--base-os"]) == 1
+    assert "base os: not masked: systemd-binfmt.service" in capsys.readouterr().out.splitlines()
+
+
+def _hook_lines(text: str) -> list[str]:
+    """A layer's body as shell lines: continuations joined, whitespace collapsed."""
+    body = text.partition("METAEND")[2].replace("\\\n", " ")
+    return [" ".join(line.split()) for line in body.splitlines()]
+
+
+def test_the_base_is_built_with_its_os_configuration_and_ci_checks_it():
+    """The config wires the photo-wall-os layer, whose hook masks exactly MASKED_UNITS and writes
+    the locale; the device layer bakes a neutral hostname, not rpi-image-gen's; base-image.yml runs
+    --base-os over an extract that holds every file base_os reads."""
+    config = (IMAGE_TREE / "config/photo-wall-base.yaml").read_text()
+    assert re.search(r"^  os: photo-wall-os$", config, flags=re.MULTILINE)
+    layer = (IMAGE_TREE / "layer/photo-wall-os.yaml").read_text()
+    assert re.search(r"^# X-Env-Layer-Name: photo-wall-os$", layer, flags=re.MULTILINE)
+    hook = _hook_lines(layer)
+    command = 'chroot "$1" systemctl mask '
+    assert [tuple(line.removeprefix(command).split()) for line in hook
+            if line.startswith(command)] == [MASKED_UNITS]
+    assert """printf 'LANG=C.UTF-8\\n' > "$1/etc/locale.conf\"""" in hook
+    device = (IMAGE_TREE / "device/photo-wall-device-none.yaml").read_text()
+    hostname = re.search(r"^# X-Env-Var-hostname: (\S+)$", device, flags=re.MULTILINE)
+    assert hostname and hostname[1] == "localhost" != BUILD_HOSTNAME
+    workflow = (REPO / ".github/workflows/base-image.yml").read_text()
+    assert "--base-os; then" in workflow
+    extract = workflow.partition('unsquashfs -no-xattrs -d "$extract"')[2].partition(">/dev/null")[0]
+    for path in ("etc/systemd", "etc/hostname", "etc/nsswitch.conf", "etc/default/locale",
+                 "etc/locale.conf"):
+        assert re.search(rf"(^|\s){re.escape(path)}(\s|$)", extract), path

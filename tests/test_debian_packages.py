@@ -152,8 +152,12 @@ def test_each_consumer_gets_its_list():
         "python3-zeroconf")
     assert packages("player") == tuple(sorted(
         (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev", "libwayland-client0")))
+    assert packages("base-os") == ("libnss-myhostname",)
     assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
-        {*packages("bootstrapper"), *packages("player")}))
+        {*packages("base-os"), *packages("bootstrapper"), *packages("player")}))
+    # The base OS's own set goes straight into the OS: no .deb names it in its Depends.
+    assert not set(packages("base-os")) & set(
+        packages("bootstrapper", "player", "node-base", "node-display", "node-manager"))
     assert packages("initrd-build") == (
         "ca-certificates", "device-tree-compiler", "gnupg", "initramfs-tools", "kmod", "python3",
         "zstd")
@@ -197,7 +201,7 @@ def test_mmdebstrap_builds_the_device_root_at_the_pin():
     (["epoch"], ["1788480000"]),
     (["packages", "bootstrapper"], ["ca-certificates", "python3", "python3-cryptography",
                                    "python3-pydantic", "python3-zeroconf"]),
-    (["packages", "bootstrapper", "player"], list(packages(*DEVICE_CONSUMERS))),
+    (["packages", "base-os", "bootstrapper", "player"], list(packages(*DEVICE_CONSUMERS))),
     (["packages", "--archive", "raspberrypi", "initrd-build"],
      ["linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom"]),
     (["sources"], list(SNAPSHOT_LINES)),

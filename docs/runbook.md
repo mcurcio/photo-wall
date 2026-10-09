@@ -1185,6 +1185,7 @@ ssh -i ~/.ssh/photo_wall_agent -o StrictHostKeyChecking=no -o UserKnownHostsFile
 ```
 
 - **Finding the Pi's address.** Central does not record a Node's IP yet. Read it from the DHCP server's lease table (the router's client list; a Pi's vendor shows as Raspberry Pi), or scan the LAN for an open port 22: `nmap -p 22 --open 192.168.1.0/24` (your subnet). On the box, `cat /run/photo-wall-node/host.json` shows the serial the Node claims, which its Player page names.
+- **The Pi's name.** Each Node is `photo-wall-<serial>`, where `<serial>` is the 8-hex serial of its TFTP directory (the last eight digits of `/proc/device-tree/serial-number`), for example `photo-wall-75628d0c`. Stage 1 sets it at every boot ([`hand_over_hostname`](../appliance/netboot_init.py)); the base image bakes only `localhost`.
 - **What to read.** `systemctl --failed`; `systemctl status photo-wall-display.service photo-wall-display-controller.service`; the display units' journal for this boot: `sudo journalctl -b --no-pager -u photo-wall-display.service -u photo-wall-display-controller.service`. The same `-u` form reads any other node unit (`photo-wall-host-core`, `photo-wall-app-broker`, `photo-wall-node-player`, `photo-wall-bus`).
 
 The journal lives in RAM and is lost at reboot, so read it before rebooting a broken Node. Shipping failed units' status and journal tail to Central is [issue 53](https://github.com/mcurcio/photo-wall/issues/53).

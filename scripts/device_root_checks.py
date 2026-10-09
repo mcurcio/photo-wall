@@ -16,8 +16,12 @@ the snapshot it was built from.
 - Agent SSH (`--agent-key FILE`): rpi-image-gen's openssh-server layer left the server and its
   per-boot host-key generator enabled, no host key baked in, exactly one login holding exactly
   that key, and sshd's effective settings key-only (docs/runbook.md, "Reaching a Node over SSH").
+- Base OS configuration (`--base-os`): the binfmt units masked (the Pi kernel has no
+  binfmt_misc), no build-time hostname baked in (stage 1 names the Node photo-wall-<serial> at
+  boot), the hosts database resolving the machine's own name (libnss-myhostname), and a default
+  locale pam_env can read (rpi_image_gen/layer/photo-wall-os.yaml).
 
-Run over the base squashfs extract (all five), both `.deb` staging trees (watchdog only, from the
+Run over the base squashfs extract (all six), both `.deb` staging trees (watchdog only, from the
 builders) and the e2e device root after provisioning (watchdog, time daemon, resolver writer).
 Every file is read inside the root: a symlink with an absolute target is followed from the root,
 never from the build host.
@@ -65,6 +69,10 @@ SSHD_CONFIG: Final = "etc/ssh/sshd_config"
 SSHD_KEY_ONLY: Final = {"passwordauthentication": "no", "kbdinteractiveauthentication": "no",
                         "pubkeyauthentication": "yes", "permitrootlogin": "no"}
 _SSHD_ALIASES: Final = {"challengeresponseauthentication": "kbdinteractiveauthentication"}
+MASKED_UNITS: Final = ("systemd-binfmt.service", "proc-sys-fs-binfmt_misc.automount",
+                       "proc-sys-fs-binfmt_misc.mount")
+# What rpi-image-gen bakes into /etc/hostname when no layer sets IGconf_device_hostname.
+BUILD_HOSTNAME: Final = "rpi-image-gen"
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +278,12 @@ def _logins(root: Path) -> Iterator[tuple[str, str]]:
             yield fields[0], fields[5]
 
 
+def _masked(root: Path, unit: str) -> bool:
+    """root's etc/systemd/system/<unit> is systemctl's mask, a link to /dev/null."""
+    mask = root / "etc/systemd/system" / unit
+    return mask.is_symlink() and os.readlink(mask) == "/dev/null"
+
+
 def agent_ssh(root: Path, key: str) -> list[str]:
     """Violations of the agent's SSH access on a base built with rpi-image-gen's openssh-server
     layer: SSH_UNITS enabled for multi-user.target and not masked; no etc/ssh/ssh_host_* baked
@@ -280,8 +294,7 @@ def agent_ssh(root: Path, key: str) -> list[str]:
         wants = root / "etc/systemd/system/multi-user.target.wants" / unit
         if not wants.is_symlink() and not wants.exists():
             found.append(f"not enabled: {unit}")
-        mask = root / "etc/systemd/system" / unit
-        if mask.is_symlink() and os.readlink(mask) == "/dev/null":
+        if _masked(root, unit):
             found.append(f"masked: {unit}")
     found += [f"baked host key: {path.relative_to(root).as_posix()}"
               for path in sorted((root / "etc/ssh").glob("ssh_host_*"))]
@@ -297,12 +310,33 @@ def agent_ssh(root: Path, key: str) -> list[str]:
     return found
 
 
+def base_os(root: Path) -> list[str]:
+    """Violations of the base's OS configuration: MASKED_UNITS each masked; etc/hostname not
+    BUILD_HOSTNAME (stage 1 writes the Node's own name at boot); `myhostname` in the hosts line of
+    etc/nsswitch.conf, so that name resolves with no /etc/hosts line; etc/default/locale,
+    followed through its link, setting LANG (pam_env reads it at every login)."""
+    found = [f"not masked: {unit}" for unit in MASKED_UNITS if not _masked(root, unit)]
+    if (_read(root, root / "etc/hostname") or "").strip() == BUILD_HOSTNAME:
+        found.append(f"baked hostname: {BUILD_HOSTNAME}")
+    hosts = [line.partition("#")[0].split()[1:]
+             for line in (_read(root, root / "etc/nsswitch.conf") or "").splitlines()
+             if line.startswith("hosts:")]
+    if not any("myhostname" in sources for sources in hosts):
+        found.append("hosts database: no myhostname in etc/nsswitch.conf")
+    locale = _read(root, root / "etc/default/locale")
+    if locale is None or not any(line.strip().startswith("LANG=")
+                                 for line in locale.splitlines()):
+        found.append("default locale: etc/default/locale sets no LANG")
+    return found
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """--root DIR [--require-installed FILE]... [--pinned-sources] [--agent-key FILE]; exit 1
+    """--root DIR [--require-installed FILE]... [--pinned-sources] [--agent-key FILE]
+    [--base-os]; exit 1
     with one line per violation, 0 on a clean root. Watchdog, time-daemon and resolver-writer checks always run;
     each FILE names packages separated by whitespace or commas (a `packages` listing or a
     `Depends` value); --pinned-sources requires exactly debian_packages.PIN.sources();
-    --agent-key runs `agent_ssh`."""
+    --agent-key runs `agent_ssh`; --base-os runs `base_os`."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--require-installed", type=Path, action="append", default=[],
@@ -311,6 +345,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="the root's apt sources must be exactly the declaration's pin")
     parser.add_argument("--agent-key", type=Path, metavar="FILE",
                         help="the agent's SSH public key: the root must admit it, and only it")
+    parser.add_argument("--base-os", action="store_true",
+                        help="the base's OS configuration: binfmt masked, no build hostname, "
+                             "myhostname, a default locale")
     args = parser.parse_args(argv)
     root: Path = args.root
     violations = [f"watchdog override: {line}" for line in watchdog_overrides(root)]
@@ -325,6 +362,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         violations += [f"missing source: {line}" for line in missing_sources(root, PIN.sources())]
     if args.agent_key is not None:
         violations += [f"agent ssh: {line}" for line in agent_ssh(root, args.agent_key.read_text())]
+    if args.base_os:
+        violations += [f"base os: {line}" for line in base_os(root)]
     for line in violations:
         print(line)
     return 1 if violations else 0
