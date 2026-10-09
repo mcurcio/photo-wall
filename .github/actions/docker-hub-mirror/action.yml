@@ -5,15 +5,23 @@ description: >-
   addresses, stay clear of Docker Hub's anonymous per-address pull limit. It adds the mirror to
   the Docker daemon's registry-mirrors (docker pull and run, Compose, the default builder),
   which applies only to docker.io references, keeps digest pins as written and falls back to
-  Docker Hub when the mirror misses; and it outputs the same mirror as BuildKit configuration
-  for docker/setup-buildx-action, whose docker-container builders ignore the daemon's mirrors.
-  Run it before the job's first Docker step: it restarts the daemon. Images and Dockerfiles
-  keep their Docker Hub references, so nothing outside CI depends on the mirror.
+  Docker Hub when the mirror fails; and it outputs the same mirror as BuildKit configuration
+  and as the BuildKit image for docker/setup-buildx-action, whose docker-container builders
+  ignore the daemon's mirrors. It then proves the route: it pulls one digest-pinned Docker Hub
+  image with the daemon's debug log on and fails unless the daemon fetched it from the mirror,
+  since a fallback to Docker Hub is silent. Run it before the job's first Docker step: it
+  restarts the daemon. Images and Dockerfiles keep their Docker Hub references, so nothing
+  outside CI depends on the mirror.
 
 outputs:
   buildkitd-config:
     description: The mirror as buildkitd TOML, for setup-buildx-action's buildkitd-config-inline
     value: ${{ steps.mirror.outputs.buildkitd-config }}
+  buildkit-image:
+    description: >-
+      BuildKit's own image through the mirror, for setup-buildx-action's driver-opts
+      (image=...); the builder container is pulled before any buildkitd configuration applies
+    value: ${{ steps.mirror.outputs.buildkit-image }}
 
 runs:
   using: composite
@@ -23,9 +31,19 @@ runs:
       shell: bash
       env:
         MIRROR: mirror.gcr.io
+        # Small, in the tag-and-digest form the repository pins Docker Hub images with.
+        PROBE_REPOSITORY: library/alpine
+        PROBE_IMAGE: alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
       run: |
         set -eu
-        # Merge into the runner's daemon.json (it already holds the cgroup settings), never replace it.
+        # The mirror as the runner itself sees it, without the daemon in between.
+        status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+          -H 'Accept: application/vnd.oci.image.index.v1+json' \
+          -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+          "https://$MIRROR/v2/$PROBE_REPOSITORY/manifests/${PROBE_IMAGE#*@}" || true)
+        echo "Runner GET of the probe manifest on $MIRROR: HTTP $status"
+        # Merge into the runner's daemon.json (it already holds the cgroup settings), never replace
+        # it. Debug logging names the endpoint each pull uses.
         sudo python3 - "https://$MIRROR" <<'PY'
         import json, pathlib, sys
         path = pathlib.Path("/etc/docker/daemon.json")
@@ -34,18 +52,33 @@ runs:
         mirrors = config.setdefault("registry-mirrors", [])
         if sys.argv[1] not in mirrors:
             mirrors.insert(0, sys.argv[1])
+        config["debug"] = True
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(config, indent=2) + "\n")
         PY
+        echo "daemon.json: $(sudo cat /etc/docker/daemon.json | tr -d '\n')"
+        since=$(date '+%Y-%m-%d %H:%M:%S')
         sudo systemctl restart docker
-        mirrors=$(docker info --format '{{json .RegistryConfig.Mirrors}}')
-        case "$mirrors" in
-          *"$MIRROR"*) echo "Docker Hub mirror: $mirrors" ;;
-          *) echo "::error::the Docker daemon does not list $MIRROR: $mirrors"; exit 1 ;;
-        esac
+        docker info --format 'Docker {{.ServerVersion}}, storage {{.Driver}} {{json .DriverStatus}}, mirrors {{json .RegistryConfig.Mirrors}}'
+        # The capability, not the setting: one pull, and the daemon's own account of its source.
+        pulled=0
+        docker pull --quiet "$PROBE_IMAGE" || pulled=$?
+        log=$(sudo journalctl -u docker --since "$since" --no-pager -o cat)
+        echo "Daemon log for the probe pull:"
+        grep -iE 'pull|mirror|endpoint|registry|resolv|fetch|auth|token|error' <<<"$log" | cut -c1-400 || true
+        if [ "$pulled" -ne 0 ]; then
+          echo "::error::the probe pull of $PROBE_IMAGE failed (exit $pulled); see the daemon log above"
+          exit 1
+        fi
+        if ! grep -qF "$MIRROR" <<<"$log" || grep -qE 'Attempting next endpoint|registry-1\.docker\.io' <<<"$log"; then
+          echo "::error::the daemon did not fetch $PROBE_IMAGE from $MIRROR; see the daemon log above"
+          exit 1
+        fi
+        echo "Docker Hub mirror: $PROBE_IMAGE came from $MIRROR"
         {
           echo 'buildkitd-config<<BUILDKITD'
           echo '[registry."docker.io"]'
           echo "  mirrors = [\"$MIRROR\"]"
           echo 'BUILDKITD'
+          echo "buildkit-image=$MIRROR/moby/buildkit:buildx-stable-1"
         } >> "$GITHUB_OUTPUT"

@@ -270,16 +270,20 @@ image first runs the
 the one owner of the route: it adds Google's pull-through mirror,
 `mirror.gcr.io`, to the Docker daemon's `registry-mirrors` (pulls, `docker run`,
 Compose and the default builder) and outputs the same mirror as BuildKit
-configuration, which every `docker/setup-buildx-action` passes as
-`buildkitd-config-inline`, since a docker-container builder ignores the daemon's
-mirrors. The mirror applies only to `docker.io` references, serves the pinned
+configuration and BuildKit's own image (`moby/buildkit`) on the mirror, which
+every `docker/setup-buildx-action` passes as `buildkitd-config-inline` and
+`driver-opts: image=…`, since a docker-container builder ignores the daemon's
+mirrors and its own image is pulled before that configuration applies. Because
+the daemon falls back to Docker Hub silently, the action then proves the route:
+it pulls one digest-pinned Docker Hub image with the daemon's debug log on and
+fails unless that log shows the mirror served it. The mirror applies only to `docker.io` references, serves the pinned
 digests unchanged and falls back to Docker Hub on a miss; Dockerfiles and
 Compose files keep their Docker Hub references, so nothing outside CI depends on
 it. Other registries (`ghcr.io`, `mcr.microsoft.com`) are pulled directly, and
 scripts pull through [`registry_pull.py`](../scripts/registry_pull.py)'s retry.
 `tests/test_service_workflows.py` fails any job with steps that does not run the
 mirror before its first Docker step, unless the test lists it as pulling nothing
-from Docker Hub, and any builder set up without the mirror.
+from Docker Hub, and any builder set up without the mirror or its BuildKit image.
 
 ## Service image builds
 

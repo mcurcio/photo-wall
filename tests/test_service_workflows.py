@@ -244,6 +244,7 @@ def test_linux_media_runs_in_parallel_and_writes_its_cache_only_from_main():
 MIRROR_ACTION = 'docker-hub-mirror'
 BUILDKIT_MIRROR = ('buildkitd-config-inline: '
                    '${{ steps.docker-hub-mirror.outputs.buildkitd-config }}\n')
+BUILDKIT_IMAGE = 'driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}\n'
 # A step that reaches Docker: the CLI, Compose, a builder, or an action that builds an image.
 _DOCKER_STEP = re.compile(r'\bdocker\b|\bcompose\b|buildx|build-push-action'
                           r'|uses: \./\.github/actions/(service-image|software-e2e-setup)\n')
@@ -313,7 +314,8 @@ def test_every_job_that_reaches_docker_hub_runs_the_mirror_before_docker():
 
 def test_every_buildx_builder_carries_the_mirror():
     """A docker-container builder ignores the daemon's mirrors: each gets the action's BuildKit
-    configuration, from a mirror step that ran before it."""
+    configuration and BuildKit's own image through the mirror (setup-buildx-action otherwise
+    pulls moby/buildkit from Docker Hub), from a mirror step that ran before it."""
     routed = _routed_actions()
     sources = [(path, '      ') for path in WORKFLOWS.glob('*.yml')]
     sources += [(path, '    ') for path in ACTIONS.glob('*/action.yml')]
@@ -323,6 +325,7 @@ def test_every_buildx_builder_carries_the_mirror():
             if 'uses: docker/setup-buildx-action@' in step:
                 builders += 1
                 assert BUILDKIT_MIRROR in step, path
+                assert BUILDKIT_IMAGE in step, path
     assert builders >= 6  # not vacuous: the six builders today
     for action in ACTIONS.glob('*/action.yml'):
         if 'docker/setup-buildx-action@' in action.read_text():
