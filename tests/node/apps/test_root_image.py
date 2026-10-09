@@ -26,6 +26,7 @@ from support.repo import REPO
 from appliance.apps import environment
 from appliance.apps.environment import mounted_root, stage_image
 from appliance.kernel import image_mount
+from appliance.kernel.capacity import line
 from appliance.kernel.image_mount import IMAGE_MOUNT_OPTIONS, NO_IMAGE, SystemdImageMounter
 from scripts import build_node_base_deb as base
 from scripts.build_environment_image import EnvironmentImage
@@ -151,6 +152,27 @@ def test_a_pool_file_left_unsealed_is_unlinked_and_the_next_attempt_stages(world
     assert world.stage(world.incoming()) == world.roots / world.sha
 
 
+@pytest.mark.parametrize("mounted", [True, False], ids=["mounted", "pooled"])
+def test_a_wrong_size_ref_for_a_held_digest_is_a_pairing_refusal_never_an_unlink(world, mounted):
+    world.stage(world.incoming())
+    if not mounted:
+        world.mounter.mounts.clear()
+    wrong = replace(world.reference, size_bytes=world.reference.size_bytes + 1)
+    with pytest.raises(ValueError, match="^environment_reference_mismatch$"):
+        world.stage(world.incoming(), wrong)
+    # The image (and any live mount over it) stays; the right ref stages it with no download.
+    assert world.pool.exists() and (world.roots / world.sha in world.mounter.mounts) == mounted
+    assert world.stage(world.roots.parent / "downloads" / world.sha) == world.roots / world.sha
+
+
+def test_a_pool_file_backing_a_live_mount_is_never_unlinked(world):
+    world.stage(world.incoming())
+    world.pool.chmod(0o644)  # its own facts now fail, but the loop holds its inode
+    with pytest.raises(ValueError, match="^root_image_ownership$"):
+        world.stage(world.incoming())
+    assert world.pool.exists() and world.roots / world.sha in world.mounter.mounts
+
+
 def test_the_incoming_file_is_sealed_before_it_gets_a_pool_name(world, monkeypatch):
     order = []
     monkeypatch.setattr(environment, "ROOT_GID", os.getgid() + 1)  # forces the fchown
@@ -218,27 +240,38 @@ def test_the_image_format_is_part_of_the_base_identity(tmp_path, monkeypatch):
     assert base_abi(tmp_path / "changed") != base_abi(tmp_path / "original")
 
 
-@pytest.mark.parametrize("differ", [False, True])
-def test_the_component_build_ships_an_image_only_when_two_builds_agree(tmp_path, world, differ):
-    built = []
-
+def _image_builder(built: list, *, differ: bool = False, size_bytes: int | None = None):
     def build_image(archive, reference, output, *, tools, **abi):
         output.mkdir(parents=True)
         data = IMAGE_BYTES + (b"!" if differ and built else b"")
         sha = hashlib.sha256(data).hexdigest()
         (output / (sha + ".squashfs")).write_bytes(data)
         built.append(output)
-        return EnvironmentImage(sha, len(data), output / (sha + ".squashfs"))
+        return EnvironmentImage(sha, size_bytes or len(data), output / (sha + ".squashfs"))
+    return build_image
+
+
+@pytest.mark.parametrize("differ", [False, True])
+def test_the_component_build_ships_an_image_only_when_two_builds_agree(tmp_path, world, differ):
+    built = []
 
     def run() -> EnvironmentImage:
-        return reproducible_image(tmp_path / "app.tar", world.reference, tmp_path / "work",
-                                  abi=ABI, tools="tools", build_image=build_image)
+        return reproducible_image(tmp_path / "app.tar", world.reference, tmp_path / "work", role="app",
+                                  abi=ABI, tools="tools", build_image=_image_builder(built, differ=differ))
     if differ:
         with pytest.raises(ValueError, match="^node_components_image_not_reproducible$"):
             run()
     else:
         assert run().sha256 == world.sha
     assert len(built) == 2 and built[0] != built[1]
+
+
+@pytest.mark.parametrize("role", ["app", "manager-primary"])
+def test_the_component_build_ships_no_image_over_its_line(tmp_path, world, role):
+    over = line("app-image" if role == "app" else "manager-image").cap_bytes + 1
+    with pytest.raises(ValueError, match="^node_components_image_over_line$"):
+        reproducible_image(tmp_path / "app.tar", world.reference, tmp_path / "work", role=role, abi=ABI,
+                           tools="tools", build_image=_image_builder([], size_bytes=over))
 
 
 # SystemdImageMounter over real-format mountinfo and sysfs fixtures.

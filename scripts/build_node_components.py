@@ -8,7 +8,8 @@ Each release root ships as its squashfs image (E2c), `<role>.squashfs`, never a 
 tar is built in a private temporary directory, the image is built from it twice and the two
 digests must agree (`node_components_image_not_reproducible`), and the role's ref in
 components.json carries the image's sha256 and size. Each image must fit its memory line on the
-Node (`check_image_lines`, `node_components_image_over_line`): the build fails, never the Node.
+Node (`check_image_lines`, `node_components_image_over_line`), checked by `reproducible_image`,
+the only producer of a shipped image: the build fails, never the Node.
 """
 from __future__ import annotations
 
@@ -40,13 +41,16 @@ from scripts.node_component_inputs import ARCHITECTURE, digest, fetch_sources, m
 from scripts.node_release_artifacts import COMPONENTS_SCHEMA
 
 
-def reproducible_image(archive: Path, reference: AppEnvironmentRefV2, work: Path, *, abi: dict, tools: str,
-                       build_image=image_from_archive) -> EnvironmentImage:
-    """The archive's image, built twice into separate outputs; the two digests must agree."""
+def reproducible_image(archive: Path, reference: AppEnvironmentRefV2, work: Path, *, role: str, abi: dict,
+                       tools: str, build_image=image_from_archive) -> EnvironmentImage:
+    """The role's shipped image: the archive's image, built twice into separate outputs; the two
+    digests must agree and the image must fit the role's line. The only producer of a shipped
+    image, so no image leaves the build unchecked."""
     first, second = (build_image(archive, reference, work / f"image-{run}", **abi, tools=tools)
                      for run in (1, 2))
     if first.sha256 != second.sha256:
         raise ValueError("node_components_image_not_reproducible")
+    check_image_lines({role: first.size_bytes})
     return first
 
 
@@ -89,10 +93,9 @@ def build(repository: Path, revision: str, output: Path) -> None:
             ref = build_environment(deb, sealed, builder_image=BUILDER_IMAGE, architecture=ARCHITECTURE,
                                     role=role, **abi)
             image = reproducible_image(sealed / (ref.environment_sha256 + ".tar"), ref, work / role,
-                                       abi=abi, tools=tools)
+                                       role=role, abi=abi, tools=tools)
             shutil.move(image.path, output / (role + IMAGE_SUFFIX))
             refs[role] = asdict(replace(ref, environment_sha256=image.sha256, size_bytes=image.size_bytes))
-        check_image_lines({role: ref["size_bytes"] for role, ref in refs.items()})
         provenance = {"schema": COMPONENTS_SCHEMA, "architecture": ARCHITECTURE, "abi": abi,
                       "native": json.loads((native / "display-build-source.json").read_text()),
                       "native_package_lock": (native / "display-build-packages.tsv").read_text(),

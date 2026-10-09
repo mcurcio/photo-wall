@@ -221,10 +221,14 @@ def pooled(environment: AppEnvironmentRefV2, images: Path) -> bool:
 
 
 def _sealed(info: os.stat_result, environment: AppEnvironmentRefV2) -> bool:
-    """A pool image's own facts: regular, root's, 0444, one link, the release's size."""
+    """A pool image's own facts and the release's size."""
+    return _own_facts(info) and info.st_size == environment.size_bytes
+
+
+def _own_facts(info: os.stat_result) -> bool:
+    """What a sealed pool file is whatever ref names it: regular, root's, 0444, one link."""
     return (stat.S_ISREG(info.st_mode) and info.st_uid == ROOT_UID
-            and stat.S_IMODE(info.st_mode) == IMAGE_MODE and info.st_nlink == 1
-            and info.st_size == environment.size_bytes)
+            and stat.S_IMODE(info.st_mode) == IMAGE_MODE and info.st_nlink == 1)
 
 
 def mounted_root(roots: Path, environment: AppEnvironmentRefV2, *, images: Path,
@@ -293,21 +297,29 @@ def _image_sha256(descriptor: int) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def _check_pool_image(pool: Path, environment: AppEnvironmentRefV2) -> None:
-    """The pool file's facts and digest, by one descriptor; a refusal unlinks it, so it always
-    clears on the next attempt."""
+def _check_pool_image(pool: Path, environment: AppEnvironmentRefV2, *, in_use: bool) -> None:
+    """The pool file's facts and digest, by one descriptor. Only the file's own evidence makes it
+    debris (crash leftovers: its kind, owner, mode, links, or bytes that do not hash to its name),
+    and debris is unlinked so a refusal clears on the next attempt. A ref that disagrees with a
+    good file (its size) is a pairing refusal: the image stays, as for an unpaired release. A
+    file backing a live mount (`in_use`) is never unlinked: the loop would keep its inode and
+    leave the root unstageable until reboot."""
+    def debris(code: str) -> ValueError:
+        if not in_use:
+            pool.unlink(missing_ok=True)
+        return ValueError(code)
     try:
         descriptor = _open_image(pool)
-    except ValueError:
-        pool.unlink(missing_ok=True)
-        raise
+    except ValueError as error:
+        raise debris(str(error)) from error
     try:
-        if not _sealed(os.fstat(descriptor), environment):
-            pool.unlink(missing_ok=True)
-            raise ValueError("root_image_ownership")
+        info = os.fstat(descriptor)
+        if not _own_facts(info):
+            raise debris("root_image_ownership")
         if _image_sha256(descriptor) != environment.environment_sha256:
-            pool.unlink(missing_ok=True)
-            raise ValueError("root_image_digest_mismatch")
+            raise debris("root_image_digest_mismatch")
+        if info.st_size != environment.size_bytes:
+            raise ValueError("environment_reference_mismatch")
     finally:
         os.close(descriptor)
 
@@ -334,8 +346,10 @@ def stage_image(image: Path, roots: Path, environment: AppEnvironmentRefV2, *, i
         _adopt(image, pool)
     else:
         _discard(image, pool)
-    _check_pool_image(pool, environment)
-    mounter.mount(pool, roots / environment.environment_sha256)
+    where = roots / environment.environment_sha256
+    mount = mounter.mounted(where)
+    _check_pool_image(pool, environment, in_use=mount is not None and mount.image == pool)
+    mounter.mount(pool, where)
     verify_release(roots / environment.environment_sha256, environment, **abi, owner_uid=ROOT_UID)
     return roots / environment.environment_sha256
 
