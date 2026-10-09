@@ -33,7 +33,6 @@ from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
 from contracts.models import (
     Commit,
-    Failure,
     IdentifyOutput,
     Instant,
     Layer,
@@ -42,7 +41,6 @@ from contracts.models import (
     Plan,
     PlayerConfiguration,
     PlayerTime,
-    Readiness,
     Revocation,
 )
 from contracts.player_control import (
@@ -88,8 +86,9 @@ BACKOFF = SESSION_BACKOFF
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
 LOCAL_PROOF_RETRY = 5.0
-# How long a thread-to-main handoff may wait for the GLib loop before the Player reports
-# main_loop_late instead of waiting on a starved loop in silence (G8).
+# How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
+# main_loop_late health fault instead of waiting on a starved loop in silence (G8). Readiness
+# is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
 DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
 
@@ -446,10 +445,6 @@ class PlayerService:
         self._identify_key: tuple[str, int] | None = None
         self._identify_output: str | None = None
         self._identify_deadline: float | None = None
-        # The last readiness sent and the local monotonic time it was sent: re-sent, marked
-        # main_loop_late, while the GLib loop is late; its sequence is the executor's floor.
-        # Written by the network thread only (one reference assignment).
-        self._last_readiness: tuple[Readiness, float] | None = None
         # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
         # every dispatch is MainLoopLate at once, and run() does not pet the watchdog.
         self._late_posts = LatePosts()
@@ -458,6 +453,15 @@ class PlayerService:
         if self.last_fault != code:
             LOG.warning("player fault: %s", code if detail is None else f"{code} {detail}")
         self.last_fault, self.last_fault_detail = code, detail
+
+    def _main_loop_late(self) -> None:
+        """The GLib loop missed a dispatch deadline: raise the health fault, never touch
+        readiness. Central keeps the last readiness it accepted, so committed groups stand; it
+        commits no new group once that report is older than readiness_seconds, and a long
+        stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
+        withdraw prepared playback)."""
+        self.fault("main_loop_late")
+        self._write_health(False, "main_loop_late")
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -501,8 +505,9 @@ class PlayerService:
         one is unreached: a late loop is never a capacity refusal and never fills the
         dispatcher's slots (E-G8-7). A callback that started before the deadline cannot be
         abandoned, so its outcome is awaited and returned, never MainLoopLate: its effects
-        landed (E-G8-10). One that never returns blocks the GLib thread, and the watchdog,
-        no longer petted, ends that Player."""
+        landed (E-G8-10). One that never returns blocks the GLib thread: on a V2 node its
+        probes go unanswered and the broker's probe kill ends that Player; under the V1 unit
+        the watchdog, no longer petted, does."""
         source, abandon = self._late_posts.post(self.dispatcher, callback)
         loop = asyncio.get_running_loop()
         waiter = loop.create_future()
@@ -671,7 +676,17 @@ class PlayerService:
                     self.executor = self.executor_factory(registered.player_id, self.cache,
                         self.renderer, self.clock, self.mapping)
 
-                await self.dispatch(create)
+                # A late loop never discards the registration: an abandoned create() never
+                # ran, so it is posted again until the loop runs it (main waited the same way).
+                while True:
+                    try:
+                        await self.dispatch(create)
+                        break
+                    except MainLoopLate:
+                        self._main_loop_late()
+                        if self._stop.is_set():
+                            raise
+                        await asyncio.sleep(REPORT_INTERVAL)
             except Exception as error:
                 if self.cache is not None:
                     await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
@@ -921,10 +936,7 @@ class PlayerService:
         with self._lock:
             readiness = None
             if self.executor is not None and self._plan is not None:
-                last = self._last_readiness
-                readiness = self.executor.readiness(
-                    floor=last[0].sequence if last is not None
-                    and last[0].authority_epoch == self._plan.authority_epoch else 0)
+                readiness = self.executor.readiness()
                 if any(failure.code in ("decode", "integrity") for failure in readiness.failures):
                     self._verify_due.set()
                 self._jobs = tuple(Download(self._plan.authority_epoch, self._plan.plan_id,
@@ -1133,7 +1145,7 @@ class PlayerService:
                     raise               # ends the cycle: run() locates again (0014)
                 self._uplink_fault("clock_probe", error)
             except MainLoopLate:
-                self.fault("main_loop_late")
+                self._main_loop_late()
             except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
@@ -1143,38 +1155,7 @@ class PlayerService:
         try:
             await self.poll_state()
         except MainLoopLate:
-            self.fault("main_loop_late")
-
-    async def _report_late(self) -> None:
-        """The GLib loop missed a dispatch deadline: re-send the last readiness with every
-        assignment it named failed as main_loop_late, so Central sees a late Player, not a
-        silent one. The watchdog is not petted (its deadline still restarts a stuck Player)."""
-        self.fault("main_loop_late")
-        self._write_health(False, "main_loop_late")
-        last = self._last_readiness
-        if last is None:
-            return
-        previous, observed = last
-        now = self.clock.monotonic()
-        ids = sorted({*previous.secured, *(failure.assignment_id for failure in previous.failures)})
-        late = Readiness(
-            plan_id=previous.plan_id, revision=previous.revision,
-            authority_epoch=previous.authority_epoch, sequence=previous.sequence + 1,
-            secured=previous.secured, prepared=(), capacity_ok=previous.capacity_ok,
-            clock_uncertainty=previous.clock_uncertainty,
-            observed_at=previous.observed_at + max(0.0, now - observed),
-            failures=tuple(Failure(assignment_id=key, code="main_loop_late") for key in ids))
-        self._last_readiness = late, now
-        try:
-            await self.request("POST", "/v1/player/readiness", body=late.model_dump(mode="json"))
-        except StaleFeedback:
-            pass                # the next turn polls state again
-        except UplinkError as error:
-            if error.cause is not Cause.CENTRAL:
-                raise
-            # Central refused the re-sent report (its offer may have moved on): best effort,
-            # it never ends the session, which the late loop could not rebuild anyway.
-            LOG.debug("player: main_loop_late report refused: %s", error.reason)
+            self._main_loop_late()
 
     async def _control_loop(self):
         while not self._stop.is_set():
@@ -1184,7 +1165,8 @@ class PlayerService:
                 readiness, observations = await self.dispatch(self._feedback)
                 healthy, reason = await self.dispatch(self._health_status)
             except MainLoopLate:
-                await self._report_late()
+                # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
+                self._main_loop_late()
                 await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
             # The signed-release boot-health trial has been retired (0009):
@@ -1192,7 +1174,6 @@ class PlayerService:
             # report against and no watchdog to disarm.
             self._write_health(healthy, reason)
             if readiness is not None:
-                self._last_readiness = readiness, self.clock.monotonic()
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
                 except StaleFeedback:
@@ -1232,7 +1213,7 @@ class PlayerService:
                     result = await self.dispatch(lambda: self._apply_state(state))
                 except MainLoopLate:
                     # Never started, so never applied; the next delivery or poll carries it.
-                    self.fault("main_loop_late")
+                    self._main_loop_late()
                     continue
                 await self._ack_control(state, result)
             raise ServiceError("session_closed")
@@ -1355,12 +1336,12 @@ class PlayerService:
                         proof_task = asyncio.create_task(self._local_app_proof_loop())
                     await self.hello_protocol()
                     # Reconnection reconciles authority before any download work. A late GLib
-                    # loop does not end the session here: its loops report main_loop_late.
+                    # loop does not end the session here: its loops raise main_loop_late.
                     for step in (self.probe_time, self.poll_state):
                         try:
                             await step()
                         except MainLoopLate:
-                            self.fault("main_loop_late")
+                            self._main_loop_late()
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),

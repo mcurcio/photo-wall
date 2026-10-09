@@ -40,7 +40,7 @@ from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
-from player.mainloop import CONTROL, DispatchRefused, MainLoopDispatcher
+from player.mainloop import CONTROL, DispatchRefused, LoopLate, MainLoopDispatcher
 from player.output_discovery import (
     CONFIGURED_OUTPUT_IDS,
     discover_outputs,
@@ -56,6 +56,7 @@ from player.service import (
     PlayerConfig,
     PlayerService,
     ServiceError,
+    StaleFeedback,
     State,
     Unauthorized,
     _ChunkBridge,
@@ -1292,11 +1293,13 @@ def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
     assert fifth.done() and seen == [0, 2, 3, 4]
 
 
-def test_a_late_main_loop_is_reported_on_readiness_not_silence(tmp_path, monkeypatch):
-    """G8: the GLib loop stops running dispatches (a starved control queue). The control loop
-    keeps reporting: the last readiness again, one sequence higher, every assignment failed
-    main_loop_late, and health says main_loop_late. The late callbacks never run, and when the
-    loop recovers its next report is above every late one, so Central accepts it."""
+def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
+        tmp_path, monkeypatch):
+    """G8, E-G8-8 decision: the GLib loop stops running dispatches (a starved control queue).
+    The Player raises main_loop_late on its health channel and posts nothing on readiness, so
+    the readiness Central holds (prepared included) stands; a late report with prepared=()
+    would cancel the wall's coordinated groups. The late callbacks never run, and when the loop
+    recovers its next report is the executor's next sequence with nothing withdrawn."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
 
@@ -1338,19 +1341,25 @@ def test_a_late_main_loop_is_reported_on_readiness_not_silence(tmp_path, monkeyp
 
             # The production dispatcher (4 slots), through more late cycles than it has slots.
             service.dispatcher = MainLoopDispatcher(StarvedGLib)
-            late = await turn(service, server, 8)
-            assert len(late) >= 8
+            monkeypatch.delattr(service, "poll_state")      # the real poll, no stop hook
+            late_cycles = []
+            raise_late = service._main_loop_late
+
+            def counted():
+                raise_late()
+                late_cycles.append(True)
+                if len(late_cycles) >= 8:
+                    service._stop.set()
+            monkeypatch.setattr(service, "_main_loop_late", counted)
+            posted = len(readiness_posts(server))
+            service._stop.clear()
+            await asyncio.wait_for(service._control_loop(), 5)
+            assert len(late_cycles) >= 8
+            assert readiness_posts(server)[posted:] == []   # readiness untouched
             assert len(StarvedGLib.callbacks) <= 4      # one abandoned post holds the line
-            assert [report["sequence"] for report in late] == [
-                live["sequence"] + n for n in range(1, len(late) + 1)]
-            for report in late:
-                assert report["secured"] == ["picture"] and report["prepared"] == []
-                assert report["failures"] == [{"assignment_id": "picture",
-                                               "code": "main_loop_late"}]
-            assert late[1]["observed_at"] >= late[0]["observed_at"] >= live["observed_at"]
             assert service.last_fault == "main_loop_late"
             assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
-            # The loop runs again: nothing it missed runs late, and reporting resumes above.
+            # The loop runs again: nothing it missed runs late, and reporting resumes.
             ran = []
             monkeypatch.setattr(service, "_apply_state", lambda state: ran.append(state))
             for callback in StarvedGLib.callbacks:
@@ -1358,22 +1367,23 @@ def test_a_late_main_loop_is_reported_on_readiness_not_silence(tmp_path, monkeyp
             assert ran == []
             service.dispatcher = immediate
             monkeypatch.undo()
-            recovered = (await turn(service, server, 1))[-1]
-            assert recovered["sequence"] > late[-1]["sequence"]
-            assert recovered["failures"] == []
+            recovered = (await turn(service, server, 1))[0]
+            assert recovered["sequence"] == live["sequence"] + 1     # no gap, nothing in between
+            assert recovered["failures"] == [] and recovered["secured"] == live["secured"]
+            assert json.loads(service.health_path.read_text())["health_reason"] == "healthy"
         finally:
             await close(service)
     asyncio.run(check())
 
 
-def test_a_blocked_main_loop_keeps_reporting_and_leaves_the_watchdog_to_restart(
+def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restart(
         tmp_path, monkeypatch):
     """E-G8-7, through run() with the time loop live and the production dispatcher: a GLib
     loop that stops running dispatches never turns into a dispatch_capacity refusal. The
-    Player keeps posting main_loop_late readiness across many deadlines and across a session
-    that ends meanwhile (its reconnect's cycle-start dispatches are late, not fatal), and run()
-    pets the watchdog not once until the loop runs again, so WatchdogSec restarts a Player
-    whose loop stays stuck."""
+    Player keeps raising main_loop_late (and posts no readiness) across many deadlines and
+    across a session that ends meanwhile (its reconnect's cycle-start dispatches are late, not
+    fatal), and run() pets the watchdog not once until the loop runs again, so WatchdogSec
+    restarts a Player whose loop stays stuck."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
@@ -1410,6 +1420,9 @@ def test_a_blocked_main_loop_keeps_reporting_and_leaves_the_watchdog_to_restart(
         monkeypatch.setattr(service, "fault",
                             lambda code, **kw: (faults.append(code), record(code, **kw)))
 
+        def late_count():
+            return faults.count("main_loop_late")
+
         async def until(predicate):
             while not predicate():
                 await asyncio.sleep(.005)
@@ -1419,27 +1432,111 @@ def test_a_blocked_main_loop_keeps_reporting_and_leaves_the_watchdog_to_restart(
             await asyncio.wait_for(until(lambda: posts and pets), 5)
             GLib.blocked = True
             blocked_at, petted = len(posts), len(pets)
-            await asyncio.wait_for(until(lambda: len(posts) >= blocked_at + 6), 5)
+            await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
             fail_state.append(False)        # the session ends while the loop is blocked
             await asyncio.wait_for(until(lambda: fail_state[0]), 5)
-            ended_at = len(posts)
-            await asyncio.wait_for(until(lambda: len(posts) >= ended_at + 6), 5)
-            late = posts[blocked_at:]
-            assert all(failure["code"] == "main_loop_late"
-                       for report in late for failure in report["failures"])
-            assert "dispatch_capacity" not in faults and "main_loop_late" in faults
+            ended_at = late_count()
+            await asyncio.wait_for(until(lambda: late_count() >= ended_at + 6), 5)
+            assert len(posts) == blocked_at         # no readiness while the loop is late
+            assert "dispatch_capacity" not in faults
             assert len(pets) == petted              # no pet while the loop is stuck
             assert len(GLib.queued) <= 4
             # The loop runs again: the abandoned posts drain, reporting and petting resume.
             GLib.blocked = False
             for callback in GLib.queued:
                 callback()
-            recovered_at = len(posts)
-            await asyncio.wait_for(until(lambda: len(pets) > petted and any(
-                not report["failures"] for report in posts[recovered_at:])), 5)
+            await asyncio.wait_for(
+                until(lambda: len(pets) > petted and len(posts) > blocked_at), 5)
+            assert all(not report["failures"] for report in posts)
         finally:
             service.stop()
             await asyncio.wait_for(task, 5)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
+    """Central refuses readiness as stale (409) and the state poll that follows misses the
+    dispatch deadline: the Player raises main_loop_late and the control loop carries on (the
+    next turn polls again); a late loop never ends the session here."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        polls, stale = [], []
+        request = service.request
+
+        async def refusing(method, path, **kwargs):
+            if path == "/v1/player/readiness" and len(stale) < 2:
+                stale.append(True)
+                raise StaleFeedback("state_changed")
+            return await request(method, path, **kwargs)
+        monkeypatch.setattr(service, "request", refusing)
+
+        async def poll():
+            polls.append(True)
+            if len(polls) % 2 == 0:             # the poll after each stale refusal is late
+                raise MainLoopLate("main_loop_late")
+            if len(polls) >= 5:
+                service._stop.set()
+        monkeypatch.setattr(service, "poll_state", poll)
+        try:
+            await asyncio.wait_for(service._control_loop(), 5)
+            assert len(stale) == 2 and len(polls) >= 5
+            assert service.last_fault == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkeypatch):
+    """The time loop names a missed dispatch deadline main_loop_late; MainLoopLate is a
+    ServiceError, so without its own branch it would read as a clock_probe failure."""
+    async def check():
+        service, _ = await rig(tmp_path)
+        service.health_path = tmp_path / "health.json"
+
+        async def late():
+            service._stop.set()
+            raise MainLoopLate("main_loop_late")
+        monkeypatch.setattr(service, "probe_time", late)
+        try:
+            await asyncio.wait_for(service._time_loop(), 5)
+            assert service.last_fault == "main_loop_late"
+            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_first_enrollment_on_a_late_loop_keeps_its_registration(tmp_path, monkeypatch):
+    """The executor's create() dispatch misses its deadline at first enrollment: the abandoned
+    post never ran, so it is posted again until the loop runs it. The registration stands (one
+    register, no re-enrollment that would supersede this boot), as main's unbounded wait did."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    late = [2]
+
+    def dispatcher(callback):
+        if late[0]:
+            late[0] -= 1
+            refused = Future()
+            refused.set_exception(LoopLate("main_loop_late"))
+            return refused
+        return immediate(callback)
+
+    async def check():
+        service, server = await finder_rig(finding("http://central"))
+        service.dispatcher = dispatcher
+        try:
+            await service.locate_central()
+            await service.enroll()
+            registers = [request for request in server.requests
+                         if request.url.path == "/v1/enrollment/register"]
+            assert len(registers) == 1 and late == [0]
+            assert service.executor is not None and service.cache is not None
+            assert service.registration is not None
+            assert service.last_fault == "main_loop_late"
+        finally:
             await close(service)
     asyncio.run(check())
 
@@ -1490,13 +1587,15 @@ def _player_failure_codes() -> set[str]:
 
 def test_every_player_failure_code_has_console_recovery_wording():
     """A code the console does not know falls back to the generic wording silently, so the
-    operator would never read main_loop_late's (or any new code's) recovery."""
+    operator would never read a new code's recovery. (main_loop_late is a health fault, never a
+    readiness failure code: E-G8-8 decision.)"""
     source = (Path(__file__).resolve().parents[1] / "central/console/src/readinessRecovery.js"
               ).read_text()
     table = source[source.index("const RECOVERY"):source.index("});")]
     known = set(re.findall(r"^  ([a-z_]+):", table, re.MULTILINE))
     codes = _player_failure_codes()
-    assert {"main_loop_late", "clock", "capacity", "decode", "download", "integrity"} <= codes
+    assert {"clock", "capacity", "decode", "download", "integrity"} <= codes
+    assert "main_loop_late" not in codes
     assert codes - known == set()
 
 

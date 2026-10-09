@@ -12,8 +12,6 @@ const RECOVERY = Object.freeze({
     "The Player could not secure this assignment. Check Player storage and its network path to Central, then check Central media delivery.",
   integrity:
     "The Player found that its cached copy did not pass the integrity check. Check the Player cache and Central media delivery so it can reacquire a valid copy.",
-  main_loop_late:
-    "The Player is overloaded: its display loop is falling behind, so it cannot confirm this assignment. Use lighter media or fewer videos on this Player; it restarts itself if the loop stays stuck.",
 });
 
 const UNKNOWN_RECOVERY =

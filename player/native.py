@@ -196,6 +196,9 @@ class _Draw:
     completed_at: float = 0
     applied_calibration: AppliedCalibration | None = None
     primitives: tuple | None = None
+    # What this draw shows (_shown): the one record present() compares against, so "a draw
+    # is owed" is just "the newest draw, pending or else acknowledged, shows something else".
+    shown: tuple | None = None
 
 
 @dataclass
@@ -208,8 +211,6 @@ class _Surface:
     identify_banner: Any = None
     pending: _Draw | None = None
     acknowledged: _Draw | None = None
-    # What the last queued draw showed (see present): an unchanged one is not redrawn.
-    queued: tuple | None = None
     failure: str | None = None
     textures: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     targets: list[tuple[int, int]] = field(default_factory=list)
@@ -696,7 +697,8 @@ class NativeRenderer:
         if frames is not None:
             grant = frames.grant(composition.binding.output_id, composition)
             if grant is None or not grant.admitted or not grant.matches(composition):
-                surface.acknowledged = surface.queued = None
+                # A draw under a grant that is not admitted is never owed (_render drops it).
+                surface.acknowledged = surface.pending = None
                 surface.area.queue_render()
                 return PresentationResult("pending")
         if surface.pending and _fingerprint(surface.pending.composition) != _fingerprint(composition):
@@ -726,12 +728,14 @@ class NativeRenderer:
         shown = _shown(composition, generations,
                        tuple(self._decoders[key].sample_serial for key, _, _ in generations),
                        frames, grant if frames is not None else None)
+        # The newest draw is the pending one, else the acknowledged one: whatever _render
+        # dropped or drew, present() reads it from those two and nothing else.
         ack = surface.acknowledged
+        newest = surface.pending or ack
         now = time.monotonic()
-        if shown != surface.queued or (surface.pending is None and _renewal_due(ack, now)):
+        if newest is None or newest.shown != shown or _renewal_due(ack, now):
             self._serial += 1
-            surface.pending = _Draw(self._serial, composition, generations)
-            surface.queued = shown
+            surface.pending = _Draw(self._serial, composition, generations, shown=shown)
             surface.area.queue_render()
         # Presented stays keyed on layers and generations only: a playing video's newer sample
         # or a crossfade step never makes the composition already drawn read as pending.

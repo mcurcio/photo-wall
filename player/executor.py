@@ -524,8 +524,7 @@ class Executor:
                          for key, assignment in sorted(self._assignments.items())
                          if assignment.failure is not None)
 
-    def readiness(self, floor: int = 0) -> Readiness:
-        """The next report, its sequence above `floor` (the highest one its caller already sent)."""
+    def readiness(self) -> Readiness:
         with self._lock:
             if not self._plan:
                 raise AuthorityError("no current plan")
@@ -541,7 +540,7 @@ class Executor:
                     failures[key] = Failure(assignment_id=key, code="clock")
                 elif not self._capacity_ok:
                     failures[key] = Failure(assignment_id=key, code="capacity")
-            self._sequence = max(self._sequence, floor) + 1
+            self._sequence += 1
             # Wire values remain finite; unhealthy mapping is also explicitly coded.
             uncertainty = self.mapping.uncertainty
             if not math.isfinite(uncertainty):
