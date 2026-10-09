@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # Build the Node's Debian packages and their local repo (decision 0019, data flow step 1).
 #
 #   debian-packaging/build-repo.sh --output DIR [--revision REV]
@@ -22,7 +22,7 @@
 # (Docker's default builder when unset), reading and writing the BuildKit caches
 # PHOTO_WALL_NODE_BUILD_CACHE_FROM and _TO name, with `{role}` replaced by `debian-builder`: the
 # node build cache policy of scripts/node_build_inputs.py, which changes no byte.
-set -eu
+set -euo pipefail
 
 ARCHITECTURE=arm64
 BUILDER_IMAGE=photo-wall-debian-builder
@@ -62,7 +62,7 @@ for pair in "cache-from:${PHOTO_WALL_NODE_BUILD_CACHE_FROM:-}" "cache-to:${PHOTO
 	fi
 	set -- "$@" "--${pair%%:*}" "$(printf '%s' "$value" | sed "s/{role}/$ROLE/g")"
 done
-git -C "$root" archive --format=tar "$commit" packaging debian/control |
+git -C "$root" archive --format=tar "$commit" debian-packaging debian/control |
 	docker buildx build "$@" --target builder --tag "$BUILDER_IMAGE" \
 		--file debian-packaging/builder/Dockerfile -
 
