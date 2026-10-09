@@ -37,7 +37,7 @@ This page is the map; open an owning document only when the routing table sends 
 
 ## Verify
 
-CI (`pipeline.yml`) is the full gate. Locally, run the tests you touched plus mutation probes, with the commands below.
+CI (`pipeline.yml`) is the full gate for every automated tier below. Locally, run the tests you touched plus mutation probes, with the commands below. Physical Pi, PXE, HDMI and timing have no automated tier: when that area changes, bench evidence stays a manual step.
 
 | Tier | Command | Authority |
 |---|---|---|
