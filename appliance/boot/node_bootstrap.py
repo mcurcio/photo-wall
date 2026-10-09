@@ -1,4 +1,5 @@
-"""Base V2 cold handoff and exact-root preparation; no host package installation."""
+"""Base V2 cold handoff and exact-root preparation (release roots as images mounted read-only
+through PID1, E2c); no host package installation."""
 from __future__ import annotations
 
 import argparse
@@ -9,12 +10,13 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from appliance.apps.environment import verify_root
+from appliance.apps.environment import mounted_root, stage_image
 from appliance.boot.bus_environment import write_bus_environment
 from appliance.boot.storage_mount import mount_storage
 from appliance.kernel.boot_stage import run_stage
 from appliance.kernel.capacity import STORE, admit_cold, memory_values
 from appliance.kernel.clock import boot_id
+from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.node.preparer import DownloadPreparer
 from appliance.node_boot_handoff import HANDOFF, read_node_handoff
 from contracts.strict_json import loads_object
@@ -22,11 +24,13 @@ from uplink.files import write_atomically
 
 # The prepare stage's download window (every attempt and retry of every artifact ends inside
 # it): photo-wall-node-prepare.service's TimeoutStartSec=1200 less STAGING_MARGIN_SECONDS for
-# extracting and verifying the last archive downloaded (a test binds the unit to both).
+# hashing, mounting and checking the last image downloaded (a test binds the unit to both).
 STAGING_MARGIN_SECONDS = 300
 DOWNLOAD_WINDOW_SECONDS = 900
 COLD_STAGING = ".cold-staging"
-_ROOT_POOLS = ("manager-roots", "app-roots")
+# The directories holding one mount point per staged root; PID1 creates the mount points.
+_ROOT_DIRECTORIES = ("manager-roots", "app-roots")
+IMAGE_POOL = "root-images"
 
 
 def _marker(path: Path, keys: set[str]) -> dict:
@@ -88,40 +92,43 @@ def _owned_staging(staging: Path) -> None:
 
 
 def _clear_cold_staging(node_store: Path) -> None:
-    """Remove a killed earlier run's staging (its `.partial` downloads, `.stage-*` extractions,
-    archives and unpublished roots) before admission counts the store. Only this stage writes
-    COLD_STAGING, and the stages after it require it, so nothing else is using it."""
-    for pool in _ROOT_POOLS:
-        staging = node_store / pool / COLD_STAGING
-        if staging.is_symlink() or staging.exists():
-            _owned_staging(staging)
-            shutil.rmtree(staging)
+    """Remove a killed earlier run's staging (its `.partial` and complete downloads) before
+    admission counts the store. Only this stage writes COLD_STAGING, and the stages after it
+    require it, so nothing else is using it."""
+    staging = node_store / IMAGE_POOL / COLD_STAGING
+    if staging.is_symlink() or staging.exists():
+        _owned_staging(staging)
+        shutil.rmtree(staging)
 
 
-def prepare_roots(*, root: Path = Path("/")) -> None:
+def prepare_roots(*, root: Path = Path("/"), mounter: ImageMounter | None = None) -> None:
     window_ends = time.monotonic() + DOWNLOAD_WINDOW_SECONDS
+    mounter = SystemdImageMounter() if mounter is None else mounter
     central, offer, abi = materialize_handoff(root=root)
     node_store = root / str(STORE).lstrip("/")
+    images = node_store / IMAGE_POOL
     _clear_cold_staging(node_store)
     selected = (("manager-primary", offer.manager_primary, "manager-roots"),
                 ("manager-fallback", offer.manager_fallback, "manager-roots"),
                 ("app", offer.app_environment, "app-roots"))
     resident = set()
     for _, environment, destination in selected:
-        if environment is not None and (node_store / destination / environment.environment_sha256).exists():
-            verify_root(node_store / destination / environment.environment_sha256, environment, **abi)
-            resident.add(environment.environment_sha256)
+        if environment is None:
+            continue
+        try:
+            mounted_root(node_store / destination, environment, images=images, mounter=mounter, **abi)
+        except ValueError:
+            continue  # not staged (or not for this Node): fetched and staged below
+        resident.add(environment.environment_sha256)
     total, available = memory_values()
     admit_cold((entry[1] for entry in selected), total=total, available=available,
                free=shutil.disk_usage(node_store).free, resident=frozenset(resident))
     for kind, environment, destination in selected:
         if environment is None or environment.environment_sha256 in resident:
             continue
-        # Each root pool is a separate systemd writable bind mount. Keep staging
-        # under its destination so immutable publication is one atomic rename.
-        roots = node_store / destination
-        roots.mkdir(mode=0o755, exist_ok=True)
-        staging = roots / COLD_STAGING
+        # The download lands inside the image pool's one writable bind, so adopting it into the
+        # pool is one rename (a rename across two binds is EXDEV, errata E-E2C-CUT-5).
+        staging = images / COLD_STAGING
         staging.mkdir(mode=0o700, exist_ok=True)
         _owned_staging(staging)
         directory = staging / kind
@@ -130,13 +137,9 @@ def prepare_roots(*, root: Path = Path("/")) -> None:
         # stays `running` meanwhile (one oneshot, no systemd Restart=).
         preparer = DownloadPreparer(directory, url=url, retry_until=window_ends, **abi)
         preparer.prepare(environment)
-        target = roots / environment.environment_sha256
-        verified = directory / "verified" / environment.environment_sha256
-        if target.exists():
-            verify_root(target, environment, **abi)
-        else:
-            os.rename(verified, target)
-        (directory / (environment.environment_sha256 + ".tar")).unlink(missing_ok=True)
+        roots = node_store / destination
+        stage_image(directory / environment.environment_sha256, roots, environment,
+                    images=images, mounter=mounter, **abi)
         if kind == "app":
             bridge = roots / environment.environment_sha256 / "rootfs/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
             if not bridge.is_file():

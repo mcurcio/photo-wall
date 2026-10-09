@@ -184,9 +184,10 @@ jobs:
             --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
             --components "$RUNNER_TEMP/node-components"
 
-      # The squashfs images built from the set's archives (E2b; nothing ships them yet): two
-      # builds give one digest, each mounted image passes verify_root, each is smaller than its tar.
-      - name: Prove the environment images (reproducible, mount, verify_root)
+      # The shipped squashfs images (E2c; the build already refused two builds with different
+      # digests): each is its ref's digest and size, has the contract's format, and, mounted
+      # read-only, passes the full verify_root (the per-file proof's one home).
+      - name: Prove the shipped environment images (ref, format, mount, verify_root)
         env:
           PHOTO_WALL_IMAGE_MOUNT_TESTS: "1"
           PHOTO_WALL_NODE_COMPONENTS: ${{ runner.temp }}/node-components

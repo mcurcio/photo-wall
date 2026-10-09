@@ -49,7 +49,7 @@ def main() -> None:
         incremental = reference.size_bytes + OVERHEAD
         if disk.used + incremental > device_class(total).store_bytes or incremental > min(disk.free, available - EMERGENCY_HEADROOM):
             raise ValueError("root_import_capacity")
-        archive = STORE / "preparation/downloads" / (reference.environment_sha256 + ".tar")
+        archive = STORE / "preparation/downloads" / reference.environment_sha256
         stage_archive(archive, roots, reference, **abi)
     RESULTS.mkdir(mode=0o700, exist_ok=True)
     if RESULTS.is_symlink() or RESULTS.stat().st_uid != 0 or RESULTS.stat().st_mode & 0o077:

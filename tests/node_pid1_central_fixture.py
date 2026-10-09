@@ -172,8 +172,8 @@ def _central_fixture(
     original = AppEnvironmentRefV2(**components["app_environment"])
     refs = {"cold": original}
     archives = {
-        original.environment_sha256: components_dir / "app.tar",
-        manager.environment_sha256: components_dir / "manager-primary.tar",
+        original.environment_sha256: components_dir / "app.squashfs",
+        manager.environment_sha256: components_dir / "manager-primary.squashfs",
     }
     for phase, (reference, archive) in extra_refs_and_archives.items():
         reference = AppEnvironmentRefV2(**reference) if isinstance(reference, dict) else reference

@@ -1,6 +1,8 @@
-"""The environment image (scripts/build_environment_image.py) on the real built archives: two
-builds give one digest, the image mounted read-only passes the Node's own `verify_root`
-unchanged, and it has the contract's format and is smaller than its tar.
+"""The shipped environment images (E2c): each `<role>.squashfs` a component build ships is the
+image its components.json ref names, has the contract's format, and, mounted read-only, passes
+the full `verify_root` (the per-file proof's one home: the Node trusts the image digest and runs
+only the release check, errata E-E2C-DR-2). Two builds giving one digest is the build's own
+check (scripts/build_node_components.py, `node_components_image_not_reproducible`).
 
 Integration only: real docker, a real loop mount. node-components.yml runs it on the component
 set it just built or restored. pytest runs as the runner user; mount, umount and the verify over
@@ -18,19 +20,14 @@ from pathlib import Path
 
 import pytest
 
-from contracts.app_environment import AppEnvironmentRefV2
-from scripts.build_environment_image import (
-    IMAGE_SUFFIX,
-    EnvironmentImage,
-    image_from_archive,
-    tools_image,
-)
+from appliance.apps.environment import file_sha256
+from scripts.build_environment_image import IMAGE_SUFFIX, tools_image
 
 REPO = Path(__file__).resolve().parents[3]
 ENABLE_VARIABLE = "PHOTO_WALL_IMAGE_MOUNT_TESTS"
 COMPONENTS_VARIABLE = "PHOTO_WALL_NODE_COMPONENTS"
-# components.json field -> the archive scripts/build_node_components.py writes beside it.
-ARCHIVES = {"app_environment": "app.tar", "manager_primary": "manager-primary.tar"}
+# components.json field -> the image scripts/build_node_components.py ships beside it.
+IMAGES = {"app_environment": "app" + IMAGE_SUFFIX, "manager_primary": "manager-primary" + IMAGE_SUFFIX}
 
 pytestmark = pytest.mark.skipif(
     os.environ.get(ENABLE_VARIABLE) != "1",
@@ -74,38 +71,13 @@ def tools(metadata: dict) -> str:
     return tools_image(architecture=metadata["app_environment"]["architecture"])
 
 
-@pytest.fixture(scope="module")
-def builds(components, metadata, tools, tmp_path_factory):
-    """role -> its two independent builds, each into its own output, built once per module."""
-    done: dict[str, tuple[EnvironmentImage, EnvironmentImage]] = {}
-
-    def build(role: str) -> tuple[EnvironmentImage, EnvironmentImage]:
-        if role not in done:
-            reference = AppEnvironmentRefV2(**metadata[role])
-            done[role] = tuple(
-                image_from_archive(components / ARCHIVES[role], reference,
-                                   tmp_path_factory.mktemp(f"{role}-{run}"),
-                                   **metadata["abi"], tools=tools)
-                for run in ("first", "second"))
-        return done[role]
-    return build
-
-
-@pytest.mark.parametrize("role", ARCHIVES)
-def test_two_builds_of_one_archive_give_one_image_digest(role: str, builds) -> None:
-    first, second = builds(role)
-    assert first.sha256 == second.sha256
-    assert first.path.name == first.sha256 + IMAGE_SUFFIX
-
-
-@pytest.mark.parametrize("role", ARCHIVES)
-def test_the_mounted_image_passes_verify_root_unchanged(role: str, builds, metadata,
+@pytest.mark.parametrize("role", IMAGES)
+def test_the_mounted_image_passes_verify_root_unchanged(role: str, components, metadata,
                                                         tmp_path) -> None:
-    image, _ = builds(role)
     mount = tmp_path / "mount"
     mount.mkdir()
     subprocess.run(as_root(["mount", "-t", "squashfs", "-o", "loop,ro,nodev,nosuid",
-                            str(image.path), str(mount)]), check=True)
+                            str(components / IMAGES[role]), str(mount)]), check=True)
     try:
         result = subprocess.run(
             as_root([sys.executable, "-B", "-c", VERIFY, str(REPO), str(mount),
@@ -116,19 +88,20 @@ def test_the_mounted_image_passes_verify_root_unchanged(role: str, builds, metad
     assert (result.returncode, result.stdout.strip()) == (0, "verified"), result.stderr
 
 
-@pytest.mark.parametrize("role", ARCHIVES)
-def test_the_image_has_the_contract_format_and_is_smaller_than_the_archive(
-        role: str, builds, components, tools, capsys) -> None:
-    image, _ = builds(role)
+@pytest.mark.parametrize("role", IMAGES)
+def test_the_shipped_image_is_its_ref_and_has_the_contract_format(
+        role: str, components, metadata, tools, capsys) -> None:
+    image = components / IMAGES[role]
+    size = image.stat().st_size
+    assert (file_sha256(image), size) == (metadata[role]["environment_sha256"],
+                                          metadata[role]["size_bytes"])
+    assert not list(components.glob("*.tar"))
     superblock = subprocess.run(
-        ["docker", "run", "--rm", "--network", "none", "-v", f"{image.path.parent}:/image:ro",
-         tools, "unsquashfs", "-s", "/image/" + image.path.name],
+        ["docker", "run", "--rm", "--network", "none", "-v", f"{components}:/image:ro",
+         tools, "unsquashfs", "-s", "/image/" + image.name],
         check=True, capture_output=True, text=True).stdout.splitlines()
     assert "Compression zstd" in superblock
     assert "Block size 131072" in superblock
     assert "Xattrs are not stored" in superblock
-    archive = (components / ARCHIVES[role]).stat().st_size
     with capsys.disabled():
-        print(f"\n{role}: archive {archive} bytes ({archive / 2**20:.1f} MiB), "
-              f"image {image.size_bytes} bytes ({image.size_bytes / 2**20:.1f} MiB)")
-    assert image.size_bytes == image.path.stat().st_size < archive
+        print(f"\n{role}: image {size} bytes ({size / 2**20:.1f} MiB)")

@@ -34,7 +34,7 @@ def inputs(tmp_path):
         deb = (role + "-deb").encode()
         archive = (role + "-root").encode()
         (components / (role + ".deb")).write_bytes(deb)
-        (components / (role + ".tar")).write_bytes(archive)
+        (components / (role + ".squashfs")).write_bytes(archive)
         refs[role] = asdict(AppEnvironmentRefV2(hashlib.sha256(archive).hexdigest(), len(archive),
             hashlib.sha256(deb).hexdigest(), name, "2.0", "arm64", "a" * 64, "b" * 64,
             "/usr/bin/entry", **abi))
@@ -66,6 +66,9 @@ def test_one_publisher_contains_separate_exact_node_and_legacy_trees(tmp_path):
     assert words == [*legacy_words, "photowall.node=v2"]
     assert set(x.filename for x in manifest.artifacts) <= set(x.name for x in result.assets)
     assert manifest.base.content_key == next(x.sha256 for x in manifest.artifacts if x.role == "base")
+    # The release roots ship as their images (E2c), never as tar archives.
+    roots = {x.role: x.filename for x in manifest.artifacts if x.role in ("app", "manager-primary")}
+    assert len(roots) == 2 and all(name.endswith(".squashfs") for name in roots.values())
 
 
 def test_node_asset_corruption_blocks_whole_release(tmp_path):

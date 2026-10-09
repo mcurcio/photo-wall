@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+from appliance.apps.environment import IMAGE_SUFFIX
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import NodeBaseRefV2
 from contracts.node_release import (
@@ -95,11 +96,11 @@ def append(components: Path, bundle: Path, destination: Path, *, revision: str,
             info = _tarball(root, destination / name, epoch)
             records.append(NodeReleaseAssetV2(role, name, info["sha256"], info["size"]))
     inputs = [("node-base-deb", "node-base.deb"), ("node-display-deb", "node-display.deb"),
-              ("manager-primary-deb", "manager-primary.deb"), ("manager-primary", "manager-primary.tar"),
+              ("manager-primary-deb", "manager-primary.deb"), ("manager-primary", "manager-primary" + IMAGE_SUFFIX),
               ("build-provenance", "build-provenance.json")]
     for role, field in (("app", "app_environment"), ("manager-fallback", "manager_fallback")):
         if metadata[field] is not None:
-            inputs.extend(((role + "-deb", role + ".deb"), (role, role + ".tar")))
+            inputs.extend(((role + "-deb", role + ".deb"), (role, role + IMAGE_SUFFIX)))
     for role, filename in inputs:
         name = f"photo-wall-node-{revision}-{filename}"
         target = destination / name

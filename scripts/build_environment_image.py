@@ -8,8 +8,9 @@ its version, and SOURCE_DATE_EPOCH (the pin's epoch) fixes the filesystem's and 
 time, so two builds of one archive give one image digest. `-all-root` makes every member owned
 by root whoever staged the tree, so no step here needs root.
 
-Additive in wave 1: nothing ships these images yet. The release asset, components.json and the
-Node's staging still use the tar; E2c makes the image the shipped form.
+Since E2c the image is the shipped form: scripts/build_node_components.py builds each root's image
+twice (two builds must give one digest), ships it, and its digest and size are the release ref's.
+The tar is a build intermediate only.
 """
 from __future__ import annotations
 
@@ -20,12 +21,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from appliance.apps.environment import file_sha256, stage_archive
+from appliance.apps.environment import IMAGE_SUFFIX, file_sha256, stage_archive
 from contracts.app_environment import AppEnvironmentRefV2
 from scripts.debian_packages import PIN
 from scripts.node_build_inputs import BUILDER_IMAGE, docker_build, validate_builder
 
-IMAGE_SUFFIX: Final = ".squashfs"
+__all__ = ["IMAGE_SUFFIX", "SQUASHFS_OPTIONS", "EnvironmentImage", "image_from_archive", "tools_image"]
 SQUASHFS_OPTIONS: Final[tuple[str, ...]] = ("-noappend", "-no-progress", "-all-root", "-no-xattrs",
                                             "-comp", "zstd", "-b", "128K")
 TREE_MODE: Final = 0o755

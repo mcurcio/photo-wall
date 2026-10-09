@@ -12,6 +12,8 @@ GIB = 1024**3
 OVERHEAD = 256 * MIB
 EMERGENCY_HEADROOM = 512 * MIB
 STORE = Path("/run/photo-wall-node-storage")
+# The image pool (E2c): one sealed squashfs image per staged root, `<sha256>.squashfs`.
+ROOT_IMAGES: Final = STORE / "root-images"
 MEMINFO = Path("/proc/meminfo")
 CONTROLLERS = Path("/sys/fs/cgroup/cgroup.controllers")
 
