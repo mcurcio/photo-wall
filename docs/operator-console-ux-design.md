@@ -392,15 +392,17 @@ entries below that it changed say so; where the two differ, that glossary wins.
   one Output bound), or **Not enrolled** (Central saw the box at netboot but it
   never enrolled). These replace the earlier "Pending", "New" and "In service".
   Standing is a Central record, not liveness.
-- **Players list / Player page** — the fleet's homes for a Player (the
-  **Players** section, `#/players`): the list is one table, one row per box, worst
-  host tier first, with its standing, bound Frames and host health; it makes no
-  per-box node read (its host columns come from the shell's one fleet host read).
-  The Player page (`#/players/<device-id>`) is the one home for a box, with Reboot in
-  its header, then Health, node layers,
-  Outputs, boot records, app operations, Stage app and Qualified fallback,
-  each section with its own read time (no V1 section since 2026-10-02). They replace the Equipment rail and roster; the old
-  `#/equipment` address opens the Players list.
+- **Hardware list / Hardware page / Software and screens page** — the fleet's homes for
+  a Pi. The **Hardware** section (`#/hardware`) is a list of three tables (Driving a Frame
+  worst host tier first, Not driving a Frame, Retired), one row per box, with its
+  standing, bound Frames and host health; it makes no per-box node read (its host
+  columns come from the shell's one fleet host read). A Pi's Hardware page
+  (`#/hardware/<device-id>`) holds Reboot, Health, its Node API link and sessions and
+  Retire. Its **Software and screens** page (`#/players/<device-id>`, no sidebar entry)
+  holds node layers, Outputs, boot records, app operations, Stage app and Qualified
+  fallback, each section with its own read time (no V1 section since 2026-10-02). They
+  replace the Equipment rail, roster and Players list; the old `#/equipment` and
+  `#/players` addresses open the Wall.
 - **Releases / boot selection** — **Fleet › Releases** (`#/releases`) is the home of
   the fleet-wide release aggregates: the **boot selection** (the one deployment Central
   offers every node-path boot from now on, with its revision, and the previous

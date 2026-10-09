@@ -28,6 +28,9 @@ import { formatRoute } from "./routes.js";
  * statement, not a `fact()` (the `unknown` kind would read "Unknown: …"). Central reads no
  * node or host report of a retired box (G12 omits it), so nothing is judged.
  */
+/** The boot-records read failed: serials and boxes seen only at boot may be out of date. */
+export const BOOT_FACTS_UNAVAILABLE = "Boot records unavailable";
+
 export const RETIRED_NOT_READ = "Not read: Player retired";
 
 // A name's handle is this many trailing characters of the serial (as health.js handles).

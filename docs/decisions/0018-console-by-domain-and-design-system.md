@@ -42,7 +42,7 @@ The rules that keep the cut honest: **H1**, a fact is judged, explained and acte
 | Which page opens first | **Screens**, once a Frame exists; with no Frame, the Wall's first step (Add first frame) |
 | Pages for creating a show | **Deferred** to their own design pass; Scenes, Schedule and Sources stay as they are |
 | Binding from the Pi side | **Bind and unbind only from the Frame on the Wall**; Hardware links there |
-| UI kit | **Tailwind + shadcn/ui on Base UI**, with TanStack Table for dense rows |
+| UI kit | **Tailwind + shadcn/ui on Base UI**, with native tables for dense rows (the list pattern owns grouping and worst-first order; E-CDS-FIX-6 dropped TanStack Table) |
 | Look | **Keep today's look** (dark first, Console Sans, rounded cards), re-expressed from the photo library's theme; the owner wants it to feel related to Immich. Tokens carry it over, and a new look is later mostly a token change |
 
 ## The design system

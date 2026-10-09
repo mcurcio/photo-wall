@@ -411,12 +411,12 @@ def test_the_hardware_tables_scroll_sideways_at_phone_width_and_the_page_does_no
 # A1 (console DDD §61-§62): the strip and Needs attention count Players too; the Status chip.
 
 
-def _frames_with_players(registry, frame_ids):
+def _frames_with_players(registry, frame_ids, device_ids=None):
     """One Frame per id, each bound to its own newly enrolled Player: (player id, device id,
-    name) each."""
+    name) each. `device_ids` fixes the boxes' ids (else random, so name order is random)."""
     boxes = []
     for index, frame_id in enumerate(frame_ids):
-        identity, _, request = enroll(registry, count=1)
+        identity, _, request = enroll(registry, count=1, device_id=device_ids[index] if device_ids else None)
         registry.create_frame(FrameCreate(id=frame_id, surface_id="wall", x_mm=100 + 400 * index, y_mm=100,
                                           width_mm=300, height_mm=500, profile=FrameProfile(
                                               width_px=1080, height_px=1920, diagonal_inches=24)))

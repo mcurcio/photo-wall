@@ -7,7 +7,7 @@ import { FactLine } from "./domain/fact-line.tsx";
 import { PiHeader } from "./domain/pi-header.tsx";
 import { clock, fact, words } from "./facts.js";
 import {
-  BOOT_FACTS_UNAVAILABLE, interruptionFor, isBound, outputLabel, outputStates,
+  interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
 import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "./nodeControl.js";
 import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
@@ -15,7 +15,7 @@ import { AppOperationsSection } from "./PlayerCommands.jsx";
 import { QualifiedFallback } from "./QualifiedFallback.jsx";
 import { StageApp } from "./StageApp.jsx";
 import {
-  enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice, RETIRED_NOT_READ,
+  BOOT_FACTS_UNAVAILABLE, enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice, RETIRED_NOT_READ,
 } from "./players.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { formatRoute, isPlainClick, routeIdName } from "./routes.js";

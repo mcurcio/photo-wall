@@ -2,7 +2,8 @@ import type * as React from "react";
 
 import { type Severity, WORST_FIRST } from "../design/tokens";
 import { cn } from "../ui/cn";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
+import { severityBar } from "../ui/severity";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, TableRowHeader } from "../ui/table";
 
 /** One column: its header and how a row's cell reads. `rowHeader` marks the naming column. */
 export interface EntityColumn<Row> {
@@ -50,14 +51,6 @@ export function orderRows<Row extends EntityRowBase>(group: EntityGroup<Row>): R
   return group.worstFirst ? rows.sort((a, b) => rank(a) - rank(b)) : rows;
 }
 
-const ROW_TONE: Record<Severity, string> = {
-  ok: "border-l-4 border-l-ok",
-  todo: "border-l-4 border-l-todo",
-  notice: "border-l-4 border-l-notice",
-  alarm: "border-l-4 border-l-alarm",
-  unknown: "border-l-4 border-l-unknown",
-};
-
 function GroupTable<Row extends EntityRowBase>({ group, columns }: {
   group: EntityGroup<Row>;
   columns: readonly EntityColumn<Row>[];
@@ -78,13 +71,11 @@ function GroupTable<Row extends EntityRowBase>({ group, columns }: {
             <TableRow
               key={row.key}
               data-severity={row.severity ?? "none"}
-              className={cn(row.severity !== null && ROW_TONE[row.severity])}
+              className={cn(row.severity !== null && severityBar({ severity: row.severity }))}
             >
               {columns.map((column) =>
                 column.rowHeader ? (
-                  <th key={column.id} scope="row" className="px-3 py-row text-left align-top font-normal">
-                    {column.cell(row)}
-                  </th>
+                  <TableRowHeader key={column.id}>{column.cell(row)}</TableRowHeader>
                 ) : (
                   <TableCell key={column.id}>{column.cell(row)}</TableCell>
                 ),

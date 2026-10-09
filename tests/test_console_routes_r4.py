@@ -749,6 +749,14 @@ LAYERS = ("pages", "domain", "patterns", "ui", "design")
 # Layers that know no Photo Wall concept: they import no console module outside the layers.
 MODEL_FREE = {"patterns", "ui", "design"}
 MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
+# What a page or a domain component may import from outside the catalog: the models, and the
+# node read (a hook, no markup). Anything else that renders markup is a legacy module.
+PAGE_IMPORTS = MODELS | {"nodeRead.js"}
+# Legacy modules that render markup the Hardware Pi page still composes: the confirmation
+# dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
+# Dialog primitive does not carry yet), the Reboot section and the node-control gate's notice.
+# Declared in .claude/errata.md E-CDS-FIX-1; the dialogs' migration (DS2) empties this set.
+LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
 
 
 def _layer(module, src=SRC):
@@ -836,3 +844,23 @@ def test_the_truth_kinds_token_list_is_the_fact_models():
     kinds = re.search(r"const KINDS = new Set\(\[([^\]]*)\]\)", (SRC / "facts.js").read_text())
     assert tokens and kinds
     assert re.findall(r'"(\w+)"', tokens.group(1)) == re.findall(r'"(\w+)"', kinds.group(1))
+
+
+def test_pages_and_domain_components_import_only_models_and_declared_legacy_markup(layer_graph):
+    # A page composes the catalog and reads models: it never imports a legacy module that
+    # renders markup (and styles it with the legacy sheet), except the declared ones.
+    imported = {imported.name for module, imports in layer_graph.items()
+                if _layer(module) in ("pages", "domain")
+                for imported in imports if _layer(imported) is None}
+    assert imported - PAGE_IMPORTS == LEGACY_MARKUP, sorted(imported - PAGE_IMPORTS)
+
+
+def test_reboot_and_retire_have_one_home_and_it_is_not_the_software_page(graph):
+    # H1: the Hardware Pi page owns Reboot, Retire and Health; the Software page (PlayerPage)
+    # offers none of them, however it is edited.
+    software = (SRC / "PlayerPage.jsx").read_text()
+    for name in ("RebootSection", "retireRequest", "HostHealthPanel", "host-health"):
+        assert name not in software, f"PlayerPage.jsx names {name}: it belongs on Hardware"
+    assert "host-health.tsx" not in reachable(graph, "PlayerPage.jsx")
+    home = (SRC / "pages/hardware-pi-page.tsx").read_text()
+    assert {"RebootSection", "retireRequest", "HostHealthPanel"} <= set(re.findall(r"\w+", home))

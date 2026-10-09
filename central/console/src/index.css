@@ -123,7 +123,6 @@ label {
 .console__guidance,
 .plan,
 .inspector,
-.roster__group,
 .showrunner__region,
 .confirm {
   background: var(--color-surface-raised);
@@ -161,9 +160,7 @@ label {
 
 /* Identifiers (player, frame and scene ids) are long unbroken strings; let them
    wrap rather than widen the page. */
-.roster__player,
 .roster__output-label,
-.roster__boot,
 .tray__item,
 .tray__delete,
 .facet__field dd,
@@ -533,18 +530,6 @@ label {
   font-size: 10px;
 }
 
-/* The Status facet's host chip (HostChip.jsx): a link in a chip, words first. */
-.facet__host {
-  margin: 0 0 8px;
-}
-
-.host-chip {
-  display: inline-block;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  text-decoration: none;
-}
-
 .inspector__health {
   margin: 0;
   padding: 10px 16px 0;
@@ -795,48 +780,13 @@ label {
   color: var(--color-text);
 }
 
-/* Players list and Player page (console DDD §9): one card per box, and on a box's
-   page its Outputs; ids wrap and actions wrap under the facts. */
-.roster {
-  margin: 24px 0 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.roster__title {
-  margin: 0;
-  font-size: 16px;
-}
-
+/* A Player page's Outputs (console DDD §9); ids wrap and actions wrap under the facts. */
 .roster__note {
   margin: 0;
   font-size: 12px;
   color: var(--color-muted);
 }
 
-.roster__group {
-  min-width: 0;
-  padding: 12px 16px;
-}
-
-.roster__group-title {
-  margin: 0;
-  font-size: 0.9rem;
-}
-
-.roster__group-toggle {
-  padding: 0;
-  background: none;
-  border: none;
-  color: var(--color-muted);
-  font: inherit;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  cursor: pointer;
-}
-
-.roster__cards,
 .roster__outputs {
   margin: 8px 0 0;
   padding: 0;
@@ -844,27 +794,6 @@ label {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.roster__card {
-  min-width: 0;
-  padding: 8px 0 0;
-  border-top: 1px solid var(--color-line);
-}
-
-.roster__player {
-  max-width: 100%;
-  text-align: left;
-}
-
-.roster__boot {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: var(--color-muted);
-}
-
-.roster__boot:empty {
-  display: none;
 }
 
 .roster__output {
@@ -913,84 +842,6 @@ label {
 .roster__empty {
   margin: 0;
   color: var(--color-muted);
-}
-
-/* The Players table (console DDD §61): one rendering, worst first. At phone width
-   its wrapper scrolls sideways; the page itself never does. A row's tier and an
-   item's band are a leading rule for the eye; the words already carry them (§5). */
-.players__scroll {
-  max-width: 100%;
-  overflow-x: auto;
-}
-
-.players__table {
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.players__table th,
-.players__table td {
-  padding: 8px 12px 8px 0;
-  text-align: left;
-  vertical-align: top;
-  border-top: 1px solid var(--color-line);
-}
-
-.players__table thead th {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-muted);
-  white-space: nowrap;
-}
-
-.players__table tbody th {
-  white-space: nowrap;
-}
-
-.players__cell {
-  min-width: 10rem;
-}
-
-.players__row--alarm > th {
-  box-shadow: inset 3px 0 var(--color-alarm);
-  padding-left: 8px;
-}
-
-.players__row--notice > th {
-  box-shadow: inset 3px 0 var(--color-notice);
-  padding-left: 8px;
-}
-
-.players__item--alarm,
-.players__item--notice {
-  padding-left: 6px;
-  border-left: 2px solid var(--color-alarm);
-}
-
-.players__item--notice {
-  border-left-color: var(--color-notice);
-}
-
-.players__frames {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.players__chip {
-  padding: 1px 8px;
-  white-space: nowrap;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-pill);
-}
-
-.players__spares {
-  margin-top: 16px;
-}
-
-.player__host-group {
-  margin: 8px 0 0;
 }
 
 .roster__alert {
@@ -2082,8 +1933,7 @@ label {
 
 /* A region whose title repeats its page's heading keeps it for assistive
    technology only. */
-.page--scenes .showrunner__region-title,
-.page--players .roster__title {
+.page--scenes .showrunner__region-title {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -2091,10 +1941,6 @@ label {
   overflow: hidden;
   clip: rect(0 0 0 0);
   white-space: nowrap;
-}
-
-.page--players .roster {
-  margin-top: 0;
 }
 
 /* The drawer: a native modal <dialog> sliding in from the leading edge. */
@@ -2540,14 +2386,6 @@ label {
   margin: 0;
   font-weight: 600;
   overflow-wrap: anywhere;
-}
-.fact {
-  margin: 2px 0 0;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.fact__label {
-  color: var(--color-muted);
 }
 .fact--unknown {
   color: var(--color-truth-unknown);

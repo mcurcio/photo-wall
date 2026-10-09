@@ -1,39 +1,34 @@
 import type { Severity } from "../design/tokens";
 import { cn } from "../ui/cn";
+import { SeverityMark, severityTint } from "../ui/severity";
 
 /**
  * A fact outside its owning domain is only this (design rule H1): its words, where its
- * owner judges it, and the owner's severity. The href is already formatted: a pattern never
+ * owner judges it, and the owner's severity (none for a link that only navigates). The href is already formatted: a pattern never
  * formats a route.
  */
 export interface OwnerLink {
   /** "pi-07 · throttled now" */
   text: string;
   href: string;
-  severity: Severity;
+  /** Absent: a plain navigation link, in the neutral tone, not a judgement. */
+  severity?: Severity;
 }
-
-const TONE: Record<Severity, string> = {
-  ok: "border-ok bg-ok/12",
-  todo: "border-todo bg-todo/12",
-  notice: "border-notice bg-notice/12",
-  alarm: "border-alarm bg-alarm/12",
-  unknown: "border-unknown bg-unknown/12",
-};
 
 /** LinkToOwner: a read-only link chip naming a fact and leading to its owning page. */
 export function LinkToOwner({ text, href, severity }: OwnerLink) {
   return (
     <a
       href={href}
-      data-severity={severity}
+      data-severity={severity ?? "none"}
       className={cn(
-        "inline-flex max-w-full items-center rounded-pill border px-2.5 py-0.5 text-xs text-text",
+        "inline-flex max-w-full items-center gap-1.5 rounded-pill border px-2.5 py-0.5 text-xs text-text",
         "wrap-anywhere no-underline hover:underline",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
-        TONE[severity],
+        severityTint({ severity }),
       )}
     >
+      {severity ? <SeverityMark severity={severity} /> : null}
       {text}
     </a>
   );

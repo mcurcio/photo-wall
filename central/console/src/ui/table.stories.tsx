@@ -1,7 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { createColumnHelper, tableFeatures, useTable } from "@tanstack/react-table";
 
-import { DataTable } from "./table";
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow, TableRowHeader } from "./table";
 
 interface Pi {
   name: string;
@@ -9,13 +8,6 @@ interface Pi {
   temperature: string;
 }
 
-const features = tableFeatures({});
-const helper = createColumnHelper<typeof features, Pi>();
-const columns = helper.columns([
-  helper.accessor("name", { header: "Player" }),
-  helper.accessor("link", { header: "Link" }),
-  helper.accessor("temperature", { header: "Temperature" }),
-]);
 const ROWS: Pi[] = [
   { name: "pi-03", link: "linked for 2 h", temperature: "48 °C" },
   { name: "pi-07", link: "not linked for 4 min", temperature: "not read" },
@@ -24,8 +16,33 @@ const ROWS: Pi[] = [
 const NONE: Pi[] = [];
 
 function Players({ data, caption }: { data: Pi[]; caption?: string }) {
-  const table = useTable({ features, columns, data });
-  return <DataTable table={table} caption={caption} empty="No Players yet." />;
+  return (
+    <Table>
+      {caption !== undefined && <TableCaption>{caption}</TableCaption>}
+      <TableHeader>
+        <TableRow>
+          <TableHead scope="col">Player</TableHead>
+          <TableHead scope="col">Link</TableHead>
+          <TableHead scope="col">Temperature</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {data.length === 0 ? (
+          <TableRow>
+            <TableCell colSpan={3} className="text-muted">No Players yet.</TableCell>
+          </TableRow>
+        ) : (
+          data.map((pi) => (
+            <TableRow key={pi.name}>
+              <TableRowHeader>{pi.name}</TableRowHeader>
+              <TableCell>{pi.link}</TableCell>
+              <TableCell>{pi.temperature}</TableCell>
+            </TableRow>
+          ))
+        )}
+      </TableBody>
+    </Table>
+  );
 }
 
 const meta = {

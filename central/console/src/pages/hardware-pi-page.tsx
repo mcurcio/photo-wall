@@ -1,17 +1,17 @@
 import { useRef } from "react";
 
 import { retireRequest, useConfirm } from "../ConfirmAction.jsx";
+import { frameLinks } from "../domain/frame-links";
 import { HostHealthPanel, type HostsRead } from "../domain/host-health";
 import { PiHeader } from "../domain/pi-header";
 import { PiLink } from "../domain/pi-link";
-import { BOOT_FACTS_UNAVAILABLE } from "../health.js";
 import { NodeRecords, nodeReadsAllowed, useNodeControlValue } from "../nodeControl.js";
 import { useNodeDevice } from "../nodeRead.js";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { RebootSection } from "../PlayerCommands.jsx";
-import { playersByDevice } from "../players.js";
+import { BOOT_FACTS_UNAVAILABLE, playersByDevice } from "../players.js";
 import { formatRoute, routeIdName } from "../routes.js";
 import { Button } from "../ui/button";
 import { Section } from "../ui/section";
@@ -27,7 +27,7 @@ export interface HardwarePiPageProps {
 /**
  * One Pi's Hardware page (`#/hardware/<device-id>`; console by domain § Fleet): the Pi header,
  * then Reboot (with its history), Health (from the shell's fleet host read), Link and sessions
- * (this Pi's node read) and the Danger zone (Retire). Its bound Frames are links to their
+ * (the fleet host read) and the Danger zone (Retire). Its bound Frames are links to their
  * Binding on the Wall: a Bound Pi is retired only after it is unbound there. Node records are
  * read only here and on the Pi's Software page, never for a retired Pi and never while node
  * control is not on. Each section sits behind its own error boundary.
@@ -54,8 +54,7 @@ export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: Hardwar
     );
   }
   const player = row.player as { id: string } | null;
-  const frames = row.frames.map((entry) => ({ text: `Frame ${entry.frameId}`, severity: "ok" as const,
-    href: formatRoute({ section: "wall", id: entry.frameId, facet: "binding" }) }));
+  const frames = frameLinks(row.frames);
   return (
     <EntityPage header={
       <PiHeader row={row} on="hardware" headingRef={nameRef}>
@@ -80,7 +79,7 @@ export function HardwarePiPage({ deviceId, snapshot, bootFacts, hosts }: Hardwar
       )}
       <NodeRecords>
         <Section title="Link and sessions" resetKey={node.readAt}>
-          <PiLink node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+          <PiLink deviceId={deviceId} hosts={hosts} node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
         </Section>
       </NodeRecords>
       {player !== null && row.standing === "unbound" && (

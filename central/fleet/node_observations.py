@@ -344,7 +344,6 @@ class NodeObservations:
                 "first_received_at": item["created_at"], "offer_refusal": item["refusal"],
                 "physical_identity": "unverified"} for item in claims]
             return {"boot_claims": boot_claims, "deprecated_boot": deprecated_boot_in(conn, device_id),
-                    "bus_link": bus_links_in(conn, [device_id])[device_id],
                     "device_id": device_id, "device_generation": generation, "read_at": now,
                     "sessions": sessions, "reboot_commands": audit, "physical_output": "unknown",
                     "display_outputs": display_outputs_in(conn, device_id, generation),

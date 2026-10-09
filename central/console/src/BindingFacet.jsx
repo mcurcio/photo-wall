@@ -4,14 +4,13 @@ import { unbindRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./domain/fact-line.tsx";
 import {
-  BOOT_FACTS_UNAVAILABLE,
   bindableOutputs,
   isBound,
   outputLabel,
   playerLiveness,
 } from "./health.js";
 import { boundOutput } from "./join.js";
-import { identifyOffer, panelAtEnrollment, playerPageHref } from "./players.js";
+import { BOOT_FACTS_UNAVAILABLE, identifyOffer, panelAtEnrollment, playerPageHref } from "./players.js";
 import { useMutate } from "./useMutate.js";
 
 /**

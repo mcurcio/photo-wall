@@ -35,8 +35,9 @@ export default tseslint.config(
     },
   },
   {
-    // S2: only primitives and patterns style. A domain component or a page composes them
-    // and writes no className or style.
+    // S2: only primitives and patterns style. A domain component or a page composes them and
+    // writes no className or style, spreads no props onto an element (a spread could carry
+    // either), builds no element by hand and imports no class helper from the catalog.
     files: files(["domain", "pages"]),
     rules: {
       "no-restricted-syntax": [
@@ -44,6 +45,40 @@ export default tseslint.config(
         {
           selector: "JSXAttribute[name.name=/^(className|style)$/]",
           message: "Pages and domain components do not style: compose primitives and patterns.",
+        },
+        {
+          selector: "JSXSpreadAttribute",
+          message: "Pages and domain components spread no props: a spread can carry a className or style.",
+        },
+        {
+          selector: "CallExpression[callee.name=/^(createElement|cloneElement)$/], "
+            + "CallExpression[callee.property.name=/^(createElement|cloneElement)$/]",
+          message: "Pages and domain components build elements in JSX, where this lint reads them.",
+        },
+      ],
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/ui/*", "**/patterns/*"],
+              importNamePattern: "^(cn|\\w+Variants|severity[A-Z]\\w*)$",
+              message: "Class helpers belong to primitives and patterns: compose their components.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // Primitives and patterns style with classes from the tokens, never an inline style.
+    files: files(["ui", "patterns"]),
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='style']",
+          message: "Style with token classes (src/design/tokens.css), not an inline style.",
         },
       ],
     },

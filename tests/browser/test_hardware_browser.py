@@ -38,10 +38,13 @@ def _names(page, group):
 
 
 def _fleet(registry):
-    """Three Bound Pis (ok, alarm, notice, registered in that order), one Unbound and one
-    retired; the stubbed host read judges the Bound ones. Returns their names and device ids."""
+    """Three Bound Pis (ok, alarm, notice), one Unbound and one retired; the stubbed host read
+    judges the Bound ones. Their device ids are fixed so that name order, the order the list
+    receives its rows in, is the reverse of worst-first (ok, notice, alarm): a list that did
+    not sort would fail. Returns their names and device ids."""
     (_, ok, ok_name), (_, alarm, alarm_name), (_, notice, notice_name) = _frames_with_players(
-        registry, ["f-ok", "f-alarm", "f-notice"])
+        registry, ["f-ok", "f-alarm", "f-notice"],
+        device_ids=["device-a-ok", "device-c-alarm", "device-b-notice"])
     spare_identity, _, spare_request = enroll(registry, count=1)
     retired_identity, _, retired_request = enroll(registry, count=1)
     registry.retire(retired_identity["player_id"])

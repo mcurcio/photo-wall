@@ -1,17 +1,18 @@
 import type * as React from "react";
 
 import type { Severity } from "../design/tokens";
-import { busLinkFact, fact } from "../facts.js";
-import { BOOT_FACTS_UNAVAILABLE } from "../health.js";
-import { hostRow, playersTable } from "../hostHealth.js";
+import { type Fact, fact } from "../facts.js";
+import { playersTable } from "../hostHealth.js";
 import { type EntityColumn, type EntityGroup, EntityList, type EntityRowBase } from "../patterns/entity-list";
 import { Note } from "../patterns/fact-row";
 import { FocusFilter, FocusLink } from "../patterns/focus-filter";
 import { HealthBadge } from "../patterns/health-badge";
 import { OwnerLinks } from "../patterns/link-to-owner";
-import { type PlayerRow, playersByDevice, RETIRED_NOT_READ } from "../players.js";
+import { BOOT_FACTS_UNAVAILABLE, type PlayerRow, playersByDevice, RETIRED_NOT_READ } from "../players.js";
 import { formatRoute, routeIdName } from "../routes.js";
+import { hostsBusLink } from "./bus-link";
 import { FactLine } from "./fact-line";
+import { frameLinks } from "./frame-links";
 import { HostFactsReceipt, HostItemLine, type HostLine, type HostsRead, hostVerdict } from "./host-health";
 
 const NO_PIS = "No Pis yet. Power on one Pi on this network; it appears here.";
@@ -22,8 +23,7 @@ type Judged = ReturnType<typeof playersTable>[number];
 interface HardwareRow extends EntityRowBase {
   pi: PlayerRow;
   judged: Judged;
-  busLink: unknown;
-  readAt: number | null;
+  busLink: Fact;
 }
 
 const items = (list: readonly HostLine[] | undefined, names: readonly string[]) =>
@@ -41,7 +41,7 @@ function hostColumns(): EntityColumn<HardwareRow>[] {
   return [
     { id: "link", header: "Link", cell: (row) => (
       <>
-        <FactLine label="Node API link" fact={busLinkFact(row.busLink as never, row.readAt)} />
+        <FactLine label="Node API link" fact={row.busLink} />
         <Lines lines={items(health(row), ["host"])} />
       </>
     ) },
@@ -77,8 +77,7 @@ function baseColumns(): EntityColumn<HardwareRow>[] {
         {row.judged.group === "bound" && row.judged.health !== null && (
           <HealthBadge verdict={hostVerdict(row.judged.health)} />
         )}
-        <OwnerLinks links={row.pi.frames.map((entry) => ({ text: `Frame ${entry.frameId}`, severity: "ok" as const,
-          href: formatRoute({ section: "wall", id: entry.frameId, facet: "binding" }) }))} />
+        <OwnerLinks links={frameLinks(row.pi.frames)} />
       </>
     ) },
   ];
@@ -113,8 +112,7 @@ export function HardwareList({ snapshot, bootFacts, hosts, focus }: HardwareList
     return {
       key: pi.deviceId, pi, judged: entry,
       severity: (entry.group === "bound" ? entry.tier : null) as Severity | null,
-      busLink: (hostRow(hosts?.read ?? null, pi.deviceId) as { bus_link?: unknown } | null)?.bus_link,
-      readAt: (hosts?.read as { read_at?: number } | null)?.read_at ?? null,
+      busLink: hostsBusLink(hosts, pi.deviceId),
     };
   };
   const shown = focus === null ? pis : pis.filter((pi) => pi.deviceId === focus);

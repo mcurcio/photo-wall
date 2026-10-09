@@ -145,3 +145,31 @@ def test_story_renders_clean_passes_axe_and_matches_its_baseline(
         pytest.fail(f"{story} ({scheme}) differs from its baseline in {share:.2%} of pixels "
                     f"(limit {DIFFERING:.2%}); actual saved at {actual}; if the change is "
                     f"intended run {UPDATE_COMMAND}")
+
+
+def test_dialog_ignores_escape_and_outside_presses_while_busy_and_yields_when_idle(
+        page, catalog_origin):
+    # The primitive's in-flight rule (ui/dialog.tsx, the rule of ConfirmAction.jsx): the
+    # screenshot walk cannot see it, so the Interactive story is driven. Confirm holds the
+    # dialog busy for two seconds.
+    page.set_viewport_size(VIEWPORT)
+    page.goto(f"{catalog_origin}/iframe.html?id=primitives-dialog--interactive&viewMode=story")
+    page.wait_for_selector("body.sb-show-main")
+    dialog = page.get_by_role("dialog")
+
+    page.get_by_role("button", name="Retire", exact=True).click()
+    dialog.wait_for()
+    page.keyboard.press("Escape")
+    dialog.wait_for(state="hidden")  # idle: Escape closes it
+
+    page.get_by_role("button", name="Retire", exact=True).click()
+    dialog.wait_for()
+    page.get_by_role("button", name="Confirm retire").click()
+    assert dialog.get_attribute("aria-busy") == "true"
+    assert page.get_by_role("button", name="Cancel").is_disabled()
+    assert page.evaluate("document.activeElement === document.querySelector('[role=dialog]')")
+    page.keyboard.press("Escape")
+    page.mouse.click(5, 5)  # the backdrop
+    page.wait_for_timeout(300)
+    assert dialog.is_visible(), "Escape or an outside press closed a busy dialog"
+    dialog.wait_for(state="hidden", timeout=5000)  # the request ends: it closes itself

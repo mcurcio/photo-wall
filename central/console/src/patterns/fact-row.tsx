@@ -1,26 +1,23 @@
+import { cva } from "class-variance-authority";
 import type * as React from "react";
 
 import type { Severity, TruthKind } from "../design/tokens";
 import { cn } from "../ui/cn";
+import { severityBand } from "../ui/severity";
 
-/** Whole class names, so Tailwind's scan finds each one. */
-const TONE: Record<TruthKind, string> = {
-  set: "text-truth-set",
-  reported: "text-truth-reported",
-  claimed: "text-truth-claimed",
-  derived: "text-truth-derived",
-  planned: "text-truth-planned",
-  unknown: "text-truth-unknown",
-};
-
-/** A judged line's band, for the eye only: its words already carry it. */
-const BAND: Record<Severity, string> = {
-  ok: "",
-  todo: "border-l-2 border-todo pl-2",
-  notice: "border-l-2 border-notice pl-2",
-  alarm: "border-l-2 border-alarm pl-2",
-  unknown: "",
-};
+/** A fact's tone per truth kind: a `cva`, so the colour lint (eslint.config.js) reads it. */
+const truthTone = cva("", {
+  variants: {
+    tone: {
+      set: "text-truth-set",
+      reported: "text-truth-reported",
+      claimed: "text-truth-claimed",
+      derived: "text-truth-derived",
+      planned: "text-truth-planned",
+      unknown: "text-truth-unknown",
+    },
+  },
+});
 
 export interface FactRowProps {
   /** The fact's name; with none the line stands alone. */
@@ -39,7 +36,7 @@ export function FactRow({ label, tone, band = null, children }: FactRowProps) {
     <p
       data-truth={tone}
       data-band={band ?? "none"}
-      className={cn("m-0 mt-0.5 min-w-0 text-sm wrap-anywhere", TONE[tone], band && BAND[band])}
+      className={cn("m-0 mt-0.5 min-w-0 text-sm wrap-anywhere", truthTone({ tone }), band && severityBand({ severity: band }))}
     >
       {label ? <span className="text-muted">{`${label}: `}</span> : null}
       {children}

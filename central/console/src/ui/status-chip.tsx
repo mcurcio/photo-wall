@@ -2,32 +2,7 @@ import type * as React from "react";
 
 import type { Severity } from "../design/tokens";
 import { cn } from "./cn";
-
-/** A severity's shape: a chip never relies on colour alone. */
-const MARK: Record<Severity, string> = {
-  ok: "●",
-  todo: "■",
-  notice: "◆",
-  alarm: "▲",
-  unknown: "○",
-};
-
-/** Whole class names, so Tailwind's scan finds each one. */
-const TONE: Record<Severity, string> = {
-  ok: "border-ok bg-ok/12",
-  todo: "border-todo bg-todo/12",
-  notice: "border-notice bg-notice/12",
-  alarm: "border-alarm bg-alarm/12",
-  unknown: "border-unknown bg-unknown/12",
-};
-
-const MARK_TONE: Record<Severity, string> = {
-  ok: "text-ok",
-  todo: "text-todo",
-  notice: "text-notice",
-  alarm: "text-alarm",
-  unknown: "text-unknown",
-};
+import { SeverityMark, severityTint } from "./severity";
 
 export interface StatusChipProps {
   severity: Severity;
@@ -45,12 +20,10 @@ export function StatusChip({ severity, children }: StatusChipProps) {
       data-severity={severity}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-0.5 text-xs text-text",
-        TONE[severity],
+        severityTint({ severity }),
       )}
     >
-      <span aria-hidden="true" className={MARK_TONE[severity]}>
-        {MARK[severity]}
-      </span>
+      <SeverityMark severity={severity} />
       {children}
     </span>
   );
