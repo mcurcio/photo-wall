@@ -9,7 +9,6 @@ from contracts.node_link import NODE_BUS_MEMORY_MAX
 
 MIB = 1024**2
 GIB = 1024**3
-OVERHEAD = 256 * MIB
 EMERGENCY_HEADROOM = 512 * MIB
 STORE = Path("/run/photo-wall-node-storage")
 # The image pool (E2c): one sealed squashfs image per staged root, `<sha256>.squashfs`.
@@ -33,19 +32,6 @@ class DeviceClass:
                 and 0 < self.store_bytes < self.min_total_bytes):
             raise ValueError("device_class_invalid")
 
-
-# Interim values (tar era), replaced when the image format is calibrated.
-CLASSES: tuple[DeviceClass, ...] = (
-    DeviceClass("pi5-4gb", 3584 * MIB, 2560 * MIB),
-    DeviceClass("pi5-8gb", 7168 * MIB, 3840 * MIB),
-)
-if not CLASSES or any(low.min_total_bytes >= high.min_total_bytes for low, high in zip(CLASSES, CLASSES[1:])):
-    raise ValueError("device_class_invalid")
-
-# The preparation slice holds the largest store plus the preparing process itself; the
-# slice file's MemoryMax= is bound to this number by a test, and no unit repeats it.
-PREPARATION_PROCESS_BYTES = 256 * MIB
-PREPARATION_SLICE_BYTES = max(item.store_bytes for item in CLASSES) + PREPARATION_PROCESS_BYTES
 
 # --- the memory line table (design-r3 §2.4) ---------------------------------------------------
 # One line per memory consumer on the smallest device class. Every program slice and unit
@@ -82,6 +68,23 @@ class MemoryLine:
             raise ValueError("memory_line_invalid")
 
 
+# The preparation slice's members (E2c): the images held on the store tmpfs, whose pages are
+# charged to the slice that wrote them, the rest of the store, and the preparing processes.
+_PREPARATION_MEMBERS: Final = (
+    MemoryLine("app-image", 320 * MIB, "M 288 (E2b image) + 32, rounded", parent="preparation"),
+    MemoryLine("app-image-rollback", 320 * MIB, "the previous app image (design-r3 §5.2 rollback room)",
+               parent="preparation"),
+    MemoryLine("manager-image", 96 * MIB, "M 62 + 32, rounded; releases ship one manager root (C7)",
+               parent="preparation"),
+    MemoryLine("store-residue", 32 * MIB,
+               "E: AppManager's session and prepared.json, debris, directories; 16 KiB pages",
+               parent="preparation"),
+    MemoryLine("preparation-process", 192 * MIB,
+               "AppManager's TemporaryFileSystem /run 32 + /tmp 64 (floor) + E 96 anon: AppManager and "
+               "the import worker at once, or the prepare one-shot", floor_bytes=96 * MIB,
+               parent="preparation"),
+)
+
 LINES: Final[tuple[MemoryLine, ...]] = (
     MemoryLine("kernel", 200 * MIB, "E: kernel, slab, page tables, PID1, journald, udev"),
     MemoryLine("cma", 64 * MIB, "E"),
@@ -107,10 +110,15 @@ LINES: Final[tuple[MemoryLine, ...]] = (
                cgroup="photowallbus.slice"),
     MemoryLine("bus-server", NODE_BUS_MEMORY_MAX, "the slice's whole line",
                cgroup="photo-wall-bus.service", parent="bus"),
-    MemoryLine("app", 992 * MIB, "M 229; texture budget 512 (player/service.py:128)",
+    MemoryLine("app", 992 * MIB, "M 229 anon (tar era) + the Player's file working set from its image "
+               "(unmeasured, DR-9); texture budget 512",
                peak_bytes=229 * MIB, floor_bytes=512 * MIB, cgroup="photowallapp.slice"),
-    MemoryLine("preparation", PREPARATION_SLICE_BYTES, "interim, tar era: PREPARATION_SLICE_BYTES; "
-               "E2c sets it to the root lines plus the process line", cgroup="photowallpreparation.slice"),
+    # The preparation slice's cap is its members' sum, never a literal (C2: images and the store
+    # are charged to their writer).
+    MemoryLine("preparation", sum(item.cap_bytes for item in _PREPARATION_MEMBERS),
+               "C2: images and the store are charged to their writer; image lines, store residue and "
+               "the process line", cgroup="photowallpreparation.slice"),
+    *_PREPARATION_MEMBERS,
 )
 _LINES_BY_NAME: Final = {item.name: item for item in LINES}
 # Every service line sits in a slice line of this table, never in PID1's default system.slice: a
@@ -126,6 +134,38 @@ if len(_LINES_BY_NAME) != len(LINES) or any(
 def line(name: str) -> MemoryLine:
     """The line called `name`; KeyError on an unknown name."""
     return _LINES_BY_NAME[name]
+
+
+# Everything outside the program slices' members: the lines with no parent. What a board holds
+# beyond them is the content line (design-r3 §2.4), which must exist on every class.
+FIXED_BYTES: Final = sum(item.cap_bytes for item in LINES if item.parent is None)
+
+
+def content_line(total_bytes: int) -> int:
+    """The bytes a board of MemTotal `total_bytes` leaves for content beyond the fixed lines."""
+    return total_bytes - FIXED_BYTES
+
+
+# The store holds the image lines and its residue: bytes are counted once, as images.
+IMAGE_ROOM_BYTES: Final = sum(line(name).cap_bytes for name in ("app-image", "app-image-rollback", "manager-image"))
+STORE_BYTES: Final = IMAGE_ROOM_BYTES + line("store-residue").cap_bytes
+
+CLASSES: tuple[DeviceClass, ...] = (
+    DeviceClass("pi5-4gb", 3584 * MIB, STORE_BYTES),
+    DeviceClass("pi5-8gb", 7168 * MIB, STORE_BYTES),
+)
+if not CLASSES or any(low.min_total_bytes >= high.min_total_bytes for low, high in zip(CLASSES, CLASSES[1:])):
+    raise ValueError("device_class_invalid")
+
+
+def check_content_line(lines: tuple[MemoryLine, ...], classes: tuple[DeviceClass, ...]) -> None:
+    """Refuse a line table that leaves the smallest class no content line."""
+    fixed = sum(item.cap_bytes for item in lines if item.parent is None)
+    if min(item.min_total_bytes for item in classes) - fixed <= 0:
+        raise ValueError("memory_line_no_content")
+
+
+check_content_line(LINES, CLASSES)
 
 
 def cgroup_path(name: str) -> str:
@@ -177,9 +217,8 @@ def device_class(total: int) -> DeviceClass:
 
 
 def cold_peak(references) -> int:
-    # Plain tar bytes upper-bound expanded regular bytes; reserve metadata/inodes.
-    sizes = {ref.environment_sha256: ref.size_bytes for ref in references if ref is not None}
-    return sum(sizes.values()) + max(sizes.values(), default=0) + OVERHEAD
+    """The store bytes a boot offer's roots hold: each distinct image once (no unpack, no copy)."""
+    return sum({ref.environment_sha256: ref.size_bytes for ref in references if ref is not None}.values())
 
 
 def admit_cold(references, *, total: int, available: int, free: int,
@@ -187,12 +226,11 @@ def admit_cold(references, *, total: int, available: int, free: int,
     references = tuple(references)
     sizes = {ref.environment_sha256: ref.size_bytes for ref in references if ref is not None}
     missing = [size for digest, size in sizes.items() if digest not in resident]
-    incremental = sum(missing) + max(missing, default=0) + (OVERHEAD if missing else 0)
-    retained_peak = sum(sizes.values()) + max(missing, default=0) + OVERHEAD
+    incremental = sum(missing)
+    retained = sum(sizes.values())
     store = device_class(total).store_bytes
-    if retained_peak > store:
-        raise StorageShort(retained_peak, store)
-    # Tar-era admission still reads MemAvailable above the emergency headroom.
+    if retained > store:
+        raise StorageShort(retained, store)
     room = min(free, available - EMERGENCY_HEADROOM)
     if incremental > room:
         raise StorageShort(incremental, max(0, room))
@@ -203,14 +241,14 @@ def preparation_room(*, total: int, available: int, free: int, used: int) -> int
     """The bytes a new preparation may stage: the smaller of the device class's store left, the
     free bytes, and MemAvailable above the emergency headroom; never below 0 (a refusal needs
     `required > room`, and required always exceeds 0, so the clamp changes no decision)."""
-    # The class fixes the whole-store cap. MemAvailable already excludes old root/app
-    # resident pages; compare only incremental staging plus emergency headroom.
+    # The class fixes the whole-store cap. MemAvailable already excludes resident images and
+    # app pages; compare only the incremental image plus emergency headroom.
     return max(0, min(device_class(total).store_bytes - used, free, available - EMERGENCY_HEADROOM))
 
 
 def admit_preparation(size_bytes: int, *, total: int, available: int, free: int,
                       used: int) -> int:
-    incremental = 2 * size_bytes + OVERHEAD
+    incremental = size_bytes
     room = preparation_room(total=total, available=available, free=free, used=used)
     if incremental > room:
         raise StorageShort(incremental, room)

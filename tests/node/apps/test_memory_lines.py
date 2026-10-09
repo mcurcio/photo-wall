@@ -1,18 +1,32 @@
 """The memory line table (appliance/kernel/capacity.py LINES) against the node's systemd files and
 the transient Player unit: every MemoryMax= is its line, members fit their slice, MemoryMin=
-stays inside its line. Config-file test: no systemd, no database."""
+stays inside its line; the content line left on every class, and each shipped image within its
+line. Config-file test: no systemd, no database."""
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Final
 
+import pytest
 from support.repo import REPO
 from test_netboot_liveness import _parse_unit
 
 from appliance.apps.process_linux import app_unit_properties
-from appliance.kernel.capacity import GIB, LINES, MIB, cgroup_path, line
+from appliance.kernel.capacity import (
+    CLASSES,
+    GIB,
+    LINES,
+    MIB,
+    STORE_BYTES,
+    cgroup_path,
+    check_content_line,
+    content_line,
+    line,
+)
 from scripts.build_node_base_deb import UNITS
+from scripts.build_node_components import check_image_lines
 
 SYSTEMD = REPO / "appliance/systemd"
 # The unit files node-base-deb ships (scripts/release_plan.py, its systemd globs).
@@ -76,3 +90,31 @@ def test_every_memory_min_is_within_its_line() -> None:
 def test_the_transient_player_unit_cap_is_the_app_line() -> None:
     caps = [p for p in app_unit_properties(Path("/r")) if p.startswith("MemoryMax=")]
     assert caps == [f"MemoryMax={line('app').cap_bytes}"], caps
+
+
+def test_the_content_line_is_what_a_board_holds_beyond_the_fixed_lines() -> None:
+    # Design-r3 §2.4 after E2c (brief §3(b)): fixed 3496 MiB; the measured 4 GB board and the class floor.
+    assert content_line(4045 * MIB) == 549 * MIB
+    assert content_line(3584 * MIB) == 88 * MIB
+    assert line("preparation").cap_bytes == 960 * MIB
+    assert STORE_BYTES == 768 * MIB
+
+
+def test_a_line_table_that_leaves_no_content_line_is_refused() -> None:
+    check_content_line(LINES, CLASSES)
+    floor = min(item.min_total_bytes for item in CLASSES)
+    # Raise the app line until the smallest class has no content left, then one byte short of it.
+    exhausted = tuple(replace(item, cap_bytes=item.cap_bytes + content_line(floor), peak_bytes=None)
+                      if item.name == "app" else item for item in LINES)
+    with pytest.raises(ValueError, match="^memory_line_no_content$"):
+        check_content_line(exhausted, CLASSES)
+    one_left = tuple(replace(item, cap_bytes=item.cap_bytes - 1) if item.name == "app" else item
+                     for item in exhausted)
+    check_content_line(one_left, CLASSES)
+
+
+def test_a_shipped_image_over_its_line_fails_the_component_build() -> None:
+    check_image_lines({"app": line("app-image").cap_bytes, "manager-primary": line("manager-image").cap_bytes})
+    for sizes in ({"app": 321 * MIB}, {"manager-primary": line("manager-image").cap_bytes + 1}):
+        with pytest.raises(ValueError, match="^node_components_image_over_line$"):
+            check_image_lines(sizes)

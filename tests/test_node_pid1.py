@@ -740,12 +740,19 @@ def assert_memory_lines(node):
         if not shown.get("ControlGroup"):
             continue  # not started this boot
         assert shown["MemoryMax"] == str(item.cap_bytes), (item.name, shown)
-        events = None
+        reading = {"MemoryMax": shown["MemoryMax"], "memory.events": None}
         if item.cgroup.endswith(".slice"):
-            text = node.run("cat", "/sys/fs/cgroup" + shown["ControlGroup"] + "/memory.events")
+            directory = "/sys/fs/cgroup" + shown["ControlGroup"]
+            text = node.run("cat", directory + "/memory.events")
             events = dict(row.split() for row in text.splitlines() if len(row.split()) == 2)
             assert events["oom_kill"] == "0", (item.name, events)
-        checked[item.cgroup] = {"MemoryMax": shown["MemoryMax"], "memory.events": events}
+            # The evidence a line is re-derived from (E2c B3 AC5): the slice's peak, and its
+            # anonymous, tmpfs and page-cache bytes (images are file pages, DR-9).
+            stat = dict(row.split() for row in node.run("cat", directory + "/memory.stat").splitlines()
+                        if len(row.split()) == 2)
+            reading.update({"memory.events": events, "memory.peak": node.run("cat", directory + "/memory.peak").strip(),
+                            "memory.stat": {key: stat.get(key) for key in ("anon", "shmem", "file")}})
+        checked[item.cgroup] = reading
     (node.work / "memory-lines.json").write_text(json.dumps(checked, sort_keys=True))
     # The base slice always runs after a completed stage: the check is never vacuous.
     assert "photowallbase.slice" in checked, checked
