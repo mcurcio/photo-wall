@@ -44,6 +44,13 @@ device:
   # pulling in a real Pi board layer's kernel/boot-firmware/wifi-firmware --
   # this build emits a bare rootfs squashfs, not a bootable Pi disk image.
   layer: photo-wall-device-none
+  # The agent's login (docs/runbook.md, "Reaching a Node over SSH"), made by
+  # rpi-image-gen's device-user-admin layer, which the openssh-server layer
+  # below requires. No password: the account logs in by SSH key only, and
+  # passwordless sudo lets it read every unit's journal and run systemctl.
+  user1: photowall
+  user1sudo: nopasswd
+  user1groups: adm,systemd-journal
 
 layer:
   # Debian (not Raspberry Pi OS) trixie arm64 minbase from the declaration's
@@ -62,6 +69,19 @@ layer:
   # photo-wall-bootstrapper `.deb`, after the declaration's "bootstrap" stage
   # (the CA bundle) is in place. See layer/photo-wall-device.yaml.
   app: photo-wall-device
+  # rpi-image-gen's own SSH server layer (layer/net-misc/openssh-server.yaml at
+  # the pinned commit): Debian's openssh-server, enabled for boot, with the
+  # host keys Debian's postinst made at build time removed and a fresh set made
+  # at every boot (ssh-hostkeys-generate.service; the base's root is a RAM
+  # overlay, so /etc/ssh is writable and nothing persists across boots).
+  ssh: openssh-server
+
+ssh:
+  # The one authorized key, from this source tree; its private half never is.
+  pubkey_user1: ${@SRCROOT}/photo_wall_agent.pub
+  # Public-key authentication only: no password, no keyboard-interactive, no
+  # root login (the layer's sshd_config.d/01pubkey-only.conf).
+  pubkey_only: y
 
 image:
   # Custom image layer (image/photo-wall-squashfs.yaml): emits ONE

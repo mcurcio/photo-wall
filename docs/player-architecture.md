@@ -8,6 +8,8 @@ This page describes the V2 Player node as it exists at v0.17.0 (`origin/main` 86
 
 A Pi netboots a small initramfs (stage 1), which locates Central, takes a boot offer, mounts the offered base read-only in RAM and hands the hardware watchdog to systemd. On the base (stage 2), systemd starts the `photo-wall-node.target` cohort: three one-shot boot stages, then independent base services for host observation (HostCore), app effects (broker), manager recovery, and display policy (Weston with the Photo Wall shell plus a display controller). The broker launches the Player app from an exact, sealed app root as a transient systemd unit. The Player draws through GTK into Weston; the shell admits its surface and keeps it on screen only while tagged buffers keep being presented. Every base service and the Player report to Central separately, over separate sessions.
 
+The base OS also runs Debian's OpenSSH server for agent access (rpi-image-gen's `openssh-server` layer; one login, by the one baked-in key only), independent of every Photo Wall unit: [Reaching a Node over SSH](runbook.md#reaching-a-node-over-ssh).
+
 ### Glossary
 
 | Term | Meaning on this page |

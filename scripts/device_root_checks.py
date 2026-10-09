@@ -13,6 +13,9 @@ the snapshot it was built from.
   not installed, so the base must carry them.
 - Pinned sources (`--pinned-sources`): the apt sources are exactly the declaration's
   `PIN.sources()` -- no foreign source, and none of the pin's missing.
+- Agent SSH (`--agent-key FILE`): rpi-image-gen's openssh-server layer left the server and its
+  per-boot host-key generator enabled, no host key baked in, exactly one login holding exactly
+  that key, and sshd's effective settings key-only (docs/runbook.md, "Reaching a Node over SSH").
 
 Run over the base squashfs extract (all five), both `.deb` staging trees (watchdog only, from the
 builders) and the e2e device root after provisioning (watchdog, time daemon, resolver writer).
@@ -54,6 +57,14 @@ DPKG_STATUS: Final = "var/lib/dpkg/status"
 INSTALLED: Final = "install ok installed"
 APT_SOURCES: Final = ("etc/apt/sources.list", "etc/apt/sources.list.d")
 _MAX_LINKS: Final = 8
+SSH_UNITS: Final = ("ssh.service", "ssh-hostkeys-generate.service")
+SSHD_CONFIG: Final = "etc/ssh/sshd_config"
+# sshd keeps the first value it reads for a keyword; Debian's sshd_config includes
+# sshd_config.d/*.conf (sorted) before its own lines. ChallengeResponseAuthentication is
+# KbdInteractiveAuthentication's older name.
+SSHD_KEY_ONLY: Final = {"passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                        "pubkeyauthentication": "yes", "permitrootlogin": "no"}
+_SSHD_ALIASES: Final = {"challengeresponseauthentication": "kbdinteractiveauthentication"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,17 +244,73 @@ def missing_sources(root: Path, required: Sequence[AptSource]) -> list[str]:
             if (source.uri.rstrip("/"), source.suite) not in present]
 
 
+def _sshd_settings(root: Path) -> dict[str, str]:
+    """keyword (lower-cased, aliases folded) -> the value sshd would use, outside any Match
+    block: the sorted sshd_config.d drop-ins first, then sshd_config's own lines."""
+    paths = [*sorted((root / SSHD_CONFIG).with_suffix(".d").glob("*.conf")), root / SSHD_CONFIG]
+    settings: dict[str, str] = {}
+    for path in paths:
+        for line in (_read(root, path) or "").splitlines():
+            words = line.partition("#")[0].split(None, 1)
+            if len(words) < 2:
+                continue
+            keyword = words[0].lower()
+            if keyword == "match":
+                break
+            if keyword != "include":
+                settings.setdefault(_SSHD_ALIASES.get(keyword, keyword), words[1].strip().lower())
+    return settings
+
+
+def _logins(root: Path) -> Iterator[tuple[str, str]]:
+    """(user, home) for every etc/passwd entry with an absolute home."""
+    for line in (_read(root, root / "etc/passwd") or "").splitlines():
+        fields = line.split(":")
+        if len(fields) >= 6 and fields[5].startswith("/"):
+            yield fields[0], fields[5]
+
+
+def agent_ssh(root: Path, key: str) -> list[str]:
+    """Violations of the agent's SSH access on a base built with rpi-image-gen's openssh-server
+    layer: SSH_UNITS enabled for multi-user.target and not masked; no etc/ssh/ssh_host_* baked
+    in (each boot makes its own); exactly one login's .ssh/authorized_keys, holding exactly `key`;
+    and sshd's effective settings SSHD_KEY_ONLY."""
+    found: list[str] = []
+    for unit in SSH_UNITS:
+        wants = root / "etc/systemd/system/multi-user.target.wants" / unit
+        if not wants.is_symlink() and not wants.exists():
+            found.append(f"not enabled: {unit}")
+        mask = root / "etc/systemd/system" / unit
+        if mask.is_symlink() and os.readlink(mask) == "/dev/null":
+            found.append(f"masked: {unit}")
+    found += [f"baked host key: {path.relative_to(root).as_posix()}"
+              for path in sorted((root / "etc/ssh").glob("ssh_host_*"))]
+    holders = {user: text for user, home in _logins(root)
+               if (text := _read(root, root / home.lstrip("/") / ".ssh/authorized_keys"))
+               and text.strip()}
+    if [text.split() for text in holders.values()] != [key.split()]:
+        found.append(f"authorized keys: {sorted(holders)} hold keys, want one login with exactly "
+                     "the agent key")
+    settings = _sshd_settings(root)
+    found += [f"sshd: {keyword} is {settings.get(keyword)}, want {value}"
+              for keyword, value in SSHD_KEY_ONLY.items() if settings.get(keyword) != value]
+    return found
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """--root DIR [--require-installed FILE]... [--pinned-sources]; exit 1 with one line per
-    violation, 0 on a clean root. Watchdog, time-daemon and resolver-writer checks always run;
+    """--root DIR [--require-installed FILE]... [--pinned-sources] [--agent-key FILE]; exit 1
+    with one line per violation, 0 on a clean root. Watchdog, time-daemon and resolver-writer checks always run;
     each FILE names packages separated by whitespace or commas (a `packages` listing or a
-    `Depends` value); --pinned-sources requires exactly debian_packages.PIN.sources()."""
+    `Depends` value); --pinned-sources requires exactly debian_packages.PIN.sources();
+    --agent-key runs `agent_ssh`."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--require-installed", type=Path, action="append", default=[],
                         metavar="FILE", help="package names that must be installed")
     parser.add_argument("--pinned-sources", action="store_true",
                         help="the root's apt sources must be exactly the declaration's pin")
+    parser.add_argument("--agent-key", type=Path, metavar="FILE",
+                        help="the agent's SSH public key: the root must admit it, and only it")
     args = parser.parse_args(argv)
     root: Path = args.root
     violations = [f"watchdog override: {line}" for line in watchdog_overrides(root)]
@@ -256,6 +323,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.pinned_sources:
         violations += [f"foreign source: {line}" for line in foreign_sources(root, PIN.sources())]
         violations += [f"missing source: {line}" for line in missing_sources(root, PIN.sources())]
+    if args.agent_key is not None:
+        violations += [f"agent ssh: {line}" for line in agent_ssh(root, args.agent_key.read_text())]
     for line in violations:
         print(line)
     return 1 if violations else 0

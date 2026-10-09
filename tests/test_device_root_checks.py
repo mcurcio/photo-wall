@@ -2,13 +2,17 @@
 watchdog overrides, time daemons, resolver writers, missing packages, foreign and missing apt
 sources, and the one-line-per-violation CLI. Generated fixtures only; the real base extract is CI's."""
 
+import re
 from pathlib import Path
 
 import pytest
+from support.repo import REPO
 
 from scripts.debian_packages import PIN
 from scripts.device_root_checks import (
+    SSH_UNITS,
     InstalledPackage,
+    agent_ssh,
     foreign_sources,
     main,
     missing_packages,
@@ -293,3 +297,113 @@ def test_main_refuses_a_base_that_names_no_pinned_source(tmp_path, capsys):
     assert main(["--root", str(root), "--pinned-sources"]) == 1
     assert capsys.readouterr().out.splitlines() == [
         f"missing source: {source.uri} {source.suite}" for source in PIN.sources()]
+
+
+# --- agent SSH (docs/runbook.md, "Reaching a Node over SSH") ------------------------------------
+
+IMAGE_TREE = REPO / "appliance/rpi_image_gen"
+AGENT_KEY = (IMAGE_TREE / "photo_wall_agent.pub").read_text()
+# Debian trixie's stock sshd_config head, then what rpi-image-gen's openssh-server layer writes
+# with pubkey_only=y (layer/net-misc/openssh-server.yaml at the pinned commit).
+STOCK_SSHD_CONFIG = """\
+Include /etc/ssh/sshd_config.d/*.conf
+#PermitRootLogin prohibit-password
+KbdInteractiveAuthentication no
+UsePAM yes
+X11Forwarding yes
+Subsystem sftp /usr/lib/openssh/sftp-server
+"""
+PUBKEY_ONLY = """\
+PermitRootLogin no
+ChallengeResponseAuthentication no
+PasswordAuthentication no
+GSSAPIAuthentication no
+UsePAM yes
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+"""
+PASSWD = "root:x:0:0:root:/root:/bin/bash\nphotowall:x:1000:1000::/home/photowall:/bin/bash\n"
+
+
+def ssh_root(root: Path) -> Path:
+    """What the openssh-server and device-user-admin layers leave in the base."""
+    write(root, "etc/passwd", PASSWD)
+    write(root, "etc/ssh/sshd_config", STOCK_SSHD_CONFIG)
+    write(root, "etc/ssh/sshd_config.d/01pubkey-only.conf", PUBKEY_ONLY)
+    write(root, "home/photowall/.ssh/authorized_keys", AGENT_KEY)
+    wants = root / "etc/systemd/system/multi-user.target.wants"
+    wants.mkdir(parents=True)
+    for unit in SSH_UNITS:
+        (wants / unit).symlink_to(f"/usr/lib/systemd/system/{unit}")
+    return root
+
+
+def test_the_layers_output_admits_the_agent_key_by_key_only(tmp_path):
+    assert agent_ssh(ssh_root(tmp_path), AGENT_KEY) == []
+
+
+def test_a_disabled_or_masked_server_is_refused(tmp_path):
+    root = ssh_root(tmp_path)
+    (root / "etc/systemd/system/multi-user.target.wants/ssh-hostkeys-generate.service").unlink()
+    (root / "etc/systemd/system/ssh.service").symlink_to("/dev/null")
+    assert agent_ssh(root, AGENT_KEY) == ["masked: ssh.service",
+                                          "not enabled: ssh-hostkeys-generate.service"]
+
+
+def test_a_baked_host_key_is_refused(tmp_path):
+    root = ssh_root(tmp_path)
+    write(root, "etc/ssh/ssh_host_ed25519_key", "x")
+    assert agent_ssh(root, AGENT_KEY) == ["baked host key: etc/ssh/ssh_host_ed25519_key"]
+
+
+@pytest.mark.parametrize("where, text", [
+    ("home/photowall/.ssh/authorized_keys", ""),                                  # no key
+    ("home/photowall/.ssh/authorized_keys", "ssh-ed25519 AAAAother other\n"),     # another key
+    ("root/.ssh/authorized_keys", AGENT_KEY),                                     # a second login
+])
+def test_anything_but_one_login_with_exactly_the_key_is_refused(tmp_path, where, text):
+    root = ssh_root(tmp_path)
+    write(root, where, text)
+    assert [line.split(":")[0] for line in agent_ssh(root, AGENT_KEY)] == ["authorized keys"]
+
+
+@pytest.mark.parametrize("drop_in, refused", [
+    ("", ["passwordauthentication", "pubkeyauthentication", "permitrootlogin"]),   # pubkey_only=n
+    ("PasswordAuthentication yes\n" + PUBKEY_ONLY, ["passwordauthentication"]),    # first wins
+    ("Match User x\n" + PUBKEY_ONLY, ["passwordauthentication", "pubkeyauthentication",
+                                       "permitrootlogin"]),                         # not global
+])
+def test_sshd_settings_that_are_not_key_only_are_refused(tmp_path, drop_in, refused):
+    root = ssh_root(tmp_path)
+    write(root, "etc/ssh/sshd_config.d/01pubkey-only.conf", drop_in)
+    assert [line.split()[1] for line in agent_ssh(root, AGENT_KEY)] == refused
+
+
+def test_main_checks_agent_ssh_only_when_asked(tmp_path, capsys):
+    root = debian_root(tmp_path)
+    assert main(["--root", str(root)]) == 0
+    assert main(["--root", str(root), "--agent-key", str(IMAGE_TREE / "photo_wall_agent.pub")]) == 1
+    assert "agent ssh: not enabled: ssh.service" in capsys.readouterr().out.splitlines()
+
+
+def test_the_base_enables_rpi_image_gens_ssh_layer_with_the_one_key_and_ci_checks_it():
+    """The config wires the openssh-server layer key-only to the key file; base-image.yml's root
+    check reads that same file over the built squashfs."""
+    config = (IMAGE_TREE / "config/photo-wall-base.yaml").read_text()
+    sections: dict[str, dict[str, str]] = {}
+    section = ""
+    for line in config.splitlines():
+        if re.fullmatch(r"[a-z_]+:", line):
+            section = line[:-1]
+        elif match := re.fullmatch(r"  ([a-z0-9_]+): *(\S+)", line):
+            sections.setdefault(section, {})[match[1]] = match[2]
+    assert sections["layer"]["ssh"] == "openssh-server"
+    assert sections["ssh"] == {"pubkey_user1": "${@SRCROOT}/photo_wall_agent.pub",
+                               "pubkey_only": "y"}
+    assert sections["device"]["user1sudo"] == "nopasswd"
+    lines = AGENT_KEY.splitlines()
+    assert len(lines) == 1 and lines[0].split()[0] == "ssh-ed25519", lines
+    assert not [path for path in IMAGE_TREE.rglob("*") if path.is_file()
+                and "PRIVATE KEY" in path.read_text(errors="replace")]
+    workflow = (REPO / ".github/workflows/base-image.yml").read_text()
+    assert "--agent-key appliance/rpi_image_gen/photo_wall_agent.pub" in workflow
