@@ -1,0 +1,211 @@
+"""The construction-time import check (scripts/import_check.py, decision 0019) on tiny source and
+staged trees with a fake build root: each refusal kind, the owner's exemption list (an exempt
+upward edge and its ancestor package pass; any other upward edge is refused) and a clean pass.
+The real build runs it inside dpkg-buildpackage (debian/rules); tests/debs proves the packages."""
+
+from pathlib import Path, PurePosixPath
+
+import pytest
+
+from scripts import import_check
+from scripts.import_check import Declared, ImportCheckError, Refusal
+
+REPO = Path(__file__).resolve().parents[1]
+
+# Three packages: lib (a wire library on pydantic), low and top (two appliance contexts). low's
+# runner reaches up into top inside a function: the retiring edge the exemption list names.
+SOURCE = {
+    "appliance/__init__.py": '"""The namespace\'s docstring."""\n',
+    "appliance/low/__init__.py": "",
+    "appliance/low/core.py": "import json\nfrom lib import wire\n",
+    "appliance/low/runner.py": ("from appliance.low import core\n\n"
+                                "def retire():\n    from appliance.top import run\n"),
+    "appliance/top/__init__.py": "",
+    "appliance/top/run.py": "import appliance.low.core\nimport lib.wire\n",
+    "appliance/stage1.py": "",
+    "lib/__init__.py": "",
+    "lib/wire.py": "import pydantic\nimport pydantic.fields\n",
+}
+INSTALLS = {"photo-wall-lib": ("lib",), "photo-wall-low": ("appliance/low",),
+            "photo-wall-top": ("appliance/top",)}
+DEPENDS = {
+    "photo-wall-lib": "python3, python3-pydantic, ${misc:Depends}",
+    "photo-wall-low": "python3,\n photo-wall-lib (= ${pw-version:photo-wall-lib}),\n ${misc:Depends}",
+    "photo-wall-top": ("python3, photo-wall-low (= ${pw-version:photo-wall-low}),\n"
+                       " photo-wall-lib (= ${pw-version:photo-wall-lib}), systemd, ${misc:Depends}"),
+    "photo-wall-units": "systemd, ${misc:Depends}",
+}
+EXEMPT = '"appliance.low.runner -> appliance.top.run"'
+OWNERS = {"pydantic": "python3-pydantic"}
+ROOTS = {"python3": frozenset(), "systemd": frozenset(), "python3-pydantic": frozenset({"pydantic"}),
+         "python3-nats": frozenset({"nats"})}
+
+
+def pyproject(ignore: str = EXEMPT, *, tables: int = 1) -> str:
+    layers = ('[[tool.importlinter.contracts]]\nname = "Node contexts point down"\n'
+              'type = "layers"\ncontainers = ["appliance"]\nlayers = ["top", "low"]\n'
+              f"ignore_imports = [{ignore}]\n\n")
+    # A forbidden contract's ignore lines exempt nothing.
+    forbidden = ('[[tool.importlinter.contracts]]\nname = "Low reaches no top"\n'
+                 'type = "forbidden"\nsource_modules = ["appliance.low"]\n'
+                 'forbidden_modules = ["appliance.top"]\n'
+                 'ignore_imports = ["appliance.low.core -> appliance.top.run"]\n')
+    return "[tool.importlinter]\nroot_packages = [\"appliance\", \"lib\"]\n\n" + layers * tables + forbidden
+
+
+def control(depends: dict[str, str]) -> str:
+    stanzas = ["Source: photo-wall\nBuild-Depends: debhelper-compat (= 13)"]
+    stanzas += [f"# {package}'s stanza\nPackage: {package}\nArchitecture: all\nDepends: {value}\n"
+                f"Description: {package}\n words" for package, value in depends.items()]
+    return "\n\n".join(stanzas) + "\n"
+
+
+def build(tmp_path: Path, *, source: dict[str, str] | None = None,
+          depends: dict[str, str] | None = None, ignore: str = EXEMPT, tables: int = 1):
+    repo, staged = tmp_path / "repo", tmp_path / "staged"
+    for name, text in (SOURCE | (source or {})).items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    for package, roots in INSTALLS.items():
+        into = staged / package / import_check.directory(package).relative_to("/")
+        for root in roots:
+            for path in sorted((repo / root).glob("*.py")):
+                target = into / path.relative_to(repo)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+    (staged / "photo-wall-units/lib/systemd/system").mkdir(parents=True)
+    (tmp_path / "control").write_text(control(depends or DEPENDS))
+    (tmp_path / "pyproject.toml").write_text(pyproject(ignore, tables=tables))
+    return repo, staged
+
+
+def run(tmp_path: Path, **kwargs) -> list[Refusal]:
+    repo, staged = build(tmp_path, **kwargs)
+    return import_check.check(repo=repo, staged=staged, control=tmp_path / "control",
+                              pyproject=tmp_path / "pyproject.toml", owner=OWNERS.get,
+                              roots_of=ROOTS.get)
+
+
+def kinds(refusals: list[Refusal]) -> set[tuple[str, str, str, str]]:
+    return {(each.package, each.kind, each.module, each.importer) for each in refusals}
+
+
+def test_declared_imports_with_the_exempt_upward_edge_pass(tmp_path):
+    assert run(tmp_path) == []
+
+
+def test_the_exemption_covers_the_ancestor_package_its_target_installs(tmp_path):
+    """`from appliance.top import run` imports appliance.top too: exempt with its target."""
+    without = run(tmp_path, ignore="")
+    assert kinds(without) == {
+        ("photo-wall-low", "undeclared-sibling", "appliance.top", "appliance.low.runner"),
+        ("photo-wall-low", "undeclared-sibling", "appliance.top.run", "appliance.low.runner")}
+
+
+def test_an_upward_edge_the_list_does_not_name_is_refused(tmp_path):
+    """The forbidden contract's ignore line for core -> top.run exempts nothing."""
+    refusals = run(tmp_path, source={"appliance/low/core.py": "from lib import wire\n"
+                                                              "import appliance.top.run\n"})
+    assert kinds(refusals) == {
+        ("photo-wall-low", "undeclared-sibling", "appliance.top", "appliance.low.core"),
+        ("photo-wall-low", "undeclared-sibling", "appliance.top.run", "appliance.low.core")}
+
+
+def test_an_import_of_a_sibling_not_in_depends_is_refused(tmp_path):
+    depends = DEPENDS | {"photo-wall-top": "python3, photo-wall-low (= ${pw-version:photo-wall-low})"}
+    assert kinds(run(tmp_path, depends=depends)) == {
+        ("photo-wall-top", "undeclared-sibling", "lib", "appliance.top.run"),
+        ("photo-wall-top", "undeclared-sibling", "lib.wire", "appliance.top.run")}
+
+
+def test_an_import_of_a_first_party_module_no_package_installs_is_refused(tmp_path):
+    refusals = run(tmp_path, source={"appliance/top/run.py": "import appliance.low.core\n"
+                                                            "import lib.wire\n"
+                                                            "import appliance.stage1\n"
+                                                            "import appliance.ghost\n"})
+    # appliance itself is the namespace the package directories share: no package, no refusal.
+    assert kinds(refusals) == {
+        ("photo-wall-top", "unowned-module", "appliance.stage1", "appliance.top.run"),
+        ("photo-wall-top", "unowned-module", "appliance.ghost", "appliance.top.run")}
+
+
+def test_a_third_party_import_whose_provider_is_not_in_depends_is_refused(tmp_path):
+    depends = DEPENDS | {"photo-wall-lib": "python3, ${misc:Depends}"}
+    refusals = run(tmp_path, depends=depends)
+    assert kinds(refusals) == {("photo-wall-lib", "undeclared-provider", "pydantic", "lib.wire")}
+    assert refusals[0].line() == ("import-check: photo-wall-lib: undeclared-provider: "
+                                  "pydantic <- lib.wire")
+
+
+def test_a_third_party_import_the_build_root_cannot_resolve_is_refused(tmp_path):
+    refusals = run(tmp_path, source={"lib/wire.py": "import pydantic\nimport _pw_unpackaged\n"})
+    assert kinds(refusals) == {("photo-wall-lib", "unresolved-import", "_pw_unpackaged",
+                                "lib.wire")}
+
+
+def test_a_depends_entry_no_edge_reaches_is_refused_unless_it_owns_no_import_root(tmp_path):
+    depends = DEPENDS | {"photo-wall-low": ("python3, python3-nats, systemd, "
+                                            "photo-wall-lib (= ${pw-version:photo-wall-lib}), "
+                                            "photo-wall-top (= ${pw-version:photo-wall-top})")}
+    refusals = run(tmp_path, depends=depends)
+    # top is reached only through the exempt edge, which gives no Depends.
+    assert kinds(refusals) == {
+        ("photo-wall-low", "unused-depends", "python3-nats", "debian/control"),
+        ("photo-wall-low", "unused-depends", "photo-wall-top", "debian/control")}
+
+
+def test_a_depends_entry_the_build_root_does_not_hold_is_refused(tmp_path):
+    depends = DEPENDS | {"photo-wall-lib": "python3, python3-pydantic, python3-absent"}
+    assert kinds(run(tmp_path, depends=depends)) == {
+        ("photo-wall-lib", "unjudgeable-depends", "python3-absent", "debian/control")}
+
+
+@pytest.mark.parametrize("ignore, tables, detail", [
+    ('"appliance.low.* -> appliance.top.run"', 1, "is not `<module> -> <module>`"),
+    ('"appliance.low.runner->appliance.top.run"', 1, "is not `<module> -> <module>`"),
+    (EXEMPT, 0, "0 import-linter layers contracts"),
+    (EXEMPT, 2, "2 import-linter layers contracts"),
+])
+def test_an_unreadable_exemption_list_is_refused(tmp_path, ignore, tables, detail):
+    refusals = run(tmp_path, ignore=ignore, tables=tables)
+    assert [each.kind for each in refusals] == ["exemption-invalid"]
+    assert detail in refusals[0].module
+
+
+def test_an_exemption_naming_a_module_no_package_installs_is_refused(tmp_path):
+    refusals = run(tmp_path, ignore=EXEMPT + ', "appliance.stage1 -> appliance.top.run"')
+    assert kinds(refusals) == {("pyproject.toml", "exemption-invalid",
+                                "appliance.stage1 (no package installs it)",
+                                "appliance.stage1 -> appliance.top.run")}
+
+
+def test_the_control_file_reads_pins_and_other_names_and_skips_substvars(tmp_path):
+    (tmp_path / "control").write_text(control(DEPENDS))
+    assert import_check.declared(tmp_path / "control")["photo-wall-top"] == Declared(
+        frozenset({"photo-wall-low", "photo-wall-lib"}), frozenset({"python3", "systemd"}))
+
+
+def test_the_runtime_directories_follow_depends_and_exempt_targets(tmp_path):
+    repo, staged = build(tmp_path)
+    installed = import_check.installed_modules(staged, INSTALLS)
+    assert installed["appliance.top.run"] == "photo-wall-top"
+    directories = import_check.runtime_directories(
+        "photo-wall-low", declared=import_check.declared(tmp_path / "control"),
+        exempt=import_check.exemptions(tmp_path / "pyproject.toml"), installed=installed)
+    assert directories == tuple(PurePosixPath(f"/usr/lib/photo-wall/{name}")
+                                for name in ("low", "lib", "top"))
+
+
+def test_a_module_two_packages_install_is_an_error(tmp_path):
+    repo, staged = build(tmp_path)
+    twice = staged / "photo-wall-top/usr/lib/photo-wall/top/lib/wire.py"
+    twice.parent.mkdir(parents=True)
+    twice.write_text("")
+    with pytest.raises(ImportCheckError, match="lib.wire is installed by"):
+        import_check.installed_modules(staged, INSTALLS)
+
+
+def test_the_repositorys_exemption_list_is_the_node_layers_ignore_lines():
+    exempt = import_check.exemptions(REPO / "pyproject.toml")
+    assert exempt and all(importer.startswith("appliance.") and imported.startswith("appliance.node.")
+                          for importer, imported in exempt)

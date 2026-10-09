@@ -14,7 +14,8 @@ Build-Depends: debhelper-compat (= 13),
  python3-pywayland,
  python3-cffi-backend,
  python3-cairo,
- weston
+ weston,
+ python3-pydantic
 Standards-Version: 4.7.2
 Rules-Requires-Root: no
 Homepage: https://github.com/mcurcio/photo-wall
@@ -32,32 +33,47 @@ Homepage: https://github.com/mcurcio/photo-wall
 
 Package: photo-wall-common
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ python3-nats,
+ python3-pydantic,
+ ${misc:Depends}
 Description: Photo Wall wire contracts and Node API
  The contracts and nodeapi import roots every Node program shares.
 
 Package: photo-wall-uplink
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ ${misc:Depends}
 Description: Photo Wall uplink: locating and trusting Central
  The stdlib-only uplink import root, shared by stage 1 and the Node's programs.
 
 Package: photo-wall-node-kernel
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ ${misc:Depends}
 Description: Photo Wall Node kernel
  The Node's primitives (appliance.kernel): clock, boot store, credentials,
  capacity and the memory line table, boot-stage records, image mounts.
 
 Package: photo-wall-node-central-session
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ ${misc:Depends}
 Description: Photo Wall Node's Central session (retiring)
  The appliance.central_session context.
 
 Package: photo-wall-node-host
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ ${misc:Depends}
 Description: Photo Wall HostCore
  The appliance.host context: host metrics and facts, operator reboot, local
  recovery deadlines.
@@ -71,6 +87,9 @@ Depends: weston,
  python3-pywayland,
  python3-cffi-backend,
  python3-cairo,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
  ${shlibs:Depends},
  ${misc:Depends}
 Description: Photo Wall display host
@@ -79,27 +98,48 @@ Description: Photo Wall display host
 
 Package: photo-wall-node-health
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-display (= ${pw-version:photo-wall-node-display}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ ${misc:Depends}
 Description: Photo Wall health judge
  The appliance.health context: Node facts to one verdict and the overlay
  instruction.
 
 Package: photo-wall-node-apps
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ ${misc:Depends}
 Description: Photo Wall app lifecycle
  The appliance.apps context: effect broker, progress probe, app process, stop,
  root import and release images.
 
 Package: photo-wall-node-boot
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
+ ${misc:Depends}
 Description: Photo Wall Node boot stages
  The appliance.boot context: storage, handoff and prepare.
 
 Package: photo-wall-node-manager
 Architecture: all
-Depends: ${misc:Depends}
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ photo-wall-node-host (= ${pw-version:photo-wall-node-host}),
+ photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
+ ${misc:Depends}
 Description: Photo Wall AppManager context (retiring)
  The appliance.node context.
 

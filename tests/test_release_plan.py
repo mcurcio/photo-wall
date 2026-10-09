@@ -599,6 +599,26 @@ def test_every_node_deb_closure_file_is_claimed_by_its_package(policies, package
     assert [path for path in files if not claimer.claims(path)] == []
 
 
+def test_every_tree_file_a_debian_install_file_names_is_claimed_by_the_node_debs():
+    """dh_install falls back to the source tree for a path debian/tmp lacks: each such file
+    ships in a binary package of the one source package, so a change to it releases node-debs."""
+    tracked = _tracked()
+    sources = [line.split()[0] for install in sorted((REPO / "debian").glob("*.install"))
+               for line in install.read_text().splitlines() if line.strip()]
+    files = [path for source in sources for path in tracked
+             if matches(source, path) or matches(f"{source}/**", path)]
+    assert files
+    assert [path for path in files if not _package("node-debs").claims(path)] == []
+
+
+def test_every_first_party_file_the_import_check_imports_is_claimed_by_the_node_debs():
+    """debian/rules runs scripts/import_check.py inside the build: it and what it imports decide
+    whether the packages build."""
+    files = _with_imports({"scripts/import_check.py"})
+    assert {"scripts/import_check.py", "scripts/module_closure.py"} <= files
+    assert [path for path in files if not _package("node-debs").claims(path)] == []
+
+
 def _covered(source: str, tracked: list[str]) -> list[str]:
     """The tracked files a COPY/ADD source (a manifest path) brings into an image."""
     return [path for path in tracked if path == source or matches(f"{source}/**", path)

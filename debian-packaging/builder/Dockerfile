@@ -5,8 +5,9 @@
 #   pinned   the base image moved onto the pin. The image's own sources serve only the CA bundle
 #            the https snapshot needs; then they go, and apt's preference holds the snapshot above
 #            the image's newer packages, which dist-upgrade --allow-downgrades brings back to it.
-#   builder  debhelper, dpkg-dev, curl (the repo step's one download) and the source package's
-#            Build-Depends, read from debian/control.
+#   builder  debhelper, dpkg-dev, curl (the repo step's downloads) and the Build-Depends of both
+#            source packages build-repo.sh builds, read from their control files: photo-wall's
+#            (debian/control) and python-nats's (debian-packaging/python-nats/debian/control).
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS pinned
 COPY debian-packaging/snapshot.list /etc/apt/sources.list.d/photo-wall-snapshot.list
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
@@ -17,7 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
  && rm -rf /var/lib/apt/lists/*
 
 FROM pinned AS builder
-COPY debian/control /src/debian/control
+COPY debian/control /src/photo-wall/debian/control
+COPY debian-packaging/python-nats/debian/control /src/python-nats/debian/control
 RUN apt-get update && apt-get install -y --no-install-recommends debhelper dpkg-dev curl \
- && apt-get build-dep -y /src \
+ && apt-get build-dep -y /src/photo-wall /src/python-nats \
  && rm -rf /var/lib/apt/lists/*

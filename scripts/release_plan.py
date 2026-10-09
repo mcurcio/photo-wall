@@ -264,10 +264,20 @@ PACKAGES: Final = (
     Package("player-deb", "the Player .deb", _PLAYER_DEB),
     # The one source package (decision 0019): node-components.yml's `debs` job builds every
     # binary package of debian/control in the pinned build container and the local repo beside
-    # upstream's nats-server .deb (debian-packaging/build-repo.sh).
+    # upstream's nats-server .deb and python3-nats (debian-packaging/build-repo.sh). The build
+    # runs the import check (scripts/import_check.py and what it imports) and installs the
+    # import roots the debian/*.install files name; tests/test_release_plan.py holds both claimed.
     Package("node-debs", "the Node's Debian packages from the one source package, and their "
             "local repo", (*_PROJECT, ".github/workflows/node-components.yml", "debian/**",
-                           "debian-packaging/**")),
+                           "debian-packaging/**", "scripts/import_check.py",
+                           "scripts/module_closure.py", "scripts/debian_packages.py",
+                           "contracts/**", "nodeapi/**", "uplink/**", "appliance/kernel/**",
+                           "appliance/feed.py", "appliance/feed_socket.py",
+                           "appliance/central_session/**", "appliance/host/**",
+                           "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
+                           "appliance/app_launcher.py", "appliance/process_identity.py",
+                           "appliance/boot/**", "appliance/node_boot_handoff.py",
+                           "appliance/node/**")),
     Package("node-manager-deb", "the exact versioned AppManager .deb",
             (*_DEB_BUILD, "scripts/build_node_manager_deb.py", "appliance/__init__.py",
              "appliance/node/__init__.py", "appliance/node/manager.py", "appliance/node/manager_runner.py",

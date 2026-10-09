@@ -1,1 +1,4 @@
 usr/lib/photo-wall/node-display
+appliance/display_host/*.py usr/lib/photo-wall/node-display/appliance/display_host
+appliance/display_host/overlay/*.py usr/lib/photo-wall/node-display/appliance/display_host/overlay
+usr/lib/photo-wall/node-display/overlay/protocol usr/lib/photo-wall/node-display/appliance/display_host/overlay

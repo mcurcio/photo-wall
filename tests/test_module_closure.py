@@ -326,3 +326,24 @@ def test_an_undeclared_missing_import_fails_the_isolated_import(tmp_path):
     (into / "pkg_b/helper.py").write_text("import _pw_undeclared_lib\n")
     with pytest.raises(ClosureError, match="pkg_b.helper: ModuleNotFoundError"):
         isolated_import(into, ("pkg_b.helper",), policy=POLICY)
+
+
+def test_the_finder_records_each_direct_import_with_its_ancestors_found_or_not(tmp_path):
+    tree(tmp_path, {
+        **BASE,
+        "pkg_a/main.py": "import json\nimport pkg_b.helper\nfrom pkg_c import deferred, VALUE\n"
+                         "from . import sibling\nfrom .sibling import thing\n\n"
+                         "def later():\n    import _pw_absent_lib.sub\n",
+        "pkg_a/sibling.py": "thing = 1\n",
+    })
+    finder = module_closure.Finder([str(tmp_path), *search_path()], frozenset(FIRST_PARTY))
+    finder.import_hook("pkg_a.main")
+    assert {edge for edge in finder.edges if edge[0] == "pkg_a.main"} == {
+        ("pkg_a.main", "json"), ("pkg_a.main", "pkg_b"), ("pkg_a.main", "pkg_b.helper"),
+        ("pkg_a.main", "pkg_c"), ("pkg_a.main", "pkg_c.deferred"), ("pkg_a.main", "pkg_a"),
+        ("pkg_a.main", "pkg_a.sibling"), ("pkg_a.main", "_pw_absent_lib"),
+        ("pkg_a.main", "_pw_absent_lib.sub")}
+    # Direct, never transitive: the helper's import is the helper's edge; the stdlib is not
+    # scanned, so every importer is first-party.
+    assert ("pkg_b.helper", "hashlib") in finder.edges
+    assert {importer.partition(".")[0] for importer, _ in finder.edges} <= set(FIRST_PARTY)
