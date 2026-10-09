@@ -7,7 +7,8 @@ carries no revision -- node-components.yml stamps that separately, after a build
 Each release root ships as its squashfs image (E2c), `<role>.squashfs`, never a tar: the sealed
 tar is built in a private temporary directory, the image is built from it twice and the two
 digests must agree (`node_components_image_not_reproducible`), and the role's ref in
-components.json carries the image's sha256 and size.
+components.json carries the image's sha256 and size. Each image must fit its memory line on the
+Node (`check_image_lines`, `node_components_image_over_line`): the build fails, never the Node.
 """
 from __future__ import annotations
 
@@ -16,9 +17,11 @@ import hashlib
 import json
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from appliance.kernel.capacity import line
 from contracts.app_environment import AppEnvironmentRefV2
 from scripts.build_app_environment import build as build_environment
 from scripts.build_environment_image import (
@@ -45,6 +48,15 @@ def reproducible_image(archive: Path, reference: AppEnvironmentRefV2, work: Path
     if first.sha256 != second.sha256:
         raise ValueError("node_components_image_not_reproducible")
     return first
+
+
+def check_image_lines(sizes: Mapping[str, int]) -> None:
+    """Each role's image fits its line on the Node (appliance/kernel/capacity.py): the app within
+    `app-image`, every manager role within `manager-image`."""
+    for role, size in sizes.items():
+        cap = line("app-image" if role == "app" else "manager-image").cap_bytes
+        if size > cap:
+            raise ValueError("node_components_image_over_line")
 
 
 def build(repository: Path, revision: str, output: Path) -> None:
@@ -80,6 +92,7 @@ def build(repository: Path, revision: str, output: Path) -> None:
                                        abi=abi, tools=tools)
             shutil.move(image.path, output / (role + IMAGE_SUFFIX))
             refs[role] = asdict(replace(ref, environment_sha256=image.sha256, size_bytes=image.size_bytes))
+        check_image_lines({role: ref["size_bytes"] for role, ref in refs.items()})
         provenance = {"schema": COMPONENTS_SCHEMA, "architecture": ARCHITECTURE, "abi": abi,
                       "native": json.loads((native / "display-build-source.json").read_text()),
                       "native_package_lock": (native / "display-build-packages.tsv").read_text(),
