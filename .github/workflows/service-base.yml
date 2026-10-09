@@ -50,6 +50,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - name: Authenticate to the durable image registry
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

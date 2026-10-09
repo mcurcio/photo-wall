@@ -249,12 +249,17 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - name: Authenticate to the durable image registry
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
       # The service-image action reads the amd64 caches checks.yml wrote for this
       # revision, so a release does not rebuild from scratch. github.repository is
       # already lowercase (mcurcio/photo-wall), which ghcr requires.
