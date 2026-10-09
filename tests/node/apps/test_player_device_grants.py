@@ -5,8 +5,6 @@ v3d owns card0 and renderD128, vc4-drm owns card1 (the display controller), and 
 decoder (a module the v0.22.1 base does not yet load) registers a video node and its
 media-controller node on one platform device.
 """
-import configparser
-import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -16,7 +14,8 @@ import pytest
 from appliance.apps import device_grants
 from appliance.apps import process_linux as linux
 from appliance.apps.device_grants import DeviceGrant, player_device_grants
-from appliance.apps.process_linux import DISPLAY_SOCKET, app_unit_properties
+from appliance.apps.process_linux import PW_DISPLAY_GID, app_unit_properties
+from appliance.kernel.display_paths import WAYLAND_DIRECTORY, WAYLAND_SOCKET
 
 RENDER_GID, VIDEO_GID = 991, 44  # the Pi's base; tests resolve them through the group lookup
 GROUPS = {"render": RENDER_GID, "video": VIDEO_GID}
@@ -109,6 +108,7 @@ def test_start_spawns_the_player_with_this_nodes_grants(pi5, tmp_path, monkeypat
     monkeypatch.setattr(driver, "verify", lambda environment: True)
     monkeypatch.setattr(driver, "_await_unit_unloaded", lambda previous: None)
     monkeypatch.setattr(driver, "_observe", lambda *args: "running")
+    monkeypatch.setattr(driver, "display_incarnation", lambda: "weston-1")
     monkeypatch.setattr(device_grants.grp, "getgrnam",
                         lambda name: SimpleNamespace(gr_gid=GROUPS[name]))  # the base's group database
     commands = []
@@ -119,12 +119,48 @@ def test_start_spawns_the_player_with_this_nodes_grants(pi5, tmp_path, monkeypat
     assert "DeviceAllow=/dev/dri/renderD128 rw" in properties
     assert f"SupplementaryGroups={VIDEO_GID} {RENDER_GID} 10005" in properties
     assert not any("card" in p for p in properties)
+    assert store["launch"]["display"] == "weston-1"  # the incarnation this Player is bound to
 
 
-def test_the_display_socket_is_the_one_weston_creates():
-    unit = configparser.ConfigParser(strict=False, interpolation=None)
-    unit.read(REPO / "appliance/systemd/photo-wall-display.service")
-    words = shlex.split(unit["Service"]["ExecStart"])
-    runtime = next(w.split("=", 1)[1] for w in words if w.startswith("XDG_RUNTIME_DIR="))
-    socket = next(w.split("=", 1)[1] for w in words if w.startswith("--socket="))
-    assert DISPLAY_SOCKET == f"{runtime}/{socket}"
+def test_the_player_reaches_weston_through_the_socket_directory_bound_to_one_incarnation():
+    props = app_unit_properties(Path("/r"), ())
+    assert "BindsTo=photo-wall-display.service" in props and "After=photo-wall-display.service" in props
+    binds = next(p for p in props if p.startswith("BindReadOnlyPaths=/run/photo-wall-app-proof")).split("=", 1)[1]
+    assert str(WAYLAND_DIRECTORY) in binds.split()  # the directory, at the same path
+    assert not any("wayland-0" in bind for bind in binds.split())  # never the socket file
+    environment = next(p for p in props if p.startswith("Environment=")).split("=", 1)[1].split()
+    assert f"WAYLAND_DISPLAY={WAYLAND_SOCKET}" in environment
+    assert "XDG_RUNTIME_DIR=/run/photo-wall-wayland" in environment  # the Player's own tmpfs
+    assert any(p.startswith("SupplementaryGroups=") and str(PW_DISPLAY_GID) in p.split("=")[1].split()
+               for p in props)  # pw-display: traverses the 0750 directory
+
+
+def test_pw_display_is_the_bases_fixed_gid():
+    source = (REPO / "scripts/build_node_base_deb.py").read_text()
+    assert f'u pw-display {PW_DISPLAY_GID} "Photo Wall display"' in source
+
+
+@pytest.mark.parametrize("shown,expected", [
+    ("ActiveState=active\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\n", "0f6e0c7d-9c4a-4e0e-8d1f-2a3b4c5d6e7f"),
+    ("ActiveState=activating\nInvocationID=0f6e0c7d9c4a4e0e8d1f2a3b4c5d6e7f\n", None),
+    ("ActiveState=inactive\nInvocationID=\n", None)])
+def test_the_display_incarnation_is_the_active_westons_invocation(tmp_path, monkeypatch, shown, expected):
+    driver = linux.SystemdAppProcessDriver(tmp_path, None, base_abi="b", graphics_abi="g", plugin_abi="p")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=shown)
+    monkeypatch.setattr(linux.subprocess, "run", run)
+    assert driver.display_incarnation() == expected
+    assert calls == [["/usr/bin/systemctl", "show", "photo-wall-display.service",
+                      "--property=ActiveState,InvocationID"]]
+
+
+@pytest.mark.parametrize("load,quiet,expected", [("not-found", True, True), ("loaded", True, False),
+                                                 ("not-found", False, False)])
+def test_the_unit_is_collected_only_unloaded_and_quiet(tmp_path, monkeypatch, load, quiet, expected):
+    driver = linux.SystemdAppProcessDriver(tmp_path, None, base_abi="b", graphics_abi="g", plugin_abi="p")
+    monkeypatch.setattr(linux, "systemctl_show", lambda unit: {"LoadState": load})
+    monkeypatch.setattr(driver, "absent_and_quiescent", lambda: quiet)
+    assert driver.unit_collected() is expected

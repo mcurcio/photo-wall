@@ -27,6 +27,9 @@ class Driver:
         self.starts = []
         self.target_fails = False
         self.unknown_stop = False
+        self.display = "weston-1"  # the active display incarnation (None: down)
+        self.launch_display = None  # the incarnation the last start recorded
+        self.collected = True  # PID1 unloaded the old app unit
 
     def current(self):
         return self.running
@@ -55,8 +58,18 @@ class Driver:
     def absent_and_quiescent(self):
         return self.running is None
 
+    def display_incarnation(self):
+        return self.display
+
+    def launched_display(self):
+        return self.launch_display
+
+    def unit_collected(self):
+        return self.running is None and self.collected
+
     def start(self, reference, operation_id):
         self.starts.append(reference)
+        self.launch_display = self.display
         if self.target_fails and len(self.starts) == 1:
             raise OSError("target exited")
         self.running = RunningApp(reference, NodeProcessIdentity(500 + len(self.starts), 999, uuid4()),
@@ -225,6 +238,44 @@ def test_an_app_that_proved_control_is_no_longer_the_switchs_to_fail(setup):
     driver.running = None
     broker.reconcile()
     assert broker.record["phase"] == "running" and driver.starts == [command.target]
+
+
+def test_a_switched_app_follows_a_new_display_incarnation_once(setup):
+    """The cold start's relaunch rule holds for the switch's launch: same root, same record."""
+    broker, driver, command, _ = setup
+    broker.execute()
+    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
+                                             "progress": {"kind": "stopped"}})
+    reported = list(broker.record["pending"])
+    driver.running, driver.display, driver.collected = None, "weston-2", False
+    broker.reconcile()  # Weston restarted, but PID1 has not unloaded the old unit yet
+    assert driver.starts == [command.target]
+    driver.collected = True
+    broker.reconcile()  # a later turn, the same incarnation
+    assert driver.starts == [command.target, command.target]
+    assert driver.running.operation_id == command.operation_id
+    assert broker.record["phase"] == "running" and broker.record["pending"] == reported
+    driver.running = None  # it exits again under the same Weston: no loop
+    broker.reconcile()
+    broker.reconcile()
+    assert driver.starts == [command.target, command.target] and broker.record["phase"] == "running"
+
+
+def test_a_fallback_follows_a_new_display_incarnation_and_a_failed_relaunch_is_reported(setup):
+    broker, driver, command, _ = setup
+    driver.target_fails = True
+    broker.execute()
+    assert broker.record["phase"] == "fallback_running"
+    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
+                                             "progress": {"kind": "stopped"}})
+    driver.running, driver.display = None, "weston-2"
+    broker.reconcile()
+    assert driver.starts == [command.target, command.fallback, command.fallback]
+    driver.running, driver.display = None, "weston-3"
+    driver.start = lambda *args: (_ for _ in ()).throw(OSError("spawn failed"))
+    broker.reconcile()
+    assert broker.record["phase"] == "effect_unknown"
+    assert parse_app_effect_event(broker.record["pending"][-1].encode()).fault == "relaunch_outcome_unknown"
 
 
 def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):

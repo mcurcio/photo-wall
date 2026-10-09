@@ -101,13 +101,32 @@ systemd's, not a poll or a retry in either process:
   while Weston's `RuntimeDirectory` (`/run/photo-wall-display`) is absent, so no
   `RuntimeDirectoryPreserve=` is needed. The directory leaves with the incarnation
   that made it, and no reader can open a dead incarnation's sockets.
+- The public Wayland socket is not in that directory. Weston binds it at
+  `/run/photo-wall-display-wayland/wayland-0` (`--socket=` takes the absolute path),
+  in a directory the base's tmpfiles.d creates as `pw-display:pw-display 0750`. It
+  outlives every incarnation, so an app in group `pw-display` binds the directory,
+  never a socket file a restart replaces, and never sees `control.sock` or
+  `ingress.sock`. Weston's umask under `PAMName=login` is 0002, so the socket is
+  group-writable. [`appliance/kernel/display_paths.py`](../appliance/kernel/display_paths.py)
+  is the one home of these paths; a unit test pins them to the packaged units and
+  tmpfiles.d.
 
 Any other consumer of `/run/photo-wall-display` must follow the same rule: start
 after the display unit is ready, and end with the Weston incarnation it connected
-to. The app broker's `After=` now orders it on READY=1. The Player's transient unit
-is not ordered or bound to the display unit yet, and the broker does not relaunch
-it when a new Weston incarnation starts. Until then, a Weston restart leaves the
-Player exited.
+to. The app broker's `After=` orders it on READY=1. The Player's transient unit
+binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
+`WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
+([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
+READY=1 and it stops with that Weston. Each launch records the display's
+`InvocationID`. One rule, `relaunch_for_display`
+([`broker.py`](../appliance/apps/broker.py)), serves whichever launch is current:
+the boot's (`AppEffectBroker.reconcile`) or an online switch's
+(`OnlineEffectBroker.reconcile`, for its target or fallback). When the Player is
+absent while a newer incarnation runs, the same environment starts again under the
+same operation, once for that incarnation. Until PID1 has unloaded the old unit
+nothing starts, and the next turn asks again. A switch still completes only at the
+control proof. The node-pid1 success scenario crashes Weston under a linked Player
+and requires a new Player to link.
 
 The node-pid1 scenarios start the controller alone, so Weston comes up only
 through the units' own dependencies. Every scenario then checks that `control.sock`
