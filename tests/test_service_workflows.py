@@ -237,3 +237,104 @@ def test_linux_media_runs_in_parallel_and_writes_its_cache_only_from_main():
     action = (ACTIONS / 'service-image/action.yml').read_text()
     assert 'uses: ./.github/actions/buildkit-cache' in action
     assert 'write: ${{ inputs.cache-write }}' in action
+
+
+# --- Docker Hub pulls go through the mirror (docs/module-appliance-ci.md, "Docker Hub pulls") ---
+
+MIRROR_ACTION = 'docker-hub-mirror'
+BUILDKIT_MIRROR = ('buildkitd-config-inline: '
+                   '${{ steps.docker-hub-mirror.outputs.buildkitd-config }}\n')
+# A step that reaches Docker: the CLI, Compose, a builder, or an action that builds an image.
+_DOCKER_STEP = re.compile(r'\bdocker\b|\bcompose\b|buildx|build-push-action'
+                          r'|uses: \./\.github/actions/(service-image|software-e2e-setup)\n')
+# Jobs that pull nothing from Docker Hub, so they need no mirror; every other job with steps
+# runs it before its first Docker step, so a new job is red until it does or is listed here.
+WITHOUT_DOCKER_HUB = {
+    'checks.yml': {'static', 'unit', 'node-bus',
+                   'console-catalog'},             # the Playwright image, from mcr.microsoft.com
+    'pipeline.yml': {'plan', 'tested', 'gate',
+                     'seal'},                      # reads and tags ghcr.io images only
+    'base-image.yml': {'build-base-image'},        # runs only the squashfs it built and imported
+}
+
+
+def _steps(body, indent):
+    """The steps of a job or composite action, comment lines dropped (a comment heads the next
+    step, so it would be counted with the one before)."""
+    text = '\n'.join(line for line in body.splitlines() if not line.lstrip().startswith('#'))
+    return re.split(rf'^{indent}- ', text + '\n', flags=re.MULTILINE)[1:]
+
+
+def _workflow_jobs():
+    for workflow in sorted(WORKFLOWS.glob('*.yml')):
+        parts = re.split(r'^  ([\w-]+):\n', workflow.read_text().split('\njobs:\n', 1)[1],
+                         flags=re.MULTILINE)
+        for job, body in zip(parts[1::2], parts[2::2]):
+            if '\n    steps:\n' in body:  # not a reusable-workflow call
+                yield workflow.name, job, body
+
+
+def _first_docker_contact(steps, routed):
+    """'mirror' when a step routing through the mirror comes before any Docker step, 'docker'
+    when a Docker step comes first, None when there is neither."""
+    for step in steps:
+        if any(f'uses: ./.github/actions/{action}\n' in step for action in routed):
+            return 'mirror'
+        if _DOCKER_STEP.search(step):
+            return 'docker'
+    return None
+
+
+def _routed_actions():
+    """The mirror action, and each composite action that runs it before any Docker step."""
+    routed = {MIRROR_ACTION}
+    for action in ACTIONS.glob('*/action.yml'):
+        if _first_docker_contact(_steps(action.read_text(), '    '), {MIRROR_ACTION}) == 'mirror':
+            routed.add(action.parent.name)
+    return routed
+
+
+def test_every_job_that_reaches_docker_hub_runs_the_mirror_before_docker():
+    routed = _routed_actions()
+    assert 'software-e2e-setup' in routed
+    listed = {(name, job) for name, jobs in WITHOUT_DOCKER_HUB.items() for job in jobs}
+    seen = set()
+    for name, job, body in _workflow_jobs():
+        seen.add((name, job))
+        contact = _first_docker_contact(_steps(body, '      '), routed)
+        if (name, job) in listed:
+            assert contact != 'mirror', f'{name}: {job} runs the mirror; drop it from the list'
+        else:
+            assert contact == 'mirror', (
+                f'{name}: {job} must run ./.github/actions/{MIRROR_ACTION} before its first '
+                'Docker step, or be listed as pulling nothing from Docker Hub')
+    assert listed <= seen, listed - seen
+
+
+def test_every_buildx_builder_carries_the_mirror():
+    """A docker-container builder ignores the daemon's mirrors: each gets the action's BuildKit
+    configuration, from a mirror step that ran before it."""
+    routed = _routed_actions()
+    sources = [(path, '      ') for path in WORKFLOWS.glob('*.yml')]
+    sources += [(path, '    ') for path in ACTIONS.glob('*/action.yml')]
+    builders = 0
+    for path, indent in sources:
+        for step in _steps(path.read_text(), indent):
+            if 'uses: docker/setup-buildx-action@' in step:
+                builders += 1
+                assert BUILDKIT_MIRROR in step, path
+    assert builders >= 6  # not vacuous: the six builders today
+    for action in ACTIONS.glob('*/action.yml'):
+        if 'docker/setup-buildx-action@' in action.read_text():
+            assert action.parent.name in routed, action
+
+
+def test_no_job_level_image_is_pulled_from_docker_hub():
+    """A job's `container:` or `services:` image is pulled before any step runs, so before the
+    mirror: it must name another registry (mirror.gcr.io/library/<name>@<digest> for a Docker Hub
+    image)."""
+    for workflow in WORKFLOWS.glob('*.yml'):
+        for reference in re.findall(r'^\s+(?:image|container): *([^\s{][^\s]*)$',
+                                    workflow.read_text(), flags=re.MULTILINE):
+            host = reference.split('/', 1)[0]
+            assert '/' in reference and '.' in host and host != 'docker.io', (workflow, reference)

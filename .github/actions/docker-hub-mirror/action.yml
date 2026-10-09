@@ -1,0 +1,51 @@
+name: Docker Hub mirror
+description: >-
+  The repository's one route for Docker Hub pulls in CI (docs/module-appliance-ci.md, "Docker
+  Hub pulls"): Google's pull-through mirror, mirror.gcr.io, so hosted runners, which share
+  addresses, stay clear of Docker Hub's anonymous per-address pull limit. It adds the mirror to
+  the Docker daemon's registry-mirrors (docker pull and run, Compose, the default builder),
+  which applies only to docker.io references, keeps digest pins as written and falls back to
+  Docker Hub when the mirror misses; and it outputs the same mirror as BuildKit configuration
+  for docker/setup-buildx-action, whose docker-container builders ignore the daemon's mirrors.
+  Run it before the job's first Docker step: it restarts the daemon. Images and Dockerfiles
+  keep their Docker Hub references, so nothing outside CI depends on the mirror.
+
+outputs:
+  buildkitd-config:
+    description: The mirror as buildkitd TOML, for setup-buildx-action's buildkitd-config-inline
+    value: ${{ steps.mirror.outputs.buildkitd-config }}
+
+runs:
+  using: composite
+  steps:
+    - name: Route Docker Hub pulls through the mirror
+      id: mirror
+      shell: bash
+      env:
+        MIRROR: mirror.gcr.io
+      run: |
+        set -eu
+        # Merge into the runner's daemon.json (it already holds the cgroup settings), never replace it.
+        sudo python3 - "https://$MIRROR" <<'PY'
+        import json, pathlib, sys
+        path = pathlib.Path("/etc/docker/daemon.json")
+        text = path.read_text() if path.exists() else ""
+        config = json.loads(text) if text.strip() else {}
+        mirrors = config.setdefault("registry-mirrors", [])
+        if sys.argv[1] not in mirrors:
+            mirrors.insert(0, sys.argv[1])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(config, indent=2) + "\n")
+        PY
+        sudo systemctl restart docker
+        mirrors=$(docker info --format '{{json .RegistryConfig.Mirrors}}')
+        case "$mirrors" in
+          *"$MIRROR"*) echo "Docker Hub mirror: $mirrors" ;;
+          *) echo "::error::the Docker daemon does not list $MIRROR: $mirrors"; exit 1 ;;
+        esac
+        {
+          echo 'buildkitd-config<<BUILDKITD'
+          echo '[registry."docker.io"]'
+          echo "  mirrors = [\"$MIRROR\"]"
+          echo 'BUILDKITD'
+        } >> "$GITHUB_OUTPUT"

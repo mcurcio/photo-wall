@@ -55,6 +55,9 @@ jobs:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
       - uses: ./.github/actions/python-uv
 
       - name: Install the locked environment
@@ -107,6 +110,7 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
         with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
           use: false
 
       # The builders run `docker buildx build` themselves, which reads the GHA cache service's

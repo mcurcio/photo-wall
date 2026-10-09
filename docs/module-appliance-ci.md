@@ -261,6 +261,26 @@ The [initial OS publication failure](evidence/2026-09-08-os-base-publication.md)
 records the packaged test-key fixture correction and distinguishes it from
 the successful shared-media and browser workflow checks.
 
+## Docker Hub pulls
+
+Hosted runners share addresses, so anonymous Docker Hub pulls hit its per-address
+limit (`toomanyrequests`). Every CI job that pulls, runs or builds a Docker Hub
+image first runs the
+[`docker-hub-mirror`](../.github/actions/docker-hub-mirror/action.yml) action,
+the one owner of the route: it adds Google's pull-through mirror,
+`mirror.gcr.io`, to the Docker daemon's `registry-mirrors` (pulls, `docker run`,
+Compose and the default builder) and outputs the same mirror as BuildKit
+configuration, which every `docker/setup-buildx-action` passes as
+`buildkitd-config-inline`, since a docker-container builder ignores the daemon's
+mirrors. The mirror applies only to `docker.io` references, serves the pinned
+digests unchanged and falls back to Docker Hub on a miss; Dockerfiles and
+Compose files keep their Docker Hub references, so nothing outside CI depends on
+it. Other registries (`ghcr.io`, `mcr.microsoft.com`) are pulled directly, and
+scripts pull through [`registry_pull.py`](../scripts/registry_pull.py)'s retry.
+`tests/test_service_workflows.py` fails any job with steps that does not run the
+mirror before its first Docker step, unless the test lists it as pulling nothing
+from Docker Hub, and any builder set up without the mirror.
+
 ## Service image builds
 
 The root Dockerfile's application stages and the

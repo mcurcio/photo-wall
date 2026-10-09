@@ -1,9 +1,9 @@
 name: Software e2e setup
 description: >-
-  The setup every software-e2e job shares, after its media OS guard and checkout: the pinned
-  CPython and uv, the locked harness environment, registry access, the Immich fixture images
-  prefetched in the background, the build cache and the media worker image, and on request the
-  central image. One definition, so the parallel e2e jobs cannot drift apart.
+  The setup every software-e2e job shares, after its media OS guard and checkout: the Docker Hub
+  mirror, the pinned CPython and uv, the locked harness environment, registry access, the Immich
+  fixture images prefetched in the background, the build cache and the media worker image, and on
+  request the central image. One definition, so the parallel e2e jobs cannot drift apart.
 
 inputs:
   media-base-image:
@@ -25,6 +25,9 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: docker-hub-mirror
+      uses: ./.github/actions/docker-hub-mirror
+
     - uses: ./.github/actions/python-uv
 
     - name: Install the locked harness environment
@@ -48,6 +51,8 @@ runs:
 
     - name: Set up the container build cache
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      with:
+        buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
     - name: Build or restore the central image
       id: central

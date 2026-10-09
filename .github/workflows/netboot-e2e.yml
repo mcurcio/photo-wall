@@ -69,6 +69,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
       - uses: ./.github/actions/python-uv
 
       - name: Install the locked harness environment
@@ -134,6 +137,8 @@ jobs:
 
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
 
       - name: Build or restore the central image
         id: central
