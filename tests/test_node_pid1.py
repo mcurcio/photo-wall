@@ -233,9 +233,7 @@ class Node:
         }
         for image_path, digest in expected.items():
             assert run("/usr/bin/sha256sum", image_path).split()[0] == digest
-        assert not run(
-            "/usr/bin/dpkg", "--verify", "photo-wall-node-base", "photo-wall-node-display"
-        ).strip()
+        # dpkg --verify and the exact payload binding, both honouring the image's dpkg filters.
         container.copy_in(
             Path(__file__).with_name("node_pid1_package_verify.py"),
             "/var/lib/node_pid1_package_verify.py",
