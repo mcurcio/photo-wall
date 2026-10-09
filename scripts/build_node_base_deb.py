@@ -133,7 +133,8 @@ def stage_tree(tree: Path, destination: Path) -> str:
     (temporary / "photo-wall-node.conf").write_text("d /run/photo-wall-node 0700 root root -\nd /run/photo-wall-app-proof 0755 root root -\n"
                                                      "d /run/photo-wall-boot-stage 0755 root root -\n"
                                                      "d /run/photo-wall-app-feed 0750 root pw-node-feeds -\n"
-                                                     "d /run/photo-wall-display-feed 0750 pw-display pw-node-feeds -\n")
+                                                     "d /run/photo-wall-display-feed 0750 pw-display pw-node-feeds -\n"
+                                                     "d /run/photo-wall-display-wayland 0750 pw-display pw-display -\n")
     # Include units, generated cohort policy and UID/tmpfiles contracts in identity.
     for path in sorted(destination.rglob("*")):
         if path.is_file() and not path.is_symlink():

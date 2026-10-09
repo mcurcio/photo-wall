@@ -43,6 +43,7 @@ from node_pid1_central_fixture import (
 from test_fleet_attempts import DEVICE_ID, SERIAL
 
 from appliance.kernel.capacity import LINES
+from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME, WAYLAND_SOCKET
 from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgWallMarks
 from central.node_bus_wiring import WALL_TABLE
@@ -100,9 +101,11 @@ JOIN_SECONDS = 120
 HUB_RESTART_SECONDS = 60
 HOST_STATE_STREAM = "KV_state_host"
 BIRTH_SUBJECT = "$KV.state_host.birth"
-DISPLAY_UNIT = "photo-wall-display.service"
 CONTROLLER_UNIT = "photo-wall-display-controller.service"
-CONTROL_SOCKET = "/run/photo-wall-display/control.sock"
+PLAYER_UNIT = "photo-wall-node-player.service"
+# Weston's RestartSec and READY=1, the broker's next turn, the Player's start and its app link.
+PLAYER_RELAUNCH_SECONDS = 60
+CONTROL_SOCKET = str(RUNTIME / "control.sock")
 # The controller's journal must never hold these: its connect to a control.sock not yet bound
 # (started before Weston's READY=1), or a sandbox set up on a vanished runtime directory.
 CONTROLLER_FAULTS = ("FileNotFoundError", "226/NAMESPACE")
@@ -290,17 +293,24 @@ class Node:
         started_ns = since_epoch // datetime.timedelta(microseconds=1) * 1000
         bound_ns = int(self.run("stat", "-c", "%.9Z", CONTROL_SOCKET).strip().replace(".", ""))
         journal = self.run("journalctl", "--no-pager", "-b", "-u", CONTROLLER_UNIT)
+        # The app's way in: owned by pw-display and group-writable (connect needs write).
+        client = self.run("stat", "-c", "%U %G %A", str(WAYLAND_SOCKET), str(WAYLAND_SOCKET.parent))
         evidence = {
             "display": display,
             "controller": controller,
             "controller_started": started,
             "control_socket_changed_ns": bound_ns,
             "controller_faults": [fault for fault in CONTROLLER_FAULTS if fault in journal],
+            "wayland": client.split("\n"),
         }
         (self.work / (name + ".json")).write_text(json.dumps(evidence, sort_keys=True))
         assert display["ActiveState"] == "active" and controller["ActiveState"] == "active", evidence
         assert controller["NRestarts"] == "0", evidence
         assert not evidence["controller_faults"], evidence
+        socket_row, directory_row = client.splitlines()
+        owner, group, mode = socket_row.split()
+        assert (owner, group, mode[0], mode[5]) == ("pw-display", "pw-display", "s", "w"), evidence
+        assert directory_row == "pw-display pw-display drwxr-x---", evidence
         # Both read the one kernel's realtime clock. The shell binds and chmods control.sock in
         # its init, before the module that sends READY=1 loads.
         assert bound_ns <= started_ns, evidence
@@ -327,6 +337,26 @@ class Node:
             assert time.monotonic() < deadline, (signal, display, now_display, now_controller)
             time.sleep(0.5)
         self.verify_display_ready(name)
+
+    def player_follows_display(self, fixture):
+        """Weston crashes: the Player bound to it (BindsTo=) stops with it, and the broker starts
+        the same environment again for the new Weston incarnation, which links to Central again."""
+        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
+        linked = status_of(fixture, self.work)["current"]
+        assert before["ActiveState"] == "active" and linked, (before, linked)
+        self.recover_display("SIGSEGV", "display-under-player")
+        deadline = time.monotonic() + PLAYER_RELAUNCH_SECONDS
+        while True:
+            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,InvocationID")
+            current = status_of(fixture, self.work)["current"]
+            if (now["InvocationID"] not in ("", before["InvocationID"])
+                    and now["SubState"] == "running"
+                    and current and current["process"] != linked["process"]):
+                break
+            assert time.monotonic() < deadline, ("no Player for the new Weston", before, now, current)
+            time.sleep(0.5)
+        (self.work / "player-after-display.json").write_text(
+            json.dumps({"before": before, "after": now, "linked": current}, sort_keys=True))
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -879,6 +909,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 node.verify_image_mounts(components_dir)
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
+                node.player_follows_display(fixture)
             stage_and_complete(fixture, node, phase, reference)
             if phase == "success":
                 node.verify_target_mount(reference)

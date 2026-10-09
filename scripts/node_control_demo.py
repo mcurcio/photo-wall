@@ -143,6 +143,19 @@ class RecordingAppDriver:
         self.running = None
         self.selected = None
         self.calls = []
+        self.display = "weston-1"  # the running display incarnation (None: down)
+        self.launch_display = None  # the incarnation the last start recorded
+        self.collected = True  # PID1 unloaded the old unit
+
+    def display_incarnation(self):
+        return self.display
+
+    def launched_display(self):
+        return self.launch_display
+
+    def unit_collected(self):
+        return self.running is None and self.collected
+
 
     def current(self):
         return self.running
@@ -160,6 +173,7 @@ class RecordingAppDriver:
         from contracts.node_protocol import NodeProcessIdentity
 
         self.calls.append("start_simulated_process")
+        self.launch_display = self.display
         self.running = RunningApp(
             environment, NodeProcessIdentity(100, 50, UUID(int=6)), 1, operation_id,
         )

@@ -7,6 +7,7 @@ or production command route is supplied by this portable module.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from threading import RLock
 from typing import Protocol
@@ -72,7 +73,44 @@ class AppProcessDriver(Protocol):
         ...
 
     def select(self, environment: AppEnvironmentRefV2) -> None: ...
-    def start(self, environment: AppEnvironmentRefV2, operation_id: UUID) -> RunningApp: ...
+    def start(self, environment: AppEnvironmentRefV2, operation_id: UUID) -> RunningApp:
+        """Spawn; the launch records the display incarnation current at the spawn."""
+        ...
+
+    def display_incarnation(self) -> str | None:
+        """The running display's incarnation (Weston's InvocationID); None while it is down."""
+        ...
+
+    def launched_display(self) -> str | None:
+        """The display incarnation the current launch recorded (None: none was running)."""
+        ...
+
+    def unit_collected(self) -> bool:
+        """The app unit's name is free: no process, no job, unloaded (a start can begin now)."""
+        ...
+
+
+def relaunch_for_display(driver: AppProcessDriver, environment: AppEnvironmentRefV2,
+                         operation_id: UUID, *, intent: Callable[[], None] = lambda: None,
+                         ) -> RunningApp | None:
+    """The one relaunch rule, for whichever launch is current (the boot's or a switch's).
+
+    The app runs bound to one display incarnation (`BindsTo=` Weston) and stops with it. Its
+    owner, holding a settled record that says `environment` should be running, calls this when
+    the app is absent: if a newer display incarnation is active, the same environment and
+    operation start again. Every launch records the incarnation it was spawned under, so this
+    is once per incarnation, never a retry loop. Until the old unit is collected nothing starts
+    and None is returned: the owner's next turn asks again. `intent` runs just before the
+    spawn (the owner's durable intent). A failed start raises; the owner records it.
+    """
+    display = driver.display_incarnation()
+    if display is None or display == driver.launched_display() or not driver.unit_collected():
+        return None
+    intent()
+    running = driver.start(environment, operation_id)
+    if running.environment != environment or running.operation_id != operation_id:
+        raise ValueError("started_environment_mismatch")
+    return running
 
 
 class AppEffectBroker:
@@ -125,7 +163,8 @@ class AppEffectBroker:
             return record
 
     def reconcile(self) -> EffectRecord | None:
-        """Observe ambiguous effects without starting, stopping or selecting again."""
+        """Observe ambiguous effects without starting, stopping or selecting again, except the
+        one display relaunch (`relaunch_for_display`) of a settled launch found absent."""
         with self._lock:
             record = self.journal.current()
             if record is None:
@@ -136,7 +175,17 @@ class AppEffectBroker:
                     and (record.running is None or running.process == record.running.process)):
                 record = replace(record, phase="running", running=running, fault=None)
             elif running is None and record.phase in ("running", "exited"):
-                record = replace(record, phase="exited", fault="process_exited")
+                command = record.command
+                intent = replace(record, phase="intent_start", running=None, fault=None)
+                try:
+                    running = relaunch_for_display(self.driver, command.environment,
+                                                   command.operation_id,
+                                                   intent=lambda: self.journal.put(intent))
+                except Exception:
+                    record = replace(intent, phase="effect_unknown", fault="relaunch_outcome_unknown")
+                else:
+                    record = (replace(record, phase="exited", fault="process_exited") if running is None
+                              else replace(intent, phase="running", running=running))
             else:
                 # Absence after intent cannot prove that no short-lived process ran.
                 record = replace(record, phase="effect_unknown", fault="reconciliation_required")
