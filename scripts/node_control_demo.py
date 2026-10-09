@@ -145,12 +145,17 @@ class RecordingAppDriver:
         self.calls = []
         self.display = "weston-1"  # the running display incarnation (None: down)
         self.launch_display = None  # the incarnation the last start recorded
+        self.collected = True  # PID1 unloaded the old unit
 
     def display_incarnation(self):
         return self.display
 
     def launched_display(self):
         return self.launch_display
+
+    def unit_collected(self):
+        return self.running is None and self.collected
+
 
     def current(self):
         return self.running

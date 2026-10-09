@@ -159,7 +159,10 @@ def test_an_app_absent_under_a_new_display_incarnation_starts_again_once():
     broker.cold_start(ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env()))
     driver.running, driver.display = None, None  # Weston stopped and took the Player with it
     assert broker.reconcile().phase == "exited"
-    driver.display = "weston-2"
+    driver.display, driver.collected = "weston-2", False
+    assert broker.reconcile().phase == "exited"  # the old unit not yet unloaded: a later turn
+    assert driver.calls.count("start_simulated_process") == 1
+    driver.collected = True
     relaunched = broker.reconcile()
     assert (relaunched.phase, relaunched.running) == ("running", driver.running)
     assert relaunched.running.operation_id == UUID(int=3)

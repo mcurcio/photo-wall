@@ -155,3 +155,12 @@ def test_the_display_incarnation_is_the_active_westons_invocation(tmp_path, monk
     assert driver.display_incarnation() == expected
     assert calls == [["/usr/bin/systemctl", "show", "photo-wall-display.service",
                       "--property=ActiveState,InvocationID"]]
+
+
+@pytest.mark.parametrize("load,quiet,expected", [("not-found", True, True), ("loaded", True, False),
+                                                 ("not-found", False, False)])
+def test_the_unit_is_collected_only_unloaded_and_quiet(tmp_path, monkeypatch, load, quiet, expected):
+    driver = linux.SystemdAppProcessDriver(tmp_path, None, base_abi="b", graphics_abi="g", plugin_abi="p")
+    monkeypatch.setattr(linux, "systemctl_show", lambda unit: {"LoadState": load})
+    monkeypatch.setattr(driver, "absent_and_quiescent", lambda: quiet)
+    assert driver.unit_collected() is expected

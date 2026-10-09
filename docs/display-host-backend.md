@@ -118,13 +118,15 @@ binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
 `WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
 ([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
 READY=1 and it stops with that Weston. Each launch records the display's
-`InvocationID`; when the broker finds the Player absent while a newer incarnation
-runs, it starts the same environment again, once for that incarnation
-([`AppEffectBroker.reconcile`](../appliance/apps/broker.py)). The node-pid1 success
-scenario crashes Weston under a linked Player and requires a new Player to link.
-This covers the cold-started Player; after an online switch the switch's own
-record governs, and a Weston restart still leaves that Player exited until the
-next boot.
+`InvocationID`. One rule, `relaunch_for_display`
+([`broker.py`](../appliance/apps/broker.py)), serves whichever launch is current:
+the boot's (`AppEffectBroker.reconcile`) or an online switch's
+(`OnlineEffectBroker.reconcile`, for its target or fallback). When the Player is
+absent while a newer incarnation runs, the same environment starts again under the
+same operation, once for that incarnation. Until PID1 has unloaded the old unit
+nothing starts, and the next turn asks again. A switch still completes only at the
+control proof. The node-pid1 success scenario crashes Weston under a linked Player
+and requires a new Player to link.
 
 The node-pid1 scenarios start the controller alone, so Weston comes up only
 through the units' own dependencies. Every scenario then checks that `control.sock`

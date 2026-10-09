@@ -136,6 +136,10 @@ class SystemdAppProcessDriver:
         launch = self.store.read("launch")
         return None if launch is None else launch.get("display")
 
+    def unit_collected(self) -> bool:
+        """PID1 unloaded the fixed unit name (after --collect) and no app or job remains."""
+        return systemctl_show(UNIT)["LoadState"] == "not-found" and self.absent_and_quiescent()
+
     def select(self, environment: AppEnvironmentRefV2) -> None:
         self.verify(environment)
         self.store.write("selected", {"environment": primitive(environment)})

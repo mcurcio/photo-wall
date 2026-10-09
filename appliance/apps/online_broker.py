@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from uuid import uuid4
 
-from appliance.apps.broker import RunningApp
+from appliance.apps.broker import RunningApp, relaunch_for_display
 from appliance.apps.probe import RECOVERY_ACKNOWLEDGED, RECOVERY_ARMED
 from appliance.apps.stop_operation import (
     StopGuaranteeUnavailable,
@@ -237,6 +237,15 @@ class OnlineEffectBroker:
             return
         command = parse_stage_command(record["command"].encode())
         if record["phase"] in ("running", "fallback_running"):
+            # The same relaunch rule as a cold start's, for the switch's current launch: a Weston
+            # restart takes the app with it, and the new Weston gets the same root again. The
+            # switch's own record is untouched; it still completes only at the control proof.
+            launched = command.target if record["phase"] == "running" else command.fallback
+            try:
+                relaunch_for_display(self.driver, launched, command.operation_id)
+            except Exception:
+                self._event("effect_unknown", fault="relaunch_outcome_unknown")
+                return
             self._settle(record, command)
             return
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
