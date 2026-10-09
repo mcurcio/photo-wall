@@ -5,12 +5,21 @@ ConditionPathExists=/usr/lib/photo-wall-display/photo-wall-shell.so
 After=systemd-user-sessions.service systemd-logind.service
 Wants=systemd-logind.service
 Conflicts=photo-wall-weston.service getty@tty1.service
+# Each Weston incarnation brings its controller (which BindsTo= it) back after READY=1; see
+# docs/display-host-backend.md#units-and-weston-incarnations.
+Wants=photo-wall-display-controller.service
 # A crash loop leaves the unit failed and reported, never a reboot: recovery is
 # operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
 StartLimitIntervalSec=10min
 StartLimitBurst=10
 
 [Service]
+# READY=1 from Weston's own systemd-notify module, loaded after the shell has bound control.sock
+# and Weston its Wayland socket; it pings the watchdog from Weston's event loop, so a hung
+# compositor is aborted and restarted like a crashed one.
+Type=notify
+NotifyAccess=main
+WatchdogSec=10s
 User=pw-display
 Group=pw-display
 PAMName=login
@@ -29,7 +38,9 @@ RuntimeDirectory=photo-wall-display
 RuntimeDirectoryMode=0700
 Environment=XDG_RUNTIME_DIR=/run/photo-wall-display
 Environment=PHOTO_WALL_CONTROLLER_UID=10005
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --socket=wayland-0 --idle-time=0
+# env restates XDG_RUNTIME_DIR because pam_systemd (PAMName=login) replaces it with /run/user/<uid>;
+# env execs Weston, so the main PID (NotifyAccess=main) is Weston's.
+ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --modules=systemd-notify.so --socket=wayland-0 --idle-time=0
 Restart=always
 RestartSec=2
 Slice=photowallbase.slice

@@ -2,6 +2,10 @@
 Description=Photo Wall base display evidence controller
 ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/run/photo-wall-node/display.json
+# One controller per Weston incarnation: it starts after Weston's READY=1 (control.sock bound),
+# stops when that Weston ends and comes back with the next (the display unit Wants= it), so it
+# never runs, or sets up its sandbox, while /run/photo-wall-display is absent.
+BindsTo=photo-wall-display.service
 After=photo-wall-display.service
 
 After=photo-wall-node-handoff.service

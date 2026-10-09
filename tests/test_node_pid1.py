@@ -18,6 +18,7 @@ they fail. Each test removes its own containers, database and archive copies.
 """
 
 import asyncio
+import datetime
 import hashlib
 import json
 import os
@@ -99,6 +100,15 @@ JOIN_SECONDS = 120
 HUB_RESTART_SECONDS = 60
 HOST_STATE_STREAM = "KV_state_host"
 BIRTH_SUBJECT = "$KV.state_host.birth"
+DISPLAY_UNIT = "photo-wall-display.service"
+CONTROLLER_UNIT = "photo-wall-display-controller.service"
+CONTROL_SOCKET = "/run/photo-wall-display/control.sock"
+# The controller's journal must never hold these: its connect to a control.sock not yet bound
+# (started before Weston's READY=1), or a sandbox set up on a vanished runtime directory.
+CONTROLLER_FAULTS = ("FileNotFoundError", "226/NAMESPACE")
+# Weston's WatchdogSec (photo-wall-display.service), plus its RestartSec, start and the controller's.
+DISPLAY_RECOVERY_SECONDS = 30
+EPOCH = datetime.datetime(1970, 1, 1)
 
 
 @pytest.fixture
@@ -262,6 +272,61 @@ class Node:
             *(() if scenario is None else (scenario,)),
             timeout=1200,
         )
+        self.verify_display_ready("display-ready")
+
+    def verify_display_ready(self, name):
+        """The controller of the running Weston incarnation started once, after Weston's READY=1:
+        Weston's control socket existed before the controller's main process started, it never
+        restarted, and its journal this boot holds no connect or sandbox fault."""
+        display = unit_properties_of(self, DISPLAY_UNIT, "ActiveState,MainPID,InvocationID")
+        controller = unit_properties_of(
+            self, CONTROLLER_UNIT, "ActiveState,SubState,NRestarts,InvocationID"
+        )
+        started = self.run(
+            "systemctl", "show", CONTROLLER_UNIT, "-P", "ExecMainStartTimestamp",
+            "--timestamp=us+utc",
+        ).strip()
+        since_epoch = datetime.datetime.strptime(started, "%a %Y-%m-%d %H:%M:%S.%f UTC") - EPOCH
+        started_ns = since_epoch // datetime.timedelta(microseconds=1) * 1000
+        bound_ns = int(self.run("stat", "-c", "%.9Z", CONTROL_SOCKET).strip().replace(".", ""))
+        journal = self.run("journalctl", "--no-pager", "-b", "-u", CONTROLLER_UNIT)
+        evidence = {
+            "display": display,
+            "controller": controller,
+            "controller_started": started,
+            "control_socket_changed_ns": bound_ns,
+            "controller_faults": [fault for fault in CONTROLLER_FAULTS if fault in journal],
+        }
+        (self.work / (name + ".json")).write_text(json.dumps(evidence, sort_keys=True))
+        assert display["ActiveState"] == "active" and controller["ActiveState"] == "active", evidence
+        assert controller["NRestarts"] == "0", evidence
+        assert not evidence["controller_faults"], evidence
+        # Both read the one kernel's realtime clock. The shell binds and chmods control.sock in
+        # its init, before the module that sends READY=1 loads.
+        assert bound_ns <= started_ns, evidence
+        return display, controller
+
+    def recover_display(self, signal, name):
+        """Weston's main process gets `signal`; within DISPLAY_RECOVERY_SECONDS a new Weston
+        incarnation is ready and a new controller runs against it, cleanly (verify_display_ready)."""
+        display, controller = self.verify_display_ready(name + "-before")
+        self.run("systemctl", "kill", "--kill-whom=main", "-s", signal, DISPLAY_UNIT)
+        deadline = time.monotonic() + DISPLAY_RECOVERY_SECONDS
+        while True:
+            now_display = unit_properties_of(self, DISPLAY_UNIT, "ActiveState,InvocationID")
+            now_controller = unit_properties_of(
+                self, CONTROLLER_UNIT, "ActiveState,SubState,InvocationID"
+            )
+            if (
+                now_display["InvocationID"] not in ("", display["InvocationID"])
+                and now_display["ActiveState"] == "active"
+                and now_controller["InvocationID"] not in ("", controller["InvocationID"])
+                and now_controller["SubState"] == "running"
+            ):
+                break
+            assert time.monotonic() < deadline, (signal, display, now_display, now_controller)
+            time.sleep(0.5)
+        self.verify_display_ready(name)
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -974,6 +1039,13 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             names = {name: value for name, value in host["metrics"]}
             assert names.get("memcg_present") == 1, host
             assert any(name.startswith("memory_peak:") for name in names), host
+            # The display stack needs no storage, so it runs here, without a Player on it: a
+            # crashed Weston and a hung one (its watchdog aborts it) each come back with a
+            # controller bound to the new incarnation.
+            node.recover_display("SIGSEGV", "display-after-crash")
+            node.recover_display("SIGSTOP", "display-after-hang")
+            hung = node.run("journalctl", "--no-pager", "-b", "-u", DISPLAY_UNIT)
+            assert "Watchdog timeout" in hung, "a stopped Weston was not aborted by its watchdog"
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])
