@@ -16,6 +16,7 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
+from central.fleet.node_bus_presence import record_look_in
 from central.fleet.node_observations import _FLEET_HOSTS_SQL, NodeObservations
 from central.fleet.node_sessions import (
     OBSERVATION_DAILY_CAP,
@@ -239,7 +240,28 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     assert _device(read, spare_id) == {"device_id": spare_id, "host": None,
                                        "previous_boot_received_at": None, "intake_full": False,
                                        "preparation_intake_full": False,
-                                       "boot": None, "facts": None, "preparation": None}
+                                       "boot": None, "facts": None, "preparation": None,
+                                       "bus_link": {"linked": None, "changed_at": None,
+                                                    "looked_at": None}}
+
+
+def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(registry):
+    boots, sessions = _rig(registry)
+    Host(registry, sessions, boots).post()
+    unlinked_id, unseen_id = "device-" + "d" * 64, "device-" + "e" * 64
+    with registry.db.transaction() as conn:
+        for device_id in (unlinked_id, unseen_id):
+            conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)",
+                         (device_id,))
+        record_look_in(conn, {DEVICE_ID: True}, 100.0)
+        record_look_in(conn, {unlinked_id: True}, 110.0)
+        record_look_in(conn, {unlinked_id: False}, 120.0)
+    read = NodeObservations(sessions).fleet_hosts()
+    assert _device(read)["bus_link"] == {"linked": True, "changed_at": 100.0, "looked_at": 120.0}
+    assert _device(read, unlinked_id)["bus_link"] == {"linked": False, "changed_at": 120.0,
+                                                      "looked_at": 120.0}
+    assert _device(read, unseen_id)["bus_link"] == {"linked": None, "changed_at": None,
+                                                    "looked_at": 120.0}
 
 
 def test_a_held_fleet_lock_does_not_block_g12(registry):
