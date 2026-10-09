@@ -39,6 +39,9 @@ SCHEMES = ("dark", "light")
 VIEWPORT = {"width": 800, "height": 600}
 UPDATE = os.environ.get("PHOTO_WALL_CATALOG_UPDATE") == "1"
 UPDATE_COMMAND = "python3 scripts/catalog_baselines.py"
+# Where a failing story's screenshot is kept. CI names its evidence mount; Chromium's own temp
+# files stay in the container's /tmp (TMPDIR on the bind mount was the one difference from the browser leg, where Chromium ran).
+ACTUALS = Path(os.environ.get("PHOTO_WALL_CATALOG_ACTUAL") or tempfile.gettempdir())
 
 # Axe's page-level rules judge a whole document, not a component shown alone.
 AXE_OPTIONS = {"rules": {rule: {"enabled": False}
@@ -137,7 +140,7 @@ def test_story_renders_clean_passes_axe_and_matches_its_baseline(
     assert baseline.exists(), f"no baseline for {story} ({scheme}): run {UPDATE_COMMAND}"
     share = differing_share(shot, Image.open(baseline))
     if share > DIFFERING:
-        actual = Path(tempfile.gettempdir()) / f"{story}.{scheme}.actual.png"
+        actual = ACTUALS / f"{story}.{scheme}.actual.png"
         shot.save(actual)
         pytest.fail(f"{story} ({scheme}) differs from its baseline in {share:.2%} of pixels "
                     f"(limit {DIFFERING:.2%}); actual saved at {actual}; if the change is "
