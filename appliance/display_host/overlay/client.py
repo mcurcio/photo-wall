@@ -9,12 +9,17 @@ from the real presentation of that exact commit. Caps as the retired C client: a
 per Output, 128 MB of buffers in all, 8192 px a side and 4096 x 2160 px in area, 16 Outputs.
 
 The health layer (manager v3): `HealthLayer`, the production hook, takes one health surface per
-Output on its first sized configure and commits a 1 x 1 fully transparent buffer at once, so the
-layer is mapped before any instruction and the shell's amber fallback tint stays off on a healthy
-wall. It reads the judge's overlay instructions on `health.sock` (`JudgeLink`) and draws each page
-`overlay.health` decides: tint on = one whole-Output ARGB buffer (darkening plus the card), tint off
-= the transparent 1 x 1 buffer. A health commit never acks (ack binds the slate/trial configure);
-its presentation feedback is reported to the judge as a `PresentedReport`.
+Output, with a `wp_viewport`, on its first sized configure and commits a fully transparent solid
+buffer (`wp_single_pixel_buffer_manager_v1`, rgba 0) at once, so the layer is mapped before any
+instruction and the shell's amber fallback tint stays off on a healthy wall. It reads the judge's
+overlay instructions on `health.sock` (`JudgeLink`) and draws each page `overlay.health` decides:
+tint on = one whole-Output ARGB buffer (darkening plus the card), tint off = the transparent solid
+buffer. Every health commit sets the viewport destination to the Output size, so the solid buffer
+is scaled over the whole Output and the ARGB buffer maps 1:1. The layer never shows a small ARGB
+shm buffer: Weston 14's DRM backend takes one for a cursor-plane candidate and aborts on the Pi 5
+(docs/display-host-backend.md, "The health layer's buffers"). A health commit never acks (ack
+binds the slate/trial configure); its presentation feedback is reported to the judge as a
+`PresentedReport`.
 
 pywayland and the generated bindings (`overlay/protocol`, built by meson) are imported in `main`,
 so the pure parts import anywhere. Per-Output state lives here once; a composing client adds a
@@ -116,11 +121,13 @@ class OutputHook(Protocol):
 class OverlayClient:
     """Per-Output slate and trial surfaces on the bound private manager."""
 
-    def __init__(self, *, compositor, shm, presentation, manager,
+    def __init__(self, *, compositor, shm, presentation, manager, viewporter, single_pixel,
                  hooks: Sequence[OutputHook] = (),
                  painter: Callable[[DrawList, object], None] = paint) -> None:
         self.compositor, self.shm, self.presentation, self.manager = (
             compositor, shm, presentation, manager)
+        # Bound for the hooks: the health layer's viewports and its transparent solid buffer.
+        self.viewporter, self.single_pixel = viewporter, single_pixel
         self.hooks = tuple(hooks)
         self.painter = painter
         self.outputs: dict[str, OutputState] = {}
@@ -361,8 +368,9 @@ class HealthSurface:
     output: OutputState
     health: HealthOutput
     surface: object
+    viewport: object                    # its destination is the Output size on every commit
     based: bool = False                 # the first (transparent) buffer was committed
-    buffers: int = 0
+    buffers: int = 0                    # ARGB buffers held by the compositor (not the solid one)
     shown: HealthPage | None = None
     size: tuple[int, int] = (0, 0)      # the Output size `shown` was drawn for
     commits: dict[int, int] = field(default_factory=dict)   # commit id -> committed at (ms)
@@ -383,6 +391,7 @@ class HealthLayer:
             on_closed=self.board.reconnected, clock=clock)
         self.client: OverlayClient | None = None
         self.surfaces: dict[str, HealthSurface] = {}
+        self.clear: object | None = None    # the transparent solid buffer every surface shares
         self.late = 0                   # commits not presented within D (the watchdog is M3)
         self._commit_ids = iter(range(1, 2**63))
 
@@ -395,11 +404,14 @@ class HealthLayer:
         state = self.surfaces.get(output.name)
         now = self.clock()
         if state is None:
+            if self.clear is None:
+                self.clear = client.single_pixel.create_u32_rgba_buffer(0, 0, 0, 0)
             surface = client.compositor.create_surface()
             layer = client.manager.get_health_layer(surface, output.name)
+            viewport = client.viewporter.get_viewport(surface)
             state = self.surfaces[output.name] = HealthSurface(
-                output, self.board.configure(output.name, now), surface)
-            state.held.update((surface, layer))
+                output, self.board.configure(output.name, now), surface, viewport)
+            state.held.update((surface, layer, viewport))
         elif (state.shown is not None and state.shown.tint
               and state.size != (output.width, output.height)):
             state.health.repaint()
@@ -436,23 +448,28 @@ class HealthLayer:
             state.health.drawn(page)
 
     def _commit(self, state: HealthSurface, page: HealthPage | None) -> bool:
-        """Commit `page` (None or tint off: a 1 x 1 transparent buffer; tint on: the whole
-        Output). False when the buffer count or memory cap holds it back (it stays due)."""
+        """Commit `page` over the whole Output (None or tint off: the transparent solid buffer,
+        scaled by the viewport; tint on: a whole-Output ARGB buffer). False when the buffer count
+        or memory cap holds a tint-on page back (it stays due); the solid buffer costs no cap."""
         client, output = self.client, state.output
-        assert client is not None
-        tint = page is not None and page.tint
-        width, height = (output.width, output.height) if tint else (1, 1)
-        if tint and not size_admissible(width, height):
+        assert client is not None and self.clear is not None
+        width, height = output.width, output.height
+        argb = None                     # (pixels, size) of a tint-on page's ARGB buffer
+        if page is None or not page.tint:
+            buffer = self.clear
+        elif not size_admissible(width, height):
             self._fail_visible(state, page, f"{width} x {height} is over the size caps")
             return True
-        if not buffer_admissible(width, height, state.buffers, client.memory):
+        elif not buffer_admissible(width, height, state.buffers, client.memory):
             return False
-        buffer, pixels, size = client.allocate(width, height, "photo-wall-health")
-        if tint and not self._paint(page, pixels, width, height):
-            buffer.destroy()
-            pixels.close()
-            self._fail_visible(state, page, "paint failed")
-            return True
+        else:
+            buffer, pixels, size = client.allocate(width, height, "photo-wall-health")
+            if not self._paint(page, pixels, width, height):
+                buffer.destroy()
+                pixels.close()
+                self._fail_visible(state, page, "paint failed")
+                return True
+            argb = pixels, size
         serial = page.serial if page is not None else None
         commit_id = next(self._commit_ids)
         feedback = client.presentation.feedback(state.surface)
@@ -461,15 +478,19 @@ class HealthLayer:
             lambda proxy, *_: self._feedback(state, proxy, commit_id, serial, presented=True))
         feedback.dispatcher["discarded"] = (
             lambda proxy: self._feedback(state, proxy, commit_id, serial, presented=False))
+        state.viewport.set_destination(width, height)
         state.surface.attach(buffer, 0, 0)
         state.surface.damage(0, 0, width, height)
         state.surface.commit()          # never `ack`: that binds the slate/trial configure serial
         state.commits[commit_id] = self.clock()
-        state.buffers += 1
-        client.memory += size
-        state.held.add(buffer)
-        buffer.dispatcher["release"] = lambda proxy: self._release(state, proxy, pixels, size)
-        state.shown, state.size = page, (output.width, output.height)
+        if argb is not None:
+            pixels, size = argb
+            state.buffers += 1
+            client.memory += size
+            state.held.add(buffer)
+            buffer.dispatcher["release"] = (
+                lambda proxy: self._release(state, proxy, pixels, size))
+        state.shown, state.size = page, (width, height)
         return True
 
     def _fail_visible(self, state: HealthSurface, page: HealthPage | None, why: str) -> None:
@@ -583,6 +604,8 @@ def main(*, hooks: Sequence[OutputHook] | None = None,
 
     from .protocol.photo_wall_frame_v1 import PwDiagnosticManagerV1
     from .protocol.presentation_time import WpPresentation
+    from .protocol.single_pixel_buffer_v1 import WpSinglePixelBufferManagerV1
+    from .protocol.viewporter import WpViewporter
     from .protocol.wayland import WlCompositor, WlShm
 
     if hooks is None:
@@ -598,8 +621,11 @@ def main(*, hooks: Sequence[OutputHook] | None = None,
         registry.dispatcher["global"] = (
             lambda _registry, name, interface, _version: names.setdefault(interface, name))
         display.roundtrip()
-        wanted = ("wl_compositor", "wl_shm", "wp_presentation", "pw_diagnostic_manager_v1")
-        if any(interface not in names for interface in wanted):
+        wanted = ("wl_compositor", "wl_shm", "wp_presentation", "pw_diagnostic_manager_v1",
+                  "wp_viewporter", "wp_single_pixel_buffer_manager_v1")
+        missing = [interface for interface in wanted if interface not in names]
+        if missing:
+            log.error("compositor lacks %s", ", ".join(missing))
             return 1
         # Held for the loop: its proxies (and their dispatchers) die with it.
         _client = OverlayClient(
@@ -608,6 +634,9 @@ def main(*, hooks: Sequence[OutputHook] | None = None,
             presentation=registry.bind(names["wp_presentation"], WpPresentation, 1),
             manager=registry.bind(names["pw_diagnostic_manager_v1"], PwDiagnosticManagerV1,
                                   manager_version),
+            viewporter=registry.bind(names["wp_viewporter"], WpViewporter, 1),
+            single_pixel=registry.bind(names["wp_single_pixel_buffer_manager_v1"],
+                                       WpSinglePixelBufferManagerV1, 1),
             hooks=hooks)
         run(display, hooks)
     except RuntimeError as error:      # pywayland: the connection failed (-1)
