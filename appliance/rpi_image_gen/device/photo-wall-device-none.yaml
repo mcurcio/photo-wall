@@ -42,10 +42,13 @@
 #  handling) -- confirmed by grepping the whole pinned rpi-image-gen tree
 #  that no IGconf_device_* variable is read anywhere in image-base.yaml, our
 #  own ../image/photo-wall-squashfs.yaml, ../image/rootfs.cfg.in, or
-#  ../image/pre-image.sh, so device-base's vars and device-user-admin's
-#  login-user machinery would be pure, unwanted weight on this headless
-#  rootfs. No packages, no hooks: metadata-only, same pattern as this repo's
-#  own ../image/photo-wall-squashfs.yaml.
+#  ../image/pre-image.sh, so device-base's vars are unwanted weight on this
+#  headless rootfs. device-user-admin itself does come in, not through
+#  device-base but as the requirement of rpi-image-gen's openssh-server layer:
+#  it makes the agent's SSH login user (../config/photo-wall-base.yaml,
+#  `device: user1`; docs/runbook.md, "Reaching a Node over SSH"). This layer
+#  still adds nothing: no packages, no hooks, metadata-only, same pattern as
+#  this repo's own ../image/photo-wall-squashfs.yaml.
 #
 #  image/post-image.sh (pinned rpi-image-gen commit
 #  262d4df5a9f9d4133370465399a7958a7c22cdc7) unconditionally truncates every
@@ -59,7 +62,7 @@
 #  Valid: int:512-512, under `X-Env-VarPrefix: device`), which this layer
 #  deliberately does not require (see above). Declare it directly below, same
 #  schema, same default, so post-image.sh's truncate has a value without
-#  pulling in device-base's device-user-admin login-user machinery.
+#  pulling in device-base.
 #
 #  post-image.sh's other consumer of IGconf_device_* -- the Image Description
 #  Provisioning (IDP) block at lines 22-43, gated on

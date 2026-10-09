@@ -1167,17 +1167,18 @@ node factory therefore continues to serve observations with effects closed.
 
 ## Reaching a Node over SSH
 
-Every V2 Node runs Debian's OpenSSH server from the base package (`node-base.deb`), so an agent or the operator on the LAN can read a Node's journal and units directly. Only `root` logs in, and only with the agent key: no password, no keyboard-interactive login. It starts with the base, before and apart from the app, the display and Central, so it works when those are broken.
+Every Node's base OS runs Debian's OpenSSH server, so an agent or the operator on the LAN can read a Node's journal and units directly. It comes from rpi-image-gen's own `openssh-server` layer, enabled in the base build's [config](../appliance/rpi_image_gen/config/photo-wall-base.yaml), like any other OS dependency, not from a Photo Wall package. It starts with the OS, apart from the app, the display and Central, so it works when those are broken.
 
-- **The key.** The one authorized public key is [`appliance/ssh/photo_wall_agent.pub`](../appliance/ssh/photo_wall_agent.pub); the release bakes it into the base. Its private half lives only on the agent's machine, at `~/.ssh/photo_wall_agent`, never in the repo. Changing the key is a PR to that file, and a Node gets the new key only by booting a base from a release built after it.
-- **The host key changes at every boot.** A Node has no persistent disk, so `ssh.service` makes a new ed25519 host key under `/run` each boot. Skip host-key checking for these boxes rather than editing `known_hosts` after each reboot:
+- **The login.** One user, `photowall`, logs in with the agent key only: no password, no keyboard-interactive login, no root login. It has passwordless `sudo` and is in the `systemd-journal` group.
+- **The key.** The one authorized public key is [`appliance/rpi_image_gen/photo_wall_agent.pub`](../appliance/rpi_image_gen/photo_wall_agent.pub); the base build bakes it into `photowall`'s `authorized_keys`. Its private half lives only on the agent's machine, at `~/.ssh/photo_wall_agent`, never in the repo. Changing the key is a PR to that file, and a Node gets the new key only by booting a base from a release built after it.
+- **The host key changes at every boot.** The base carries no host key, and a Node's root is a RAM overlay, so each boot makes new host keys. Skip host-key checking for these boxes rather than editing `known_hosts` after each reboot:
 
 ```sh
-ssh -i ~/.ssh/photo_wall_agent -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@<pi-ip>
+ssh -i ~/.ssh/photo_wall_agent -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null photowall@<pi-ip>
 ```
 
 - **Finding the Pi's address.** Central does not record a Node's IP yet. Read it from the DHCP server's lease table (the router's client list; a Pi's vendor shows as Raspberry Pi), or scan the LAN for an open port 22: `nmap -p 22 --open 192.168.1.0/24` (your subnet). On the box, `cat /run/photo-wall-node/host.json` shows the serial the Node claims, which its Player page names.
-- **What to read.** `systemctl --failed`; `systemctl status photo-wall-display.service photo-wall-display-controller.service`; the display units' journal for this boot: `journalctl -b --no-pager -u photo-wall-display.service -u photo-wall-display-controller.service`. The same `-u` form reads any other node unit (`photo-wall-host-core`, `photo-wall-app-broker`, `photo-wall-node-player`, `photo-wall-bus`).
+- **What to read.** `systemctl --failed`; `systemctl status photo-wall-display.service photo-wall-display-controller.service`; the display units' journal for this boot: `sudo journalctl -b --no-pager -u photo-wall-display.service -u photo-wall-display-controller.service`. The same `-u` form reads any other node unit (`photo-wall-host-core`, `photo-wall-app-broker`, `photo-wall-node-player`, `photo-wall-bus`).
 
 The journal lives in RAM and is lost at reboot, so read it before rebooting a broken Node. Shipping failed units' status and journal tail to Central is [issue 53](https://github.com/mcurcio/photo-wall/issues/53).
 
