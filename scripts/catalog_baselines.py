@@ -16,6 +16,11 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.registry_pull import pull_image  # noqa: E402
+
 IMAGE = re.search(r"mcr\.microsoft\.com/playwright/python:\S+",
                   (ROOT / ".github/workflows/checks.yml").read_text()).group(0)
 TAG, _, PIN = IMAGE.partition("@")
@@ -35,7 +40,7 @@ python -m pytest -q -p no:cacheprovider {test} \
 def pull_pinned():
     """Docker Desktop's containerd store refuses `run image@digest` for a multi-platform index
     on some hosts, so pull and run by tag, and check the tag still resolves to CI's digest."""
-    subprocess.run(["docker", "pull", "-q", "--platform", PLATFORM, TAG], check=True)
+    pull_image(TAG, platform=PLATFORM)
     index = subprocess.run(["docker", "buildx", "imagetools", "inspect", TAG, "--format",
                             "{{.Manifest.Digest}}"], check=True, capture_output=True, text=True)
     if index.stdout.strip() != PIN:
