@@ -37,6 +37,8 @@ This page is the map; open an owning document only when the routing table sends 
 
 ## Verify
 
+CI (`pipeline.yml`) is the full gate for every automated tier below. Locally, run the tests you touched plus mutation probes, with the commands below. Physical Pi, PXE, HDMI and timing have no automated tier: when that area changes, bench evidence stays a manual step.
+
 | Tier | Command | Authority |
 |---|---|---|
 | Static | `.venv/bin/python -m ruff check .` · `.venv/bin/lint-imports` · `python3 scripts/check_docs.py` | CI + local |
@@ -73,7 +75,7 @@ Published-wire tests skip unless `PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR` names a 
 | Launch, deploy, recovery | [runbook](docs/runbook.md#local-launch) |
 | A consequential choice | [design decisions](docs/design-decisions.md), [decision records](docs/decisions/) |
 | Acceptance, evidence | [validation](docs/validation.md), [evidence conventions](docs/evidence/README.md) |
-| Process | [design principles](CONTRIBUTING.md#design-principles), [orchestration](CONTRIBUTING.md#recursive-development-and-agent-orchestration), [subagent models](CONTRIBUTING.md#subagent-model-selection), [credentials](CONTRIBUTING.md#fixtures-and-credentials) |
+| Process | [design principles](CONTRIBUTING.md#design-principles), [orchestration](CONTRIBUTING.md#recursive-development-and-agent-orchestration), [Codex subagent models](CONTRIBUTING.md#codex-subagent-model-selection), [credentials](CONTRIBUTING.md#fixtures-and-credentials) |
 
 ## Non-negotiables
 

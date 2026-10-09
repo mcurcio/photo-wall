@@ -153,7 +153,7 @@ class _Proxy:
 
 
 class _Wayland:
-    """Fakes for the four globals; `log` records every request in order, `buffers` every wl_buffer."""
+    """Fakes for the bound globals; `log` records every request in order, `buffers` every wl_buffer."""
 
     def __init__(self, fail_ack=False):
         self.log, self.buffers, self.fail_ack = [], [], fail_ack
@@ -165,6 +165,8 @@ class _Wayland:
         self.presentation.feedback = lambda surface: _Proxy(self.log, "feedback")
         self.manager = _Proxy(self.log, "manager")
         self.manager.ack = self._ack
+        self.viewporter = _Proxy(self.log, "viewporter")      # the health layer's; unused here
+        self.single_pixel = _Proxy(self.log, "single_pixel")
 
     def _pool(self):
         pool = _Proxy(self.log, "pool")
@@ -204,6 +206,8 @@ def overlay_client(monkeypatch, tmp_path):
         wayland = _Wayland(**wayland_options)
         return (client.OverlayClient(compositor=wayland.compositor, shm=wayland.shm,
                                      presentation=wayland.presentation, manager=wayland.manager,
+                                     viewporter=wayland.viewporter,
+                                     single_pixel=wayland.single_pixel,
                                      painter=painter), wayland, surfaces)
     return make
 

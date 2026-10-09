@@ -28,7 +28,8 @@ client_header = custom_target('frame-client-header', input: xml,
   command: [scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
 wayland_client = dependency('wayland-client', version: '>=1.22')
 wayland_protocols = dependency('wayland-protocols')
-presentation_xml = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir') / 'stable/presentation-time/presentation-time.xml'
+protocols_dir = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir')
+presentation_xml = protocols_dir / 'stable/presentation-time/presentation-time.xml'
 presentation_header = custom_target('presentation-client-header', input: presentation_xml,
   output: 'presentation-time-client.h',
   command: [scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
@@ -40,7 +41,10 @@ presentation_code = custom_target('presentation-code', input: presentation_xml,
 # python3 cannot see Debian's pywayland. Its bindings are generated here.
 python = find_program('/usr/bin/python3')
 core_xml = dependency('wayland-scanner', native: true).get_variable(pkgconfig: 'pkgdatadir') / 'wayland.xml'
-custom_target('overlay-protocol', input: [core_xml, presentation_xml, xml], output: 'protocol',
+viewporter_xml = protocols_dir / 'stable/viewporter/viewporter.xml'
+single_pixel_xml = protocols_dir / 'staging/single-pixel-buffer/single-pixel-buffer-v1.xml'
+custom_target('overlay-protocol',
+  input: [core_xml, presentation_xml, viewporter_xml, single_pixel_xml, xml], output: 'protocol',
   command: [python, '-m', 'pywayland.scanner', '-o', '@OUTPUT@', '-i', '@INPUT@'],
   install: true, install_dir: display_dir / 'overlay')
 install_data('overlay/__init__.py', 'overlay/instruction.py', 'overlay/render.py',
