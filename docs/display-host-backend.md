@@ -81,6 +81,41 @@ generations and the compositor incarnation fence connector reuse. A new controll
 connection explicitly invalidates old grants rather than inventing recovered
 presentation evidence. Compositor loss remains Output unknown until recovery.
 
+## Units and Weston incarnations
+
+The display stack is two base units in `photowallbase.slice`. Their ordering is
+systemd's, not a poll or a retry in either process:
+
+- `photo-wall-display.service` runs Weston with `Type=notify`, `NotifyAccess=main`
+  and Weston's own `systemd-notify.so` module (`--modules=`). Weston loads it after
+  it has created its Wayland socket and the shell has bound `control.sock`, so
+  READY=1 means both sockets accept connections. The `/usr/bin/env` wrapper restates
+  `XDG_RUNTIME_DIR`, which `PAMName=login`'s pam_systemd would otherwise replace,
+  and execs Weston, so the main PID is Weston's. `WatchdogSec=10s`: the module pings
+  from Weston's event loop at half that interval, so a hung compositor is aborted
+  (SIGABRT) and restarted like a crashed one.
+- `photo-wall-display-controller.service` has `BindsTo=` and `After=` the display
+  unit, and the display unit `Wants=` it. Each Weston incarnation therefore gets
+  one controller, started after its READY=1 and stopped when it ends; the next
+  incarnation brings a new one. The controller never starts, or builds its sandbox,
+  while Weston's `RuntimeDirectory` (`/run/photo-wall-display`) is absent, so no
+  `RuntimeDirectoryPreserve=` is needed. The directory leaves with the incarnation
+  that made it, and no reader can open a dead incarnation's sockets.
+
+Any other consumer of `/run/photo-wall-display` must follow the same rule: start
+after the display unit is ready, and end with the Weston incarnation it connected
+to. The app broker's `After=` now orders it on READY=1. The Player's transient unit
+is not ordered or bound to the display unit yet, and the broker does not relaunch
+it when a new Weston incarnation starts. Until then, a Weston restart leaves the
+Player exited.
+
+The node-pid1 scenarios start the controller alone, so Weston comes up only
+through the units' own dependencies. Every scenario then checks that `control.sock`
+existed before the controller's main process started, that the controller never
+restarted, and that its journal holds no `FileNotFoundError` or `226/NAMESPACE`.
+The `refused` scenario also sends Weston SIGSEGV, then SIGSTOP (its watchdog aborts
+it), and requires a new Weston and a new clean controller each time.
+
 ## Base controller ingress
 
 `python -m appliance.display_host.runner --config <systemd-credential>` starts the

@@ -2,14 +2,14 @@
 
 Argument `refused` (the node-pid1 `refused` scenario): the storage stage alone reads a fake
 /proc/meminfo below the smallest memory class, and the base units start as one PID1
-transaction, so the units' own Requires= decide what runs after the refusal.
+transaction, so the units' own Requires= decide what runs after the refusal; the display stack,
+which needs no storage, then starts as in every scenario.
 """
 
 import json
 import shutil
 import subprocess
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -53,7 +53,23 @@ for unit in units:
     (d / "fixture-cohort.conf").write_text("[Unit]\nConditionKernelCommandLine=\n")
 shutil.copy2("/var/tmp/fixture-head.so", "/usr/lib/photo-wall-fixture-head.so")
 d = Path("/etc/systemd/system/photo-wall-display.service.d")
-(d / "fixture-headless.conf").write_text("""[Service]
+# The installed unit's own command with only the hardware swapped: headless instead of DRM, and
+# the fixture head loaded before the production modules, so READY=1 (systemd-notify.so, Type=)
+# and every other argument stay the package's.
+(execstart,) = [
+    line.split("=", 1)[1]
+    for line in Path("/lib/systemd/system/photo-wall-display.service").read_text().splitlines()
+    if line.startswith("ExecStart=")
+]
+for production, fixture in (
+    ("--backend=drm", "--backend=headless --no-outputs --renderer=pixman"),
+    ("--modules=", "--modules=/usr/lib/photo-wall-fixture-head.so,"),
+    ("--idle-time=0", "--idle-time=0 --width=640 --height=480 --no-config"),
+):
+    if execstart.count(production) != 1:
+        raise AssertionError("display ExecStart lacks " + production + ": " + execstart)
+    execstart = execstart.replace(production, fixture)
+(d / "fixture-headless.conf").write_text(f"""[Service]
 TTYPath=
 StandardInput=null
 UtmpIdentifier=
@@ -61,7 +77,7 @@ TTYReset=no
 TTYVHangup=no
 TTYVTDisallocate=no
 ExecStart=
-ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=headless --no-outputs --renderer=pixman --shell=/usr/lib/photo-wall-display/photo-wall-shell.so --modules=/usr/lib/photo-wall-fixture-head.so --socket=wayland-0 --idle-time=0 --width=640 --height=480 --no-config
+ExecStart={execstart}
 """)
 # The real Player's normal DRM discovery reads synthetic hardware metadata. The
 # compositor's matching Virtual-1 head is real headless Weston, never a DRM claim.
@@ -112,19 +128,17 @@ if scenario == "refused":
     if started.returncode == 0:
         raise AssertionError("refused storage did not fail the base transaction")
     print("REFUSED BASE TRANSACTION FAILED", started.returncode, flush=True)
+    # The display stack is independent of storage: the controller alone, as the target pulls it.
+    subprocess.run(["systemctl", "start", "photo-wall-display-controller.service"], check=True)
     raise SystemExit(0)
 subprocess.run(
     ["systemctl", "start", "photo-wall-node-handoff.service", "photo-wall-node-storage.service"],
     check=True,
 )
 subprocess.run(["systemctl", "start", "photo-wall-node-prepare.service"], check=True, timeout=1200)
-subprocess.run(["systemctl", "start", "photo-wall-display.service"], check=True)
-for _ in range(100):
-    if Path("/run/photo-wall-display/wayland-0").exists():
-        break
-    time.sleep(0.1)
-else:
-    raise AssertionError("fixture compositor socket missing")
+# The controller alone: its BindsTo= pulls Weston in and After= holds it until READY=1, which
+# tests/test_node_pid1.py's verify_display_ready checks.
+subprocess.run(["systemctl", "start", "photo-wall-display-controller.service"], check=True)
 subprocess.run(
     [
         "systemctl",
