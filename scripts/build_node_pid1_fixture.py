@@ -15,9 +15,13 @@ manager-primary.squashfs, node-base.deb, node-display.deb). Output, a new direct
 The arm64 image is FROM `--base-image`, the pinned Debian build container's image ID
 (photo-wall-debian-builder, loaded by debian-packaging/build-container.sh: the build root of
 node-display.deb, which carries the pinned Weston stack and a compiler), installs exactly the
-supplied base and display packages, and compiles the checked-in headless fixture head. The
-image is identified by its immutable local ID only; the temporary FROM alias is removed after
-the build.
+supplied base package and, by name from the local repo `--debs` (debian-packaging/build-repo.sh's
+output, read as the display harness reads it: a `file:` source preferred at 1002), the display
+with its photo-wall siblings, which it pins at their exact versions, and compiles the checked-in
+headless fixture head. The components' node-display.deb, byte for byte the repo's
+(node-components.yml checks), sits beside the base package in /var/tmp for the PID1 scenarios'
+package binding (tests/node_pid1_package_verify.py). The image is identified by its immutable
+local ID only; the temporary FROM alias is removed after the build.
 """
 
 from __future__ import annotations
@@ -44,9 +48,12 @@ FAILURE_ENTRY = 'raise SystemExit("intentional nonrelease PID1 failure fixture")
 PLAYER_MAIN = "usr/lib/photo-wall-player/__main__.py"
 DOCKERFILE = """FROM {alias}
 COPY node-base.deb node-display.deb fixture-head.c /var/tmp/
+COPY debs /var/tmp/photo-wall-debs
 RUN printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d \\
+ && echo 'deb [trusted=yes] file:/var/tmp/photo-wall-debs ./' > /etc/apt/sources.list.d/photo-wall-local.list \\
+ && printf 'Package: *\\nPin: origin ""\\nPin-Priority: 1002\\n' > /etc/apt/preferences.d/photo-wall-local \\
  && apt-get update \\
- && apt-get install -y --no-install-recommends /var/tmp/node-base.deb /var/tmp/node-display.deb \\
+ && apt-get install -y --no-install-recommends /var/tmp/node-base.deb photo-wall-node-display \\
  && dpkg --audit
 RUN cc -shared -fPIC -Wall -Wextra -Werror $(pkg-config --cflags libweston-14) \\
  /var/tmp/fixture-head.c -o /var/tmp/fixture-head.so $(pkg-config --libs libweston-14)
@@ -79,9 +86,10 @@ def derive_target(base_image: str, app_deb: Path, work: Path, role: str) -> Path
     return work / (role + ".deb")
 
 
-def build_image(base_image: str, components: Path, work: Path) -> str:
+def build_image(base_image: str, components: Path, debs: Path, work: Path) -> str:
     """The fixture image, FROM a local image: so Docker's daemon-backed default builder, never
-    the current one (a docker-container builder cannot see the daemon's images)."""
+    the current one (a docker-container builder cannot see the daemon's images). `debs` is the
+    local repo the display installs from."""
     alias = "photo-wall-node-pid1-base:" + secrets.token_hex(6)
     subprocess.run(["docker", "tag", base_image, alias], check=True)
     try:
@@ -89,6 +97,7 @@ def build_image(base_image: str, components: Path, work: Path) -> str:
             raise ValueError("node_pid1_base_alias_mismatch")
         for name in ("node-base.deb", "node-display.deb"):
             shutil.copyfile(components / name, work / name)
+        shutil.copytree(debs, work / "debs")
         shutil.copyfile(FIXTURE_HEAD, work / "fixture-head.c")
         (work / "Dockerfile").write_text(DOCKERFILE.format(alias=alias))
         tag = "photo-wall-node-pid1:" + secrets.token_hex(6)
@@ -98,8 +107,9 @@ def build_image(base_image: str, components: Path, work: Path) -> str:
         subprocess.run(["docker", "rmi", alias], check=False, capture_output=True)
 
 
-def build(components: Path, output: Path, *, base_image: str) -> dict:
+def build(components: Path, debs: Path, output: Path, *, base_image: str) -> dict:
     components = components.resolve(strict=True)
+    debs = debs.resolve(strict=True)
     if output.exists():
         raise ValueError("node_pid1_fixture_output_exists")
     inspected = inspect(base_image)
@@ -125,7 +135,7 @@ def build(components: Path, output: Path, *, base_image: str) -> dict:
                 json.dumps(asdict(ref), sort_keys=True))
         image_work = work / "image"
         image_work.mkdir()
-        image = build_image(base_image, components, image_work)
+        image = build_image(base_image, components, debs, image_work)
     fixture = {"components": str(components), "image": image, "base_image": base_image}
     (output / "fixture.json").write_text(json.dumps(fixture, sort_keys=True))
     return fixture
@@ -135,12 +145,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--components", type=Path, required=True)
+    parser.add_argument("--debs", type=Path, required=True,
+                        help="the local repo (debian-packaging/build-repo.sh --output)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base-image", required=True,
                         help="exact arm64 image ID of photo-wall-debian-builder "
                              "(debian-packaging/build-container.sh)")
     args = parser.parse_args()
-    print(json.dumps(build(args.components, args.output, base_image=args.base_image),
+    print(json.dumps(build(args.components, args.debs, args.output,
+                           base_image=args.base_image),
                      sort_keys=True))
 
 

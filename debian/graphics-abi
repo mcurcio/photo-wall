@@ -6,40 +6,50 @@
 #
 # with no trailing newline (Python's json.dumps(sort_keys=True) form, which the Node and the
 # release read). The hex is a sha256 over, first, the sorted lines `<package>/<path>\0<sha256>`
-# of every regular file in the trees of photo-wall-node-display (less abi.json) and
-# photo-wall-frame-client, DEBIAN aside: the compiled shell, the diagnostic client and the client
-# library; then the sorted `dpkg-query -W -f '${binary:Package} ${Version} ${Architecture}\n'`
-# of every package the two packages' expanded Depends name: the runtime they resolve against.
-# The display's own version is not an input: debian/content-versions derives it from this tree,
-# abi.json included (erratum E-0019-P1A-5).
+# of the Meson outputs: every regular file in the trees of photo-wall-node-display and
+# photo-wall-frame-client, DEBIAN aside, less abi.json and less the display's Python tree
+# (usr/lib/photo-wall/node-display/appliance/: its context's modules and the overlay's generated
+# bindings), so a display_host Python edit leaves the identity alone (erratum E-0019-P2A-4):
+# the compiled shell, the diagnostic client and the client library; then the sorted
+# `dpkg-query -W -f '${binary:Package} ${Version} ${Architecture}\n'` of every third-party
+# package the two packages' expanded Depends name: the runtime they resolve against. A
+# photo-wall-* sibling is no input: it is content-versioned Python the display's own version
+# already follows. The display's own version is not an input either: debian/content-versions
+# derives it from this tree, abi.json included (erratum E-0019-P1A-5).
 #
 # Run by debian/rules after dh_shlibdeps, when ${shlibs:Depends} is known; dpkg-gencontrol -O
-# expands each package's Depends as dh_gencontrol will, without writing a control file.
+# expands each package's Depends as dh_gencontrol will, without writing a control file. Each
+# ${pw-version:...} gets a placeholder there (content-versions sets them later) and the sibling
+# names it expands to are dropped.
 # tests/debs/test_display_packages.py recomputes the identity from the installed packages.
 set -eu
 
 DISPLAY=photo-wall-node-display
 CLIENT=photo-wall-frame-client
 ABI=usr/lib/photo-wall/node-display/abi.json
+PYTHON_TREE=usr/lib/photo-wall/node-display/appliance
 PLUGIN_ABI=frame-v3
 
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 
-# Appends to $2 the package names package $1's expanded Depends field holds (alternatives
-# included), one per line.
+# Appends to $2 the third-party package names package $1's expanded Depends field holds
+# (alternatives included), one per line.
+placeholders=$(grep -o 'pw-version:[a-z0-9.+-]*' debian/control | LC_ALL=C sort -u |
+	sed -e 's/^/-V/' -e 's/$/=0/')
 depends() {
+	# shellcheck disable=SC2086 # one -V argument per word
 	dpkg-gencontrol -p"$1" -P"debian/$1" -T"debian/$1.substvars" -f"$scratch/files" \
-		-O"$scratch/control"
+		-O"$scratch/control" $placeholders
 	sed -n 's/^Depends: //p' "$scratch/control" | tr ',|' '\n\n' |
 		sed -e 's/([^)]*)//g' -e 's/\[[^]]*\]//g' -e 's/:[a-z0-9]*//' -e 's/[[:space:]]//g' \
-			-e '/^$/d' >> "$2"
+			-e '/^$/d' -e '/^photo-wall-/d' >> "$2"
 }
 
-# Every regular file of both trees, as `<package>/<path>`, abi.json aside, with its sha256.
+# The Meson outputs of both trees, as `<package>/<path>`, abi.json aside, with their sha256.
 for package in "$CLIENT" "$DISPLAY"; do
-	(cd "debian/$package" && find . -type f ! -path './DEBIAN/*' -printf "$package/%P\n") \
-		>> "$scratch/paths"
+	(cd "debian/$package" && find . -type f ! -path './DEBIAN/*' ! -path "./$PYTHON_TREE/*" \
+		-printf "$package/%P\n") >> "$scratch/paths"
 done
 grep -vxF "$DISPLAY/$ABI" "$scratch/paths" | LC_ALL=C sort > "$scratch/files.sorted"
 : > "$scratch/identity"

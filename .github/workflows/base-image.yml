@@ -189,11 +189,22 @@ jobs:
           name: photo-wall-node-components-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-node-components
 
+      # The local repo the base installs the display from, by name, with the photo-wall packages
+      # it pins at their exact versions (layer/photo-wall-device.yaml).
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-node-debs
+
       # Cache A's node input: the bytes of the two node .debs the squashfs bakes. node-base.deb
       # is pure staging under the pin's SOURCE_DATE_EPOCH and node-display.deb is the local
       # repo's (debian-packaging/build-repo.sh, whose two builds must agree), so each one's bytes
-      # are its inputs. A stale hit cannot pass silently: the node ABI check below requires the
-      # cached squashfs's installed ABI to equal these components'.
+      # are its inputs. The display's bytes also name what it pulls from that repo: its control
+      # pins each photo-wall sibling at its content-derived version (debian/content-versions),
+      # and python3-nats is built from debian-packaging/python-nats/ (in the key below). A stale
+      # hit cannot pass silently: the node ABI check below requires the cached squashfs's
+      # installed ABI to equal these components'.
       - name: Compute the node component input digest
         id: node-components
         run: |
@@ -279,7 +290,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}-${{ steps.node-components.outputs.inputs_digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', 'debian-packaging/python-nats/**', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}-${{ steps.node-components.outputs.inputs_digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -295,7 +306,7 @@ jobs:
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB" \
                "IGconf_app_node_base_deb=$RUNNER_TEMP/photo-wall-node-components/node-base.deb" \
-               "IGconf_app_node_display_deb=$RUNNER_TEMP/photo-wall-node-components/node-display.deb" \
+               "IGconf_app_node_debs=$RUNNER_TEMP/photo-wall-node-debs" \
                "IGconf_app_device_packages=$DEVICE_PACKAGES" \
                "IGconf_app_debian_sources=$DEBIAN_SOURCES"
 

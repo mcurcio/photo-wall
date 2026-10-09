@@ -23,8 +23,10 @@ acceptance, PXE boot or the absolute U1 graphics/kernel/panel/pre-display cases.
 [`scripts/build_node_components.py`](../../../scripts/build_node_components.py) output (the
 builder base-image runs) and writes the nonrelease `success` target (the component Player at a
 higher version), the `failure` target (an entrypoint that exits), both sealed for the same ABI,
-and an arm64 image built FROM the node-display build image with exactly the supplied base and
-display packages and the compiled [headless module](../../../tests/node_pid1_fixture_head.c).
+and an arm64 image built FROM the node-display build image with exactly the supplied base
+package, the display installed by name from the local repo
+([`debian-packaging/build-repo.sh`](../../../debian-packaging/build-repo.sh)'s output) with the
+photo-wall packages it pins, and the compiled [headless module](../../../tests/node_pid1_fixture_head.c).
 `PHOTO_WALL_NODE_PID1_FIXTURE` names that output; the tests skip without it, and fail instead
 under `PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1` (the CI job).
 
@@ -37,10 +39,17 @@ shared parent-directory metadata is not attributed to one package.
 
 ```sh
 docker compose -f tests/integration/compose.test-database.yml up -d --wait
+debian-packaging/build-repo.sh --output "$WORK/debs"
+for package in photo-wall-node-display photo-wall-frame-client; do   # Linux: needs dpkg-deb
+  deb=$(sed -n "/^Package: $package\$/,/^\$/s/^Filename: //p" "$WORK/debs/Packages")
+  dpkg-deb -x "$WORK/debs/$deb" "$WORK/display-root"
+done
 .venv/bin/python -m scripts.build_node_components --repository "$PWD" \
-  --revision "$(git rev-parse HEAD)" --output "$WORK/components"   # Linux: needs dpkg-deb
+  --revision "$(git rev-parse HEAD)" --debs "$WORK/debs" --display-root "$WORK/display-root" \
+  --output "$WORK/components"
+builder=$(docker image inspect --format '{{.Id}}' "$(debian-packaging/build-container.sh)")
 .venv/bin/python -m scripts.build_node_pid1_fixture --components "$WORK/components" \
-  --output "$WORK/fixture"
+  --debs "$WORK/debs" --base-image "$builder" --output "$WORK/fixture"
 PHOTO_WALL_NODE_PID1_FIXTURE="$WORK/fixture" PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 \
   .venv/bin/python scripts/test_local.py -q -m node_pid1 -k "$SCENARIO" \
   --basetemp "$WORK/run" tests/test_node_pid1.py

@@ -29,10 +29,17 @@ def trace_request(self, method, path, *args, **kwargs):
     return status, raw
 NodeHTTP.request = trace_request
 
-# The built display and frame client, from a local repo mounted at /node-debs (decision 0019).
+# The built display and frame client, installed by name from a local repo mounted at /node-debs
+# (decision 0019), read as the display harness reads it: the display pins its photo-wall siblings
+# at their exact versions, which only the repo holds.
 if Path("/node-debs/Packages").exists():
-    subprocess.run(["sh", "-c", "dpkg -i /node-debs/photo-wall-node-display_*.deb "
-                    "/node-debs/photo-wall-frame-client_*.deb"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["sh", "-c",
+                    "echo 'deb [trusted=yes] file:/node-debs ./' > /etc/apt/sources.list.d/local.list"
+                    " && printf 'Package: *\\nPin: origin \"\"\\nPin-Priority: 1002\\n'"
+                    " > /etc/apt/preferences.d/local && apt-get update"
+                    " && apt-get install -y --no-install-recommends"
+                    " photo-wall-node-display photo-wall-frame-client"],
+                   check=True, stdout=subprocess.DEVNULL)
 CLIENT = "/usr/lib/photo-wall/frame-client"
 native_source = "/repo/appliance/display_host/native"
 if os.environ.get("PHOTO_WALL_GTK_PROBE") != "1":

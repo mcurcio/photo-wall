@@ -1,13 +1,36 @@
 """The nats-server pin's one home, debian-packaging/nats-server.env (decision 0019): every
-reader takes its version from that file, and the hub Central runs is the same release."""
+reader takes its version from that file, and the hub Central runs is the same release. The
+nats-py pin, debian-packaging/python-nats/upstream.env, is uv.lock's nats-py sdist."""
 
 import re
+import tomllib
 from pathlib import Path
 
 from scripts import nats_server
 
 REPO = Path(__file__).resolve().parents[2]
 PIN_FILE = REPO / "debian-packaging/nats-server.env"
+NATS_PY = REPO / "debian-packaging/python-nats"
+
+
+def _locked(name: str) -> dict:
+    return next(package for package in tomllib.loads((REPO / "uv.lock").read_text())["package"]
+                if package["name"] == name)
+
+
+def test_python_nats_builds_the_locked_nats_py_sdist():
+    """The Node's python3-nats is the nats-py the repository's environment locks: the same
+    version, from the same sdist bytes."""
+    pin = nats_server.read_pin((NATS_PY / "upstream.env").read_text())
+    locked = _locked("nats-py")
+    assert pin == {"NATS_PY_VERSION": locked["version"], "NATS_PY_SDIST_URL": locked["sdist"]["url"],
+                   "NATS_PY_SDIST_SHA256": locked["sdist"]["hash"].removeprefix("sha256:")}
+
+
+def test_python_nats_source_package_is_the_pinned_upstream_version():
+    changelog = (NATS_PY / "debian/changelog").read_text().splitlines()[0]
+    version = nats_server.read_pin((NATS_PY / "upstream.env").read_text())["NATS_PY_VERSION"]
+    assert changelog.startswith(f"python-nats ({version}-1) ")
 
 
 def _pin() -> dict[str, str]:

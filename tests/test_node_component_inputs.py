@@ -100,6 +100,9 @@ def reads(tmp_path_factory, fetched):
     components.mkdir()
     for name in ("node-base.deb", "node-display.deb"):
         (components / name).write_bytes(name.encode())
+    debs = work / "debs"
+    debs.mkdir()
+    (debs / "Packages").write_bytes(b"")
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(environment, "docker_build", _docker)
         patch.setattr(player, "run_dpkg_deb", lambda root, output: output)
@@ -118,7 +121,7 @@ def reads(tmp_path_factory, fetched):
                                   architecture="arm64", base_abi="b", graphics_abi="g",
                                   plugin_abi="p")
             (work / "image").mkdir()
-            fixture.build_image(IMAGE, components, work / "image")
+            fixture.build_image(IMAGE, components, debs, work / "image")
         finally:
             opened = _READS.pop()
     found: dict[str, set[str]] = {"tree": set(), "repo": set()}
