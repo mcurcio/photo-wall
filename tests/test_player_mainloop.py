@@ -11,32 +11,50 @@ from pathlib import Path
 import pytest
 
 from player.mainloop import (
+    BUS,
     CONTROL,
     GDK_PRIORITY_REDRAW,
     MIN_GAP_MS,
     TICK,
     MainLoopDispatcher,
     Tick,
+    watch_bus,
 )
 
 PLAYER = Path(__file__).resolve().parents[1] / "player"
 OWNER = PLAYER / "mainloop.py"
-# Every GLib/GStreamer call that adds a main-loop source. A source added anywhere else has a
-# priority no one chose, which is how the control queue starved (G8).
-SOURCE_CALLS = frozenset({"idle_add", "timeout_add", "timeout_add_seconds", "add_signal_watch",
-                          "add_signal_watch_full", "io_add_watch", "child_watch_add",
-                          "unix_signal_add", "unix_fd_add_full", "add_watch", "add_watch_full"})
+# Every GLib/GStreamer/GTK name that adds a main-loop source. A source added anywhere else has
+# a priority no one chose, which is how the control queue starved (G8). The guard flags any
+# REFERENCE to one (attribute, name, import, or a getattr string), not only a direct call, so an
+# alias (`add = GLib.idle_add`), `from GLib import timeout_add`, a source object
+# (`GLib.Idle().attach()`), a context invoke or a widget tick callback is refused too.
+SOURCE_NAMES = frozenset({
+    "idle_add", "idle_add_full", "timeout_add", "timeout_add_full", "timeout_add_seconds",
+    "timeout_add_seconds_full", "add_signal_watch", "add_signal_watch_full", "io_add_watch",
+    "io_add_watch_full", "child_watch_add", "child_watch_add_full", "unix_signal_add",
+    "unix_signal_add_full", "unix_fd_add", "unix_fd_add_full", "add_watch", "add_watch_full",
+    "Idle", "Timeout", "Source", "invoke", "invoke_full", "add_tick_callback", "threads_add_idle",
+    "threads_add_idle_full", "threads_add_timeout", "threads_add_timeout_full"})
+
+
+def _source_name(name: str | None) -> bool:
+    return name is not None and (name in SOURCE_NAMES or name.endswith("_source_new"))
 
 
 def stray_sources(path: Path) -> list[str]:
     found = []
     for node in ast.walk(ast.parse(path.read_text(), str(path))):
-        if isinstance(node, ast.Call):
-            target = node.func
-            name = (target.attr if isinstance(target, ast.Attribute)
-                    else target.id if isinstance(target, ast.Name) else None)
-            if name is not None and (name in SOURCE_CALLS or name.endswith("_source_new")):
-                found.append(f"{path.name}:{node.lineno} {name}")
+        if isinstance(node, ast.Attribute):
+            names = [node.attr]
+        elif isinstance(node, ast.Name):
+            names = [node.id]
+        elif isinstance(node, ast.ImportFrom):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            names = [node.value]
+        else:
+            continue
+        found += [f"{path.name}:{node.lineno} {name}" for name in names if _source_name(name)]
     return found
 
 
@@ -53,6 +71,20 @@ def test_the_guard_sees_a_stray_source(tmp_path):
                      "s = GLib.timeout_source_new(5)\nbus.add_signal_watch()\n")
     assert stray_sources(stray) == ["stray.py:2 idle_add", "stray.py:3 timeout_source_new",
                                     "stray.py:4 add_signal_watch"]
+
+
+@pytest.mark.parametrize("source", [
+    "add = GLib.idle_add\nadd(print)",
+    "from gi.repository.GLib import timeout_add as later\nlater(5, print)",
+    "GLib.Idle().attach(None)",
+    "GLib.MainContext.default().invoke_full(200, print)",
+    "area.add_tick_callback(print)",
+    "getattr(GLib, 'idle_add')(print)",
+])
+def test_the_guard_sees_an_aliased_or_indirect_source(tmp_path, source):
+    stray = tmp_path / "stray.py"
+    stray.write_text(source + "\n")
+    assert stray_sources(stray) != []
 
 
 class FakeGLib:
@@ -129,3 +161,16 @@ def test_a_tick_whose_work_returns_false_or_raises_ends():
     with pytest.raises(RuntimeError):
         glib.added[-1][3]()
     assert len(glib.added) == 1
+
+
+def test_a_bus_watch_runs_at_tick_priority_never_below_paint():
+    """A GStreamer bus watch at the idle default (200) would sit behind continuous paint, so an
+    EOS or error would wait on the display; watch_bus pins it at BUS, beside the tick."""
+    class Bus:
+        priorities = []
+
+        def add_signal_watch_full(self, priority):
+            self.priorities.append(priority)
+    bus = Bus()
+    watch_bus(bus)
+    assert bus.priorities == [BUS] and BUS == TICK

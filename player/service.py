@@ -496,10 +496,13 @@ class PlayerService:
             raise RuntimeError("Player control requires the renderer thread")
 
     async def dispatch(self, callback):
-        """Run `callback` on the GLib thread. MainLoopLate when it has not run within
-        DISPATCH_DEADLINE (it is abandoned then: a callback not yet started never runs), and
-        at once while an abandoned one is unreached: a late loop is never a capacity refusal
-        and never fills the dispatcher's slots (E-G8-7)."""
+        """Run `callback` on the GLib thread. MainLoopLate when it has not started within
+        DISPATCH_DEADLINE (it is abandoned then and never runs), and at once while an abandoned
+        one is unreached: a late loop is never a capacity refusal and never fills the
+        dispatcher's slots (E-G8-7). A callback that started before the deadline cannot be
+        abandoned, so its outcome is awaited and returned, never MainLoopLate: its effects
+        landed (E-G8-10). One that never returns blocks the GLib thread, and the watchdog,
+        no longer petted, ends that Player."""
         source, abandon = self._late_posts.post(self.dispatcher, callback)
         loop = asyncio.get_running_loop()
         waiter = loop.create_future()
@@ -520,12 +523,14 @@ class PlayerService:
         source.add_done_callback(settle)
         try:
             finished, _ = await asyncio.wait((waiter,), timeout=DISPATCH_DEADLINE)
+            if not finished:
+                if abandon():
+                    raise MainLoopLate("main_loop_late")
+                await asyncio.wait((waiter,))       # already running: it completes
         finally:
             if not waiter.done():
                 abandon()
                 waiter.cancel()
-        if not finished:
-            raise MainLoopLate("main_loop_late")
         try:
             return waiter.result()
         except LoopLate as error:
@@ -1226,7 +1231,7 @@ class PlayerService:
                 try:
                     result = await self.dispatch(lambda: self._apply_state(state))
                 except MainLoopLate:
-                    # Not applied (cancelled); the next delivery or poll carries it again.
+                    # Never started, so never applied; the next delivery or poll carries it.
                     self.fault("main_loop_late")
                     continue
                 await self._ack_control(state, result)

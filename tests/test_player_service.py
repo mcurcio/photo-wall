@@ -1,5 +1,6 @@
 """Control-service authority and network bounds; simulated renderer is not Pi evidence."""
 
+import ast
 import asyncio
 import base64
 import contextlib
@@ -9,10 +10,14 @@ import inspect
 import json
 import logging
 import math
+import re
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import typing
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -42,7 +47,7 @@ from player.output_discovery import (
     output_app_id,
     weston_ini,
 )
-from player.rendering import CapacityResult, RecordingRenderer
+from player.rendering import CapacityResult, PrepareResult, PresentationResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
     BootContext,
@@ -1459,6 +1464,42 @@ def test_a_full_dispatcher_is_a_capacity_refusal_not_a_late_loop(tmp_path):
     asyncio.run(check())
 
 
+def _player_failure_codes() -> set[str]:
+    """Every readiness failure code player/ can emit: Failure(code=...) literals, every
+    literal assigned to an assignment's `failure`, and the renderer's result codes."""
+    def literals(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, ast.IfExp):
+            return literals(node.body) | literals(node.orelse)
+        return set()
+    codes = {code for result in (PrepareResult, PresentationResult)
+             for code in typing.get_args(typing.get_type_hints(result)["code"])} - {"none"}
+    for path in (Path(__file__).resolve().parents[1] / "player").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Failure":
+                codes |= {code for keyword in node.keywords if keyword.arg == "code"
+                          for code in literals(keyword.value)}
+            elif isinstance(node, ast.Assign) and any(
+                    isinstance(target, ast.Attribute) and target.attr == "failure"
+                    and getattr(target.value, "id", None) == "assignment"
+                    for target in node.targets):
+                codes |= literals(node.value)
+    return codes
+
+
+def test_every_player_failure_code_has_console_recovery_wording():
+    """A code the console does not know falls back to the generic wording silently, so the
+    operator would never read main_loop_late's (or any new code's) recovery."""
+    source = (Path(__file__).resolve().parents[1] / "central/console/src/readinessRecovery.js"
+              ).read_text()
+    table = source[source.index("const RECOVERY"):source.index("});")]
+    known = set(re.findall(r"^  ([a-z_]+):", table, re.MULTILINE))
+    codes = _player_failure_codes()
+    assert {"main_loop_late", "clock", "capacity", "decode", "download", "integrity"} <= codes
+    assert codes - known == set()
+
+
 def test_health_has_boot_authority_and_no_secrets(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
@@ -1695,9 +1736,68 @@ def test_a_state_delivered_while_the_loop_is_late_is_skipped_not_fatal(tmp_path,
         service.dispatcher = MainLoopDispatcher(GLib)
         try:
             with pytest.raises(ServiceError, match="session_closed"):
-                await service._websocket_loop()
+                await asyncio.wait_for(service._websocket_loop(), 5)
             assert len(applied) == 1 and service.last_fault == "main_loop_late"
         finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_state_applied_across_the_deadline_is_acknowledged_not_reported_late(
+        tmp_path, monkeypatch):
+    """E-G8-10: GLib reaches a delivery's dispatch before DISPATCH_DEADLINE and the apply ends
+    after it. The callback ran, so its outcome is the answer: the state is applied once and
+    acknowledged, and nothing reads main_loop_late (a late report would withdraw `prepared`)."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .1)
+
+    class GLib:
+        """A GLib thread that reaches each post at 20 ms."""
+        threads = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            thread = threading.Timer(.02, callback)
+            cls.threads.append(thread)
+            thread.start()
+
+    async def check():
+        service, server = await rig(tmp_path)
+        applied, acked, faults = [], [], []
+        record = service.fault
+        monkeypatch.setattr(service, "fault",
+                            lambda code, **kw: (faults.append(code), record(code, **kw)))
+
+        def slow_apply(state):
+            time.sleep(.3)                  # starts at 20 ms, ends past the 100 ms deadline
+            applied.append(state)
+            return "applied"
+
+        async def ack(state, result):
+            acked.append(result)
+        monkeypatch.setattr(service, "_apply_state", slow_apply)
+        monkeypatch.setattr(service, "_ack_control", ack)
+        message = json.dumps({"type": "state", **server.state.model_dump(mode="json")})
+
+        class Socket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def __aiter__(self):
+                yield message
+
+        service.link.websocket_connect = lambda uri, **options: Socket()
+        service.dispatcher = MainLoopDispatcher(GLib)
+        try:
+            with pytest.raises(ServiceError, match="session_closed"):
+                await asyncio.wait_for(service._websocket_loop(), 5)
+            assert len(applied) == 1 and acked == ["applied"]
+            assert "main_loop_late" not in faults and not service._late_posts.late
+        finally:
+            for thread in GLib.threads:
+                thread.join()
             await close(service)
     asyncio.run(check())
 
