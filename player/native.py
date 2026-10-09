@@ -697,8 +697,10 @@ class NativeRenderer:
         if frames is not None:
             grant = frames.grant(composition.binding.output_id, composition)
             if grant is None or not grant.admitted or not grant.matches(composition):
-                # A draw under a grant that is not admitted is never owed (_render drops it).
-                surface.acknowledged = surface.pending = None
+                # Nothing drawn before admission stands: a cleared acknowledgment makes the
+                # first present() after admission draw. A pending draw needs no reset here:
+                # _render drops it while its grant is not admitted.
+                surface.acknowledged = None
                 surface.area.queue_render()
                 return PresentationResult("pending")
         if surface.pending and _fingerprint(surface.pending.composition) != _fingerprint(composition):

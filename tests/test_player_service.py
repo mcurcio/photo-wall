@@ -1382,7 +1382,7 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
     loop that stops running dispatches never turns into a dispatch_capacity refusal. The
     Player keeps raising main_loop_late (and posts no readiness) across many deadlines and
     across a session that ends meanwhile (its reconnect's cycle-start dispatches are late, not
-    fatal), and run() pets the watchdog not once until the loop runs again, so WatchdogSec
+    fatal: it re-locates once and that session holds), and run() pets the watchdog not once until the loop runs again, so WatchdogSec
     restarts a Player whose loop stays stuck."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
@@ -1413,7 +1413,14 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
                 posts.append(json.loads(request.content))
             return result
 
-        service, _ = await finder_rig(finding("http://central"), handle)
+        find = finding("http://central")
+        locates = []
+
+        async def counted_find():
+            locates.append(True)
+            return await find()
+
+        service, _ = await finder_rig(counted_find, handle)
         service.dispatcher = MainLoopDispatcher(GLib)
         faults = []
         record = service.fault
@@ -1435,8 +1442,12 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
             await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
             fail_state.append(False)        # the session ends while the loop is blocked
             await asyncio.wait_for(until(lambda: fail_state[0]), 5)
-            ended_at = late_count()
+            ended_at, located_at = late_count(), len(locates)
             await asyncio.wait_for(until(lambda: late_count() >= ended_at + 6), 5)
+            # The reconnect's late cycle-start dispatches keep its session: one re-locate,
+            # then the session holds (a late start that ended it would re-locate every cycle).
+            assert len(locates) <= located_at + 1
+            assert service._located
             assert len(posts) == blocked_at         # no readiness while the loop is late
             assert "dispatch_capacity" not in faults
             assert len(pets) == petted              # no pet while the loop is stuck
