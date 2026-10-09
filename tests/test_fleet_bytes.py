@@ -1,4 +1,4 @@
-"""Offer bytes are served from the cache's recorded facts; no request hashes them."""
+"""Node offer bytes are served from the cache's recorded facts; no request hashes them."""
 
 import asyncio
 import hashlib
@@ -10,10 +10,9 @@ from central.assets.layout import CacheLayout
 from central.assets.reader import Opened, Unavailable
 from central.assets.store import CacheStore
 from central.fleet.bytes import OfferByteReader
-from central.fleet.models import FleetError
-from central.fleet.service import OfferAsset
+from central.fleet.models import FleetError, OfferAsset
 from central.kernel.assets import AssetReady
-from central.kernel.job_types import FetchPackage
+from central.kernel.job_types import FetchSealedEnvironment
 from central.kernel.jobs import asset_key
 
 
@@ -46,7 +45,7 @@ class Reader:
 
 def _asset(blob: bytes) -> OfferAsset:
     digest = hashlib.sha256(blob).hexdigest()
-    return OfferAsset("app", "v1.0.0", digest, digest, len(blob))
+    return OfferAsset("environment", "node-app", digest, digest, len(blob), "sealed-environment-v2")
 
 
 def _cached(root, asset: OfferAsset, on_disk: bytes, *, size=None, digest=None) -> Reader:
@@ -54,7 +53,7 @@ def _cached(root, asset: OfferAsset, on_disk: bytes, *, size=None, digest=None) 
     (default: the asset's own claim)."""
     reader = Reader(root, size=asset.size if size is None else size,
                     digest=asset.sha256 if digest is None else digest)
-    reader.put(FetchPackage(sha256=asset.content_key), on_disk)
+    reader.put(FetchSealedEnvironment(sha256=asset.content_key), on_disk)
     return reader
 
 
@@ -68,7 +67,8 @@ def _closed(fd) -> bool:
 
 def test_headers_come_from_recorded_facts_and_no_request_hashes(tmp_path, monkeypatch) -> None:
     blob = b"exact offer bytes"
-    asset = OfferAsset("app", "v1.0.0", "a" * 64, "a" * 64, len(blob))
+    asset = OfferAsset("environment", "node-app", "a" * 64, "a" * 64, len(blob),
+                       "sealed-environment-v2")
     # Same size, different bytes: only a per-request hash could tell. The worker verified the
     # digest on fill and the node verifies it after download, so the serve trusts the facts.
     reader = _cached(tmp_path, asset, b"X" * len(blob))
@@ -102,17 +102,14 @@ def test_cached_inode_of_another_size_is_never_opened(tmp_path) -> None:
     # Facts claim the offer's size; the file on disk is not that size. CacheStore.open refuses
     # it, so the serve sees no file, never a descriptor with a false Content-Length.
     reader = _cached(tmp_path, _asset(blob), b"short")
-    with pytest.raises(FleetError, match="app_absent_after_ready") as refused:
+    with pytest.raises(FleetError, match="environment_absent_after_ready") as refused:
         asyncio.run(OfferByteReader(reader).open_exact(_asset(blob)))
     assert refused.value.status == 503 and reader.opened_fd is None
 
 
-def test_absent_content_is_named_with_retry_after_and_preflight_closes_fd(tmp_path) -> None:
+def test_absent_content_is_named_with_retry_after(tmp_path) -> None:
     blob = b"ready"
-    reader = _cached(tmp_path, _asset(blob), blob)
-    asyncio.run(OfferByteReader(reader).preflight((_asset(blob),)))
-    assert _closed(reader.opened_fd)
     cold = Reader(tmp_path, unavailable=Unavailable("timeout", 5))
-    with pytest.raises(FleetError, match="app_timeout") as refused:
+    with pytest.raises(FleetError, match="environment_timeout") as refused:
         asyncio.run(OfferByteReader(cold).open_exact(_asset(blob)))
     assert (refused.value.status, refused.value.retry_after) == (503, 5)

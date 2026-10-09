@@ -89,11 +89,14 @@ def test_every_desired_file_is_kept_and_only_the_unwanted_releases_are_removed(r
     assert world.reads.asset(key).produced is not None
 
 
-def test_a_v1_desired_deb_is_kept(registry, tmp_path):
+def test_the_promoted_deb_is_kept(registry, tmp_path):
     from content_db import facts_of, put_file
-    from test_content_catalog_sync import deb, published
-    world = make_sync_world(registry, tmp_path)(Upstream(), releases=[published("v0.0.1")],
-                                                promoted="v0.0.1")
+    from test_content_catalog_sync import deb
+
+    from central.content_catalog.ports import ReleaseRow
+    world = make_sync_world(registry, tmp_path)(
+        Upstream(), releases=[ReleaseRow("v0.0.1", False, deb("v0.0.1"), None)],
+        promoted="v0.0.1")
     kept = AssetKey(AssetKind.PLAYER_DEB, deb("v0.0.1").sha256)
     gone = AssetKey(AssetKind.PLAYER_DEB, "9" * 64)
     for key in (kept, gone):

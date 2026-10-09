@@ -20,7 +20,7 @@ import time
 from datetime import timedelta
 
 import pytest
-from content_db import Reads, insert_device, put_file, seed_releases
+from content_db import Reads, put_file, seed_releases
 from fakes.publisher import RecordingPublisher
 from fastapi.testclient import TestClient
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -35,14 +35,13 @@ from central.content_wiring import ContentServices
 from central.db import Database
 from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
-from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.catalog_records import PgReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
-from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch, SyncReleases
+from central.kernel.job_types import FetchPackage, Prefetch, SyncReleases
 from central.kernel.jobs import asset_key
 from central.kernel.publishing import Failed, Ready
-from central.netboot_base import SERIAL_HEADER
 from contracts.equipment import equipment_device_id
 from contracts.time import ManualClock
 
@@ -65,9 +64,8 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def os_job(tag: str) -> FetchOsImage:
-    """The fetch of `release(tag)`'s OS image: keyed by its tarball sha."""
-    return FetchOsImage(tarball_sha256=sha(image(tag)))
+def package_job(tag: str) -> FetchPackage:
+    return FetchPackage(sha256=sha(deb(tag)))
 
 
 def digest(data: bytes) -> str:
@@ -84,10 +82,6 @@ def release(tag: str, *, package: bool = True, os_image: bool = True,
     )
 
 
-def dev(device_id: str, **fields) -> dict:
-    return {"device_id": device_id, **fields}
-
-
 class StubDatabase:
     def __init__(self) -> None:
         self.reachable: bool | Exception = True
@@ -102,7 +96,7 @@ class StubDatabase:
 
 
 class World:
-    def __init__(self, registry, tmp_path, *, releases=(), devices=(), promoted=None, capacity=4,
+    def __init__(self, registry, tmp_path, *, releases=(), promoted=None, capacity=4,
                  wait: float = 5.0) -> None:
         self.clock = ManualClock(1000.0)
         self.records = PgAssetRecords(self.clock)
@@ -110,10 +104,8 @@ class World:
         self.reads = Reads(self.transactions)
         self.publisher = RecordingPublisher(self.clock, self.records, self.transactions)
         seed_releases(self.transactions, releases, promoted=promoted)
-        for fields in devices:
-            insert_device(registry.db, **fields)
         self.store = CacheStore(CacheLayout(tmp_path))
-        self.catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(),
+        self.catalog = ReleaseCatalog(releases=PgReleaseRecords(),
                                       stored=DiskStoredAssets(records=self.records,
                                                               store=self.store),
                                       transactions=self.transactions, publisher=self.publisher,
@@ -142,14 +134,6 @@ class World:
             self.records.record_produced(tx, asset_key(job), facts)
         return facts
 
-    def cached_image(self, tag: str) -> bytes:
-        job = os_job(tag)
-        self.reference(job, owner=tag)
-        self.produce(job, image(tag))
-        return image(tag)
-
-    def row(self):
-        return self.reads.device(DEVICE_ID)
 
 
 @pytest.fixture
@@ -157,8 +141,8 @@ def world(registry, tmp_path):
     return lambda **options: World(registry, tmp_path, **options)
 
 
-def base(client, serial: str | None = SERIAL):
-    return client.get("/v1/netboot/base", headers={SERIAL_HEADER: serial} if serial else {})
+def package(client, tag: str = T1):
+    return client.get(f"/v1/app/package/{sha(deb(tag))}.deb")
 
 
 def until(predicate, seconds: float = 5.0) -> None:
@@ -168,161 +152,23 @@ def until(predicate, seconds: float = 5.0) -> None:
         time.sleep(0.01)
 
 
-# -- GET /v1/netboot/base --------------------------------------------------------------------------
+# -- the deleted V1 boot routes ----------------------------------------------------------------
 
 
-def test_a_cached_base_streams_with_its_digest_and_records_the_served_tag(world):
-    w = world(releases=[release(T1)])
-    data = w.cached_image(T1)
-    with TestClient(w.app) as client:
-        response = base(client)
-    assert response.status_code == 200
-    assert response.content == data
-    assert response.headers["digest"] == digest(data)  # the Digest matches the bytes
-    assert response.headers["content-length"] == str(len(data))
-    assert response.headers["cache-control"] == "public, immutable"
-    assert response.headers["content-type"] == "application/octet-stream"
-    assert (w.row().last_served_tag, w.row().boot_outcome) == (T1, "pending")
-    assert w.publisher.calls == []  # on disk: nothing is published
-
-
-@pytest.mark.parametrize("releases", [[], [release(T1, os_image=False)]])
-def test_nothing_to_boot_is_404_base_unknown(world, releases):
-    # Decision 4: unknown content is a 404, including an empty catalog at netboot.
-    w = world(releases=releases)
-    with TestClient(w.app) as client:
-        response = base(client)
-    assert response.status_code == 404
-    assert response.json() == {"error": "base_unknown"}
-    assert w.publisher.calls == []
-
-
-def test_a_miss_waits_then_503s_with_retry_after_and_records_nothing(world):
-    w = world(releases=[release(T1)], wait=0.2)
-    w.reference(os_job(T1), owner=T1)
-    with TestClient(w.app) as client:
-        response = base(client)
-    assert response.status_code == 503
-    assert response.json() == {"error": "base_timeout"}
-    assert response.headers["retry-after"] == "5"
-    assert w.row().last_served_tag is None  # record_served only on a 200
-    assert [(c.job, c.retry_terminal) for c in w.publisher.calls] == [
-        (os_job(T1), True)]  # the request path may retry a terminal failure
-    assert w.slots.in_use == 0
-
-
-def test_a_miss_is_served_once_the_fetch_lands(world):
-    w = world(releases=[release(T1)])
-    job = os_job(T1)
-    w.reference(job, owner=T1)
-    with TestClient(w.app) as client:
-        result = {}
-        request = threading.Thread(target=lambda: result.update(response=base(client)))
-        request.start()
-        until(lambda: w.slots.in_use == 1)  # the request is waiting on the fetch's handle
-        facts = w.produce(job, image(T1))
-        w.publisher.record_outcome(job, Ready(facts))
-        request.join(10)
-    response = result["response"]
-    assert response.status_code == 200 and response.content == image(T1)
-    assert response.headers["digest"] == digest(image(T1))
-    assert w.row().last_served_tag == T1
-
-
-@pytest.mark.parametrize(("outcome", "code", "retry_after"), [
-    (Failed(False, "origin_unreachable", timedelta(seconds=7)), "base_origin_unreachable", "7"),
-    (Failed(True, "download_not_found", None), "base_download_not_found", "30"),
+@pytest.mark.parametrize(("method", "path"), [
+    ("GET", "/v1/netboot/base"),
+    ("GET", "/v1/netboot/manifest"),
+    ("GET", "/v1/operator/netboot"),
+    ("PUT", f"/v1/operator/devices/{DEVICE_ID}/pin"),
+    ("DELETE", f"/v1/operator/devices/{DEVICE_ID}/pin"),
+    ("POST", "/v1/player/base-health"),
 ])
-def test_a_failed_fetch_is_503_with_its_reason(world, outcome, code, retry_after):
-    w = world(releases=[release(T1)])
-    job = os_job(T1)
-    w.reference(job, owner=T1)
+def test_no_v1_boot_route_is_mounted(world, method, path):
+    w = world(releases=[release(T1)], promoted=T1)
     with TestClient(w.app) as client:
-        result = {}
-        request = threading.Thread(target=lambda: result.update(response=base(client)))
-        request.start()
-        until(lambda: w.slots.in_use == 1)
-        w.publisher.record_outcome(job, outcome)
-        request.join(10)
-    response = result["response"]
-    assert response.status_code == 503
-    assert response.json() == {"error": code}
-    assert response.headers["retry-after"] == retry_after
-    assert w.row().last_served_tag is None
-
-
-def test_an_unpinned_device_gets_its_known_good_while_the_frontier_is_absent(world):
-    w = world(releases=[release(T1), release(T2)], devices=[
-        dev(DEVICE_ID, serial=SERIAL, known_good_tag=T1),
-        dev("device-other", known_good_tag=T2)])
-    w.reference(os_job(T2), owner=T2)
-    data = w.cached_image(T1)
-    with TestClient(w.app) as client:
-        response = base(client)
-    assert response.status_code == 200 and response.content == data
-    # serving the substitute published the wanted tag's fetch (issue #24) in its read transaction
-    assert [(c.job, c.retry_terminal, c.within is not None) for c in w.publisher.calls] == [
-        (os_job(T2), True, True)]
-    assert w.publisher.inserted == [os_job(T2)]
-    assert w.row().last_served_tag == T1  # the substitute is what was served
-
-
-def _asgi_get(path: str, headers: dict[str, str]):
-    scope = {
-        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1", "method": "GET", "scheme": "http", "path": path,
-        "raw_path": path.encode(), "query_string": b"", "root_path": "",
-        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
-        "server": ("testserver", 80), "client": ("127.0.0.1", 1234),
-    }
-    return scope
-
-
-def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(world):
-    w = world(releases=[release(T1)], wait=30)
-    w.reference(os_job(T1), owner=T1)
-    sent: list[dict] = []
-
-    async def main() -> None:
-        gone = asyncio.Event()
-        requested = False
-
-        async def receive():
-            nonlocal requested
-            if not requested:
-                requested = True
-                return {"type": "http.request", "body": b"", "more_body": False}
-            await gone.wait()
-            return {"type": "http.disconnect"}
-
-        async def send(message):
-            sent.append(message)
-
-        call = asyncio.ensure_future(w.app(_asgi_get("/v1/netboot/base", {SERIAL_HEADER: SERIAL}),
-                                           receive, send))
-        for _ in range(500):
-            if w.slots.in_use == 1:
-                break
-            await asyncio.sleep(0.01)
-        assert w.slots.in_use == 1
-        gone.set()  # the Pi gives up long before the 30s deadline
-        await asyncio.wait_for(call, 5)
-
-    asyncio.run(main())
-    assert w.slots.in_use == 0  # freed at once, not after 30s
-    assert sent[0]["status"] == 499
-    assert w.publisher.inserted == [os_job(T1)]  # the fetch is never cancelled
-    assert w.row().last_served_tag is None
-
-
-def test_the_serial_log_line_carries_only_the_sanitized_serial(world, caplog):
-    w = world()
-    with TestClient(w.app) as client, caplog.at_level("INFO", logger="central.app"):
-        base(client, "bad serial\nforged")
-        base(client)
-    lines = [r.getMessage() for r in caplog.records if "netboot base fetch" in r.getMessage()]
-    assert lines == ["netboot base fetch: serial=<absent-or-invalid>",
-                     f"netboot base fetch: serial={SERIAL}"]
+        response = client.request(method, path, headers=AUTH, json={"tag": T1})
+    assert response.status_code == 404
+    assert w.publisher.calls == []
 
 
 # -- GET /v1/app/package/{sha256}.deb --------------------------------------------------------------
@@ -354,40 +200,104 @@ def test_a_malformed_or_unknown_package_is_404(world, name):
 
 
 def test_a_missing_package_is_503_with_retry_after(world):
-    w = world(releases=[release(T1)], wait=0.2)
-    w.reference(FetchPackage(sha256=sha(deb(T1))), owner=T1)
+    w = world(releases=[release(T1)], promoted=T1, wait=0.2)
+    w.reference(package_job(T1), owner=T1)
     with TestClient(w.app) as client:
-        response = client.get(f"/v1/app/package/{sha(deb(T1))}.deb")
+        response = package(client)
     assert response.status_code == 503
     assert response.json() == {"error": "app_timeout"}
     assert response.headers["retry-after"] == "5"
+    assert [(c.job, c.retry_terminal) for c in w.publisher.calls] == [
+        (package_job(T1), True)]  # the request path may retry a terminal failure
+    assert w.slots.in_use == 0
+
+
+def test_a_miss_is_served_once_the_fetch_lands(world):
+    w = world(releases=[release(T1)], promoted=T1)
+    job = package_job(T1)
+    w.reference(job, owner=T1)
+    with TestClient(w.app) as client:
+        result = {}
+        request = threading.Thread(target=lambda: result.update(response=package(client)))
+        request.start()
+        until(lambda: w.slots.in_use == 1)  # the request is waiting on the fetch's handle
+        facts = w.produce(job, deb(T1))
+        w.publisher.record_outcome(job, Ready(facts))
+        request.join(10)
+    response = result["response"]
+    assert response.status_code == 200 and response.content == deb(T1)
+    assert response.headers["digest"] == digest(deb(T1))
+
+
+@pytest.mark.parametrize(("outcome", "code", "retry_after"), [
+    (Failed(False, "origin_unreachable", timedelta(seconds=7)), "app_origin_unreachable", "7"),
+    (Failed(True, "download_not_found", None), "app_download_not_found", "30"),
+])
+def test_a_failed_fetch_is_503_with_its_reason(world, outcome, code, retry_after):
+    w = world(releases=[release(T1)], promoted=T1)
+    job = package_job(T1)
+    w.reference(job, owner=T1)
+    with TestClient(w.app) as client:
+        result = {}
+        request = threading.Thread(target=lambda: result.update(response=package(client)))
+        request.start()
+        until(lambda: w.slots.in_use == 1)
+        w.publisher.record_outcome(job, outcome)
+        request.join(10)
+    response = result["response"]
+    assert response.status_code == 503
+    assert response.json() == {"error": code}
+    assert response.headers["retry-after"] == retry_after
+
+
+def _asgi_get(path: str, headers: dict[str, str]):
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1", "method": "GET", "scheme": "http", "path": path,
+        "raw_path": path.encode(), "query_string": b"", "root_path": "",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "server": ("testserver", 80), "client": ("127.0.0.1", 1234),
+    }
+    return scope
+
+
+def test_a_disconnect_frees_the_waiter_slot_and_leaves_the_job(world):
+    w = world(releases=[release(T1)], promoted=T1, wait=30)
+    w.reference(package_job(T1), owner=T1)
+    sent: list[dict] = []
+
+    async def main() -> None:
+        gone = asyncio.Event()
+        requested = False
+
+        async def receive():
+            nonlocal requested
+            if not requested:
+                requested = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await gone.wait()
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        call = asyncio.ensure_future(w.app(_asgi_get(f"/v1/app/package/{sha(deb(T1))}.deb", {}),
+                                           receive, send))
+        for _ in range(500):
+            if w.slots.in_use == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert w.slots.in_use == 1
+        gone.set()  # the client gives up long before the 30s deadline
+        await asyncio.wait_for(call, 5)
+
+    asyncio.run(main())
+    assert w.slots.in_use == 0  # freed at once, not after 30s
+    assert sent[0]["status"] == 499
+    assert w.publisher.inserted == [package_job(T1)]  # the fetch is never cancelled
 
 
 # -- manifests -------------------------------------------------------------------------------------
-
-
-def test_the_netboot_manifest_is_the_served_tags_package(world):
-    w = world(releases=[release(T1), release(T2)], devices=[
-        dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1, last_served_at=1000.0)])
-    with TestClient(w.app) as client:
-        response = client.get("/v1/netboot/manifest", headers={SERIAL_HEADER: SERIAL})
-    assert response.status_code == 200
-    assert response.json() == {"version": T1, "sha256": sha(deb(T1)), "size": len(deb(T1)),
-                               "tag": T1}
-
-
-@pytest.mark.parametrize(("devices", "releases", "code"), [
-    ([], [release(T1)], "app_manifest_unresolved"),
-    ([dev(DEVICE_ID, serial=SERIAL, last_served_tag=T1, last_served_at=1000.0)],
-     [release(T1, package=False)],
-     "app_manifest_undeployable"),
-])
-def test_an_unresolvable_netboot_manifest_is_503(world, devices, releases, code):
-    w = world(releases=releases, devices=devices)
-    with TestClient(w.app) as client:
-        response = client.get("/v1/netboot/manifest", headers={SERIAL_HEADER: SERIAL})
-    assert response.status_code == 503
-    assert response.json() == {"error": code}
 
 
 def test_the_app_manifest_is_the_promoted_package_without_its_bytes(world):
@@ -496,10 +406,7 @@ def test_operator_content_routes_are_admin_gated(world):
     with TestClient(w.app) as client:
         for method, path in [("GET", "/v1/operator/app/releases"),
                              ("POST", f"/v1/operator/app/releases/{T1}/promote"),
-                             ("POST", "/v1/operator/app/releases/refresh"),
-                             ("PUT", f"/v1/operator/devices/{DEVICE_ID}/pin"),
-                             ("DELETE", f"/v1/operator/devices/{DEVICE_ID}/pin"),
-                             ("GET", "/v1/operator/netboot")]:
+                             ("POST", "/v1/operator/app/releases/refresh")]:
             assert client.request(method, path, json={"tag": T1}).status_code == 401, path
 
 
@@ -554,44 +461,3 @@ def test_refresh_publishes_a_sync(world):
         response = client.post("/v1/operator/app/releases/refresh", headers=AUTH)
     assert response.status_code == 202 and response.json() == {"status": "polling"}
     assert SyncReleases() in w.publisher.inserted and Prefetch() in w.publisher.inserted
-
-
-def test_pin_and_unpin(world):
-    w = world(releases=[release(T1)], devices=[dev(DEVICE_ID, serial=SERIAL)])
-    with TestClient(w.app) as client:
-        pinned = client.put(f"/v1/operator/devices/{DEVICE_ID}/pin", headers=AUTH,
-                            json={"tag": T1})
-        assert pinned.status_code == 200 and pinned.json() == {"status": "pinned"}
-        assert w.row().attached_tag == T1
-        assert os_job(T1) in w.publisher.inserted
-        cleared = client.delete(f"/v1/operator/devices/{DEVICE_ID}/pin", headers=AUTH)
-        assert cleared.status_code == 200 and cleared.json() == {"status": "cleared"}
-        assert w.row().attached_tag is None
-
-
-@pytest.mark.parametrize(("device_id", "tag", "code"), [
-    ("device-unknown", T1, "device_not_found"),
-    (DEVICE_ID, "v9.9.9", "release_not_found"),
-])
-def test_pin_refusals_are_404_with_no_write(world, device_id, tag, code):
-    w = world(releases=[release(T1)], devices=[dev(DEVICE_ID, serial=SERIAL)])
-    with TestClient(w.app) as client:
-        response = client.put(f"/v1/operator/devices/{device_id}/pin", headers=AUTH,
-                              json={"tag": tag})
-        assert client.delete("/v1/operator/devices/device-unknown/pin",
-                             headers=AUTH).status_code == 404
-    assert response.status_code == 404 and response.json() == {"error": code}
-    assert w.row().attached_tag is None
-
-
-def test_the_netboot_view_is_frontier_and_devices_only(world):
-    w = world(releases=[release(T1)], devices=[
-        dev(DEVICE_ID, serial=SERIAL, known_good_tag=T1)])
-    with TestClient(w.app) as client:
-        response = client.get("/v1/operator/netboot", headers=AUTH)
-    assert response.status_code == 200
-    body = response.json()
-    assert set(body) == {"frontier", "devices"}
-    assert body["frontier"] == T1
-    assert [d["device_id"] for d in body["devices"]] == [DEVICE_ID]
-    assert body["devices"][0]["known_good_tag"] == T1

@@ -8,7 +8,6 @@ Job types are imported at runtime, never under `TYPE_CHECKING`: `handler_job_typ
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Final
 
@@ -16,13 +15,11 @@ from central.assets.os_image import extract_squashfs
 from central.assets.production import AssetProduction
 from central.assets.store import CacheStore
 from central.kernel.assets import AssetReady, OriginLocator
-from central.kernel.handling import OriginRejected
 from central.kernel.job_types import (
     AssetJob,
     FetchLibraryThumbnail,
     FetchOsImage,
     FetchPackage,
-    FetchPlayerPayload,
     FetchSealedEnvironment,
     Prefetch,
 )
@@ -37,7 +34,6 @@ from central.kernel.ports import (
 from central.kernel.publishing import Publisher, started
 from central.kernel.transactions import Transactions
 from contracts.node_boot import MAX_ENVIRONMENT_BYTES
-from contracts.player_payload import MAX_ARCHIVE_BYTES, PayloadError, verify_archive
 from contracts.release import MAX_ROOTFS_BYTES
 
 MAX_TARBALL_BYTES: Final = MAX_ROOTFS_BYTES
@@ -99,31 +95,6 @@ class FetchSealedEnvironmentHandler(FetchPackageHandler):
 
     async def handle(self, job: FetchSealedEnvironment) -> AssetReady:
         return await self._production.produce(job, self._write)
-
-
-class FetchPlayerPayloadHandler:
-    """Cache verified data-only Player archive bytes under their own asset kind."""
-
-    def __init__(self, *, production: AssetProduction, origin: ReleaseOrigin,
-                 expected_abi: Callable[[str], Awaitable[str | None]]) -> None:
-        self._production = production
-        self._origin = origin
-        self._expected_abi = expected_abi
-
-    async def handle(self, job: FetchPlayerPayload) -> AssetReady:
-        return await self._production.produce(job, self._write)
-
-    async def _write(self, temp: Path, locator: OriginLocator) -> None:
-        await self._origin.download(locator, temp,
-                                    max_bytes=locator.size or MAX_ARCHIVE_BYTES)
-        try:
-            manifest = await asyncio.to_thread(verify_archive, temp)
-            expected = await self._expected_abi(locator.sha256)
-            if expected is None or manifest["base_abi"] != expected:
-                raise PayloadError("base_abi_claim_mismatch")
-        except PayloadError:
-            temp.unlink(missing_ok=True)
-            raise OriginRejected("player_payload_invalid") from None
 
 
 class FetchLibraryThumbnailHandler:

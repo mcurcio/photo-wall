@@ -10,7 +10,6 @@ on failure and never returns a partial list.
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,12 +21,6 @@ from central.kernel.job_types import (
 )
 from central.kernel.transactions import Transaction
 from central.kernel.types import release_version, require_reason, require_sha256
-from contracts.player_payload import FORMAT as PLAYER_PAYLOAD_FORMAT
-
-
-@dataclass(frozen=True, slots=True)
-class NetbootBaseRequest:
-    serial: str | None  # raw header; the catalog sanitizes it
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,9 +29,6 @@ class PackageRequest:
 
     def __post_init__(self) -> None:
         require_sha256(self.sha256)
-
-
-ContentRequest: TypeAlias = NetbootBaseRequest | PackageRequest
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +76,7 @@ class DesiredTiers:
 
 
 class ContentCatalog(Protocol):
-    async def resolve(self, request: ContentRequest) -> Resolution: ...
+    async def resolve(self, request: PackageRequest) -> Resolution: ...
 
     async def desired_assets(self) -> frozenset[AssetJob]: ...
 
@@ -180,13 +170,6 @@ class AssetRecords(Protocol):
         that wrote it, so no two machines' clocks are ever compared."""
         ...
 
-    def lock_produced(self, tx: Transaction, key: AssetKey) -> AssetReady | None:
-        """The key's produced facts (None when absent or not produced), read under a lock held
-        to the end of `tx` that serializes with `record_produced`: a concurrent recording either
-        committed before this read, and is seen, or waits until `tx` ends. References play no
-        part: facts are returned even when every reference was retired."""
-        ...
-
 
 def _complete_locator(locator: object) -> None:
     if not isinstance(locator, OriginLocator) or locator.sha256 is None or locator.size is None:
@@ -208,22 +191,6 @@ class UpstreamVersion:
             raise ValueError("invalid_changed_at")
         if type(self.asset_id) is not int or self.asset_id <= 0:
             raise ValueError("invalid_asset_id")
-
-
-@dataclass(frozen=True, slots=True)
-class PlayerPayload:
-    """A schema-2 Player archive and the base-owned launcher ABI it requires."""
-
-    locator: OriginLocator
-    format: str
-    base_abi: str
-
-    def __post_init__(self) -> None:
-        _complete_locator(self.locator)
-        if (self.format != PLAYER_PAYLOAD_FORMAT
-                or not isinstance(self.base_abi, str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.base_abi) is None):
-            raise ValueError("invalid_player_payload")
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,25 +222,20 @@ NODE_RELEASE_INVALID: Final = "node_release_invalid"
 class PublishedRelease:
     tag: str  # release_version-valid
     is_prerelease: bool
-    package: OriginLocator | None  # the Player .deb; url, sha256 and size all set when present
-    package_problem: str | None  # require_reason; set iff package is None
     os_image: OriginLocator | None  # the base tarball; url, sha256 and size set when present
-    # Set only for a manifest that was read, valid and complete (its `.deb` attached); None
-    # otherwise (absent, 404/410, invalid, or `.deb` not attached yet): an observation with no
-    # version is refused over a stored one, so it can never wipe the tag.
+    # Set only for a `manifest.json` that was read, valid and complete (its base tarball
+    # attached); None otherwise (absent, 404/410, invalid, or not attached yet): an observation
+    # with no version is refused over a stored one, so it can never wipe the tag.
     upstream_version: UpstreamVersion | None
-    payload: PlayerPayload | None = None
-    base_abi: str | None = None
-    base_abi_squashfs_sha256: str | None = None
     node_publication: NodePublication | None = None
     # Why the attached node manifest was refused (deterministic, this release only); never set
     # with `node_publication`. Both None: the release attaches no node manifest.
     node_problem: str | None = None
     # The node manifest asset's own `(updated_at, id)`: the version of `node_publication` or of
-    # `node_problem`, guarded independently of the legacy manifest's `upstream_version`.
+    # `node_problem`, guarded independently of `manifest.json`'s `upstream_version`.
     node_version: UpstreamVersion | None = None
-    # False only for a pre-release listed while legacy pre-releases are off: its node facts are
-    # observed, its legacy facts were not read, and no legacy row is written for it.
+    # False only for a pre-release listed while pre-releases are off: its node facts are
+    # observed, its `manifest.json` was not read, and no `app_releases` row is written for it.
     legacy: bool = True
 
     def __post_init__(self) -> None:
@@ -288,31 +250,11 @@ class PublishedRelease:
             raise ValueError("invalid_node_version")
         if type(self.legacy) is not bool:
             raise ValueError("invalid_legacy")
-        if not self.legacy and (self.os_image is not None or self.payload is not None
-                                or self.upstream_version is not None
+        if not self.legacy and (self.os_image is not None or self.upstream_version is not None
                                 or (self.node_publication is None and self.node_problem is None)):
             raise ValueError("invalid_unlisted_legacy")
-        if self.package is None:
-            if self.package_problem is None:
-                raise ValueError("missing_package_problem")
-            require_reason(self.package_problem)
-        else:
-            _complete_locator(self.package)
-            if self.package_problem is not None:
-                raise ValueError("unexpected_package_problem")
         if self.os_image is not None:
             _complete_locator(self.os_image)
-        if self.payload is not None and not isinstance(self.payload, PlayerPayload):
-            raise ValueError("invalid_player_payload")
-        if (self.base_abi is None) != (self.base_abi_squashfs_sha256 is None):
-            raise ValueError("incomplete_base_abi")
-        if self.base_abi is not None and (
-                self.os_image is None
-                or not isinstance(self.base_abi, str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.base_abi) is None
-                or not isinstance(self.base_abi_squashfs_sha256, str)
-                or re.fullmatch(r"[0-9a-f]{64}", self.base_abi_squashfs_sha256) is None):
-            raise ValueError("invalid_base_abi")
 
 
 @dataclass(frozen=True, slots=True)

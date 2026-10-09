@@ -41,15 +41,6 @@ def _seed(registry, *, phase: str = "stop_committed", schema: int = 1,
                      "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,900,900)")
         conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
                      "VALUES(%s,%s,900,900)", (DEVICE, SERIAL))
-        conn.execute("INSERT INTO fleet_boot_offers(offer_id,installation_audience,device_id,"
-                     "serial,kernel_boot_id,boot_nonce,base_policy_source,base_policy_revision,"
-                     "app_policy_source,app_policy_revision,base_tag,base_content_key,"
-                     "base_sha256,base_size,app_status,compatibility_basis,offer_schema,"
-                     "created_at,expires_at) "
-                     "VALUES(%s,%s,%s,%s,%s,%s,'operator_baseline',1,'explicit',1,"
-                     "'v1.0.0',%s,%s,1024,'unconfigured','none',2,900,2000)",
-                     (OFFER, AUDIENCE, DEVICE, SERIAL, BOOT, "1" * 32,
-                      "a" * 64, "b" * 64))
         conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
                      "device_generation,kernel_boot_id,offer_id,installation_audience,"
                      "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at) "

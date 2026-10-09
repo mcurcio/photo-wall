@@ -2,7 +2,8 @@
 
 The domain code under test runs against the migrated schema through the real repositories, like
 the rest of the suite (the `registry` fixture skips without PHOTO_WALL_TEST_DATABASE_URL; CI runs
-it). Rows go in through the repositories, or as SQL for tables no repository writes (`devices`).
+it). Rows go in through the repositories, or as SQL for what no repository writes (`devices`, a
+release's Player `.deb`).
 """
 
 from __future__ import annotations
@@ -18,10 +19,10 @@ from runtime_fakes import apply_procrastinate_schema
 from test_registry import enroll, frame
 
 from central.assets.store import CacheStore
-from central.content_catalog.ports import DeviceRow, Promoter, Promotion, ReleaseRow, StoredEtag
+from central.content_catalog.ports import Promoter, Promotion, ReleaseRow, StoredEtag
 from central.db import Database
 from central.infra.asset_records import PgAssetRecords
-from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransaction, PgTransactions, pg_connection
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, AssetReference, OriginLocator
 from central.kernel.ports import PublishedRelease
@@ -76,46 +77,48 @@ def sha(text: str) -> str:
 
 
 def published(row: ReleaseRow) -> PublishedRelease:
-    """The listing entry that stores `row` (the inverse of `PgReleaseRecords.get`), with no
-    upstream version: any later observation applies over it."""
-    return PublishedRelease(row.tag, row.is_prerelease, row.package,
-                            None if row.package else "no_player_asset", row.os_image, None)
+    """The listing entry that stores `row`'s release facts (its OS image), with no upstream
+    version: any later observation applies over it."""
+    return PublishedRelease(row.tag, row.is_prerelease, row.os_image, None)
 
 
 def seed_releases(transactions: PgTransactions, rows, *, promoted: str | None = None,
                   promoted_by: Promoter = "operator", last_good: str | None = None,
                   etag: str | None = None, now: float = 1000.0,
                   etag_stored_at: float | None = None) -> None:
-    """Claim and apply every release (a `ReleaseRow` or `PublishedRelease`; a divergent row is
-    applied frozen), then the policy and the ETag (stored at `etag_stored_at`, default `now`)."""
+    """Claim and apply every release (a `ReleaseRow` or `PublishedRelease`). A `ReleaseRow`'s
+    Player `.deb` is written as SQL, as the netboot tracer seeds it: no sync writes one. Then the
+    policy (`promoted_by` "auto" stands for a promotion the retired auto-promote recorded) and
+    the ETag (stored at `etag_stored_at`, default `now`)."""
     releases = PgReleaseRecords()
     with transactions.begin() as tx:
         for row in rows:
             release = published(row) if isinstance(row, ReleaseRow) else row
-            divergent = isinstance(row, ReleaseRow) and row.divergent
-            if releases.claim(tx, release, now=now) is not None or divergent:
-                releases.apply(tx, release, divergent=divergent, now=now)
+            if releases.claim(tx, release, now=now) is not None:
+                releases.apply(tx, release, now=now)
+            if isinstance(row, ReleaseRow) and row.package is not None:
+                pg_connection(tx).execute(
+                    "UPDATE app_releases SET asset_url=%s,asset_sha256=%s,asset_size=%s "
+                    "WHERE tag=%s",
+                    (row.package.url, row.package.sha256, row.package.size, row.tag))
         if promoted is not None:
-            releases.set_promoted(tx, promoted, by=promoted_by)
+            releases.set_promoted(tx, promoted)
+            pg_connection(tx).execute("UPDATE app_release_policy SET promoted_by=%s",
+                                      (promoted_by,))
         if last_good is not None:
             releases.set_last_good(tx, last_good)
         if etag is not None:
             releases.store_etag(tx, etag, now=now if etag_stored_at is None else etag_stored_at)
 
 
-def insert_device(db, device_id: str, *, serial: str | None = None,
-                  attached_tag: str | None = None, known_good_tag: str | None = None,
-                  last_served_tag: str | None = None, boot_outcome: str | None = None,
-                  failed_tag: str | None = None, last_served_at: float | None = None,
-                  retired: bool = False, seen: float = 1000.0) -> None:
-    """A `devices` row (the tags must be releases: the table's foreign keys)."""
+def insert_device(db, device_id: str, *, serial: str | None = None, retired: bool = False,
+                  seen: float = 1000.0) -> None:
+    """A `devices` row."""
     with db.transaction() as conn:
         conn.execute(
-            "INSERT INTO devices(device_id, serial, attached_tag, known_good_tag, "
-            "last_served_tag, boot_outcome, failed_tag, last_served_at, first_seen, last_seen, "
-            "retired_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (device_id, serial, attached_tag, known_good_tag, last_served_tag, boot_outcome,
-             failed_tag, last_served_at, seen, seen, seen if retired else None))
+            "INSERT INTO devices(device_id, serial, first_seen, last_seen, retired_at) "
+            "VALUES(%s,%s,%s,%s,%s)",
+            (device_id, serial, seen, seen, seen if retired else None))
 
 
 def bind_a_player(registry) -> None:
@@ -130,10 +133,6 @@ class Reads:
 
     def __init__(self, transactions: PgTransactions) -> None:
         self.transactions = transactions
-
-    def device(self, device_id: str) -> DeviceRow | None:
-        with self.transactions.begin() as tx:
-            return PgDeviceRecords().get(tx, device_id)
 
     def release(self, tag: str) -> ReleaseRow | None:
         with self.transactions.begin() as tx:

@@ -516,12 +516,10 @@ def test_the_packaged_tarball_is_the_declared_layout_central_reads(tmp_path):
 
 
 def test_central_reads_the_packaged_manifest_as_a_deployable_release(tmp_path):
-    """The images block is additive: Central's parser (central/origins/github.py) ignores it and
-    finds the .deb and the base tarball the packager attached."""
+    """The images block is additive: Central's parser (central/origins/github.py) ignores it, and
+    the Player `.deb`, and finds the base tarball the packager attached."""
     destination, manifest = _packaged(tmp_path)
     assets = _asset_urls([{"name": path.name, "browser_download_url": f"https://x/{path.name}"}
                           for path in destination.iterdir()])
     parsed = _parse_manifest((destination / MANIFEST).read_bytes(), assets, None)
-    assert parsed.package_problem is None
-    assert parsed.package.sha256 == manifest["player_deb"]["sha256"]
     assert parsed.os_image.sha256 == manifest["base_image"]["sha256"]

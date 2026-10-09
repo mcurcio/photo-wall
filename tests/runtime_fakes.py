@@ -17,7 +17,6 @@ from central.kernel.job_types import (
     FetchLibraryThumbnail,
     FetchOsImage,
     FetchPackage,
-    FetchPlayerPayload,
     FetchSealedEnvironment,
     MaintainCache,
     Prefetch,
@@ -37,11 +36,6 @@ class FetchOsImageStub:
 
 class FetchPackageStub:
     async def handle(self, job: FetchPackage) -> AssetReady:
-        return FACTS
-
-
-class FetchPlayerPayloadStub:
-    async def handle(self, job: FetchPlayerPayload) -> AssetReady:
         return FACTS
 
 
@@ -81,15 +75,14 @@ class PurgeStub:
 
 
 def catalog_stubs() -> list[Any]:
-    return [FetchOsImageStub(), FetchPackageStub(), FetchPlayerPayloadStub(),
-            FetchSealedEnvironmentStub(), FetchLibraryThumbnailStub(), SyncReleasesStub(),
+    return [FetchOsImageStub(), FetchPackageStub(), FetchSealedEnvironmentStub(),
+            FetchLibraryThumbnailStub(), SyncReleasesStub(),
             PrefetchStub(), MaintainCacheStub(), RescueStub(), PurgeStub()]
 
 
 def catalog_instances() -> list[Job]:
     samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32),
                FetchPackage: FetchPackage(sha256="ab" * 32),
-               FetchPlayerPayload: FetchPlayerPayload(sha256="ef" * 32),
                FetchSealedEnvironment: FetchSealedEnvironment(sha256="12" * 32),
                FetchLibraryThumbnail: FetchLibraryThumbnail(asset_id="asset-" + "34" * 32)}
     return [samples.get(job_type) or job_type() for job_type in CATALOG]

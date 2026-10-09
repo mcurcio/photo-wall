@@ -3,8 +3,8 @@
 The console assumes node control and shows no V1-lane surface. That posture is held by ONE
 source-scan test over every console module, with ONE shared list (`V2_POSTURE`, below: the
 bead's acceptance list, verbatim), and mutation probes proving the scan refuses what it should.
-The pure parts of node control (nodeControl.js) and the deprecated-path line (bootFacts.js)
-run under Node, as tests/test_console_players.py runs the fleet model.
+The pure parts of node control (nodeControl.js) and the boot facts (bootFacts.js) run under
+Node, as tests/test_console_players.py runs the fleet model.
 """
 
 import json
@@ -23,9 +23,9 @@ SRC = Path(__file__).parents[1] / "central/console/src"
 #   reader  only this module reads `transport_enabled`.
 V2_POSTURE = {
     "routes": ("/v1/operator/fleet", "maintenance-requests", "app-override", "app-policy",
-               "base-baseline", "/v1/netboot/"),
+               "base-baseline", "/v1/netboot/", "/v1/operator/netboot", "/pin"),
     "words": ("V1", "netboot base", "release frontier", "maintenance request",
-              "node management is off"),
+              "node management is off", "photowall.node", "deprecated path"),
     "exemptions": {"nodeControl.js": ("node management is off",)},
     "reader": ("transport_enabled", "nodeControl.js"),
 }
@@ -163,10 +163,17 @@ out.gates = [
   { state: "open", effective_state: "open", generation: 4, reason: null },
 ].map((value) => factText(control.effectGateFact(value)));
 out.recorded = factText(control.effectGateFact({ ...gate, changed_at: 1000 }));
-out.deprecated = [
-  boot.deprecatedBootFact({ path: "offer", recorded_at: 1700 }, 2000),
-  boot.deprecatedBootFact({ path: "base_without_offer", recorded_at: 1990 }, 2000),
-].map(factText).concat([boot.deprecatedBootFact(null, 2000)]);
+const rows = [{ device_id: "device-a", serial: "10000000aaaa0001" }, { device_id: "device-b" }];
+out.boot = [
+  null,
+  { read: null, failed: false },
+  { read: null, failed: true },
+  { read: { devices: rows }, failed: false },
+  { read: { devices: rows }, failed: true },
+].map((hosts) => {
+  const facts = boot.bootFactsFrom(hosts);
+  return { ...facts, devices: [...facts.devices.values()] };
+});
 console.log(JSON.stringify(out));
 """
 
@@ -213,9 +220,13 @@ def test_the_effect_gate_has_one_wording_with_centrals_reason_and_no_age():
     assert " ago" not in out["recorded"]
 
 
-def test_the_deprecated_path_line_is_centrals_record_with_centrals_age():
-    assert _run()["deprecated"] == [
-        "Central's newest boot record for this box is a deprecated boot offer · recorded 5 min ago",
-        "Central's newest boot record for this box is a base image served without an offer · recorded 10 s ago",
-        None,
+def test_boot_facts_are_each_boxs_serial_from_the_fleet_host_read():
+    rows = [{"device_id": "device-a", "serial": "10000000aaaa0001"},
+            {"device_id": "device-b", "serial": None}]
+    assert _run()["boot"] == [
+        {"devices": [], "loaded": False, "unavailable": False},  # node control off: no read
+        {"devices": [], "loaded": False, "unavailable": False},  # not read yet
+        {"devices": [], "loaded": False, "unavailable": True},   # the first read failed
+        {"devices": rows, "loaded": True, "unavailable": False},
+        {"devices": rows, "loaded": True, "unavailable": True},  # a later read failed: kept
     ]

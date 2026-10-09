@@ -2,59 +2,46 @@
 the sha256 of its base tarball, so jobs may run in any order.
 
 Real PostgreSQL (the `registry` fixture; CI runs it), a fake origin, real tarballs, the real
-release sync, `AssetProduction` with the real OS-image handler, and the real boot route over
-`AssetReader`. A worker's run is `FetchOsImageHandler.handle` plus the `record_produced` the
-runtime writes after it. T7 migrates a schema at 027 across 028.
+release sync, `AssetProduction` with the real OS-image handler, and reads through the real
+`AssetReader` (what a node offer's base route opens). A worker's run is
+`FetchOsImageHandler.handle` plus the `record_produced` the runtime writes after it. T7 migrates
+a schema at 027 across 028.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
+import os
 from datetime import timedelta
 
 import pytest
-from content_db import Reads, RecordingTransactions, insert_device, schema_before
+from content_db import Reads, RecordingTransactions, schema_before
 from fakes.origin import FakeReleaseOrigin
 from fakes.publisher import RecordingPublisher
-from fastapi.testclient import TestClient
 from support.github_release import real_tarball
-from test_content_routes_http import ADMIN, StubDatabase
 
-from central.app import create_app
 from central.assets.handlers import FetchOsImageHandler
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.assets.production import AssetProduction
-from central.assets.reader import AssetReader, WaiterSlots
+from central.assets.reader import AssetReader, Opened, WaiterSlots
 from central.assets.store import CacheStore
-from central.content_catalog.catalog import NetbootCandidates, ReleaseCatalog
+from central.content_catalog.catalog import ReleaseCatalog
 from central.content_catalog.sync import SyncReleasesHandler
-from central.content_wiring import ContentServices
 from central.db import Database
-from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
-from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+from central.infra.catalog_records import PgReleaseRecords
 from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import pg_connection
 from central.kernel.assets import AssetKey, AssetKind, AssetReady, OriginLocator
 from central.kernel.job_types import FetchOsImage, SyncReleases
 from central.kernel.jobs import asset_key
-from central.kernel.ports import (
-    NetbootBaseRequest,
-    PublishedRelease,
-    ReleaseListing,
-    UpstreamVersion,
-)
-from central.netboot_base import SERIAL_HEADER
-from contracts.equipment import equipment_device_id
+from central.kernel.ports import Candidates, PublishedRelease, ReleaseListing, UpstreamVersion
 from contracts.time import ManualClock
 
 V1, V2 = "v1.0.0", "v1.1.0"
-SERIAL = "10000000c0ffee77"
-DEVICE_ID = equipment_device_id("pi", SERIAL.encode())
 
 
 class Build:
@@ -82,8 +69,7 @@ def url(tag: str) -> str:
 
 def published(tag: str, build: Build, at: int = 1) -> PublishedRelease:
     """`tag` shipping `build`, observed at upstream version `at`: a re-cut is a newer one."""
-    return PublishedRelease(tag, False, None, "no_player_asset", build.locator(url(tag)),
-                            UpstreamVersion(float(at), 1))
+    return PublishedRelease(tag, False, build.locator(url(tag)), UpstreamVersion(float(at), 1))
 
 
 class HeldOrigin(FakeReleaseOrigin):
@@ -119,12 +105,12 @@ class World:
         self.publisher = RecordingPublisher(self.clock, self.assets, self.transactions)
         self.store = CacheStore(CacheLayout(tmp_path / "cache"))
         self.catalog = ReleaseCatalog(
-            releases=PgReleaseRecords(), devices=PgDeviceRecords(),
+            releases=PgReleaseRecords(),
             stored=DiskStoredAssets(records=self.assets, store=self.store),
             transactions=self.transactions, publisher=self.publisher, clock=self.clock)
         self.origin = HeldOrigin()
         self.sync_handler = SyncReleasesHandler(
-            origin=self.origin, releases=PgReleaseRecords(), devices=PgDeviceRecords(),
+            origin=self.origin, releases=PgReleaseRecords(),
             assets=self.assets, transactions=self.transactions, publisher=self.publisher,
             catalog=self.catalog, clock=self.clock,
             node_releases=PgNodeReleaseRecords(self.clock),
@@ -133,13 +119,10 @@ class World:
             production=AssetProduction(store=self.store, records=self.assets,
                                        transactions=self.transactions),
             origin=self.origin, store=self.store)
-        reader = AssetReader(store=self.store, records=self.assets,
-                             transactions=self.transactions, publisher=self.publisher,
-                             slots=WaiterSlots(4), clock=self.clock,
-                             wait_timeout=timedelta(seconds=1))
-        database = StubDatabase()
-        self.app = create_app(database, self.clock, ADMIN, content=ContentServices(
-            catalog=self.catalog, reader=reader, probe=PodProbe(database.healthy), feed=None))
+        self.reader = AssetReader(store=self.store, records=self.assets,
+                                  transactions=self.transactions, publisher=self.publisher,
+                                  slots=WaiterSlots(4), clock=self.clock,
+                                  wait_timeout=timedelta(seconds=1))
         self._etag = 0
 
     # -- the release origin and its sync ----------------------------------------------------------
@@ -193,13 +176,14 @@ class World:
         return sorted(p.name for p in directory.iterdir()
                       if not p.name.startswith(TEMP_PREFIX)) if directory.exists() else []
 
-    def boot(self, serial: str = SERIAL):
-        with TestClient(self.app) as client:
-            return client.get("/v1/netboot/base", headers={SERIAL_HEADER: serial})
-
-
-def digest(data: bytes) -> str:
-    return "sha-256=" + base64.b64encode(hashlib.sha256(data).digest()).decode()
+    def read(self, build: Build) -> bytes:
+        """The image's bytes as a node offer's base route opens them (its exact job)."""
+        opened = asyncio.run(self.reader.read(Candidates((build.job,), pinned=True)))
+        assert isinstance(opened, Opened), opened
+        with os.fdopen(opened.fd, "rb") as source:
+            data = source.read()
+        assert (opened.size, opened.sha256) == (build.facts.size, build.facts.sha256)
+        return data
 
 
 @pytest.fixture
@@ -207,7 +191,7 @@ def world(registry, tmp_path):
     return World(registry, tmp_path)
 
 
-def test_t1_a_recut_moves_the_reference_to_the_new_key_and_boots_it(world):
+def test_t1_a_recut_moves_the_reference_to_the_new_key_and_reads_it(world):
     world.list(published(V1, S1), serving={url(V1): S1})
     assert world.fetch(S1) == S1.facts
     world.list(published(V1, S2, at=2), serving={url(V1): S2})  # re-cut: same URL, new bytes
@@ -215,11 +199,7 @@ def test_t1_a_recut_moves_the_reference_to_the_new_key_and_boots_it(world):
     assert world.os_references(V1) == [S2.sha]  # v1 references only (os-image, S2)
     assert world.reads.facts(S1.key) == S1.facts  # the old key keeps its facts
     assert world.fetch(S2) == S2.facts
-    response = world.boot()
-    assert response.status_code == 200
-    assert response.content == S2.squashfs
-    assert response.headers["digest"] == digest(S2.squashfs)
-    assert world.reads.device(DEVICE_ID).last_served_tag == V1
+    assert world.read(S2) == S2.squashfs
 
 
 def test_t2_a_zombie_on_the_old_key_cannot_touch_the_new_one(world):
@@ -239,9 +219,7 @@ def test_t2_a_zombie_on_the_old_key_cannot_touch_the_new_one(world):
     assert world.file(S2) == S2.squashfs
     assert world.reads.asset(S2.key).produced == S2.facts
     assert world.file(S1) == S1.squashfs and world.reads.facts(S1.key) == S1.facts
-    response = world.boot()
-    assert response.status_code == 200 and response.content == S2.squashfs
-    assert response.headers["digest"] == digest(S2.squashfs)
+    assert world.read(S2) == S2.squashfs
 
 
 def test_t3_a_flip_flop_keeps_the_facts_and_downloads_once(world):
@@ -254,12 +232,10 @@ def test_t3_a_flip_flop_keeps_the_facts_and_downloads_once(world):
     assert world.reads.asset(S2.key).produced == S2.facts  # the facts survived the interlude
 
 
-def test_t4_two_tags_sharing_a_tarball_are_one_asset_and_one_candidate(world):
+def test_t4_two_tags_sharing_a_tarball_are_one_asset(world):
     world.list(published(V1, S1), published(V2, S1), serving={url(V1): S1, url(V2): S1})
     assert world.os_asset_rows() == 1
     assert sorted(world.reads.owners(S1.key)) == [V1, V2]
-    resolution = asyncio.run(world.catalog.resolve(NetbootBaseRequest(SERIAL)))
-    assert resolution == NetbootCandidates((S1.job,), pinned=False, tags=(V2,))  # the preferred
     world.fetch(S1)
     assert world.os_files() == [f"base-{S1.sha}.squashfs"]
 
@@ -271,18 +247,6 @@ def test_t5_a_rejected_newest_reference_falls_back_to_another_tags_url(world):
     assert world.fetch(S1) == S1.facts
     assert [locator.url for locator in world.origin.downloads] == [url(V2), url(V1)]
     assert world.file(S1) == S1.squashfs
-
-
-def test_t6_a_substitute_serve_records_the_known_good_tag(world):
-    # The device's frontier (v1.1.0) is not on disk; its known-good (v1.0.0) is and is served.
-    world.list(published(V1, S1), published(V2, S2), serving={url(V1): S1, url(V2): S2})
-    insert_device(world.db, DEVICE_ID, serial=SERIAL, known_good_tag=V1)
-    insert_device(world.db, "device-other", known_good_tag=V2)
-    world.fetch(S1)
-    response = world.boot()
-    assert response.status_code == 200 and response.content == S1.squashfs
-    assert world.reads.device(DEVICE_ID).last_served_tag == V1
-    assert S2.job in world.publisher.inserted  # the wanted image's fetch was published
 
 
 # -- T7: migration 028 ----------------------------------------------------------------------------

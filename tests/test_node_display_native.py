@@ -14,7 +14,7 @@ import pytest
 import uvicorn
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
-from test_fleet_attempts import DEVICE_ID, OFFER_ID, SERIAL
+from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_registry import frame
 
 from central.coordination import Coordinator
@@ -79,10 +79,12 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
     @app.post("/fixture/ready")
     def ready(value: dict):
         nonlocal fixture_player
-        import test_fleet_attempts
+        from test_node_boot import cold_setup
 
-        monkeypatch.setattr(test_fleet_attempts, "BOOT_ID", UUID(value["boot_id"]))
-        test_fleet_attempts._seed(registry)
+        from contracts.node_boot import NodeBootRequestV2
+
+        boots, _, _ = cold_setup(registry)
+        offer_id = boots.offer(NodeBootRequestV2(SERIAL, UUID(value["boot_id"]), "a" * 64)).offer_id
         key = Ed25519PrivateKey.generate()
         public = key.public_key().public_bytes_raw().hex()
         nonce = registry.challenge(public)["nonce"]
@@ -113,7 +115,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
         ).receipt
         claim = NodeSessionClaim(
             SERIAL,
-            OFFER_ID,
+            offer_id,
             UUID(value["boot_id"]),
             "app_effect_broker",
             uuid4(),
@@ -146,7 +148,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
         )
         with registry.db.transaction() as conn:
             configuration = registry.configuration_in(conn, player["player_id"], 1)
-        return {"serial": SERIAL, "offer_id": str(OFFER_ID), "configuration": {
+        return {"serial": SERIAL, "offer_id": str(offer_id), "configuration": {
             "player_id": player["player_id"], "authority_epoch": 1, "configuration_revision": 1,
             "bindings": [b.model_dump(mode="json") for b in configuration["bindings"]],
             "enabled_outputs": [],

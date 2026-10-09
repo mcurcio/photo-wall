@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import io
 import json
@@ -17,10 +16,6 @@ from support.release_build import base_bundle as synthetic_base_bundle
 from support.release_build import bootstrapper_deb as synthetic_bootstrapper_deb
 from support.release_build import player_deb as synthetic_player_deb
 
-from central.assets.handlers import FetchPlayerPayloadHandler
-from central.kernel.assets import OriginLocator
-from central.kernel.handling import OriginRejected
-from central.origins.github import _asset_urls, _parse_manifest
 from contracts.player_payload import (
     FORMAT,
     PayloadError,
@@ -31,7 +26,6 @@ from contracts.player_payload import (
 )
 from contracts.release import (
     MANIFEST,
-    MANIFEST_V2,
     base_abi_sidecar,
     legacy_projection,
     parse_base_abi_sidecar,
@@ -79,11 +73,6 @@ def test_payload_archive_and_dual_release_manifests(tmp_path):
     assert legacy_projection(manifest) == legacy
     assert manifest["base_image"]["base_abi"] == inner["base_abi"]
     assert verify(destination, revision=REVISION).manifest == manifest
-    assets = _asset_urls([{"name": path.name, "browser_download_url": f"https://x/{path.name}"}
-                          for path in destination.iterdir()])
-    parsed = _parse_manifest((destination / MANIFEST_V2).read_bytes(), assets, None)
-    assert parsed.payload is not None
-    assert parsed.payload.locator.sha256 == manifest["player_payload"]["sha256"]
 
 
 def test_payload_manifest_duplicate_key_is_rejected(tmp_path):
@@ -111,35 +100,6 @@ def test_base_abi_sidecar_requires_canonical_duplicate_free_json():
     with pytest.raises(ValueError, match="invalid"):
         parse_base_abi_sidecar(b'{"schema":true,"base_abi":"' + abi.encode()
                                + b'","squashfs_sha256":"' + digest.encode() + b'"}\n')
-
-
-def test_payload_fetch_rejects_inner_outer_abi_disagreement(tmp_path):
-    payload, inner = _payload(tmp_path)
-    digest = hashlib.sha256(payload.read_bytes()).hexdigest()
-    locator = OriginLocator("https://example.test/payload.tar.gz", digest,
-                            payload.stat().st_size)
-
-    class Origin:
-        async def download(self, _locator, destination, *, max_bytes):
-            assert max_bytes == locator.size
-            shutil.copyfile(payload, destination)
-
-    async def wrong(_sha):
-        return "sha256:" + "f" * 64
-
-    async def correct(_sha):
-        return inner["base_abi"]
-
-    temp = tmp_path / "download.tmp"
-    wrong_handler = FetchPlayerPayloadHandler(production=None, origin=Origin(),
-                                              expected_abi=wrong)
-    with pytest.raises(OriginRejected, match="player_payload_invalid"):
-        asyncio.run(wrong_handler._write(temp, locator))
-    assert not temp.exists()
-    correct_handler = FetchPlayerPayloadHandler(production=None, origin=Origin(),
-                                                expected_abi=correct)
-    asyncio.run(correct_handler._write(temp, locator))
-    assert temp.read_bytes() == payload.read_bytes()
 
 
 def test_payload_rejects_unlisted_archive_member(tmp_path):

@@ -42,19 +42,6 @@ def _seed_player(registry, *, canonical_device: bool) -> None:
                      (PLAYER_ID, "test-public-key", "test-token-hash", DEVICE_ID))
 
 
-def _seed_offer(conn, *, audience: str = AUDIENCE) -> None:
-    conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
-                 "discovered_at,updated_at) VALUES('v1.0.0',1,0,0,FALSE,900,900)")
-    conn.execute("INSERT INTO fleet_boot_offers(offer_id,installation_audience,device_id,"
-                 "serial,kernel_boot_id,boot_nonce,base_policy_source,base_policy_revision,"
-                 "app_policy_source,app_policy_revision,base_tag,base_content_key,"
-                 "base_sha256,base_size,app_status,compatibility_basis,created_at,expires_at) "
-                 "VALUES(%s,%s,%s,%s,%s,%s,'operator_baseline',0,'legacy_promotion',0,"
-                 "'v1.0.0',%s,%s,100,'unconfigured','none',900,1100)",
-                 (OFFER_ID, audience, DEVICE_ID, SERIAL, BOOT_ID, "b" * 32,
-                  "b" * 64, "c" * 64))
-
-
 def _seed_session(conn, session_id: UUID) -> None:
     conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
                  "device_generation,kernel_boot_id,offer_id,installation_audience,trust_mode,"
@@ -85,7 +72,6 @@ def test_ticketless_player_retirement_creates_canonical_tombstone_once(registry)
 def test_retirement_revokes_same_generation_session_and_queued_attempt(registry) -> None:
     _seed_player(registry, canonical_device=True)
     with registry.db.transaction() as conn:
-        _seed_offer(conn)
         _seed_session(conn, SESSION_ID)
         conn.execute("INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
                      "desired_revision,target_sha256,phase,created_at,updated_at,"
@@ -110,7 +96,6 @@ def test_retirement_revokes_same_generation_session_and_queued_attempt(registry)
 def test_new_os_session_requires_explicit_revocation_of_previous_one(registry) -> None:
     _seed_player(registry, canonical_device=True)
     with registry.db.transaction() as conn:
-        _seed_offer(conn)
         _seed_session(conn, SESSION_ID)
     with pytest.raises(UniqueViolation):
         with registry.db.transaction() as conn:

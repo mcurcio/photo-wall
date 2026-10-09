@@ -21,8 +21,8 @@ only while visible, stops with zero further samples on a terminal, unlisted or
 node_control_disabled answer and after 2 minutes without progress, and a qualification Central
 accepts is listed and admits a following Stage as its fallback;
 and (NV1, Part E) the V2 posture: a Central without node control shows one banner, one "not
-shown" line and sends no node read; the Boot section holds node records only, plus the one
-deprecated-path line Central serves; the effect gate comes from the shell's one status read.
+shown" line and sends no node read; the Boot section holds node records only; the effect gate
+comes from the shell's one status read.
 
 Every assertion is behavioural (role, text, outcome); ages are Central's read time minus
 Central's receipt time, driven by the registry's controlled clock.
@@ -362,18 +362,9 @@ def test_with_node_control_on_there_is_no_banner_and_the_player_page_reads_no_st
         expect(page.get_by_role("region", name="Node control", exact=True)).to_have_count(0)
 
 
-def test_the_boot_section_holds_node_records_and_the_one_deprecated_path_line(page, registry):
+def test_the_boot_section_holds_node_records_only(page, registry):
     box = Box(registry)
     box.host_sample()
-    deprecated = {"on": False}
-
-    def stub(route):
-        data = route.fetch().json()
-        if deprecated["on"]:
-            data["deprecated_boot"] = {"path": "offer", "recorded_at": data["read_at"] - 120}
-        route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
-
-    page.route(DEVICE_READ, stub)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
         open_player(page, NAME)
@@ -382,19 +373,11 @@ def test_the_boot_section_holds_node_records_and_the_one_deprecated_path_line(pa
             f"Current node session's boot: Boot {BOOT_ID} (claimed at boot by the box, unverified)")
         expect(boot).to_contain_text(
             f"Node boot offer: Issued for boot {BOOT_ID}, not proof the Player booted")
-        expect(boot).to_contain_text(
-            "A Pi boots by node path when its kernel command line carries photowall.node=v2.")
-        expect(boot).not_to_contain_text("deprecated")
         expect(boot.locator("p[data-truth]")).to_have_count(2)
-        deprecated["on"] = True
-        warning = boot.get_by_role("note")
-        expect(warning).to_have_text(
-            "Booted by the deprecated path: Central's newest boot record for this box is a deprecated "
-            "boot offer · recorded 2 min ago · its kernel command line lacks photowall.node=v2; "
-            "Select and Stage do not reach it", timeout=10_000)
-        expect(warning).to_have_count(1)
-        expect(boot).not_to_contain_text("A Pi boots by node path")
-        expect(boot.locator("p[data-truth]")).to_have_count(3)
+        # No V1 boot record, no kernel command line advice: every Pi boots by node path.
+        expect(boot).not_to_contain_text("deprecated")
+        expect(boot).not_to_contain_text("photowall.node")
+        expect(boot.get_by_role("note")).to_have_count(0)
 
 
 def test_a_failed_device_read_keeps_its_rows_marked_refresh_failed(page, registry):

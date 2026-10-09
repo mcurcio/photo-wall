@@ -188,9 +188,9 @@ def test_sealed_environment_worker_and_exact_reader_hold_inode_lease(registry, t
 
 def _desired(registry):
     from central.content_catalog.catalog import ReleaseCatalog
-    from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+    from central.infra.catalog_records import PgReleaseRecords
     from central.infra.transactions import PgTransactions
-    catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(), stored=None,
+    catalog = ReleaseCatalog(releases=PgReleaseRecords(), stored=None,
                              transactions=PgTransactions(registry.db), publisher=None,
                              clock=registry.clock)
     with PgTransactions(registry.db).begin() as tx:

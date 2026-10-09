@@ -1,6 +1,5 @@
 """Rule 2 of docs/central-idempotent-jobs.md (§4, §6, §8): a release observation is applied only
-if its upstream version is not older than the stored one, the frozen flag is derived from the
-locked row, the ETag is trusted for one hour, and automatic promotion is serialized by a lock.
+if its upstream version is not older than the stored one, and the ETag is trusted for one hour.
 
 Real PostgreSQL (the `registry` fixture; CI runs it) through the real repositories and the real
 sync. The origin is `RecordingOrigin`, or the real `GitHubReleaseOrigin` over an
@@ -30,34 +29,27 @@ from support.github_release import (
     release_entry,
 )
 from test_content_catalog_sync import (
-    NOW,
     T1,
-    T2,
     RecordingOrigin,
     World,
-    deb,
-    deb_key,
     image,
     image_key,
     listing,
     make_world,
-    produced,
     published,
     sync,
 )
 
-from central.content_catalog.ports import Promotion, ReleaseRow
+from central.content_catalog.ports import ReleaseRow
 from central.content_catalog.sync import ETAG_MAX_AGE
-from central.infra.asset_records import PgAssetRecords
-from central.infra.catalog_records import AUTO_PROMOTION_LOCK, PgReleaseRecords
+from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransactions
-from central.kernel.assets import AssetKey, AssetKind, AssetReady
+from central.kernel.assets import AssetKey, AssetKind
 from central.kernel.job_types import Prefetch, SyncReleases
 from central.kernel.ports import ReleaseListing, UpstreamVersion
 from central.origins.github import GitHubReleaseOrigin
 
-A, B = deb(T1, "-A"), deb(T1, "-B")  # two cuts of v1's .deb
-S1, S2 = image(T1, "-S1"), image(T1, "-S2")  # two cuts of v1's OS image
+S1, S2, S3 = image(T1, "-S1"), image(T1, "-S2"), image(T1, "-S3")  # cuts of v1's OS image
 UNCHANGED = ReleaseListing((), None, unchanged=True)
 
 
@@ -77,7 +69,7 @@ def owners(w: World, *keys: AssetKey) -> dict[AssetKey, list[str] | None]:
 
 
 def keys_of(tag: str = T1) -> tuple[AssetKey, ...]:
-    return (deb_key(A), deb_key(B), image_key(tag, "-S1"), image_key(tag, "-S2"))
+    return (image_key(tag, "-S1"), image_key(tag, "-S2"))
 
 
 def fetches_since(w: World, first: int) -> list:
@@ -87,7 +79,7 @@ def fetches_since(w: World, first: int) -> list:
 def references_match_the_row(w: World, tag: str = T1) -> None:
     """Every key the tag references is exactly what its row names: nothing orphaned."""
     row = w.reads.release(tag)
-    named = {deb_key(row.package)} if row.package is not None else set()
+    named = set()
     if row.os_image is not None:
         named.add(AssetKey(AssetKind.OS_IMAGE, row.os_image.sha256))
     with w.db.transaction() as conn:
@@ -97,15 +89,14 @@ def references_match_the_row(w: World, tag: str = T1) -> None:
     assert referenced == named
 
 
-def wait_until_blocked_or_done(w: World, thread: threading.Thread, *,
-                               advisory: bool = False) -> bool:
-    """Whether `thread` is waiting on a lock in this test's database (an advisory
-    `AUTO_PROMOTION_LOCK` wait, or any lock) before it finishes; False once it finished without
-    waiting. Well inside the 5 s `lock_timeout` of `Database.transaction`."""
+def wait_until_blocked_or_done(w: World, thread: threading.Thread) -> bool:
+    """Whether `thread` is waiting on a lock in this test's database before it finishes; False
+    once it finished without waiting. Well inside the 5 s `lock_timeout` of
+    `Database.transaction`."""
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline and thread.is_alive():
         with w.db.transaction() as conn:
-            if waiting_backends(conn, advisory_lock=AUTO_PROMOTION_LOCK if advisory else None):
+            if waiting_backends(conn):
                 return True
         time.sleep(0.01)
     return False
@@ -165,81 +156,38 @@ def join(*threads_and_errors) -> None:
 
 
 def test_v1_a_stale_observation_after_a_fresh_one_is_refused_and_touches_nothing(world):
-    w = world(listing(published(T1, package=B, os_image=S2, at=20)))
+    w = world(listing(published(T1, os_image=S2, at=20)))
     sync(w)
     row, references, first = stored_row(w), owners(w, *keys_of()), len(w.publisher.calls)
-    assert references[deb_key(B)] == [T1] and references[image_key(T1, "-S2")] == [T1]
-    w.origin.listing = listing(published(T1, package=A, os_image=S1, at=10), etag="e2")
+    assert references[image_key(T1, "-S2")] == [T1]
+    w.origin.listing = listing(published(T1, os_image=S1, at=10), etag="e2")
     sync(w)
-    assert stored_row(w) == row  # the row, its version and mirror_state
-    assert owners(w, *keys_of()) == references  # A and S1 were never referenced
-    assert w.reads.asset(deb_key(A)) is None and w.reads.asset(image_key(T1, "-S1")) is None
-    assert fetches_since(w, first) == []  # no changed key, so no fetch
+    assert stored_row(w) == row  # the row and its version
+    assert owners(w, *keys_of()) == references  # S1 was never referenced
+    assert w.reads.asset(image_key(T1, "-S1")) is None
+    assert fetches_since(w, first) == []
 
 
 def test_v2_a_stale_observation_before_a_fresh_one_is_overwritten(world):
-    w = world(listing(published(T1, package=A, os_image=S1, at=10)))
+    w = world(listing(published(T1, os_image=S1, at=10)))
     sync(w)
-    w.origin.listing = listing(published(T1, package=B, os_image=S2, at=20), etag="e2")
+    w.origin.listing = listing(published(T1, os_image=S2, at=20), etag="e2")
     sync(w)
-    assert w.reads.release(T1) == ReleaseRow(T1, False, B, S2)
+    assert w.reads.release(T1) == ReleaseRow(T1, False, None, S2)
     got = stored_row(w)
     assert (got["upstream_changed_at"], got["upstream_asset_id"]) == (20.0, 1)
-    assert owners(w, *keys_of()) == {deb_key(A): None, deb_key(B): [T1],
-                                     image_key(T1, "-S1"): None, image_key(T1, "-S2"): [T1]}
+    assert owners(w, *keys_of()) == {image_key(T1, "-S1"): None, image_key(T1, "-S2"): [T1]}
 
 
 def test_v3_an_equal_version_re_applies_a_changed_flag_but_no_key(world):
-    w = world(listing(published(T1, package=B, os_image=S2, at=20)))
+    w = world(listing(published(T1, os_image=S2, at=20)))
     sync(w)
     references, first = owners(w, *keys_of()), len(w.publisher.calls)
-    w.origin.listing = listing(published(T1, pre=True, package=B, os_image=S2, at=20),
-                               etag="e2")
+    w.origin.listing = listing(published(T1, pre=True, os_image=S2, at=20), etag="e2")
     sync(w)
     assert w.reads.release(T1).is_prerelease is True  # the flag landed
     assert owners(w, *keys_of()) == references
     assert fetches_since(w, first) == []
-
-
-def test_v4_the_frozen_flag_is_derived_from_the_locked_row(world):
-    w = world(listing(published(T1, package=A, at=10)))
-    sync(w)
-    produced(w, A)
-    w.origin.listing = listing(published(T1, package=B, at=20), etag="e2")
-    sync(w)  # B re-cut after A was produced: frozen at A
-    assert w.reads.release(T1).package == A and w.reads.release(T1).divergent
-    assert w.reads.owners(deb_key(B)) is None
-    w.origin.listing = listing(published(T1, package=A, at=30), etag="e3")
-    sync(w)  # upstream is back at A: unfrozen, since nothing carries the flag
-    assert (w.reads.release(T1).package, w.reads.release(T1).divergent) == (A, False)
-    assert stored_row(w)["mirror_error"] is None
-    w.origin.listing = listing(published(T1, package=B, at=25), etag="e4")
-    sync(w)  # a stale B is refused: it cannot freeze the tag again
-    assert (w.reads.release(T1).package, w.reads.release(T1).divergent) == (A, False)
-    assert stored_row(w)["upstream_changed_at"] == 30.0
-    assert w.reads.owners(deb_key(B)) is None
-
-
-# -- V5: automatic promotion ----------------------------------------------------------------------
-
-
-def test_v5_the_last_automatic_promotion_read_every_row_committed_before_it(world, monkeypatch):
-    # Tail X takes the lock and reads the rows (only v1), then pauses. v2 commits elsewhere. Tail
-    # Y must wait on the lock, so it reads after X wrote: it promotes v2, the newest. Were the
-    # rows read before the lock, Y would promote v2 first and X, resuming, would write v1 last.
-    w = world(UNCHANGED, releases=[published(T1)])
-    read_rows, go = pause_after(monkeypatch, w.handler._releases, "all")
-    x = in_thread(lambda: sync(w))
-    assert read_rows.wait(10)
-    with PgTransactions(w.db).begin() as tx:  # a newer release commits elsewhere
-        assert PgReleaseRecords().claim(tx, published(T2), now=NOW) is None
-    y_handler = w.another_handler(RecordingOrigin(UNCHANGED))
-    y = in_thread(lambda: asyncio.run(y_handler.handle(SyncReleases())))
-    y_waited = wait_until_blocked_or_done(w, y[0], advisory=True)
-    go.set()
-    join(x, y)
-    assert y_waited  # Y blocked on the lock X held
-    assert w.reads.promotion() == Promotion(T2, "auto")
 
 
 # -- V6: migration 029 ----------------------------------------------------------------------------
@@ -274,8 +222,9 @@ def test_v6_029_adds_the_version_pair_and_the_etag_time_and_clears_the_etag(empt
 class GitHubWire:
     """GitHub's releases list, `manifest.json` and base tarball for one release, served by an
     `httpx.MockTransport`; `manifest_status` 404 is a manifest listed but gone mid re-draft,
-    `manifest_body` replaces the valid body (a broken upload), and `attach_deb` False lists the
-    release without the `.deb` its manifest names (an upload caught midway)."""
+    `manifest_body` replaces the valid body (a broken upload), and `attach_tarball` False lists
+    the release without the base tarball its manifest names (an upload caught midway). The
+    manifest still names a Player `.deb`, as releases did: Central reads none of it."""
 
     REPO = "owner/repo"
     BASE = "https://example.test/dl"
@@ -285,7 +234,7 @@ class GitHubWire:
         self.uploaded = uploaded
         self.manifest_status = 200
         self.manifest_body: bytes | None = None
-        self.attach_deb = True
+        self.attach_tarball = True
         self.tarball, self.tarball_sha, _ = real_tarball(b"squashfs " * 64)
         self.deb = b"deb bytes " * 64
 
@@ -299,8 +248,9 @@ class GitHubWire:
                 self.tag, manifest_url=f"{self.BASE}/manifest.json",
                 tarball_url=f"{self.BASE}/photo-wall-base.tar.gz", deb_filename=name,
                 deb_url=f"{self.BASE}/{name}", uploaded=self.uploaded)
-            if not self.attach_deb:
-                entry["assets"] = [a for a in entry["assets"] if a["name"] != name]
+            if not self.attach_tarball:
+                entry["assets"] = [a for a in entry["assets"]
+                                   if a["name"] != "photo-wall-base.tar.gz"]
             return httpx.Response(200, json=[entry])
         if str(request.url) == f"{self.BASE}/manifest.json":
             if self.manifest_status != 200:
@@ -322,7 +272,7 @@ def test_v7_the_version_is_the_read_manifests_updated_at_and_id():
     assert release.upstream_version == UpstreamVersion(1788220800.0, 7)
     wire.manifest_status = 404  # the same listing, the manifest gone
     (release,) = wire.listed().releases
-    assert release.upstream_version is None and release.package is None
+    assert release.upstream_version is None and release.os_image is None
 
 
 def test_v7_a_recut_upstream_is_a_newer_version():
@@ -335,10 +285,10 @@ def test_v7_a_recut_upstream_is_a_newer_version():
 def test_v9_a_listing_whose_manifest_is_gone_cannot_wipe_the_tag(world):
     wire = GitHubWire(T1)
     w = world(None, origin=wire.origin())
-    sync(w)  # v1 stored at the manifest's version, with its .deb and OS image
+    sync(w)  # v1 stored at the manifest's version, with its OS image and no `.deb`
     row, first = w.reads.release(T1), len(w.publisher.calls)
-    assert row.package is not None and row.os_image is not None
-    keys = (deb_key(row.package), AssetKey(AssetKind.OS_IMAGE, row.os_image.sha256))
+    assert row.package is None and row.os_image is not None
+    keys = (AssetKey(AssetKind.OS_IMAGE, row.os_image.sha256),)
     before = stored_row(w)
     assert before["upstream_changed_at"] == 1788220800.0
     wire.manifest_status = 404
@@ -351,7 +301,7 @@ def test_v9_a_listing_whose_manifest_is_gone_cannot_wipe_the_tag(world):
 @pytest.mark.parametrize("broken", [
     b"{not json",
     b'{"schema": 2}',
-    b'{"schema": 1, "player_deb": {"filename": "not-a-deb.txt"}}',
+    b'{"schema": 1, "base_image": {"filename": "not-attached.tar.gz"}}',
 ])
 def test_v9b_a_newer_invalid_manifest_cannot_wipe_the_tag(world, broken):
     # Owner decision (errata 2026-09-24, bead 3): a manifest read but invalid is unversioned,
@@ -360,7 +310,7 @@ def test_v9b_a_newer_invalid_manifest_cannot_wipe_the_tag(world, broken):
     w = world(None, origin=wire.origin())
     sync(w)
     row, first = w.reads.release(T1), len(w.publisher.calls)
-    keys = (deb_key(row.package), AssetKey(AssetKind.OS_IMAGE, row.os_image.sha256))
+    keys = (AssetKey(AssetKind.OS_IMAGE, row.os_image.sha256),)
     before = stored_row(w)
     wire.uploaded = ("2026-09-02T00:00:00Z", 70)  # re-uploaded a day later, as new assets
     wire.manifest_body = broken
@@ -371,28 +321,29 @@ def test_v9b_a_newer_invalid_manifest_cannot_wipe_the_tag(world, broken):
 
 
 def test_v9c_an_upload_caught_midway_cannot_wipe_the_tag_and_applies_once_complete(world):
-    # Owner decision (errata 2026-09-24, bead 3): a newer manifest naming a .deb the release does
-    # not attach yet (`asset_missing`) is unversioned, so it is refused; once the .deb is
+    # Owner decision (errata 2026-09-24, bead 3): a newer manifest naming a base tarball the
+    # release does not attach yet is unversioned, so it is refused; once the tarball is
     # attached, the same manifest asset is versioned, newer than the row, and applied.
     wire = GitHubWire(T1)
     w = world(None, origin=wire.origin())
     sync(w)
     old, first = w.reads.release(T1), len(w.publisher.calls)
     before = stored_row(w)
-    wire.uploaded = ("2026-09-02T00:00:00Z", 70)  # the re-cut: manifest first, .deb pending
-    wire.deb = b"re-cut deb bytes " * 64
-    wire.attach_deb = False
+    wire.uploaded = ("2026-09-02T00:00:00Z", 70)  # the re-cut: manifest first, tarball pending
+    wire.tarball, wire.tarball_sha, _ = real_tarball(b"re-cut squashfs " * 64)
+    wire.attach_tarball = False
     sync(w)
     assert stored_row(w) == before
-    assert w.reads.owners(deb_key(old.package)) == [T1]
+    old_key = AssetKey(AssetKind.OS_IMAGE, old.os_image.sha256)
+    assert w.reads.owners(old_key) == [T1]
     assert fetches_since(w, first) == []
-    wire.attach_deb = True  # the upload completes
+    wire.attach_tarball = True  # the upload completes
     sync(w)
     new = w.reads.release(T1)
-    assert new.package is not None and new.package.sha256 != old.package.sha256
+    assert new.os_image is not None and new.os_image.sha256 != old.os_image.sha256
     assert stored_row(w)["upstream_changed_at"] > before["upstream_changed_at"]
-    assert w.reads.owners(deb_key(old.package)) is None  # never produced: the re-cut heals
-    assert w.reads.owners(deb_key(new.package)) == [T1]
+    assert w.reads.owners(old_key) is None
+    assert w.reads.owners(AssetKey(AssetKind.OS_IMAGE, new.os_image.sha256)) == [T1]
 
 
 # -- V8: the hourly full listing repairs an equal-version stale observation ------------------------
@@ -445,62 +396,24 @@ def test_v8_a_stale_equal_version_is_repaired_by_the_hourly_listing_and_by_refre
 
 
 def test_v10_a_concurrent_first_insert_gives_the_second_the_first_row(world, monkeypatch):
-    # X inserts v1 (A at version 10) and holds its transaction open. Y's claim of v1 (B at 20)
+    # X inserts v1 (S1 at version 10) and holds its transaction open. Y's claim of v1 (S2 at 20)
     # waits on the unique index, then locks and returns X's committed row: it retires X's
-    # reference to A. No reference is left that the row does not name.
-    w = world(listing(published(T1, package=A, os_image=S1, at=10)))
+    # reference to S1. No reference is left that the row does not name.
+    w = world(listing(published(T1, os_image=S1, at=10)))
     claimed, go = pause_after(monkeypatch, w.handler._releases, "claim")
     x = in_thread(lambda: sync(w))
     assert claimed.wait(10)
     y_handler = w.another_handler(RecordingOrigin(
-        listing(published(T1, package=B, os_image=S2, at=20), etag="e2")))
+        listing(published(T1, os_image=S2, at=20), etag="e2")))
     y_previous = recording(monkeypatch, y_handler._releases, "claim")
     y = in_thread(lambda: asyncio.run(y_handler.handle(SyncReleases())))
     y_waited = wait_until_blocked_or_done(w, y[0])
     go.set()
     join(x, y)
     assert y_waited  # Y's insert waited for X's
-    assert y_previous == [ReleaseRow(T1, False, A, S1)]  # X's row, read under the lock
-    assert w.reads.release(T1) == ReleaseRow(T1, False, B, S2)
-    assert owners(w, *keys_of()) == {deb_key(A): None, deb_key(B): [T1],
-                                     image_key(T1, "-S1"): None, image_key(T1, "-S2"): [T1]}
-    references_match_the_row(w)
-
-
-# -- V11: the frozen flag serializes with a concurrent FetchPackage (review P1) --------------------
-
-
-@pytest.mark.parametrize("fetch", ["commits_first", "commits_during_the_sync"])
-def test_v11_the_frozen_flag_serializes_with_the_old_debs_fetch(world, monkeypatch, fetch):
-    # v1 ships A, referenced but not produced; upstream re-cuts it to B while FetchPackage(A)
-    # records A's facts. Whatever the timing, the tag is frozen iff A's facts committed before
-    # the sync decided: a recording after the sync's read WAITS for the sync (`lock_produced`),
-    # so it never lands unseen between the read and the commit.
-    w = world(listing(published(T1, package=A, at=10)))
-    sync(w)
-    facts = AssetReady(A.size, A.sha256)
-
-    def fetch_records() -> None:  # the worker's `ok`, in its own transaction
-        with PgTransactions(w.db).begin() as tx:
-            PgAssetRecords(w.clock).record_produced(tx, deb_key(A), facts)
-
-    w.origin.listing = listing(published(T1, package=B, at=20), etag="e2")
-    if fetch == "commits_first":
-        fetch_records()
-        sync(w)
-        assert (w.reads.release(T1).package, w.reads.release(T1).divergent) == (A, True)
-        assert w.reads.owners(deb_key(B)) is None
-        return
-    decided, go = pause_after(monkeypatch, w.handler, "_frozen_package")
-    x = in_thread(lambda: sync(w))
-    assert decided.wait(10)  # the sync read "A not produced" and holds its transaction
-    fetcher = in_thread(fetch_records)
-    fetch_waited = wait_until_blocked_or_done(w, fetcher[0])
-    go.set()
-    join(x, fetcher)
-    assert fetch_waited  # the recording waited for the sync's commit
-    assert (w.reads.release(T1).package, w.reads.release(T1).divergent) == (B, False)
-    assert w.reads.facts(deb_key(A)) == facts  # A landed after the tag had moved to B
+    assert y_previous == [ReleaseRow(T1, False, None, S1)]  # X's row, read under the lock
+    assert w.reads.release(T1) == ReleaseRow(T1, False, None, S2)
+    assert owners(w, *keys_of()) == {image_key(T1, "-S1"): None, image_key(T1, "-S2"): [T1]}
     references_match_the_row(w)
 
 
@@ -510,19 +423,18 @@ def test_v11_the_frozen_flag_serializes_with_the_old_debs_fetch(world, monkeypat
 @pytest.mark.parametrize("held_after", ["claim", "apply"])
 def test_v12_a_claim_of_an_existing_row_waits_and_gets_the_holders_write(world, monkeypatch,
                                                                          held_after):
-    # X claims v1 and applies B at 20, holding its transaction after `held_after`. Y's claim of
-    # v1 (C at 30) waits, then gets X's B as `previous`, so it retires B: nothing is orphaned.
-    # Held after `claim` (the row locked, not yet written), only `claim`'s FOR UPDATE makes Y
-    # wait: an unlocked read would return A at once. Held after `apply`, Y's insert already
-    # waits on X's row version.
-    c = deb(T1, "-C")
-    w = world(listing(published(T1, package=A, at=10)))
+    # X claims v1 and applies S2 at 20, holding its transaction after `held_after`. Y's claim of
+    # v1 (S3 at 30) waits, then gets X's S2 as `previous`, so it retires S2: nothing is
+    # orphaned. Held after `claim` (the row locked, not yet written), only `claim`'s FOR UPDATE
+    # makes Y wait: an unlocked read would return S1 at once. Held after `apply`, Y's insert
+    # already waits on X's row version.
+    w = world(listing(published(T1, os_image=S1, at=10)))
     sync(w)
-    w.origin.listing = listing(published(T1, package=B, at=20), etag="e2")
+    w.origin.listing = listing(published(T1, os_image=S2, at=20), etag="e2")
     held, go = pause_after(monkeypatch, w.handler._releases, held_after)
     x = in_thread(lambda: sync(w))
     assert held.wait(10)
-    y_handler = w.another_handler(RecordingOrigin(listing(published(T1, package=c, at=30),
+    y_handler = w.another_handler(RecordingOrigin(listing(published(T1, os_image=S3, at=30),
                                                           etag="e3")))
     y_previous = recording(monkeypatch, y_handler._releases, "claim")
     y = in_thread(lambda: asyncio.run(y_handler.handle(SyncReleases())))
@@ -530,8 +442,8 @@ def test_v12_a_claim_of_an_existing_row_waits_and_gets_the_holders_write(world, 
     go.set()
     join(x, y)
     assert y_waited
-    assert y_previous == [ReleaseRow(T1, False, B, image(T1))]  # X's write, read under the lock
-    assert w.reads.release(T1).package == c
-    assert owners(w, deb_key(A), deb_key(B), deb_key(c)) == {
-        deb_key(A): None, deb_key(B): None, deb_key(c): [T1]}
+    assert y_previous == [ReleaseRow(T1, False, None, S2)]  # X's write, read under the lock
+    assert w.reads.release(T1).os_image == S3
+    assert owners(w, image_key(T1, "-S1"), image_key(T1, "-S2"), image_key(T1, "-S3")) == {
+        image_key(T1, "-S1"): None, image_key(T1, "-S2"): None, image_key(T1, "-S3"): [T1]}
     references_match_the_row(w)

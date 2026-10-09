@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 from test_coordination import report
-from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, SERIAL, _seed
+from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_registry import enroll, frame
 
 from central.coordination import Coordinator
@@ -34,16 +34,12 @@ from contracts.node_protocol import (
 from contracts.player_control import ControlAck, ControlHello
 
 
-def rig(registry, *, node_v2=False):
-    offer_id = OFFER_ID
-    if node_v2:
-        from test_node_boot import cold_setup
+def rig(registry):
+    from test_node_boot import cold_setup
 
-        from contracts.node_boot import NodeBootRequestV2
-        boots, _, _ = cold_setup(registry)
-        offer_id = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)).offer_id
-    else:
-        _seed(registry)
+    from contracts.node_boot import NodeBootRequestV2
+    boots, _, _ = cold_setup(registry)
+    offer_id = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)).offer_id
     player, key, _ = enroll(registry, device_id=DEVICE_ID)
     for index in range(2):
         frame(registry, f"node-f{index}")

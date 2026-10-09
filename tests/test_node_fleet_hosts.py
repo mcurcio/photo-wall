@@ -236,8 +236,8 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     registry.retire(retired)
     read = NodeObservations(sessions).fleet_hosts()
     assert _device(read, retired_id) is None
-    assert _device(read) is not None
-    assert _device(read, spare_id) == {"device_id": spare_id, "host": None,
+    assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
+    assert _device(read, spare_id) == {"device_id": spare_id, "serial": None, "host": None,
                                        "previous_boot_received_at": None, "intake_full": False,
                                        "preparation_intake_full": False,
                                        "boot": None, "facts": None, "preparation": None,

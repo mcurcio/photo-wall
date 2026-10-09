@@ -41,7 +41,7 @@ class Witnesses:
     def __init__(self, registry):
         self.registry = registry
         (self.coordinator,self.player,self.key,self.sessions,self.claims,self.grants,
-         facts,_,self.proof) = rig(registry,node_v2=True)
+         facts,_,self.proof) = rig(registry)
         self.display = NodeDisplay(self.sessions,runtime=self.coordinator)
         self.claim = self.claims['display_host']
         self.grant = self.grants['display_host']

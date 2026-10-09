@@ -32,7 +32,12 @@ BASE_SIZE = 4096
 DOWNLOAD = f"https://github.com/{REPO}/releases/download/v1.2.3/{DEB_NAME}"
 
 
-def manifest_bytes(filename, sha256, size, *, schema=1, base=None):
+BASE = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
+
+
+def manifest_bytes(filename, sha256, size, *, schema=1, base=BASE):
+    """A release's `manifest.json`. It names a Player `.deb` as releases did; Central reads
+    only its `base_image`."""
     manifest = {
         "schema": schema,
         "revision": "a" * 40,
@@ -79,7 +84,7 @@ class Server:
                                redirect=redirect, error=error)
         return url
 
-    def deployable(self, tag="v1.2.3", *, prerelease=False, deb_body=BODY, schema=1, base=None,
+    def deployable(self, tag="v1.2.3", *, prerelease=False, deb_body=BODY, schema=1, base=BASE,
                    attach_base=True):
         deb_url = f"https://github.com/{REPO}/releases/download/{tag}/{DEB_NAME}"
         manifest_url = f"https://github.com/{REPO}/releases/download/{tag}/manifest.json"
@@ -163,81 +168,54 @@ def test_implements_the_kernel_port():
 # -- D1 listing ----------------------------------------------------------------
 
 
-def test_normal_release_becomes_a_published_release_with_package():
+def base_url(tag="v1.2.3"):
+    return f"https://github.com/{REPO}/releases/download/{tag}/{BASE_NAME}"
+
+
+def test_a_release_becomes_its_os_image_and_no_player_deb():
     server = Server()
-    _, sha, deb_url = server.deployable("v1.2.3")
+    server.deployable("v1.2.3")
     result = discover(server)
     record = only(result.releases)
-    assert (record.tag, record.package_problem, record.is_prerelease) == ("v1.2.3", None, False)
-    assert record.package == OriginLocator(url=deb_url, sha256=sha, size=len(BODY))
-    assert record.os_image is None  # the manifest carries no base_image
+    assert (record.tag, record.is_prerelease) == ("v1.2.3", False)
+    assert record.os_image == OriginLocator(url=base_url(), sha256=BASE_SHA, size=BASE_SIZE)
+    assert not hasattr(record, "package")
     assert result.etag == ETAG and result.unchanged is False
+    # The `.deb` the manifest names is never fetched.
+    assert [str(r.url) for r in server.requests if str(r.url).endswith(".deb")] == []
 
 
-def test_schema_two_prefers_payload_and_checks_legacy_projection():
+def test_a_release_still_carrying_the_v1_files_is_read_as_schema_one():
+    # manifest.v2.json and the Player payload are neither read nor required.
     server = Server()
-    base_record = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
-    row, _, _ = server.deployable("v1.2.3", base=base_record)
-    legacy_url = next(asset["browser_download_url"] for asset in row["assets"]
-                      if asset["name"] == "manifest.json")
-    legacy = json.loads(server.blobs[legacy_url]["chunks"][0])
-    payload_name = f"photo-wall-player-payload-{'a' * 40}.tar.gz"
-    payload_url = f"https://github.com/{REPO}/releases/download/v1.2.3/{payload_name}"
+    row, _, _ = server.deployable("v1.2.3")
     v2_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.v2.json"
-    payload_record = {"filename": payload_name, "sha256": "c" * 64, "size": 100,
-                      "format": "pw-player-data-v1", "base_abi": "sha256:" + "d" * 64}
-    v2 = {**legacy, "schema": 2, "player_payload": payload_record,
-          "base_image": {**base_record, "base_abi": "sha256:" + "d" * 64,
-                         "base_abi_squashfs_sha256": "e" * 64}}
-    server.blob(v2_url, chunks=[json.dumps(v2).encode()])
+    payload_name = f"photo-wall-player-payload-{'a' * 40}.tar.gz"
+    server.blob(v2_url, chunks=[b"{not even json"])
     row["assets"].extend((asset("manifest.v2.json", v2_url),
-                          asset(payload_name, payload_url)))
-    observed = only(discover(server).releases)
-    assert observed.payload is not None
-    assert observed.payload.locator == OriginLocator(payload_url, "c" * 64, 100)
-    assert observed.payload.base_abi == payload_record["base_abi"]
-    assert observed.base_abi == "sha256:" + "d" * 64
-    assert observed.base_abi_squashfs_sha256 == "e" * 64
-
-    # A v2 manifest which disagrees with the legacy view is never promoted into catalog facts.
-    v2["player_deb"]["sha256"] = "e" * 64
-    server.blob(v2_url, chunks=[json.dumps(v2).encode()])
-    invalid = only(discover(server).releases)
-    assert invalid.package is None and invalid.upstream_version is None
-    assert invalid.package_problem == "manifest_invalid"
-
-
-def test_base_image_becomes_the_os_image_locator():
-    server = Server()
-    base = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
-    server.deployable("v1.2.3", base=base)
+                          asset(payload_name, f"https://example.test/{payload_name}")))
     record = only(discover(server).releases)
-    assert record.os_image == OriginLocator(
-        url=f"https://github.com/{REPO}/releases/download/v1.2.3/{BASE_NAME}",
-        sha256=BASE_SHA, size=BASE_SIZE)
+    assert record.os_image == OriginLocator(url=base_url(), sha256=BASE_SHA, size=BASE_SIZE)
+    assert v2_url not in [str(r.url) for r in server.requests]
 
 
 def test_base_image_not_attached_or_malformed_is_no_os_image():
     server = Server()
-    server.deployable("v1.2.3", base={"filename": BASE_NAME, "sha256": BASE_SHA,
-                                      "size": BASE_SIZE}, attach_base=False)
+    server.deployable("v1.2.3", attach_base=False)
     server.deployable("v1.2.4", base={"filename": BASE_NAME, "sha256": "nope", "size": BASE_SIZE})
+    server.deployable("v1.2.5", base=None)
     releases = discover(server).releases
-    assert [r.os_image for r in releases] == [None, None]
-    assert all(r.package is not None for r in releases)
+    assert [r.os_image for r in releases] == [None, None, None]
 
 
 def test_os_image_survives_an_invalid_player_deb():
     server = Server()
     manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    base_url = f"https://github.com/{REPO}/releases/download/v1.2.3/{BASE_NAME}"
-    base = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
-    server.blob(manifest_url, chunks=[manifest_bytes("not-a-deb.txt", SHA, 1, base=base)])
+    server.blob(manifest_url, chunks=[manifest_bytes("not-a-deb.txt", SHA, 1)])
     server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url),
-                                                     asset(BASE_NAME, base_url)]))
+                                                     asset(BASE_NAME, base_url())]))
     record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "manifest_invalid"
-    assert record.os_image is not None and record.os_image.url == base_url
+    assert record.os_image is not None and record.os_image.url == base_url()
 
 
 def test_draft_release_is_excluded():
@@ -254,7 +232,7 @@ def test_prerelease_excluded_by_default_and_included_when_configured():
     assert {r.tag for r in discover(server).releases} == {"v1.2.3"}
     included = discover(server, include_prereleases=True)
     record = next(r for r in included.releases if r.tag == "v1.3.0-rc.1")
-    assert record.is_prerelease is True and record.package is not None
+    assert record.is_prerelease is True and record.os_image is not None
 
 
 def test_non_semver_tag_is_skipped_with_no_record():
@@ -266,53 +244,38 @@ def test_non_semver_tag_is_skipped_with_no_record():
     assert {r.tag for r in discover(server).releases} == {"v1.2.3"}
 
 
-def test_schema_mismatch_has_no_package_and_does_not_crash():
+@pytest.mark.parametrize("schema", [2, 3])
+def test_a_schema_other_than_one_has_no_os_image_and_does_not_crash(schema):
     server = Server()
-    server.deployable("v1.2.3", schema=3)
+    server.deployable("v1.2.3", schema=schema)
     record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "schema_mismatch"
+    assert record.os_image is None and record.upstream_version is None
 
 
-def test_missing_manifest_asset_has_no_package():
+def test_missing_manifest_asset_has_no_os_image():
     server = Server()
-    server.blob(DOWNLOAD, chunks=[BODY])
-    server.releases.append(release("v1.2.3", assets=[asset(DEB_NAME, DOWNLOAD)]))
+    server.releases.append(release("v1.2.3", assets=[asset(BASE_NAME, base_url())]))
     record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "no_manifest"
+    assert record.os_image is None and record.upstream_version is None
 
 
-def test_manifest_not_json_is_manifest_invalid():
+@pytest.mark.parametrize("body", [b"{not json", b" " * (64 * 1024 + 1)])
+def test_an_unparsable_or_oversize_manifest_is_no_os_image_not_an_abort(body):
     server = Server()
     manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, chunks=[b"{not json"])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
+    server.blob(manifest_url, chunks=[body])
+    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url),
+                                                     asset(BASE_NAME, base_url())]))
     record = only(discover(server).releases)
-    assert record.package_problem == "manifest_invalid"
+    assert record.os_image is None and record.upstream_version is None
 
 
-def test_oversize_manifest_is_manifest_invalid_not_an_abort():
+def test_manifest_asset_listed_but_absent_upstream_has_no_os_image():
     server = Server()
     manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, chunks=[b" " * (64 * 1024 + 1)])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    assert only(discover(server).releases).package_problem == "manifest_invalid"
-
-
-def test_manifest_names_deb_absent_from_assets_is_asset_missing():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, chunks=[manifest_bytes(DEB_NAME, SHA, len(BODY))])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "asset_missing"
-
-
-def test_manifest_asset_listed_but_absent_upstream_has_no_package():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "no_manifest"
+    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url),
+                                                     asset(BASE_NAME, base_url())]))
+    assert only(discover(server).releases).os_image is None
 
 
 # -- the upstream version: the manifest asset's (updated_at, id), only when its body was read --
@@ -322,14 +285,14 @@ MANIFEST_URL = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.jso
 UPLOADED = {"id": 7, "updated_at": "2026-09-01T00:00:00Z"}
 
 
-def _versioned(server, *, manifest=None, attach_deb=False, **version):
+def _versioned(server, *, manifest=None, attach_base=False, **version):
     """v1.2.3 whose manifest asset carries `version`; `manifest` is its body (None: 404), and
-    `attach_deb` attaches the `.deb` a valid manifest names."""
+    `attach_base` attaches the base tarball a valid manifest names."""
     if manifest is not None:
         server.blob(MANIFEST_URL, chunks=[manifest])
     assets = [asset("manifest.json", MANIFEST_URL, **version)]
-    if attach_deb:
-        assets.append(asset(DEB_NAME, DOWNLOAD))
+    if attach_base:
+        assets.append(asset(BASE_NAME, base_url()))
     server.releases.append(release("v1.2.3", assets=assets))
     return only(discover(server).releases)
 
@@ -338,28 +301,28 @@ VALID = manifest_bytes(DEB_NAME, SHA, len(BODY))
 
 
 def test_a_valid_complete_manifest_carries_its_assets_updated_at_and_id():
-    record = _versioned(Server(), manifest=VALID, attach_deb=True, **UPLOADED)
-    assert record.package_problem is None
+    record = _versioned(Server(), manifest=VALID, attach_base=True, **UPLOADED)
+    assert record.os_image is not None
     assert record.upstream_version == UpstreamVersion(1788220800.0, 7)
 
 
 def test_an_offset_updated_at_is_read_as_the_same_instant():
-    record = _versioned(Server(), manifest=VALID, attach_deb=True, id=7,
+    record = _versioned(Server(), manifest=VALID, attach_base=True, id=7,
                         updated_at="2026-09-01T02:00:00+02:00")
     assert record.upstream_version == UpstreamVersion(1788220800.0, 7)
 
 
-@pytest.mark.parametrize("manifest,problem", [
-    (b"{not json", "manifest_invalid"),
-    (b"[1]", "manifest_invalid"),  # not an object
-    (manifest_bytes(DEB_NAME, SHA, len(BODY), schema=3), "schema_mismatch"),
-    (manifest_bytes("not-a-deb.txt", SHA, 1), "manifest_invalid"),  # a malformed player_deb
-    (VALID, "asset_missing"),  # valid, but its .deb is not attached: an incomplete upload
+@pytest.mark.parametrize("manifest", [
+    b"{not json",
+    b"[1]",  # not an object
+    manifest_bytes(DEB_NAME, SHA, len(BODY), schema=3),
+    manifest_bytes(DEB_NAME, SHA, len(BODY), base={"filename": BASE_NAME}),  # malformed
+    VALID,  # valid, but its base tarball is not attached: an incomplete upload
 ])
-def test_a_read_but_invalid_or_incomplete_manifest_is_no_version(manifest, problem):
+def test_a_read_but_invalid_or_incomplete_manifest_is_no_version(manifest):
     # Owner decisions (errata 2026-09-24, bead 3): invalid or incomplete is treated as unread.
     record = _versioned(Server(), manifest=manifest, **UPLOADED)
-    assert record.package_problem == problem and record.upstream_version is None
+    assert record.os_image is None and record.upstream_version is None
 
 
 @pytest.mark.parametrize("version", [
@@ -374,8 +337,8 @@ def test_a_read_but_invalid_or_incomplete_manifest_is_no_version(manifest, probl
     {"id": 7, "updated_at": 1788220800},
 ])
 def test_an_invalid_id_or_updated_at_is_no_version(version):
-    record = _versioned(Server(), manifest=VALID, attach_deb=True, **version)
-    assert record.package_problem is None and record.upstream_version is None
+    record = _versioned(Server(), manifest=VALID, attach_base=True, **version)
+    assert record.os_image is not None and record.upstream_version is None
 
 
 def test_a_manifest_not_read_is_no_version():

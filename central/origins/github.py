@@ -1,4 +1,5 @@
-"""The GitHub Releases gateway: the kernel `ReleaseOrigin` for the Player `.deb` and the OS image.
+"""The GitHub Releases gateway: the kernel `ReleaseOrigin` for the releases' OS images and node
+release manifests.
 
 A port of `central/github_releases.py` (which stays until P2 deletes it). The discipline is
 unchanged: identity encoding pinned and enforced, every read bounded while streaming, an exact
@@ -32,7 +33,6 @@ from central.kernel.handling import OriginRejected, OriginUnavailable
 from central.kernel.ports import (
     NODE_RELEASE_INVALID,
     NodePublication,
-    PlayerPayload,
     PublishedRelease,
     ReleaseListing,
     UpstreamVersion,
@@ -44,20 +44,12 @@ from contracts.node_release import (
     encode_node_release,
     parse_node_release,
 )
-from contracts.player_payload import FORMAT as PLAYER_PAYLOAD_FORMAT
-from contracts.player_payload import MAX_ARCHIVE_BYTES as MAX_PLAYER_PAYLOAD_BYTES
-from contracts.player_payload import archive_name as player_payload_name
 from contracts.release import (
     BASE_IMAGE,
     MANIFEST,
     MANIFEST_SCHEMA,
-    MANIFEST_V2,
     MAX_MANIFEST_BYTES,
     MAX_ROOTFS_BYTES,
-    PAYLOAD_MANIFEST_SCHEMA,
-    PLAYER_DEB,
-    PLAYER_PAYLOAD,
-    legacy_projection,
 )
 
 GITHUB_API_BASE: Final = "https://api.github.com"
@@ -97,16 +89,11 @@ class _BodyEncoded(Exception):
 
 @dataclass(frozen=True, slots=True)
 class _Manifest:
-    """What one release's `manifest.json` yields: the `.deb` (or why not), the OS image, and the
-    upstream version: set only by `_parse_manifest`, for a valid manifest."""
+    """What one release's `manifest.json` yields: the OS image and the upstream version, set
+    only by `_parse_manifest`, for a valid and complete manifest."""
 
-    package: OriginLocator | None
-    package_problem: str | None
-    os_image: OriginLocator | None
+    os_image: OriginLocator | None = None
     upstream_version: UpstreamVersion | None = None
-    payload: PlayerPayload | None = None
-    base_abi: str | None = None
-    base_abi_squashfs_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,12 +208,12 @@ class GitHubReleaseOrigin:
 
     async def _resolve(self, client: httpx.AsyncClient, entry: object) -> PublishedRelease | None:
         """One listed release, or None (a draft, a non-semver tag, or a pre-release with neither
-        legacy pre-releases enabled nor a node manifest).
+        pre-releases enabled nor a node manifest).
 
         A node release is observed whether or not it is a pre-release: the node path lists
         pre-releases (the console labels them) and never downloads them in the background. With
-        `include_prereleases` off a pre-release's legacy manifest is not read (`legacy=False`),
-        so V1 rows and V1 auto-promotion are unchanged."""
+        `include_prereleases` off a pre-release's `manifest.json` is not read (`legacy=False`),
+        so no `app_releases` row is written for it."""
         if not isinstance(entry, dict) or entry.get("draft") is True:
             return None
         is_prerelease = bool(entry.get("prerelease"))
@@ -241,18 +228,14 @@ class GitHubReleaseOrigin:
             return None
         node, node_problem, node_version = await self._node_manifest(client, assets, tag)
         if not legacy:
-            return PublishedRelease(tag=tag, is_prerelease=True, package=None,
-                                    package_problem="legacy_prerelease_unlisted", os_image=None,
+            return PublishedRelease(tag=tag, is_prerelease=True, os_image=None,
                                     upstream_version=None, node_publication=node,
                                     node_problem=node_problem, node_version=node_version,
                                     legacy=False)
         manifest = await self._manifest(client, assets)
-        return PublishedRelease(tag=tag, is_prerelease=is_prerelease, package=manifest.package,
-                                package_problem=manifest.package_problem,
+        return PublishedRelease(tag=tag, is_prerelease=is_prerelease,
                                 os_image=manifest.os_image,
                                 upstream_version=manifest.upstream_version,
-                                payload=manifest.payload, base_abi=manifest.base_abi,
-                                base_abi_squashfs_sha256=manifest.base_abi_squashfs_sha256,
                                 node_publication=node, node_problem=node_problem,
                                 node_version=node_version)
 
@@ -262,9 +245,9 @@ class GitHubReleaseOrigin:
         """(publication, problem, version) of the attached node manifest; all None when none is
         attached. A deterministic refusal is this release's `problem`, never an exception: one
         malformed manifest must not stop discovery of every other release. A transport failure
-        (`OriginUnavailable`) still aborts the listing, as for the legacy manifest.
+        (`OriginUnavailable`) still aborts the listing, as for `manifest.json`.
 
-        An attached malformed node manifest never falls back to similarly named legacy assets."""
+        An attached malformed node manifest never falls back to similarly named assets."""
         manifest = assets.get(NODE_RELEASE_MANIFEST)
         if manifest is None:
             return None, None, None
@@ -294,25 +277,17 @@ class GitHubReleaseOrigin:
         return publication, None, manifest.version
 
     async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset]) -> _Manifest:
-        manifest_asset = assets.get(MANIFEST_V2) or assets.get(MANIFEST)
+        """`manifest.json` read as schema 1: only its OS image. Every other record it carries
+        (the retired Player `.deb`, bootstrapper and payload) is neither read nor required."""
+        manifest_asset = assets.get(MANIFEST)
         if manifest_asset is None:
-            return _Manifest(None, "no_manifest", None)
+            return _Manifest()
         try:
             body = await self._fetch_manifest(client, manifest_asset.url)
         except (_BodyTooLarge, _BodyEncoded):
-            return _Manifest(None, "manifest_invalid", None)  # deterministic: this release only
+            return _Manifest()  # deterministic: this release only
         if body is None:  # listed, but gone upstream (404/410): no body, so no version
-            return _Manifest(None, "no_manifest", None)
-        if MANIFEST_V2 in assets:
-            legacy = assets.get(MANIFEST)
-            if legacy is None:
-                return _Manifest(None, "asset_missing", None)
-            try:
-                legacy_body = await self._fetch_manifest(client, legacy.url)
-            except (_BodyTooLarge, _BodyEncoded):
-                return _Manifest(None, "manifest_invalid", None)
-            if legacy_body is None or not _dual_manifests_agree(body, legacy_body):
-                return _Manifest(None, "manifest_invalid", None)
+            return _Manifest()
         return _parse_manifest(body, assets, manifest_asset.version)
 
     async def _fetch_manifest(self, client: httpx.AsyncClient, url: str, *, maximum: int = MAX_MANIFEST_BYTES) -> bytes | None:
@@ -418,80 +393,27 @@ def _require_api_base(api_base: object) -> str:
 
 def _parse_manifest(body: bytes, assets: dict[str, _Asset],
                     version: UpstreamVersion | None) -> _Manifest:
-    """The `.deb`, optional data-only payload, and OS image a manifest declares. The version
-    is set only for a valid and complete schema-1 or schema-2 manifest whose declared assets
-    are attached. Schema 2 is compared with schema 1 before this parser runs.
+    """The OS image a schema-1 manifest declares. The version is set only for a valid manifest
+    whose OS image is declared and attached.
 
-    This is the one place a version is set. An invalid manifest (`manifest_invalid`,
-    `schema_mismatch`) or an incomplete upload (`asset_missing`: typically a release caught
-    mid-upload) is unversioned like an unread one, so the sync refuses it over any stored
-    observation: a broken or partial upload never takes a working release's `.deb` from the Pis.
+    This is the one place a version is set. An invalid manifest or an incomplete upload
+    (typically a release caught mid-upload) is unversioned like an unread one, so the sync
+    refuses it over any stored observation: a broken or partial upload never takes a working
+    release's OS image away.
     """
     try:
         manifest = json.loads(body)
     except (ValueError, UnicodeError):
-        return _Manifest(None, "manifest_invalid", None)
+        return _Manifest()
     if not isinstance(manifest, dict):
-        return _Manifest(None, "manifest_invalid", None)
+        return _Manifest()
     schema = manifest.get("schema")
-    if type(schema) is not int or schema not in (MANIFEST_SCHEMA, PAYLOAD_MANIFEST_SCHEMA):
-        return _Manifest(None, "schema_mismatch", None)
-    # The OS image is independent of the .deb: parsed whatever the player_deb outcome.
+    if type(schema) is not int or schema != MANIFEST_SCHEMA:
+        return _Manifest()
     os_image = _locator(manifest.get(BASE_IMAGE), assets, suffix="", max_size=None)
-    player = manifest.get(PLAYER_DEB)
-    if _declared_file(player, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES) is None:
-        return _Manifest(None, "manifest_invalid", os_image)
-    package = _locator(player, assets, suffix=".deb", max_size=MAX_DOWNLOAD_BYTES)
-    if package is None:  # the manifest names a .deb the release does not attach (yet)
-        return _Manifest(None, "asset_missing", os_image)
-    payload = None
-    base_abi = base_digest = None
-    if schema == PAYLOAD_MANIFEST_SCHEMA:
-        base_record = manifest.get(BASE_IMAGE)
-        if (not isinstance(base_record, dict)
-                or set(base_record) != {"filename", "sha256", "size", "base_abi",
-                                        "base_abi_squashfs_sha256"}
-                or os_image is None
-                or not isinstance(base_record.get("base_abi"), str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", base_record["base_abi"]) is None
-                or not isinstance(base_record.get("base_abi_squashfs_sha256"), str)
-                or re.fullmatch(r"[0-9a-f]{64}",
-                                base_record["base_abi_squashfs_sha256"]) is None):
-            return _Manifest(None, "manifest_invalid", os_image)
-        base_abi = base_record["base_abi"]
-        base_digest = base_record["base_abi_squashfs_sha256"]
-        record = manifest.get(PLAYER_PAYLOAD)
-        if (not isinstance(record, dict)
-                or set(record) != {"filename", "sha256", "size", "format", "base_abi"}
-                or not isinstance(manifest.get("revision"), str)
-                or re.fullmatch(r"[0-9a-f]{40}", manifest["revision"]) is None
-                or record.get("filename") != player_payload_name(manifest["revision"])
-                or record.get("format") != PLAYER_PAYLOAD_FORMAT
-                or not isinstance(record.get("base_abi"), str)
-                or re.fullmatch(r"sha256:[0-9a-f]{64}", record["base_abi"]) is None):
-            return _Manifest(None, "manifest_invalid", os_image)
-        locator = _locator(record, assets, suffix=".tar.gz",
-                           max_size=MAX_PLAYER_PAYLOAD_BYTES)
-        if locator is None:
-            return _Manifest(None, "asset_missing", os_image)
-        try:
-            payload = PlayerPayload(locator, record["format"], record["base_abi"])
-        except ValueError:
-            return _Manifest(None, "manifest_invalid", os_image)
-    return _Manifest(package, None, os_image, version, payload, base_abi,
-                     base_digest)  # valid and complete
-
-
-def _dual_manifests_agree(v2_body: bytes, legacy_body: bytes) -> bool:
-    """The v2 view must have exactly the legacy facts old Central reads under schema 1."""
-    try:
-        v2, legacy = json.loads(v2_body), json.loads(legacy_body)
-    except (ValueError, UnicodeError):
-        return False
-    return (isinstance(v2, dict) and isinstance(legacy, dict)
-            and type(v2.get("schema")) is int and v2["schema"] == PAYLOAD_MANIFEST_SCHEMA
-            and type(legacy.get("schema")) is int and legacy["schema"] == MANIFEST_SCHEMA
-            and legacy_projection(v2) == legacy)
+    if os_image is None:  # malformed, or not attached (yet)
+        return _Manifest()
+    return _Manifest(os_image, version)  # valid and complete
 
 
 def _asset_urls(raw_assets: object) -> dict[str, _Asset]:

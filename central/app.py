@@ -45,7 +45,6 @@ from central.media_ports import (
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.netboot_base import record_base_health
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
@@ -63,7 +62,6 @@ from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
-    BaseHealth,
     Calibration,
     Identifier,
     Model,
@@ -132,10 +130,6 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
 
 
-class DevicePin(Model):
-    # The tag to pin a device to (0012 bead 7). Bounded here; the catalog checks
-    # the tag's shape (422) and that the release and the device exist (404).
-    tag: str = Field(min_length=1, max_length=128)
 
 
 def create_app(
@@ -555,29 +549,6 @@ def create_app(
             raise RegistryError("stale_authority", 403)
         return {"accepted": coordinator.readiness(identity["id"], request)}
 
-    @app.post("/v1/player/base-health")
-    def base_health(request: BaseHealth, identity: dict = Depends(player)):
-        # Authenticated by the enrolled-device token (the `player` dependency),
-        # but -- unlike readiness -- requires NO live plan offer (0012 r7), so an
-        # enrolled-but-unbound, base-booted device can move the latest-verified
-        # frontier. Join player_id -> players.device_id -> devices, then advance
-        # known-good only for a genuinely healthy, monotonic report whose
-        # running_tag equals the tag Central recorded as last-served (E1: the
-        # write is a single conditional UPDATE under FOR UPDATE, so a concurrent
-        # recovery serve that moved the served tag invalidates a stale write).
-        if request.authority_epoch != identity["authority_epoch"]:
-            raise RegistryError("stale_authority", 403)
-        with db.transaction() as conn:
-            row = conn.execute(
-                "SELECT device_id FROM players WHERE id=%s", (identity["id"],)
-            ).fetchone()
-            accepted = (
-                record_base_health(conn, row["device_id"], request, clock=clock)
-                if row is not None
-                else False
-            )
-        return {"accepted": accepted}
-
     @app.post("/v1/player/observations")
     def observation(request: Observation, identity: dict = Depends(player)):
         if request.authority_epoch != identity["authority_epoch"]:
@@ -677,29 +648,6 @@ def create_app(
         # release appears without waiting for the next cadence.
         await _content().catalog.refresh()
         return JSONResponse({"status": "polling"}, status_code=202)
-
-    @app.put("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
-    async def pin_device(device_id: Identifier, request: DevicePin):
-        # Operator pin (0012 bead 7): sets `devices.attached_tag`, which the catalog
-        # resolves as the only candidate (a pinned device never gets a substitute),
-        # and publishes the tag's OS-image and `.deb` fetches in the same
-        # transaction, so a recovery pin comes up on the device's NEXT netboot.
-        # Unknown release or device -> 404 with no write.
-        await _content().catalog.pin(device_id, request.tag)
-        return {"status": "pinned"}
-
-    @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
-    async def unpin_device(device_id: Identifier):
-        # Clear the pin: the device falls back to the unpinned precedence.
-        await _content().catalog.unpin(device_id)
-        return {"status": "cleared"}
-
-    @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])
-    async def netboot_status():
-        # Read-only operator view: the live frontier and every active device's
-        # netboot state (pin, known-good, last served, boot outcome, fence).
-        view = await _content().catalog.netboot_view()
-        return {"frontier": view.frontier, "devices": [asdict(row) for row in view.devices]}
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
@@ -892,7 +840,7 @@ def create_app(
     mount_library_routes(app, admin=admin, media=media_application, content=content)
     if content is not None:
         mount_content_routes(app, content)
-    mount_fleet_routes(app, db=db, clock=clock, admin=admin, content=content)
+    mount_fleet_routes(app, db=db, clock=clock, admin=admin)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       serving_verifier=node_serving_verifier, content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)

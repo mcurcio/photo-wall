@@ -524,7 +524,6 @@ def test_opt_in_fetches_the_per_device_manifest_and_hands_the_tag_forward(tmp_pa
     assert run(subject, 1) is True
     assert transport.sent[0][1][SERIAL_HEADER] == SERIAL
     assert json.loads(public.read_text()) == {"schema": 1, "base_running_tag": TAG}
-    assert load_config(public).base_running_tag == TAG
 
 
 def test_an_unreadable_serial_keeps_the_global_manifest():

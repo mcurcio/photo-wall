@@ -30,12 +30,6 @@ class FetchPackage(Job[AssetReady], name="player_deb.fetch", asset=AssetKind.PLA
     sha256: Sha256
 
 
-class FetchPlayerPayload(Job[AssetReady], name="player_payload.fetch",
-                         asset=AssetKind.PLAYER_PAYLOAD,
-                         delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
-    sha256: Sha256
-
-
 class FetchSealedEnvironment(Job[AssetReady], name="sealed_environment.fetch",
                              asset=AssetKind.SEALED_ENVIRONMENT,
                              delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
@@ -48,7 +42,7 @@ class FetchLibraryThumbnail(Job[AssetReady], name="library_thumbnail.fetch",
                                               priority=_THUMBNAIL_PRIORITY)):
     """One preview tile; its handler's library half is injected by the media worker (R22).
 
-    Below every other FETCH job's priority: a queued OS image, package or payload fetch is
+    Below every other FETCH job's priority: a queued OS image, package or environment fetch is
     always picked first. A running tile still holds a FETCH slot for its attempt (at most
     the client's metadata budget, `ImmichClient.thumbnail`).
     """
@@ -81,8 +75,8 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
-AssetJob: TypeAlias = (FetchOsImage | FetchPackage | FetchPlayerPayload | FetchSealedEnvironment
+AssetJob: TypeAlias = (FetchOsImage | FetchPackage | FetchSealedEnvironment
                        | FetchLibraryThumbnail)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
-    FetchOsImage, FetchPackage, FetchPlayerPayload, FetchSealedEnvironment, FetchLibraryThumbnail,
+    FetchOsImage, FetchPackage, FetchSealedEnvironment, FetchLibraryThumbnail,
     SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs)

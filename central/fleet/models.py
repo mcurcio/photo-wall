@@ -8,16 +8,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from central.content_catalog.catalog import sanitize_serial
-from contracts.release import MAX_ROOTFS_BYTES
-
-Digest = str
-T0_AUDIENCE = "photo-wall-central-t0"  # correlation label, not an authenticated audience
-
 
 @dataclass(frozen=True, slots=True)
 class OfferAsset:
-    """Frozen exact bytes requested by an offer or accepted fallback."""
+    """Frozen exact bytes a node boot offer or a node app command names."""
 
     kind: str
     tag: str
@@ -35,26 +29,6 @@ class FleetError(Exception):
 
 class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class Artifact(WireModel):
-    tag: str = Field(min_length=1, max_length=128)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size: int = Field(gt=0, le=MAX_ROOTFS_BYTES)
-
-
-class OfferRequest(WireModel):
-    schema_version: Literal[1] = Field(alias="schema")
-    kind: Literal["pi"]
-    serial: str = Field(min_length=1, max_length=128)
-    kernel_boot_id: UUID
-    boot_nonce: str = Field(pattern=r"^[0-9a-f]{16,128}$")
-
-    def validated_serial(self) -> str:
-        serial = sanitize_serial(self.serial)
-        if serial is None:
-            raise FleetError("invalid_serial", 422)
-        return serial
 
 
 class CheckIn(WireModel):
@@ -114,37 +88,3 @@ class CheckInV2(CheckIn):
         if self.app_evidence.kernel_boot_id != self.kernel_boot_id:
             raise ValueError("app_evidence_boot_mismatch")
         return self
-
-
-class PolicyWrite(WireModel):
-    expected_revision: int = Field(ge=0)
-    target: Artifact | None
-
-
-class OverrideWrite(WireModel):
-    expected_revision: int = Field(ge=0)
-    target: Artifact
-
-
-class RevisionWrite(WireModel):
-    expected_revision: int = Field(ge=0)
-
-
-class BaselineWrite(WireModel):
-    expected_revision: int = Field(ge=0)
-    tag: str = Field(min_length=1, max_length=128)
-
-
-class MaintenanceRequestWrite(WireModel):
-    """Operator intent tied to the exact policy and device generation on screen."""
-
-    request_id: UUID
-    expected_device_generation: int = Field(strict=True, gt=0)
-    expected_policy_source: Literal["explicit", "override"]
-    expected_policy_revision: int = Field(strict=True, gt=0)
-    expected_target_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    ttl_seconds: int = Field(strict=True, ge=300, le=86400)
-
-
-class MaintenanceRequestCancel(WireModel):
-    expected_revision: int = Field(strict=True, gt=0)

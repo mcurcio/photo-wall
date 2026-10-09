@@ -1,31 +1,13 @@
-"""Process-level end-to-end for the netboot base/squashfs path: the REAL stage 1
-(`appliance.netboot_init` over the REAL `uplink` transport, locate and direct fetch)
-against a REAL Central (uvicorn) + REAL Postgres, over a real socket -- once through a
-gateway's 301 to Central over verified TLS (decision 0014), and plain http for the
-chained app `.deb` flow (`appliance.provision.Bootstrapper` over `uplink.finder.find_central`
-and `uplink.fetch.DirectFetch`, Project 2).
+"""Process-level end-to-end over a real socket for the app `.deb` flow
+(`appliance.provision.Bootstrapper` over `uplink.finder.find_central` and
+`uplink.fetch.DirectFetch`) against a REAL Central (uvicorn) + REAL Postgres, and the real
+stage 1 (`appliance.netboot_init`) refusing a Digest-less base from a stub.
 
-This closes the gap the unit + TestClient tests leave: there, the client used a
-mocked fetcher and the server used an in-memory TestClient, so the two halves
-never met over the wire. Here the fetch is a genuine HTTP round trip to a live
-uvicorn server on an ephemeral 127.0.0.1 port.
-
-NOT a kernel/QEMU boot (owner's hardware bench, out of scope): the ram/mount ops
-are injected exactly as the unit test does, since we are not pivoting a real
-root -- but everything up to and including the download + digest verification is
-real. It also chains the app `.deb` fetch via the existing Bootstrapper tracer
-path in the same run, so one flow proves connect -> download runtime (squashfs)
--> download package (.deb). The REAL dpkg install of a real `.deb`, by the packaged
-provisioner in the device root, remains the docker-compose tracer's job
-(scripts/test_netboot_e2e.py); here the package is a synthetic blob because this
-test proves the WIRE contract (fetch + streamed sha256 verify), not the install.
-The tracer's own helpers that need no docker are tested at the end.
-
-P2: Central serves through the content catalog and the asset read path, built by
-the production wiring (`build_content_services`). The fixtures seed what a
-release sync and a finished fetch leave behind -- the release row, the Asset
-record with its produced facts, the file at its cache path -- instead of the
-retired `base_cache`/`app_packages` rows.
+Central serves no V1 netboot base any more (decision 0019): the node boot path's base is a
+node offer's artifact. The REAL dpkg install of a real `.deb`, by the packaged provisioner in
+the device root, remains the docker-compose tracer's job (scripts/test_netboot_e2e.py); here the
+package is a synthetic blob because this test proves the WIRE contract (fetch + streamed sha256
+verify), not the install. The tracer's own helpers that need no docker are tested at the end.
 
 Runs under the DB harness (scripts/test_local.py / PHOTO_WALL_TEST_DATABASE_URL);
 it skips only when no Postgres is configured, like every other DB-backed test --
@@ -46,7 +28,6 @@ import time
 import urllib.error
 import urllib.request
 from copy import deepcopy
-from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -57,22 +38,18 @@ import uvicorn
 
 from appliance.bootstrap import read_pi_serial
 from appliance.netboot_init import NetbootError, netboot
-from appliance.provision import Bootstrapper, fetch_manifest
+from appliance.provision import Bootstrapper
 from central.app import create_app
 from central.assets.layout import CacheLayout
 from central.assets.reader import AssetReader, WaiterSlots
 from central.assets.store import CacheStore
-from central.content_catalog.catalog import device_id_for_serial
 from central.content_wiring import build_content_services
 from central.infra.asset_records import PgAssetRecords
-from central.infra.catalog_records import PgReleaseRecords
 from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
-from central.infra.transactions import PgTransactions, pg_connection
-from central.kernel.assets import AssetReady, AssetReference, OriginLocator
-from central.kernel.job_types import FetchOsImage, FetchPackage
+from central.infra.transactions import PgTransactions
+from central.kernel.job_types import FetchPackage
 from central.kernel.jobs import asset_key
-from central.kernel.ports import PublishedRelease
 from contracts.clock_record import ClockRecord, ClockState
 from scripts import test_netboot_e2e as tracer
 from scripts.debian_packages import DEVICE_CONSUMERS, mmdebstrap_argv
@@ -84,13 +61,10 @@ from scripts.test_netboot_e2e import (  # reuse tracer helpers
     promote_path,
     release_seed_sql,
 )
-from uplink.causes import Cause, UplinkError
-from uplink.fetch import DirectFetch
 from uplink.finder import find_central
-from uplink.locate import locate
 from uplink.origin import Origin
 from uplink.resolver import Configured
-from uplink.transport import HOP_TIMEOUT, HttpTransport
+from uplink.transport import HttpTransport
 from uplink.trust import Trust
 
 REPO = Path(__file__).resolve().parents[1]
@@ -98,9 +72,6 @@ ADMIN = "e2e-netboot-admin-" + "x" * 32
 SQUASHFS = b"rpi-image-gen base squashfs payload, streamed over a real socket" * 64
 SERIAL_BYTES = b"10000000cafef00d\x00"          # devicetree serial-number shape
 SERIAL = "10000000cafef00d"
-TAG = "v9.9.9"
-DEB_SHA = hashlib.sha256(("deb-" + TAG).encode()).hexdigest()  # TAG's `.deb` (manifest only)
-TARBALL_SHA = "b" * 64  # TAG's base tarball: the OS image's key
 
 
 class _Log:
@@ -186,33 +157,6 @@ class _InstallCapture:
         self.starts += 1
 
 
-def _seed_base(registry, cache_root, *, tag=TAG, squashfs=SQUASHFS, cached=True,
-               pin_serial=SERIAL):
-    """What a release sync plus a finished FetchOsImage leave behind, for a pinned device.
-
-    The release row (with its `.deb` and base-tarball locators), the os-image Asset
-    with its reference and -- when `cached` -- its produced facts and the file at its
-    cache path, and a device pinned to `tag` so the serial resolves deterministically."""
-    db, clock = registry.db, registry.clock
-    tarball = OriginLocator("https://example.test/base.tgz", TARBALL_SHA, len(squashfs))
-    package = OriginLocator("https://example.test/app.deb", DEB_SHA, 4096)
-    key = asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA))
-    assets = PgAssetRecords(clock)
-    with PgTransactions(db).begin() as tx:
-        PgReleaseRecords().claim(tx, PublishedRelease(tag, False, package, None, tarball, None),
-                                 now=clock.utc())
-        assets.reference(tx, key, AssetReference(tag, tarball, None, None))
-        if cached:
-            assets.record_produced(
-                tx, key, AssetReady(len(squashfs), hashlib.sha256(squashfs).hexdigest()))
-        pg_connection(tx).execute(
-            "INSERT INTO devices(device_id,first_seen,last_seen,attached_tag) VALUES(%s,%s,%s,%s)",
-            (device_id_for_serial(pin_serial), clock.utc(), clock.utc(), tag),
-        )
-    if cached:
-        _write(cache_root, key, squashfs)
-
-
 def _write(cache_root, key, data):
     path = CacheLayout(cache_root).path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,32 +230,13 @@ def _netboot(root: str, tmp_path: Path, ops: _Ops, *, keeper: _Keeper | None = N
             serial_reader=_serial_reader(tmp_path), log=_Log())
 
 
-def _served_row(registry, serial=SERIAL):
-    with registry.db.transaction() as conn:
-        return conn.execute(
-            "SELECT last_served_tag, boot_outcome, known_good_tag FROM devices "
-            "WHERE device_id=%s", (device_id_for_serial(serial),)).fetchone()
-
-
-def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_path):
+def test_the_bootstrapper_fetches_the_promoted_package_over_the_wire(registry, tmp_path):
     cache_root = tmp_path / "cache"
-    _seed_base(registry, cache_root)
-
     app = _app(registry, cache_root)
-    ops = _Ops(tmp_path / "run")
     with _serve(app) as origin:
-        # --- Phase 1: REAL netboot base fetch over the wire ---
-        _netboot(origin + "/", tmp_path, ops)
-        assert ops.mounted and ops.mounted[0][0] == SQUASHFS      # runtime downloaded
-        # The serial reached the SERVER, not just the client's header: the 200
-        # recorded the served tag on the device row that serial derives.
-        row = _served_row(registry)
-        assert (row["last_served_tag"], row["boot_outcome"]) == (TAG, "pending")
-
-        # --- Phase 2: chain the app .deb fetch via the Bootstrapper path ---
-        # A promoted release whose `.deb` is produced and on disk: the compose
-        # tracer's seed (scripts/test_netboot_e2e.py) and its promotion through the
-        # operator route, proven here against a real schema.
+        # A promoted release whose `.deb` is produced and on disk: the compose tracer's seed
+        # (scripts/test_netboot_e2e.py) and its promotion through the operator route, proven
+        # here against a real schema.
         payload = b"synthetic photo-wall-player package bytes" * 32
         sha = hashlib.sha256(payload).hexdigest()
         with psycopg.connect(registry.db.dsn, autocommit=True) as conn:
@@ -338,133 +263,6 @@ def test_real_client_fetches_runtime_then_package_over_the_wire(registry, tmp_pa
         assert asyncio.run(bootstrapper.run(max_attempts=1)) is True
         assert capture.sha == sha                                  # package downloaded + verified
         assert capture.starts == 1
-
-
-def _enroll_device(registry, serial, token, *, epoch=1):
-    device_id = device_id_for_serial(serial)
-    player_id = "p-" + hashlib.sha256(device_id.encode()).hexdigest()[:32]
-    token_hash = hashlib.sha256(token.encode()).hexdigest()
-    with registry.db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO players(id,public_key,token_hash,authority_epoch,registered_at,"
-            "last_seen,device_id) VALUES(%s,%s,%s,%s,%s,%s,%s)",
-            (player_id, "pk-" + device_id, token_hash, epoch,
-             registry.clock.utc(), registry.clock.utc(), device_id),
-        )
-
-
-def _post_base_health(origin, body, token):
-    request = urllib.request.Request(
-        origin + "/v1/player/base-health",
-        data=json.dumps(body).encode(), method="POST",
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-    )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=15) as response:
-        return response.status, json.loads(response.read())
-
-
-def test_base_health_advances_frontier_with_the_served_tag_over_the_wire(registry, tmp_path):
-    # (criterion b + c) The FULL per-device arc over a real socket:
-    #   1. a real base serve records `last_served_tag = TAG` on the 200;
-    #   2. the REAL appliance client (provision.fetch_manifest over a located
-    #      DirectFetch, serial header) fetches /v1/netboot/manifest and LEARNS
-    #      the served tag from the
-    #      response -- proof the reported tag is the served tag, not a guess;
-    #   3. base-health on that learned tag validates (`running_tag ==
-    #      last_served_tag`) and advances known-good, moving latest-verified.
-    # Un-over-mocked: real uvicorn + Postgres, real fetch client, real HTTP.
-    cache_root = tmp_path / "cache"
-    _seed_base(registry, cache_root)         # release (+ its .deb) + cached base + pin
-    token = "wire-e2e-token-" + "z" * 32
-    _enroll_device(registry, SERIAL, token)
-
-    ops = _Ops(tmp_path / "run")
-    app = _app(registry, cache_root)
-    with _serve(app) as origin:
-        # (1) real base serve over the wire -> records last_served_tag = TAG.
-        _netboot(origin + "/", tmp_path, ops)
-        assert ops.mounted and ops.mounted[0][0] == SQUASHFS
-
-        # (2) REAL appliance manifest client learns the served tag over the wire.
-        transport = _transport(tmp_path)
-        central = locate(Origin.parse_root(origin), transport=transport)
-        manifest = fetch_manifest(DirectFetch(central, transport=transport, seconds=30), SERIAL)
-        assert manifest.tag == TAG             # the served tag, echoed by central
-        assert manifest.sha256 == DEB_SHA
-
-        # (3) base-health with the LEARNED tag advances the frontier.
-        status, accepted = _post_base_health(
-            origin,
-            {"authority_epoch": 1, "sequence": 1, "running_tag": manifest.tag, "healthy": True},
-            token,
-        )
-        assert status == 200 and accepted == {"accepted": True}
-
-    row = _served_row(registry)
-    assert row["known_good_tag"] == TAG        # frontier advanced on real evidence
-    assert row["boot_outcome"] == "healthy"
-
-
-def test_base_health_with_a_guessed_tag_is_rejected_over_the_wire(registry, tmp_path):
-    # The negative: a tag that is NOT the served tag never advances the frontier
-    # (central validates running_tag == last_served_tag). Proves criterion (b)'s
-    # guarantee is enforced server-side, not merely honored by a cooperative client.
-    cache_root = tmp_path / "cache"
-    _seed_base(registry, cache_root)
-    token = "wire-e2e-token-" + "y" * 32
-    _enroll_device(registry, SERIAL, token)
-    ops = _Ops(tmp_path / "run")
-    app = _app(registry, cache_root)
-    with _serve(app) as origin:
-        _netboot(origin + "/", tmp_path, ops)
-        status, accepted = _post_base_health(
-            origin,
-            {"authority_epoch": 1, "sequence": 1, "running_tag": "v0.0.1", "healthy": True},
-            token,
-        )
-        assert status == 200 and accepted == {"accepted": False}
-    assert _served_row(registry)["known_good_tag"] is None  # a guessed tag never advances
-
-
-def test_real_central_corruption_fails_closed_over_the_wire(registry, tmp_path):
-    cache_root = tmp_path / "cache"
-    _seed_base(registry, cache_root)
-    app = _app(registry, cache_root)
-    ops = _Ops(tmp_path / "run")
-    with _serve(app) as origin:
-        # Tamper the served bytes WITHOUT touching the recorded produced facts, at the
-        # same length (the read path opens only a file of the recorded size): central
-        # serves the tampered bytes with the recorded (now-mismatching) Digest header,
-        # and the client's streamed sha256 must refuse.
-        tampered = SQUASHFS[:-1] + bytes([SQUASHFS[-1] ^ 0x01])
-        _write(cache_root, asset_key(FetchOsImage(tarball_sha256=TARBALL_SHA)), tampered)
-        with pytest.raises(NetbootError, match="netboot_integrity"):
-            _netboot(origin + "/", tmp_path, ops)
-        assert ops.mounted == []
-
-
-def test_real_central_uncached_tag_yields_503_over_the_wire(registry, tmp_path):
-    # Real Central fails closed (503 after the read-through wait) for a known but
-    # uncached tag, so the client names Central's own error rather than accepting a
-    # Digest-less 200 -- and the miss published the tag's fetch for a worker to run.
-    # The wait outlasts one hop: the client must wait for Central's answer, not time out.
-    cache_root = tmp_path / "cache"
-    _seed_base(registry, cache_root, cached=False)  # release + reference + pin, no bytes
-    app = _app(registry, cache_root, wait=timedelta(seconds=HOP_TIMEOUT + 1))
-    ops = _Ops(tmp_path / "run")
-    with _serve(app) as origin:
-        with pytest.raises(UplinkError) as caught:
-            _netboot(origin + "/", tmp_path, ops)
-        assert ops.mounted == []
-    assert (caught.value.cause, caught.value.reason) == (Cause.CENTRAL, "error")
-    assert caught.value.central_error.startswith("base_")
-    with registry.db.transaction() as conn:
-        queued = conn.execute("SELECT task_name, args FROM procrastinate_jobs "
-                              "WHERE status = 'todo'").fetchall()
-    assert [(q["task_name"], q["args"]["tarball_sha256"]) for q in queued] == [
-        ("photo_wall.os_image.fetch", TARBALL_SHA)]
-    assert _served_row(registry)["last_served_tag"] is None  # a miss records nothing
 
 
 class _NoDigestHandler(http.server.BaseHTTPRequestHandler):
@@ -494,23 +292,6 @@ def test_missing_digest_header_fails_closed_over_the_wire(tmp_path):
             _netboot(f"http://127.0.0.1:{stub.port}/", tmp_path, ops)
     assert ops.mounted == []
     assert stub.requests == ["/v1/locate", "/v1/netboot/base"]
-
-
-def test_real_netboot_locates_through_a_301_to_central_over_verified_tls(registry, tmp_path):
-    # S4b-AC3: the Pi's real case -- an http root whose gateway 301s to Central's
-    # https origin -- end to end: locate verifies the TLS certificate against the test
-    # CA only, then the base is one direct request, digest-verified and "mounted".
-    cache_root = tmp_path / "cache"
-    _seed_base(registry, cache_root)
-    ops, keeper = _Ops(tmp_path / "run"), _Keeper()
-    with tls.serve_tls(_app(registry, cache_root), tls.CENTRAL) as port:
-        with tls.redirect_stub(f"https://127.0.0.1:{port}/v1/locate") as gateway:
-            _netboot(f"http://localhost:{gateway.port}/", tmp_path, ops, keeper=keeper)
-    assert ops.mounted and ops.mounted[0][0] == SQUASHFS
-    assert gateway.requests == ["/v1/locate"]          # the base never went through it
-    # S0-AC6b: hand_over runs once, after the real download and mount.
-    assert keeper.handed_over is True and keeper.pets > 0
-    assert _served_row(registry)["last_served_tag"] == TAG
 
 
 # --- the compose tracer's helpers that need no docker ------------------------------------

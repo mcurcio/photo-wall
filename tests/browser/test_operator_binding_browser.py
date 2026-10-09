@@ -44,6 +44,7 @@ from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
 
 from central.content_catalog.catalog import device_id_for_serial
+from central.fleet.node_sessions import NodeControlConfig
 from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
@@ -634,14 +635,15 @@ def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
         assert registry.inventory().frames[0].player_id is None
 
 
-# --- Boot facts (slice 2 §5): one optional read of the netboot records.
+# --- Boot facts (slice 2 §5): each box's serial, from the shell's one fleet host read.
 
 SERIAL = "10000000c0ffee42"
-NETBOOT = "**/v1/operator/netboot"
+HOSTS = "**/v1/operator/node/hosts"
+NODE = NodeControlConfig("node-test")
 
 
 def _netbooted_player(registry, serial=SERIAL):
-    """A Player whose Pi netbooted: a `devices` row (seeded by SQL, as the netboot seam
+    """A Player whose Pi booted: a `devices` row (seeded by SQL, as the node boot path
     writes it) shares the Player's device_id, both derived from the serial."""
     device_id = device_id_for_serial(serial)
     with registry.db.transaction() as conn:
@@ -659,13 +661,13 @@ def _serial_option(scope, serial=SERIAL, output_id="HDMI-A-1"):
 def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, registry):
     _netbooted_player(registry)
     _placed_frame(registry, "boot-1")
-    with operator_server(registry.db, registry.clock) as origin:
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sign_in(page, origin)
         inspector = open_frame(page, "boot-1", "binding")
         # The handle is the serial's suffix (joined on device_id, not the Player id).
         expect(_serial_option(inspector)).to_be_visible()
-        # The Player is named by its serial handle; the serial is its claim. The shared
-        # devices record gives identity only: no boot record of the deprecated path is shown.
+        # The Player is named by its serial handle; the serial is its claim, served by the
+        # fleet host read: no V1 boot record is shown.
         player = open_player(page, f"Player …{SERIAL[-6:]}")
         expect(player).to_contain_text(
             f"Serial: Serial {SERIAL} (claimed at boot by the box, unverified)")
@@ -675,7 +677,7 @@ def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, re
 def test_the_hardware_list_names_boxes_by_their_distinct_serial_handles(page, registry):
     first_player = _netbooted_player(registry, SERIAL)
     second_player = _netbooted_player(registry, "10000000c0ffee93")
-    with operator_server(registry.db, registry.clock) as origin:
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin, "hardware")
         players = hardware_list(page)
         first = players.get_by_role("link", name="Player …ffee42", exact=True)
@@ -702,9 +704,9 @@ def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry)
     identity, _, _ = enroll(registry, count=1)
     player_id = identity["player_id"]
     name = player_name(registry, player_id)
-    page.route(NETBOOT, lambda route: route.fulfill(
+    page.route(HOSTS, lambda route: route.fulfill(
         status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
-    with operator_server(registry.db, registry.clock) as origin:
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin, "hardware")
         listing = hardware_list(page)
         expect(listing).to_contain_text("Boot records unavailable")
@@ -720,7 +722,7 @@ def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry)
 def test_a_player_that_never_netbooted_is_named_by_its_player_id_handle(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-2")
-    with operator_server(registry.db, registry.clock) as origin:
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
         open_player(page, player_name(registry, identity["player_id"]))
         # Its Boot section holds node records only, once read.
@@ -735,16 +737,16 @@ def test_a_player_that_never_netbooted_is_named_by_its_player_id_handle(page, re
 def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
     _netbooted_player(registry)
     _placed_frame(registry, "boot-3")
-    with operator_server(registry.db, registry.clock) as origin:
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
         inspector = open_frame(page, "boot-3", "binding")
         expect(_serial_option(inspector)).to_be_visible()
 
-        # 30 s later the next snapshot re-reads the boot facts, and Central answers 503.
-        page.route(NETBOOT, lambda route: route.fulfill(
+        # The next fleet host read (every 15 s) is refused, and Central answers 503.
+        page.route(HOSTS, lambda route: route.fulfill(
             status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
-        with page.expect_response(NETBOOT):
+        with page.expect_response(HOSTS):
             page.clock.run_for(35000)
         expect(inspector.get_by_text("Boot records unavailable", exact=False)).to_be_visible()
         # The last known serial is kept.
@@ -755,10 +757,10 @@ def test_a_401_from_the_boot_facts_read_does_not_log_the_operator_out(page, regi
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-4")
     name = player_name(registry, identity["player_id"])
-    page.route(NETBOOT, lambda route: route.fulfill(
+    page.route(HOSTS, lambda route: route.fulfill(
         status=401, content_type="application/json", body='{"error": "unauthorized"}'))
-    with operator_server(registry.db, registry.clock) as origin:
-        with page.expect_response(NETBOOT):
+    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+        with page.expect_response(HOSTS):
             sign_in(page, origin)
         go(page, "hardware")
         listing = hardware_list(page)

@@ -376,8 +376,7 @@ def test_try_is_withdrawn_for_a_base_change_or_no_app_as_a_hint():
 
 
 SCOPE = ("Every Player that boots by node path from now on is offered this deployment, including Players Central "
-         "has not seen. Central cannot list which Players will boot. A Pi whose kernel command line lacks "
-         "photowall.node=v2 is misconfigured and is not offered it.")
+         "has not seen. Central cannot list which Players will boot.")
 
 
 def test_put_on_the_wall_is_one_confirmation_naming_the_reboot_cost_in_both_gate_forms():

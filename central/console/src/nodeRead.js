@@ -10,13 +10,13 @@ import { usePolledRead } from "./polledRead.js";
  *
  * THE READ (`useNodeDevice`): one box's node records, read only while its Player page is
  * open — `GET …/node/devices/<id>` (its sessions, host samples, preparation, broker
- * projection, Display Host's newest exchange per Output, boot claims, the deprecated-path
- * boot fact and reboot audit) and `GET …/node/devices/<id>/app-attempts` (its app
- * operations) — every `cadenceMs` through the shared polled read (polledRead.js), never for
- * a retired box and never while node control is off (`skip`). The effect gate is NOT read
- * here: the shell's node status read is its one source (nodeControl.js). Like the boot facts
- * it goes through `apiWrite(path, {method: "GET"})`, so a failure never touches the session.
- * A failed read KEEPS the last values and reports its error beside them; a read refused
+ * projection, Display Host's newest exchange per Output, boot claims and reboot audit) and
+ * `GET …/node/devices/<id>/app-attempts` (its app operations) — every `cadenceMs` through
+ * the shared polled read (polledRead.js), never for a retired box and never while node
+ * control is off (`skip`). The effect gate is NOT read here: the shell's node status read is
+ * its one source (nodeControl.js). Like the fleet host read it goes through
+ * `apiWrite(path, {method: "GET"})`, so a failure never touches the session. A failed read
+ * KEEPS the last values and reports its error beside them; a read refused
  * `node_control_disabled` is such a failure, until the shell's read raises the banner.
  *
  * THE MODEL (`layerEvidence`, `currentSessionBoot`, `processFacts`): pure functions from

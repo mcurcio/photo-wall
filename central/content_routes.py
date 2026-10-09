@@ -1,9 +1,8 @@
 """The Player-facing content routes and the pod probes (a composition-root module; imports fastapi).
 
-Every byte route resolves through the catalog and reads through `AssetReader` (design §6(b)-(c),
+The package route resolves through the catalog and reads through `AssetReader` (design §6(b)-(c),
 §10.2): Unknown is a 404, a miss waits up to 30s on the fetch job's handle, then serves or 503s
-with `Retry-After`. The routes are unauthenticated (trusted LAN, 0009): a Pi has no credential
-before it boots.
+with `Retry-After`. The routes are unauthenticated (trusted LAN, 0009).
 
 Starlette never cancels an endpoint when its client goes away, so `until_disconnect` watches
 `http.disconnect` (the `media_gateway.py` pattern) and cancels the read. A Pi gone at ~10s frees
@@ -14,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import logging
 import os
 from collections.abc import Awaitable, Iterator
 from contextlib import suppress
@@ -25,12 +23,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from central.assets.reader import Opened, Unavailable
-from central.content_catalog.catalog import DevicePackage, ManifestRefusal, sanitize_serial
+from central.content_catalog.catalog import DevicePackage, ManifestRefusal
 from central.content_wiring import ContentServices
-from central.kernel.ports import Candidates, NetbootBaseRequest, PackageRequest, Unknown
-from central.netboot_base import SERIAL_HEADER
-
-LOG = logging.getLogger("central.app")  # the netboot serial log line keeps its logger
+from central.kernel.ports import Candidates, PackageRequest, Unknown
 
 CHUNK_BYTES: Final = 1024 * 1024
 DEB_MEDIA_TYPE: Final = "application/vnd.debian.binary-package"
@@ -105,7 +100,7 @@ def _package(package: DevicePackage) -> dict[str, object]:
 
 
 def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
-    """Bind the netboot, package and manifest routes plus `/livez` and `/readyz`."""
+    """Bind the package and manifest routes plus `/livez` and `/readyz`."""
     catalog, reader, probe = content.catalog, content.reader, content.probe
 
     async def read(request: Request, candidates: Candidates) -> Opened | Unavailable | None:
@@ -114,29 +109,6 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
             return await until_disconnect(request, reader.read(candidates))
         except ClientDisconnected:
             return None
-
-    @app.get("/v1/netboot/base")
-    async def netboot_base(request: Request) -> Response:
-        # The Pi self-identifies by serial. The catalog sanitizes it before any use, and the log
-        # line records only the sanitized value.
-        header = request.headers.get(SERIAL_HEADER)
-        LOG.info("netboot base fetch: serial=%s",
-                 sanitize_serial(header) or "<absent-or-invalid>")
-        base = NetbootBaseRequest(header)
-        resolution = await catalog.resolve(base)
-        if isinstance(resolution, Unknown):
-            return error_response("base_unknown", 404)  # decision 4, also an empty catalog
-        served = await read(request, resolution)
-        if served is None:
-            return Response(status_code=_CLIENT_GONE)
-        if isinstance(served, Unavailable):
-            return _unavailable("base", served)  # a miss records nothing about the device
-        try:
-            await catalog.record_served(base, resolution, served.job)  # only after a 200
-        except BaseException:
-            os.close(served.fd)
-            raise
-        return stream_opened(served, "application/octet-stream")
 
     @app.get("/v1/app/package/{sha256}.deb")
     async def app_package(request: Request, sha256: str) -> Response:
@@ -153,15 +125,6 @@ def mount_content_routes(app: FastAPI, content: ContentServices) -> None:
         if isinstance(served, Unavailable):
             return _unavailable("app", served)
         return stream_opened(served, DEB_MEDIA_TYPE)
-
-    @app.get("/v1/netboot/manifest")
-    async def netboot_manifest(request: Request) -> Response:
-        # The `.deb` of the tag whose base this device was actually served this boot (F4), plus
-        # that tag, which the enrolled player reports back as base-health `running_tag`.
-        package = await catalog.device_package(request.headers.get(SERIAL_HEADER))
-        if isinstance(package, ManifestRefusal):
-            return error_response(package.code, 503)
-        return JSONResponse({**_package(package), "tag": package.tag})
 
     @app.get("/v1/app/manifest")
     async def app_manifest() -> Response:

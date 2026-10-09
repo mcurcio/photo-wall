@@ -112,17 +112,6 @@ class PgAssetRecords:
         if recorded != facts:
             raise ProducedFactsConflict(f"{key}: recorded {recorded}, given {facts}")
 
-    def lock_produced(self, tx: Transaction, key: AssetKey) -> AssetReady | None:
-        # FOR SHARE conflicts with record_produced's UPDATE (FOR NO KEY UPDATE), and with nothing
-        # else the catalog takes on an asset row: reference()'s foreign-key checks take FOR KEY
-        # SHARE, and another reader's FOR SHARE is compatible.
-        row = pg_connection(tx).execute(
-            "SELECT produced_size, produced_sha256 FROM assets "
-            "WHERE kind=%s AND identity=%s FOR SHARE",
-            (key.kind.value, key.identity),
-        ).fetchone()
-        return None if row is None else _produced(row)
-
     # `last_served_at` is the database server's clock, written and compared by the database
     # alone: a reader on one host and the cache cleaner on another never compare their clocks.
     def touch_served(self, tx: Transaction, key: AssetKey) -> None:

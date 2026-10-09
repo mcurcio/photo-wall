@@ -1,28 +1,26 @@
-"""The catalog's seams: release rows and device rows over the existing tables, and disk presence.
+"""The catalog's seams: release rows over the existing tables, and disk presence.
 
-`ReleaseRecords` covers `app_releases`, `app_release_policy`, `app_release_poll` and the
-`bindings` count; `DeviceRecords` covers `devices`. Both take the kernel's opaque `Transaction`,
-so the domain never sees psycopg (`central/infra/catalog_records.py` implements them).
+`ReleaseRecords` covers `app_releases`, `app_release_policy` and `app_release_poll`. It takes the
+kernel's opaque `Transaction`, so the domain never sees psycopg
+(`central/infra/catalog_records.py` implements it).
 `StoredAssets` answers "is this asset on disk now" (`central/infra/stored_assets.py`).
 `NodeReleaseRecords` is the node half of a release sync (`central/infra/node_releases.py`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypeAlias
 
 from central.kernel.assets import OriginLocator
 from central.kernel.job_types import AssetJob
-from central.kernel.ports import PlayerPayload, PublishedRelease
+from central.kernel.ports import PublishedRelease
 from central.kernel.ports import StoredAssets as StoredAssets  # re-exported: the catalog's seam
 from central.kernel.transactions import Transaction
 from central.kernel.types import require_reason
 
-BootOutcome: TypeAlias = Literal["pending", "healthy", "failed"]
-# Who set the current promotion (027's `promoted_by`). The periodic sync moves only an "auto"
-# promotion; an "operator" one is never overridden (issue #23, owner ruling).
+# Who set the current promotion (027's `promoted_by`). Only the operator promotes now; a
+# promotion the retired automatic promotion recorded reads "auto".
 Promoter: TypeAlias = Literal["auto", "operator"]
 
 
@@ -32,22 +30,15 @@ class ReleaseRow:
     is_prerelease: bool
     package: OriginLocator | None  # the .deb (asset_url/asset_sha256/asset_size)
     os_image: OriginLocator | None  # the base tarball (base_tarball_url/_sha256/_size)
-    divergent: bool = False  # the .deb was re-cut upstream after it was produced: frozen
-    payload: PlayerPayload | None = None
-    base_abi: str | None = None
-    base_abi_squashfs_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FleetDesiredAssets:
-    """Exact content keys named by current fleet policy, the selected and previous node
-    deployments or unexpired V1 offers; plus `window`, the fetch jobs of the
-    window's node deployments (the newest stable releases), newest release first, which are
-    desired too but fetched in the background (a file may be in both)."""
+    """Exact content keys of the selected and previous node deployments; plus `window`, the
+    fetch jobs of the window's node deployments (the newest stable releases), newest release
+    first, which are desired too but fetched in the background (a file may be in both)."""
 
     base_tarballs: frozenset[str] = frozenset()
-    player_debs: frozenset[str] = frozenset()
-    player_payloads: frozenset[str] = frozenset()
     sealed_environments: frozenset[str] = frozenset()
     window: tuple[AssetJob, ...] = ()
 
@@ -118,57 +109,14 @@ class Promotion:
     by: Promoter
 
 
-@dataclass(frozen=True, slots=True)
-class PromotionWrite:
-    """What `set_promoted` did. `outgoing` is the promotion it found, read under the policy row's
-    lock (None when nothing was promoted); `moved` is False only when an "auto" write met an
-    "operator" promotion, which the write itself refuses."""
-
-    moved: bool
-    outgoing: Promotion | None
-
-
-@dataclass(frozen=True, slots=True)
-class DeviceRow:
-    device_id: str
-    serial: str | None
-    attached_tag: str | None  # the operator pin
-    known_good_tag: str | None
-    last_served_tag: str | None
-    boot_outcome: BootOutcome | None
-    failed_tag: str | None  # the sticky rollback fence
-    last_served_at: float | None
-    retired: bool
-
-
-@dataclass(frozen=True, slots=True)
-class NamedTags:
-    """The DISTINCT tags active devices name; bounded by the release count, not the device count."""
-
-    pinned: frozenset[str]
-    known_good: frozenset[str]
-    served: frozenset[str]  # last_served_tag, served within the window: what a device runs now
-
-
-@dataclass(frozen=True, slots=True)
-class DeviceUpdate:
-    failed_tag: str | None  # the new devices.failed_tag
-    mark_boot_failed: bool  # also set boot_outcome='failed'
-
-
 class ReleaseRecords(Protocol):
     def get(self, tx: Transaction, tag: str) -> ReleaseRow | None: ...
 
     def all(self, tx: Transaction) -> tuple[ReleaseRow, ...]: ...
 
-    def fleet_desired_assets(self, tx: Transaction, *, now: float) -> FleetDesiredAssets:
-        """Digest roots from explicit fleet selection, the wanted V2 node deployments
-        (`central/infra/node_releases.py` `wanted_deployments`: selected, previous,
-        and the window as `window`) and active schema-2 offers."""
-        ...
-
-    def payload_abi_for(self, tx: Transaction, sha256: str, *, now: float) -> str | None:
-        """One unambiguous outer ABI claim for exact payload bytes, else None."""
+    def fleet_desired_assets(self, tx: Transaction) -> FleetDesiredAssets:
+        """Digest roots of the wanted node deployments (`central/infra/node_releases.py`
+        `wanted_deployments`: selected, previous, and the window as `window`)."""
         ...
 
     def shipping(self, tx: Transaction, sha256: str) -> tuple[ReleaseRow, ...]:
@@ -178,24 +126,18 @@ class ReleaseRecords(Protocol):
     def claim(self, tx: Transaction, release: PublishedRelease, *,
               now: float) -> ReleaseRow | None:
         """Insert the release if its tag is absent, and return None: this first observation is
-        applied (the legacy NOT NULL `mirror_state` is 'discovered' with a package, else
-        'undeployable'). Otherwise lock the row (`FOR UPDATE`) and return it: the PREVIOUS row,
-        which the caller derives from and then offers the observation to `apply`.
+        applied. Otherwise lock the row (`FOR UPDATE`) and return it: the PREVIOUS row, which
+        the caller derives from and then offers the observation to `apply`.
 
         A concurrent first insert of the same tag waits for the winner, then returns its row.
         """
         ...
 
-    def apply(self, tx: Transaction, release: PublishedRelease, *, divergent: bool,
-              now: float) -> bool:
+    def apply(self, tx: Transaction, release: PublishedRelease, *, now: float) -> bool:
         """Write the observation over the claimed row, unless its upstream version is older than
         the stored one: a stored NULL version takes any observation; a stored version takes only
         a set, not older one (equal re-applies). True when written; a refusal writes nothing.
-
-        `divergent` is the frozen flag the caller derived from the locked row: the row is
-        'divergent' iff it is set; a row leaving 'divergent' is 'discovered' with a package, else
-        'undeployable'.
-        """
+        The row's package columns are never written here."""
         ...
 
     def promoted_tag(self, tx: Transaction) -> str | None: ...
@@ -204,11 +146,9 @@ class ReleaseRecords(Protocol):
         """The promoted tag and who set it; None when nothing is promoted."""
         ...
 
-    def set_promoted(self, tx: Transaction, tag: str, *, by: Promoter) -> PromotionWrite:
-        """Move the promoted pointer and record who moved it (`by` has no default), unless `by`
-        is "auto" and the promotion is the operator's: the write enforces that rule under the
-        row lock, so a promotion committed after any earlier read still wins. An "operator"
-        write always moves it."""
+    def set_promoted(self, tx: Transaction, tag: str) -> Promotion | None:
+        """Move the promoted pointer to `tag` as the operator's, and return the promotion it
+        replaced, read under the policy row's lock (None when nothing was promoted)."""
         ...
 
     def last_good_tag(self, tx: Transaction) -> str | None:
@@ -224,54 +164,3 @@ class ReleaseRecords(Protocol):
         ...
 
     def store_etag(self, tx: Transaction, etag: str | None, *, now: float) -> None: ...
-
-    def lock_auto_promotion(self, tx: Transaction) -> None:
-        """Take the transaction-scoped lock that serializes automatic promotions: the holder
-        reads every row committed before it, and writes before the next holder reads."""
-        ...
-
-    def bound_player_count(self, tx: Transaction) -> int:
-        """count(DISTINCT player_id) FROM bindings."""
-        ...
-
-
-class DeviceRecords(Protocol):
-    def lock(self, tx: Transaction, device_id: str, serial: str, *, now: float) -> DeviceRow:
-        """Upsert first_seen/last_seen/serial, then SELECT ... FOR UPDATE (E1)."""
-        ...
-
-    def active(self, tx: Transaction) -> tuple[DeviceRow, ...]:
-        """Every device with retired_at IS NULL (the operator view; never a request path)."""
-        ...
-
-    def known_good_tags(self, tx: Transaction) -> frozenset[str]:
-        """DISTINCT known_good_tag of active devices: the frontier's input, per netboot."""
-        ...
-
-    def named_tags(self, tx: Transaction, *, served_since: float) -> NamedTags:
-        """The served role counts a device only when `last_served_at >= served_since`."""
-        ...
-
-    def names_any(self, tx: Transaction, tags: Collection[str], *, served_since: float) -> bool:
-        """Whether an active device pins, ran healthy on, or was last served (at or after
-        `served_since`) one of `tags`: the same predicate per role as `named_tags`."""
-        ...
-
-    def get(self, tx: Transaction, device_id: str) -> DeviceRow | None: ...
-
-    def apply(self, tx: Transaction, device_id: str, update: DeviceUpdate) -> None: ...
-
-    def record_served(self, tx: Transaction, device_id: str, tag: str, *, now: float) -> None:
-        """last_served_tag=tag, boot_outcome='pending', last_served_at=now."""
-        ...
-
-    def set_pin(self, tx: Transaction, device_id: str, tag: str | None) -> bool:
-        """Set or clear attached_tag; False when no such device."""
-        ...
-
-    def sweep_failed_boots(self, tx: Transaction, *, served_before: float) -> int:
-        """Fail devices left 'pending' since before `served_before` (E2/E2b); return the count.
-
-        Fences COALESCE(attached_tag, last_served_tag) only when failed_tag IS NULL.
-        """
-        ...
