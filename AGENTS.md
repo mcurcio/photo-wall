@@ -73,7 +73,7 @@ Published-wire tests skip unless `PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR` names a 
 | Launch, deploy, recovery | [runbook](docs/runbook.md#local-launch) |
 | A consequential choice | [design decisions](docs/design-decisions.md), [decision records](docs/decisions/) |
 | Acceptance, evidence | [validation](docs/validation.md), [evidence conventions](docs/evidence/README.md) |
-| Process | [design principles](CONTRIBUTING.md#design-principles), [orchestration](CONTRIBUTING.md#recursive-development-and-agent-orchestration), [subagent models](CONTRIBUTING.md#subagent-model-selection), [credentials](CONTRIBUTING.md#fixtures-and-credentials) |
+| Process | [design principles](CONTRIBUTING.md#design-principles), [orchestration](CONTRIBUTING.md#recursive-development-and-agent-orchestration), [Codex subagent models](CONTRIBUTING.md#codex-subagent-model-selection), [credentials](CONTRIBUTING.md#fixtures-and-credentials) |
 
 ## Non-negotiables
 

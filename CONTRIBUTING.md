@@ -40,7 +40,7 @@ For agent-led development, the top-level agent must act as the orchestrator. It 
 
 Update the owning documents as contracts and implementation evolve. Add verified setup/run/check commands and record results without presenting proposed or unqualified capabilities as complete. Delegation changes who performs the work; it does not remove the orchestrator's responsibility for correctness.
 
-### Subagent model selection
+### Codex subagent model selection
 
 The requested project preference is **`gpt-5.3-codex-spark`** for suitable lightweight subagent work. Prefer it for clear, bounded implementation, focused tests, mechanical changes and documentation; keep ambiguous design and integrated correctness review on a model suited to those tasks. [Official subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
