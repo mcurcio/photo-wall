@@ -424,7 +424,7 @@ Order: B1 → B2 → B3, then B4 (docs) in parallel with B3 once B2 has landed. 
 | brief | revised after design review | — | this file; errata E-E2C-CUT-1..11 and E-E2C-DR-1..12 in `.claude/errata.md` |
 | B1 tracer: images on the cold path, mounted through PID1 | landed (CI pending) | b3e7a5f | G-static and G-unit green locally (only the brief's baseline failures: 67 `test_console_*`, 2 macOS uplink); AC2/AC3 (node-pid1) and AC1 (node-components) are CI's; `MIN_SITES` 10 → 7 after the DR-10 deletions |
 | B2 online path on images; no tar on the Node; launch check | landed (CI pending) | 55ac01f | Q1 = R (owner 2026-10-09). G-static green; G-unit green locally except the brief's baseline (67 `test_console_*`, 2 macOS uplink); AC1 (node-pid1) is CI's; erratum E-E2C-B2-1 (worker injected via `OnlineRunner(worker=)`; off-page seams) |
-| B3 line table, admission, store, content-line check | open | — | needs B2 |
+| B3 line table, admission, store, content-line check | landed (CI pending) | 25eae4d | G-static green; touched-package G-unit green (1217 passed); preparation 960 MiB = members' sum, store 768, content line 549/88 MiB checked at import; AC5 (node-pid1 slice evidence, no `oom_kill`) is CI's; the node-pid1 legs now record `memory.peak` and `memory.stat` `anon`/`shmem`/`file` for every slice |
 | B4 docs | open | — | after B2, parallel with B3 |
 
 **Start here (cold reader):** read §1, §2.1, §3(b), then the bead you are given. The design-r3 and epic files are background; this brief wins where they differ (§4).
