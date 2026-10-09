@@ -8,8 +8,8 @@ This proves the 0009 *software* contract, on the device's own package set:
   the PACKAGED provisioner (the bootstrapper `.deb`, installed with dpkg) runs
   as its unit runs it (`umask 077; python3 -I -B
   /usr/lib/photo-wall-bootstrapper`) inside the DEVICE ROOT: the base's device
-  set (`scripts/debian_packages.py`, the bootstrapper's and the Player's
-  packages) built by mmdebstrap at the declared snapshot, with no package
+  set (`scripts/debian_packages.py` DEVICE_CONSUMERS: the base OS's, the
+  bootstrapper's and the Player's packages) built by mmdebstrap at the declared snapshot, with no package
   lists. Its command line names a gateway stub that 301s every request
   cross-host (by name) to a REAL central (uvicorn) + REAL Postgres: it locates
   Central through the gateway, fetches the app manifest and the REAL Player

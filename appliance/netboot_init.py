@@ -37,9 +37,11 @@ every network send and read in them pets it too, each one bounded call (`_PacedT
 7. mount and hand off: `LinuxOps.mount_root` (the base's loop device attached by stage 1
    itself, every mount given kernel options only), a note if the base's CA bundle differs
    from this initrd's (R5, Q3 = A), stage 1's working resolver copied onto the new root
-   (`hand_over_resolver`: stage 2 has no DHCP client of its own), this initrd's kernel modules
-   copied onto the new root (`hand_over_modules`: the base carries none, and the modules travel
-   with the kernel they were built for), then the watchdog hand-over to systemd, last.
+   (`hand_over_resolver`: stage 2 has no DHCP client of its own), the Node's name
+   `photo-wall-<serial>` written to the new root's /etc/hostname (`hand_over_hostname`), this
+   initrd's kernel modules copied onto the new root (`hand_over_modules`: the base carries
+   none, and the modules travel with the kernel they were built for), then the watchdog
+   hand-over to systemd, last.
 
 Every failure prints one `FAILED phase=<n> ...` line and exits non-zero into the boot script's
 `photowall_restart`, the one way out. No boot-context file is written: the Player enrolls
@@ -155,6 +157,14 @@ INITRD_CA_BUNDLE = DEBIAN_CA_BUNDLE
 _STAGE1_RESOLVER: Final = Path("/etc/resolv.conf")
 STAGE2_RESOLVER: Final = Path("etc/resolv.conf")
 MAX_RESOLVER_BYTES: Final = 4096
+# The Node's name, `photo-wall-<serial>` (owner, 2026-10-09: "photo-wall-<serial>, set at boot"),
+# written to the new root's /etc/hostname, which systemd reads as PID 1 starts: only stage 1
+# knows the serial, so the base bakes a neutral one. <serial> is the 8-hex form the Pi's
+# bootloader asks TFTP for (TFTP_PREFIX=0, docs/module-pxe-service.md), the devicetree serial's
+# last eight digits: 161a5de075628d0c names photo-wall-75628d0c.
+HOSTNAME_PREFIX: Final = "photo-wall-"
+STAGE2_HOSTNAME: Final = Path("etc/hostname")
+_SHORT_SERIAL: Final = re.compile(r"[0-9a-f]{8}")
 # The running kernel's modules, as mkinitramfs staged them into this initrd (the modules and
 # depmod's indexes), and where stage 2's udev looks for them, relative to the new root. The base
 # carries no kernel and no modules: they come from the same TFTP staging as the kernel, so the
@@ -403,6 +413,25 @@ def hand_over_resolver(rootmnt: Path, *, source: Path = _STAGE1_RESOLVER) -> str
         return "dns=none"
     nameservers, search = _resolver_entries(data.decode("ascii", "replace"))
     return f"dns={','.join(nameservers) or 'none'} search={','.join(search) or 'none'}"
+
+
+def node_hostname(serial: str | None) -> str | None:
+    """HOSTNAME_PREFIX + the serial's last eight hex digits, lower-cased; None without a serial
+    or when it does not end in eight hex digits (not a Pi's devicetree serial)."""
+    short = (serial or "")[-8:].lower()
+    return HOSTNAME_PREFIX + short if _SHORT_SERIAL.fullmatch(short) else None
+
+
+def hand_over_hostname(rootmnt: Path, serial: str | None) -> str:
+    """Write `node_hostname(serial)` to rootmnt / STAGE2_HOSTNAME, mode 0644, replacing the
+    base's neutral name (a symlink is replaced, never followed). Returns the phase-7 console
+    summary 'hostname=<name>'. Without a name the base's stays ('hostname=unchanged'): a name is
+    not worth a failed boot. A write failure raises OSError: one FAILED line, then the restart."""
+    name = node_hostname(serial)
+    if name is None:
+        return "hostname=unchanged (no Pi serial)"
+    write_atomically(rootmnt / STAGE2_HOSTNAME, f"{name}\n".encode("ascii"), mode=0o644)
+    return f"hostname={name}"
 
 
 def hand_over_modules(rootmnt: Path, *, pet: Callable[[], None], release: str | None = None,
@@ -741,6 +770,7 @@ def _run_netboot(cmdline, rootmnt: Path, console: _Console, *, ops, transport: T
             console.log.info(f"note: CA bundle differs from the base's: initrd=sha256:"
                              f"{differs[0]} base=sha256:{differs[1]}")
         resolver = hand_over_resolver(rootmnt)
+        console.line(7, f"mount + handoff: {hand_over_hostname(rootmnt, serial)}")
         console.line(7, "mount + handoff: "
                         + ops.hand_over_modules(rootmnt, pet=console.keeper.pet))
         console.line(7, f"mount + handoff: success {resolver}")
