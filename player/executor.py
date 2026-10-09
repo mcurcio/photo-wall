@@ -22,7 +22,13 @@ from contracts.models import (
 )
 from contracts.time import Clock, TimeMapping
 from player.cache import Cache, CacheCapacityError, CacheError
-from player.rendering import LocalLayer, OutputComposition, PresentationResult, Renderer
+from player.rendering import (
+    PRESENTATION_FRESHNESS,
+    LocalLayer,
+    OutputComposition,
+    PresentationResult,
+    Renderer,
+)
 
 
 class AuthorityError(ValueError):
@@ -518,7 +524,8 @@ class Executor:
                          for key, assignment in sorted(self._assignments.items())
                          if assignment.failure is not None)
 
-    def readiness(self) -> Readiness:
+    def readiness(self, floor: int = 0) -> Readiness:
+        """The next report, its sequence above `floor` (the highest one its caller already sent)."""
         with self._lock:
             if not self._plan:
                 raise AuthorityError("no current plan")
@@ -534,7 +541,7 @@ class Executor:
                     failures[key] = Failure(assignment_id=key, code="clock")
                 elif not self._capacity_ok:
                     failures[key] = Failure(assignment_id=key, code="capacity")
-            self._sequence += 1
+            self._sequence = max(self._sequence, floor) + 1
             # Wire values remain finite; unhealthy mapping is also explicitly coded.
             uncertainty = self.mapping.uncertainty
             if not math.isfinite(uncertainty):
@@ -714,7 +721,7 @@ class Executor:
         if drawn is None or completed is None or not math.isfinite(completed):
             return None
         age = self.clock.monotonic() - completed
-        if (not 0 <= age <= .5 or drawn.binding != candidate.binding
+        if (not 0 <= age <= PRESENTATION_FRESHNESS or drawn.binding != candidate.binding
                 or drawn.calibration != candidate.calibration or drawn.fallback != candidate.fallback
                 or len(drawn.layers) != len(candidate.layers)):
             return None

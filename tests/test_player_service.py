@@ -34,6 +34,7 @@ from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
+from player.mainloop import CONTROL, DispatchRefused, MainLoopDispatcher
 from player.output_discovery import (
     CONFIGURED_OUTPUT_IDS,
     discover_outputs,
@@ -44,7 +45,6 @@ from player.rendering import CapacityResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
     BootContext,
-    GLibDispatcher,
     IdentifyOutput,
     PlayerConfig,
     PlayerService,
@@ -1269,12 +1269,13 @@ def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
     class GLib:
         callbacks = []
         @classmethod
-        def idle_add(cls, callback):
+        def idle_add(cls, callback, *, priority):
+            assert priority == CONTROL
             cls.callbacks.append(callback)
-    dispatcher = GLibDispatcher(GLib)
+    dispatcher = MainLoopDispatcher(GLib)
     seen = []
     futures = [dispatcher(lambda n=n: seen.append(n)) for n in range(4)]
-    assert isinstance(dispatcher(lambda: None).exception(), ServiceError)
+    assert isinstance(dispatcher(lambda: None).exception(), DispatchRefused)
     futures[1].cancel()
     for callback in GLib.callbacks:
         callback()
@@ -1282,6 +1283,78 @@ def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
     fifth = dispatcher(lambda: seen.append(4))
     GLib.callbacks[-1]()
     assert fifth.done() and seen == [0, 2, 3, 4]
+
+
+def test_a_late_main_loop_is_reported_on_readiness_not_silence(tmp_path, monkeypatch):
+    """G8: the GLib loop stops running dispatches (a starved control queue). The control loop
+    keeps reporting: the last readiness again, one sequence higher, every assignment failed
+    main_loop_late, and health says main_loop_late. The late callbacks never run, and when the
+    loop recovers its next report is above every late one, so Central accepts it."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    class StarvedGLib:
+        callbacks = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            cls.callbacks.append(callback)
+
+    def readiness_posts(server):
+        return [json.loads(request.content) for request in server.requests
+                if request.url.path == "/v1/player/readiness"]
+
+    async def turn(service, server, count):
+        posted = len(readiness_posts(server))
+
+        async def poll():
+            try:
+                await PlayerService.poll_state(service)
+            finally:
+                if len(readiness_posts(server)) >= posted + count:
+                    service._stop.set()
+        monkeypatch.setattr(service, "poll_state", poll)
+        service._stop.clear()
+        await asyncio.wait_for(service._control_loop(), 5)
+        return readiness_posts(server)[posted:]
+
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            service.health_path = tmp_path / "health.json"
+            service.boot_id = "00000000-1111-2222-3333-444444444444"
+            service._feedback()
+            assert await service.download(service._jobs[0])
+            service.tick_main()
+            live = (await turn(service, server, 1))[-1]
+            assert live["secured"] == ["picture"] and not live["failures"]
+
+            service.dispatcher = MainLoopDispatcher(StarvedGLib, slots=64)
+            late = await turn(service, server, 2)
+            assert len(late) >= 2
+            assert [report["sequence"] for report in late] == [
+                live["sequence"] + n for n in range(1, len(late) + 1)]
+            for report in late:
+                assert report["secured"] == ["picture"] and report["prepared"] == []
+                assert report["failures"] == [{"assignment_id": "picture",
+                                               "code": "main_loop_late"}]
+            assert late[1]["observed_at"] >= late[0]["observed_at"] >= live["observed_at"]
+            assert service.last_fault == "main_loop_late"
+            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
+            # The loop runs again: nothing it missed runs late, and reporting resumes above.
+            ran = []
+            monkeypatch.setattr(service, "_apply_state", lambda state: ran.append(state))
+            for callback in StarvedGLib.callbacks:
+                callback()
+            assert ran == []
+            service.dispatcher = immediate
+            monkeypatch.undo()
+            recovered = (await turn(service, server, 1))[-1]
+            assert recovered["sequence"] > late[-1]["sequence"]
+            assert recovered["failures"] == []
+        finally:
+            await close(service)
+    asyncio.run(check())
 
 
 def test_health_has_boot_authority_and_no_secrets(tmp_path):

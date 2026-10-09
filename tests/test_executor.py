@@ -22,7 +22,7 @@ from contracts.models import (
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
-from player.rendering import PresentationResult, RecordingRenderer
+from player.rendering import PRESENTATION_FRESHNESS, PresentationResult, RecordingRenderer
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -137,7 +137,7 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
             drawn = composition
             completed = rig.clock.monotonic()
             if fault == "old":
-                completed -= .6
+                completed -= PRESENTATION_FRESHNESS + .1
             elif fault == "future":
                 completed += .1
             elif fault == "binding":

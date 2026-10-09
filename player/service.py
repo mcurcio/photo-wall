@@ -19,7 +19,7 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Awaitable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -33,6 +33,7 @@ from contracts.equipment import READ_CAP, equipment_device_id
 from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
 from contracts.models import (
     Commit,
+    Failure,
     IdentifyOutput,
     Instant,
     Layer,
@@ -41,6 +42,7 @@ from contracts.models import (
     Plan,
     PlayerConfiguration,
     PlayerTime,
+    Readiness,
     Revocation,
 )
 from contracts.player_control import (
@@ -56,6 +58,7 @@ from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError
+from player.mainloop import DispatchRefused, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
@@ -85,6 +88,9 @@ BACKOFF = SESSION_BACKOFF
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
 LOCAL_PROOF_RETRY = 5.0
+# How long a thread-to-main handoff may wait for the GLib loop before the Player reports
+# main_loop_late instead of waiting on a starved loop in silence (G8).
+DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -98,6 +104,10 @@ class Unauthorized(ServiceError):
 
 class StaleFeedback(ServiceError):
     pass
+
+
+class MainLoopLate(ServiceError):
+    """A dispatch missed DISPATCH_DEADLINE; its callback was cancelled unless already running."""
 
 
 class PlayerConfig(Model):
@@ -328,38 +338,6 @@ class Download:
     layer: Layer
 
 
-class GLibDispatcher:
-    """At most `slots` queued callbacks on GLib's default-idle queue; caller awaits each, never blocks GLib."""
-
-    def __init__(self, glib, slots: int = 4):
-        self.glib = glib
-        self._slots = threading.BoundedSemaphore(slots)
-
-    def lane(self, slots: int) -> GLibDispatcher:
-        """A sibling on the same GLib idle queue and priority with its own slots: it never takes ours."""
-        return GLibDispatcher(self.glib, slots)
-
-    def __call__(self, callback: Callable) -> Future:
-        future = Future()
-        if not self._slots.acquire(blocking=False):
-            future.set_exception(ServiceError("dispatch_capacity"))
-            return future
-
-        def run():
-            try:
-                if future.set_running_or_notify_cancel():
-                    try:
-                        future.set_result(callback())
-                    except Exception as error:
-                        future.set_exception(error)
-            finally:
-                self._slots.release()
-            return False
-
-        self.glib.idle_add(run)
-        return future
-
-
 class _ChunkBridge:
     def __init__(self, authorized: Callable[[], bool]):
         self.queue = queue.Queue(maxsize=4)
@@ -467,6 +445,10 @@ class PlayerService:
         self._identify_key: tuple[str, int] | None = None
         self._identify_output: str | None = None
         self._identify_deadline: float | None = None
+        # The last readiness sent and the local monotonic time it was sent: re-sent, marked
+        # main_loop_late, while the GLib loop is late; its sequence is the executor's floor.
+        # Written by the network thread only (one reference assignment).
+        self._last_readiness: tuple[Readiness, float] | None = None
 
     def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
@@ -510,7 +492,20 @@ class PlayerService:
             raise RuntimeError("Player control requires the renderer thread")
 
     async def dispatch(self, callback):
-        return await asyncio.wrap_future(self.dispatcher(callback))
+        """Run `callback` on the GLib thread. MainLoopLate when it has not run within
+        DISPATCH_DEADLINE: it is cancelled then, so a callback not yet started never runs."""
+        future = asyncio.wrap_future(self.dispatcher(callback))
+        try:
+            done, _ = await asyncio.wait((future,), timeout=DISPATCH_DEADLINE)
+        finally:
+            if not future.done():
+                future.cancel()     # cancels the posted callback unless it is running
+        if not done:
+            raise MainLoopLate("main_loop_late")
+        try:
+            return future.result()
+        except DispatchRefused as error:
+            raise ServiceError(str(error)) from error
 
     async def _mark_central_retrying(self) -> None:
         """Best-effort UI update; never let a diagnostic dispatch replace a cycle error."""
@@ -895,7 +890,10 @@ class PlayerService:
         with self._lock:
             readiness = None
             if self.executor is not None and self._plan is not None:
-                readiness = self.executor.readiness()
+                last = self._last_readiness
+                readiness = self.executor.readiness(
+                    floor=last[0].sequence if last is not None
+                    and last[0].authority_epoch == self._plan.authority_epoch else 0)
                 if any(failure.code in ("decode", "integrity") for failure in readiness.failures):
                     self._verify_due.set()
                 self._jobs = tuple(Download(self._plan.authority_epoch, self._plan.plan_id,
@@ -939,7 +937,7 @@ class PlayerService:
         if healthy and not self.boot_id:
             healthy, reason = False, "identity"
         if (reason not in {"healthy", "executor", "identity", "configuration", "clock",
-                           "renderer_capacity", "disconnected"}
+                           "renderer_capacity", "disconnected", "main_loop_late"}
                 or (reason == "healthy") != bool(healthy)):
             raise ValueError("inconsistent health reason")
         body = dict(boot_id=self.boot_id, sampled_monotonic=self.clock.monotonic(),
@@ -1103,25 +1101,71 @@ class PlayerService:
                 if error.cause is Cause.REDIRECT:
                     raise               # ends the cycle: run() locates again (0014)
                 self._uplink_fault("clock_probe", error)
+            except MainLoopLate:
+                self.fault("main_loop_late")
             except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
                 self.fault("clock_probe")
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
+    async def _poll_after_stale(self) -> None:
+        """Central refused feedback as stale: fetch state; a late loop applies it next turn."""
+        try:
+            await self.poll_state()
+        except MainLoopLate:
+            self.fault("main_loop_late")
+
+    async def _report_late(self) -> None:
+        """The GLib loop missed a dispatch deadline: re-send the last readiness with every
+        assignment it named failed as main_loop_late, so Central sees a late Player, not a
+        silent one. The watchdog is not petted (its deadline still restarts a stuck Player)."""
+        self.fault("main_loop_late")
+        self._write_health(False, "main_loop_late")
+        last = self._last_readiness
+        if last is None:
+            return
+        previous, observed = last
+        now = self.clock.monotonic()
+        ids = sorted({*previous.secured, *(failure.assignment_id for failure in previous.failures)})
+        late = Readiness(
+            plan_id=previous.plan_id, revision=previous.revision,
+            authority_epoch=previous.authority_epoch, sequence=previous.sequence + 1,
+            secured=previous.secured, prepared=(), capacity_ok=previous.capacity_ok,
+            clock_uncertainty=previous.clock_uncertainty,
+            observed_at=previous.observed_at + max(0.0, now - observed),
+            failures=tuple(Failure(assignment_id=key, code="main_loop_late") for key in ids))
+        self._last_readiness = late, now
+        try:
+            await self.request("POST", "/v1/player/readiness", body=late.model_dump(mode="json"))
+        except StaleFeedback:
+            pass                # the next turn polls state again
+        except UplinkError as error:
+            if error.cause is not Cause.CENTRAL:
+                raise
+            # Central refused the re-sent report (its offer may have moved on): best effort,
+            # it never ends the session, which the late loop could not rebuild anyway.
+            LOG.debug("player: main_loop_late report refused: %s", error.reason)
+
     async def _control_loop(self):
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
-            await self.poll_state()
-            readiness, observations = await self.dispatch(self._feedback)
-            healthy, reason = await self.dispatch(self._health_status)
+            try:
+                await self.poll_state()
+                readiness, observations = await self.dispatch(self._feedback)
+                healthy, reason = await self.dispatch(self._health_status)
+            except MainLoopLate:
+                await self._report_late()
+                await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
+                continue
             # The signed-release boot-health trial has been retired (0009):
             # every boot is ticketless, so there is no per-boot release to
             # report against and no watchdog to disarm.
             self._write_health(healthy, reason)
             if readiness is not None:
+                self._last_readiness = readiness, self.clock.monotonic()
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self.poll_state()
+                    await self._poll_after_stale()
             for observation in observations:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
@@ -1143,7 +1187,7 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self.poll_state()
+                    await self._poll_after_stale()
 
     async def _websocket_loop(self):
         async with self.link.websocket(self.session, "/v1/player/session",
@@ -1153,7 +1197,12 @@ class PlayerService:
                 if body.pop("type", None) != "state":
                     raise ServiceError("message_type")
                 state = State.model_validate(body)
-                result = await self.dispatch(lambda: self._apply_state(state))
+                try:
+                    result = await self.dispatch(lambda: self._apply_state(state))
+                except MainLoopLate:
+                    # Not applied (cancelled); the next delivery or poll carries it again.
+                    self.fault("main_loop_late")
+                    continue
                 await self._ack_control(state, result)
             raise ServiceError("session_closed")
 
@@ -1274,9 +1323,13 @@ class PlayerService:
                     if proof_task is None:
                         proof_task = asyncio.create_task(self._local_app_proof_loop())
                     await self.hello_protocol()
-                    # Reconnection reconciles authority before any download work.
-                    await self.probe_time()
-                    await self.poll_state()
+                    # Reconnection reconciles authority before any download work. A late GLib
+                    # loop does not end the session here: its loops report main_loop_late.
+                    for step in (self.probe_time, self.poll_state):
+                        try:
+                            await step()
+                        except MainLoopLate:
+                            self.fault("main_loop_late")
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
@@ -1460,7 +1513,7 @@ def main():
                 serial=display_serial(read_pi_serial()))
         except Exception:
             native_fault = "native_initialization"
-    dispatcher = GLibDispatcher(GLib)
+    dispatcher = MainLoopDispatcher(GLib)
     service = PlayerService(
         config,
         identity,
@@ -1498,9 +1551,9 @@ def main():
 
     signal.signal(signal.SIGTERM, finish)
     signal.signal(signal.SIGINT, finish)
-    GLib.timeout_add(33, tick)
+    Tick(GLib, 33, tick)
     service.start()
-    # Probes are answered on the same GLib queue as control dispatch (own one-slot lane), never here.
+    # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink).start()
     watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
     with contextlib.suppress(KeyboardInterrupt):

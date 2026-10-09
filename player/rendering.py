@@ -13,6 +13,11 @@ from typing import Literal, Protocol
 
 from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
 
+REDRAW_RENEWAL = 1.0
+"""Seconds after which a native renderer redraws an unchanged composition (render on change)."""
+PRESENTATION_FRESHNESS = 2 * REDRAW_RENEWAL
+"""Seconds a draw acknowledgment stays current: one missed renewal never reads as pending."""
+
 
 @dataclass(frozen=True)
 class LocalLayer:

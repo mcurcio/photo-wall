@@ -16,8 +16,8 @@ from contracts.node_app_link import (
     parse_node_probe_open,
 )
 from contracts.player_control import ControlAppliedReceipt
+from player.mainloop import CONTROL, DispatchRefused, MainLoopDispatcher
 from player.probe_responder import RETRY_DELAYS, ProbeResponder
-from player.service import GLibDispatcher, ServiceError
 
 NONCES = [format(index, "x") * 64 for index in range(1, 6)]
 BOOT_ID = "12345678-1234-1234-1234-123456789abc"
@@ -29,7 +29,9 @@ class FakeGLib:
     def __init__(self):
         self.callbacks = []
 
-    def idle_add(self, callback):
+    def idle_add(self, callback, *, priority):
+        # Control and its probe lane share one priority, above the tick and GDK paint.
+        assert priority == CONTROL
         self.callbacks.append(callback)
 
     def run_idle(self):
@@ -79,7 +81,7 @@ def channel_pair():
 class Rig:
     def __init__(self, dispatcher=None):
         self.glib = FakeGLib()
-        self.dispatcher = dispatcher or GLibDispatcher(self.glib)
+        self.dispatcher = dispatcher or MainLoopDispatcher(self.glib)
         self.relinks = 0
         self.player, self.broker = channel_pair()
         self.responder = ProbeResponder(self.dispatcher, on_relink=self.relink,
@@ -166,7 +168,7 @@ def test_queued_probe_never_takes_a_control_slot():
     control = [rig_.dispatcher(lambda: None) for _ in range(4)]
     assert not any(future.done() for future in control)       # all queued, none refused
     assert len(rig_.glib.callbacks) == 5
-    assert isinstance(rig_.dispatcher(lambda: None).exception(timeout=0), ServiceError)  # still four
+    assert isinstance(rig_.dispatcher(lambda: None).exception(timeout=0), DispatchRefused)  # still four
     rig_.glib.run_idle()           # same queue: the probe and the control work drain together
     assert all(future.done() and future.exception() is None for future in control)
     assert rig_.answers() == [NONCES[0]]
@@ -176,7 +178,7 @@ def test_queued_probe_never_takes_a_control_slot():
 def test_full_control_queue_still_queues_the_probe_on_the_same_glib_queue():
     rig_ = Rig()
     control = [rig_.dispatcher(lambda: None) for _ in range(4)]   # control work fills its slots
-    assert isinstance(rig_.dispatcher(lambda: None).exception(timeout=0), ServiceError)
+    assert isinstance(rig_.dispatcher(lambda: None).exception(timeout=0), DispatchRefused)
     rig_.open()
     rig_.probe(NONCES[0])
     rig_.settle()
@@ -190,7 +192,7 @@ def test_full_control_queue_still_queues_the_probe_on_the_same_glib_queue():
 def test_busy_probe_lane_refusal_answers_nothing_and_frees_the_gate():
     rig_ = Rig()
     held = rig_.responder.dispatcher(lambda: None)              # the probe lane's one slot
-    assert isinstance(rig_.responder.dispatcher(lambda: None).exception(timeout=0), ServiceError)
+    assert isinstance(rig_.responder.dispatcher(lambda: None).exception(timeout=0), DispatchRefused)
     rig_.open()
     rig_.probe(NONCES[0])
     rig_.settle()
@@ -269,7 +271,7 @@ def test_todays_broker_refusal_retries_with_slow_capped_backoff():
         if len(delays) == 8:
             raise Stop
 
-    responder = ProbeResponder(GLibDispatcher(FakeGLib()), on_relink=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
                                connector=connector, sleep=sleep)
     with pytest.raises(Stop):
         responder._run()
@@ -305,7 +307,7 @@ def test_unavailable_socket_retries_and_a_probed_channel_resets_the_backoff():
         if len(delays) == 4:
             raise Stop
 
-    responder = ProbeResponder(GLibDispatcher(FakeGLib()), on_relink=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
                                connector=connector, sleep=sleep)
     with pytest.raises(Stop):
         responder._run()
@@ -319,7 +321,7 @@ def test_start_runs_one_daemon_thread_named_player_probe():
         started.set()
         raise OSError("socket_unavailable")
 
-    responder = ProbeResponder(GLibDispatcher(FakeGLib()), on_relink=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
                                connector=connector, sleep=lambda _s: threading.Event().wait(60))
     responder.start()
     assert started.wait(2)
@@ -382,7 +384,7 @@ def test_real_seqpacket_channel_round_trip():
     except OSError:
         pytest.skip("SOCK_SEQPACKET is Linux-only")
     glib = FakeGLib()
-    responder = ProbeResponder(GLibDispatcher(glib), on_relink=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(glib), on_relink=lambda: None,
                                connector=lambda _path: player)
     thread = threading.Thread(target=responder._channel, daemon=True)
     thread.start()

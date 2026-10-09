@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run the native display harness (tests/native_display_smoke.py) in a Linux arm64 container.
+"""Run the native display harnesses (tests/native_display_smoke.py, then
+tests/native_player_mainloop_harness.py) in a Linux arm64 container.
 
 The harness runs a real headless Weston with the current `photo-wall-shell.so`, a stub app and the
 private diagnostic client, and reads output pixels through Weston's own `weston_capture_v1`. It
@@ -7,12 +8,14 @@ cannot run on macOS (no Weston there), so every host runs it the same way: in an
 the pinned node builder (`scripts.node_build_inputs.BUILDER_IMAGE`), with apt pinned to
 `scripts.debian_packages.PIN`, holding the node display runtime and build packages (with the
 overlay client's pywayland and pycairo, which the harness also reads pixels and checks the private
-protocol with).
+protocol with), and the Player's Debian runtime (GTK, GStreamer, PyGObject, PyOpenGL, pydantic),
+which the Player main-loop harness drives on real GLib and GL.
 
 The image is tagged `photo-wall-display-harness:<digest>`, the digest being the sha256 of its
 recipe text (Dockerfile and apt sources), so a pin or package change rebuilds it and nothing else
 does: later runs reuse it. The run step has no network: `appliance/display_host` is mounted
-read-only at /current-source and `tests` at /smoke, and the container's exit code is the result.
+read-only at /current-source, `tests` at /smoke and `player` and `contracts` under /repo, and the
+container's exit code is the result.
 
   --rebuild      build the image even when its tag exists
   --keep-image   keep superseded harness images (other digests); by default a fresh build
@@ -49,7 +52,8 @@ WESTON_LOG = "/tmp/pw-weston.log"
 
 def recipe() -> dict[str, str]:
     """PURE. The image's build context: file name -> text."""
-    names = " ".join(sorted({*packages("node-display", "node-display-build"), *HARNESS_PACKAGES}))
+    names = " ".join(sorted({*packages("node-display", "node-display-build", "player"),
+                             *HARNESS_PACKAGES}))
     return {
         "snapshot.list": "".join(source.line() + "\n" for source in PIN.sources()),
         "Dockerfile": f"""FROM {BUILDER_IMAGE}
@@ -100,7 +104,10 @@ def run_argv(tag: str, name: str, repository: Path = REPOSITORY) -> list[str]:
             "--network", "none",
             "-v", f"{repository / 'appliance' / 'display_host'}:/current-source:ro",
             "-v", f"{repository / 'tests'}:/smoke:ro",
-            tag, "/usr/bin/python3", "/smoke/native_display_smoke.py"]
+            "-v", f"{repository / 'player'}:/repo/player:ro",
+            "-v", f"{repository / 'contracts'}:/repo/contracts:ro",
+            tag, "/bin/sh", "-c", "/usr/bin/python3 /smoke/native_display_smoke.py"
+            " && /usr/bin/python3 /smoke/native_player_mainloop_harness.py"]
 
 
 def main(argv: list[str] | None = None) -> int:

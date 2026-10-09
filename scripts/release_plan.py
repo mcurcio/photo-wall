@@ -427,6 +427,7 @@ SUITES: Final = (
                                  "player-environment"),
           paths=("tests/test_node_pid1.py", "tests/node_pid1_*", "tests/node/apps/test_environment_image.py",
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",
+                 "tests/native_player_mainloop_harness.py", "tests/native_display_media.py",
                  "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
                  "scripts/run_display_harness.py",
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",

@@ -17,7 +17,10 @@ from typing import Any, Literal
 
 from contracts.models import AppliedCalibration
 from player.geometry import cover_rect, homography, inverse
+from player.mainloop import Tick, watch_bus
 from player.rendering import (
+    PRESENTATION_FRESHNESS,
+    REDRAW_RENEWAL,
     CapacityResult,
     LocalLayer,
     OutputComposition,
@@ -176,6 +179,8 @@ class _Surface:
     identify_banner: Any = None
     pending: _Draw | None = None
     acknowledged: _Draw | None = None
+    # What the last queued draw showed (see present): an unchanged one is not redrawn.
+    queued: tuple | None = None
     failure: str | None = None
     textures: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     targets: list[tuple[int, int]] = field(default_factory=list)
@@ -279,7 +284,8 @@ class NativeRenderer:
             if "Wayland" not in type(display).__name__:
                 raise RuntimeError("node_display_requires_wayland")
             self._frames = WaylandFrames(display)
-            self._frame_timer = self.GLib.timeout_add(1000, self._renew_display_frames)
+            self._frame_timer = Tick(self.GLib, int(REDRAW_RENEWAL*1000),
+                                     self._renew_display_frames)
         diagnostic_style = self.Gtk.CssProvider()
         diagnostic_style.load_from_data(b"""
             .photo-wall-diagnostic {
@@ -400,8 +406,12 @@ class NativeRenderer:
             return False
         # Static photos need real tagged buffer commits too. GTK still owns the
         # paint/commit; no timer or frame callback manufactures display evidence.
+        # A surface present() renewed within REDRAW_RENEWAL needs no second paint.
+        now = time.monotonic()
         for surface in self._surfaces.values():
-            surface.area.queue_render()
+            ack = surface.acknowledged
+            if ack is None or now-ack.completed_at >= REDRAW_RENEWAL:
+                surface.area.queue_render()
         return True
 
     def _window_realized(self, window, surface) -> None:
@@ -492,7 +502,7 @@ class NativeRenderer:
             return Gst.PadProbeReturn.OK
         sink.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, event_probe)
         decoder.bus = pipeline.get_bus()
-        decoder.bus.add_signal_watch()
+        watch_bus(decoder.bus)
         decoder.bus_handler = decoder.bus.connect("message", self._bus_message, decoder)
         if pipeline.set_state(Gst.State.PAUSED) == Gst.StateChangeReturn.FAILURE:
             self._destroy_decoder(decoder)
@@ -658,7 +668,7 @@ class NativeRenderer:
         if frames is not None:
             grant = frames.grant(composition.binding.output_id, composition)
             if grant is None or not grant.admitted or not grant.matches(composition):
-                surface.acknowledged = None
+                surface.acknowledged = surface.queued = None
                 surface.area.queue_render()
                 return PresentationResult("pending")
         if surface.pending and _fingerprint(surface.pending.composition) != _fingerprint(composition):
@@ -682,16 +692,43 @@ class NativeRenderer:
                     return PresentationResult("failed", "decode")
                 decoder.playing = playing
         generations = self._generations(composition)
-        self._serial += 1
-        surface.pending = _Draw(self._serial, composition, generations)
-        surface.area.queue_render()
+        # Render on change: a new draw only when what it shows changed (layers, decoder
+        # generations, alpha, a new video sample, a trial edit) or the last one is due for
+        # renewal. A static photo is not redrawn every tick (G8).
+        shown = (_fingerprint(composition), generations,
+                 tuple(local.alpha for local in composition.layers),
+                 tuple(self._decoders[key].sample_serial for key, _, _ in generations),
+                 self._trial_key(frames, composition, grant) if frames is not None else None)
         ack = surface.acknowledged
+        now = time.monotonic()
+        if shown != surface.queued or (surface.pending is None and (
+                ack is None or now-ack.completed_at >= REDRAW_RENEWAL)):
+            self._serial += 1
+            surface.pending = _Draw(self._serial, composition, generations)
+            surface.queued = shown
+            surface.area.queue_render()
+        # Presented stays keyed on layers and generations only: a playing video's newer sample
+        # or a crossfade step never makes the composition already drawn read as pending.
         if (ack and _fingerprint(ack.composition) == _fingerprint(composition)
-                and ack.generations == generations and time.monotonic()-ack.completed_at < .5):
+                and ack.generations == generations
+                and now-ack.completed_at < PRESENTATION_FRESHNESS):
             return PresentationResult("presented", composition=ack.composition,
                                       presented_at=ack.completed_at,
                                       applied_calibration=ack.applied_calibration if getattr(self, "_frames", None) else None)
         return PresentationResult("pending")
+
+    @staticmethod
+    def _trial_key(frames, composition: OutputComposition, grant) -> object:
+        """The active calibration trial's identity, so a trial edit or expiry is a change."""
+        try:
+            trial = frames.trial(composition, grant)
+        except Exception:
+            return object()     # unreadable here: always redraw, and _render reports it
+        if trial is None:
+            return None
+        candidate = trial.candidate
+        return (candidate.trial_id, candidate.generation, candidate.sequence,
+                candidate.candidate_sha256)
 
     def release(self, assignment_id: str) -> None:
         self._thread()
@@ -1035,7 +1072,7 @@ class NativeRenderer:
     def close(self) -> None:
         self._thread()
         if getattr(self, "_frame_timer", None) is not None:
-            self.GLib.source_remove(self._frame_timer)
+            self._frame_timer.stop()
             self._frame_timer = None
         if getattr(self, "_frames", None) is not None:
             self._frames.close()
