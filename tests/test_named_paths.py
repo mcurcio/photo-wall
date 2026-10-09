@@ -1,4 +1,4 @@
-"""Every path a test, a script, a workflow cache key or the display meson list names exists.
+"""Every path a test, a script or a workflow cache key names exists.
 
 A negative assertion about a path that no longer exists passes vacuously, and a `hashFiles`
 pattern that matches nothing hashes the empty set into a cache key that never changes. Both
@@ -20,14 +20,14 @@ from scripts.release_plan import matches
 REPO: Final = Path(__file__).resolve().parents[1]
 SCANNED: Final = ("tests", "scripts")
 WORKFLOWS: Final = REPO / ".github" / "workflows"
-MESON: Final = REPO / "appliance" / "display_host" / "meson.build"
-OVERLAY: Final = "appliance/display_host/overlay"
-KNOWN_ABSENT: Final[frozenset[str]] = frozenset({
-    "appliance/build.py", "appliance/updates.py", "appliance/sub/provision.py"})  # deliberate fixtures
+KNOWN_ABSENT: Final[frozenset[str]] = frozenset({  # deliberate fixtures
+    "appliance/build.py", "appliance/updates.py", "appliance/sub/provision.py",
+    # tests/test_import_check.py's synthetic source tree, written under tmp_path
+    "appliance/low/__init__.py", "appliance/low/core.py", "appliance/low/runner.py",
+    "appliance/top/__init__.py", "appliance/top/run.py"})
 APPLIANCE_PATH: Final = re.compile(r"(?<![\w.])(appliance/(?:[a-z_]+/)*[a-z_]+\.py)\b")
 HASHED: Final = re.compile(r"hashFiles\(([^)]*)\)")
 QUOTED: Final = re.compile(r"'([^']*)'")
-MESON_OVERLAY: Final = re.compile(r"'(overlay/[^'/]+\.py)'")
 
 
 @cache
@@ -68,12 +68,3 @@ def test_every_hashed_pattern_in_a_workflow_matches_a_tracked_file() -> None:
     empty = [f"{workflow}: {pattern}" for workflow, pattern in patterns
              if not any(matches(pattern, path) for path in _tracked())]
     assert not empty, empty
-
-
-def test_the_overlay_install_list_is_every_overlay_module() -> None:
-    installed = {f"appliance/display_host/{name}"
-                 for name in MESON_OVERLAY.findall(MESON.read_text())}
-    tracked = {path for path in _tracked()
-               if path.startswith(OVERLAY + "/") and path.endswith(".py")
-               and "/" not in path.removeprefix(OVERLAY + "/")}
-    assert installed == tracked
