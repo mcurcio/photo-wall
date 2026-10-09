@@ -226,7 +226,7 @@ def test_stop_complete_journal_before_start_recovers_once(setup, monkeypatch):
 def test_worker_spawn_intent_survives_lost_systemd_reply_without_duplicate(setup, monkeypatch):
     from appliance.apps import import_worker
     broker, _, command, _ = setup
-    worker = import_worker.RootImportWorker(broker.store)
+    worker = import_worker.RootImportWorker(broker.store, base_abi="b", graphics_abi="g", plugin_abi="p")
     monkeypatch.setattr(worker, "ready", lambda command: False)
     calls = []
     def lost_reply(*args, **kwargs):
@@ -246,7 +246,7 @@ def test_worker_spawn_intent_survives_lost_systemd_reply_without_duplicate(setup
 def test_completed_worker_never_respawns(setup, monkeypatch):
     from appliance.apps import import_worker
     broker, driver, command, _ = setup
-    worker = import_worker.RootImportWorker(broker.store)
+    worker = import_worker.RootImportWorker(broker.store, base_abi="b", graphics_abi="g", plugin_abi="p")
     monkeypatch.setattr(worker, "ready", lambda command: True)
     def forbidden(*args, **kwargs):
         raise AssertionError("completed worker must not spawn again")
@@ -258,7 +258,7 @@ def test_completed_worker_never_respawns(setup, monkeypatch):
 def test_worker_same_unit_new_invocation_never_passes_recovery(setup, monkeypatch):
     from appliance.apps import import_worker
     broker, _, command, _ = setup
-    worker = import_worker.RootImportWorker(broker.store)
+    worker = import_worker.RootImportWorker(broker.store, base_abi="b", graphics_abi="g", plugin_abi="p")
     incarnation = uuid4()
     broker.store.write("import-worker", {"command_sha256": command.command_sha256, "unit": "same.service",
         "phase": "observed", "identity": {"pid": 101, "ticks": 303, "invocation": str(incarnation)}})

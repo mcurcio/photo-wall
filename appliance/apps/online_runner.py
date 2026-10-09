@@ -18,10 +18,11 @@ PREPARED = Path("/run/photo-wall-node-storage/preparation/prepared.json")
 
 
 class OnlineRunner:
-    def __init__(self, store, driver, session, recovery, *, prepared: Path = PREPARED):
+    def __init__(self, store, driver, session, recovery, *, worker: RootImportWorker,
+                 prepared: Path = PREPARED):
         self.store, self.driver, self.session = store, driver, session
         self.broker = OnlineEffectBroker(store, driver, session, recovery)
-        self.worker = RootImportWorker(store)
+        self.worker = worker
         self.prepared = prepared
 
     def tick(self):

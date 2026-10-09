@@ -18,7 +18,6 @@ from appliance.apps.environment import (
     canonical_bytes,
     capacity,
     inventory,
-    stage_archive,
     verify_root,
 )
 from appliance.host.host import HostCore, RebootRequest
@@ -29,6 +28,7 @@ from contracts.node_commands import reboot_digest
 from contracts.node_protocol import NodeProducerV2
 from scripts.build_app_environment import materialize
 from scripts.build_node_base_deb import stage_tree
+from scripts.sealed_archive import stage_archive
 
 # A fixed replacement identity: a parameter value must be the same in every collection (xdist
 # workers each collect, and must agree).
@@ -96,7 +96,7 @@ def test_reboot_unknown_effect_cannot_repeat_after_service_restart(tmp_path):
     recovered.close()
 
 
-def fixture_archive(directory: Path, extra=None):
+def fixture_archive(directory: Path, extra=None, *, deb_name: str = "player"):
     source = directory / "source"
     root = source / "rootfs"
     root.mkdir(parents=True)
@@ -108,7 +108,7 @@ def fixture_archive(directory: Path, extra=None):
     python.write_text("#!/bin/sh\nexit 0\n")
     python.chmod(0o755)
     lock, snapshot = b'{"packages":[]}', b'{"snapshot":"fixture"}'
-    reference = AppEnvironmentRefV2("0" * 64, 1, "a" * 64, "player", "1.0", "amd64",
+    reference = AppEnvironmentRefV2("0" * 64, 1, "a" * 64, deb_name, "1.0", "amd64",
                                     hashlib.sha256(lock).hexdigest(), hashlib.sha256(snapshot).hexdigest(),
                                     "/entry", "base-v2", "graphics-v2", "plugins-v2")
     fields = asdict(reference)
@@ -219,18 +219,18 @@ def test_manager_no_fallback_exhausts_primary_once():
 
 
 def test_stream_mutation_after_path_stat_never_publishes(tmp_path, monkeypatch):
-    from appliance.apps import environment
+    from scripts import sealed_archive
     archive, reference = fixture_archive(tmp_path)
     roots = tmp_path / "roots"
     roots.mkdir()
-    original = environment.os.open
+    original = sealed_archive.os.open
     def mutate_before_open(path, *args, **kwargs):
         if path == archive:
             data = bytearray(archive.read_bytes())
             data[-1] = 1
             archive.write_bytes(data)
         return original(path, *args, **kwargs)
-    monkeypatch.setattr(environment.os, "open", mutate_before_open)
+    monkeypatch.setattr(sealed_archive.os, "open", mutate_before_open)
     with pytest.raises(ValueError, match="digest_mismatch"):
         stage_archive(archive, roots, reference, base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
     assert not list(roots.iterdir())
