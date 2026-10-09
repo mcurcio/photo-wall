@@ -170,6 +170,11 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("libpam-systemd", _NODE_BASE,
                   why="base Weston logind seat session and PAM systemd registration"),
     DebianPackage("mount", _NODE_BASE, why="bounded diskless node storage tmpfs mount"),
+    # OpenSSH over dropbear: Debian's default server, enabled for boot by its own package, and it
+    # brings the client tools (ssh-keygen, scp, sftp) an agent expects.
+    DebianPackage("openssh-server", _NODE_BASE,
+                  why="the agent's key-only root SSH on every V2 Node (docs/runbook.md, "
+                      "\"Reaching a Node over SSH\")"),
     DebianPackage("libweston-14-0", _DISPLAY, why="base display compositor ABI"),
     DebianPackage("libjansson4", _DISPLAY, why="bounded native display JSON protocol"),
     DebianPackage("libcairo2", _DISPLAY, why="base diagnostic rendering"),

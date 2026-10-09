@@ -97,6 +97,13 @@ SMALLEST_CLASS_BYTES = 3584 * 1024 * 1024
 # current again about a minute after a hub outage (erratum E-E3B-FR1).
 JOIN_SECONDS = 120
 HUB_RESTART_SECONDS = 60
+# The agent's SSH access (docs/runbook.md, "Reaching a Node over SSH"; appliance/ssh/).
+SSH_UNIT = "ssh.service"
+SSH_HOST_KEY = "/run/photo-wall-ssh/ssh_host_ed25519_key"
+SSH_AUTHORIZED_KEYS = "/usr/lib/photo-wall-ssh/authorized_keys"
+SSH_PROBE = "/var/lib/node-ssh-probe"   # root-owned 0755: StrictModes refuses a key under /tmp
+SSH_CLIENT = ("-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10")
 HOST_STATE_STREAM = "KV_state_host"
 BIRTH_SUBJECT = "$KV.state_host.birth"
 
@@ -406,6 +413,50 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             {"bus": before, "unit": shown, "restarted": after, "others": pids, "birth": born,
              "reborn": reborn}, sort_keys=True))
         return born, reborn
+
+    def verify_ssh(self):
+        """The agent's SSH server from node-base.deb: its package enables it for boot (the fixture
+        boots basic.target, so this starts it as multi-user.target would); it listens on port 22
+        with this boot's generated host key; its effective configuration lets root in by the base's
+        one key alone; and a stranger's key is refused with publickey the only method offered. The
+        repo's private key exists nowhere, so a second sshd under the same configuration, with only
+        its authorized key file swapped for a throwaway key's, proves root gets in by key and runs
+        a command."""
+        assert self.run("systemctl", "is-enabled", SSH_UNIT).strip() == "enabled"
+        self.run("systemctl", "start", SSH_UNIT)
+        assert unit_properties_of(self, SSH_UNIT, "ActiveState")["ActiveState"] == "active"
+        host_key = self.run("ssh-keygen", "-lf", SSH_HOST_KEY + ".pub").split()[1]
+        scanned = self.run("sh", "-ec", f"ssh-keyscan -t ed25519 -p 22 127.0.0.1 > {SSH_PROBE}.scan; "
+                           f"ssh-keygen -lf {SSH_PROBE}.scan").split()[1]
+        assert scanned == host_key, (scanned, host_key)
+        effective = {}
+        for row in self.run("/usr/sbin/sshd", "-T").splitlines():
+            keyword, _, value = row.partition(" ")
+            effective.setdefault(keyword, value)
+        expected = {"allowusers": "root", "permitrootlogin": "without-password",
+                    "authenticationmethods": "publickey", "pubkeyauthentication": "yes",
+                    "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                    "authorizedkeysfile": SSH_AUTHORIZED_KEYS, "hostkey": SSH_HOST_KEY}
+        assert {name: effective.get(name) for name in expected} == expected, effective
+        repo_key = (Path(__file__).resolve().parents[1] / "appliance/ssh/photo_wall_agent.pub").read_text()
+        assert self.run("cat", SSH_AUTHORIZED_KEYS) == repo_key
+        stranger = SSH_PROBE + "/key"
+        self.run("sh", "-ec", f"install -d -m 0755 {SSH_PROBE}; ssh-keygen -q -t ed25519 -N '' -C '' -f {stranger}; "
+                 f"install -m 0644 {stranger}.pub {SSH_PROBE}/authorized_keys")
+        refused = self.container.exec("ssh", *SSH_CLIENT, "-i", stranger, "root@127.0.0.1", "true", timeout=60)
+        assert refused.returncode == 255, (refused.returncode, refused.stderr)
+        assert "Permission denied (publickey)." in refused.stderr, refused.stderr
+        self.run("/usr/sbin/sshd", "-p", "2222", "-o", f"AuthorizedKeysFile={SSH_PROBE}/authorized_keys",
+                 "-o", f"PidFile={SSH_PROBE}/sshd.pid")
+        try:
+            uid = self.run("ssh", *SSH_CLIENT, "-p", "2222", "-i", stranger, "root@127.0.0.1", "id", "-u",
+                           timeout=60)
+        finally:
+            self.container.exec("sh", "-c", f"kill $(cat {SSH_PROBE}/sshd.pid)", timeout=10)
+        assert uid.strip() == "0", uid
+        (self.work / "ssh.json").write_text(json.dumps(
+            {"host_key": host_key, "effective": {name: effective.get(name) for name in expected}},
+            sort_keys=True))
 
     def induce_bus_oom(self):
         """A real OOM kill of the bus: its cap lowered at runtime to BUS_OOM_CAP and a memory stream
@@ -813,6 +864,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
             if phase == "success":
                 node.verify_image_mounts(components_dir)
                 node.verify_bus()
+                node.verify_ssh()
                 reported = assert_bus_memory_reported(fixture, node)
             stage_and_complete(fixture, node, phase, reference)
             if phase == "success":

@@ -283,6 +283,8 @@ PACKAGES: Final = (
              "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target",
              # The Node bus: its configuration and its pinned server (E3c).
              "appliance/bus/**", "scripts/nats_server.py", "scripts/pinned_fetch.py",
+             # The agent's SSH access: sshd configuration, its unit drop-in and the one key.
+             "appliance/ssh/**",
              # HostCore's nodeapi session and its vendored nats-py wheel (E3c S4).
              "nodeapi/**", "scripts/vendored_packages.py")),
     Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),

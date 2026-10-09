@@ -10,6 +10,9 @@ The package also carries the Node bus (E3c): the pinned linux-arm64 nats-server 
 `node-bus.conf` under BUS_DIRECTORY, run by photo-wall-bus.service, so the package is arm64; the
 release's Apache-2.0 LICENSE ships beside the binary, as each vendored wheel's licences ship in its
 dist-info.
+The package also carries the agent's SSH access: Debian's openssh-server (a Depends) with Photo Wall's
+sshd configuration, the release's one authorized public key and a drop-in for Debian's ssh.service
+(SSH_FILES; docs/runbook.md "Reaching a Node over SSH").
 `stage_tree` stays network-free (unit-tier tests stage it); `stage_vendored` adds the pinned bytes,
 and `stage_package` (both) is the one path to a .deb (erratum E-E3C-CUT-4).
 
@@ -75,6 +78,15 @@ UNITS = ("photo-wall-node.target", "photo-wall-host-core.service", "photo-wall-a
          "photo-wall-health.service", "photo-wall-bus.service")
 BUS_DIRECTORY: Final = "usr/lib/photo-wall-bus"   # nats-server and node-bus.conf
 BUS_CONF: Final = "appliance/bus/node-bus.conf"
+# The agent's SSH access: repo file -> installed path. The key is the one authorized key, read
+# from the base (not a home directory) so the read-only base is the only place it can come from.
+SSH_AUTHORIZED_KEYS: Final = "usr/lib/photo-wall-ssh/authorized_keys"
+SSH_FILES: Final = MappingProxyType({
+    "appliance/ssh/photo_wall_agent.pub": SSH_AUTHORIZED_KEYS,
+    "appliance/ssh/sshd.conf": "etc/ssh/sshd_config.d/photo-wall.conf",
+    # Sorted before any later drop-in (the PID1 fixture's cohort reset sorts after it).
+    "appliance/ssh/ssh.service.conf": "lib/systemd/system/ssh.service.d/10-photo-wall.conf",
+})
 
 
 def sources(tree: Path) -> set[str]:
@@ -83,7 +95,7 @@ def sources(tree: Path) -> set[str]:
     imports, keyed by `node_component_inputs.builder_files` (the fetched tree holds no script)."""
     return {*(path.as_posix() for policy in POLICIES.values()
               for path in closure_for(policy, repo=tree).files),
-            *(f"appliance/systemd/{name}" for name in UNITS), BUS_CONF}
+            *(f"appliance/systemd/{name}" for name in UNITS), BUS_CONF, *SSH_FILES}
 
 
 def stage_tree(tree: Path, destination: Path) -> str:
@@ -112,6 +124,14 @@ def stage_tree(tree: Path, destination: Path) -> str:
     bus.mkdir(parents=True)
     (bus / "node-bus.conf").write_bytes((tree / BUS_CONF).read_bytes())
     digests.extend(("nats-server", NATS_SERVER_VERSION))
+    # The SSH files, mode 0644 in 0755 directories whatever the build's umask: sshd's StrictModes
+    # refuses a group- or world-writable authorized key path. The file walk below digests them.
+    for source, installed in SSH_FILES.items():
+        target = destination / installed
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        target.parent.chmod(0o755)
+        target.write_bytes((tree / source).read_bytes())
+        target.chmod(0o644)
     # The release roots' image format (E2c): the base mounts these images, so a new format (or new
     # mksquashfs options) is a new base_abi and every release ref sealed for the old one refuses.
     digests.extend(("image-format", IMAGE_SUFFIX, *SQUASHFS_OPTIONS))

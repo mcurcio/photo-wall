@@ -46,6 +46,7 @@ units = [
     "photo-wall-health.service",
     "photo-wall-manager-supervisor.service",
     "photo-wall-bus.service",
+    "ssh.service",  # the base's drop-in (10-photo-wall.conf) adds the condition; this sorts after
 ]
 for unit in units:
     d = Path("/etc/systemd/system") / (unit + ".d")
