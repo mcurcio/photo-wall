@@ -57,12 +57,31 @@ runs:
         path.write_text(json.dumps(config, indent=2) + "\n")
         PY
         echo "daemon.json: $(sudo cat /etc/docker/daemon.json | tr -d '\n')"
+        # The runner's Docker client holds a Docker Hub login; each pull hands it to the daemon,
+        # which presents it to the mirror too, and the mirror answers "unauthorized:
+        # authentication failed", so the daemon falls back to Docker Hub. Drop it: the mirror
+        # serves anonymous pulls. Prints only the configuration's shape, never a credential.
+        python3 - "${DOCKER_CONFIG:-$HOME/.docker}/config.json" <<'PY'
+        import json, pathlib, sys
+        path = pathlib.Path(sys.argv[1])
+        config = json.loads(path.read_text() or "{}") if path.exists() else {}
+        auths, helpers = config.get("auths", {}), config.get("credHelpers", {})
+        print(f"Docker client config {path}: auths {sorted(auths)}, "
+              f"credsStore {config.get('credsStore')!r}, credHelpers {sorted(helpers)}")
+        hub = [key for key in (*auths, *helpers) if "docker.io" in key]
+        for key in hub:
+            auths.pop(key, None)
+            helpers.pop(key, None)
+        if hub:
+            path.write_text(json.dumps(config, indent=2) + "\n")
+            print(f"Dropped the Docker Hub login(s) {hub}: pulls reach the mirror anonymously")
+        PY
         since=$(date '+%Y-%m-%d %H:%M:%S')
         sudo systemctl restart docker
         docker info --format 'Docker {{.ServerVersion}}, storage {{.Driver}} {{json .DriverStatus}}, mirrors {{json .RegistryConfig.Mirrors}}'
         # The capability, not the setting: one pull, and the daemon's own account of its source.
         pulled=0
-        docker pull --quiet "$PROBE_IMAGE" || pulled=$?
+        timeout 60 docker pull --quiet "$PROBE_IMAGE" || pulled=$?
         log=$(sudo journalctl -u docker --since "$since" --no-pager -o cat)
         echo "Daemon log for the probe pull:"
         grep -iE 'pull|mirror|endpoint|registry|resolv|fetch|auth|token|error' <<<"$log" | cut -c1-400 || true

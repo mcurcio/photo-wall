@@ -274,7 +274,10 @@ configuration and BuildKit's own image (`moby/buildkit`) on the mirror, which
 every `docker/setup-buildx-action` passes as `buildkitd-config-inline` and
 `driver-opts: image=…`, since a docker-container builder ignores the daemon's
 mirrors and its own image is pulled before that configuration applies. Because
-the daemon falls back to Docker Hub silently, the action then proves the route:
+the daemon falls back to Docker Hub silently, the action drops the runner's own
+Docker Hub login from the Docker client configuration (the daemon presents it to
+the mirror, which rejects it with `unauthorized: authentication failed`; the
+mirror serves anonymous pulls), then proves the route:
 it pulls one digest-pinned Docker Hub image with the daemon's debug log on and
 fails unless that log shows the mirror served it. The mirror applies only to `docker.io` references, serves the pinned
 digests unchanged and falls back to Docker Hub on a miss; Dockerfiles and
