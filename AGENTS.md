@@ -37,6 +37,8 @@ This page is the map; open an owning document only when the routing table sends 
 
 ## Verify
 
+CI (`pipeline.yml`) is the full gate. Locally, run the tests you touched plus mutation probes, with the commands below.
+
 | Tier | Command | Authority |
 |---|---|---|
 | Static | `.venv/bin/python -m ruff check .` · `.venv/bin/lint-imports` · `python3 scripts/check_docs.py` | CI + local |
