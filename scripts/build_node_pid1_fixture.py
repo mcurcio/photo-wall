@@ -1,7 +1,7 @@
 """Build the real-PID1 lifecycle scenarios' fixture from one node component set.
 
-Input: a scripts/build_node_components.py output (components.json, app.deb, app.tar,
-manager-primary.tar, node-base.deb, node-display.deb). Output, a new directory:
+Input: a scripts/build_node_components.py output (components.json, app.deb, app.squashfs,
+manager-primary.squashfs, node-base.deb, node-display.deb). Output, a new directory:
 
   targets/{success,failure}.{deb,tar} and -reference.json
       Nonrelease stage targets sealed for the same ABI: `success` is the component's own

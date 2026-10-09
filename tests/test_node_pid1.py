@@ -464,19 +464,28 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
             "systemctl", "stop", "photo-wall-node-player.service", "photo-wall-node-manager.service"
         )
         components = json.loads((components_dir / "components.json").read_text())
+        # The cold roots are images (E2c): staged by the predicate the Node itself uses, and
+        # their pool images re-hashed; the online target is still a tar-staged tree (until B2).
         verify_script = """import json,pathlib,sys
 sys.path.insert(0,'/usr/lib/photo-wall-node-bootstrap')
-from appliance.apps.environment import verify_root
+from appliance.apps.environment import IMAGE_SUFFIX,file_sha256,mounted_root,verify_root
+from appliance.kernel.image_mount import SystemdImageMounter
 from contracts.app_environment import AppEnvironmentRefV2
 value=json.loads(sys.argv[1]);refs=json.loads(sys.argv[2]);count=0
-for kind,ref in refs:
- path=pathlib.Path('/run/photo-wall-node-storage')/kind/ref['environment_sha256']
- verify_root(path,AppEnvironmentRefV2(**ref),**value['abi']);count+=1
+store=pathlib.Path('/run/photo-wall-node-storage');images=store/'root-images'
+for kind,form,ref in refs:
+ ref=AppEnvironmentRefV2(**ref);sha=ref.environment_sha256
+ if form=='image':
+  mounted_root(store/kind,ref,images=images,mounter=SystemdImageMounter(),**value['abi'])
+  assert file_sha256(images/(sha+IMAGE_SUFFIX))==sha,sha
+ else:
+  verify_root(store/kind/sha,ref,**value['abi'])
+ count+=1
 print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
         refs = [
-            ("app-roots", components["app_environment"]),
-            ("manager-roots", components["manager_primary"]),
-            ("app-roots", reference),
+            ("app-roots", "image", components["app_environment"]),
+            ("manager-roots", "image", components["manager_primary"]),
+            ("app-roots", "tree", reference),
         ]
         verified = run(
             "/usr/bin/python3",
@@ -487,6 +496,37 @@ print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
             timeout=180,
         )
         (self.work / "runtime-root-verification.json").write_text(verified)
+
+    def verify_image_mounts(self, components_dir):
+        """Each cold root is a read-only squashfs loop mount of its pool image (E2c), read
+        independently of the Node's own predicate: mountinfo's per-mount options (field 6) say
+        `ro`, the loop's sysfs `ro` is 1 and its backing file is the pool image; the Player runs
+        with RootDirectory= the app root's rootfs."""
+        components = json.loads((components_dir / "components.json").read_text())
+        store = "/run/photo-wall-node-storage"
+        roots = {"app-roots": components["app_environment"]["environment_sha256"],
+                 "manager-roots": components["manager_primary"]["environment_sha256"]}
+        script = """import json,pathlib,sys
+want=json.loads(sys.argv[1]);store=sys.argv[2];found={}
+for line in pathlib.Path('/proc/self/mountinfo').read_text().splitlines():
+ f=line.split();found[f[4]]=f
+out={}
+for kind,sha in want.items():
+ f=found[store+'/'+kind+'/'+sha];sys_dir=pathlib.Path('/sys/dev/block')/f[2]
+ out[kind]={'fstype':f[f.index('-',6)+1],'mount_options':f[5].split(','),
+  'loop_ro':(sys_dir/'ro').read_text().strip(),
+  'backing_file':(sys_dir/'loop/backing_file').read_text().strip()}
+print(json.dumps(out,sort_keys=True))"""
+        mounts = json.loads(self.run("/usr/bin/python3", "-c", script, json.dumps(roots), store))
+        (self.work / "image-mounts.json").write_text(json.dumps(mounts, sort_keys=True))
+        for kind, sha in roots.items():
+            mount = mounts[kind]
+            assert mount["fstype"] == "squashfs" and "ro" in mount["mount_options"], mounts
+            assert mount["loop_ro"] == "1", mounts
+            assert mount["backing_file"] == f"{store}/root-images/{sha}.squashfs", mounts
+        root = self.run("systemctl", "show", "photo-wall-node-player.service", "-p",
+                        "RootDirectory", "--value").strip()
+        assert root == f"{store}/app-roots/{roots['app-roots']}/rootfs", root
 
     def capture_and_remove(self, fixture, primary_error):
         """Capture diagnostics, then remove only this owned container and prove it absent."""
@@ -749,6 +789,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
         try:
             node.cold(fixture, components_dir)
             if phase == "success":
+                node.verify_image_mounts(components_dir)
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
             stage_and_complete(fixture, node, phase, reference)

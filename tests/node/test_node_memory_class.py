@@ -164,7 +164,7 @@ def test_storage_mounts_the_class_store_and_checks_its_size_with_or_without_memc
     assert mount[:3] == ["/usr/bin/mount", "-t", "tmpfs"] and mount[-1] == str(store)
     assert f"size={2560 * MIB}" in mount[mount.index("-o") + 1].split(",")
     assert calls["sized"] == [(store, 2560 * MIB)]
-    assert {child.name for child in store.iterdir()} == {"app-roots", "manager-roots", "downloads", "preparation"}
+    assert {child.name for child in store.iterdir()} == {"app-roots", "manager-roots", "root-images", "downloads", "preparation"}
     absent = "memory controller absent: memory limits not enforced" in caplog.text
     assert absent == (controllers is None or "memory" not in controllers.split())
 

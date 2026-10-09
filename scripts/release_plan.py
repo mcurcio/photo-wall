@@ -299,7 +299,6 @@ PACKAGES: Final = (
              "scripts/vendored_packages.py", "nodeapi/**",
              "scripts/build_node_display_deb.py", "scripts/build_node_manager_deb.py",
              "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
-             "scripts/node_service_probe.py",
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
              "scripts/eeprom_update.py", "scripts/player_start_probe.py",
              "scripts/os_agent_service_probe.py",

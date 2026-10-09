@@ -121,55 +121,67 @@ def test_no_app_handoff_creates_no_cold_start_authority(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("unsafe_staging", [False, True])
-def test_cold_staging_stays_inside_exact_destination_mount(tmp_path, monkeypatch, unsafe_staging):
+def test_cold_staging_stays_inside_the_image_pool_bind(tmp_path, monkeypatch, unsafe_staging):
     selected = offer(app=True)
     abi = {name: getattr(selected.base, name) for name in ("base_abi", "graphics_abi", "plugin_abi")}
     monkeypatch.setattr(bootstrap, "materialize_handoff", lambda **_: (ROOT, selected, abi))
     monkeypatch.setattr(bootstrap, "memory_values", lambda: (8 * 1024**3, 8 * 1024**3))
     node_store = tmp_path / str(bootstrap.STORE).lstrip("/")
-    node_store.mkdir(parents=True)
+    images = node_store / "root-images"
+    images.mkdir(parents=True)
     if unsafe_staging:
-        bad = node_store / "manager-roots/.cold-staging"
-        bad.mkdir(parents=True, mode=0o755)
+        bad = images / ".cold-staging"
+        bad.mkdir(mode=0o755)
         bad.chmod(0o755)
-    prepared, renamed, verified = [], [], []
+    prepared, staged, checked = [], [], []
 
     class Preparer:
-        def __init__(self, directory, **_):
+        def __init__(self, directory, **kw):
+            assert {key: kw[key] for key in abi} == abi
             self.directory = directory
         def prepare(self, environment):
             prepared.append(self.directory)
-            root = self.directory / "verified" / environment.environment_sha256
-            bridge = root / "rootfs/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
-            bridge.parent.mkdir(parents=True)
-            bridge.write_bytes(b"fixture-bridge")
-            (self.directory / (environment.environment_sha256 + ".tar")).write_bytes(b"fixture")
+            self.directory.mkdir(parents=True, mode=0o700)
+            (self.directory / environment.environment_sha256).write_bytes(b"fixture")
 
-    rename = bootstrap.os.rename
-    def same_mount_rename(source, target):
-        # Matching st_dev alone cannot detect EXDEV across separate bind mounts.
-        assert source.parents[3] == target.parent
-        renamed.append((source, target))
-        rename(source, target)
+    def stage_image(image, roots, environment, *, images, mounter, **measured):
+        # The download is adopted by one rename inside the pool's one writable bind (CUT-5).
+        assert image == images / ".cold-staging" / image.parent.name / environment.environment_sha256
+        assert measured == abi
+        staged.append((image.parent.name, roots.name))
+        bridge = roots / environment.environment_sha256 / "rootfs/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+        bridge.parent.mkdir(parents=True)
+        bridge.write_bytes(b"fixture-bridge")
+        return roots / environment.environment_sha256
+
+    def mounted_root(roots, environment, *, images, mounter, **measured):
+        assert measured == abi and images == node_store / "root-images"
+        checked.append(environment.environment_sha256)
+        if not (roots / environment.environment_sha256).exists():
+            raise ValueError("root_image_not_staged")
+        return roots / environment.environment_sha256
 
     monkeypatch.setattr(bootstrap, "DownloadPreparer", Preparer)
-    monkeypatch.setattr(bootstrap.os, "rename", same_mount_rename)
-    monkeypatch.setattr(bootstrap, "verify_root", lambda root, *_, **__: verified.append(root))
+    monkeypatch.setattr(bootstrap, "stage_image", stage_image)
+    monkeypatch.setattr(bootstrap, "mounted_root", mounted_root)
+    mounter = object()
     if unsafe_staging:
         with pytest.raises(ValueError, match="node_cold_staging_ownership"):
-            bootstrap.prepare_roots(root=tmp_path)
-        assert not prepared and not renamed
+            bootstrap.prepare_roots(root=tmp_path, mounter=mounter)
+        assert not prepared and not staged
         return
-    bootstrap.prepare_roots(root=tmp_path)
+    bootstrap.prepare_roots(root=tmp_path, mounter=mounter)
     assert [p.relative_to(node_store).as_posix() for p in prepared] == [
-        "manager-roots/.cold-staging/manager-primary", "app-roots/.cold-staging/app"]
-    assert len(renamed) == 2
-    assert all(p.parent.stat().st_mode & 0o777 == 0o700 for p in prepared)
+        "root-images/.cold-staging/manager-primary", "root-images/.cold-staging/app"]
+    assert staged == [("manager-primary", "manager-roots"), ("app", "app-roots")]
+    assert (images / ".cold-staging").stat().st_mode & 0o777 == 0o700
     assert not (node_store / "downloads").exists()
-    bootstrap.prepare_roots(root=tmp_path)
-    assert len(prepared) == 2 and len(verified) == 2
+    # Staged roots are resident on the next run: recomputed, never downloaded again.
+    bootstrap.prepare_roots(root=tmp_path, mounter=mounter)
+    assert len(prepared) == 2 and len(staged) == 2 and len(checked) == 4
     unit = (REPO / "appliance/systemd/photo-wall-node-prepare.service").read_text()
-    writable = next(line for line in unit.splitlines() if line.startswith("ReadWritePaths="))
-    assert "/run/photo-wall-node-storage/downloads" not in writable
-    assert "/run/photo-wall-node-storage/preparation" not in writable
-    assert "/run/photo-wall-node-storage " not in writable
+    writable = next(line for line in unit.splitlines() if line.startswith("ReadWritePaths=")).split()
+    assert "/run/photo-wall-node-storage/root-images" in writable
+    # PID1 creates the mount points: the stager writes no root directory (CUT-8).
+    assert not [path for path in writable if path.endswith(("-roots", "/downloads", "/preparation"))]
+    assert "/run/photo-wall-node-storage" not in writable

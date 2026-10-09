@@ -3,6 +3,11 @@
 The set is a function of its inputs alone (scripts/node_component_inputs.py): it is built from
 `fetch_sources`'s tree, records the inputs manifest and digest in build-provenance.json, and
 carries no revision -- node-components.yml stamps that separately, after a build or a restore.
+
+Each release root ships as its squashfs image (E2c), `<role>.squashfs`, never a tar: the sealed
+tar is built in a private temporary directory, the image is built from it twice and the two
+digests must agree (`node_components_image_not_reproducible`), and the role's ref in
+components.json carries the image's sha256 and size.
 """
 from __future__ import annotations
 
@@ -11,10 +16,17 @@ import hashlib
 import json
 import shutil
 import tempfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
+from contracts.app_environment import AppEnvironmentRefV2
 from scripts.build_app_environment import build as build_environment
+from scripts.build_environment_image import (
+    IMAGE_SUFFIX,
+    EnvironmentImage,
+    image_from_archive,
+    tools_image,
+)
 from scripts.build_node_base_deb import stage_package as stage_base
 from scripts.build_node_display_deb import build as build_display
 from scripts.build_node_manager_deb import stage_tree as stage_manager
@@ -23,6 +35,16 @@ from scripts.build_player_deb import run_dpkg_deb
 from scripts.node_build_inputs import BUILDER_IMAGE
 from scripts.node_component_inputs import ARCHITECTURE, digest, fetch_sources, manifest
 from scripts.node_release_artifacts import COMPONENTS_SCHEMA
+
+
+def reproducible_image(archive: Path, reference: AppEnvironmentRefV2, work: Path, *, abi: dict, tools: str,
+                       build_image=image_from_archive) -> EnvironmentImage:
+    """The archive's image, built twice into separate outputs; the two digests must agree."""
+    first, second = (build_image(archive, reference, work / f"image-{run}", **abi, tools=tools)
+                     for run in (1, 2))
+    if first.sha256 != second.sha256:
+        raise ValueError("node_components_image_not_reproducible")
+    return first
 
 
 def build(repository: Path, revision: str, output: Path) -> None:
@@ -49,12 +71,15 @@ def build(repository: Path, revision: str, output: Path) -> None:
                                   native_client=native / "libphoto-wall-frame-client.so")
         shutil.copyfile(player_deb, output / "app.deb")
         refs = {}
+        tools = tools_image(architecture=ARCHITECTURE)
         for role, deb in (("manager-primary", manager_deb), ("app", output / "app.deb")):
             sealed = work / (role + "-environment")
             ref = build_environment(deb, sealed, builder_image=BUILDER_IMAGE, architecture=ARCHITECTURE,
                                     role=role, **abi)
-            shutil.copyfile(sealed / (ref.environment_sha256 + ".tar"), output / (role + ".tar"))
-            refs[role] = asdict(ref)
+            image = reproducible_image(sealed / (ref.environment_sha256 + ".tar"), ref, work / role,
+                                       abi=abi, tools=tools)
+            shutil.move(image.path, output / (role + IMAGE_SUFFIX))
+            refs[role] = asdict(replace(ref, environment_sha256=image.sha256, size_bytes=image.size_bytes))
         provenance = {"schema": COMPONENTS_SCHEMA, "architecture": ARCHITECTURE, "abi": abi,
                       "native": json.loads((native / "display-build-source.json").read_text()),
                       "native_package_lock": (native / "display-build-packages.tsv").read_text(),
