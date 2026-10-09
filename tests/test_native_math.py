@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
+import player.native as native_module
 from contracts.models import Calibration
 from player.geometry import (
     compose_pixel,
@@ -19,6 +21,7 @@ from player.geometry import (
     transform,
 )
 from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
+from player.rendering import REDRAW_RENEWAL
 
 
 def test_local_diagnostic_distinguishes_startup_from_enrolled_unbound_output():
@@ -332,3 +335,58 @@ def test_capacity_waits_for_real_surface_initialization():
     surface.programs = (1, 2)
     assert renderer.capacity(()).available
     assert not renderer.capacity(()).qualified
+
+
+def test_the_frame_renewer_paints_only_surfaces_not_renewed_within_a_renewal():
+    """G8 E-G8-4: present() renews a shown draw every REDRAW_RENEWAL, so the display-host
+    renewer paints only surfaces with no acknowledgment or one at least that old."""
+    class Area:
+        def __init__(self):
+            self.renders = 0
+
+        def queue_render(self):
+            self.renders += 1
+
+    now = time.monotonic()
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._closed = False
+    renderer._surfaces = {
+        name: SimpleNamespace(area=Area(), acknowledged=None if completed is None
+                              else SimpleNamespace(completed_at=completed))
+        for name, completed in (("none", None), ("fresh", now + 60),
+                                ("old", now - REDRAW_RENEWAL - .1))}
+    assert renderer._renew_display_frames() is True
+    assert {name: surface.area.renders for name, surface in renderer._surfaces.items()} == {
+        "none": 1, "fresh": 0, "old": 1}
+
+
+def test_a_crossfade_step_or_a_trial_edit_is_a_change_to_redraw():
+    """G8 render on change, E-G8-3: alpha and the calibration trial change pixels without
+    changing the composition's fingerprint, so each is part of what a surface shows."""
+    class Frames:
+        def __init__(self, candidate):
+            self.candidate = candidate
+
+        def trial(self, composition, grant):
+            if self.candidate == "unreadable":
+                raise ValueError("unreadable")
+            return None if self.candidate is None else SimpleNamespace(candidate=self.candidate)
+
+    def trial(sequence):
+        return SimpleNamespace(trial_id="t", generation=1, sequence=sequence,
+                               candidate_sha256="0" * 64)
+
+    def shown(alpha=1.0, frames=None):
+        local = SimpleNamespace(layer="picture", path=None, alpha=alpha)
+        composition = SimpleNamespace(binding="hdmi1", calibration=Calibration(),
+                                      fallback=False, layers=(local,))
+        return native_module._shown(composition, (), (), frames, object())
+
+    assert shown() == shown()
+    assert shown(.5) != shown(1.0)
+    assert shown(frames=Frames(None)) == shown()
+    assert shown(frames=Frames(trial(1))) != shown()
+    assert shown(frames=Frames(trial(1))) == shown(frames=Frames(trial(1)))
+    assert shown(frames=Frames(trial(2))) != shown(frames=Frames(trial(1)))
+    unreadable = Frames("unreadable")
+    assert shown(frames=unreadable) != shown(frames=unreadable)

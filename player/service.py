@@ -58,7 +58,7 @@ from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AuthorityError, Executor
 from player.identity import Identity, load_identity
 from player.local_app_proof import LocalAppProofClient, LocalProofError
-from player.mainloop import DispatchRefused, MainLoopDispatcher, Tick
+from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
@@ -107,7 +107,8 @@ class StaleFeedback(ServiceError):
 
 
 class MainLoopLate(ServiceError):
-    """A dispatch missed DISPATCH_DEADLINE; its callback was cancelled unless already running."""
+    """The GLib loop is late: a dispatch missed DISPATCH_DEADLINE (its callback abandoned
+    unless already running), or an earlier abandoned one is still unreached."""
 
 
 class PlayerConfig(Model):
@@ -449,6 +450,9 @@ class PlayerService:
         # main_loop_late, while the GLib loop is late; its sequence is the executor's floor.
         # Written by the network thread only (one reference assignment).
         self._last_readiness: tuple[Readiness, float] | None = None
+        # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
+        # every dispatch is MainLoopLate at once, and run() does not pet the watchdog.
+        self._late_posts = LatePosts()
 
     def fault(self, code: str, *, detail: str | None = None):
         if self.last_fault != code:
@@ -493,17 +497,39 @@ class PlayerService:
 
     async def dispatch(self, callback):
         """Run `callback` on the GLib thread. MainLoopLate when it has not run within
-        DISPATCH_DEADLINE: it is cancelled then, so a callback not yet started never runs."""
-        future = asyncio.wrap_future(self.dispatcher(callback))
+        DISPATCH_DEADLINE (it is abandoned then: a callback not yet started never runs), and
+        at once while an abandoned one is unreached: a late loop is never a capacity refusal
+        and never fills the dispatcher's slots (E-G8-7)."""
+        source, abandon = self._late_posts.post(self.dispatcher, callback)
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+
+        def settle(done) -> None:
+            def deliver() -> None:
+                if waiter.done():
+                    return
+                if done.cancelled():
+                    waiter.cancel()
+                elif done.exception() is not None:
+                    waiter.set_exception(done.exception())
+                else:
+                    waiter.set_result(done.result())
+            with contextlib.suppress(RuntimeError):     # this loop already closed
+                loop.call_soon_threadsafe(deliver)
+
+        source.add_done_callback(settle)
         try:
-            done, _ = await asyncio.wait((future,), timeout=DISPATCH_DEADLINE)
+            finished, _ = await asyncio.wait((waiter,), timeout=DISPATCH_DEADLINE)
         finally:
-            if not future.done():
-                future.cancel()     # cancels the posted callback unless it is running
-        if not done:
+            if not waiter.done():
+                abandon()
+                waiter.cancel()
+        if not finished:
             raise MainLoopLate("main_loop_late")
         try:
-            return future.result()
+            return waiter.result()
+        except LoopLate as error:
+            raise MainLoopLate("main_loop_late") from error
         except DispatchRefused as error:
             raise ServiceError(str(error)) from error
 
@@ -1370,7 +1396,10 @@ class PlayerService:
                         self._offered = False
                         self._jobs = ()
                     self._write_health(False)
-                    watchdog.pet()      # one completed cycle, whatever its outcome (M5)
+                    # One completed cycle, whatever its outcome (M5), unless the GLib loop has
+                    # not reached an abandoned dispatch: a stuck loop is the watchdog's to end.
+                    if not self._late_posts.late:
+                        watchdog.pet()
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)

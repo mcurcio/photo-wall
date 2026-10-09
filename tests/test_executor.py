@@ -22,7 +22,12 @@ from contracts.models import (
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
-from player.rendering import PRESENTATION_FRESHNESS, PresentationResult, RecordingRenderer
+from player.rendering import (
+    PRESENTATION_FRESHNESS,
+    REDRAW_RENEWAL,
+    PresentationResult,
+    RecordingRenderer,
+)
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -154,6 +159,24 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
     observations = rig.play(layer())
     assert not any(o.status == "presented" for o in observations)
     assert any(o.status == "failed" for o in observations)
+
+
+def test_native_ack_older_than_a_renewal_but_within_freshness_is_presented(tmp_path):
+    """G8 render on change: an unchanged photo is redrawn only every REDRAW_RENEWAL, so an
+    acknowledgment up to PRESENTATION_FRESHNESS old still reads as presented."""
+    rig = Rig(tmp_path)
+    age = (REDRAW_RENEWAL + PRESENTATION_FRESHNESS) / 2
+
+    class RenewingRenderer(RecordingRenderer):
+        def present(self, composition):
+            if not composition.layers:
+                return super().present(composition)
+            return PresentationResult("presented", composition=composition,
+                                      presented_at=rig.clock.monotonic() - age)
+
+    rig.renderer = rig.executor.renderer = RenewingRenderer()
+    observations = rig.play(layer())
+    assert any(o.status == "presented" for o in observations)
 
 
 def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBinding:

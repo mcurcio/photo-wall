@@ -34,6 +34,11 @@ class DispatchRefused(ValueError):
     """The dispatcher's slots are all queued; the callback was not posted."""
 
 
+class LoopLate(DispatchRefused):
+    """Not posted: an earlier post was abandoned at its caller's deadline and the loop has
+    not reached it yet, so the loop is late and a new post would only queue behind it."""
+
+
 class MainLoopDispatcher:
     """At most `slots` queued callbacks at `priority`; the caller awaits each, never blocking GLib.
 
@@ -70,6 +75,55 @@ class MainLoopDispatcher:
 
         self.glib.idle_add(run, priority=self.priority)
         return future
+
+
+class LatePosts:
+    """Posts through a dispatcher that a caller may abandon at its deadline.
+
+    An abandoned post stays queued (GLib cannot unqueue it) but never runs its callback; it
+    counts as unreached until the loop reaches it. While any is unreached the loop is late:
+    `post` refuses at once with LoopLate instead of queueing another, so a blocked loop holds
+    at most the posts in flight when it blocked, never fills the dispatcher's slots, and the
+    late state clears itself when the loop runs again (FIFO at one priority)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._unreached = 0
+
+    @property
+    def late(self) -> bool:
+        """An abandoned post is still queued: the loop has not run since it was posted."""
+        with self._lock:
+            return self._unreached > 0
+
+    def post(self, dispatcher: Callable[[Callable], Future],
+             callback: Callable) -> tuple[Future, Callable[[], bool]]:
+        """(future, abandon). abandon() returns False once the callback has started (it
+        then completes); otherwise the callback never runs and the post counts as late."""
+        with self._lock:
+            if self._unreached:
+                refused = Future()
+                refused.set_exception(LoopLate("main_loop_late"))
+                return refused, lambda: False
+        state = {"started": False, "abandoned": False}
+
+        def run():
+            with self._lock:
+                if state["abandoned"]:
+                    self._unreached -= 1
+                    return None
+                state["started"] = True
+            return callback()
+
+        def abandon() -> bool:
+            with self._lock:
+                if state["started"] or state["abandoned"]:
+                    return False
+                state["abandoned"] = True
+                self._unreached += 1
+                return True
+
+        return dispatcher(run), abandon
 
 
 class Tick:
@@ -121,4 +175,4 @@ def watch_bus(bus) -> None:
 
 
 __all__ = ["BUS", "CONTROL", "GDK_PRIORITY_REDRAW", "MIN_GAP_MS", "TICK", "DispatchRefused",
-           "MainLoopDispatcher", "Tick", "watch_bus"]
+           "LatePosts", "LoopLate", "MainLoopDispatcher", "Tick", "watch_bus"]

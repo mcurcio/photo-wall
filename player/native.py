@@ -102,6 +102,35 @@ def _fingerprint(composition: OutputComposition) -> tuple:
             tuple((local.layer, local.path) for local in composition.layers))
 
 
+def _renewal_due(ack: _Draw | None, now: float) -> bool:
+    """Nothing acknowledged yet, or the last draw is REDRAW_RENEWAL old: paint again."""
+    return ack is None or now - ack.completed_at >= REDRAW_RENEWAL
+
+
+def _trial_key(frames, composition: OutputComposition, grant) -> object:
+    """The active calibration trial's identity, so a trial edit or expiry is a change."""
+    if frames is None:
+        return None
+    try:
+        trial = frames.trial(composition, grant)
+    except Exception:
+        return object()     # unreadable here: always redraw, and _render reports it
+    if trial is None:
+        return None
+    candidate = trial.candidate
+    return (candidate.trial_id, candidate.generation, candidate.sequence,
+            candidate.candidate_sha256)
+
+
+def _shown(composition: OutputComposition, generations: tuple, sample_serials: tuple,
+           frames, grant) -> tuple:
+    """Everything that changes a surface's pixels (G8 render on change, E-G8-3): layers,
+    decoder generations, alpha, each video's newest sample and the calibration trial."""
+    return (_fingerprint(composition), generations,
+            tuple(local.alpha for local in composition.layers), sample_serials,
+            _trial_key(frames, composition, grant))
+
+
 def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
     layers = []
     for local in reversed(composition.layers):
@@ -409,8 +438,7 @@ class NativeRenderer:
         # A surface present() renewed within REDRAW_RENEWAL needs no second paint.
         now = time.monotonic()
         for surface in self._surfaces.values():
-            ack = surface.acknowledged
-            if ack is None or now-ack.completed_at >= REDRAW_RENEWAL:
+            if _renewal_due(surface.acknowledged, now):
                 surface.area.queue_render()
         return True
 
@@ -695,14 +723,12 @@ class NativeRenderer:
         # Render on change: a new draw only when what it shows changed (layers, decoder
         # generations, alpha, a new video sample, a trial edit) or the last one is due for
         # renewal. A static photo is not redrawn every tick (G8).
-        shown = (_fingerprint(composition), generations,
-                 tuple(local.alpha for local in composition.layers),
-                 tuple(self._decoders[key].sample_serial for key, _, _ in generations),
-                 self._trial_key(frames, composition, grant) if frames is not None else None)
+        shown = _shown(composition, generations,
+                       tuple(self._decoders[key].sample_serial for key, _, _ in generations),
+                       frames, grant if frames is not None else None)
         ack = surface.acknowledged
         now = time.monotonic()
-        if shown != surface.queued or (surface.pending is None and (
-                ack is None or now-ack.completed_at >= REDRAW_RENEWAL)):
+        if shown != surface.queued or (surface.pending is None and _renewal_due(ack, now)):
             self._serial += 1
             surface.pending = _Draw(self._serial, composition, generations)
             surface.queued = shown
@@ -716,19 +742,6 @@ class NativeRenderer:
                                       presented_at=ack.completed_at,
                                       applied_calibration=ack.applied_calibration if getattr(self, "_frames", None) else None)
         return PresentationResult("pending")
-
-    @staticmethod
-    def _trial_key(frames, composition: OutputComposition, grant) -> object:
-        """The active calibration trial's identity, so a trial edit or expiry is a change."""
-        try:
-            trial = frames.trial(composition, grant)
-        except Exception:
-            return object()     # unreadable here: always redraw, and _render reports it
-        if trial is None:
-            return None
-        candidate = trial.candidate
-        return (candidate.trial_id, candidate.generation, candidate.sequence,
-                candidate.candidate_sha256)
 
     def release(self, assignment_id: str) -> None:
         self._thread()
