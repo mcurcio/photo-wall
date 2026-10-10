@@ -507,3 +507,25 @@ def test_a_kept_photo_over_a_scene_beneath_fades_to_reveal_it(registry, tmp_path
         _play_one_cycle(client, frame, _scene("top", fade=3, keep_last=True))
         assert _shown(frame.advance(9.5)) == (False, [("photo", 1.0), ("photo", 0.33)])
         assert _shown(frame.advance(1)) == (False, [("photo", 1.0)])
+
+
+def test_a_kept_photo_followed_by_a_see_through_program_keeps_its_fade(registry, tmp_path):
+    """A see-through Program right after a kept photo still follows it: the Player draws the
+    kept photo only as its fallback, never beneath a playing layer, so the photo fades out as
+    authored and the half-strength Program then shows over black. Holding the photo instead
+    would cut from full strength to that. Mutation probe: count only opaque followers (1.0 at
+    19.5 s)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        veil = _scene("veil", keep_last=False)
+        veil["contributions"][0]["opacity"] = .5
+        for body in (_scene("first", fade=3, keep_last=True), veil):
+            saved = client.put(f"/v1/operator/scenes/{body['scene_id']}", json=body, headers=AUTH)
+            assert saved.status_code == 200, saved.text
+        now = registry.clock.utc()
+        _program(client, frame, "first", now, now + 20)
+        _program(client, frame, "veil", now + 20, now + 40)
+        frame.sync()
+        assert _shown(frame.advance(19.5)) == (False, [("photo", 0.33)])
+        assert _shown(frame.advance(1)) == (False, [("photo", 0.5)])  # no kept photo beneath

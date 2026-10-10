@@ -1067,3 +1067,22 @@ def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
     beneath.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
     beneath.advance(5)
     assert kept(beneath) == [(1, 2)]
+
+
+def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
+    """The projection that decides a final-cycle hold is bounded by the caller's `max_events`:
+    the same advance that fits the budget without a kept photo exceeds it with one. Mutation
+    probe: give the projection its own budget (the kept advance succeeds)."""
+    def advance(after_end):
+        runtime = Runtime()
+        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+            media(fade_in_seconds=1, fade_out_seconds=2, after_end=after_end),)))
+        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
+                                    ends_at=10))
+        return runtime.advance(5, max_events=2)
+
+    from central.runtime import RuntimeBudgetExceeded
+
+    assert advance("leave_as_is").contributions
+    with pytest.raises(RuntimeBudgetExceeded):
+        advance("keep_this_photo")

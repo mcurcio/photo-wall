@@ -745,7 +745,7 @@ class Runtime:
             budget.consume()
             self._process(event, budget)
         self._state.now = now
-        return self._view(now, holds=holds)
+        return self._view(now, budget=budget if holds else None)
 
     def _matching(self, scene_id: str) -> list[_Run]:
         return [
@@ -957,15 +957,19 @@ class Runtime:
                 )
             self._state.queue.remove(item)
 
-    def _followed_at(self, run: _Run, at: float) -> frozenset[str]:
-        """The targets another Run contributes to at `at`, from a detached projection without
-        the final-cycle rule (so it never recurses)."""
-        view = self._copy()._advance(at, _TransitionBudget(10000), holds=False)
+    def _followed_at(self, run: _Run, at: float, budget: _TransitionBudget) -> frozenset[str]:
+        """The targets another Run contributes to at `at`, see-through ones included (the
+        Player draws a kept photo only as its fallback, never beneath a playing layer), from a
+        detached projection without the final-cycle rule (so it never recurses), spending the
+        caller's transition budget."""
+        view = self._copy()._advance(at, budget, holds=False)
         return frozenset(intent.target for intent in view.contributions
                          if intent.run_id != run.run_id
                          and intent.interval_start <= at < intent.interval_end)
 
-    def _view(self, now: float, *, holds: bool = True) -> RuntimeView:
+    def _view(self, now: float, *, budget: _TransitionBudget | None) -> RuntimeView:
+        """The view at `now`; with a budget, kept photos' final cycles are held
+        (`_may_hold_to_the_end`), spending it on what follows them."""
         intents: list[Intent] = []
         runs = sorted(self._state.runs.values(), key=lambda r: r.order)
         followed: dict[str, frozenset[str]] = {}
@@ -978,9 +982,9 @@ class Runtime:
             position = max(0.0, now - start)
             for contribution in definitions:
                 fade_out = contribution.fade_out_seconds
-                if fade_out and holds and _may_hold_to_the_end(run, contribution):
+                if fade_out and budget is not None and _may_hold_to_the_end(run, contribution):
                     if run.run_id not in followed:
-                        followed[run.run_id] = self._followed_at(run, end)
+                        followed[run.run_id] = self._followed_at(run, end, budget)
                     if contribution.target not in followed[run.run_id]:
                         fade_out = 0
                 opacity = contribution.opacity
