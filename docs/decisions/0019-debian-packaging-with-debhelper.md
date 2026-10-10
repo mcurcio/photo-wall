@@ -137,7 +137,7 @@ Each constraint today's builders enforce was tested for whether it is real or an
 
 - Versions do not sort; about ten lines of `debian/rules` shell compute them.
 - About 13 binary packages instead of 5.
-- The nats-py version is held equal to `uv.lock` by a test, not by construction.
+- The nats-py version is held equal to `uv.lock` by a test, not by construction: the version, sdist URL and sha256 have three written homes (`uv.lock`, `debian-packaging/python-nats/upstream.env`, its `debian/changelog`), bound by `tests/debs/test_pins.py` (FIX-10).
 - `demo_wall.py` changes: its Player runs from the app image (`docker import` of the root tar) instead of a wheelhouse.
 
 ## Deferred
@@ -169,18 +169,23 @@ The design above is kept as approved. Building it found these differences, each 
 - `packaging/python-nats/` is `debian-packaging/python-nats/`: a root directory named `packaging` shadows PyPI `packaging` for the closure tooling (P1A-1). The pin is `debian-packaging/snapshot.list` (P1A-2), and its first line's instant is the one `SOURCE_DATE_EPOCH` (`debian-packaging/snapshot-epoch.sh`, P4-8).
 - The build container prefers the local repo over the snapshot (apt pin 1002), because trixie's own `nats-server` 2.10.27 would otherwise out-rank the pinned 2.15.0 (P1A-3). nats-server's licence ships as upstream's text in `photo-wall-node`'s doc directory (P1A-4).
 - `graphics_abi` is circular as written in this record. It hashes the Meson outputs of the display and frame client and the third-party runtime, never the context's Python (P1A-5, P1B-1, P2A-9). `base_abi` hashes `photo-wall-node`'s expanded Depends and the image format only, so a change to a base unit or launcher keeps `base_abi` and app images stay compatible (P2B-5).
-- Build-time Python that stays is larger than listed: `scripts/import_check.py`, `scripts/seal_root.py` and `scripts/node_release_writer.py` (the check, the seal and the release contract), plus `scripts/module_closure.py`'s finder.
+- Build-time Python that stays is larger than listed: `scripts/import_check.py`, `scripts/seal_root.py` and `scripts/node_release_writer.py` (the check, the seal and the release contract), plus `scripts/module_closure.py`'s finder, which stage 1's device harness also uses (FIX-7).
+- `photo-wall-common` installs `contracts` and `nodeapi` less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`, `contracts/os_attempt_report.py`), and the import check refuses a common module no Node program reaches, so a Central-only edit keeps every Node package's version, as Q1 asks (FIX-5).
+- The release roles keep their contract names for the root packages' `.deb`s (RECUT-2): `node-base-deb` carries `photo-wall-node`, `node-display-deb` `photo-wall-node-display`, `app-deb` `photo-wall-player` and `manager-primary-deb` `photo-wall-app-manager` (FIX-11).
 
 **Packages and the import check**
 
 - The check runs at `execute_after_dh_install`, not `override_dh_auto_test`: no `debian/<package>/` tree exists earlier (RECUT-5), and `nocheck` cannot skip it. Depends name **direct** imports, not closures (RECUT-4).
 - The Depends cycle through the retiring ignore lines is resolved by the owner's pick, "Exempt listed edges": an edge listed in `pyproject.toml`'s `layers` `ignore_imports` gives no Depends (OWNER-1, RECUT-12). Costs: a launcher's `PATH` exposes every module of the package directories it reaches (P2B-4); installing `photo-wall-uplink` pulls `python3-pydantic` and `python3-nats` through `photo-wall-common` (P2A-8).
+- Each launcher's forbidden list (the broker reaches no host module, HostCore no app lifecycle) is judged by a CI test (`tests/node/test_launcher_closures.py`), no longer by the build: one guarantee rung lower (P2B-4, FIX-8).
 - The record's table had no home for the `appliance/*.py` modules the launchers reach: `feed.py` and `feed_socket.py` are in `photo-wall-node-kernel`, `process_identity.py` in `photo-wall-node-apps`, `node_boot_handoff.py` in `photo-wall-node-boot` (P1A-11, P2A-2).
 
 **Roots, seal and fixture**
 
 - The image is not the root: `appliance/apps/environment.py`'s layout is three metadata files beside `rootfs/` (P3A-2). mmdebstrap's own cleanup runs after its customize hooks, so the seal runs after mmdebstrap, from `build-root.sh`, not as a hook (P3A-1). The app root's file capabilities are handled by the seal (P3A-3). `build-root.sh` writes a fixed empty `/etc/hostname`, since two builds in containers with different hostnames differed in that file (P1A-6, P3A-9).
-- The PID1 fixture is a Dockerfile FROM the build container, not the slim target, because its head needs the compiler and `libweston-14-dev`; its stage targets are built with `build-root.sh --once` (P3A-8).
+- The PID1 fixture is a Dockerfile FROM the build container, not the slim target, because its head needs the compiler and `libweston-14-dev`; its stage targets are built with `build-root.sh --once` (P3A-8). Its `success` target is the built Player re-versioned with `dpkg-deb` (a source rebuild cannot give the same bytes another content version); `failure` is the `equivs` stub (FIX-9).
+- The base's OS packages for Debian packages the Node runs on (`python3-cffi-backend`, `libgl1-mesa-dri`, `libpam-systemd`) are the device layer's `packages:`, and `base-image.yml` derives the packages it requires from the layers' `packages:` lists (FIX-6).
+- A root's two digest-equality builds run at once (FIX-12).
 
 **Stage 1 (P4)**
 
@@ -192,6 +197,14 @@ The design above is kept as approved. Building it found these differences, each 
 - Coverage lost: the V1 start probe also proved that the base's own libkmod finds `vc4` and `v3d` by device alias; nothing replaces it yet (V1B-2).
 - The GitHub origin lists a release only by its node manifest: its `manifest.json` read and the `PHOTO_WALL_RELEASE_PRERELEASES` gate are deleted (V1P-5, V1P-6, FIX-3), as are the V1 units `player.service`, `weston.service` and `weston.ini`, `app_launcher.py` and the process sampler (FIX-2).
 - Not done: the Dockerfile and Compose still default to `central.app:create_app`; `README.md` still describes the V1 promote flow and its removed runbook anchors (outside the docs pass's paths).
+
+**Open for the owner**
+
+- **Stored node releases from before this PR.** The release, deployment and boot offer contracts refuse a manager reference not named `photo-wall-app-manager`, and Central re-parses its stored rows, so after this Central is deployed every release, deployment and offer an earlier build stored is refused: boot offers fail and the release page and the release sync's tail raise. The choice is the owner's: a forward migration that retires the earlier rows (the new release re-ingests), or the package names judged only where a root is built and run, not on Central's stored documents (FIX-1).
+- **Changes from the approved design.** `base_abi` no longer hashes the base's units and launchers (P2B-5), and a launcher can import every module of the directories it reaches, with the forbidden lists a CI test (P2B-4).
+- **Which needs are Depends.** `photo-wall-node` Depends on `systemd` and `udev` (this record's shape), while its unit's `libpam-systemd` and the display's `libgl1-mesa-dri` are layer packages under the brief's rule that OS dependencies never enter a Photo Wall package (FIX-6).
+- **The Player's watchdog.** The node Player still sends `READY=1` and watchdog pets, but its transient unit sets no `WatchdogSec`, so a hung Player is not restarted (FIX-2).
+- **CI wall time.** Every pull request's e2e waits for the Node component build (FIX-12).
 
 **Not run**
 
