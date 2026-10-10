@@ -7,7 +7,7 @@ import pytest
 from node.test_node_linux_adapters import store
 from test_node_boot import environment
 
-from appliance.apps.broker import RunningApp
+from appliance.apps.broker import Launch, RunningApp
 from appliance.apps.online_broker import OnlineEffectBroker
 from appliance.apps.stop_operation import StopCompleted, StopView
 from contracts.node_lifecycle import (
@@ -17,6 +17,7 @@ from contracts.node_lifecycle import (
     stage_digest,
 )
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
+from scripts.node_control_demo import MemoryRelaunchPacing
 
 
 class Driver:
@@ -28,8 +29,9 @@ class Driver:
         self.target_fails = False
         self.unknown_stop = False
         self.display = "weston-1"  # the active display incarnation (None: down)
-        self.launch_display = None  # the incarnation the last start recorded
+        self.launch = Launch(old.app_epoch, "weston-1", 0)  # the current launch
         self.collected = True  # PID1 unloaded the old app unit
+        self.clock = lambda: 1000  # boottime ms, read at each start
 
     def current(self):
         return self.running
@@ -61,20 +63,26 @@ class Driver:
     def display_incarnation(self):
         return self.display
 
-    def launched_display(self):
-        return self.launch_display
+    def launched(self):
+        return self.launch
 
     def unit_collected(self):
         return self.running is None and self.collected
 
     def start(self, reference, operation_id):
         self.starts.append(reference)
-        self.launch_display = self.display
+        self.launch = Launch(self.old_epoch + len(self.starts), self.display, self.clock())
         if self.target_fails and len(self.starts) == 1:
             raise OSError("target exited")
         self.running = RunningApp(reference, NodeProcessIdentity(500 + len(self.starts), 999, uuid4()),
                                   self.old_epoch + len(self.starts), operation_id)
         return self.running
+
+
+def online_broker(store, driver, session, recovery, clock=lambda: 1000):
+    """An online broker with its own relaunch pacing on `clock` (boottime ms)."""
+    return OnlineEffectBroker(store, driver, session, recovery, pacing=MemoryRelaunchPacing(),
+                              now_ms=clock)
 
 
 def stage(producer, old, target, fallback, *, offer_id):
@@ -96,7 +104,12 @@ def setup(tmp_path, monkeypatch):
     session = SimpleNamespace(grant=SimpleNamespace(producer=producer, session_id=uuid4(),
         offer_id=command.offer_id), claim=None, request=lambda *args, **kwargs: (200, b'{}'))
     driver = Driver(old)
-    broker = OnlineEffectBroker(journal, driver, session, SimpleNamespace(arm=lambda x: x.receipt, advance=lambda *a: None))
+    clock = {"ms": 1000}
+    driver.clock = lambda: clock["ms"]
+    broker = online_broker(journal, driver, session,
+                           SimpleNamespace(arm=lambda x: x.receipt, advance=lambda *a: None),
+                           clock=lambda: clock["ms"])
+    broker.clock = clock  # the test's boottime, in ms
     broker.accept(command)
     yield broker, driver, command, module
     journal.close()
@@ -255,10 +268,46 @@ def test_a_switched_app_follows_a_new_display_incarnation_once(setup):
     assert driver.starts == [command.target, command.target]
     assert driver.running.operation_id == command.operation_id
     assert broker.record["phase"] == "running" and broker.record["pending"] == reported
-    driver.running = None  # it exits again under the same Weston: no loop
-    broker.reconcile()
-    broker.reconcile()
-    assert driver.starts == [command.target, command.target] and broker.record["phase"] == "running"
+
+
+def test_a_controlled_switch_app_that_exits_starts_again_with_backoff(setup):
+    """After control is proven, an exit under the same Weston is relaunched on the pacing: the
+    same root and operation, the switch's record untouched."""
+    broker, driver, command, _ = setup
+    broker.execute()
+    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
+                                             "progress": {"kind": "stopped"}})
+    reported = list(broker.record["pending"])
+    waits = []
+    for _ in range(3):
+        broker.clock["ms"] += 2_000  # each run lasts 2 s
+        driver.running, exited_at = None, broker.clock["ms"]
+        starts = len(driver.starts)
+        for _ in range(400):  # turns 100 ms apart, bounded
+            broker.reconcile()
+            if len(driver.starts) > starts:
+                break
+            broker.clock["ms"] += 100
+        waits.append(broker.clock["ms"] - exited_at)
+    assert waits == [1_000, 5_000, 30_000]
+    assert driver.starts == [command.target] * 4
+    assert driver.running.operation_id == command.operation_id
+    assert broker.record["phase"] == "running" and broker.record["pending"] == reported
+
+
+def test_an_uncontrolled_target_that_exits_still_falls_back(setup):
+    """E-1B-17: before control, an exit under the same Weston is the switch's failure, never a
+    paced relaunch of the target."""
+    broker, driver, command, _ = setup
+    broker.execute()
+    driver.running = None
+    for _ in range(3):
+        broker.reconcile()
+        broker.clock["ms"] += 1_000
+    assert driver.starts == [command.target, command.fallback]
+    assert broker.record["phase"] == "fallback_running"
+    assert parse_app_effect_event(
+        broker.record["pending"][-3].encode()).fault == "target_exited_before_control"
 
 
 def test_a_fallback_follows_a_new_display_incarnation_and_a_failed_relaunch_is_reported(setup):
@@ -282,7 +331,7 @@ def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):
     broker, driver, _, _ = setup
     driver.unknown_stop = True
     broker.execute()
-    restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
+    restarted = online_broker(broker.store, driver, broker.session, broker.recovery)
     restarted.reconcile()
     assert restarted.record["phase"] == "intent_stop"
     assert driver.stop_calls == 1 and driver.starts == []
@@ -296,7 +345,7 @@ def test_stop_complete_journal_before_start_recovers_once(setup, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         broker.execute()
     assert broker.record["phase"] == "stopped"
-    restarted = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
+    restarted = online_broker(broker.store, driver, broker.session, broker.recovery)
     restarted.reconcile()
     restarted.reconcile()
     assert driver.stop_calls == 1 and driver.starts == [command.target]
@@ -358,7 +407,7 @@ def test_pending_stop_recovers_locally_after_session_loss_without_redispatch(set
     broker.session.grant = None
     broker.session.request = lambda *a, **k: (_ for _ in ()).throw(AssertionError("network"))
     driver.unknown_stop = False
-    recovered = OnlineEffectBroker(broker.store, driver, broker.session, broker.recovery)
+    recovered = online_broker(broker.store, driver, broker.session, broker.recovery)
     recovered.service()
     recovered.service()
     assert driver.stop_calls == 1 and driver.starts == [command.target]

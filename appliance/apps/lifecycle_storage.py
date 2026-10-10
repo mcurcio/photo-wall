@@ -74,10 +74,15 @@ class FileRelaunchPacing:
 
     def get(self) -> RelaunchPacing | None:
         """The stored pacing, or None; a malformed row is ValueError("relaunch_pacing_invalid")."""
-        raise NotImplementedError
+        row = self.store.read("relaunch-pacing")
+        if row is None:
+            return None
+        if set(row) != {"epoch", "exits", "not_before_ms"}:
+            raise ValueError("relaunch_pacing_invalid")
+        return RelaunchPacing(**row)
 
     def put(self, pacing: RelaunchPacing) -> None:
-        raise NotImplementedError
+        self.store.write("relaunch-pacing", primitive(pacing))
 
 
 class FileManagerRecoveryStore:

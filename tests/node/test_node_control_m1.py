@@ -3,7 +3,13 @@ from uuid import UUID
 
 import pytest
 
-from appliance.apps.broker import AppEffectBroker, ColdStart
+from appliance.apps.broker import (
+    RELAUNCH_BACKOFF_MS,
+    STABLE_RUN_MS,
+    AppEffectBroker,
+    ColdStart,
+    Launch,
+)
 from appliance.display_host.domain import DisplayHost, Surface
 from appliance.host.host import HostCore, RebootRequest
 from contracts.app_environment import AppEnvironmentRefV2
@@ -11,6 +17,7 @@ from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 from scripts.node_control_demo import (
     MemoryEffectJournal,
     MemoryRebootJournal,
+    MemoryRelaunchPacing,
     RecordingAppDriver,
     RecordingDisplayBackend,
     RecordingRebootDriver,
@@ -138,10 +145,50 @@ def env():
                                "c" * 64, "d" * 64, "/usr/bin/player", "base", "gfx", "plugin")
 
 
+class Clock:
+    """The broker's boottime, in ms, moved by the test."""
+
+    def __init__(self):
+        self.ms = 0
+
+    def __call__(self):
+        return self.ms
+
+
+def cold_broker(driver, clock=None, pacing=None):
+    """A cold-start broker over `driver`, started once (operation 3)."""
+    broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
+                             authorized_environment=env(), journal=MemoryEffectJournal(),
+                             driver=driver, pacing=pacing or MemoryRelaunchPacing(),
+                             now_ms=clock or (lambda: 0))
+    broker.cold_start(ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env()))
+    return broker
+
+
+def wait_for_start(broker, driver, clock, *, turns=4_000, step=100):
+    """Reconcile every `step` ms until the app is started again: the ms waited (None: never)."""
+    started, since = len(driver.calls), clock.ms
+    for _ in range(turns):
+        record = broker.reconcile()
+        if len(driver.calls) > started:
+            assert record.phase == "running" and record.running == driver.running
+            return clock.ms - since
+        assert (record.phase, record.fault) == ("exited", "process_exited")
+        clock.ms += step
+    return None
+
+
+def run_for(driver, clock, ms):
+    """The current run lasts `ms`, then exits."""
+    clock.ms += ms
+    driver.running = None
+
+
 def test_broker_retry_and_repeated_exit_reconciliation_are_idempotent():
     driver, journal = RecordingAppDriver(), MemoryEffectJournal()
     broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
-                             authorized_environment=env(), journal=journal, driver=driver)
+                             authorized_environment=env(), journal=journal, driver=driver,
+                             pacing=MemoryRelaunchPacing(), now_ms=lambda: 0)
     command = ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env())
     first = broker.cold_start(command)
     assert broker.cold_start(command) == first
@@ -151,42 +198,96 @@ def test_broker_retry_and_repeated_exit_reconciliation_are_idempotent():
     assert broker.reconcile().phase == "exited"
 
 
-def test_an_app_absent_under_a_new_display_incarnation_starts_again_once():
-    """The Player is bound to one Weston: it is started again once per new incarnation."""
-    driver, journal = RecordingAppDriver(), MemoryEffectJournal()
-    broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
-                             authorized_environment=env(), journal=journal, driver=driver)
-    broker.cold_start(ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env()))
+def test_an_app_that_exits_under_the_same_display_starts_again_with_backoff():
+    """CrashLoopBackOff: consecutive short runs wait 1 s, 5 s, 30 s, then 5 minutes each; a run
+    that lasted STABLE_RUN_MS starts the count again. Every start is a new launch epoch."""
+    clock = Clock()
+    driver = RecordingAppDriver(clock=clock)
+    broker = cold_broker(driver, clock)
+    epochs, waits = [driver.running.app_epoch], []
+    for _ in range(5):
+        run_for(driver, clock, 2_000)
+        waits.append(wait_for_start(broker, driver, clock))
+        epochs.append(driver.running.app_epoch)
+    assert waits == [1_000, 5_000, 30_000, 300_000, 300_000]
+    assert RELAUNCH_BACKOFF_MS == (1_000, 5_000, 30_000, 300_000)
+    run_for(driver, clock, STABLE_RUN_MS)
+    waits.append(wait_for_start(broker, driver, clock))
+    epochs.append(driver.running.app_epoch)
+    assert waits[-1] == 1_000
+    assert epochs == [1, 2, 3, 4, 5, 6, 7]
+    assert driver.running.operation_id == UUID(int=3)
+    assert driver.calls.count("start_simulated_process") == 7
+
+
+def test_an_exit_is_counted_once_however_many_turns_see_it():
+    clock, pacing = Clock(), MemoryRelaunchPacing()
+    driver = RecordingAppDriver(clock=clock)
+    broker = cold_broker(driver, clock, pacing)
+    run_for(driver, clock, 2_000)
+    for _ in range(5):  # five turns at the same instant see the same exit
+        assert broker.reconcile().phase == "exited"
+    assert pacing.puts == 1 and pacing.pacing.exits == 1
+    assert wait_for_start(broker, driver, clock) == 1_000
+    assert pacing.puts == 1
+    run_for(driver, clock, 2_000)
+    assert wait_for_start(broker, driver, clock) == 5_000
+    assert pacing.puts == 2 and pacing.pacing.exits == 2
+
+
+def test_a_new_display_incarnation_starts_the_app_at_once():
+    """Weston took the app with it: no wait, and the count of the app's own failures is kept."""
+    clock = Clock()
+    driver = RecordingAppDriver(clock=clock)
+    broker = cold_broker(driver, clock)
+    run_for(driver, clock, 2_000)
+    assert wait_for_start(broker, driver, clock) == 1_000
+    clock.ms += 2_000
     driver.running, driver.display = None, None  # Weston stopped and took the Player with it
     assert broker.reconcile().phase == "exited"
+    clock.ms += 3_000
     driver.display, driver.collected = "weston-2", False
     assert broker.reconcile().phase == "exited"  # the old unit not yet unloaded: a later turn
-    assert driver.calls.count("start_simulated_process") == 1
+    driver.collected = True
+    assert wait_for_start(broker, driver, clock) == 0
+    assert driver.launched() == Launch(3, "weston-2", clock.ms)
+    run_for(driver, clock, 2_000)  # its own failure again: the count went on from 1
+    assert wait_for_start(broker, driver, clock) == 5_000
+
+
+def test_a_failed_relaunch_is_paced_and_retried_once_the_unit_is_collected():
+    """E-1B-18: a relaunch whose start failed is not left for good; its launch's exit is paced
+    like any other, and the next start waits until PID1 unloaded the old unit."""
+    class FailingDriver(RecordingAppDriver):
+        fail = False
+
+        def start(self, environment, operation_id):
+            if not self.fail:
+                return super().start(environment, operation_id)
+            self.calls.append("start_simulated_process")
+            # The systemd driver records the launch before the spawn that failed.
+            self.launch = Launch(self.launch.epoch + 1, self.display, self.clock())
+            raise OSError("spawn failed")
+    clock = Clock()
+    driver = FailingDriver(clock=clock)
+    broker = cold_broker(driver, clock)
+    driver.fail = True
+    run_for(driver, clock, 2_000)
+    assert broker.reconcile().phase == "exited"
+    clock.ms += 1_000
+    failed = broker.reconcile()
+    assert (failed.phase, failed.fault) == ("effect_unknown", "relaunch_outcome_unknown")
+    assert driver.calls.count("start_simulated_process") == 2
+    driver.fail, driver.collected = False, False
+    assert broker.reconcile().phase == "exited"  # the failed launch's exit: wait 5 s
+    clock.ms += 5_000  # due, but its unit is not collected yet
+    assert broker.reconcile().phase == "exited"
+    assert driver.calls.count("start_simulated_process") == 2
     driver.collected = True
     relaunched = broker.reconcile()
     assert (relaunched.phase, relaunched.running) == ("running", driver.running)
-    assert relaunched.running.operation_id == UUID(int=3)
-    driver.running = None  # the relaunched app exits under the same Weston: no loop
-    assert broker.reconcile().phase == "exited" and broker.reconcile().phase == "exited"
-    assert driver.calls.count("start_simulated_process") == 2
-
-
-def test_a_failed_relaunch_is_unknown_and_never_retried():
-    class FailingDriver(RecordingAppDriver):
-        def start(self, environment, operation_id):
-            if self.calls.count("start_simulated_process"):
-                self.calls.append("start_simulated_process")
-                raise OSError("spawn failed")
-            return super().start(environment, operation_id)
-    driver, journal = FailingDriver(), MemoryEffectJournal()
-    broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
-                             authorized_environment=env(), journal=journal, driver=driver)
-    broker.cold_start(ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env()))
-    driver.running, driver.display = None, "weston-2"
-    assert broker.reconcile().fault == "relaunch_outcome_unknown"
-    driver.display = "weston-3"
-    assert broker.reconcile().phase == "effect_unknown"
-    assert driver.calls.count("start_simulated_process") == 2
+    assert relaunched.running.app_epoch == 3  # the failed launch was epoch 2
+    assert driver.calls.count("start_simulated_process") == 3
 
 
 def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor():
@@ -196,7 +297,8 @@ def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor(
             raise OSError("lost start result")
     driver, journal = LostDriver(), MemoryEffectJournal()
     broker = AppEffectBroker(boot_id=UUID(int=1), offer_id=UUID(int=2),
-                             authorized_environment=env(), journal=journal, driver=driver)
+                             authorized_environment=env(), journal=journal, driver=driver,
+                             pacing=MemoryRelaunchPacing(), now_ms=lambda: 0)
     command = ColdStart(UUID(int=3), UUID(int=1), UUID(int=2), env())
     assert broker.cold_start(command).phase == "effect_unknown"
     with pytest.raises(ValueError, match="unreconciled"):

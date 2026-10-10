@@ -8,14 +8,13 @@ from uuid import uuid4
 
 import pytest
 from node.apps.test_node_online_broker import Driver as SwitchDriver
-from node.apps.test_node_online_broker import stage
+from node.apps.test_node_online_broker import online_broker, stage
 from node.test_node_linux_adapters import store as boot_store
 from node.test_node_probe_broker import DUE, FAST, loop_for, turns
 from test_node_boot import environment
 
 from appliance.apps.broker import RunningApp
 from appliance.apps.broker_runner import BrokerLoop
-from appliance.apps.online_broker import OnlineEffectBroker
 from appliance.apps.probe import (
     KILL_AFTER_MS,
     PROBE_PERIOD_MS,
@@ -116,7 +115,7 @@ def switched(tmp_path, monkeypatch):
     advanced = []
     recovery = SimpleNamespace(arm=lambda obligation: obligation.receipt,
                                advance=lambda obligation, progress: advanced.append(progress))
-    broker = OnlineEffectBroker(journal, SwitchDriver(old), session, recovery)
+    broker = online_broker(journal, SwitchDriver(old), session, recovery)
     broker.accept(command)
     broker.execute()
     assert broker.record["phase"] == "running" and "recovery" in broker.record
@@ -353,7 +352,7 @@ def scripted_loop(tmp_path, runs, dues, *, kill=True):
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,
                       session=SimpleNamespace(ensure=lambda: None), driver=driver,
                       links=SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None),
-                      probes=probes, feeds=SimpleNamespace(serve=lambda: None))
+                      probes=probes, feeds=SimpleNamespace(serve=lambda: None), clock=lambda: 0)
     return loop, probes.feed, kills, store
 
 
