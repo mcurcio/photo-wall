@@ -38,6 +38,7 @@ from operator_harness import (
     drive_poll,
     operator_server,
     pause_page_clock,
+    run_page_clock,
     sign_in,
 )
 from playwright.sync_api import expect
@@ -747,7 +748,7 @@ def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
         page.route(NETBOOT, lambda route: route.fulfill(
             status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
         with page.expect_response(NETBOOT):
-            page.clock.run_for(35000)
+            run_page_clock(page, 35000)
         expect(inspector.get_by_text("Boot records unavailable", exact=False)).to_be_visible()
         # The last known serial is kept.
         expect(_serial_option(inspector)).to_be_visible()

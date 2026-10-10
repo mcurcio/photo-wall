@@ -37,7 +37,7 @@ a Program" on the Schedule page, then Scene → When → Review. `schedule_progr
 
 import re
 from collections.abc import Mapping
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from operator_harness import pause_page_clock, sign_in
 from playwright.sync_api import expect
@@ -371,7 +371,8 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
     default, 0).
 
     With `submit`, sends it ("Schedule Program", or "Add separate windows" for more than
-    one window) and returns the first Program PUT response; without it, returns the flow's
+    one window), waits (on success) for that Program's card and returns the first Program
+    PUT response; without it, returns the flow's
     form on Review, filled and unsent.
     """
     form = start_schedule(page)
@@ -395,6 +396,12 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
         lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
     ) as info:
         form.get_by_role("button", name=action, exact=True).click()
+    if info.value.ok:
+        # Listed before anything can use it (the refresh after the save landed): the
+        # answer arrives before the console's refresh read does.
+        program_id = unquote(info.value.url.rsplit("/", 1)[-1])
+        expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
+            f"Program {program_id}", exact=True)).to_be_visible()
     return info.value
 
 
@@ -435,7 +442,8 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
     the Scene's frames, or 0). `repeat` is the label of the "if it is already running"
     choice; its default ("Leave it running") is left as it is. Central answers
     synchronously with an Admission ({status, reason}); the console mints the activation
-    id, so the operator never types one. Without `submit`, returns the form on Review.
+    id, so the operator never types one. With `submit`, returns once the console says the
+    outcome; without it, returns the form on Review.
     """
     form = start_show_now(page, scene_id)
     form.get_by_role("button", name="Continue", exact=True).click()
@@ -452,6 +460,10 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
         lambda r: r.url.endswith("/v1/operator/activations") and r.request.method == "POST"
     ) as info:
         form.get_by_role("button", name="Activate now", exact=True).click()
+    # The outcome is said only after the console's refresh read has landed (useMutate),
+    # so whatever the test does next sees the state after the activation.
+    expect(page.get_by_role("region", name="Runs", exact=True).get_by_label(
+        "Activation outcome", exact=True)).to_be_visible()
     return info.value
 
 

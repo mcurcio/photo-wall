@@ -119,6 +119,7 @@ def tile_health(page, frame_id):
 
 INVENTORY = "**/v1/operator/inventory"
 SNAPSHOT = "**/v1/operator/snapshot"
+POLL_MS = 5000  # the console's snapshot poll (useSnapshot.js POLL_MS)
 
 
 def drive_poll(page):
@@ -132,8 +133,22 @@ def drive_poll(page):
     """
     status = page.get_by_role("group", name="Snapshot status", exact=True)
     with page.expect_response(SNAPSHOT):
-        page.clock.run_for(5000)
+        page.clock.run_for(POLL_MS)
     expect(status).not_to_have_attribute("aria-busy", "true")
+
+
+def run_page_clock(page, ms):
+    """Run the paused page clock `ms` forward one poll at a time, each poll's read landing.
+
+    Never one `run_for` jump past a request timeout: the fake clock also drives
+    `AbortSignal.timeout` (15 s for every console read and write), so a read begun inside
+    a long jump is aborted when the jump outruns its real response, and the single-flight
+    poller makes nothing more until the clock runs again. Each step here is one poll
+    interval and waits for that poll (`drive_poll`), so every read the steps start lands.
+    """
+    assert ms % POLL_MS == 0, f"{ms} ms is not a whole number of {POLL_MS} ms polls"
+    for _ in range(ms // POLL_MS):
+        drive_poll(page)
 
 
 _OFFENDERS = """() => [...document.querySelectorAll("body *")]
