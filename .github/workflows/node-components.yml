@@ -1,8 +1,8 @@
 name: V2 node components
 
 # Builds the exact V2 node component set ONCE per pipeline run, for every job that needs it:
-# base-image.yml bakes node-base.deb and node-display.deb into the squashfs and the seal ships
-# the set (the photo-wall-node-components-<revision> artifact), and each node-pid1.yml leg boots
+# base-image.yml installs photo-wall-node from the same run's local repo into the squashfs and
+# the seal ships the set (the photo-wall-node-components-<revision> artifact), and each node-pid1.yml leg boots
 # it under real systemd from the PID1 fixture derived here (the -node-pid1-fixture- artifact:
 # the stage targets, fixture.json and the fixture image as a `docker save` archive). Called by
 # pipeline.yml (its `node-components` job) when the plan lists either consumer, and by
@@ -22,11 +22,12 @@ name: V2 node components
 # nats-server .deb and python3-nats (debian-packaging/build-repo.sh), built twice (the two indexes,
 # which name every .deb's sha256, must agree) and proved by installing the whole set through it
 # (tests/debs/test_local_repo.py), by the display and frame client's installed files and ABI
-# identity (tests/debs/test_display_packages.py) and by each Python context importing from its
-# runtime directories alone (tests/debs/test_context_packages.py); it also runs stage 1's uplink
+# identity (tests/debs/test_display_packages.py), by each Python context importing from its
+# runtime directories alone (tests/debs/test_context_packages.py) and by photo-wall-node's
+# launchers, units, users and base ABI (tests/debs/test_node_package.py); it also runs stage 1's uplink
 # on the device's runtime in that container (scripts/uplink_device_harness.py). It uploads the repo as
-# photo-wall-node-debs-<revision>, which the `build` job takes the display (node-display.deb,
-# byte for byte) and the frame client (inside app.deb) from.
+# photo-wall-node-debs-<revision>, which the `build` job takes the composition (node-base.deb, byte
+# for byte), the display (node-display.deb, byte for byte) and the frame client (inside app.deb) from.
 #
 # Above that, the whole output is cached: the set is a function of its inputs alone and names
 # no commit (scripts/node_component_inputs.py), so the key is the digest of the very input
@@ -128,10 +129,10 @@ jobs:
               python3 --version
               python3 -I -S /harness.py run --closure /work/closure --certs /work/certs'
 
-      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports)
+      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports, the composition)
         env:
           PHOTO_WALL_LOCAL_REPO: ${{ runner.temp }}/node-debs
-        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py tests/debs/test_context_packages.py
+        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py tests/debs/test_context_packages.py tests/debs/test_node_package.py
 
       - name: Upload the local repo
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -169,13 +170,18 @@ jobs:
           name: photo-wall-node-debs-${{ inputs.revision }}
           path: ${{ runner.temp }}/node-debs
 
-      # The display's abi.json and the frame client library, as the two packages install them.
-      - name: Unpack the display and frame client packages
+      # The base's abi.json (photo-wall-node), the display's and the frame client library, as the
+      # packages install them.
+      - name: Unpack the composition, display and frame client packages
         run: |
           set -eu
+          unpack() {
+            deb=$(sed -n "/^Package: $1\$/,/^\$/s/^Filename: //p" "$RUNNER_TEMP/node-debs/Packages")
+            dpkg-deb -x "$RUNNER_TEMP/node-debs/$deb" "$2"
+          }
+          unpack photo-wall-node "$RUNNER_TEMP/node-root"
           for package in photo-wall-node-display photo-wall-frame-client; do
-            deb=$(sed -n "/^Package: $package\$/,/^\$/s/^Filename: //p" "$RUNNER_TEMP/node-debs/Packages")
-            dpkg-deb -x "$RUNNER_TEMP/node-debs/$deb" "$RUNNER_TEMP/display-root"
+            unpack "$package" "$RUNNER_TEMP/display-root"
           done
 
       - name: Compute the component input digest
@@ -255,7 +261,8 @@ jobs:
           export SOURCE_DATE_EPOCH
           .venv/bin/python -m scripts.build_node_components \
             --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --debs "$RUNNER_TEMP/node-debs" --display-root "$RUNNER_TEMP/display-root" \
+            --debs "$RUNNER_TEMP/node-debs" --node-root "$RUNNER_TEMP/node-root" \
+            --display-root "$RUNNER_TEMP/display-root" \
             --output "$RUNNER_TEMP/node-components"
 
       # The targets are the app repacked: their environments read the app's cache (the same
@@ -309,19 +316,23 @@ jobs:
             --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
             --debs "$RUNNER_TEMP/node-debs" --components "$RUNNER_TEMP/node-components"
 
-      # A restored set too: the display it ships is this run's package, and its ABI the package's.
-      - name: Prove the set ships the local repo's display and its ABI
+      # A restored set too: the composition and the display it ships are this run's packages, and
+      # its ABI is theirs.
+      - name: Prove the set ships the local repo's composition and display and their ABI
         run: |
           set -eu
-          deb=$(sed -n '/^Package: photo-wall-node-display$/,/^$/s/^Filename: //p' "$RUNNER_TEMP/node-debs/Packages")
-          cmp "$RUNNER_TEMP/node-debs/$deb" "$RUNNER_TEMP/node-components/node-display.deb"
-          python3 - "$RUNNER_TEMP/display-root/usr/lib/photo-wall/node-display/abi.json" \
+          for pair in photo-wall-node:node-base.deb photo-wall-node-display:node-display.deb; do
+            deb=$(sed -n "/^Package: ${pair%%:*}\$/,/^\$/s/^Filename: //p" "$RUNNER_TEMP/node-debs/Packages")
+            cmp "$RUNNER_TEMP/node-debs/$deb" "$RUNNER_TEMP/node-components/${pair#*:}"
+          done
+          python3 - "$RUNNER_TEMP/node-root/usr/lib/photo-wall/node/abi.json" \
+            "$RUNNER_TEMP/display-root/usr/lib/photo-wall/node-display/abi.json" \
             "$RUNNER_TEMP/node-components/components.json" <<'PYCODE'
           import json, sys
-          packaged = json.load(open(sys.argv[1]))
-          shipped = json.load(open(sys.argv[2]))["abi"]
-          if {name: shipped[name] for name in packaged} != packaged:
-              raise SystemExit(f"components.json abi {shipped} is not the display's {packaged}")
+          packaged = {**json.load(open(sys.argv[1])), **json.load(open(sys.argv[2]))}
+          shipped = json.load(open(sys.argv[3]))["abi"]
+          if shipped != packaged:
+              raise SystemExit(f"components.json abi {shipped} is not the packages' {packaged}")
           PYCODE
 
       # The shipped squashfs images (E2c; the build already refused two builds with different

@@ -9,9 +9,10 @@ debian/rules runs it once every binary package's tree is staged (`execute_after_
 and the build fails unless every judged package's declared Depends is exactly what its modules
 import directly. It is the one home of the package rules:
 
-- A *judged* package is a binary package whose staged tree, debian/<package>/, holds a .py under
-  its one directory, /usr/lib/photo-wall/<package without `photo-wall-`>/. A module's owner is
-  the package whose staged tree holds its file.
+- A *judged* package is a binary package whose staged tree, debian/<package>/, installs a module
+  (a .py whose path parts are identifiers) under its one directory,
+  /usr/lib/photo-wall/<package without `photo-wall-`>/. A module's owner is the package whose
+  staged tree holds its file.
 - Edges are direct imports, never closures (Debian Depends name direct needs; apt resolves the
   rest): module_closure's Finder scans each installed module that the source tree holds,
   function bodies included, and records every import its code makes (`Finder.edges`).
@@ -31,12 +32,29 @@ It exits 0 silently, or 1 with one line per refusal:
 `runtime_directories` is the package directories a program of a package needs on sys.path: its
 own, its photo-wall Depends' and the targets of its exempt edges, recursively.
 
+The composition, photo-wall-node, installs no module: it installs the launchers, one directory
+each under its own, /usr/lib/photo-wall/node/<launcher>/__main__.py, run as
+`python3 -I -B /usr/lib/photo-wall/node/<launcher>`. Each launcher declares two module-level
+literals, `ENTRY` (the module it runs as __main__) and `PATH` (the absolute directories it
+prepends to sys.path, sorted), read here with ast (`launchers`). The composition is judged by
+the launcher rule instead of the module rule:
+
+- PATH must be exactly `launcher_path(ENTRY)`: the package directories ENTRY's transitive
+  closure reaches, over every edge, exempt ones included (a launcher runs the whole program).
+  A PATH that differs either way, or a missing or non-literal constant, is `launcher-path`.
+- Each PATH directory's package must be one the composition Depends on at its exact version,
+  or the refusal is `undeclared-launcher-directory`.
+- Each photo-wall sibling the composition Depends on must lie on some launcher's PATH, or the
+  refusal is `unused-depends`. Its other Depends (systemd, udev, nats-server) are not judged:
+  no module of it imports anything.
+
 Build tooling: stdlib only, runs on the build root's python3.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import subprocess
@@ -56,11 +74,13 @@ from scripts.module_closure import Finder, first_party_packages, search_path  # 
 Edge = tuple[str, str]  # (importer, imported), dotted module names
 RefusalKind = Literal['undeclared-sibling', 'unowned-module', 'undeclared-provider',
                       'unresolved-import', 'unused-depends', 'unjudgeable-depends',
-                      'exemption-invalid']
+                      'exemption-invalid', 'launcher-path', 'undeclared-launcher-directory']
 
 PREFIX: Final = "photo-wall-"
 PRIVATE_ROOT: Final = PurePosixPath("/usr/lib/photo-wall")
 DIST_PACKAGES: Final = PurePosixPath("/usr/lib/python3/dist-packages")
+# The composition: the one package judged by the launcher rule, whose directory holds launchers.
+COMPOSITION: Final = "photo-wall-node"
 # The exemption list's one home: this contract of pyproject.toml's import-linter tables.
 EXEMPT_CONTRACT: Final = {"type": "layers", "containers": ["appliance"]}
 CONTROL: Final = "debian/control"
@@ -175,6 +195,8 @@ def installed_modules(staged: Path, packages: Iterable[str]) -> Mapping[str, str
         root = staged / package / directory(package).relative_to("/")
         for path in sorted(root.rglob("*.py")) if root.is_dir() else ():
             parts = path.relative_to(root).with_suffix("").parts
+            if not all(part.isidentifier() for part in parts):
+                continue    # no module: a launcher directory (root-import/__main__.py)
             module = ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
             if module in owners:
                 raise ImportCheckError(f"{module} is installed by {owners[module]} and {package}")
@@ -233,9 +255,111 @@ def runtime_directories(package: str, *, declared: Mapping[str, Declared],
     return tuple(directory(each) for each in seen)
 
 
-def _judged(staged: Path, packages: Iterable[str]) -> list[str]:
-    return sorted(package for package in packages if package.startswith(PREFIX)
-                  and any((staged / package / directory(package).relative_to("/")).rglob("*.py")))
+def launcher_path(entry: str, *, edges: frozenset[Edge],
+                  installed: Mapping[str, str]) -> tuple[PurePosixPath, ...]:
+    """The directories, sorted, of the packages owning every installed module `entry` reaches,
+    itself included, over `edges` (exempt ones too): what its launcher's PATH must be. Raises
+    ImportCheckError when no package installs `entry`."""
+    if entry not in installed:
+        raise ImportCheckError(f"{entry} is installed by no package")
+    following: dict[str, set[str]] = {}
+    for importer, imported in edges:
+        following.setdefault(importer, set()).add(imported)
+    seen, todo = set(), [entry]
+    while todo:
+        module = todo.pop()
+        if module not in seen:
+            seen.add(module)
+            todo += [each for each in following.get(module, ()) if each in installed]
+    return tuple(sorted({directory(installed[module]) for module in seen}))
+
+
+def _launcher_files(staged: Path) -> list[tuple[str, Path]]:
+    root = staged / COMPOSITION / directory(COMPOSITION).relative_to("/")
+    return sorted((path.parent.name, path) for path in root.glob("*/__main__.py"))
+
+
+def _literal(node: ast.expr | None, name: str, path: Path) -> object:
+    try:
+        return ast.literal_eval(node) if node is not None else None
+    except ValueError:
+        raise ImportCheckError(f"{name} is not a literal in {path}") from None
+
+
+def _read_launcher(path: Path) -> tuple[str, tuple[str, ...]]:
+    """(ENTRY, PATH) of one launcher's __main__.py, read with ast, never run. ImportCheckError
+    for a missing, repeated or non-literal constant, or one of the wrong type."""
+    found: dict[str, object] = {}
+    try:
+        tree = ast.parse(path.read_text(), str(path))
+    except (OSError, SyntaxError) as error:
+        raise ImportCheckError(f"{path}: {error}") from None
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names, value = [node.target.id], node.value
+        elif isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            value = node.value
+        else:
+            continue
+        for name in set(names) & {"ENTRY", "PATH"}:
+            if name in found:
+                raise ImportCheckError(f"{name} is assigned twice in {path}")
+            found[name] = _literal(value, name, path)
+    entry, path_value = found.get("ENTRY"), found.get("PATH")
+    if not isinstance(entry, str) or not _MODULE.fullmatch(entry):
+        raise ImportCheckError(f"ENTRY is not a literal module name in {path}")
+    if not isinstance(path_value, tuple) or not all(
+            isinstance(each, str) and PurePosixPath(each).is_absolute() for each in path_value):
+        raise ImportCheckError(f"PATH is not a literal tuple of absolute directories in {path}")
+    return entry, path_value
+
+
+def launchers(staged: Path) -> Mapping[str, tuple[str, tuple[str, ...]]]:
+    """Each launcher the composition's staged tree installs, under
+    usr/lib/photo-wall/node/<launcher>/__main__.py -> (ENTRY, PATH), read with ast. Raises
+    ImportCheckError for a launcher whose constants are missing or not literals."""
+    return {name: _read_launcher(path) for name, path in _launcher_files(staged)}
+
+
+def _package_of(path: str) -> str | None:
+    """The Photo Wall package whose one directory `path` is, or None."""
+    candidate = PurePosixPath(path)
+    return PREFIX + candidate.name if candidate.parent == PRIVATE_ROOT else None
+
+
+def _composition(staged: Path, siblings: frozenset[str], edges: frozenset[Edge],
+                 installed: Mapping[str, str]) -> set[Refusal]:
+    """The launcher rule's refusals for the composition (see the module docstring)."""
+    refusals: set[Refusal] = set()
+    on_path: set[str] = set()
+    for launcher, path in _launcher_files(staged):
+        try:
+            entry, declared_path = _read_launcher(path)
+            expected = tuple(str(each) for each in launcher_path(entry, edges=edges,
+                                                                  installed=installed))
+        except ImportCheckError as error:
+            refusals.add(Refusal(COMPOSITION, "launcher-path", str(error), launcher))
+            continue
+        for each in sorted(set(expected) - set(declared_path)):
+            refusals.add(Refusal(COMPOSITION, "launcher-path", f"{each} (missing from PATH)",
+                                 launcher))
+        for each in sorted(set(declared_path) - set(expected)):
+            refusals.add(Refusal(COMPOSITION, "launcher-path", f"{each} (not reached)",
+                                 launcher))
+        if set(declared_path) == set(expected) and declared_path != expected:
+            refusals.add(Refusal(COMPOSITION, "launcher-path", "PATH is not sorted and unique",
+                                 launcher))
+        for each in declared_path:
+            package = _package_of(each)
+            if package not in siblings:
+                refusals.add(Refusal(COMPOSITION, "undeclared-launcher-directory", each,
+                                     launcher))
+            elif package is not None:
+                on_path.add(package)
+    for sibling in sorted(siblings - on_path):
+        refusals.add(Refusal(COMPOSITION, "unused-depends", sibling, CONTROL))
+    return refusals
 
 
 def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
@@ -257,11 +381,14 @@ def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
                 refusals.add(Refusal(pyproject.name, "exemption-invalid",
                                      f"{module} (no package installs it)",
                                      f"{importer} -> {imported}"))
-    judged = _judged(staged, depends)
+    judged = sorted(set(installed.values()))
     first_party = frozenset(first_party_packages(repo))
     providers: dict[str, str | None] = {}
     reached: dict[str, set[str]] = {package: set() for package in judged}
-    for edge in sorted(source_edges(repo, installed)):
+    edges = source_edges(repo, installed)
+    if COMPOSITION in depends:
+        refusals |= _composition(staged, depends[COMPOSITION].siblings, edges, installed)
+    for edge in sorted(edges):
         importer, imported = edge
         package = installed.get(importer)
         if package not in reached:

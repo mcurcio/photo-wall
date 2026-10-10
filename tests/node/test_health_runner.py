@@ -321,11 +321,10 @@ def test_health_sock_reads_peers_with_the_kernel_peer_uid():
 # -- packaging -----------------------------------------------------------------------------
 
 
-def test_the_judge_closure_is_small_and_the_base_ships_its_unit(tmp_path):
-    from scripts.build_node_base_deb import POLICIES, UNITS, stage_tree
-    from scripts.module_closure import closure_for
+def test_the_judge_closure_is_small_and_the_base_ships_its_unit():
+    from node.launcher_closures import closure
 
-    modules = set(closure_for(POLICIES["health-judge"], repo=REPO).modules)
+    modules = set(closure("health-judge").modules)
     assert {"appliance.health.runner", "appliance.health.judge", "contracts.node_faults",
             "appliance.kernel", "appliance.kernel.probe_timing",
             "appliance.display_host.overlay.instruction"} <= modules
@@ -333,20 +332,17 @@ def test_the_judge_closure_is_small_and_the_base_ships_its_unit(tmp_path):
     assert not [module for module in modules if module.startswith((
         "appliance.central_session", "appliance.apps.broker", "appliance.apps.probe_channel",
         "appliance.display_host.weston", "appliance.display_host.runner"))]
-    assert "photo-wall-health.service" in UNITS
-    root = tmp_path / "package"
-    stage_tree(REPO, root)
-    assert (root / "usr/lib/photo-wall-health-judge/__main__.py").is_file()
-    unit = (root / "lib/systemd/system/photo-wall-health.service").read_text().splitlines()
+    assert (REPO / "appliance/launchers/health-judge/__main__.py").is_file()
+    unit = (REPO / "appliance/systemd/photo-wall-health.service").read_text().splitlines()
     for line in ("User=pw-health", "Group=pw-health", "SupplementaryGroups=pw-node-feeds",
                  "RuntimeDirectory=photo-wall-health", "RuntimeDirectoryMode=0755",
                  "RestrictAddressFamilies=AF_UNIX", "ProtectSystem=strict", "PrivateDevices=yes",
                  "NoNewPrivileges=yes", "CapabilityBoundingSet=", "MemoryMax=64M",
                  "Restart=always", "RestartSec=2", "Slice=photowallbase.slice",
                  "After=photo-wall-app-broker.service",
-                 "ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-health-judge"):
+                 "ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/health-judge"):
         assert line in unit, line
-    target = (root / "lib/systemd/system/photo-wall-node.target").read_text()
+    target = (REPO / "appliance/systemd/photo-wall-node.target").read_text()
     wants = next(line for line in target.splitlines() if line.startswith("Wants="))
     assert "photo-wall-health.service" in wants.split("=", 1)[1].split()
     assert runner.HEALTH_SOCKET.parent.name == "photo-wall-health"

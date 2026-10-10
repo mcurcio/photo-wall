@@ -11,9 +11,8 @@ does not depend on whether the build interpreter ships `test`/`_testcapi`.
 
 Each artefact has one ClosurePolicy (Project 2 design §2.7): its root modules, the packages it
 must not reach, and its third-party table (import root -> Debian package), which is derived from
-the Debian declaration (`scripts/debian_packages.py`) and never hand-written, and its vendored
-table (import root -> a wheel `scripts/vendored_packages.py` pins, staged in the launcher's own
-directory). A declared third-party or vendored import is allowed and recorded; an undeclared one
+the Debian declaration (`scripts/debian_packages.py`) and never hand-written. A declared
+third-party import is allowed and recorded; an undeclared one
 fails the build; a declared one no code reaches is reported by `unreached_imports`, which the
 `.deb` builders refuse. The initramfs policy allows no third-party import, and its forbidden list
 travels in the manifest to the initrd verifier, so it is written once. A `.deb`'s closure is staged privately as a directory
@@ -52,8 +51,6 @@ class ClosurePolicy:
     roots: tuple[str, ...]
     forbidden: tuple[str, ...]              # top-level names, or dotted first-party modules/packages
     third_party: Mapping[str, str]          # import root -> Debian package; never hand-written
-    # import root -> vendored distribution (scripts/vendored_packages.py), staged beside the closure
-    vendored: Mapping[str, str] = MappingProxyType({})
 
 
 # The ONE forbidden policy for the initramfs: written into the manifest; the verifier reads it.
@@ -313,13 +310,13 @@ def read_manifest(path: Path) -> Manifest:
 
 
 def _declared_imports(policy: ClosurePolicy) -> Mapping[str, str]:
-    """Every third-party import root `policy` allows: its Debian and its vendored tables."""
-    return MappingProxyType({**policy.third_party, **policy.vendored})
+    """Every third-party import root `policy` allows: its Debian table."""
+    return MappingProxyType(dict(policy.third_party))
 
 
 def closure_for(policy: ClosurePolicy, *, repo: Path = REPO) -> Closure:
-    """The closure of `policy`'s roots over `repo`, under its forbidden list and both its
-    third-party tables (recorded together in Closure.third_party)."""
+    """The closure of `policy`'s roots over `repo`, under its forbidden list and its
+    third-party table (recorded in Closure.third_party)."""
     return compute_closure(policy.roots, repo=repo, first_party=first_party_packages(repo),
                            forbidden=policy.forbidden, third_party=_declared_imports(policy))
 
@@ -330,10 +327,9 @@ def initrd_closure(repo: Path = REPO) -> Closure:
 
 
 def unreached_imports(closure: Closure, policy: ClosurePolicy) -> tuple[str, ...]:
-    """Declared import roots (policy.third_party and policy.vendored keys) the closure never
-    reached, sorted. The builders and the every-PR test refuse a non-empty result: a stale
-    declaration would put an unused package on the base and in Depends, or an unused wheel in a
-    launcher. With compute_closure's refusal this makes closure.third_party ==
+    """Declared import roots (policy.third_party keys) the closure never reached, sorted. The
+    builders and the every-PR test refuse a non-empty result: a stale declaration would put an
+    unused package in Depends. With compute_closure's refusal this makes closure.third_party ==
     set(_declared_imports(policy)) for every .deb."""
     return tuple(sorted(set(_declared_imports(policy)) - set(closure.third_party)))
 

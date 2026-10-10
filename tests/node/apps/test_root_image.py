@@ -28,7 +28,6 @@ from appliance.apps.environment import mounted_root, stage_image
 from appliance.kernel import image_mount
 from appliance.kernel.capacity import line
 from appliance.kernel.image_mount import IMAGE_MOUNT_OPTIONS, NO_IMAGE, SystemdImageMounter
-from scripts import build_node_base_deb as base
 from scripts.build_environment_image import EnvironmentImage
 from scripts.build_node_components import reproducible_image
 from scripts.sealed_archive import stage_archive
@@ -251,15 +250,6 @@ def test_host_core_cannot_read_the_image_pool():
     unit = (REPO / "appliance/systemd/photo-wall-host-core.service").read_text().splitlines()
     hidden = next(line for line in unit if line.startswith("InaccessiblePaths=")).split("=", 1)[1]
     assert "-/run/photo-wall-node-storage/root-images" in hidden.split()
-
-
-def test_the_image_format_is_part_of_the_base_identity(tmp_path, monkeypatch):
-    def base_abi(root: Path) -> str:
-        return json.loads((root / "usr/lib/photo-wall-node-base/abi.json").read_text())["base_abi"]
-    base.stage_tree(REPO, tmp_path / "original")
-    monkeypatch.setattr(base, "SQUASHFS_OPTIONS", (*base.SQUASHFS_OPTIONS, "-noI"))
-    base.stage_tree(REPO, tmp_path / "changed")
-    assert base_abi(tmp_path / "changed") != base_abi(tmp_path / "original")
 
 
 def _image_builder(built: list, *, differ: bool = False, size_bytes: int | None = None):

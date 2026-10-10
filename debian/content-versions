@@ -10,6 +10,11 @@
 # Packages are visited leaves first, so each such substvar is set before the package that uses
 # it; a pin no visit can satisfy (a cycle, or a sibling this build does not produce) is refused.
 # Every argument is passed on to each dpkg-gencontrol call (debian/rules passes ${nats:Version}).
+#
+# A package may carry a hook, debian/<package>.pre-identity: if that file is executable, it runs
+# after the package's first pass and before its identity hash, given the package name, so what it
+# writes (the base's abi.json, from the expanded Depends) counts in the version. It may write only
+# under debian/<package>/.
 set -eu
 
 identity() {
@@ -41,6 +46,9 @@ while [ -n "$pending" ]; do
 		fi
 		# shellcheck disable=SC2086 # $versions is a list of arguments
 		dh_gencontrol -p"$package" -- "$@" $versions
+		if [ -x "debian/$package.pre-identity" ]; then
+			"debian/$package.pre-identity" "$package"
+		fi
 		version="0+$(identity "$package")"
 		# shellcheck disable=SC2086
 		dh_gencontrol -p"$package" -- -v"$version" "$@" $versions

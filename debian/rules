@@ -19,6 +19,18 @@ execute_after_dh_install:
 execute_after_dh_shlibdeps:
 	debian/graphics-abi
 
+# photo-wall-node.target is enabled by a link the package ships as data
+# (debian/photo-wall-node.links), never by a maintainer script: the base's rpi-image-gen chroot and
+# the PID1 fixture's image build run no systemd, the enablement is covered by the package's content
+# version and by dpkg --verify, and no deb-systemd-helper state is baked into the image. No other
+# package ships a unit.
+override_dh_installsystemd:
+	dh_installsystemd -Nphoto-wall-node
+
+# nats-server's licence ships as upstream's text, readable where the base's docs are kept.
+override_dh_compress:
+	dh_compress -Xnats-server.LICENSE
+
 # No -dbgsym packages: the local repo holds exactly debian/control's binary packages.
 override_dh_strip:
 	dh_strip --no-automatic-dbgsym

@@ -7,7 +7,7 @@ Before=photo-wall-app-broker.service photo-wall-manager-supervisor.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-node-bootstrap prepare
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/node-bootstrap prepare
 RemainAfterExit=yes
 User=root
 UMask=0077

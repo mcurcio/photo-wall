@@ -8,8 +8,8 @@ first-party). A builder that reads anything else finds nothing there and fails, 
 undeclared input cannot reach the outputs. `manifest` digests that tree with everything else the
 outputs derive from: the first-party modules the build and fixture processes import from the
 working tree (their computed closure), the files they read by path (`WORKING_FILES`), the
-local repo the display and frame client come from (the sha256 of its index, `--debs`/Packages,
-which names every .deb's sha256: debian-packaging/build-repo.sh), the builder image,
+local repo the composition, the display and the frame client come from (the sha256 of its index,
+`--debs`/Packages, which names every .deb's sha256: debian-packaging/build-repo.sh), the builder image,
 architecture, Debian snapshot, SOURCE_DATE_EPOCH and Python version. The build
 records the manifest and its digest in build-provenance.json; node-components.yml computes the
 same digest (`key`) BEFORE building, as its cache key, and after a build or a restore `stamp`
@@ -17,7 +17,7 @@ recomputes it, refuses outputs that record another, and writes the revision stam
 (scripts/node_release_artifacts.py), the only place the commit appears.
 
 The outputs carry no revision and no time, so equal inputs at different commits give the same
-`node-base.deb`, `node-display.deb`, `manager-primary.deb` and `app.deb`; an environment archive
+`manager-primary.deb` and `app.deb` (`node-base.deb` and `node-display.deb` are the local repo's); an environment archive
 is the same whenever its BuildKit layers are (the role cache). tests/test_node_component_inputs.py
 proves every file the builders read is in the manifest.
 """
@@ -33,7 +33,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
 
-from scripts import build_node_base_deb as base
 from scripts import build_node_manager_deb as manager
 from scripts import build_player_deb as player
 from scripts.debian_packages import PIN
@@ -50,17 +49,19 @@ ENTRY_MODULES: Final = ("scripts.build_node_components", "scripts.build_node_pid
                         "scripts.node_component_inputs")
 # What those processes read by path rather than import: the locked environment they run in,
 # the workflow and setup that run them, the fixture's C head (build_node_pid1_fixture's
-# FIXTURE_HEAD; tests/test_node_component_inputs.py fails if a read is missing here), and the two
-# pins their imports read at import (scripts/debian_packages.py, scripts/nats_server.py).
+# FIXTURE_HEAD; tests/test_node_component_inputs.py fails if a read is missing here), and the
+# files their imports read at import: the pins (scripts/debian_packages.py, scripts/nats_server.py)
+# and the image format (scripts/build_environment_image.py).
 WORKING_FILES: Final = ("uv.lock", ".github/workflows/node-components.yml",
                         ".github/actions/python-uv/action.yml", "tests/node_pid1_fixture_head.c",
-                        "debian-packaging/snapshot.list", "debian-packaging/nats-server.env")
+                        "debian-packaging/snapshot.list", "debian-packaging/nats-server.env",
+                        "debian-packaging/image-format.env")
 
 
 def tree_sources(tree: Path) -> tuple[str, ...]:
     """Every path of a fetched `tree` the component builders read."""
     return tuple(sorted({*(f"{name}/__init__.py" for name in first_party_packages(tree)),
-                         *base.sources(tree), *manager.sources(tree),
+                         *manager.sources(tree),
                          *player.sources(tree)}))
 
 

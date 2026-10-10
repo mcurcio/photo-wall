@@ -27,7 +27,6 @@ from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import reboot_digest
 from contracts.node_protocol import NodeProducerV2
 from scripts.build_app_environment import materialize
-from scripts.build_node_base_deb import stage_tree
 from scripts.sealed_archive import stage_archive
 
 # A fixed replacement identity: a parameter value must be the same in every collection (xdist
@@ -176,18 +175,12 @@ def test_materializer_preserves_absolute_loader_link_bytes_and_rejects_cycle(tmp
         materialize(archive, tmp_path / "bad")
 
 
-def test_node_base_packaging_has_separate_host_closure_and_no_boot_switch(tmp_path):
-    source = REPO
-    stage_tree(source, tmp_path / "package")
-    root = tmp_path / "package"
-    assert not (root / "usr/lib/photo-wall-host-core/appliance/apps/broker.py").exists()
-    assert not (root / "usr/lib/photo-wall-host-core/player").exists()
-    assert (root / "usr/lib/photo-wall-host-core/appliance/host/host_runner.py").exists()
-    control = (root / "DEBIAN/control").read_text()
-    assert "login" in control and "libpam-systemd" in control
-    units = [path for path in (root / "lib/systemd/system").rglob("*") if path.is_file()]
-    assert units and not any("ConditionKernelCommandLine" in path.read_text() for path in units)
-    assert not any(path.name.endswith(".d") for path in (root / "lib/systemd/system").iterdir())
+def test_node_base_units_have_no_boot_switch():
+    from node.apps.test_memory_lines import NODE_UNITS
+
+    assert NODE_UNITS and not any("ConditionKernelCommandLine" in path.read_text()
+                                  for path in NODE_UNITS)
+    assert not any(path.name.endswith(".d") for path in (REPO / "appliance/systemd").iterdir())
 
 
 def test_manager_package_has_executable_without_effect_closure(tmp_path):
@@ -325,24 +318,6 @@ def test_expected_process_root_is_pinned_and_symlink_replacement_refused(tmp_pat
     root.rename(renamed)
     root.symlink_to(renamed)
     assert not process_root_matches(tmp_path / "proc", 12, root)
-
-
-def test_node_base_abi_binds_exact_dependency_declaration(tmp_path, monkeypatch):
-    import json
-
-    from scripts import build_node_base_deb
-
-    source = REPO
-    original = tmp_path / 'original'
-    changed = tmp_path / 'changed'
-    original_version = build_node_base_deb.stage_tree(source, original)
-    dependencies = build_node_base_deb.packages('node-base')
-    monkeypatch.setattr(build_node_base_deb, 'packages', lambda consumer: (*dependencies, 'fixture-dependency'))
-    changed_version = build_node_base_deb.stage_tree(source, changed)
-    marker = 'usr/lib/photo-wall-node-base/abi.json'
-    assert json.loads((original / marker).read_text()) != json.loads((changed / marker).read_text())
-    assert original_version != changed_version
-    assert 'fixture-dependency' in (changed / 'DEBIAN/control').read_text()
 
 
 @pytest.mark.parametrize("mask", [0o022, 0o077])

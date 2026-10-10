@@ -136,8 +136,8 @@ def test_the_player_reaches_weston_through_the_socket_directory_bound_to_one_inc
 
 
 def test_pw_display_is_the_bases_fixed_gid():
-    source = (REPO / "scripts/build_node_base_deb.py").read_text()
-    assert f'u pw-display {PW_DISPLAY_GID} "Photo Wall display"' in source
+    source = (REPO / "debian/photo-wall-node.sysusers").read_text()
+    assert f'u pw-display {PW_DISPLAY_GID} "Photo Wall display" /nonexistent' in source.splitlines()
 
 
 @pytest.mark.parametrize("shown,expected", [

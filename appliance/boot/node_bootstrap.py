@@ -59,7 +59,7 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     # The bus needs only the origin and the serial, so it runs (and Central can reach it) even
     # when the checks below refuse this boot's base.
     write_bus_environment(root, central, offer.serial)
-    marker =_marker(root / "usr/lib/photo-wall-node-base/abi.json", {"base_abi"})
+    marker = _marker(root / "usr/lib/photo-wall/node/abi.json", {"base_abi"})
     if marker["base_abi"] != offer.base.base_abi:
         raise ValueError("node_measured_base_abi_mismatch")
     graphics = _marker(root / "usr/lib/photo-wall/node-display/abi.json", {"graphics_abi", "plugin_abi"})

@@ -259,6 +259,8 @@ PACKAGES: Final = (
     # upstream's nats-server .deb and python3-nats (debian-packaging/build-repo.sh). The build
     # runs the import check (scripts/import_check.py and what it imports) and installs the
     # import roots the debian/*.install files name; tests/test_release_plan.py holds both claimed.
+    # photo-wall-node, the composition (launchers, units, bus configuration), ships byte for byte
+    # as the node release's node-base.deb.
     Package("node-debs", "the Node's Debian packages from the one source package, and their "
             "local repo", (*_PROJECT, ".github/workflows/node-components.yml", "debian/**",
                            "debian-packaging/**", "scripts/import_check.py",
@@ -271,7 +273,10 @@ PACKAGES: Final = (
                            "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
                            "appliance/app_launcher.py", "appliance/process_identity.py",
                            "appliance/boot/**", "appliance/node_boot_handoff.py",
-                           "appliance/node/**")),
+                           "appliance/node/**", "appliance/launchers/**", "appliance/bus/**",
+                           "appliance/systemd/photo-wall-*.service",
+                           "appliance/systemd/photowall*.slice",
+                           "appliance/systemd/photo-wall-node.target")),
     Package("node-manager-deb", "the exact versioned AppManager .deb",
             (*_DEB_BUILD, "scripts/build_node_manager_deb.py", "appliance/__init__.py",
              "appliance/node/__init__.py", "appliance/node/manager.py", "appliance/node/manager_runner.py",
@@ -287,20 +292,9 @@ PACKAGES: Final = (
              ".github/workflows/node-components.yml")),
     Package("player-environment", "the sealed Debian V2 Player environment",
             (*_PLAYER_DEB, "scripts/build_app_environment.py", "scripts/node_build_inputs.py", "appliance/apps/environment.py",
-             "scripts/build_environment_image.py", "scripts/sealed_archive.py")),
-    Package("node-base-deb", "the isolated V2 node base .deb",
-            (*_DEB_BUILD, "scripts/build_node_base_deb.py", "appliance/node/**", "appliance/kernel/**",
-             "appliance/host/**", "appliance/apps/**", "appliance/boot/**", "appliance/display_host/**", "contracts/**",
-             "uplink/**", "appliance/__init__.py", "appliance/central_session/**", "appliance/feed.py",
-             "appliance/feed_socket.py",
-             "appliance/health/**", "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
-             "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target",
-             # The Node bus: its configuration and its pinned server (E3c).
-             "appliance/bus/**", "scripts/nats_server.py", "debian-packaging/nats-server.env",
-             "scripts/pinned_fetch.py",
-             # HostCore's nodeapi session and its vendored nats-py wheel (E3c S4).
-             "nodeapi/**", "scripts/vendored_packages.py")),
-    # The squashfs bakes the node base .deb and the display; the initrd carries stage 1's closure
+             "scripts/build_environment_image.py", "debian-packaging/image-format.env",
+             "scripts/sealed_archive.py")),
+    # The squashfs installs photo-wall-node from the local repo; the initrd carries stage 1's closure
     # (contracts, uplink and appliance's stage-1 modules); the rest of appliance/ is the image and
     # initramfs definition, claimed whole.
     Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and boot data",
@@ -312,9 +306,7 @@ PACKAGES: Final = (
              "scripts/build_node_components.py", "scripts/node_component_inputs.py",
              "scripts/node_release_artifacts.py",
              "scripts/build_app_environment.py", "scripts/build_environment_image.py",
-             "scripts/sealed_archive.py", "scripts/build_node_base_deb.py", "scripts/nats_server.py",
-             "debian-packaging/nats-server.env", "scripts/pinned_fetch.py",
-             "scripts/vendored_packages.py", "nodeapi/**",
+             "scripts/sealed_archive.py", "nodeapi/**",
              "debian/**", "debian-packaging/**", "scripts/build_node_manager_deb.py",
              "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
@@ -357,6 +349,7 @@ NOT_SHIPPED: Final = (
     "scripts/test_local.py",
     "scripts/build_node_pid1_fixture.py",  # the node-pid1 scenarios' fixture; never shipped
     "scripts/run_display_harness.py",  # node-pid1's display-harness job runner; never shipped
+    "scripts/nats_server.py",  # the bus tests' pinned nats-server binary; never shipped
     ".github/workflows/node-pid1.yml",
     "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
 )
@@ -422,7 +415,7 @@ SUITES: Final = (
     # Central it runs against (its fixture imports central.app, so all of Central's Python), and
     # its own builder, harness, the test modules the harness borrows from, and workflow; and the
     # display harness job's runner and fixture (the job builds appliance/display_host itself).
-    Suite("node-pid1", packages=("node-base-deb", "node-manager-deb", "node-display-deb",
+    Suite("node-pid1", packages=("node-manager-deb", "node-display-deb",
                                  "player-environment", "node-debs"),
           paths=("tests/test_node_pid1.py", "tests/node_pid1_*", "tests/node/apps/test_environment_image.py",
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",

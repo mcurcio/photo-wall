@@ -23,7 +23,7 @@ from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
 
 UNIT = "photo-wall-node-player.service"
-# pw-display's fixed id (the base's sysusers.d, scripts/build_node_base_deb.py): the Player joins
+# pw-display's fixed id (the base's sysusers.d, debian/photo-wall-node.sysusers): the Player joins
 # it to traverse WAYLAND_DIRECTORY (0750) and connect to the socket.
 PW_DISPLAY_GID = 10005
 APP_PROPERTIES = ("LoadState", "ActiveState", "SubState", "MainPID", "InvocationID", "ControlGroup",

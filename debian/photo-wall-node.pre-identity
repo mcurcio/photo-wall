@@ -1,0 +1,5 @@
+#!/bin/sh
+# debian/content-versions' hook for photo-wall-node: the base ABI identity, written into the
+# tree after the first dh_gencontrol pass (its Depends expanded) and before the identity hash.
+set -eu
+exec debian/base-abi "$1"

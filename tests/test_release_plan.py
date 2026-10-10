@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from contracts.release import IMAGES
-from scripts import build_node_base_deb as node_base_deb
 from scripts import build_node_manager_deb as node_manager_deb
 from scripts import release_plan
 from scripts.module_closure import POLICIES, closure_for, first_party_packages
@@ -575,9 +574,7 @@ def test_every_computed_closure_file_is_claimed_by_its_package(policy, packages)
         assert [path for path in files if not package.claims(path)] == [], name
 
 
-@pytest.mark.parametrize("policies, package", [((node_manager_deb.POLICY,), "node-manager-deb"),
-                                               (tuple(node_base_deb.POLICIES.values()),
-                                                "node-base-deb")])
+@pytest.mark.parametrize("policies, package", [((node_manager_deb.POLICY,), "node-manager-deb")])
 def test_every_node_deb_closure_file_is_claimed_by_its_package(policies, package):
     """The node .debs stage their import closures (uplink included), so each closure file is an
     input of the package: a change to it releases that .deb."""

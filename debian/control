@@ -3,6 +3,7 @@ Section: misc
 Priority: optional
 Maintainer: Photo Wall <noreply@example.invalid>
 Build-Depends: debhelper-compat (= 13),
+ dh-sequence-installsysusers,
  meson,
  ninja-build,
  pkgconf,
@@ -168,6 +169,11 @@ Depends: photo-wall-node-manager (= ${pw-version:photo-wall-node-manager}),
 Description: Photo Wall AppManager launcher
  The manager root's program.
 
+# The composition the base installs: the seven launchers (appliance/launchers/<launcher>/, each
+# naming its PATH, which the import check holds to its entry's imports), the base's units, slices
+# and target (enabled by debian/photo-wall-node.links), its system users and runtime directories,
+# the bus configuration and the base ABI (debian/base-abi). nats-server is upstream's .deb, in the
+# local repo at the pin; its licence ships in this package's doc directory.
 Package: photo-wall-node
 Architecture: all
 Depends: photo-wall-common (= ${pw-version:photo-wall-common}),

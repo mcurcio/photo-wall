@@ -11,7 +11,7 @@ StartLimitIntervalSec=10min
 StartLimitBurst=10
 
 [Service]
-ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-app-broker
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/app-broker
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=photo-wall-app-broker

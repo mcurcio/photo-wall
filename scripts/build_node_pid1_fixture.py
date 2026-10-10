@@ -1,7 +1,7 @@
 """Build the real-PID1 lifecycle scenarios' fixture from one node component set.
 
 Input: a scripts/build_node_components.py output (components.json, app.deb, app.squashfs,
-manager-primary.squashfs, node-base.deb, node-display.deb). Output, a new directory:
+manager-primary.squashfs) and the local repo it was built from. Output, a new directory:
 
   targets/{success,failure}.{deb,squashfs} and -reference.json
       Nonrelease stage targets sealed for the same ABI and shipped as images (E2c), as releases
@@ -14,14 +14,15 @@ manager-primary.squashfs, node-base.deb, node-display.deb). Output, a new direct
 
 The arm64 image is FROM `--base-image`, the pinned Debian build container's image ID
 (photo-wall-debian-builder, loaded by debian-packaging/build-container.sh: the build root of
-node-display.deb, which carries the pinned Weston stack and a compiler), installs exactly the
-supplied base package and, by name from the local repo `--debs` (debian-packaging/build-repo.sh's
-output, read as the display harness reads it: a `file:` source preferred at 1002), the display
-with its photo-wall siblings, which it pins at their exact versions, and compiles the checked-in
-headless fixture head. The components' node-display.deb, byte for byte the repo's
-(node-components.yml checks), sits beside the base package in /var/tmp for the PID1 scenarios'
-package binding (tests/node_pid1_package_verify.py). The image is identified by its immutable
-local ID only; the temporary FROM alias is removed after the build.
+the packages, which carries the pinned Weston stack and a compiler), installs photo-wall-node by
+name from the local repo `--debs` (debian-packaging/build-repo.sh's output, read as the display
+harness reads it: a `file:` source preferred at 1002), with every context it pins at its exact
+version and upstream's nats-server, and compiles the checked-in headless fixture head. The repo
+stays at /var/tmp/photo-wall-debs for the PID1 scenarios' package binding
+(tests/node_pid1_package_verify.py), which binds the installed composition and display to the
+components' node-base.deb and node-display.deb, the repo's own bytes (node-components.yml
+checks). The image is identified by its immutable local ID only; the temporary FROM alias is
+removed after the build.
 """
 
 from __future__ import annotations
@@ -47,13 +48,13 @@ ROLES = ("success", "failure")
 FAILURE_ENTRY = 'raise SystemExit("intentional nonrelease PID1 failure fixture")\n'
 PLAYER_MAIN = "usr/lib/photo-wall-player/__main__.py"
 DOCKERFILE = """FROM {alias}
-COPY node-base.deb node-display.deb fixture-head.c /var/tmp/
+COPY fixture-head.c /var/tmp/
 COPY debs /var/tmp/photo-wall-debs
 RUN printf '#!/bin/sh\\nexit 101\\n' > /usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d \\
  && echo 'deb [trusted=yes] file:/var/tmp/photo-wall-debs ./' > /etc/apt/sources.list.d/photo-wall-local.list \\
  && printf 'Package: *\\nPin: origin ""\\nPin-Priority: 1002\\n' > /etc/apt/preferences.d/photo-wall-local \\
  && apt-get update \\
- && apt-get install -y --no-install-recommends /var/tmp/node-base.deb photo-wall-node-display \\
+ && apt-get install -y --no-install-recommends photo-wall-node \\
  && dpkg --audit
 RUN cc -shared -fPIC -Wall -Wextra -Werror $(pkg-config --cflags libweston-14) \\
  /var/tmp/fixture-head.c -o /var/tmp/fixture-head.so $(pkg-config --libs libweston-14)
@@ -86,17 +87,15 @@ def derive_target(base_image: str, app_deb: Path, work: Path, role: str) -> Path
     return work / (role + ".deb")
 
 
-def build_image(base_image: str, components: Path, debs: Path, work: Path) -> str:
+def build_image(base_image: str, debs: Path, work: Path) -> str:
     """The fixture image, FROM a local image: so Docker's daemon-backed default builder, never
     the current one (a docker-container builder cannot see the daemon's images). `debs` is the
-    local repo the display installs from."""
+    local repo photo-wall-node installs from."""
     alias = "photo-wall-node-pid1-base:" + secrets.token_hex(6)
     subprocess.run(["docker", "tag", base_image, alias], check=True)
     try:
         if inspect(alias)["Id"] != base_image:
             raise ValueError("node_pid1_base_alias_mismatch")
-        for name in ("node-base.deb", "node-display.deb"):
-            shutil.copyfile(components / name, work / name)
         shutil.copytree(debs, work / "debs")
         shutil.copyfile(FIXTURE_HEAD, work / "fixture-head.c")
         (work / "Dockerfile").write_text(DOCKERFILE.format(alias=alias))
@@ -135,7 +134,7 @@ def build(components: Path, debs: Path, output: Path, *, base_image: str) -> dic
                 json.dumps(asdict(ref), sort_keys=True))
         image_work = work / "image"
         image_work.mkdir()
-        image = build_image(base_image, components, debs, image_work)
+        image = build_image(base_image, debs, image_work)
     fixture = {"components": str(components), "image": image, "base_image": base_image}
     (output / "fixture.json").write_text(json.dumps(fixture, sort_keys=True))
     return fixture

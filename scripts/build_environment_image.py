@@ -11,10 +11,16 @@ by root whoever staged the tree, so no step here needs root.
 Since E2c the image is the shipped form: scripts/build_node_components.py builds each root's image
 twice (two builds must give one digest), ships it, and its digest and size are the release ref's.
 The tar is a build intermediate only.
+
+The image format (IMAGE_SUFFIX and the mksquashfs options) is read from its one home,
+debian-packaging/image-format.env, which photo-wall-node's base ABI also hashes (debian/base-abi);
+the Node's own IMAGE_SUFFIX (appliance/apps/environment.py) must equal the file's, or this module
+refuses to import.
 """
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -28,8 +34,23 @@ from scripts.node_build_inputs import BUILDER_IMAGE, docker_build, validate_buil
 from scripts.sealed_archive import stage_archive
 
 __all__ = ["IMAGE_SUFFIX", "SQUASHFS_OPTIONS", "EnvironmentImage", "image_from_archive", "tools_image"]
-SQUASHFS_OPTIONS: Final[tuple[str, ...]] = ("-noappend", "-no-progress", "-all-root", "-no-xattrs",
-                                            "-comp", "zstd", "-b", "128K")
+IMAGE_FORMAT: Final = Path(__file__).resolve().parents[1] / "debian-packaging/image-format.env"
+
+
+def read_image_format(text: str) -> tuple[str, tuple[str, ...]]:
+    """(IMAGE_SUFFIX, SQUASHFS_OPTIONS) of an image-format.env: sh-quoted NAME=value lines,
+    `#` comments and blank lines aside."""
+    values = {}
+    for line in text.splitlines():
+        if line.strip() and not line.strip().startswith("#"):
+            name, _, value = line.partition("=")
+            values[name.strip()] = " ".join(shlex.split(value))
+    return values["IMAGE_SUFFIX"], tuple(values["SQUASHFS_OPTIONS"].split())
+
+
+_SUFFIX, SQUASHFS_OPTIONS = read_image_format(IMAGE_FORMAT.read_text())
+if _SUFFIX != IMAGE_SUFFIX:
+    raise ValueError("image_format_suffix_mismatch")
 TREE_MODE: Final = 0o755
 # The tool image: the builder image on the pin's snapshot (the same sources and preference as the
 # component builders), plus mksquashfs/unsquashfs at the snapshot's version.

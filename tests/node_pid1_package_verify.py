@@ -1,5 +1,10 @@
 """Read-only installed package binding to each exact embedded Debian archive.
 
+The archives are the local repo's .debs the image installed from (/var/tmp/photo-wall-debs, its
+Packages index naming each package's file): photo-wall-node and photo-wall-node-display by
+default, or the paths given as arguments. Each result carries its archive's sha256, which the
+caller binds to the shipped component (node-base.deb, node-display.deb).
+
 The image's dpkg may filter paths out on install (`path-exclude`, as Debian's slim images do
 for /usr/share/doc): the packages still ship them (Debian Policy 12.7), dpkg records them as
 owned and `dpkg --verify` reports them missing. Both checks here therefore skip exactly the
@@ -17,7 +22,21 @@ import tarfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 
-ARCHIVES = tuple(sys.argv[1:]) or ("/var/tmp/node-base.deb", "/var/tmp/node-display.deb")
+REPO = Path("/var/tmp/photo-wall-debs")
+PACKAGES = ("photo-wall-node", "photo-wall-node-display")
+
+
+def repo_archive(package, repo=REPO):
+    """The one .deb of `package` the local repo's Packages index names."""
+    found = [line.partition(":")[2].strip()
+             for stanza in (repo / "Packages").read_text().split("\n\n")
+             if f"Package: {package}" in stanza.splitlines()
+             for line in stanza.splitlines() if line.startswith("Filename:")]
+    assert len(found) == 1, (package, found)
+    return str(repo / found[0])
+
+
+ARCHIVES = tuple(sys.argv[1:]) or tuple(repo_archive(package) for package in PACKAGES)
 _FILTER = re.compile(r"^(?:--)?(path-exclude|path-include)[=\s]\s*(\S+)\s*$")
 
 
@@ -99,6 +118,8 @@ for archive in ARCHIVES:
         {
             "package": package,
             "version": version,
+            "archive": archive,
+            "sha256": hashlib.sha256(Path(archive).read_bytes()).hexdigest(),
             "exact_payload_members": count,
             "dpkg_filtered_members": filtered_count,
         }

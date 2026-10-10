@@ -10,7 +10,7 @@ StartLimitIntervalSec=10min
 StartLimitBurst=10
 
 [Service]
-ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-manager-supervisor
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/manager-supervisor
 Restart=on-failure
 RestartSec=2
 RuntimeDirectory=photo-wall-manager-supervisor

@@ -6,6 +6,7 @@ transaction, so the units' own Requires= decide what runs after the refusal; the
 which needs no storage, then starts as in every scenario.
 """
 
+import ast
 import json
 import shutil
 import subprocess
@@ -13,10 +14,12 @@ import sys
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, "/usr/lib/photo-wall-node-bootstrap")
-from appliance.kernel.clock import boot_id, boottime_ms
-from appliance.node_boot_handoff import write_node_handoff
-from contracts.node_boot import parse_node_boot_offer
+sys.path[:0] = next(ast.literal_eval(node.value) for node in ast.parse(Path(
+    "/usr/lib/photo-wall/node/node-bootstrap/__main__.py").read_text()).body
+    if isinstance(node, ast.AnnAssign) and node.target.id == "PATH")  # its launcher's PATH
+from appliance.kernel.clock import boot_id, boottime_ms  # noqa: E402
+from appliance.node_boot_handoff import write_node_handoff  # noqa: E402
+from contracts.node_boot import parse_node_boot_offer  # noqa: E402
 
 config = json.loads(Path("/var/lib/node-fixture-config.json").read_text())
 request = urllib.request.Request(

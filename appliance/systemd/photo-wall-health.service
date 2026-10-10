@@ -7,7 +7,7 @@ User=pw-health
 Group=pw-health
 # Reads the node feeds (sockets 0660 root:pw-node-feeds); nothing else.
 SupplementaryGroups=pw-node-feeds
-ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-health-judge
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/health-judge
 Restart=always
 RestartSec=2
 RuntimeDirectory=photo-wall-health

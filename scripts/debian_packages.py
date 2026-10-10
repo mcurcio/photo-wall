@@ -32,7 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
-Consumer = Literal["player", "initrd-build", "node-base", "node-manager"]
+Consumer = Literal["player", "initrd-build", "node-manager"]
 Archive = Literal["debian", "raspberrypi"]
 # When a package lands in a root. Every root fetches the pin over https, and apt inside a root
 # cannot do that until the CA bundle is there, so:
@@ -148,14 +148,13 @@ _EVERY_STAGE: Final[frozenset[Consumer]] = frozenset({"player", "initrd-build"})
 _PLAYER: Final[frozenset[Consumer]] = frozenset({"player"})
 _INITRD_BUILD: Final[frozenset[Consumer]] = frozenset({"initrd-build"})
 _NODE_MANAGER: Final[frozenset[Consumer]] = frozenset({"node-manager"})
-_NODE_BASE: Final[frozenset[Consumer]] = frozenset({"node-base"})
 _RENDER_STACK: Final = "the render stack, loaded through gi and GStreamer, not imported by name"
 _PI_BOOT: Final = "the Pi 5 kernel, DTBs and bootloader image (unpinned archive)"
 
 PACKAGES: Final[tuple[DebianPackage, ...]] = (
-    DebianPackage("python3", _EVERY_STAGE | _NODE_BASE | _NODE_MANAGER,
+    DebianPackage("python3", _EVERY_STAGE | _NODE_MANAGER,
                   why="the interpreter every stage runs on (one version at the pin)"),
-    DebianPackage("ca-certificates", _EVERY_STAGE | _NODE_BASE | _NODE_MANAGER,
+    DebianPackage("ca-certificates", _EVERY_STAGE | _NODE_MANAGER,
                   why="Trust.public() reads the Debian bundle (R5); apt over https in the build "
                       "root", stage="bootstrap"),
     DebianPackage("python3-zeroconf", _PLAYER, imports=("zeroconf",)),
@@ -178,7 +177,7 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     # The base's device layer is metadata-only (appliance/rpi_image_gen/device/
     # photo-wall-device-none.yaml), so nothing else brings udev: without it there is no render
     # or input group and player.service fails at spawn, 216/GROUP.
-    DebianPackage("udev", _PLAYER | _NODE_BASE,
+    DebianPackage("udev", _PLAYER,
                   why="creates the render and input groups player.service's "
                       "SupplementaryGroups name, and gives /dev/dri and /dev/input their "
                       "groups (Debian's 50-udev-default.rules); libinput and logind's seats "
@@ -186,12 +185,8 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("passwd", _PLAYER,
                   why="the Player postinst runs useradd/usermod (Debian Policy: a maintainer "
                       "script's non-essential tool is a Depends)"),
-    DebianPackage("systemd", _NODE_BASE, why="isolated base unit manager"),
-    DebianPackage("login", _NODE_BASE, why="base Weston PAMName=login session configuration"),
-    DebianPackage("libpam-systemd", _NODE_BASE,
-                  why="base Weston logind seat session and PAM systemd registration"),
-    DebianPackage("mount", _NODE_BASE, why="bounded diskless node storage tmpfs mount"),
-    # The display and the frame client's Depends live in debian/control (decision 0019).
+    # The Node's packages' Depends live in debian/control (decision 0019); the base's OS packages
+    # in its rpi-image-gen layers (R4).
     DebianPackage("libwayland-client0", _PLAYER, why="the frame client library the Player loads"),
     DebianPackage("initramfs-tools", _INITRD_BUILD, why="mkinitramfs"),
     DebianPackage("gnupg", _INITRD_BUILD, why="apt key handling"),
@@ -265,7 +260,6 @@ def packages(*consumers: Consumer, archive: Archive = "debian",
              stage: Stage | None = None) -> tuple[str, ...]:
     """Sorted, unique names used by any of `consumers` from `archive` (in `stage`, when given):
       packages("player")                   the Player .deb's Depends
-      packages("node-base")                the node base .deb's Depends
       packages("initrd-build")             the initrd build root's --include
       packages("initrd-build", archive="raspberrypi")   its kernel/firmware/eeprom install"""
     _checked(consumers, archive)

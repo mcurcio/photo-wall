@@ -219,8 +219,6 @@ class Node:
         # This allowlist binds a supplied image to the exact trusted packages and
         # separate fixture source, in addition to requiring an immutable image ID.
         expected = {
-            "/var/tmp/node-base.deb": file_sha(components_dir / "node-base.deb"),
-            "/var/tmp/node-display.deb": file_sha(components_dir / "node-display.deb"),
             "/var/tmp/fixture-head.c": file_sha(
                 Path(__file__).with_name("node_pid1_fixture_head.c")
             ),
@@ -234,6 +232,12 @@ class Node:
         )
         package_binding = run("/usr/bin/python3", "/var/lib/node_pid1_package_verify.py")
         (work / "installed-package-binding.json").write_text(package_binding)
+        # The installed composition and display are the shipped components, byte for byte (the
+        # repo's .debs the image installed from, decision 0019).
+        assert {each["package"]: each["sha256"] for each in json.loads(package_binding)} == {
+            "photo-wall-node": file_sha(components_dir / "node-base.deb"),
+            "photo-wall-node-display": file_sha(components_dir / "node-display.deb"),
+        }
         run("systemd-sysusers")
         run("systemd-tmpfiles", "--create")
         config = work / "config.json"
@@ -413,7 +417,7 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         raise AssertionError("the Node bus never answered: " + str(self.work))
 
     def _host_birth(self, deadline, *, not_epoch=None):
-        """The host component's {"birth", "base", "epoch"}, read with HostCore's shipped nats-py and
+        """The host component's {"birth", "base", "epoch"}, read with python3-nats and HostCore's
         nodeapi, once it is there (in an epoch other than `not_epoch`) before `deadline`."""
         last = ""
         while time.monotonic() < deadline:
@@ -444,7 +448,7 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         return json.loads(result.stdout)["value"] if result.returncode == 0 else None
 
     def verify_bus(self, before_kill=None):
-        """The bus from node-base.deb runs on loopback, named for the Node, inside its fence from
+        """The bus photo-wall-node starts runs on loopback, named for the Node, inside its fence from
         contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
         notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
         and, after the kill, writes it again in the bus's new epoch with no help from Central.
@@ -551,8 +555,8 @@ print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_m
         components = json.loads((components_dir / "components.json").read_text())
         # Every root is an image (E2c): staged by the predicate the Node itself uses, and its
         # pool image re-hashed.
-        verify_script = """import json,pathlib,sys
-sys.path.insert(0,'/usr/lib/photo-wall-node-bootstrap')
+        verify_script = """import ast,json,pathlib,sys
+sys.path[:0]=next(ast.literal_eval(n.value) for n in ast.parse(pathlib.Path('/usr/lib/photo-wall/node/node-bootstrap/__main__.py').read_text()).body if isinstance(n,ast.AnnAssign) and n.target.id=='PATH')
 from appliance.apps.environment import IMAGE_SUFFIX,file_sha256,mounted_root
 from appliance.kernel.image_mount import SystemdImageMounter
 from contracts.app_environment import AppEnvironmentRefV2

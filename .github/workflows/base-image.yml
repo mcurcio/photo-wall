@@ -16,8 +16,8 @@ name: rpi-image-gen base OS build
 #
 # The V2 node components are built once per run by node-components.yml (the
 # pipeline's `node-components` job; this workflow's own `components` job when
-# dispatched) and downloaded here: the squashfs bakes node-base.deb and the
-# display from the local repo.
+# dispatched) and downloaded here: the squashfs installs photo-wall-node from
+# the same run's local repo, and its installed ABI must be the components'.
 # A pull request uploads no release artifact (only the seal, on main, reads
 # them); its failure diagnostics are still kept.
 on:
@@ -121,32 +121,47 @@ jobs:
           name: photo-wall-node-components-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-node-components
 
-      # The local repo the base installs the display from, by name, with the photo-wall packages
-      # it pins at their exact versions (layer/photo-wall-device.yaml).
+      # The local repo the base installs photo-wall-node from, by name, with every context it pins
+      # at its exact version and nats-server at its pin (layer/photo-wall-device.yaml).
       - name: Download the local repo
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: photo-wall-node-debs-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-node-debs
 
-      # Cache A's node input: the bytes of the two node .debs the squashfs bakes. node-base.deb
-      # is pure staging under the pin's SOURCE_DATE_EPOCH and node-display.deb is the local
-      # repo's (debian-packaging/build-repo.sh, whose two builds must agree), so each one's bytes
-      # are its inputs. The display's bytes also name what it pulls from that repo: its control
-      # pins each photo-wall sibling at its content-derived version (debian/content-versions),
-      # and python3-nats is built from debian-packaging/python-nats/ (in the key below). A stale
-      # hit cannot pass silently: the node ABI check below requires the cached squashfs's
-      # installed ABI to equal these components'.
-      - name: Compute the node component input digest
-        id: node-components
+      # Cache A's node input: the Package=Version lines of every package the local repo gives
+      # photo-wall-node, itself included, following each Depends name the repo's index holds
+      # (the contexts, python3-nats, nats-server). Each Photo Wall version is a hash of what the
+      # package installs (debian/content-versions), nats-server's is its pin, and python3-nats
+      # is built from debian-packaging/python-nats/ (in the key below), so the lines name the
+      # bytes the squashfs installs; the OS packages the layers name come from the pin and the
+      # recipe, also in the key. A stale hit cannot pass silently: the node ABI check below
+      # requires the cached squashfs's installed ABI to equal these components'.
+      - name: Compute the base's package set from the local repo
+        id: node-packages
         run: |
           set -eu
-          components="$RUNNER_TEMP/photo-wall-node-components"
-          base=$(sha256sum < "$components/node-base.deb" | cut -d' ' -f1)
-          display=$(sha256sum < "$components/node-display.deb" | cut -d' ' -f1)
-          digest=$(printf 'node-base.deb %s\nnode-display.deb %s\n' "$base" "$display" \
-            | sha256sum | cut -d' ' -f1)
-          echo "inputs_digest=$digest" >> "$GITHUB_OUTPUT"
+          python3 - "$RUNNER_TEMP/photo-wall-node-debs/Packages" > "$RUNNER_TEMP/base-node-packages" <<'PYCODE'
+          import re, sys
+          index = {}
+          for stanza in open(sys.argv[1]).read().split("\n\n"):
+              fields = dict(line.split(": ", 1) for line in stanza.splitlines() if ": " in line)
+              if "Package" in fields:
+                  index[fields["Package"]] = fields
+          seen, todo = set(), ["photo-wall-node"]
+          while todo:
+              name = todo.pop()
+              if name in seen or name not in index:
+                  continue
+              seen.add(name)
+              todo += re.findall(r"(?:^|[,|])\s*([a-z0-9][a-z0-9+.-]*)", index[name].get("Depends", ""))
+          if "photo-wall-node" not in seen:
+              raise SystemExit("the local repo holds no photo-wall-node")
+          for name in sorted(seen):
+              print(f"{name}={index[name]['Version']}")
+          PYCODE
+          cat "$RUNNER_TEMP/base-node-packages"
+          echo "digest=$(sha256sum < "$RUNNER_TEMP/base-node-packages" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # Host tools used by the UNGATED content-verify + bundle-assembly steps
       # (squashfs `unsquashfs`, initrd `lsinitramfs`). Installed here, out of
@@ -195,8 +210,9 @@ jobs:
       # they are exactly the pin.
       # Cache A: the rpi-image-gen squashfs build (~20 min) is content-addressed
       # on its TRUE input closure -- the rpi-image-gen tree (its layers name the
-      # base's OS packages), the pin, the node component input digest (above:
-      # the two node .debs the squashfs bakes), the checker, and this workflow.
+      # base's OS packages), the pin, the base's package set from the local repo
+      # (above: every Photo Wall package it installs at its content version), the
+      # checker, and this workflow.
       # Deliberately EXACT match only (no restore-keys): a prefix-fallback could
       # restore a stale base built from different inputs -- exactly the
       # poisoning risk. The Player's code is NOT in this closure because it is
@@ -209,7 +225,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', 'debian-packaging/python-nats/**', 'scripts/device_root_checks.py', '.github/workflows/base-image.yml') }}-${{ steps.node-components.outputs.inputs_digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', 'debian-packaging/python-nats/**', 'scripts/device_root_checks.py', '.github/workflows/base-image.yml') }}-${{ steps.node-packages.outputs.digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -223,8 +239,7 @@ jobs:
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
             -- "IGconf_sys_workroot=$WORKROOT" \
-               "IGconf_app_node_base_deb=$RUNNER_TEMP/photo-wall-node-components/node-base.deb" \
-               "IGconf_app_node_debs=$RUNNER_TEMP/photo-wall-node-debs" \
+               "IGconf_app_local_repo=$RUNNER_TEMP/photo-wall-node-debs" \
                "IGconf_app_debian_sources=$DEBIAN_SOURCES"
 
       # rpi-image-gen's genimage/deploy output can be root-owned and not
@@ -336,7 +351,7 @@ jobs:
 
           echo "== MUST BE PRESENT =="
           # The node's units ship at the vendor path; photo-wall-node.target is
-          # enabled by a link the node base `.deb` bakes as data.
+          # enabled by a link photo-wall-node ships as data.
           # On merged-/usr Debian, /lib is a symlink to /usr/lib, so the
           # packaged unit is listed under usr/lib/systemd/system; accept either.
           if grep -Eq -- '^- squashfs-root/(usr/)?lib/systemd/system/photo-wall-node.target$' "$typed"; then
@@ -347,7 +362,7 @@ jobs:
           require_path l etc/systemd/system/multi-user.target.wants/photo-wall-node.target 'photo-wall-node.target enablement symlink'
           # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
           # regular file on some distros), so accept either type here. The
-          # node's units run it as `python3 -I -B /usr/lib/<launcher>`.
+          # node's units run it as `python3 -I -B /usr/lib/photo-wall/node/<launcher>`.
           if grep -Eq -- '^[-l] squashfs-root/usr/bin/python3$' "$typed"; then
             echo "OK: found the python3 interpreter (usr/bin/python3, file or symlink)"
           else
@@ -377,8 +392,9 @@ jobs:
           # generator enabled; the binfmt units are masked, no build hostname is
           # baked in, the hosts database has myhostname, the default locale
           # sets LANG, and no V1 unit or bootstrapper directory is left.
-          printf '%s\n' photo-wall-node-base photo-wall-node-display \
-            python3-cffi-backend libgl1-mesa-dri libnss-myhostname > "$RUNNER_TEMP/base-packages.list"
+          printf '%s\n' photo-wall-node photo-wall-node-display nats-server python3-nats \
+            python3-cffi-backend libgl1-mesa-dri libpam-systemd libnss-myhostname \
+            > "$RUNNER_TEMP/base-packages.list"
           if python3 scripts/device_root_checks.py --root "$extract" \
               --require-installed "$RUNNER_TEMP/base-packages.list" \
               --pinned-sources \
@@ -750,7 +766,7 @@ jobs:
           components = json.loads((work / "photo-wall-node-components/components.json").read_text())
           squashfs = work / "photo-wall-base-bundle/photo-wall-base.squashfs"
           installed = {}
-          for name in ("usr/lib/photo-wall-node-base/abi.json", "usr/lib/photo-wall/node-display/abi.json"):
+          for name in ("usr/lib/photo-wall/node/abi.json", "usr/lib/photo-wall/node-display/abi.json"):
               installed.update(json.loads(subprocess.check_output(["unsquashfs", "-cat", str(squashfs), name])))
           if installed != components["abi"]:
               raise SystemExit("installed node ABI does not match exact component roots")

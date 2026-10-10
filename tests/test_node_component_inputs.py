@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from scripts import build_app_environment as environment
-from scripts import build_node_base_deb as base
 from scripts import build_node_manager_deb as manager
 from scripts import build_node_pid1_fixture as fixture
 from scripts import build_player_deb as player
@@ -96,10 +95,6 @@ def reads(tmp_path_factory, fetched):
     tree = shutil.copytree(fetched, work / "tree")
     client = work / "client.so"
     client.write_bytes(ARM64_ELF)
-    components = work / "components"
-    components.mkdir()
-    for name in ("node-base.deb", "node-display.deb"):
-        (components / name).write_bytes(name.encode())
     debs = work / "debs"
     debs.mkdir()
     (debs / "Packages").write_bytes(b"")
@@ -110,7 +105,6 @@ def reads(tmp_path_factory, fetched):
         patch.setattr(fixture.subprocess, "run", lambda *a, **k: None)
         _READS.append(set())
         try:
-            base.stage_tree(tree, work / "base")
             manager.stage_tree(tree, work / "manager")
             (work / "player").mkdir()
             deb = player.build_tree(tree, work / "player", architecture="arm64",
@@ -121,7 +115,7 @@ def reads(tmp_path_factory, fetched):
                                   architecture="arm64", base_abi="b", graphics_abi="g",
                                   plugin_abi="p")
             (work / "image").mkdir()
-            fixture.build_image(IMAGE, components, debs, work / "image")
+            fixture.build_image(IMAGE, debs, work / "image")
         finally:
             opened = _READS.pop()
     found: dict[str, set[str]] = {"tree": set(), "repo": set()}
@@ -145,7 +139,7 @@ def _uncovered(found: dict[str, set[str]], tree_sources, builder_files) -> set[s
 def test_every_file_the_component_builders_read_is_in_the_key(reads, sources):
     assert _uncovered(reads, sources, inputs.builder_files()) == set()
     # Not vacuous: each builder's reads were seen.
-    assert {"appliance/systemd/player.service", "appliance/systemd/photo-wall-node.target",
+    assert {"appliance/systemd/player.service",
             "player/service.py", "appliance/node/manager_runner.py", "pyproject.toml",
             "scripts/debian_packages.py"} <= reads["tree"]
     assert {"tests/node_pid1_fixture_head.c", "scripts/build_app_environment.py",
@@ -153,7 +147,6 @@ def test_every_file_the_component_builders_read_is_in_the_key(reads, sources):
 
 
 @pytest.mark.parametrize("dropped", ["appliance/systemd/weston.service",
-                                     "appliance/systemd/photo-wall-host-core.service",
                                      "player/service.py", "scripts/debian_packages.py"])
 def test_the_guard_names_a_tree_read_the_key_would_miss(reads, sources, dropped):
     """Mutation probe: a builder's `sources` that forgot one of these reads fails the guard."""
@@ -220,7 +213,6 @@ def test_the_key_is_stable_and_ignores_what_no_builder_reads(repository, debs):
 
 
 @pytest.mark.parametrize("edited", ["player/service.py", "appliance/node/manager_runner.py",
-                                    "appliance/systemd/photo-wall-node.target",
                                     "scripts/debian_packages.py", "pyproject.toml"])
 def test_a_committed_component_input_changes_the_key(repository, debs, edited):
     repository, first = repository

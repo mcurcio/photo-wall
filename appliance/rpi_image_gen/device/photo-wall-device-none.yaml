@@ -19,7 +19,7 @@
 #  emits a bare rootfs squashfs, not a bootable Pi image.
 #
 #  Dropping rpi-device-base also drops its udev, which the display needs (the
-#  render and input groups, the device nodes' groups): the node base `.deb`
+#  render and input groups, the device nodes' groups): photo-wall-node
 #  Depends on udev, so the base gets it with the Node's software.
 #
 #  rpi-image-gen ships no hardware-agnostic/"none" device layer of its own.
