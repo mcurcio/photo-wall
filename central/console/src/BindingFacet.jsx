@@ -36,8 +36,8 @@ import { useMutate } from "./useMutate.js";
  * that removes the chosen Output clears the choice and announces it.
  *
  * On success the facet shows the amber "Review required" state and a
- * "Calibrate this Frame" CTA that switches the Inspector to the Calibration
- * facet (pending -> bind -> calibrate).
+ * "Set its position" CTA that switches the Frame page to its Position tab
+ * (pending -> bind -> position). It is the Frame page's Hardware tab (pages/frame-page.tsx).
  *
  * UNBIND opens the one confirmation dialog (ConfirmAction, slice 2 §7), which
  * captures the Frame's generation, live Runs and sibling Frame when it opens.
@@ -48,9 +48,9 @@ import { useMutate } from "./useMutate.js";
  * serial suffix when the App-level boot facts know it (bootFacts.js).
  *
  * @param {{snapshot: object|null, bootFacts?: object|null, frameId: string,
- *          onFacet?: (facet: string) => void}} props
+ *          onTab?: (tab: string) => void}} props
  */
-export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
+export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
   const mutate = useMutate();
   const ids = useId();
   const [message, setMessage] = useState(/** @type {string|null} */ (null));
@@ -181,7 +181,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
   return (
     <div className="facet facet--binding">
       <h3 ref={headingRef} className="facet__title" tabIndex={-1}>
-        Binding
+        Pi and HDMI output
       </h3>
 
       {bound ? (
@@ -221,15 +221,15 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onFacet }) {
           {reviewRequired && (
             <div className="facet__review" role="status">
               <p className="facet__review-text">
-                Review required — this Frame was just bound; its calibration is no
-                longer valid.
+                Review required — this Frame was just bound; set its position on
+                this Display again.
               </p>
               <button
                 type="button"
                 className="facet__cta"
-                onClick={() => onFacet?.("calibration")}
+                onClick={() => onTab?.("position")}
               >
-                Calibrate this Frame
+                Set its position
               </button>
             </div>
           )}

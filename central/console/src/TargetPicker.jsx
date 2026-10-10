@@ -87,12 +87,12 @@ export function FrameChips({ snapshot, frameIds, recoveryLinks = false }) {
     <span className="run-control__frames">
       {frameIds.map((frameId) => {
         const health = frameHealth(snapshot, frameId);
-        const recoveryFacet = recoveryLinks ? health?.facet : null;
+        const recoveryTab = recoveryLinks ? health?.tab : null;
         return (
           <span key={frameId} className={`run-control__frame health--${health?.severity ?? "todo"}`}>
             {health === null ? `${frameId}: not in the inventory` : `${frameId}: ${health.tileLabel}`}
-            {recoveryFacet !== null && recoveryFacet !== undefined && (
-              <a href={formatRoute({ section: "wall", id: frameId, facet: recoveryFacet })}>
+            {recoveryTab !== null && recoveryTab !== undefined && (
+              <a href={formatRoute({ section: "wall", id: frameId, tab: recoveryTab })}>
                 {`Open Frame ${frameId}`}
               </a>
             )}

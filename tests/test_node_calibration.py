@@ -174,3 +174,41 @@ def test_native_capability_survives_generation_revocation_without_current_boot(r
     for operation in ("preview", "commit"):
         with pytest.raises(RegistryError, match="calibration_trial_required"):
             registry.calibrate("node-f0", operation, 2, Calibration(), expected_generation=1)
+
+
+def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
+    """An open Position or Picture tab keeps its trial alive with `keepalive` (the console's
+    Frame page): the idle deadline slides, the candidate and its sequence stay, the Node is
+    handed the later deadline under the same hard one, and the hard deadline still ends it.
+
+    Mutation: make `keepalive` answer like `status` -> at 8 s the Node is handed no trial."""
+    trials, request, exchange = setup_trial(registry)
+    row = trials.begin("node-f0")
+    trial_id = __import__("uuid").UUID(row["trial_id"])
+    began = registry.clock.utc()
+
+    def sample():  # the Node's next display exchange, on its boot clock
+        at = 1500 + int((registry.clock.utc() - began) * 1000)
+        return parse_trial(exchange(replace(
+            request, request_id=uuid4(), sampled_boottime_ms=at,
+            receipt=replace(request.receipt, sampled_boottime_ms=at, buffer_id=f"weston-{at}"),
+        )).trial)
+
+    first = sample()
+    registry.clock.advance(4)
+    kept = trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)
+    assert kept["state"] == "active" and kept["sequence"] == 1
+    assert kept["candidate_sha256"] == row["candidate_sha256"]
+    registry.clock.advance(4)  # 8 s since begin: past the 5 s idle window it began with
+    later = sample()
+    assert later.sequence == 1 and later.candidate_sha256 == first.candidate_sha256
+    assert later.expires_boottime_ms > first.expires_boottime_ms
+    assert later.hard_expires_boottime_ms == first.hard_expires_boottime_ms
+    assert trials.operate("node-f0", trial_id, operation="status", expected_sequence=1)["state"] == "active"
+    while registry.clock.utc() + 4 < row["hard_expires_at"]:
+        assert trials.operate("node-f0", trial_id, operation="keepalive",
+                              expected_sequence=1)["state"] == "active"
+        registry.clock.advance(4)
+        sample()
+    registry.clock.advance(4)
+    assert trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)["state"] == "expired"

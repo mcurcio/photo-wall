@@ -11,12 +11,10 @@ import { useMutate } from "./useMutate.js";
  * and deleting Frames, and for the Unplaced tray's drag-out and Delete. It OWNS every Plan
  * and tray write (framesApi writes through `useMutate`, the delete confirmation) and hands
  * them to the select-only Plan.jsx and UnplacedTray.jsx as `edit` handlers, so the Wall's
- * daily face, which renders those two without `edit`, holds no write. There is no Inspector
- * here. **Done** calls `onDone(frameId|null)` with the Frame selected here, and the Wall
- * returns to its daily face (that Frame's Status when one is selected).
+ * daily face, which renders those two without `edit`, holds no write. **Done** calls
+ * `onDone()`, and the Wall returns to its daily face.
  *
- * The selection is this mode's own (the route names no Frame); it starts at `initialFrameId`,
- * the Frame the daily face last showed.
+ * The selection is this mode's own (the route names no Frame); it starts empty.
  *
  * Unplaced-tray drag-out (Bead 11). The dragged frame id lives in a REF so the plan's
  * pointer-up reads it synchronously (a full press->move->release can fire before React
@@ -27,11 +25,11 @@ import { useMutate } from "./useMutate.js";
  * window in the bubble path), so a genuine drop is read and cleared before this reset.
  *
  * @param {{snapshot: object, surfaceId: string|null, filter: React.ReactNode,
- *          initialFrameId: string|null, onDone: (frameId: string|null) => void}} props
+ *          onDone: () => void}} props
  */
-export function LayoutEditor({ snapshot, surfaceId, filter, initialFrameId, onDone }) {
+export function LayoutEditor({ snapshot, surfaceId, filter, onDone }) {
   const mutate = useMutate();
-  const [chosen, setChosen] = useState(/** @type {string|null} */ (initialFrameId));
+  const [chosen, setChosen] = useState(/** @type {string|null} */ (null));
   const trayDragRef = useRef(/** @type {string|null} */ (null));
   // The plan region: the focus successor of a delete from the plan or the tray.
   const planRegionRef = useRef(/** @type {HTMLElement|null} */ (null));
@@ -86,7 +84,7 @@ export function LayoutEditor({ snapshot, surfaceId, filter, initialFrameId, onDo
       <div className="console__main">
         <div className="layout__bar" role="group" aria-label="Editing layout">
           <h2 className="layout__title">Editing layout</h2>
-          <button type="button" className="console__button" onClick={() => onDone(selection)}>
+          <button type="button" className="console__button" onClick={() => onDone()}>
             Done
           </button>
         </div>

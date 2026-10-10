@@ -1,8 +1,9 @@
 """The Wall facets' pure parts (console DDD §19-§21; bead D1): players.js `identifyOffer` and
 `enrolledFact`, health.js's Calibration and Panel-at-enrollment words, run under Node as
 tests/test_console_players.py runs them, plus the source scans for the retired words and
-modules. The browser half is tests/browser/test_operator_commissioning_browser.py (Calibration),
-test_operator_binding_browser.py (Binding, Identify) and test_player_page_browser.py.
+modules. The browser half is tests/browser/test_console_frame_page_browser.py (the Frame
+page's Position, Picture and Frame profile),
+test_operator_binding_browser.py (Hardware, Identify) and test_player_page_browser.py.
 """
 
 import json
@@ -58,8 +59,8 @@ const unplugged = health.frameHealth({ inventory: { ...snapshot.inventory,
   outputs: snapshot.inventory.outputs.map((output) => output.output_id === "HDMI-A-1"
     && output.player_id === "p-bound" ? { ...output, observation: { connected: false } } : output),
 } }, "lobby");
-const pick = ({ state, severity, cause, label, tileLabel, facet }) =>
-  ({ state, severity, cause, label, tileLabel, facet });
+const pick = ({ state, severity, cause, label, tileLabel, tab }) =>
+  ({ state, severity, cause, label, tileLabel, tab });
 out.health = [pick(calibrate), pick(unplugged)];
 out.panelWording = factText(players.panelAtEnrollment({ connected: false }, null, null));
 console.log(JSON.stringify(out));
@@ -100,18 +101,16 @@ def test_frame_health_says_calibration_and_keeps_the_panel_alarm_worded_as_a_rec
     out = _run()
     assert out["health"] == [
         {"state": "needs-calibration", "severity": "todo", "cause": "calibration",
-         "label": "Needs calibration", "tileLabel": "Needs calibration", "facet": "calibration"},
+         "label": "Needs calibration", "tileLabel": "Needs calibration", "tab": "position"},
         # An unplugged-at-enrollment Panel on a bound Frame is still an alarm (§19), in the
-        # one wording panelAtEnrollment renders, and opens Binding, where that record is shown.
+        # one wording panelAtEnrollment renders, and opens Hardware, where that record is shown.
         {"state": "no-panel-at-enrollment", "severity": "alarm", "cause": "panel",
          "label": "No Panel listed as connected at the Player app's last enrollment (may be stale)",
-         "tileLabel": "No Panel listed at the last enrollment", "facet": "binding"},
+         "tileLabel": "No Panel listed at the last enrollment", "tab": "hardware"},
     ]
     assert out["health"][1]["label"] == out["panelWording"]
 
 
-# The renamed facet's old route key may appear only in routes.js (its alias, FACET_ALIASES).
-_ALIAS_KEY = re.compile(r"\bcommissioning\b")
 _RETIRED_WORDS = re.compile(r"Commission|commission|Trial\b|\bT1\b|\bT2\b")
 
 
@@ -119,25 +118,9 @@ def test_no_console_string_says_commissioning_trial_or_a_tier():
     offenders = []
     for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx"), SRC / "routeSamples.json"]:
         for number, line in enumerate(module.read_text().splitlines(), 1):
-            scanned = line.replace("LiveCalibrationTrial", "")
-            # `LiveCalibrationTrial` is a component name, not a string (§20: strings only).
-            if module.name == "routes.js":
-                scanned = _ALIAS_KEY.sub("", scanned)
-            if _RETIRED_WORDS.search(scanned):
+            if _RETIRED_WORDS.search(line):
                 offenders.append(f"{module.name}:{number}: {line.strip()}")
     assert offenders == []
-
-
-def test_the_calibration_paths_speak_of_live_calibration_not_a_preview():
-    facet = (SRC / "CalibrationFacet.jsx").read_text()
-    native = (SRC / "LiveCalibrationTrial.jsx").read_text()
-    # The legacy path's commit is never called Save calibration (U9 gap, §20).
-    assert "Save without acknowledgment" in facet
-    assert "Save calibration" not in facet
-    assert "Save calibration" in native
-    for retired in (">Preview<", "Re-preview", "Preview and commit", "Commit\n", "Revert\n",
-                    "Previewing on the panel", "Display at last Player start", "Bound Output"):
-        assert retired not in facet, retired
 
 
 def test_the_gated_seam_and_the_recovery_banner_are_deleted():

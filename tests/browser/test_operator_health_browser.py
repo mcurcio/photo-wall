@@ -14,7 +14,7 @@ import re
 import time
 
 import pytest
-from console_tasks import connect, go, open_frame
+from console_tasks import connect, go, open_frame, visible_page
 from operator_harness import (
     SNAPSHOT,
     RequestGate,
@@ -76,15 +76,15 @@ def test_a_reporting_player_reads_last_heard_with_centrals_age(page, registry):
         expect(label).to_have_text("Heard recently")
         expect(label).to_have_class(_severity("ok"))
 
-        # The Inspector header and the Binding facet read the same fact.
+        # The Frame page's header and its Hardware tab read the same fact.
         page.get_by_role("button", name=f"Frame {FRAME}", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {FRAME} inspector", exact=True)
+        inspector = visible_page(page)
         expect(inspector).to_contain_text("Player app last reported 2 s ago")
-        inspector.get_by_role("tab", name="Binding", exact=True).click()
+        inspector.get_by_role("tab", name="Hardware", exact=True).click()
         expect(inspector.get_by_role("tabpanel")).to_contain_text("Player app last reported 2 s ago")
 
         # Honesty: ok states when Central last heard the Player, never playback. The one
-        # "connected" allowed is the Binding facet's Panel record, worded as Central's record
+        # "connected" allowed is the Hardware tab's Panel record, worded as Central's record
         # at the last enrollment (console DDD §19), never as liveness.
         for claim in ("LIVE", "online", r"connected(?! at the Player app's last enrollment)"):
             expect(page.get_by_text(re.compile(claim))).to_have_count(0)
@@ -121,7 +121,7 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
                 and "/v1/operator/node/status" not in request.url
                 and "/v1/operator/node/hosts" not in request.url else None)
         connect(page, origin, "wall")
-        inspector = open_frame(page, FRAME, "binding")
+        inspector = open_frame(page, FRAME, "hardware")
         link = inspector.get_by_role("link", name="See its layers on the Player page", exact=True)
         expect(link).to_have_attribute("href", re.compile(r"^#/players/device-"))
         page.wait_for_timeout(200)
@@ -298,7 +298,7 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
         expect(_health(page)).to_have_accessible_name("Needs a Player")
-        inspector = open_frame(page, FRAME, "binding")
+        inspector = open_frame(page, FRAME, "hardware")
 
         writes = RequestGate(page, "**/v1/operator/frames/*/binding")
         reads = RequestGate(page, SNAPSHOT)
@@ -317,18 +317,20 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         reads.wait_held(2)
         reads.holding = False
 
+        # The Frame page's header states the Frame's health, as its tile does.
+        health = inspector.locator("header [data-severity]")
         # The poll now answers with post-bind data, but it overlapped the write: dropped.
         reads.release(0)
         _settle(page)
-        expect(_health(page)).to_have_accessible_name("Needs a Player")
+        expect(health).to_contain_text("Needs a Player")
         # The refresh the bind issued lands.
         reads.release(0)
-        expect(_health(page)).to_have_accessible_name("Enrolled 0 s ago, no report yet")
+        expect(health).to_contain_text("Enrolled 0 s ago, no report yet")
 
         # The dropped poll released its slot: the next tick reads and applies.
         report_readiness(registry, identity["player_id"])
         page.clock.run_for(5000)
-        expect(_health(page)).to_have_accessible_name("Needs calibration")
+        expect(health).to_contain_text("Needs calibration")
 
 
 # --- The attention strip and navigation (pass 2 §5).
@@ -380,9 +382,9 @@ def test_the_strip_counts_incidents_and_leaves_to_dos_to_the_wall(page, registry
         ])
         # The unbound and needs-calibration Frames are the Wall's To finish items (G2).
         expect(page.get_by_role("list", name="To finish", exact=True).get_by_role("listitem")
-               ).to_have_text(["no-player · needs a Player Binding",
-                               "silent-a · needs calibration Calibration",
-                               "to-commission · needs calibration Calibration"])
+               ).to_have_text(["no-player · needs a Player Hardware",
+                               "silent-a · needs calibration Position",
+                               "to-commission · needs calibration Position"])
         expect(page.get_by_text(re.compile("to set up", re.I))).to_have_count(0)
         go(page, "attention")
         expect(page.get_by_role("main").get_by_role("list", name="Frames and Players needing attention",
@@ -391,28 +393,26 @@ def test_the_strip_counts_incidents_and_leaves_to_dos_to_the_wall(page, registry
         expect(page.get_by_text(re.compile("to set up", re.I))).to_have_count(0)
 
 
-def test_strip_navigation_opens_the_facet_showing_the_cause_and_focuses_the_inspector(
+def test_strip_navigation_opens_the_tab_showing_the_cause_and_focuses_the_frame_page(
         page, registry):
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
             "button", name="silent-a — Player app silent · last reported 4 min ago").click()
-        inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+        expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(inspector.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
+        expect(page.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
 
-        # A plain tile click opens Status (console DDD §61) and never moves focus.
+        # A tile click opens the Frame's page at Overview, and its heading takes focus.
+        page.go_back()
         page.get_by_role("button", name="Frame all-good", exact=True).click()
-        inspector = page.get_by_role("region", name="Frame all-good inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
+        expect(page.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(inspector.get_by_role("heading", name="Frame all-good", exact=True)
-               ).not_to_be_focused()
+        expect(page.get_by_role("heading", name="Frame all-good", exact=True)).to_be_focused()
 
 
-def test_a_needs_attention_visit_opens_the_cause_facet_and_an_ok_frame_opens_status(
+def test_a_needs_attention_visit_opens_the_cause_tab(
         page, registry):
     _seed_attention(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -420,11 +420,10 @@ def test_a_needs_attention_visit_opens_the_cause_facet_and_an_ok_frame_opens_sta
         listing = page.get_by_role("main").get_by_role(
             "list", name="Frames and Players needing attention", exact=True)
         listing.get_by_role("link", name="silent-a — Player app silent · last reported 4 min ago").click()
-        inspector = page.get_by_role("region", name="Frame silent-a inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+        expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(inspector.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
-        assert page.evaluate("window.location.hash") == "#/wall/frames/silent-a/binding"
+        expect(page.get_by_role("heading", name="Frame silent-a", exact=True)).to_be_focused()
+        assert page.evaluate("window.location.hash") == "#/wall/frames/silent-a/hardware"
 
 
 def test_a_strip_focus_request_is_spent_once_and_not_replayed_on_remount(page, registry):
@@ -544,16 +543,16 @@ def _seed_layout(registry):
 
 
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])
-def test_strip_navigation_leaves_the_inspector_in_view(page, registry, viewport):
+def test_strip_navigation_leaves_the_frame_page_in_view(page, registry, viewport):
     _seed_layout(registry)
     page.set_viewport_size(viewport)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         _open_list(page).get_by_role(
             "button", name="silent-b — Player app silent · last reported 4 min ago").click()
-        inspector = page.get_by_role("region", name="Frame silent-b inspector", exact=True)
-        expect(inspector).to_be_in_viewport()
-        expect(inspector.get_by_role("heading", name="Frame silent-b", exact=True)).to_be_focused()
+        heading = page.get_by_role("heading", name="Frame silent-b", exact=True)
+        expect(heading).to_be_in_viewport()
+        expect(heading).to_be_focused()
 
 
 def test_a_phone_width_page_never_scrolls_sideways(page, registry):
@@ -562,12 +561,11 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         page.get_by_role("button", name="Frame silent-b", exact=True).click()
-        expect(page.get_by_role("region", name="Frame silent-b inspector", exact=True)
-               ).to_be_visible()
+        expect(page.get_by_role("heading", name="Frame silent-b", exact=True)).to_be_visible()
         _open_list(page)
-        for facet in ("Status", "Binding", "Calibration"):
-            page.get_by_role("tab", name=facet, exact=True).click()
-            assert_fits_width(page, facet)
+        for tab in ("Overview", "Position", "Picture", "Hardware"):
+            page.get_by_role("tab", name=tab, exact=True).click()
+            assert_fits_width(page, tab)
         # Every Show page too, not only the last one visited.
         for section in ("now", "scenes", "schedule", "sources"):
             go(page, section)

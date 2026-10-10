@@ -1,6 +1,13 @@
 """Live CalibrationTrial application owner; exact presentation precedes atomic Save.
 
 Trials are operational, leased and separate from Registry's persistent calibration.
+The lease has two deadlines: an idle one (`inactivity_seconds`) that an edit or a
+`keepalive` slides forward, and a hard one (`hard_seconds`) fixed at begin, which the
+Node never lets a trial extend (appliance/display_host/weston.py, native/shell.c refuse
+one over 120 s; 110 s leaves room for a step in Central's clock). An open console page
+sends `keepalive` while it shows the Frame's Position or Picture tab, so a trial ends
+within the idle window once the page closes, and the console begins the next trial
+before the hard deadline.
 The only persistence write crosses Registry's in-transaction CAS port. Failed Save
 rolls back its row lock and all writes; it cannot strand a durable frozen trial.
 """
@@ -26,7 +33,7 @@ class NodeCalibration:
         display,
         registry,
         inactivity_seconds: float = 5,
-        hard_seconds: float = 30,
+        hard_seconds: float = 110,
     ):
         if not 1 <= inactivity_seconds <= hard_seconds <= 120:
             raise ValueError("trial_lifetime_bound")
@@ -100,7 +107,7 @@ class NodeCalibration:
         expected_sequence: int,
         calibration: dict | None = None,
     ) -> dict:
-        if operation not in ("edit", "save", "end", "status"):
+        if operation not in ("edit", "save", "end", "status", "keepalive"):
             raise NodeControlError("trial_operation_invalid", 422)
         if type(expected_sequence) is not int or expected_sequence < 1:
             raise NodeControlError("trial_sequence_invalid", 422)
@@ -121,7 +128,7 @@ class NodeCalibration:
             try:
                 context = self.display.current_frame_in(conn, frame_id)
             except NodeControlError:
-                if operation not in ("status", "end"):
+                if operation not in ("status", "end", "keepalive"):
                     raise
             row = conn.execute(
                 "SELECT * FROM node_calibration_trials WHERE trial_id=%s AND frame_id=%s "
@@ -146,6 +153,14 @@ class NodeCalibration:
                 ).fetchone()
             if operation == "status" or row["state"] != "active":
                 return self._view(row)
+            if operation == "keepalive":
+                # Slides only the idle deadline, never past the hard one; the candidate, its
+                # sequence and its presentation are unchanged, so Save stays as it was.
+                return self._view(conn.execute(
+                    "UPDATE node_calibration_trials SET touched_at=%s,expires_at=%s "
+                    "WHERE trial_id=%s RETURNING *",
+                    (now, min(row["hard_expires_at"], now + self.inactivity_seconds), trial_id),
+                ).fetchone())
             if row["sequence"] != expected_sequence:
                 raise NodeControlError("trial_sequence_conflict", 409)
             if operation == "end":

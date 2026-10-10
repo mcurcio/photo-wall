@@ -16,7 +16,7 @@ export interface FactLineProps {
 /**
  * The only renderer of facts (console DDD design rule 2): a label and the fact in its kind's
  * one wording (facts.js `factText`), in its truth kind's tone. With no `label`, the fact
- * stands alone (a `planned` fact names itself: "On top: …", StatusFacet.jsx).
+ * stands alone (a `planned` fact names itself: "On top: …", frame-overview.tsx).
  */
 export function FactLine({ label, fact, suffix, receipt = true, band = null }: FactLineProps) {
   return (

@@ -6,7 +6,7 @@ import SAMPLES from "./routeSamples.json";
 /**
  * The neutral sections (flow design §6): pages that belong to neither side. They see
  * frame health as status and link to the Wall; like the Show sections they never
- * import the Calibration facet or the Inspector (R4; tests/test_console_routes_r4.py).
+ * import the Frame page or its live adjustment (R4; tests/test_console_routes_r4.py).
  * The shell mounts a neutral section only while it is current.
  *
  * @type {ReadonlyArray<import("./Shell.jsx").RouteEntry>}

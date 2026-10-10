@@ -6,8 +6,8 @@ and tray write lives in LayoutEditor.jsx (Edit layout, `#/wall/layout`), which i
 positive control.
 
 Model: unfinished.js `wallUnfinished` (G2: structural, from `set` records only) and health.js
-`wallAttention` (evidence only) never share an item, and health.js `facetFor` opens the cause
-facet or the Wall's Status fallback. Run under Node as the other console model tests are.
+`wallAttention` (evidence only) never share an item, and health.js `tabFor` opens the cause
+tab or the Frame page's Overview fallback. Run under Node as the other console model tests are.
 
 The browser half is tests/browser/test_operator_wall_browser.py.
 """
@@ -83,8 +83,8 @@ const attention = health.wallAttention(snapshot);
 console.log(JSON.stringify({
   unfinished: wallUnfinished(snapshot),
   attention: { ...attention, alarms: attention.alarms.map((entry) => entry.frame.id) },
-  facet: ["unbound", "ok", "dark", "raw"].map(
-    (id) => health.facetFor(health.frameHealth(snapshot, id), "status")),
+  tab: ["unbound", "ok", "dark", "raw"].map(
+    (id) => health.tabFor(health.frameHealth(snapshot, id), "overview")),
   empty: wallUnfinished({ inventory: { frames: [] } }),
 }));
 """
@@ -106,9 +106,9 @@ def test_to_finish_is_structural_and_attention_is_evidence():
     # needs a Player, not a calibration; an origin Frame is also not on the plan.
     assert out["unfinished"] == [
         {"frameId": "origin", "step": "place", "route": wall(mode="layout")},
-        {"frameId": "origin", "step": "bind", "route": wall(id="origin", facet="binding")},
-        {"frameId": "raw", "step": "calibrate", "route": wall(id="raw", facet="calibration")},
-        {"frameId": "unbound", "step": "bind", "route": wall(id="unbound", facet="binding")},
+        {"frameId": "origin", "step": "bind", "route": wall(id="origin", tab="hardware")},
+        {"frameId": "raw", "step": "calibrate", "route": wall(id="raw", tab="position")},
+        {"frameId": "unbound", "step": "bind", "route": wall(id="unbound", tab="hardware")},
     ]
     # The silent bound Player's Frame is an attention row and not a To finish item; the
     # unbound Frame is a To finish item and not an attention row. No `todos` remain.
@@ -117,7 +117,7 @@ def test_to_finish_is_structural_and_attention_is_evidence():
     assert out["empty"] == []
 
 
-def test_facet_for_opens_the_cause_or_status():
-    # Unbound -> Binding; ok -> the Wall's Status fallback; a silent Player -> Binding;
-    # needs calibration -> Calibration.
-    assert _run()["facet"] == ["binding", "status", "binding", "calibration"]
+def test_tab_for_opens_the_cause_or_overview():
+    # Unbound -> Hardware; ok -> the Frame page's Overview fallback; a silent Player ->
+    # Hardware; needs calibration -> Position.
+    assert _run()["tab"] == ["hardware", "overview", "hardware", "position"]

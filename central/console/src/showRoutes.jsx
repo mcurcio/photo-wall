@@ -16,8 +16,8 @@ import { SourcesRegion } from "./SourcesRegion.jsx";
  * HTML `hidden` attribute (rule 2), so a draft in any of them survives a section
  * change, a Wall visit, a poll and a session expiry.
  *
- * R4: this module, and everything it imports, never reaches the Calibration facet
- * or the Inspector that hosts it; frame health appears only as status badges.
+ * R4: this module, and everything it imports, never reaches the Position tab
+ * or the Frame page that hosts it; frame health appears only as status badges.
  * tests/test_console_routes_r4.py walks the imports to prove it, and a browser test
  * visits every `samplePaths` entry (routeSamples.json, `show`).
  *

@@ -16,7 +16,7 @@ export interface HostHealthLinkProps {
  * Pi's worst host item from the one classifier (hostHealth.js `classifyHost`), "pi-07 · throttled
  * now", "pi-07 · Host Management silent 3 min", else its receipt, "pi-07 · Host Management last
  * reported 3 s ago". It leads to the Pi's Hardware page, where host health is judged and
- * explained. Wall side only (R4): Inspector.jsx hands it to the Status facet.
+ * explained. Wall side only (R4): the Frame page's Overview shows it.
  *
  * Nothing renders for an unbound Frame, nor while the shell's fleet host read is skipped (node
  * control off: its banner names that) or has not loaded. A failed read says so rather than

@@ -170,7 +170,7 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
  * status and alert regions leave the accessibility tree). Wall, fleet and neutral
- * sections mount only while current, so no hidden page ever holds Calibration DOM
+ * sections mount only while current, so no hidden page ever holds a Frame's Position tab
  * (R4) and a Pi page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the first snapshot
@@ -319,7 +319,10 @@ export function Shell({ hidden = false }) {
 
   const focusHeadingOf = (section) => setHeadingFor({ section, from: current });
 
-  const hrefFor = (section) => formatRoute(section === "wall" ? wall.lastWall : { section });
+  // The Wall link returns to the Wall as last shown, except from the Wall itself (a Frame's
+  // page), where it leads back to the plan.
+  const hrefFor = (section) =>
+    formatRoute(section === "wall" && current !== "wall" ? wall.lastWall : { section });
 
   const chooseFromDrawer = (section) => {
     choosingRef.current = true;

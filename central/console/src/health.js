@@ -7,7 +7,7 @@ export { isBound };
 /**
  * Wall health: the ONE classifier (console pass 2, slice 1 — design
  * docs/operator-console-ux-pass2.md §4). Every surface that says whether a frame
- * or Player is alright — the plan tile, the Inspector header, Calibration,
+ * or Player is alright — the plan tile, the Frame page header, Position,
  * Binding, the Players pages, the Unplaced tray, the Showrunner frame list and
  * the attention strip — reads it through here, so the states, their precedence
  * and their wording live in exactly one place. Equipment standing (slice 2,
@@ -34,11 +34,11 @@ export { isBound };
  * @typedef {"ok"|"todo"|"alarm"} Severity
  * @typedef {"unbound"|"awaiting-report"|"player-silent"|"output-interrupted"|
  *           "no-panel-at-enrollment"|"needs-calibration"|"ok"} FrameState
- * @typedef {import("./routes.js").Facet} Facet
+ * @typedef {import("./routes.js").Tab} Tab
  * @typedef {"liveness"|"binding"|"output"|"panel"|"calibration"} Cause
  * @typedef {{state: FrameState, severity: Severity, cause: Cause|null,
  *            label: string, tileLabel: string, settling: boolean,
- *            facet: Facet|null}} FrameHealth
+ *            tab: Tab|null}} FrameHealth
  * @typedef {{state: "heard"|"silent"|"awaiting-report", age: number,
  *            overdue: boolean, settling: boolean, label: string}} Liveness
  *
@@ -81,7 +81,7 @@ export function gigabytes(bytes) {
 
 /**
  * The Player app's liveness, aged against the snapshot's `read_at`. Its label is the one
- * `reported` fact of the Player app layer (`livenessFact`), so the Wall, the Inspector,
+ * `reported` fact of the Player app layer (`livenessFact`), so the Wall, the Frame page,
  * Needs attention, Binding and the Player page name the same layer in the same words.
  *
  *  - "awaiting-report": enrolled, but no report accepted on its current epoch;
@@ -180,7 +180,7 @@ export function frameHealth(snapshot, frameId) {
     return null;
   }
   if (!isBound(frame)) {
-    return healthOf("unbound", "todo", "binding", "Needs a Player", "Needs a Player", "binding");
+    return healthOf("unbound", "todo", "binding", "Needs a Player", "Needs a Player", "hardware");
   }
   const liveness = playerLiveness(snapshot, frame.player_id);
   if (liveness === null || liveness.state === "awaiting-report") {
@@ -193,24 +193,24 @@ export function frameHealth(snapshot, frameId) {
         "liveness",
         liveness?.label ?? "No report from the Player yet",
         "No report yet",
-        "binding",
+        "hardware",
       ),
       settling: liveness?.settling === true,
     };
   }
   if (liveness.state === "silent") {
     const { label } = liveness;
-    return healthOf("player-silent", "alarm", "liveness", label, playerAppSilent(), "binding");
+    return healthOf("player-silent", "alarm", "liveness", label, playerAppSilent(), "hardware");
   }
   const interruption = interruptionFor(snapshot, frameId);
   if (interruption !== null) {
     const tile = interruption.suffix === null ? "Output interrupted"
       : `Output interrupted · ${interruption.suffix}`;
-    return healthOf("output-interrupted", "alarm", "output", interruption.label, tile, "binding");
+    return healthOf("output-interrupted", "alarm", "output", interruption.label, tile, "hardware");
   }
   // Fail closed: a missing output row reads as no Panel listed. It stays an alarm (console
   // DDD §19): the enrollment record is the Wall's only signal for an unplugged Panel. Its
-  // facet is Binding, where the Panel at enrollment is shown.
+  // tab is Hardware, where the Panel at enrollment is shown.
   if (!displayDetected(boundOutput(snapshot, frameId))) {
     return healthOf(
       "no-panel-at-enrollment",
@@ -218,7 +218,7 @@ export function frameHealth(snapshot, frameId) {
       "panel",
       NO_PANEL_AT_ENROLLMENT,
       NO_PANEL_LISTED,
-      "binding",
+      "hardware",
     );
   }
   if (frame.calibration_valid !== true) {
@@ -228,7 +228,7 @@ export function frameHealth(snapshot, frameId) {
       "calibration",
       "Needs calibration",
       "Needs calibration",
-      "calibration",
+      "position",
     );
   }
   return healthOf("ok", "ok", null, liveness.label, "Heard recently", null);
@@ -298,20 +298,20 @@ export function interruptionFor(snapshot, frameId) {
 }
 
 /** One FrameHealth; only an awaiting-report frame can be settling. */
-function healthOf(state, severity, cause, label, tileLabel, facet) {
-  return { state, severity, cause, label, tileLabel, settling: false, facet };
+function healthOf(state, severity, cause, label, tileLabel, tab) {
+  return { state, severity, cause, label, tileLabel, settling: false, tab };
 }
 
 /**
- * The Inspector facet that shows the cause of a frame's health; `ok` opens the caller's
- * fallback (the Wall passes "status": console DDD §61).
+ * The Frame page tab that shows the cause of a frame's health; `ok` opens the caller's
+ * fallback (Overview, routes.js `DEFAULT_TAB`).
  *
  * @param {FrameHealth|null} health
- * @param {Facet} currentFacet
- * @returns {Facet}
+ * @param {Tab} fallback
+ * @returns {Tab}
  */
-export function facetFor(health, currentFacet) {
-  return health?.facet ?? currentFacet;
+export function tabFor(health, fallback) {
+  return health?.tab ?? fallback;
 }
 
 /**
