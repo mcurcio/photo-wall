@@ -19,12 +19,15 @@ interface Profile {
   video?: boolean;
 }
 
+/** A Frame's readiness as Central works it out (central/displays/model.py `Readiness`); never stored. */
+export type Readiness = "unbound" | "display-changed" | "position-needed" | "ready";
+
 interface Frame {
   id: string;
   generation?: number;
   profile?: Profile;
   calibration?: { rotation?: number };
-  calibration_valid?: boolean;
+  readiness?: Readiness;
   player_id?: string | null;
   output_id?: string | null;
 }
@@ -88,7 +91,7 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
   const observation = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
     ?.observation ?? null;
   const rotation = frame.calibration?.rotation ?? 0;
-  const quarterTurn = frame.calibration_valid === true && (rotation === 90 || rotation === 270);
+  const quarterTurn = frame.readiness === "ready" && (rotation === 90 || rotation === 270);
   const mismatch = isBound(frame) && observation?.connected === true && usable(profile) && usable(observation) &&
     (profile.width_px !== (quarterTurn ? observation.height_px : observation.width_px) ||
       profile.height_px !== (quarterTurn ? observation.width_px : observation.height_px));
@@ -163,7 +166,7 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
           subject="Frame profile"
           variant="inline"
           verdict={{ severity: "todo", label: "Check the Display", receipt: null }}
-          what={`The Pi reported its Display at ${observation.width_px} × ${observation.height_px}, but this Frame's profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `The saved rotation ${rotation}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
+          what={`The Pi reported its Display at ${observation.width_px} × ${observation.height_px}, but this Frame's profile is ${profile.width_px} × ${profile.height_px}. ${frame.readiness === "ready" ? `The saved rotation ${rotation}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
           doing={null}
           action={{ label: "Edit Frame profile", onAction: begin }}
           details={(

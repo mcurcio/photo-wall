@@ -6,6 +6,7 @@ caller's Frame snapshot. It deliberately stores no second copy of readiness stat
 
 from __future__ import annotations
 
+from central.displays.model import Readiness as FrameReadiness
 from central.installation_models import FrameInventory
 from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import (
@@ -61,7 +62,7 @@ def _snapshot_bindings(frames: tuple[FrameInventory, ...], player_id: str, read_
         )
         for frame in owned
     )
-    enabled = {frame.output_id for frame in owned if frame.calibration_valid}
+    enabled = {frame.output_id for frame in owned if frame.readiness is FrameReadiness.READY}
     return bindings, enabled, {frame.id: frame for frame in owned}
 
 

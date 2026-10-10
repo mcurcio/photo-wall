@@ -128,14 +128,22 @@ class FramePosition:
 
 def readiness(position: FramePosition) -> Readiness:
     """UNBOUND, then DISPLAY_CHANGED (a Display is seen and the commit names another), then
-    POSITION_NEEDED (position_generation != generation), else READY."""
-    raise NotImplementedError
+    POSITION_NEEDED (position_generation != generation), else READY. With no Position commit there
+    is no Display it could name, so a Frame never positioned needs Position, not a display check."""
+    if not position.bound:
+        return Readiness.UNBOUND
+    if (position.seen_display_id is not None and position.position_generation is not None
+            and position.position_display_id != position.seen_display_id):
+        return Readiness.DISPLAY_CHANGED
+    if position.position_generation != position.generation:
+        return Readiness.POSITION_NEEDED
+    return Readiness.READY
 
 
 def adopts(position: FramePosition, seen_before: UUID | None, seen_now: UUID) -> bool:
     """Whether the bound Frame takes `seen_now` as its Position's Display when it is recorded on its
     Output: only on a first sighting (seen_before None) and only when the commit names none."""
-    raise NotImplementedError
+    return position.bound and seen_before is None and position.position_display_id is None
 
 
 @dataclass(frozen=True)

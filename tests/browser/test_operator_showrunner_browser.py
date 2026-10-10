@@ -148,11 +148,11 @@ def _authored_photos(registry):
 
 
 def _seed(registry):
-    """Seed two placed frames with KNOWN calibration_valid:
+    """Seed two placed frames with KNOWN readiness:
 
-    - VALID_FRAME is bound then committed, so calibration_valid=true.
-    - INVALID_FRAME is bound only (bind sets calibration_valid=false) and never
-      committed, so calibration_valid=false.
+    - VALID_FRAME is bound then committed, so it is ready.
+    - INVALID_FRAME is bound only (bind raises the generation) and never
+      committed, so it needs its position.
 
     Two separate players so each frame binds a connected HDMI-A-1 of its own.
     """
@@ -166,14 +166,14 @@ def _seed(registry):
         id=INVALID_FRAME, surface_id="wall", x_mm=500, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
 
-    # VALID_FRAME: bind (generation 0->1, calibration_valid=false) then commit
-    # (calibration_valid=true, revision 2).
+    # VALID_FRAME: bind (generation 0->1, position needed) then commit
+    # (ready, revision 2).
     registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0)
     registry.calibrate(
         VALID_FRAME, "commit", expected_revision=1,
         calibration=Calibration(gain=1.5), expected_generation=1)
 
-    # INVALID_FRAME: bind only -> calibration_valid stays false.
+    # INVALID_FRAME: bind only -> it still needs its position.
     registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)
     return id_a["player_id"], id_b["player_id"]
 

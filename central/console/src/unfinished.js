@@ -8,7 +8,7 @@ import { isUnplaced } from "./projection.js";
  *  - "place": the Frame is not on the plan (the Unplaced tray's rule, projection.js
  *    `isUnplaced`); fixed in Edit layout.
  *  - "bind": no Binding exists; fixed on the Frame page's Hardware tab.
- *  - "calibrate": bound, and `calibration_valid` is not true; fixed on the Frame page's
+ *  - "calibrate": bound, and its `readiness` is not "ready"; fixed on the Frame page's
  *    Position tab. An unbound Frame has no position to save, so it is never asked for one.
  *
  * No `reported` or `derived` fact (liveness, readiness, host health) adds or removes an
@@ -33,7 +33,7 @@ export function wallUnfinished(snapshot) {
     if (!isBound(frame)) {
       items.push({ frameId: frame.id, step: "bind",
         route: { section: "wall", id: frame.id, tab: "hardware" } });
-    } else if (frame.calibration_valid !== true) {
+    } else if (frame.readiness !== "ready") {
       items.push({ frameId: frame.id, step: "calibrate",
         route: { section: "wall", id: frame.id, tab: "position" } });
     }

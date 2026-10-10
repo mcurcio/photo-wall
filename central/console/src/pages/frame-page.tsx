@@ -4,7 +4,7 @@ import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameOverview } from "../domain/frame-overview";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
-import { FrameProfile } from "../domain/frame-profile";
+import { FrameProfile, type Readiness } from "../domain/frame-profile";
 import type { HostsRead } from "../domain/hosts-read";
 import { frameHealth } from "../health.js";
 import { boundOutput, isBound } from "../join.js";
@@ -38,7 +38,7 @@ interface Frame {
   output_id?: string | null;
   profile?: { width_px?: number; height_px?: number };
   calibration?: { rotation?: number };
-  calibration_valid?: boolean;
+  readiness?: Readiness;
 }
 
 const TABS = [

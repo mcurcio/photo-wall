@@ -11,6 +11,12 @@ display" and of the Output document's body:
   `output_documents.change` rises only when the body's digest differs. Everything else is `{}`.
 - `PgDisplayQueries`: the operator API's reads (`DisplayQueries`).
 
+Readiness (slice C2; migration 073) is worked out by `model.readiness` from facts read here and
+nowhere else: `POSITION_COLUMNS` over `SEEN_DISPLAY_JOIN` gives every reader (the Registry's
+configuration and inventory, the installation repository, the Hardware tab) the same
+`FramePosition`; `commit_position` is what both Position commits write; the judge adopts a first
+Display (`model.adopts`) on the Frame bound where it is recorded.
+
 `resolve_output` is what `Registry.bind` calls in its own transaction: a binding can turn the
 identity recorded on the Output (pending, or tied to another Frame) into a Display.
 
@@ -38,10 +44,13 @@ from central.db import Database, DatabaseTransactionClock
 from central.displays.model import (
     DisplayKey,
     DisplaySettings,
+    FramePosition,
     Readiness,
     Sighting,
+    adopts,
     display_key,
     project_output,
+    readiness,
     serial_usable,
 )
 from central.displays.ports import DisplayRefused
@@ -78,6 +87,53 @@ DOCUMENT_STREAM: Final = "KV_desired_display"   # the display line's desired buc
 _REPORT_SUBJECT: Final = "$KV.state_display."
 _KV_OPERATION: Final = "KV-Operation"            # a delete or purge marker carries no value
 _CLOCK: Final = DatabaseTransactionClock()
+
+
+# --- Readiness facts -----------------------------------------------------------------------------
+
+# A frames row `f`, its binding `b` (LEFT JOIN or JOIN) and this join give POSITION_COLUMNS.
+SEEN_DISPLAY_JOIN: Final = ("LEFT JOIN output_displays seen ON seen.player_id=b.player_id "
+                            "AND seen.output_id=b.output_id")
+POSITION_FACTS: Final = ("bound", "generation", "position_generation", "position_display_id",
+                         "seen_display_id")
+POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.position_generation, "
+                           "f.position_display_id, seen.display_id AS seen_display_id")
+
+
+def frame_position(row: Mapping[str, Any]) -> FramePosition:
+    """The readiness facts of a row selected with POSITION_COLUMNS."""
+    return FramePosition(bool(row["bound"]), row["generation"], row["position_generation"],
+                         row["position_display_id"], row["seen_display_id"])
+
+
+def frame_readiness(row: Mapping[str, Any]) -> Readiness:
+    """`model.readiness` of a row selected with POSITION_COLUMNS."""
+    return readiness(frame_position(row))
+
+
+def frame_readiness_in(conn: Any, frame_id: str) -> Readiness | None:
+    """The Frame's readiness in the caller's transaction; None for an unknown Frame."""
+    row = conn.execute(f"SELECT {POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "  # noqa: S608
+                       f"{SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
+    return None if row is None else frame_readiness(row)
+
+
+def commit_position(conn: Any, frame_id: str) -> None:
+    """A Position commit, in the committing transaction: it is made at the Frame's current
+    generation, against the Display last seen on its bound Output (NULL when none)."""
+    conn.execute("UPDATE frames f SET position_generation=f.generation, position_display_id=("
+                 "SELECT seen.display_id FROM bindings b " + SEEN_DISPLAY_JOIN + " WHERE b.frame_id=f.id) "
+                 "WHERE f.id=%s", (frame_id,))
+
+
+def _adopt(conn: Any, player_id: str, output_id: str, seen_before: UUID | None, display_id: UUID) -> None:
+    """The Frame bound to this Output takes `display_id`, newly recorded there, as its Position's
+    Display when `model.adopts` says so (a first sighting, and its Position commit names none)."""
+    frame = conn.execute(f"SELECT f.id, {POSITION_COLUMNS} FROM bindings b JOIN frames f ON f.id=b.frame_id "  # noqa: S608
+                         f"{SEEN_DISPLAY_JOIN} WHERE b.player_id=%s AND b.output_id=%s FOR NO KEY UPDATE OF f",
+                         (player_id, output_id)).fetchone()
+    if frame is not None and adopts(frame_position(frame), seen_before, display_id):
+        conn.execute("UPDATE frames SET position_display_id=%s WHERE id=%s", (display_id, frame["id"]))
 
 
 # --- Recognising a Display -----------------------------------------------------------------------
@@ -149,10 +205,12 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
     row = conn.execute("SELECT identity, display_id FROM output_displays WHERE player_id=%s AND output_id=%s "
                        "FOR UPDATE", (player_id, report.output_id)).fetchone()
     before = None if row is None else _identity(row["identity"])
-    display_id = None if row is None else row["display_id"]
+    seen_before = display_id = None if row is None else row["display_id"]
     if report.identity is not None:
         display_id = _recognise(conn, player_id, report.output_id, report.identity, report.modes,
                                 before=before, recorded=display_id, now=now)
+    if display_id is not None and display_id != seen_before:   # a Display newly recorded here
+        _adopt(conn, player_id, report.output_id, seen_before, display_id)
     identity = report.identity or before
     conn.execute(
         "INSERT INTO output_displays(player_id, output_id, connected, identity, display_id, report, reported_at) "
@@ -373,25 +431,20 @@ class PgDisplayQueries:
 
     def frame_display(self, frame_id: str) -> FrameDisplayView:
         with self._db.transaction() as conn:
-            frame = conn.execute("SELECT f.calibration_valid, b.player_id, b.output_id FROM frames f "
-                                 "LEFT JOIN bindings b ON b.frame_id=f.id WHERE f.id=%s", (frame_id,)).fetchone()
+            frame = conn.execute(f"SELECT {POSITION_COLUMNS}, b.player_id, b.output_id, seen.connected, "  # noqa: S608
+                                 f"seen.reported_at FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+                                 f"{SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
-            seen = display = None
-            if frame["player_id"] is not None:
-                seen = conn.execute("SELECT connected, display_id, reported_at FROM output_displays "
-                                    "WHERE player_id=%s AND output_id=%s",
-                                    (frame["player_id"], frame["output_id"])).fetchone()
-            if seen is not None and seen["display_id"] is not None:
-                display = conn.execute("SELECT * FROM displays WHERE id=%s", (seen["display_id"],)).fetchone()
-        # Readiness from the Position flag until slice C2 works it out from Position commits.
-        readiness = (Readiness.UNBOUND if frame["player_id"] is None
-                     else Readiness.READY if frame["calibration_valid"] else Readiness.POSITION_NEEDED)
+            displays = {row["id"]: row for row in conn.execute(
+                "SELECT * FROM displays WHERE id=ANY(%s)",
+                ([i for i in (frame["seen_display_id"], frame["position_display_id"]) if i is not None],)).fetchall()}
+        display, position_display = displays.get(frame["seen_display_id"]), displays.get(frame["position_display_id"])
         return FrameDisplayView(
-            frame_id=frame_id, readiness=readiness, player_id=frame["player_id"], output_id=frame["output_id"],
-            display=None if display is None else _display_view(display), position_display=None,
-            connected=None if seen is None else seen["connected"],
-            reported_at=None if seen is None else seen["reported_at"])
+            frame_id=frame_id, readiness=frame_readiness(frame), player_id=frame["player_id"],
+            output_id=frame["output_id"], display=None if display is None else _display_view(display),
+            position_display=None if position_display is None else _display_view(position_display),
+            connected=frame["connected"], reported_at=frame["reported_at"])
 
 
 class PgDisplayCommands:
@@ -408,5 +461,7 @@ class PgDisplayCommands:
         raise NotImplementedError
 
 
-__all__ = ["DOCUMENT_STREAM", "REPORT_STREAM", "DisplayDocuments", "DisplayWakes", "OutputReportJudge",
-           "PgDisplayCommands", "PgDisplayQueries", "output_documents", "record_report", "resolve_output"]
+__all__ = ["DOCUMENT_STREAM", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
+           "DisplayDocuments", "DisplayWakes", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
+           "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "output_documents",
+           "record_report", "resolve_output"]

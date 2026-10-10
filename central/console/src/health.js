@@ -221,7 +221,7 @@ export function frameHealth(snapshot, frameId) {
       "hardware",
     );
   }
-  if (frame.calibration_valid !== true) {
+  if (frame.readiness !== "ready") {
     return healthOf(
       "needs-calibration",
       "todo",
