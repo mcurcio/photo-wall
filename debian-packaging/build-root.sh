@@ -9,8 +9,9 @@
 # app root) or photo-wall-app-manager (the manager root). Everything else comes from the
 # committed tree at REV (default HEAD), never the working copy: the roots container
 # (debian-packaging/build-container.sh --target roots: mmdebstrap and squashfs-tools at the pin),
-# debian-packaging/snapshot.list, the image format (debian-packaging/image-format.env), this
-# recipe, debian-packaging/seal-hook.sh and scripts/seal_root.py.
+# debian-packaging/snapshot.list and its epoch (debian-packaging/snapshot-epoch.sh), the image
+# format (debian-packaging/image-format.env), this recipe, debian-packaging/seal-hook.sh and
+# scripts/seal_root.py.
 #
 # A build runs, in a privileged roots container:
 #
@@ -98,7 +99,7 @@ build() {
 	roots --volume "$work/$1:/out" --env package="$package" --env role="$role" \
 		--env owner="$(id -u):$(id -g)" "$ROOTS_IMAGE" sh -ec "$MMDEBSTRAP"'
 		set -a; . /src/debian-packaging/image-format.env; set +a
-		SOURCE_DATE_EPOCH=$(python3 -I /src/scripts/debian_packages.py epoch)
+		SOURCE_DATE_EPOCH=$(sh /src/debian-packaging/snapshot-epoch.sh)
 		export SOURCE_DATE_EPOCH
 		deb() { echo "/repo/$(sed -n "/^Package: $1\$/,/^\$/s/^Filename: //p" /repo/Packages)"; }
 		mkdir /tmp/abi

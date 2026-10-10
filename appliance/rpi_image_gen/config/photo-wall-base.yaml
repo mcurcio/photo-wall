@@ -27,9 +27,9 @@
 #     -- IGconf_app_local_repo=/path/to/local-repo \
 #        IGconf_app_debian_sources=/path/to/photo-wall-debian.list
 #
-# Reproducibility: the Debian arm64 base is pulled from the declaration's
-# pinned snapshot.debian.org sources (`python3 scripts/debian_packages.py
-# sources`, rendered to a file by the CI job), never a rolling mirror and
+# Reproducibility: the Debian arm64 base is pulled from the pinned
+# snapshot.debian.org sources (debian-packaging/snapshot.list, copied to a
+# file without its comments by the CI job), never a rolling mirror and
 # never a timestamp taken from the environment: rpi-image-gen's own snapshot
 # layer reads SOURCE_DATE_EPOCH, which its `env -i` layer pipeline clears.
 

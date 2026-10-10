@@ -42,8 +42,8 @@ defaults:
 # Human-bumpable cache epoch. The two expensive base-OS stages (the
 # rpi-image-gen squashfs and the scratch kernel+initrd) are content-addressed
 # and cached below, keyed by a hash of each stage's TRUE input closure. Every
-# Debian package either stage installs comes from the declaration's snapshot
-# pin (scripts/debian_packages.py, in both keys); only the Raspberry Pi archive
+# Debian package either stage installs comes from the snapshot pin
+# (debian-packaging/snapshot.list, in both keys); only the Raspberry Pi archive
 # is unpinned (it has no snapshot service), so the scratch kernel stage's
 # linux-image-rpi-2712 + raspi-firmware + rpi-eeprom are the one input no key
 # can hash. Bump this integer to force BOTH caches to miss and fully rebuild
@@ -81,23 +81,23 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
 
-      # The Debian declaration (scripts/debian_packages.py) renders the mirror;
-      # the runner's system python3 runs it (stdlib only). Its snapshot pin, as
-      # DEBIAN_SNAPSHOT_EPOCH, is the fixed instant the CA-age reference is
-      # pinned to, given to each step as SOURCE_DATE_EPOCH. The initrd's CA list
-      # is the base's, so it is as old as this pin: the bundle assembly warns
-      # (never fails) once it is over 90 days old (decision 0014, Q3 = A).
-      # DEBIAN_SOURCES is the pin's apt sources, one signed-by line each: the
+      # The snapshot pin (debian-packaging/snapshot.list, decision 0019 rule 1).
+      # Its instant, as DEBIAN_SNAPSHOT_EPOCH (debian-packaging/snapshot-epoch.sh),
+      # is the fixed instant the CA-age reference is pinned to, given to each
+      # step as SOURCE_DATE_EPOCH. The initrd's CA list is the base's, so it is
+      # as old as this pin: the bundle assembly warns (never fails) once it is
+      # over 90 days old (decision 0014, Q3 = A). DEBIAN_SOURCES is the pin's apt
+      # sources, its lines without the comments, one signed-by line each: the
       # base is built from them and keeps them (layer/photo-wall-debian.yaml),
       # so the base's mirror is the pin by construction, not by an environment
       # variable rpi-image-gen would clear.
-      - name: Read the Debian pin and the sources from the declaration
+      - name: Read the Debian pin and its sources from snapshot.list
         run: |
           set -eu
-          epoch=$(python3 scripts/debian_packages.py epoch)
+          epoch=$(sh debian-packaging/snapshot-epoch.sh)
           echo "DEBIAN_SNAPSHOT_EPOCH=$epoch" >> "$GITHUB_ENV"
           debian_sources="$RUNNER_TEMP/photo-wall-debian.list"
-          python3 scripts/debian_packages.py sources > "$debian_sources"
+          grep -v '^#' debian-packaging/snapshot.list > "$debian_sources"
           echo "DEBIAN_SOURCES=$debian_sources" >> "$GITHUB_ENV"
           echo "DEBIAN_SNAPSHOT_EPOCH=$epoch; base apt sources:"
           cat "$debian_sources"
@@ -201,7 +201,7 @@ jobs:
           sudo ./install_deps.sh
 
       # The base's Debian package set comes from DEBIAN_SOURCES (the
-      # declaration's pin, rendered above) through our own
+      # pin's sources, copied above) through our own
       # layer/photo-wall-debian.yaml, so it is reproducible rather than
       # "whatever the snapshot service has right now". SOURCE_DATE_EPOCH does
       # NOT choose that mirror: rpi-image-gen runs its layer pipeline under
@@ -226,7 +226,7 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', 'debian-packaging/python-nats/**', 'scripts/device_root_checks.py', '.github/workflows/base-image.yml') }}-${{ steps.node-packages.outputs.digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'debian-packaging/snapshot.list', 'debian-packaging/snapshot-epoch.sh', 'debian-packaging/python-nats/**', 'scripts/device_root_checks.py', '.github/workflows/base-image.yml') }}-${{ steps.node-packages.outputs.digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
@@ -271,7 +271,7 @@ jobs:
       # scripts/device_root_checks.py reads (systemd config and units, apt
       # sources, the dpkg database): no watchdog override, no time daemon, no
       # resolver writer, the node packages installed, nothing of the V1 lane,
-      # and apt sources that are exactly the declaration's pin (none foreign,
+      # and apt sources that are exactly snapshot.list's pin (none foreign,
       # none missing).
       #
       # Squashfs location: rpi-image-gen's image-base layer places genimage's
@@ -388,7 +388,7 @@ jobs:
           # The node packages and the OS packages the layers name are installed
           # (dpkg's own database: `install ok installed`); no watchdog override,
           # time daemon or resolver writer; the image's apt sources are exactly
-          # the declaration's pin; the agent's SSH login admits exactly the repo
+          # snapshot.list's pin; the agent's SSH login admits exactly the repo
           # key, by key only, with the server and its per-boot host-key
           # generator enabled; the binfmt units are masked, no build hostname is
           # baked in, the hosts database has myhostname, the default locale
@@ -452,9 +452,9 @@ jobs:
       # and every Photo Wall package on stage 1's path (their Package=Version
       # lines: each version is a hash of what the package installs, the hook,
       # the boot script and stage 1's code included; decision 0019 P4), the
-      # declaration (it names the root's Debian packages, its snapshot pin --
-      # so the CA bundle the hook copies -- and the Raspberry Pi packages), and
-      # this workflow. The clock floor is NOT in the cached initrd: it changes
+      # snapshot pin (debian-packaging/snapshot.list -- so the CA bundle the
+      # hook copies), and this workflow (it names the root's Debian packages
+      # and the Raspberry Pi packages). The clock floor is NOT in the cached initrd: it changes
       # per revision, so the uncached assembly puts it in a layer in front
       # (R6). NOT keyed on player/ or the rpi-image-gen config -- neither
       # affects the kernel/initrd. EXACT match only (no restore-keys): a stale-base
@@ -493,7 +493,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/netboot-kernel-out
-          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('scripts/verify_boot_display.py', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', '.github/workflows/base-image.yml') }}-${{ steps.stage1-packages.outputs.digest }}
+          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('scripts/verify_boot_display.py', 'debian-packaging/snapshot.list', '.github/workflows/base-image.yml') }}-${{ steps.stage1-packages.outputs.digest }}
 
       - name: Build the scratch kernel + initrd root (Debian trixie arm64)
         id: scratch-root
@@ -508,8 +508,7 @@ jobs:
           mkdir -p "$DIAG"
           sudo apt-get update
           # mmdebstrap builds the scratch root. debian-archive-keyring provides
-          # the keyring each pinned line names (signed-by=, from the
-          # declaration): this Ubuntu host's apt trusts no Debian key by
+          # the keyring each pinned line names (signed-by=, in snapshot.list): this Ubuntu host's apt trusts no Debian key by
           # default, and mmdebstrap copies a full `deb ...` line verbatim
           # (it adds signed-by only to a bare mirror URL). The same path
           # exists in the trixie root, so its own apt verifies the same way.
@@ -517,14 +516,22 @@ jobs:
             mmdebstrap debian-archive-keyring ca-certificates gnupg curl
 
           sudo rm -rf "$SCRATCH"
-          # Minimal Debian trixie arm64 root at the declaration's pin, carrying
-          # the initrd toolchain + interpreter the netboot init needs
-          # (packages("initrd-build"); mmdebstrap_argv is the one way a root
-          # outside rpi-image-gen is built, with only the snapshot sources).
-          # The rpi-2712 kernel itself comes from the Raspberry Pi archive,
-          # added below.
-          if ! sudo python3 scripts/debian_packages.py mmdebstrap --arch arm64 \
-              --target "$SCRATCH" initrd-build \
+          # Minimal Debian trixie arm64 root at the pin, with only its two
+          # sources (snapshot.list's lines; a snapshot's Release file is past
+          # its Valid-Until by design). Its OS packages: the CA bundle (apt
+          # inside the root fetches the pin over https, so mmdebstrap's own
+          # --include brings it first, with the host's apt), the initrd
+          # toolchain (initramfs-tools, kmod for depmod, zstd for compression,
+          # gnupg for apt's keys), the interpreter stage 1 runs on, and
+          # device-tree-compiler (fdtoverlay and fdtget at the pin for
+          # scripts/verify_boot_display.py: Ubuntu 24.04's 1.7.0 cannot apply
+          # vc4-kms-v3d-pi5 to the Pi 5 DTB). The rpi-2712 kernel itself comes
+          # from the Raspberry Pi archive, added below.
+          mapfile -t pin_sources < <(grep -v '^#' debian-packaging/snapshot.list)
+          if ! sudo mmdebstrap --arch=arm64 --variant=minbase \
+              --aptopt='Acquire::Check-Valid-Until "false"' \
+              --include=ca-certificates,device-tree-compiler,gnupg,initramfs-tools,kmod,python3,zstd \
+              trixie "$SCRATCH" "${pin_sources[@]}" \
               > "$DIAG/mmdebstrap.log" 2>&1; then
             echo "mmdebstrap failed; tail:" >&2
             tail -n 80 "$DIAG/mmdebstrap.log" >&2
@@ -544,7 +551,7 @@ jobs:
           # 0009's no-threat-model / corruption-only ruling. If RPi later re-signs
           # its key with SHA256, restore `[signed-by=.../raspberrypi.gpg]` (fetch
           # + dearmor the key) in place of `[trusted=yes]`.
-          python3 scripts/debian_packages.py sources --archive raspberrypi \
+          echo 'deb [trusted=yes] http://archive.raspberrypi.com/debian trixie main' \
             | sudo tee "$SCRATCH/etc/apt/sources.list.d/raspberrypi.list"
           sudo cp /etc/resolv.conf "$SCRATCH/etc/resolv.conf"
 
@@ -562,13 +569,9 @@ jobs:
           # rpi-eeprom (alongside the kernel + firmware) packages the bootloader
           # images build_eeprom_update.py rebuilds into the TFTP self-update
           # pair (0014 rev 5, design §2.8) -- pieeprom.upd/.sig, staged below.
-          # The list is the declaration's (one package name per line, split
-          # on purpose).
-          kernel_packages=$(python3 scripts/debian_packages.py packages \
-            --archive raspberrypi initrd-build)
-          # shellcheck disable=SC2086
           if ! sudo chroot "$SCRATCH" env DEBIAN_FRONTEND=noninteractive \
-              apt-get install -y --no-install-recommends $kernel_packages \
+              apt-get install -y --no-install-recommends \
+                linux-image-rpi-2712 raspi-firmware rpi-eeprom \
               > "$DIAG/apt-install-kernel.log" 2>&1; then
             echo "kernel/raspi-firmware/rpi-eeprom install failed; tail:" >&2
             tail -n 80 "$DIAG/apt-install-kernel.log" >&2

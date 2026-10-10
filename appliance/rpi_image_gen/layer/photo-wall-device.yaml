@@ -10,7 +10,7 @@
 #  chroot against this build's snapshot sources (the pin the base itself is
 #  built from, layer/photo-wall-debian.yaml) and fetches over https, so the CA
 #  bundle must already be there: the required ca-certificates layer brings it
-#  with mmdebstrap's own package list (tests/test_debian_packages.py binds
+#  with mmdebstrap's own package list (tests/test_device_root_checks.py binds
 #  this Requires list). Three OS dependencies of Debian packages the Node runs
 #  on are installed here, beside it, because no Photo Wall package may name
 #  them (decision 0019, R4): python3-cffi-backend, which trixie's

@@ -63,8 +63,9 @@ REFERENCE_SUFFIX: Final = ".reference.json"
 # seal and the writer import are added by `recipe_files`).
 RECIPE: Final = ("debian-packaging/build-root.sh", "debian-packaging/seal-hook.sh",
                  "debian-packaging/build-container.sh", "debian-packaging/builder/Dockerfile",
-                 "debian-packaging/snapshot.list", "debian-packaging/image-format.env")
-KEY_ENTRIES: Final = ("scripts.seal_root", "scripts.node_release_writer", "scripts.debian_packages")
+                 "debian-packaging/snapshot.list", "debian-packaging/snapshot-epoch.sh",
+                 "debian-packaging/image-format.env")
+KEY_ENTRIES: Final = ("scripts.seal_root", "scripts.node_release_writer")
 
 
 class WriterError(Exception):

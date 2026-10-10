@@ -105,8 +105,8 @@
 #  bdebstrap writes it to /etc/hostname, so without this every Node booted
 #  named "rpi-image-gen". Neutral on purpose: stage 1 replaces it with the
 #  Node's own photo-wall-<serial> at every boot (appliance/netboot_init.py
-#  hand_over_hostname), and libnss-myhostname (the declaration's base-os set,
-#  scripts/debian_packages.py) resolves whichever name is set. base-image.yml
+#  hand_over_hostname), and libnss-myhostname (layer/photo-wall-os.yaml)
+#  resolves whichever name is set. base-image.yml
 #  refuses an image baking rpi-image-gen's default
 #  (scripts/device_root_checks.py).
 # X-Env-Var-hostname-Required: n

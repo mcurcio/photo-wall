@@ -217,10 +217,10 @@ def image_inputs(target: str, text: str | None = None) -> tuple[str, ...]:
 
 # The locked Python project every build syncs. pyproject.toml counts only through DIGESTED below.
 _PROJECT: Final = ("pyproject.toml", "uv.lock")
-# The base build's tooling: the pinned uv environment and the Debian declaration it reads.
+# The base build's tooling: the pinned uv environment and the snapshot pin it reads.
 _BASE_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
                       ".github/workflows/node-components.yml", "scripts/module_closure.py",
-                      "scripts/debian_packages.py", "debian-packaging/snapshot.list",
+                      "debian-packaging/snapshot.list", "debian-packaging/snapshot-epoch.sh",
                       "scripts/device_root_checks.py")
 # The one source package (decision 0019): node-components.yml's `debs` job builds every binary
 # package of debian/control in the pinned build container and the local repo beside upstream's
@@ -229,7 +229,7 @@ _BASE_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
 # debian/*.install files name; tests/test_release_plan.py holds both claimed.
 _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian/**",
                      "debian-packaging/**", "scripts/import_check.py",
-                     "scripts/module_closure.py", "scripts/debian_packages.py",
+                     "scripts/module_closure.py",
                      # stage 1's uplink on the device runtime, run in the build container
                      "scripts/uplink_device_harness.py",
                      "contracts/**", "nodeapi/**", "uplink/**", "player/**", "appliance/kernel/**",

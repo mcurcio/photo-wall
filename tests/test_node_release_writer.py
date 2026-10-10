@@ -126,7 +126,8 @@ def test_the_key_covers_the_recipe_the_abi_and_each_roots_packages(tmp_path):
     assert {"appliance/apps/environment.py", "contracts/app_environment.py",
             "scripts/seal_root.py", "scripts/node_release_writer.py",
             "debian-packaging/build-root.sh", "debian-packaging/seal-hook.sh",
-            "debian-packaging/snapshot.list", "debian-packaging/image-format.env"} <= set(files)
+            "debian-packaging/snapshot.list", "debian-packaging/snapshot-epoch.sh",
+            "debian-packaging/image-format.env"} <= set(files)
     base, display = tmp_path / "base.json", tmp_path / "display.json"
     base.write_text(json.dumps({"base_abi": ABI["base_abi"]}))
     display.write_text(json.dumps({"graphics_abi": ABI["graphics_abi"], "plugin_abi": "frame-v3"}))
