@@ -275,7 +275,7 @@ class _Run(_MutableModel):
 def _may_hold_to_the_end(run: _Run, contribution: Contribution) -> bool:
     """A kept photo in its Run's final body cycle, with no ending of its Scene on its Frame:
     it plans no fade-out unless another Run plays on the Frame at the cycle's end
-    (`Runtime._followed_at`), so it never dips to black and snaps back to itself. The cycle is
+    (`Runtime._playing_at`), so it never dips to black and snaps back to itself. The cycle is
     final when the Scene does not loop, or when the Run's stop (Program end, duration,
     scheduled finish or Finish) falls within it; a Finish, or a follower that appears later,
     revises the cycle's fade-out, which the planner allows on an offered layer
@@ -957,22 +957,34 @@ class Runtime:
                 )
             self._state.queue.remove(item)
 
-    def _followed_at(self, run: _Run, at: float, budget: _TransitionBudget) -> frozenset[str]:
-        """The targets another Run contributes to at `at`, see-through ones included (the
-        Player draws a kept photo only as its fallback, never beneath a playing layer), from a
-        detached projection without the final-cycle rule (so it never recurses), spending the
-        caller's transition budget."""
+    def _playing_at(self, at: float, budget: _TransitionBudget) -> tuple[Intent, ...]:
+        """Every contribution playing at `at`, see-through ones included (the Player draws a
+        kept photo only as its fallback, never beneath a playing layer), from a detached
+        projection without the after-end rules (so it never recurses), spending the caller's
+        transition budget."""
         view = self._copy()._advance(at, budget, holds=False)
-        return frozenset(intent.target for intent in view.contributions
-                         if intent.run_id != run.run_id
-                         and intent.interval_start <= at < intent.interval_end)
+        return tuple(intent for intent in view.contributions
+                     if intent.interval_start <= at < intent.interval_end)
 
     def _view(self, now: float, *, budget: _TransitionBudget | None) -> RuntimeView:
-        """The view at `now`; with a budget, kept photos' final cycles are held
-        (`_may_hold_to_the_end`), spending it on what follows them."""
+        """The view at `now`. With a budget, spent on what plays at a layer's end
+        (`_playing_at`): a kept photo's final cycle is held when nothing else plays on its
+        Frame (`_may_hold_to_the_end`); and the owner's "When the top show ends, it gets out of
+        the way and the show underneath takes over": an ending keeps nothing only when no
+        other Run plays on its Frame at its end, and a photo is kept only when no Run beneath
+        it plays on its Frame at its cycle's end."""
         intents: list[Intent] = []
         runs = sorted(self._state.runs.values(), key=lambda r: r.order)
-        followed: dict[str, frozenset[str]] = {}
+        playing: dict[float, tuple[Intent, ...]] = {}
+
+        def others(run: _Run, at: float, *, beneath: bool = False) -> frozenset[str]:
+            if at not in playing:
+                playing[at] = self._playing_at(at, budget)
+            mine = (run.priority, run.root_order, run.local_order)
+            return frozenset(intent.target for intent in playing[at]
+                             if intent.run_id != run.run_id
+                             and (not beneath or intent.precedence < mine))
+
         for run in runs:
             if not run.active or (run.phase == "body" and run.body_done_at is not None):
                 continue
@@ -982,11 +994,17 @@ class Runtime:
             position = max(0.0, now - start)
             for contribution in definitions:
                 fade_out = contribution.fade_out_seconds
-                if fade_out and budget is not None and _may_hold_to_the_end(run, contribution):
-                    if run.run_id not in followed:
-                        followed[run.run_id] = self._followed_at(run, end, budget)
-                    if contribution.target not in followed[run.run_id]:
+                after_end = contribution.after_end
+                if budget is not None:
+                    if (fade_out and _may_hold_to_the_end(run, contribution)
+                            and contribution.target not in others(run, end)):
                         fade_out = 0
+                    if (after_end == "keep_nothing" and run.phase == "outro"
+                            and contribution.target in others(run, end)):
+                        after_end = "leave_as_is"
+                    if (after_end == "keep_this_photo" and run.phase == "body"
+                            and contribution.target in others(run, end, beneath=True)):
+                        after_end = "leave_as_is"
                 opacity = contribution.opacity
                 if contribution.fade_in_seconds:
                     opacity *= min(1.0, position / contribution.fade_in_seconds)
@@ -1010,7 +1028,7 @@ class Runtime:
                     base_opacity=contribution.opacity,
                     fade_in_seconds=contribution.fade_in_seconds,
                     fade_out_seconds=fade_out,
-                    after_end=contribution.after_end,
+                    after_end=after_end,
                     actuator_value=value, phase=run.phase,
                 ))
         winners: dict[str, Intent] = {}

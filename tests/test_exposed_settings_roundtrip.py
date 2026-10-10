@@ -25,6 +25,7 @@ tests/browser/test_scene_flow_browser.py.
 
 import hashlib
 
+import pytest
 from fastapi.testclient import TestClient
 from test_coordination import publish_fixture_catalog, setup_players
 from test_registry import ADMIN
@@ -176,12 +177,12 @@ class _Frame:
     prepares what is imminent, reports readiness to Central, applies the commits Central
     grants, and draws. `lose_central` draws on with no delivery and no time from Central."""
 
-    def __init__(self, registry, coordinator, player, directory):
+    def __init__(self, registry, coordinator, player, directory, *, capacity=4):
         self.registry, self.coordinator, self.player = registry, coordinator, player
         self.clock = ManualClock(registry.clock.utc())
         self.mapping = TimeMapping(self.clock)
         self.mapping.establish(.01)
-        self.renderer = RecordingRenderer(4)
+        self.renderer = RecordingRenderer(capacity)  # the real Pi's default decoder limit
         self.executor = Executor(player["player_id"], Cache(directory / "cache", 1 << 20),
                                  self.renderer, self.clock, self.mapping)
         self.output = None
@@ -471,9 +472,9 @@ def test_the_shortest_fading_ending_keeps_nothing(registry, tmp_path):
         assert _shown(frame.lose_central(60)) == BLACK
 
 
-def _program(client, frame, scene_id, starts, ends):
+def _program(client, frame, scene_id, starts, ends, *, priority=0):
     program = {"program_id": "p-" + scene_id, "scene_id": scene_id, "starts_at": starts,
-               "ends_at": ends}
+               "ends_at": ends, "priority": priority}
     scheduled = client.put(f"/v1/operator/programs/{program['program_id']}", json=program,
                            headers=AUTH)
     assert scheduled.status_code == 200, scheduled.text
@@ -529,3 +530,121 @@ def test_a_kept_photo_followed_by_a_see_through_program_keeps_its_fade(registry,
         frame.sync()
         assert _shown(frame.advance(19.5)) == (False, [("photo", 0.33)])
         assert _shown(frame.advance(1)) == (False, [("photo", 0.5)])  # no kept photo beneath
+
+
+def _kept_scene_beneath(client, frame):
+    """A kept Scene playing on the Frame, drawn (and its photo kept) before a Scene starts on
+    top of it."""
+    _save_and_start(client, _scene("beneath", keep_last=True))
+    frame.sync()
+    assert _shown(frame.advance(2)) == (False, [("photo", 1.0)])
+
+
+def test_after_a_black_ending_the_scene_beneath_takes_over(registry, tmp_path):
+    """Owner, 2026-10-10: "When the top show ends, it gets out of the way and the show
+    underneath takes over." The top Scene's ending plans no after-state of its own when a Scene
+    plays beneath at its end."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _kept_scene_beneath(client, frame)
+        _play_one_cycle(client, frame, _scene("top", ending=("black", 4), keep_last=False))
+        assert [layer.after_end for layer in _layers(coordinator, player)
+                if layer.presentation == "black"] == ["leave_as_is"]
+        assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # the ending
+        assert _shown(frame.advance(5)) == (False, [("photo", 1.0)])  # the Scene beneath
+
+
+def test_an_outage_during_an_ending_over_a_scene_beneath_shows_its_kept_photo(registry, tmp_path):
+    """Central is lost while the top Scene's (long) ending shows; when the ending is over, the
+    Scene beneath's own layers have run out too, and the Frame shows its kept photo, not
+    black. Mutation probe: let the ending keep nothing whatever plays beneath (black at the
+    end)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _kept_scene_beneath(client, frame)
+        _play_one_cycle(client, frame, _scene("top", ending=("black", 40), keep_last=False))
+        assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # 23 s: the ending
+        assert _shown(frame.lose_central(45)) == KEPT  # 68 s: past the ending and its cover
+
+
+@pytest.mark.parametrize("cycles", [1, 2], ids=["one-cycle", "looped"])
+def test_a_kept_top_scene_leaves_the_kept_photo_to_the_scene_beneath(registry, tmp_path, cycles):
+    """Owner, 2026-10-10: "When the top show ends, it gets out of the way and the show
+    underneath takes over." A top Scene that keeps its photo, over a kept Scene beneath: the
+    top's photos keep nothing of their own while a Run plays beneath them, so when Central is
+    lost before the top ends and the Scene beneath's next layer was never committed, the Frame
+    shows the beneath Scene's kept photo, not the top's. Mutation probe: let a top photo be kept
+    whatever plays beneath (the top's photo is the fallback)."""
+    player, app, coordinator = _rig(registry)
+    # Two looping Scenes on one Frame need their current and next layers resident at a
+    # boundary: more than a real Pi's default decoder limit of 4 admits (a known Player
+    # capacity limit, tracked separately), so the looped case gets room for them.
+    frame = _Frame(registry, coordinator, player, tmp_path, capacity=8 if cycles > 1 else 4)
+    with TestClient(app) as client:
+        _save_and_start(client, _scene("beneath", keep_last=True))
+        start = registry.clock.utc()
+        frame.sync()
+        top = _scene("top", keep_last=True)
+        saved = client.put("/v1/operator/scenes/top", json=top, headers=AUTH)
+        assert saved.status_code == 200, saved.text
+        _program(client, frame, "top", start + 20, start + 20 + 20 * cycles)
+        beneath = _run_id(coordinator, "beneath")
+        assert _shown(frame.advance(10)) == (False, [("photo", 1.0)])  # the Scene beneath
+        shown = frame.advance(20 * cycles)  # the top Scene's last cycle, 10 s before its end
+        assert _shown(shown) == (False, [("photo", 1.0)])
+        assert shown.layers[-1].layer.run_id != beneath
+        after = frame.lose_central(15)  # 5 s past the top's end; nothing new was committed
+        assert _shown(after) == KEPT
+        assert after.layers[0].layer.run_id == beneath
+
+
+def test_a_scene_that_starts_beneath_a_showing_scene_keeps_its_photo_while_covered(
+        registry, tmp_path):
+    """A kept Scene starts under a top Scene that is already showing, fully covered by it. Its
+    covered photo still sets what the Frame keeps (the Player applies the after-state of every
+    drawn layer, covered ones included, bottom to top), so when Central is lost and the top
+    ends, the Frame shows the beneath Scene's photo, not the top's from before. Mutation probe:
+    apply after-states to visible layers only (the top's photo is the fallback)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        top = _scene("top", keep_last=True)
+        saved = client.put("/v1/operator/scenes/top", json=top, headers=AUTH)
+        assert saved.status_code == 200, saved.text
+        start = registry.clock.utc()
+        _program(client, frame, "top", start, start + 20, priority=10)
+        frame.sync()
+        assert _shown(frame.advance(10)) == (False, [("photo", 1.0)])  # the top, kept
+        _save_and_start(client, {**_scene("beneath", keep_last=True), "cycle_seconds": 10})
+        beneath = _run_id(coordinator, "beneath")
+        shown = frame.advance(2)  # 12 s: the Scene beneath plays, covered by the top
+        assert _shown(shown) == (False, [("photo", 1.0)])
+        assert shown.layers[-1].layer.run_id != beneath
+        after = frame.lose_central(13)  # 25 s: both have ended; nothing new was committed
+        assert _shown(after) == KEPT
+        assert after.layers[0].layer.run_id == beneath
+
+
+def test_a_run_starting_on_top_at_the_top_scenes_end_still_leaves_keeping_to_the_scene_beneath(
+        registry, tmp_path):
+    """A Program that begins exactly when the kept top Scene ends, above it, does not change
+    whose photo is kept: the Scene beneath still plays at the top's end, so the top keeps
+    nothing of its own."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _save_and_start(client, _scene("beneath", keep_last=True))
+        start = registry.clock.utc()
+        for scene_id in ("top", "next"):
+            body = _scene(scene_id, keep_last=True)
+            saved = client.put(f"/v1/operator/scenes/{scene_id}", json=body, headers=AUTH)
+            assert saved.status_code == 200, saved.text
+        _program(client, frame, "top", start + 20, start + 40, priority=10)
+        _program(client, frame, "next", start + 40, start + 60, priority=20)
+        frame.sync()
+        frame.advance(25)
+        tops = [layer for layer in _layers(coordinator, player)
+                if layer.run_id == _run_id(coordinator, "top")]
+        assert tops and all(layer.after_end == "leave_as_is" for layer in tops)
