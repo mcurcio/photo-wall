@@ -25,6 +25,7 @@ tests/browser/test_scene_flow_browser.py.
 
 import hashlib
 
+import pytest
 from fastapi.testclient import TestClient
 from test_coordination import publish_fixture_catalog, setup_players
 from test_registry import ADMIN
@@ -181,7 +182,8 @@ class _Frame:
         self.clock = ManualClock(registry.clock.utc())
         self.mapping = TimeMapping(self.clock)
         self.mapping.establish(.01)
-        self.renderer = RecordingRenderer(4)
+        # Room for two Scenes' current and next layers on the Frame (a Scene beneath).
+        self.renderer = RecordingRenderer(8)
         self.executor = Executor(player["player_id"], Cache(directory / "cache", 1 << 20),
                                  self.renderer, self.clock, self.mapping)
         self.output = None
@@ -566,3 +568,31 @@ def test_an_outage_during_an_ending_over_a_scene_beneath_shows_its_kept_photo(re
         _play_one_cycle(client, frame, _scene("top", ending=("black", 40), keep_last=False))
         assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # 23 s: the ending
         assert _shown(frame.lose_central(45)) == KEPT  # 68 s: past the ending and its cover
+
+
+@pytest.mark.parametrize("cycles", [1, 2], ids=["one-cycle", "looped"])
+def test_a_kept_top_scene_leaves_the_kept_photo_to_the_scene_beneath(registry, tmp_path, cycles):
+    """Owner, 2026-10-10: "When the top show ends, it gets out of the way and the show
+    underneath takes over." A top Scene that keeps its photo, over a kept Scene beneath: the
+    top's photos keep nothing of their own while a Run plays beneath them, so when Central is
+    lost before the top ends and the Scene beneath's next layer was never committed, the Frame
+    shows the beneath Scene's kept photo, not the top's. Mutation probe: let a top photo be kept
+    whatever plays beneath (the top's photo is the fallback)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _save_and_start(client, _scene("beneath", keep_last=True))
+        start = registry.clock.utc()
+        frame.sync()
+        top = _scene("top", keep_last=True)
+        saved = client.put("/v1/operator/scenes/top", json=top, headers=AUTH)
+        assert saved.status_code == 200, saved.text
+        _program(client, frame, "top", start + 20, start + 20 + 20 * cycles)
+        beneath = _run_id(coordinator, "beneath")
+        assert _shown(frame.advance(10)) == (False, [("photo", 1.0)])  # the Scene beneath
+        shown = frame.advance(20 * cycles)  # the top Scene's last cycle, 10 s before its end
+        assert _shown(shown) == (False, [("photo", 1.0)])
+        assert shown.layers[-1].layer.run_id != beneath
+        after = frame.lose_central(15)  # 5 s past the top's end; nothing new was committed
+        assert _shown(after) == KEPT
+        assert after.layers[0].layer.run_id == beneath

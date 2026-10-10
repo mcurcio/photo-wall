@@ -1107,3 +1107,28 @@ def test_an_ending_keeps_nothing_only_when_nothing_plays_beneath_it():
 
     assert ending(beneath=False) == ["keep_nothing"]
     assert ending(beneath=True) == ["leave_as_is"]
+
+
+def test_a_photo_is_kept_only_when_no_run_beneath_it_plays_on():
+    """The same principle for Keep the last photo up: a top Scene's photo keeps nothing of its
+    own while a Run beneath it plays on its Frame at its cycle's end, so the show underneath
+    keeps its photo; a Program that follows it (on top, not beneath) does not change it.
+    Mutation probes: keep the top's photo whatever plays beneath; step aside for any
+    follower."""
+    def after_ends(other):
+        runtime = Runtime()
+        runtime.set_scene(_kept_scene())
+        runtime.set_scene(Scene(scene_id="other", cycle_seconds=10, loop=True,
+                                contributions=(media(after_end="keep_this_photo"),)))
+        if other == "beneath":
+            runtime.activate("other", "other", 0)
+        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
+                                    ends_at=20))
+        if other == "after":
+            runtime.set_program(Program(program_id="night", scene_id="other", starts_at=20,
+                                        ends_at=30))
+        return [(i.scene_id, i.after_end) for i in runtime.advance(15).contributions]
+
+    assert after_ends(None) == [("kept", "keep_this_photo")]
+    assert after_ends("after") == [("kept", "keep_this_photo")]
+    assert after_ends("beneath") == [("other", "keep_this_photo"), ("kept", "leave_as_is")]
