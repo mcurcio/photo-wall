@@ -71,10 +71,31 @@ def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
 
-def _alpha(layer: Layer, now: float) -> float:
+def _alpha(layer: Layer, now: float, *, hold_end: bool = False) -> float:
+    """The layer's strength at `now`: its opacity through its fades. `hold_end` skips the
+    fade-out (a kept still that nothing follows, `Executor._holds_end`)."""
     fade_in = min(1.0, max(0.0, (now - layer.start) / layer.fade_in)) if layer.fade_in else 1
-    fade_out = min(1.0, max(0.0, (layer.end - now) / layer.fade_out)) if layer.fade_out else 1
+    fade_out = (min(1.0, max(0.0, (layer.end - now) / layer.fade_out))
+                if layer.fade_out and not hold_end else 1)
     return layer.opacity * min(fade_in, fade_out)
+
+
+def _kept(layer: Layer) -> bool:
+    """A still that asks to be kept up when nothing follows it (`retain_on_expiry`)."""
+    return bool(layer.retain_on_expiry and layer.variant and layer.variant.duration is None)
+
+
+def _replaces_kept(layer: Layer) -> bool:
+    """A layer that asks for what is beneath it once it ends: opaque black, or an opaque still
+    that is not kept and fades out. Once it shows, nothing brings the kept still back after it
+    (a Scene's black or fading ending, a Scene that fades its photos and keeps none). A plain
+    opaque overlay leaves the kept still as the outage fallback, as before; a video or a
+    see-through layer never replaces it (a kept Scene's videos are never kept themselves)."""
+    if layer.retain_on_expiry or layer.opacity < 1:
+        return False
+    if layer.presentation == "black":
+        return True
+    return bool(layer.fade_out and layer.variant and layer.variant.duration is None)
 
 
 class Executor:
@@ -447,7 +468,23 @@ class Executor:
 
     def _local(self, assignment: _Assignment, now: float) -> LocalLayer:
         return LocalLayer(assignment.layer, assignment.path, assignment.layer.position(now),
-                          _alpha(assignment.layer, now))
+                          self._strength(assignment.layer, now))
+
+    def _strength(self, layer: Layer, now: float) -> float:
+        return _alpha(layer, now, hold_end=self._holds_end(layer))
+
+    def _holds_end(self, layer: Layer) -> bool:
+        """A kept still that nothing on its output follows keeps full strength to its end: it
+        is about to become the kept picture, so fading it out would show black and then snap
+        back to it. Something follows when another planned layer on the output runs across
+        the still's end; past the plan's horizon nothing is known to follow."""
+        if not (layer.fade_out and _kept(layer) and self._plan):
+            return False
+        return not any(
+            other.output_id == layer.output_id and other.assignment_id != layer.assignment_id
+            and other.start <= layer.end < other.end
+            for other in self._plan.layers
+        )
 
     def _compositions(self, items: Iterable[_Assignment], now: float) -> tuple[OutputComposition, ...]:
         grouped: dict[str, list[LocalLayer]] = {}
@@ -830,9 +867,10 @@ class Executor:
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
-                                    if (local.alpha >= 1 and local.layer.retain_on_expiry
-                                            and local.layer.variant
-                                            and local.layer.variant.duration is None):
+                                    # Bottom to top, so the topmost picture decides what is kept.
+                                    if _replaces_kept(local.layer):
+                                        self._retained.pop(binding.output_id, None)
+                                    elif local.alpha >= 1 and _kept(local.layer):
                                         identity = (f"{binding.output_id}:{binding.frame_id}:"
                                                     f"{binding.generation}:{local.layer.assignment_id}")
                                         owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
@@ -860,7 +898,7 @@ class Executor:
                     continuation = OutputComposition(
                         binding, binding.effective_calibration(now), tuple(
                             LocalLayer(local.layer, local.path, local.layer.position(now),
-                                       _alpha(local.layer, now)) for local in previous.layers
+                                       self._strength(local.layer, now)) for local in previous.layers
                         )
                     )
                     acknowledgment = self._acknowledgment(

@@ -11,15 +11,27 @@ and from the Player's offered plan:
 - #64 keep the last photo up: each layer's `retain_on_expiry`;
 - #65 keep these Frames together: another Scene on the same Frame is refused.
 
+The end of a Scene is proved on what the Frame shows: Central's real plans run through the real
+Player executor (player/executor.py, which owns the kept photo), and the tests read the Frame's
+composition after the Scene ends. An ending (black or fading) is never undone by the kept
+photo; a kept photo with nothing after it does not fade to black and snap back.
+
 The browser half (the console sets each value, saves, reloads and shows it) is
 tests/browser/test_scene_flow_browser.py.
 """
+
+import hashlib
 
 from fastapi.testclient import TestClient
 from test_coordination import publish_fixture_catalog, setup_players
 from test_registry import ADMIN
 
 from central.app import create_app
+from contracts.models import Commit
+from contracts.time import ManualClock, TimeMapping
+from player.cache import Cache
+from player.executor import Executor
+from player.rendering import RecordingRenderer
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 FRAME = "frame-0"
@@ -40,17 +52,24 @@ def _scene(scene_id, **settings):
     ending, seconds = settings.get("ending", ("none", 0))
     if ending != "none":
         body["outro_seconds"] = seconds
+        # "Fades out": the last photo returns over half the fade, then fades out over the rest.
         body["outro_contributions"] = [
             {"target": f"frame:{FRAME}", "role": FRAME, "kind": "black"} if ending == "black"
-            else {**contribution, "fade_out_seconds": seconds}]
+            else {**contribution,
+                  **({"fade_in_seconds": fade / 2} if fade else {}),
+                  "fade_out_seconds": seconds - fade / 2}]
     if settings.get("keep_together"):
         body["protect_frames"] = True
     return body
 
 
+# The fixture photo's bytes: the Player checks every byte it shows against its digest.
+PHOTO = b"photo-wall"
+
+
 def _rig(registry):
     player = setup_players(registry, count=1)[0]
-    publish_fixture_catalog(registry)
+    publish_fixture_catalog(registry, digest=hashlib.sha256(PHOTO).hexdigest())
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     return player, app, app.state.coordinator
 
@@ -140,3 +159,115 @@ def test_keep_frames_together_turns_another_scene_away(registry):
                               json={"scene_id": "intruder", "activation_id": "act-intruder",
                                     "priority": 10})
         assert refused.json()["reason"] == "protected_frames", refused.text
+
+
+# --- What the Frame shows when the Scene ends: Central's plans run on the Player executor.
+
+
+class _Frame:
+    """The Pi feeding FRAME, played from Central's deliveries: each sync takes the current
+    configuration and plan, fetches and prepares what is imminent, commits it, and draws."""
+
+    def __init__(self, registry, coordinator, player, directory):
+        self.registry, self.coordinator, self.player = registry, coordinator, player
+        self.clock = ManualClock(registry.clock.utc())
+        self.mapping = TimeMapping(self.clock)
+        self.mapping.establish(.01)
+        self.renderer = RecordingRenderer(4)
+        self.executor = Executor(player["player_id"], Cache(directory / "cache", 1 << 20),
+                                 self.renderer, self.clock, self.mapping)
+        self.output = None
+
+    def sync(self):
+        self.coordinator.advance()
+        delivery = self.coordinator.delivery(self.player["player_id"], self.player["authority_epoch"])
+        self.executor.accept_configuration(delivery["configuration"])
+        self.output = delivery["configuration"].bindings[0].output_id
+        plan = delivery["plan"]
+        if plan is not None:
+            self.executor.accept_plan(plan)
+            for layer in plan.layers:
+                if layer.variant is not None:
+                    self.executor.acquire(layer.assignment_id, [PHOTO])
+            self.executor.prepare_imminent()
+            readiness = self.executor.readiness()
+            if readiness.prepared:
+                self.executor.accept_commit(Commit(
+                    plan_id=plan.plan_id, revision=plan.revision, authority_epoch=plan.authority_epoch,
+                    assignment_ids=readiness.prepared, readiness_sequence=readiness.sequence,
+                    committed_at=self.clock.utc()))
+        self.executor.tick()
+        return self.renderer.outputs[self.output]
+
+    def advance(self, seconds):
+        """Both clocks move on together, then the Frame syncs and draws."""
+        self.registry.clock.advance(seconds)
+        self.clock.advance(seconds)
+        self.mapping.establish(.01)
+        return self.sync()
+
+
+def _shown(composition):
+    """What the Frame draws: each layer as (black or photo, strength), and whether it is the
+    fallback (nothing planned)."""
+    return composition.fallback, [
+        ("black" if local.layer.presentation == "black" else "photo", round(local.alpha, 2))
+        for local in composition.layers]
+
+
+def _play_one_cycle(client, frame, body):
+    """`body` scheduled for exactly one 20 s cycle, starting now (a Program, so its end and
+    ending are planned ahead), then 10 s on: mid-cycle, the photo shows at full strength."""
+    saved = client.put(f"/v1/operator/scenes/{body['scene_id']}", json=body, headers=AUTH)
+    assert saved.status_code == 200, saved.text
+    now = frame.registry.clock.utc()
+    program = {"program_id": "p-" + body["scene_id"], "scene_id": body["scene_id"],
+               "starts_at": now, "ends_at": now + 20}
+    scheduled = client.put(f"/v1/operator/programs/{program['program_id']}", json=program, headers=AUTH)
+    assert scheduled.status_code == 200, scheduled.text
+    frame.sync()
+    assert _shown(frame.advance(10)) == (False, [("photo", 1.0)])
+    return frame
+
+
+def test_after_a_black_ending_the_kept_photo_does_not_come_back(registry, tmp_path):
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _scene("black-end", ending=("black", 4), keep_last=True))
+        assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # the ending
+        # After the ending nothing plays: the Frame stays black, not the kept photo again.
+        assert _shown(frame.advance(5)) == (True, [])
+
+
+def test_after_a_fading_ending_the_kept_photo_does_not_come_back(registry, tmp_path):
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _scene("fade-end", ending=("fade", 4), fade=2, keep_last=True))
+        # The ending's photo returns over half the fade (1 s), then fades out over the rest.
+        assert _shown(frame.advance(10.5)) == (False, [("photo", 0.5)])
+        assert _shown(frame.advance(2)) == (False, [("photo", 0.5)])
+        assert _shown(frame.advance(2.5)) == (True, [])
+
+
+def test_a_kept_photo_with_nothing_after_it_does_not_fade_to_black_and_snap_back(registry, tmp_path):
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _scene("stops", fade=3, keep_last=True))
+        # 0.5 s before the last cycle ends, inside its 1.5 s fade-out: nothing follows, so the
+        # kept photo stays at full strength...
+        assert _shown(frame.advance(9.5)) == (False, [("photo", 1.0)])
+        # ...and after the Scene it stays up, the same photo, with no dip to black between.
+        assert _shown(frame.advance(1)) == (True, [("photo", 1.0)])
+
+
+def test_without_keep_the_last_photo_fades_out_to_black(registry, tmp_path):
+    """The hold is only for a kept photo: a Scene that keeps nothing fades its last photo out."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _scene("plain", fade=3, keep_last=False))
+        assert _shown(frame.advance(9.5)) == (False, [("photo", 0.33)])
+        assert _shown(frame.advance(1)) == (True, [])
