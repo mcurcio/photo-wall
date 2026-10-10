@@ -8,7 +8,7 @@ The operator-reported v0.13.0 Kubernetes gaps and claimable follow-up work are i
 
 The [domain-driven operator console design](operator-console-ddd.md) gives each domain aggregate one home in the console, ranks the console's domain gaps and plans its incremental passes, Player fleet first. It refines the [console UX design](operator-console-ux-design.md); pass 1 is approved.
 
-The [roadmap](roadmap.md) orders product work by the power user's journey, from installing Central to fixing things, with each step's current status. The [operator console design](operator-console-design.md) is the console's target design ([decision 0019](decisions/0019-first-principles-console.md)); the earlier [console UX design](operator-console-ux-design.md) is its historical gate record.
+The [roadmap](roadmap.md) orders product work by the power user's journey, from installing Central to fixing things, with each step's current status. The [operator console design](operator-console-design.md) is the console's target design ([decision 0019](decisions/0019-first-principles-console.md)); the earlier [console UX design](operator-console-ux-design.md) is its historical gate record. The [console design language](design-language.md) is the one home for the console's UI rules: principles, page templates, the pattern catalogue, save models, status words, voice, and how each roadmap step becomes a page.
 
 The [Player node architecture](player-architecture.md) describes the node as built: processes, supervision, the guarantee and liveness signal of each layer, telemetry to Central, and observed gaps.
 
