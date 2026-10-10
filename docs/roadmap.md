@@ -11,7 +11,7 @@ Where things are defined:
 - The console's target design (pages, the Frame page, power, Home Assistant, the settings catalogue) is the [operator console design](operator-console-design.md); the decisions and what they replace are [decision 0019](decisions/0019-first-principles-console.md).
 - This roadmap owns four things the others link to: each step's status today, the delivery order with each delivery's scope and acceptance, the moments of truth, and the deferred list.
 - What the owner asked for is in [requirements › Operator experience](requirements.md#operator-experience).
-- The engineering slice order for the first MVP is the [implementation plan](implementation-plan.md); this roadmap orders product capabilities on top of it. Each delivery is split into pull requests when it starts.
+- The engineering slice order for the first MVP is the [implementation plan](implementation-plan.md); this roadmap orders product capabilities on top of it. Each delivery is split into pull requests when it starts. A delivery that contains a mechanism not yet designed gets its own short design pass before its first pull request; those items are marked **design pass** below.
 
 ## Words used here
 
@@ -120,7 +120,7 @@ G6 follows the existing release choices in [console DDD Part E](operator-console
 
 ## Delivery order
 
-**1a → 1x → 1b → 1c → 2a → 2b → 3b-i → 3b-ii → 4 → 5a → 5b → 3 → 6 → 7.** Home Assistant (3) comes after the slideshow work because it needs Frame names, status words and Show now with an end time first, and the owner's priority is a visibly working wall.
+**1a → 1x → 1b → 1c → 4 → 2a → 2b → 3b-i → 3b-ii → 5a → 5b → 3 → 6 → 7.** The owner's priority is a visibly working wall: real photo sources (4) depend on nothing and give the most visible change, so they come right after the three knobs (the owner can move 4 back). Home Assistant (3) comes after the slideshow work because it needs Frame names, status words and Show now with an end time first.
 
 | # | Delivery | Size | Outcome | Depends on |
 |---|---|---|---|---|
@@ -128,11 +128,11 @@ G6 follows the existing release choices in [console DDD Part E](operator-console
 | [1x](#1x-expose-what-already-exists) | Expose what already exists | S | Every setting Central or the Pi can already do has a control | none |
 | [1b](#1b-display-identity-and-power) | Display identity and power | L | Turn a display off and on from the console; its settings follow it | 1a |
 | [1c](#1c-brightness-contrast-and-colour) | Brightness, contrast and colour | M | Brightness and contrast act on the display where it allows | 1b |
+| [4](#4-real-photo-sources) | Real photo sources | L | Connect Immich and build a real Photo source in the console | none |
 | [2a](#2a-power-night-off-and-all-offon) | Power: Night off and All off/on | M | Displays go off at 23:00 and on at 07:00 | 1b; **owner: U1 amendment** |
 | [2b](#2b-the-week) | The week | M | One repeating Schedule; every Frame says why it plays | 2a |
 | [3b-i](#3b-i-home-and-phone) | Home and phone | L | Check and act on the wall from a phone, signed in | 2a, 2b |
 | [3b-ii](#3b-ii-the-live-map) | The live map | M | Each tile shows what its Pi presents | 3b-i |
-| [4](#4-real-photo-sources) | Real photo sources | L | Connect Immich and build a real Photo source in the console | none |
 | [5a](#5a-photo-fit-and-order) | Photo fit and order | L | No cropped portraits, no bare letterbox, shuffle | 4; **owner: D13** (for no-repeat) |
 | [5b](#5b-video-captions-and-transitions) | Video, captions and transitions | M | Muted, capped videos; captions on request | 5a |
 | [3](#3-home-assistant) | Home Assistant | L | Frames as Home Assistant devices; motion wakes a room | 2a, 2b, 3b-i |
@@ -179,8 +179,8 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 - **In scope:** B6, G5. Display identity from the EDID. Settings #110, #116 (without the Home Assistant smart plug), #117, #118, #120.
 - **Out of scope:** when displays turn on and off (2a); brightness on the hardware (1c); the smart-plug method (3).
 - **Acceptance:** CI tests `tests/node/display/test_display_power_methods.py` (with fake `cec-ctl` and `ddcutil`: each method sends the right command and reports "confirmed" or "didn't answer"), `tests/test_display_identity.py` (DB: the same EDID on another Output is the same Display and its settings follow; no usable identity makes a new Display), `tests/test_display_changed_readiness.py` (DB: a changed display keeps the Frame not ready until Position is committed), `tests/browser/test_frame_power_browser.py`. Bench step: an agent runs Test off and on against the test Pi's monitor and fills in the support table.
-- **Depends on:** 1a.
-- **Risks and unknowns:** whether the Pi 5 kernel exposes the HDMI DDC bus as I2C at all; many monitors ignore CEC, so the portable monitor may support only "HDMI signal off"; the Pi does not report EDID today, and the command from Central to the Pi (a new Node bus method) is not designed; the image changes go through the image layers, not hand-built packages.
+- **Depends on:** 1a; a **design pass** for the Node bus power command.
+- **Risks and unknowns:** whether the Pi 5 kernel exposes the HDMI DDC bus as I2C at all; many monitors ignore CEC, so the portable monitor may support only "HDMI signal off"; the Pi does not report EDID today, and the command from Central to the Pi (a new Node bus method) is not designed (**design pass**, before the power pull request); the image changes go through the image layers, not hand-built packages.
 - **Size:** L. Split: spike and image tools; Display identity with G5; power methods and the Power tab.
 - **Moment it proves:** the first half of 6: Test: turn off makes the test monitor report off (by CEC or DDC/CI), or the Pi reports its HDMI signal off.
 
@@ -195,14 +195,25 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 - **Size:** M.
 - **Moment it proves:** none of the ten; it completes the owner's three questions.
 
+### 4. Real photo sources
+
+- **Outcome:** the owner connects Immich in Settings (no file, no restart), sees the real counts, and builds "Anna and Ben, last 3 years, no screenshots", whose preview matches what plays.
+- **In scope:** A3, D1, D2. Settings #8–#33, #36. Immich health over time: a rejected key or an unsupported Immich version shows as Needs a look with the fix.
+- **Out of scope:** writing anything back to Immich.
+- **Acceptance:** CI tests against the Immich fixture (`tests/integration/compose.immich.yml`): `tests/test_immich_connection.py` (Test shows the fixture's exact photo, video, album and people counts; a bad key reads as a plain error; the key never reaches the browser), `tests/test_source_filters.py` (albums, people, exclusions, the three default exclusions), `tests/test_source_preview_matches_plan.py` (every asset the planner assigns is in the preview set), `tests/browser/test_source_flow_browser.py` extended. No bench step.
+- **Depends on:** nothing. Placed right after 1c for visible value; the owner can move it back.
+- **Risks and unknowns:** the media worker's 1,000-match refusal contradicts [requirements](requirements.md#live-media-compatibility-and-preparation) and must go; Immich's API changes between versions.
+- **Size:** L. Split: connection page and health; filters and exclusions; several sources per Scene.
+- **Moments it proves:** 2 (the counts test) and 5 (the preview-matches-plan test).
+
 ### 2a. Power: Night off and All off/on
 
 - **Outcome:** with Night off set, the test monitor goes off at its start and on at its end, the Frame reads Resting, and All off holds the displays off until the next scheduled power change.
-- **In scope:** E2, F5. The power-request model and the hold rule. Settings #80, #81 (clock times), #82, #83, #87–#91 (the Home Assistant guards are stored now and used in 3).
+- **In scope:** E2, F5. The power-request model and the hold rule. Settings #80, #81 (clock times), #82, #83, #89–#91. Each power request carries a generic "source" (console, schedule, Scene, Home Assistant), so 3 adds its guards without changing the model.
 - **Out of scope:** Scene power requests (#70, #89) until the owner confirms them; sunrise and sunset times (2b, which brings the house location); Home Assistant (3).
 - **Acceptance:** CI tests `tests/test_power_requests.py` (DB, controllable clock: the newest request wins until it ends; the schedule resumes; each guard default; a hold ends at the next scheduled change), `tests/browser/test_power_lane_browser.py` (bands, holds with who set them, Resume schedule), and a node test that an "off" target runs the display's chosen method. Bench step: an agent sets a Night off window two minutes ahead on the test Pi and confirms off, then on.
-- **Depends on:** 1b; **owner decision: the U1 amendment** (blocking).
-- **Risks and unknowns:** whether Central or the Pi evaluates the schedule is not designed; the Node redesign's autonomy favours the Pi holding it, so Night off survives Central being down.
+- **Depends on:** 1b; **owner decision: the U1 amendment** (blocking); a **design pass** on who evaluates the power schedule, Central or the Pi.
+- **Risks and unknowns:** whether Central or the Pi evaluates the schedule is not designed (**design pass**); the Node redesign's autonomy favours the Pi holding it, so Night off survives Central being down.
 - **Size:** M.
 - **Moment it proves:** 6: at Night off's start the test monitor reports off within one minute, and at its end reports on within one minute.
 
@@ -239,17 +250,6 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 - **Size:** M.
 - **Moment it proves:** none alone; it makes 9's "what the Pi presents" visible.
 
-### 4. Real photo sources
-
-- **Outcome:** the owner connects Immich in Settings (no file, no restart), sees the real counts, and builds "Anna and Ben, last 3 years, no screenshots", whose preview matches what plays.
-- **In scope:** A3, D1, D2. Settings #8–#33, #36. Immich health over time: a rejected key or an unsupported Immich version shows as Needs a look with the fix.
-- **Out of scope:** writing anything back to Immich.
-- **Acceptance:** CI tests against the Immich fixture (`tests/integration/compose.immich.yml`): `tests/test_immich_connection.py` (Test shows the fixture's exact photo, video, album and people counts; a bad key reads as a plain error; the key never reaches the browser), `tests/test_source_filters.py` (albums, people, exclusions, the three default exclusions), `tests/test_source_preview_matches_plan.py` (every asset the planner assigns is in the preview set), `tests/browser/test_source_flow_browser.py` extended. No bench step.
-- **Depends on:** nothing; it can move earlier if the wall needs real photos sooner.
-- **Risks and unknowns:** the media worker's 1,000-match refusal contradicts [requirements](requirements.md#live-media-compatibility-and-preparation) and must go; Immich's API changes between versions.
-- **Size:** L. Split: connection page and health; filters and exclusions; several sources per Scene.
-- **Moments it proves:** 2 (the counts test) and 5 (the preview-matches-plan test).
-
 ### 5a. Photo fit and order
 
 - **Outcome:** on a landscape Frame, portraits show as a pair or on a blurred mat, never cropped, and Scenes shuffle instead of showing newest first.
@@ -275,7 +275,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 ### 3. Home Assistant
 
 - **Outcome:** Home Assistant shows one device per Frame with a power switch, status and Skip, and a shipped motion Blueprint wakes a room's displays.
-- **In scope:** F7. Settings #69, #87, #88, #141–#144; the device and entity map, the request topic and Blueprints ([design §8](operator-console-design.md#8-home-assistant)).
+- **In scope:** F7. Settings #69, #87 and #88 (the Home Assistant power guards, with their controls on the Power lane), #141–#144; the device and entity map, the request topic and Blueprints ([design §8](operator-console-design.md#8-home-assistant)).
 - **Out of scope:** a dedicated Home Assistant integration; native sensors.
 - **Acceptance:** CI test `tests/integration/test_home_assistant_mqtt.py` against a Mosquitto container (discovery announcements kept by the broker with stable ids; a switch becomes a power request under the hold rule; Remove clears them; a broker restart re-announces). Bench step: an agent points a throwaway Home Assistant container at the broker and checks the devices appear.
 - **Depends on:** 2a (power requests), 2b (Frame names and room label), 3b-i (status words, Show now with an end time).
@@ -289,7 +289,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 - **In scope:** A1, A5 (the network-boot self-test and router help, setting #130), B1 (the code on the display), B3's several walls, B7, C1, C2 (#104), G4's New Pis waiting, G10's Retire a Pi, the "needs 4 GB" refusal shown in the console ([requirements](requirements.md#supported-player-hardware)). Settings #7, #93, #107 (bulk actions on selected Frames), #121.
 - **Out of scope:** roles; spanning.
 - **Acceptance:** CI tests `tests/browser/test_setup_checklist_browser.py` (each step turns green only from a real check), `tests/test_new_pi_binding.py` (DB: one tap binds; the Frame keeps position, Display settings and Schedules), `tests/test_surfaces.py` (DB: several walls), and a check that a refused 2 GB board shows its reason (extending the existing node memory tests). Bench step: an agent clears the test Pi's binding, power-cycles it and times its appearance.
-- **Depends on:** 1b (the display code), 2b (names).
+- **Depends on:** 1b (the display code), 2b (names), 4 (the checklist's Immich step and B7's Favourites slideshow need the Immich page).
 - **Risks and unknowns:** several walls is a domain change: a Surface is a bare text label today, so walls need a stored record (M on its own); routers differ in how they hand out network-boot settings.
 - **Size:** L. Split: checklist and network boot; New Pis waiting and replace; several walls and groups.
 - **Moments it proves:** 1: a netbooted test Pi appears in the console within 60 seconds of power-on and its display shows the same code; 10's first half: Replace with… binds a new Pi in one action and every Frame setting survives.
@@ -337,8 +337,8 @@ Requirements and needs that are not journey steps, and where each goes:
 | Router network-boot setup, setting #130 | [6](#6-setup-and-hardware-life) |
 | Immich health over time (key rotation, version changes) | [4](#4-real-photo-sources) |
 | Central cache limit #129, Pi logs #124 | [7](#7-peace-of-mind) |
-| U1's open fault classes (compositor, graphics, kernel, panel, power, before the display starts; [requirements](requirements.md#failure-visibility-and-recovery)) | Outside this roadmap: owned by the Node programme ([Player architecture](player-architecture.md)) |
-| Nice-to-have catalogue rows no delivery names: #1 house name, #6 language, #60 slow pan and zoom, #61 clock and weather, #68 burn-in protection, #137 single sign-on | Wait until a delivery picks them up |
+| U1's open fault classes (compositor, graphics, kernel, panel, power, before the display starts; [requirements](requirements.md#failure-visibility-and-recovery)) | Outside this roadmap: owned by the Node programme ([Player architecture](player-architecture.md)). Cost: a compositor or panel fault can still leave a display dark with no explanation on it, so moment 9 holds only for faults the console can see |
+| Nice-to-have catalogue rows no delivery names: #1 house name, #6 language, #60 slow pan and zoom, #61 clock and weather, #137 single sign-on | Wait until a delivery picks them up |
 
 ## Deferred, and what that costs
 
@@ -354,6 +354,7 @@ Requirements and needs that are not journey steps, and where each goes:
 | Native sensors and auto-dim | Room-light brightness and motion need Home Assistant |
 | Lights and other non-display controls | Scenes cannot drive lights or relays |
 | Spanning one photo across several Frames (C5) | Each Frame shows its own photo |
+| Burn-in protection (#68) | The owner has OLED panels; a static element shown for hours (captions from 5b, a paused photo) can burn in. Until it lands, keep captions on auto-hide (#59) and Pause short |
 | Per-Pi software pins ([console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer)) | The whole wall runs one selected release |
 
 What the design itself gives up is listed in [the operator console design](operator-console-design.md#13-what-this-design-gives-up).
