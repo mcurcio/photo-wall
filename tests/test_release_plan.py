@@ -1042,8 +1042,11 @@ def test_the_pipeline_is_the_one_workflow_that_triggers_on_pull_requests_and_mai
             triggers = workflow.read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
             assert "pull_request" not in triggers and "push:" not in triggers, workflow.name
             assert "paths:" not in triggers, workflow.name
-    for name in ("checks.yml", "software-e2e.yml"):
-        assert "\non:\n  workflow_call:\n\n" in (WORKFLOWS / name).read_text(), name
+    # Called only: checks.yml takes nothing, software-e2e.yml the plan's revision (the node
+    # component set its Player runs from).
+    assert "\non:\n  workflow_call:\n\n" in (WORKFLOWS / "checks.yml").read_text()
+    e2e = (WORKFLOWS / "software-e2e.yml").read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
+    assert re.fullmatch(r"  workflow_call:\n    inputs:\n      revision:\n(        .*\n?)+", e2e), e2e
 
 
 def test_nothing_releases_by_hand():

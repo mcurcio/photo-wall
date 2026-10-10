@@ -10,8 +10,9 @@ debian-packaging/build-container.sh; its apt already reads only the snapshot pin
 photo-wall-node-display and photo-wall-frame-client installed from the local repo `--debs`
 (debian-packaging/build-repo.sh's output; decision 0019) and so their Depends (Weston, the
 overlay client's pywayland and pycairo, which the harness also reads pixels and checks the
-private protocol with), plus the Player's Debian runtime (GTK, GStreamer, PyGObject, PyOpenGL,
-pydantic), which the Player main-loop harness drives on real GLib and GL. Nothing of
+private protocol with), plus photo-wall-player, whose Depends are the Player's Debian runtime
+(GTK, GStreamer, PyGObject, PyOpenGL, pydantic), which the Player main-loop harness drives on
+real GLib and GL. Nothing of
 appliance/display_host is compiled here: the harness proves the packages.
 
 The image is tagged `photo-wall-display-harness:<digest>`, the digest being the sha256 of its
@@ -48,13 +49,13 @@ if str(REPOSITORY) not in sys.path:   # run as a file (`python scripts/run_displ
     sys.path.insert(0, str(REPOSITORY))
 
 from scripts.container_build import daemon_image_build  # noqa: E402
-from scripts.debian_packages import packages  # noqa: E402
 
 ARCHITECTURE = "arm64"
 IMAGE = "photo-wall-display-harness"
 BUILD_CONTAINER = REPOSITORY / "debian-packaging/build-container.sh"
-# The packages under test, from the local repo.
-DISPLAY_PACKAGES = ("photo-wall-frame-client", "photo-wall-node-display")
+# The packages under test, and the Player's (for its Depends, the Player's runtime), from the
+# local repo.
+DISPLAY_PACKAGES = ("photo-wall-frame-client", "photo-wall-node-display", "photo-wall-player")
 WESTON_LOG = "/tmp/pw-weston.log"
 
 
@@ -62,7 +63,7 @@ def recipe(base: str, base_id: str) -> dict[str, str]:
     """PURE. The image's Dockerfile, FROM the build container's tag `base`, whose image ID
     `base_id` it records, so a new build container is a new recipe. The local repo is preferred
     above the snapshot's 1001 (erratum E-0019-P1A-3)."""
-    names = " ".join((*DISPLAY_PACKAGES, *packages("player")))
+    names = " ".join(DISPLAY_PACKAGES)
     return {"Dockerfile": f"""FROM {base}
 LABEL org.photo-wall.build-container={base_id}
 COPY debs /var/tmp/photo-wall-debs

@@ -19,7 +19,6 @@ from scripts.debian_packages import (
     AptSource,
     DebianPackage,
     DeclarationError,
-    import_table,
     main,
     mmdebstrap_argv,
     packages,
@@ -30,14 +29,6 @@ from scripts.import_check import declared
 
 REPO = Path(__file__).resolve().parents[1]
 
-# The Player builder's hand-kept DEB_DEPENDS before the declaration replaced it.
-PLAYER_DEB_DEPENDS_BEFORE = (
-    "python3", "python3-gi", "python3-gst-1.0", "python3-opengl", "gir1.2-gtk-3.0",
-    "gir1.2-gst-plugins-base-1.0", "gstreamer1.0-plugins-base", "gstreamer1.0-plugins-good",
-    "gstreamer1.0-plugins-bad", "gstreamer1.0-libav", "libgl1-mesa-dri", "libegl1", "weston",
-    "python3-pydantic", "python3-httpx", "python3-websockets", "python3-cryptography",
-    "python3-zeroconf",
-)
 INITRD_INCLUDE = (
     "--include=ca-certificates,device-tree-compiler,gnupg,initramfs-tools,kmod,python3,zstd")
 SNAPSHOT_LINES = (
@@ -53,9 +44,9 @@ RASPBERRY_PI_LINE = "deb [trusted=yes] http://archive.raspberrypi.com/debian tri
 
 # --- AC1: the invariants, checked at import --------------------------------------------------
 
-ZEROCONF = DebianPackage("python3-zeroconf", frozenset({"player"}), imports=("zeroconf",))
-CA = DebianPackage("ca-certificates", frozenset({"player", "initrd-build"}),
-                   why="the CA bundle", stage="bootstrap")
+KMOD = DebianPackage("kmod", frozenset({"initrd-build"}), why="depmod")
+CA = DebianPackage("ca-certificates", frozenset({"initrd-build"}), why="the CA bundle",
+                   stage="bootstrap")
 
 
 def test_the_shipped_declaration_is_valid():
@@ -63,34 +54,22 @@ def test_the_shipped_declaration_is_valid():
 
 
 @pytest.mark.parametrize(("pin", "declared", "message"), [
-    (PIN, [ZEROCONF, ZEROCONF], "declared twice"),
-    (PIN, [replace(ZEROCONF, name="Python3-zeroconf")], "not a Debian package name"),
-    (PIN, [replace(ZEROCONF, name="z")], "not a Debian package name"),
-    (PIN, [ZEROCONF, replace(ZEROCONF, name="python3-zeroconf-fork")], "given by both"),
-    (PIN, [replace(ZEROCONF, imports=())], "no import and no reason"),
-    (PIN, [replace(ZEROCONF, archive="raspberrypi")], "unpinned raspberrypi"),
-    (PIN, [replace(ZEROCONF, consumers=frozenset({"node-manager"}), archive="raspberrypi")],
-     "unpinned raspberrypi"),
-    (PIN, [replace(ZEROCONF, consumers=frozenset({"playr"}))], "unknown or no consumers"),
-    (replace(PIN, snapshot="2026-09-04T00:00:00Z"), [ZEROCONF], "is not %Y%m%dT%H%M%SZ"),
-    (replace(PIN, snapshot="202694T000000Z"), [ZEROCONF], "is not %Y%m%dT%H%M%SZ"),
-    (PIN, [replace(ZEROCONF, stage="early")], "unknown stage"),
-    (PIN, [replace(CA, consumers=frozenset({"player"}))], "serves every root"),
-    (PIN, [replace(CA, archive="raspberrypi", consumers=frozenset({"initrd-build"}))],
-     "serves every root"),
-    (PIN, [ZEROCONF], "no package is in the bootstrap stage"),
+    (PIN, [CA, KMOD, KMOD], "declared twice"),
+    (PIN, [CA, replace(KMOD, name="Kmod")], "not a Debian package name"),
+    (PIN, [CA, replace(KMOD, name="k")], "not a Debian package name"),
+    (PIN, [CA, replace(KMOD, why="")], "names no reason"),
+    # The Player's and the manager's consumers went with their V1 builders (decision 0019).
+    (PIN, [CA, replace(KMOD, consumers=frozenset({"player"}))], "unknown or no consumers"),
+    (PIN, [CA, replace(KMOD, consumers=frozenset())], "unknown or no consumers"),
+    (replace(PIN, snapshot="2026-09-04T00:00:00Z"), [CA], "is not %Y%m%dT%H%M%SZ"),
+    (replace(PIN, snapshot="202694T000000Z"), [CA], "is not %Y%m%dT%H%M%SZ"),
+    (PIN, [CA, replace(KMOD, stage="early")], "unknown stage"),
+    (PIN, [replace(CA, archive="raspberrypi")], "serves every root"),
+    (PIN, [KMOD], "no package is in the bootstrap stage"),
 ])
 def test_validate_refuses_a_broken_declaration(pin, declared, message):
     with pytest.raises(DeclarationError, match=re.escape(message)):
         validate(pin, declared)
-
-
-def test_a_package_outside_the_initrd_build_moved_to_the_unpinned_archive_is_refused():
-    """Mutation probe (e): weston on the Raspberry Pi archive is an import-time error."""
-    moved = tuple(replace(package, archive="raspberrypi") if package.name == "weston"
-                  else package for package in PACKAGES)
-    with pytest.raises(DeclarationError, match="weston is outside the initrd build root"):
-        validate(PIN, moved)
 
 
 def test_an_initrd_build_package_may_come_from_the_raspberry_pi_archive():
@@ -101,7 +80,6 @@ def test_an_initrd_build_package_may_come_from_the_raspberry_pi_archive():
 def test_the_ca_bundle_is_the_bootstrap_stage():
     """Mutation probe: ca-certificates moved to the "apt" stage empties the bootstrap stage,
     an import-time error (apt inside a root could not fetch the https pin)."""
-    assert packages("player", stage="bootstrap") == ("ca-certificates",)
     assert packages("initrd-build", stage="bootstrap") == ("ca-certificates",)
     moved = tuple(replace(package, stage="apt") if package.stage == "bootstrap" else package
                   for package in PACKAGES)
@@ -173,30 +151,18 @@ def test_a_snapshot_list_that_is_not_exactly_the_pin_is_refused(text):
 
 
 def test_each_consumer_gets_its_list():
-    assert packages("player") == tuple(sorted(
-        (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev", "libwayland-client0")))
-    assert packages("node-manager") == ("ca-certificates", "python3")
     assert packages("initrd-build") == (
         "ca-certificates", "device-tree-compiler", "gnupg", "initramfs-tools", "kmod", "python3",
         "zstd")
     assert packages("initrd-build", archive="raspberrypi") == (
         "linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom")
-    assert packages("player", archive="raspberrypi") == ()
-    assert packages("player", stage="apt") == tuple(
-        name for name in packages("player") if name != "ca-certificates")
+    assert packages("initrd-build", stage="apt") == tuple(
+        name for name in packages("initrd-build") if name != "ca-certificates")
 
 
 def test_an_unknown_consumer_is_refused_rather_than_rendering_nothing():
     with pytest.raises(ValueError, match="unknown consumer"):
-        packages("playr")
-
-
-def test_the_import_tables_are_read_only_and_cover_the_player_imports():
-    assert sorted(import_table("player")) == [
-        "OpenGL", "cryptography", "gi", "httpx", "pydantic", "websockets", "zeroconf"]
-    assert import_table("initrd-build") == {}
-    with pytest.raises(TypeError):
-        import_table("player")["requests"] = "python3-requests"
+        packages("player")
 
 
 # --- AC4: mmdebstrap and the CLI ------------------------------------------------------------
@@ -214,8 +180,7 @@ def test_mmdebstrap_builds_the_initrd_root_at_the_pin():
 
 @pytest.mark.parametrize(("argv", "printed"), [
     (["epoch"], ["1788480000"]),
-    (["packages", "node-manager"], list(packages("node-manager"))),
-    (["packages", "player", "node-manager"], list(packages("player", "node-manager"))),
+    (["packages", "initrd-build"], list(packages("initrd-build"))),
     (["packages", "--archive", "raspberrypi", "initrd-build"],
      ["linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom"]),
     (["sources"], list(SNAPSHOT_LINES)),
@@ -236,7 +201,7 @@ def test_the_cli_execs_mmdebstrap_with_the_same_argv(monkeypatch):
 
 def test_the_cli_refuses_an_unknown_consumer():
     with pytest.raises(SystemExit):
-        main(["packages", "playr"])
+        main(["packages", "player"])
 
 
 # --- AC11: the declaration is the one place -------------------------------------------------
@@ -353,6 +318,3 @@ def test_no_python_builds_a_deb():
     for path in sorted((REPO / "scripts").glob("*.py")):
         assert '"dpkg-deb", "--build"' not in path.read_text(), path.name
 
-
-def test_the_manager_names_its_host_dependencies():
-    assert "ca-certificates" in packages("node-manager")

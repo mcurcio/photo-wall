@@ -12,9 +12,10 @@ name: Pipeline
 #   node-pid1       node-pid1.yml, the Player node lifecycle under real systemd, when a node
 #                   package, Central's fleet owners or the scenarios' own paths changed.
 #   node-components node-components.yml: the V2 node components (and the PID1 fixture when
-#                   node-pid1 runs), built ONCE for base-image and node-pid1 when the plan lists
-#                   either. A build, not a test: scripts/release_plan.py's BUILD_JOBS names its
-#                   consumers, and the gate fails a run where it failed.
+#                   node-pid1 runs), built ONCE for e2e (the Player runs from its app image),
+#                   base-image and node-pid1 when the plan lists one, so on every run. A build,
+#                   not a test: scripts/release_plan.py's BUILD_JOBS names its consumers, and the
+#                   gate fails a run where it failed.
 #   tested          the barrier every release job needs: each test job the plan listed passed.
 #   service-base, images, seal
 #                   the release, in that order: a push to main that changed a shipped package.
@@ -132,18 +133,21 @@ jobs:
     uses: ./.github/workflows/checks.yml
 
   e2e:
-    needs: plan
+    needs: [plan, node-components]
     if: contains(fromJSON(needs.plan.outputs.jobs), 'e2e')
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/software-e2e.yml
+    with:
+      revision: ${{ needs.plan.outputs.revision }}
 
   # The V2 node components for the plan's exact revision, once, for every job that needs them.
   node-components:
     needs: plan
     if: >-
-      contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
+      contains(fromJSON(needs.plan.outputs.jobs), 'e2e')
+      || contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
       || contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')
     permissions:
       contents: read

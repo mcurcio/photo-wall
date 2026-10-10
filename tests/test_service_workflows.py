@@ -161,6 +161,24 @@ def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
             assert repeated not in body, (job, repeated)
 
 
+def test_the_wall_scenario_runs_the_player_from_this_runs_app_image():
+    """The Players run from the app root node-components.yml built for the plan's revision
+    (decision 0019), never from a wheelhouse built beside it."""
+    workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    scenario = _job(workflow, 'two-players-three-outputs')
+    assert 'name: photo-wall-node-components-${{ inputs.revision }}' in scenario
+    assert '--app-image "$RUNNER_TEMP/node-components/app.squashfs"' in scenario
+    assert 'REVISION: ${{ inputs.revision }}' in scenario and '--revision "$REVISION"' in scenario
+    # The roots container that unpacks the image comes from node-components' build cache.
+    assert 'PHOTO_WALL_NODE_BUILDER: ${{ steps.setup.outputs.builder }}' in scenario
+    assert 'PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}' in scenario
+    for retired in ('build_player', 'wheelhouse'):
+        assert retired not in workflow, retired
+    job = _job((WORKFLOWS / 'pipeline.yml').read_text(), 'e2e')
+    assert 'needs: [plan, node-components]' in job
+    assert 'revision: ${{ needs.plan.outputs.revision }}' in job
+
+
 def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     """One matrix leg per scenario of tests/test_node_pid1.py, each required, never skipped,
     on native arm64, every leg booting the one component set and fixture node-components.yml

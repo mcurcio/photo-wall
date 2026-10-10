@@ -6,10 +6,10 @@ This module is the only place a Debian package name is written for the builders 
 snapshot pin is written once, in debian-packaging/snapshot.list (decision 0019, rule 1), which `PIN`
 is read from at import: the file must be exactly the two sources `DebianPin.sources()` renders,
 so it cannot carry a second mirror. Every consumer is rendered from this module: the base's apt
-sources (rpi-image-gen, from `sources`), the initrd build root (`mmdebstrap_argv`), each
-remaining builder's `Depends` (`packages`), and each closure policy's third-party table
-(`import_table`, read by `scripts/module_closure.py`). The base's own OS packages are not here:
-they live in its rpi-image-gen layers (decision 0019, R4).
+sources (rpi-image-gen, from `sources`) and the initrd build root (`mmdebstrap_argv`, and
+`packages` for its Raspberry Pi archive install). The base's own OS packages are not here: they
+live in its rpi-image-gen layers (decision 0019, R4); the Node's packages' Depends live in
+debian/control (decision 0019).
 `validate` runs at import, so no build can use a declaration that breaks an invariant.
 
 A pin bump is one edit to debian-packaging/snapshot.list: every cache keyed on that file misses and
@@ -25,14 +25,13 @@ import argparse
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from types import MappingProxyType
 from typing import Final, Literal, get_args
 
-Consumer = Literal["player", "initrd-build", "node-manager"]
+Consumer = Literal["initrd-build"]
 Archive = Literal["debian", "raspberrypi"]
 # When a package lands in a root. Every root fetches the pin over https, and apt inside a root
 # cannot do that until the CA bundle is there, so:
@@ -111,8 +110,7 @@ class DebianPin:
 class DebianPackage:
     name: str
     consumers: frozenset[Consumer]
-    imports: tuple[str, ...] = ()      # Python import roots it gives first-party code
-    why: str = ""                      # required when `imports` is empty
+    why: str                           # what the consumer needs it for
     archive: Archive = "debian"
     stage: Stage = "apt"
 
@@ -144,50 +142,17 @@ PIN: Final = read_pin(SNAPSHOT_LIST.read_text())
 RASPBERRY_PI: Final = AptSource("http://archive.raspberrypi.com/debian", "trixie", ("main",),
                                 trusted=True)
 
-_EVERY_STAGE: Final[frozenset[Consumer]] = frozenset({"player", "initrd-build"})
-_PLAYER: Final[frozenset[Consumer]] = frozenset({"player"})
+# Every root fetches the pin over https, so a "bootstrap" package serves every consumer.
+_EVERY_STAGE: Final[frozenset[Consumer]] = frozenset(get_args(Consumer))
 _INITRD_BUILD: Final[frozenset[Consumer]] = frozenset({"initrd-build"})
-_NODE_MANAGER: Final[frozenset[Consumer]] = frozenset({"node-manager"})
-_RENDER_STACK: Final = "the render stack, loaded through gi and GStreamer, not imported by name"
 _PI_BOOT: Final = "the Pi 5 kernel, DTBs and bootloader image (unpinned archive)"
 
 PACKAGES: Final[tuple[DebianPackage, ...]] = (
-    DebianPackage("python3", _EVERY_STAGE | _NODE_MANAGER,
+    DebianPackage("python3", _EVERY_STAGE,
                   why="the interpreter every stage runs on (one version at the pin)"),
-    DebianPackage("ca-certificates", _EVERY_STAGE | _NODE_MANAGER,
+    DebianPackage("ca-certificates", _EVERY_STAGE,
                   why="Trust.public() reads the Debian bundle (R5); apt over https in the build "
                       "root", stage="bootstrap"),
-    DebianPackage("python3-zeroconf", _PLAYER, imports=("zeroconf",)),
-    DebianPackage("python3-gi", _PLAYER, imports=("gi",)),
-    DebianPackage("python3-opengl", _PLAYER, imports=("OpenGL",)),
-    DebianPackage("python3-cryptography", _PLAYER, imports=("cryptography",)),
-    DebianPackage("python3-httpx", _PLAYER, imports=("httpx",)),
-    DebianPackage("python3-pydantic", _PLAYER, imports=("pydantic",)),
-    DebianPackage("python3-websockets", _PLAYER, imports=("websockets",)),
-    DebianPackage("python3-gst-1.0", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("gir1.2-gtk-3.0", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("gir1.2-gst-plugins-base-1.0", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("gstreamer1.0-plugins-base", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("gstreamer1.0-plugins-good", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("gstreamer1.0-plugins-bad", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("gstreamer1.0-libav", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("libgl1-mesa-dri", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("libegl1", _PLAYER, why=_RENDER_STACK),
-    DebianPackage("weston", _PLAYER, why=_RENDER_STACK),
-    # The base's device layer is metadata-only (appliance/rpi_image_gen/device/
-    # photo-wall-device-none.yaml), so nothing else brings udev: without it there is no render
-    # or input group and player.service fails at spawn, 216/GROUP.
-    DebianPackage("udev", _PLAYER,
-                  why="creates the render and input groups player.service's "
-                      "SupplementaryGroups name, and gives /dev/dri and /dev/input their "
-                      "groups (Debian's 50-udev-default.rules); libinput and logind's seats "
-                      "need its database"),
-    DebianPackage("passwd", _PLAYER,
-                  why="the Player postinst runs useradd/usermod (Debian Policy: a maintainer "
-                      "script's non-essential tool is a Depends)"),
-    # The Node's packages' Depends live in debian/control (decision 0019); the base's OS packages
-    # in its rpi-image-gen layers (R4).
-    DebianPackage("libwayland-client0", _PLAYER, why="the frame client library the Player loads"),
     DebianPackage("initramfs-tools", _INITRD_BUILD, why="mkinitramfs"),
     DebianPackage("gnupg", _INITRD_BUILD, why="apt key handling"),
     DebianPackage("kmod", _INITRD_BUILD, why="depmod"),
@@ -203,11 +168,9 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
 
 def validate(pin: DebianPin, packages: Sequence[DebianPackage]) -> None:
     """DeclarationError unless: the snapshot is exactly SNAPSHOT_FORMAT; every name follows
-    Debian's package-name rule; names are unique; each import root belongs to exactly one
-    package; a package with no imports says why; consumers, archive and stage are known ones;
-    every package outside the initrd build root comes from the pinned "debian" archive; a
-    "bootstrap" package is pinned and serves every consumer (every root
-    fetches the pin over https); and when the pin is fetched over https, the "bootstrap" stage
+    Debian's package-name rule; names are unique; every package says why; consumers, archive
+    and stage are known ones; a "bootstrap" package is pinned and serves every consumer (every
+    root fetches the pin over https); and when the pin is fetched over https, the "bootstrap" stage
     is not empty (nothing else can bring the CA bundle apt inside a root needs)."""
     try:
         parsed = datetime.strptime(pin.snapshot, SNAPSHOT_FORMAT)
@@ -216,7 +179,6 @@ def validate(pin: DebianPin, packages: Sequence[DebianPackage]) -> None:
     if parsed is None or parsed.strftime(SNAPSHOT_FORMAT) != pin.snapshot:
         raise DeclarationError(f"snapshot {pin.snapshot!r} is not {SNAPSHOT_FORMAT}")
     names: set[str] = set()
-    owners: dict[str, str] = {}
     for package in packages:
         if not _PACKAGE_NAME.fullmatch(package.name):
             raise DeclarationError(f"{package.name!r} is not a Debian package name")
@@ -228,16 +190,8 @@ def validate(pin: DebianPin, packages: Sequence[DebianPackage]) -> None:
             raise DeclarationError(f"{package.name}: unknown or no consumers {unknown}")
         if package.archive not in get_args(Archive):
             raise DeclarationError(f"{package.name}: unknown archive {package.archive!r}")
-        for root in package.imports:
-            if root in owners:
-                raise DeclarationError(f"import {root} is given by both {owners[root]} and "
-                                       f"{package.name}")
-            owners[root] = package.name
-        if not package.imports and not package.why:
-            raise DeclarationError(f"{package.name} names no import and no reason")
-        if package.archive != "debian" and package.consumers - _INITRD_BUILD:
-            raise DeclarationError(f"{package.name} is outside the initrd build root but comes "
-                                   f"from the unpinned {package.archive} archive")
+        if not package.why:
+            raise DeclarationError(f"{package.name} names no reason")
         if package.stage not in get_args(Stage):
             raise DeclarationError(f"{package.name}: unknown stage {package.stage!r}")
         if package.stage == "bootstrap" and (package.archive != "debian"
@@ -259,7 +213,6 @@ def _checked(consumers: Sequence[str], archive: str) -> None:
 def packages(*consumers: Consumer, archive: Archive = "debian",
              stage: Stage | None = None) -> tuple[str, ...]:
     """Sorted, unique names used by any of `consumers` from `archive` (in `stage`, when given):
-      packages("player")                   the Player .deb's Depends
       packages("initrd-build")             the initrd build root's --include
       packages("initrd-build", archive="raspberrypi")   its kernel/firmware/eeprom install"""
     _checked(consumers, archive)
@@ -269,14 +222,6 @@ def packages(*consumers: Consumer, archive: Archive = "debian",
     return tuple(sorted(package.name for package in PACKAGES
                         if package.archive == archive and package.consumers & wanted
                         and stage in (None, package.stage)))
-
-
-def import_table(consumer: Consumer) -> Mapping[str, str]:
-    """Import root -> package name over the consumer's packages that give imports: the closure
-    policy's third-party table (read-only)."""
-    _checked((consumer,), "debian")
-    return MappingProxyType({root: package.name for package in PACKAGES
-                             if consumer in package.consumers for root in package.imports})
 
 
 def mmdebstrap_argv(*, arch: str, target: str,

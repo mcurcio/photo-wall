@@ -334,7 +334,6 @@ NOT_SHIPPED: Final = (
     "scripts/test_local.py",
     "scripts/run_display_harness.py",  # node-pid1's display-harness job runner; never shipped
     "scripts/nats_server.py",  # the bus tests' pinned nats-server binary; never shipped
-    "scripts/build_player.py",  # demo_wall.py's e2e wheelhouse; never shipped
     ".github/workflows/node-pid1.yml",
     "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
 )
@@ -428,7 +427,7 @@ SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
 # through its consumers (each listed one must succeed, and cannot without it) and by its rule
 # that no job fails. tests/test_release_plan.py holds pipeline.yml's wiring to this.
 BUILD_JOBS: Final[Mapping[str, tuple[str, ...]]] = {
-    "node-components": ("base-image", "node-pid1")}
+    "node-components": ("e2e", "base-image", "node-pid1")}
 # A release runs these; base-image doubles as the release build (its artifacts are what the
 # seal packages), so a release always runs it.
 RELEASE_JOBS: Final = ("base-image", *PUBLISH_JOBS)
