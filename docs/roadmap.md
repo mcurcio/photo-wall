@@ -1,12 +1,13 @@
 # Photo Wall roadmap
 
-**Status:** accepted 2026-10-09. This is the product roadmap. It walks the whole life of a Photo Wall install the way a power user lives it, from before any hardware arrives to fixing things years later, and orders the work by what the owner can do on the real wall after each delivery. Nothing in it is built until its delivery says so.
+**Status:** Journey adopted as the roadmap by the owner, 2026-10-09; decisions 1–8 proposed, pending this PR. This is the product roadmap. It walks the whole life of a Photo Wall install the way a power user lives it, from before any hardware arrives to fixing things years later, and orders the work by what the owner can do on the real wall after each delivery. Nothing in it is built until its delivery says so.
 
 The owner, 2026-10-09 (chat), on the first-principles console review: "I LOVE the Journey section of that doc. I want those ideas codified as the roadmap." The review page is [Console Setup Review](https://claude.ai/artifact/EwjdvEcM82HyLDb4BrDSdC).
 
 Where things are defined:
 
-- The console's target design (pages, the Frame page, power, Home Assistant, the settings catalogue) is [§0 of the console UX design](operator-console-ux-design.md#0-the-first-principles-console-2026-10-09); the choices and what they replace are [decision 0019](decisions/0019-first-principles-console.md).
+- The console's target design (pages, the Frame page, power, Home Assistant, the settings catalogue) is the [operator console design](operator-console-design.md); the decisions and what they replace are [decision 0019](decisions/0019-first-principles-console.md).
+- This roadmap owns three things the others link to: each step's status today, the delivery order, and the deferred list.
 - What the owner asked for is in [requirements › Operator experience](requirements.md#operator-experience).
 - The engineering slice order for the first MVP is the [implementation plan](implementation-plan.md); this roadmap orders product capabilities on top of it. Each delivery is cut into beads when it starts, in its own design pass.
 
@@ -32,7 +33,7 @@ How to read the tables. **Priority:** M = broken without it, S = should have, N 
 | B2 | Identify | The display flashes its name and a border | M | exists | "Identify Panel" on the Binding tab |
 | B3 | Name and place | "Living room left", pick the wall | M | missing | A code-style Frame id; one wall only |
 | B4 | Fit the picture | Test pattern; drag corners, rotate, crop, nudge; live on the display; Done/Revert | M | exists | Hidden under Calibration; a 30-second session |
-| B5 | Picture quality | Brightness, contrast, colour temperature, gamma, grey ramp | S | built, no controls | Software brightness only, labelled "draft" |
+| B5 | Picture quality | Brightness, contrast, colour temperature, gamma, grey ramp | S | exists | Software brightness only, labelled "draft"; no contrast or colour |
 | B6 | Power | Detect how this display can be switched; Test off/on | M | missing | Nothing |
 | B7 | First photos | A Favourites slideshow starts by itself | M | missing | Build a Source, a Scene and a Program by hand |
 
@@ -75,7 +76,7 @@ How to read the tables. **Priority:** M = broken without it, S = should have, N 
 |---|---|---|---|---|---|
 | F1 | Glance | A live map of what each Pi presents | M | missing | Planned facts only; no picture |
 | F2 | Skip and previous | On a tile | M | missing | Nothing |
-| F3 | Hide forever | Two taps, undoable | M | missing | Re-tag the photo in Immich |
+| F3 | Never show | Two taps, undoable; the photo goes on the wall's Never show list | M | missing | Re-tag the photo in Immich |
 | F4 | Show now | An album or person on chosen Frames, for 1 hour | M | exists | Exists; no Frame choice, no end time |
 | F5 | All off/on | One button | M | missing | Nothing |
 | F6 | Phone layout | Bottom tabs, usable while standing at the display | M | missing | Tables scroll sideways off the screen |
@@ -96,7 +97,7 @@ F7 comes from the journey research (its step "Integrations"); the review page's 
 | G7 | Backup and restore | Download, a nightly copy, restore with a preview | M | missing | Nothing |
 | G8 | Logs | Per-Pi logs without SSH | S | missing | SSH only |
 
-G6 follows the owner's release choice of 2026-10-04: no automatic updates; releases pre-download and the operator clicks Apply.
+G6 follows the existing release choices in [console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer).
 
 ## Delivery order
 
@@ -109,11 +110,11 @@ Each delivery ends with something the owner can do on the real wall. Delivery 1 
 | 1c | Brightness, contrast and colour on the display | Through DDC/CI wherever the display accepts it, Photo Wall picture adjustment otherwise, each slider saying which; grey ramp; Copy to other Frames | B5, C3 | Use all three of the knobs he asked about, as far as each display allows |
 | 2 | Power schedule and the week | The Power lane with Night off and sunrise/sunset times; one power-request model (who, which Frames, until when, why), used first by All off/on, with its guard settings; repeating Schedules, running past midnight, the Default Scene, Why is this playing? | E1, E2, E3, E5, E6, F5 | Have displays go off at 23:00 and come back at 07:00, and see the week |
 | 3 | Home Assistant | MQTT discovery, the must-have controls and readings, Scenes in Home Assistant, the request topic, the setup screen, Blueprints for motion, room light and smart plugs | F7 | Let motion, away mode and a "guests" button drive the wall |
-| 3b | Home that tells the truth | Status word, problems strip, a live map of what each Pi presents, Skip, Hide, Pause, Show now with an end time, the phone layout | F1, F2, F3, F4, F6, G1, G2 | Check the wall from a phone and act on it |
+| 3b | Home that tells the truth | Status word, problems strip, a live map of what each Pi presents, Skip, Never show, Pause, Show now with an end time, the phone layout | F1, F2, F3, F4, F6, G1, G2 | Check the wall from a phone and act on it |
 | 4 | Real photo sources | The Immich connection page; albums, people, exclusions; several sources per Scene | A3, D1, D2 | Build "Anna and Ben, last 3 years, no screenshots" without leaving the console |
 | 5 | A good-looking slideshow | Blurred mat, portrait pairing, shuffle with no repeats, transitions, video rules, captions | D3, D4, D5, D6, D7 | See no black bars or cropped heads, and no longer newest-first only |
 | 6 | Setup and hardware life | The setup checklist, New Pis waiting, Frame names, several Walls and rooms, the display-changed flow | A1, A5, B1, B3, B7, C1, C2, G4, G5 | Bring a new install or a new Pi to photos in minutes |
-| 7 | Peace of mind | Backups and restore, notifications, the Hidden photos page, current photo and Pi readings in Home Assistant | G7 (and F3's list page) | Leave it alone for months |
+| 7 | Peace of mind | Backups and restore, notifications, the Never show list page, current photo and Pi readings in Home Assistant | G7 (and F3's list page) | Leave it alone for months |
 
 Dependencies the order relies on: 1b's Display identity is what lets 1c's settings follow a display; 2's power-request model is the one 3's Home Assistant switches use; 3b's live map needs the Pi to report what it presents. E3 (sun times) needs the House location from A4, so delivery 2 carries that one setting ahead of the rest of A4.
 
@@ -142,7 +143,7 @@ These decide whether a power user keeps Photo Wall. They are the roadmap's accep
 | 5 | The Photo source preview is exactly what will play | 4 |
 | 6 | Night off really turns the displays off, and they come back on in the morning | 1b, 2 |
 | 7 | "Why is this showing?" has an answer for every Frame | 2 |
-| 8 | Hiding a photo from a phone takes two taps, and it never comes back | 3b |
+| 8 | Putting a photo on the Never show list from a phone takes two taps, and it never comes back | 3b |
 | 9 | A black screen is explained in plain words that name the failing part: display, Pi, app, network or Central | 3b |
 | 10 | Replacing a Pi is one click and keeps every setting; backup and restore does the same for the whole house | 6, 7 |
 
@@ -156,6 +157,10 @@ These decide whether a power user keeps Photo Wall. They are the roadmap's accep
 | Native sensors and auto-dim | Room-light brightness and motion need Home Assistant; without it there is no automatic dimming |
 | Lights and other non-display controls | Scenes cannot drive lights or relays; only display power is controlled |
 | Spanning one photo across several Frames | Each Frame shows its own photo |
-| Per-Pi software pins (deferred by the owner 2026-10-04) | The whole wall runs one selected release; one Pi cannot be held back on another |
+| Per-Pi software pins (deferred with the release choices of [console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer)) | The whole wall runs one selected release; one Pi cannot be held back on another |
 
-What the design itself gives up is listed in [§0.12 of the console UX design](operator-console-ux-design.md#012-what-this-design-gives-up).
+What the design itself gives up is listed in [the operator console design](operator-console-design.md#13-what-this-design-gives-up).
+
+## Settings status
+
+The [settings catalogue](operator-console-design.md#11-settings-catalogue) lists 144 settings a power user expects, each with one home. On 2026-10-09, 29 exist in the console (some in a poor form: one Photo source per Scene, one schedule window, a position editor that times out, size editable only while unbound, software brightness labelled "draft"), 8 are built in Central or on the Pi with no control in the console (transition length, outro, black versus see-through fades, keep last photo, keep Frames visible together, child Scenes, end of a Schedule, releases kept on Central), and 107 are missing. Update these counts when a delivery lands.

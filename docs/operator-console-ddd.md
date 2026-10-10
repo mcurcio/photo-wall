@@ -2773,7 +2773,7 @@ W1 is also high-tier, for regression.
 
 # Part I: the console by domain (0018)
 
-**Status:** approved 2026-10-09. This part holds the domain table; [decision 0018](decisions/0018-console-by-domain-and-design-system.md) holds the owner's words, the answers, the design-system layers and rules, the migration and the costs. Sections that milestones 2 and 3 change in detail are marked superseded above and rewritten when they land. The layouts are a starting point to be re-evaluated as capabilities grow. **Superseded in part (2026-10-09)** by [decision 0019](decisions/0019-first-principles-console.md): the target navigation and the one Frame page are in [§0 of the console UX design](operator-console-ux-design.md#0-the-first-principles-console-2026-10-09).
+**Status:** approved 2026-10-09. This part holds the domain table; [decision 0018](decisions/0018-console-by-domain-and-design-system.md) holds the owner's words, the answers, the design-system layers and rules, the migration and the costs. Sections that milestones 2 and 3 change in detail are marked superseded above and rewritten when they land. The layouts are a starting point to be re-evaluated as capabilities grow. **Superseded in part (2026-10-09)** by [decision 0019](decisions/0019-first-principles-console.md): the target navigation and the one Frame page are in the [operator console design](operator-console-design.md).
 
 ## 70. The domain table
 

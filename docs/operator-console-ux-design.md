@@ -9,13 +9,10 @@ Those scratch files are pipeline working state and do **not** ship; their
 content is folded in here. If this document and any predecessor disagree, this
 document wins.
 
-> **Current target design (2026-10-09).** [§0, the first-principles console](#0-the-first-principles-console-2026-10-09),
-> is the console's target design: the object model, navigation, the Frame page,
-> Display identity, power, Home Assistant, the save model, status words and the
-> settings catalogue. The [roadmap](roadmap.md) orders its delivery and
-> [decision 0019](decisions/0019-first-principles-console.md) records what it
-> replaces. Everything after §0 is the 2026-09-13 gate record and its later notes,
-> superseded wherever §0 differs ([§0.14](#014-what-this-section-supersedes-in-this-document)).
+> **Superseded (2026-10-09) by the [operator console design](operator-console-design.md).**
+> This document is the historical gate record of 2026-09-13 with its later notes.
+> Where the two differ, the operator console design wins; see
+> [decision 0019](decisions/0019-first-principles-console.md) for what changed.
 
 **What the reader is being asked:** approve the shape and the costed decisions
 in [§10 Decisions that are yours](#10-decisions-that-are-yours) so the delivery
@@ -84,10 +81,6 @@ sold.
 > release) or Back out, through the same send functions as the homes (revised
 > 2026-10-04: there is no Publish).
 
-> **Superseded (2026-10-09) for the target design:** the sidebar, the landing and the
-> Frame Inspector's facets below describe the console as built; the target is §0
-> (Home first, Everyday / Set up, one Frame page with tabs).
->
 > **The Wall's daily face, Status and fleet host health (2026-10-02).** [Parts G and H of
 > the domain-driven console design](operator-console-ddd.md#61-screens) own these screens;
 > the shape below describes them for this document's reader.
@@ -180,449 +173,6 @@ sold.
 
 ---
 
-## 0. The first-principles console (2026-10-09)
-
-**Status:** the console's target design, accepted 2026-10-09; nothing in this section is built yet. The [roadmap](roadmap.md) orders its delivery, and [decision 0019](decisions/0019-first-principles-console.md) records the choices and what they replace. Where this section and the 2026-09-13 text or the 2026-10-02 notes below disagree, this section wins; those parts are marked superseded and kept as the record. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) are unchanged: every page here is built from that catalog.
-
-**Review page:** [Console Setup Review](https://claude.ai/artifact/EwjdvEcM82HyLDb4BrDSdC).
-
-### 0.1 Why
-
-The owner, 2026-10-09 (chat):
-
-- "Central needs another UI pass to make sure that all of the features are being exposed on the UI. I cant find some of the simple config knobs, like how do i set the visible frame position on a display? how do i control the CEC power? how do i change the brightness and contrast?"
-- "i continue to be frustrated with how poorly designed the UI is."
-- "dont stop at my first 3 questions. i want you to do a comprehensive analysis and take a "first principles" approach to thinking through this like a user would. ignore what the current code does, and just walk through the steps a power user would expect to take."
-
-Three designers walked a whole-house install as a power user would, without reading today's code, then checked the result against about 15 similar products (consumer frames such as Meural, Samsung The Frame and Aura; signage consoles such as Yodeck, ScreenCloud and Xibo; self-hosted viewers such as Immich Kiosk and ImmichFrame). A fourth merged the work and a reviewer attacked it. The journey they walked is the [roadmap](roadmap.md#the-journey).
-
-The answer to the three questions is one page: **click the Frame, then use its Position, Picture or Power tab.** Everything a person adjusts for one spot on the wall lives on that page.
-
-### 0.2 The object model
-
-Eight things the user manages, each with one home. The UI label is what the console says; the domain term is the [requirements](requirements.md) word the code keeps, so no new domain name enters the code except where the terms table below says so.
-
-| UI label | What it is, as the user sees it | Domain term |
-|---|---|---|
-| **House** | The whole home Photo Wall runs in: timezone, location for sunrise and sunset, units. There is one. | Installation |
-| **Wall** | A wall in a room, with a drawing of where its Frames hang. It carries a room label. | Wall / Surface |
-| **Frame** | A fixed spot on a wall. It holds where the picture sits there: position, crop, rotation. It stays when the display or Pi is swapped. | Frame |
-| **Display** | The TV, monitor or bare panel at a Frame, recognised from what it reports over HDMI. Its brightness, contrast, colour and power method move with it. Edited from the Frame page. | Panel, plus its display-power Actuator and the photometric part of Calibration |
-| **Pi** | The replaceable box feeding one or two Frames over HDMI. | Player; its HDMI ports are Outputs; which port feeds which Frame is a Binding |
-| **Photo source** | A saved question to Immich: albums, people, dates, with exclusions. Its answer updates by itself. | AssetSource |
-| **Scene** | What plays and how: Photo sources, Frames, timing, fit, transitions. "Good night" is a dark Scene. | Scene |
-| **Schedule** | When Scenes play: days, times, sunrise or sunset, date ranges, priority. | Program |
-
-Verbs and states the user does not manage as things: **Playing now** is a Scene Run; **Show now** (a takeover with an end time) is an Activation request that starts an overlay Run; **Hide this photo** adds to the Hidden photos list. A **Group** is a Target group; every Room is a ready-made Group.
-
-```
-House
- ├─ Wall "Living room" ── Frame "Left"  ◀── Display (Samsung 55")  ◀── Pi pw-3f2a · HDMI 1
- │                     └─ Frame "Right" ◀── Display (Samsung 55")  ◀── Pi pw-3f2a · HDMI 2
- ├─ Wall "Hall"        ── Frame "Portrait" ◀── Display (OLED panel) ◀── Pi pw-91c0 · HDMI 1
- │
- ├─ Photo sources ──used by──▶ Scenes ──play on──▶ Frames
- │                               ▲
- ├─ Schedule: content lane ──────┘   Show now (temporary, ends by itself)
- │            power lane ──────────▶ Displays on/off
- │
- └─ Home Assistant ◀──MQTT──▶ Frames as devices · power holds · Scenes · inputs
-```
-
-The labels **Frame** and **Display** follow the owner's own question ("the visible frame position on a display"). Help text says "TV" where that is plainer, but the page says "display", because not every display is a TV. This reverses the 2026-10-02 rename to "Panel" ([glossary](#3-glossary)); the code keeps Panel.
-
-### 0.3 New terms
-
-| Term | Definition | Why it is needed | Existing term it could be |
-|---|---|---|---|
-| **Display** (with identity) | The display hardware at a Frame, recognised by the maker, model and serial it reports over HDMI (its EDID, the identity block every HDMI display sends). Its picture and power settings are stored on it and follow it to another Frame. | The owner: display hardware settings "could remain consistent to where the panel moves" | Panel. Panel has no stored identity today; this gives it one. A display that reports no usable identity is a new Display each time it is plugged in. |
-| **Room** | A label on a Wall. Each distinct room makes a ready-made Group of its Frames and suggests the Home Assistant area. | People think "Living room", not "Surface 2"; every home product groups by room | A rule-defined Target group. No new domain entity. |
-| **Hidden photos** | The wall-only list of photos never to show again. Nothing is written back to Immich. | "Hide forever" is a must-have of daily use | The wall-specific configuration Photo Wall may keep ([purpose](requirements.md#purpose-and-experience)) |
-| **Power lane** | The band above the content calendar on the Schedule page that shows, for each Frame, whether its display should be on, and why. The one place that decides and explains display power. | The owner wants power as "a unique concept" with its own schedule | None. Display power is operational state ([operations](requirements.md#operations-and-scope)), not a Scene. |
-| **Night off** | The power schedule's off window (default 23:00 to 07:00, every day, all Frames). | The everyday name for the power schedule | Answers the open "persistent dark-state and wake-up policy" of [Good night](requirements.md#reference-experiences) |
-| **Power request** | A request to turn some displays on or off, carrying who asked, which Frames, until when and why. All off/on, Home Assistant and a Scene each make one. | One model for every source of power changes, so the Power lane can show why | An Activation request aimed at the display-power Actuator |
-| **Hold** | A power request with an end that is not a Scene's: All off/on or a Home Assistant switch. It lasts until the next scheduled power change unless set otherwise, and shows who set it with **Resume schedule**. | So nothing stays off forever by accident (like a thermostat hold) | A kind of power request |
-| **Blueprint** | Home Assistant's shareable automation template, which a user imports and fills in. Photo Wall ships some. | Covers motion, room light and smart plugs without custom Home Assistant code | None (a Home Assistant term) |
-
-### 0.4 Navigation
-
-The rail keeps one-time bring-up apart from everyday use.
-
-| Group | Section | What it is for |
-|---|---|---|
-| Everyday | **Home** | One status word, a live map of every Frame laid out like the room, problems with a fix button, Show now, All off/on. The console opens here. A tile opens that Frame's page. |
-| Everyday | **Schedule** | The week as a calendar with two lanes: Power (when displays are on, with holds from Home Assistant) and Content (which Scenes play); holidays; Why is this playing? |
-| Everyday | **Scenes** | Scenes, Photo sources and Hidden photos |
-| Set up | **Frames** | Walls, the wall layout, the Frame list, Groups |
-| Set up | **Pis** | New Pis waiting, software, restart, replace |
-| Set up | **Settings** | House, Photo library (Immich), Updates, Integrations (Home Assistant), Backups, Storage and network boot; later Notifications, People and access |
-| Until finished | **Setup checklist** | First-run steps; hides itself when done |
-
-The top bar carries the house status word. On a phone the tabs are **Home · Show now · Schedule · More**; a tile tap opens the Frame page, so the knobs are two taps away while standing at the display, and Position works with big arrow buttons and corner handles.
-
-Pattern: signage consoles put screens, playlists and schedule at the top and settings in one area. Frames and Pis are separate sections because a Frame is not a device (signage products that make the screen the device force re-pairing when the hardware changes).
-
-### 0.5 The Frame page
-
-One home for one spot on the wall, and the page every Home tile, Frames row and Pi port links to.
-
-**Header:** the Frame name (editable inline), its Wall and room, the status word, a live view of what the Pi is presenting (labelled as that, never "on screen"), what is playing and until when, and the buttons **Identify** and **Skip**.
-
-| Tab | What it holds | Saves |
-|---|---|---|
-| **Overview** | Today's timeline for this Frame with a now line; Why this is playing; its Groups; recent problems | nothing to save |
-| **Position** | The display shows a test pattern with the Frame name, edges, corner positions and actual output mode. Drag four corners, or nudge with arrow keys in 1, 10 or 50 pixel steps; rotation 0/90/180/270 (which sets the orientation); crop per edge; Reset to full screen. No session timeout while the tab is open. | Live, then **Done** or **Revert**; Done unlocks only when the Pi confirms the display shows the latest change |
-| **Picture** | Brightness, contrast, colour temperature (warm, 6500 K, cool), gamma (2.2), Show grey ramp, Copy to other Frames… The values belong to the display and say so ("These settings belong to the display (Samsung 55", serial …4K2) and move with it"). Each slider says where it acts: **On the display** (DDC/CI) or **Photo Wall picture adjustment**. | Live, then Done or Revert |
-| **Power** | Power method: HDMI-CEC, DDC/CI, HDMI signal off (the panel sleeps) or a smart plug through Home Assistant, the detected one chosen. **Test: turn off / turn on**, reading "Display confirmed off" or "Display didn't answer". Switch the display to this input on power-on (on). Never power off while the display shows another input (on). Then, read-only: "Now on · next off 23:00, set by Schedule › Power lane", and any hold ("Off — by Home Assistant (Away mode) until 18:00"). | Autosave with Undo; when displays are on is not set here |
-| **Photo fit** | Use the Scene's setting, or override it for this Frame; minimum quality (strict, per [compatibility](requirements.md#live-media-compatibility-and-preparation)); what was skipped here and why ("312 too small · 1,204 wrong orientation"), each clickable | Autosave with Undo |
-| **Hardware** | The Display (model, serial, size, resolution and mode, detected with an override); "Fed by Pi pw-3f2a · HDMI 1" with **Replace with…**; when a different display appears: "Its picture and power settings come with it. Re-check Position, since that belongs to this Frame." | Autosave with Undo |
-
-**Unbound Frame:** every tab shows, and Position, Picture and Power say "Choose which Pi and HDMI port feeds this Frame" with a picker. Binding happens only here (unchanged from 0018).
-
-**Errors** name the failing part inline, for example "Pi online; the display stopped answering on HDMI at 21:04. Check the display's input. [Restart photo app] [Reboot Pi]".
-
-Pattern: the screen-settings page every signage product has, split the way a TV's own menu is. Unlike those products, the Frame and the Pi are separate, so replacing a Pi keeps every setting.
-
-### 0.6 Display identity
-
-- A Display is identified by the maker, model and serial in its EDID. When a Pi reports a display on an Output, Central matches it to a known Display or records a new one.
-- Stored on the Display, and following it: brightness, contrast, colour temperature, gamma, power method, switch input on power-on, never power off while another input shows.
-- Stored on the Frame, and staying put: position, crop, rotation, photo fit.
-- A display reporting no usable identity (some bare panels) is treated as new each time it is plugged in; its settings start from defaults.
-- The settings are edited from the Frame page; there is no separate Display page.
-- Two channels inside the HDMI cable carry commands to a display: **HDMI-CEC**, the remote-control channel most TVs answer (power, input), and **DDC/CI**, the settings channel most monitors answer (brightness, contrast, often power).
-- Hardware control "as much as possible" (the owner): power through HDMI-CEC, DDC/CI, HDMI signal off, or a smart plug through Home Assistant; brightness and contrast through DDC/CI where the display accepts it, Photo Wall picture adjustment otherwise. Software adjustment is never called measured panel brightness ([failure visibility](requirements.md#failure-visibility-and-recovery)). The Pi image needs CEC and DDC tooling, which it lacks today: the test Pi, driving a portable 1920x1080 monitor, has CEC devices but no I2C bus devices and no `cec-ctl` or `ddcutil`.
-
-### 0.7 Power
-
-Power is its own concept, and Scenes can also ask for it. The owner, 2026-10-09: "I meant power as a unique concept, but it could go either way. Or both."
-
-**Who can turn displays on and off:**
-
-1. The **power schedule** in the Schedule page's Power lane: on and off times (clock or sunrise/sunset ± minutes), days, which Frames, and Night off (default off 23:00 to 07:00, every day, all Frames, powering displays off where they support it and showing black otherwise).
-2. A **Scene** that asks for its displays on, off or "leave as scheduled" (the default). Its request lasts while the Scene plays. A "Good night" Scene is optional.
-3. The console's **All off/on**, a hold.
-4. **Home Assistant**, through its switches or the request topic, a hold.
-
-**The rule:** the newest request wins until it ends, then the power schedule takes over again. The guard settings adjust it. The owner, 2026-10-09: "I'm hoping for configuration options built in sensible defaults".
-
-| Guard (Schedule › Power lane › Rules) | Default | Why this default |
-|---|---|---|
-| Home Assistant may turn displays on during Night off | No | A motion sensor at 2 am shouldn't light up the room. A person can still press All on in the console. |
-| Home Assistant may turn displays off | Yes, any time | Turning off is always safe (away mode, a film starting) |
-| Scenes may turn displays on during Night off | No | Night off means dark unless a person decides otherwise |
-| A manual hold lasts until | The next scheduled power change (other choices: a set time, or until resumed) | Like a thermostat hold: nothing stays off forever by accident |
-| Never power off a display showing another input | Yes (per display, on its Power tab) | Someone is watching TV on it |
-
-The Power lane draws solid bands while displays should be on, grey for Night off, and hatched holds labelled with who set them, each with **Resume schedule**. It is the one place that shows why a display is on or off now; the Frame page's Power tab only reads it.
-
-Display power stays operational state, apart from authored content ([operations](requirements.md#operations-and-scope)): a Scene's power request goes through the same power model and is shown in the Power lane, never hidden in the Scene's content. A resting display counts as **Resting**, not a fault.
-
-### 0.8 Home Assistant
-
-Home Assistant decides **when**, through its own automations; Photo Wall decides **what happens**, and stays authoritative for its own configuration ([operations](requirements.md#operations-and-scope)). The owner, 2026-10-09: "I like the idea of a native power schedule, yeah. But I also want home automation inputs, so also consider how this system might be exposed to home assistant."
-
-**Connection.** Central's media worker connects to Home Assistant's MQTT broker (a message relay, usually the Mosquitto add-on) and announces its devices with MQTT discovery, so they appear in Home Assistant by themselves. Zigbee2MQTT, Valetudo and Frigate integrate the same way. Only Central talks to Home Assistant: Pis never touch MQTT, and Central's internal bus to the Pis is never bridged to it. If Home Assistant goes away, the wall keeps running on its own schedule.
-
-**What Home Assistant sees.** One device for the house and one per Frame, named after it, placed in the area its room suggests. Device ids come from the Frame's internal id, so automations keep working when a display or Pi is swapped.
-
-| Device | Must have | Should have | Nice |
-|---|---|---|---|
-| Each Frame | Power switch · Status (the six words; "Can't tell" shows as unavailable) · Brightness · Skip button | Now showing (Scene, until when) · Current photo image · Pause switch · "Display should be on" (to drive a smart plug) | |
-| Photo Wall (the house) | All on/off switch · Keep all off switch (away mode) · each Scene marked "Show in Home Assistant" as a Home Assistant scene, which starts it as Show now | Night off enabled switch · Problem event ("Frame not showing") | |
-| Pis | | | Online, temperature, software version; off unless diagnostics are turned on |
-
-Power is a switch, not a light, so Home Assistant's "turn off all lights in this room" cannot blank the wall by accident.
-
-**Inputs from Home Assistant.**
-
-| In the house | What Photo Wall does | Requirements term |
-|---|---|---|
-| Motion or occupancy | Wakes or sleeps that room's displays | A Sensor feeding a Trigger; a power request |
-| Room light level | Sets Brightness through a shipped Blueprint | A Sensor; environmental adaptation |
-| A "guests arriving" button | Starts a chosen Scene as Show now for its default length | A Trigger making an Activation request |
-| Away mode | Keeps all displays off until switched back | A power request with no end |
-| A film playing on that display | Pause; Photo Wall never powers off a display showing another input | Blanking |
-| A panel with no power commands | "Display should be on" drives a smart plug through a Blueprint | The display-power Actuator |
-
-Continuous viewer tracking stays out of scope ([operations](requirements.md#operations-and-scope)). Besides the entities, Central listens on one request topic, `photowall/request`, carrying `power`, `frames`, `until` and `reason`. Photo Wall ships Blueprints for motion, room light to brightness, and smart plugs.
-
-**Setup: one screen, Settings › Integrations.** Broker address (default `mqtt://homeassistant.local:1883`), user and password (masked, kept on the server). A live checklist: broker connected → Home Assistant online → N devices published → last command received. Errors read like "Broker rejected the username/password". Toggles: **Home Assistant can control Photo Wall** (on) and **Include Pi diagnostics** (off). **Remove from Home Assistant** deletes the devices cleanly, clearing their retained announcements. The [validation guide](validation.md) already asks for stable entity ids, re-announcement after Home Assistant restarts, and cleanup when equipment is retired.
-
-**Gives up:** Home Assistant needs a broker; there are no custom Home Assistant actions (the request topic and Blueprints cover them); Photo Wall cannot switch a Home Assistant-only plug by itself (a Blueprint does). A dedicated Home Assistant integration can come later on the same interface.
-
-### 0.9 The other pages
-
-- **Home.** One word for the house ("All good"). Problems pinned on top, each with a plain cause, a since time and one fix button. A live map of each Wall where every tile shows what its Pi is presenting, labelled as that. A now/next strip, and active takeovers with a countdown and **Back to normal**. Tile actions: Skip, Previous, Hide this photo, Why is this playing?, Open Frame. Updates by push, with no Refresh button. If the whole network is down, one house-wide banner replaces per-tile alerts.
-- **Schedule.** The Power lane on top (§0.7); below it the content calendar with a now line. A Schedule has a Scene, days, start and end (a clock time or sunrise/sunset ±, showing the resolved time), runs past midnight without splitting, an optional date range or yearly event, and a priority (Normal, Special event, Always wins). A Default Scene fills the gaps. Clicking any block explains why it wins ("Evenings (Normal, Mon–Fri 17:00–23:00) beats the Default Scene").
-- **Show now** (a sheet from Home, a tile, or the phone tab). Pick what (an album, person, Photo source or Scene), where (Frames or Groups, default all) and how long (1 hour, until tonight's Night off, until I stop). It is an overlay: the schedule beneath keeps advancing and is revealed in its current state ([progression](requirements.md#progression-visibility-and-target-control)).
-- **Scenes and Photo sources.** A form with a live preview on a chosen Frame, in sections What, Where, Timing, Order, Photo fit, Video, Captions, Ending, Advanced. Photo sources pair every include with an exclude (albums, people, places, dates, favourites, tags); archived, hidden and screenshots are excluded by default; a live count and thumbnails show before and after saving. Hidden photos lists every hidden photo with Unhide.
-- **Frames.** A tab per Wall plus "+ Wall"; a canvas to real scale in cm or inches; Identify on each Frame; overlapping Frames flagged; Groups.
-- **Pis.** "New Pis waiting: which Frame did you plug this into?" (one tap binds). A table with Frames fed, status, software version and last heard. The Pi page has rename, Identify, Restart app, Reboot (requested → reboot started → back online), logs and Retire. Boxes too small say so ("2 GB, needs 4 GB").
-- **Setup checklist.** Server checks (picking a Pi release automatically, the owner's choice of 2026-10-04), Immich URL and key with a Test showing counts, house basics, first Pi, first Frame with Position, a pre-filled Favourites slideshow, a schedule and Night off. Each step turns green from a real check, never from a click. It hides itself when done.
-- **Settings.** House; Photo library (Immich, replacing today's JSON file and worker restart); Updates (new releases pre-download and you click Apply); Integrations (§0.8); Backups; Storage and network boot. Later: Notifications, People and access.
-
-### 0.10 How it behaves
-
-**Saving.**
-
-| Kind | Applies to | Model |
-|---|---|---|
-| Position and picture | Frame page › Position, Picture | Live on the real display, then **Done** or **Revert**. Done unlocks once the Pi confirms the display shows the latest change ([U9](requirements.md#failure-visibility-and-recovery)). |
-| Toggles and values | Power options, names, Settings pages, Groups, Hidden photos | Saved as you change them, with a 10-second Undo |
-| Show content | Scenes and Photo sources | **Save** applies from the next start ([requirements](requirements.md#live-media-compatibility-and-preparation): edits default to the next Run), plus **Save and apply now** |
-| Schedules | Schedules, the Power lane | Apply to future blocks; if the current block changes, choose **Change now** or **From the next block** |
-
-Position, picture and power are equipment settings, so applying them live does not conflict with the next-Run rule, which covers authored content only.
-
-**Six status words, used everywhere** (per Frame, rolled up to the house as the worst Frame state; Resting never counts as a problem):
-
-| Word | Meaning | Colour |
-|---|---|---|
-| **Showing** | The Pi reports it is presenting what was planned. (It cannot see a display someone switched off with the remote.) | green |
-| **Resting** | Dark on purpose: Night off, paused, all off. Nothing wrong. | grey-blue |
-| **Getting ready** | Starting, updating or downloading. It will show photos by itself. | blue |
-| **Needs a look** | Playing, but degraded: old photos, Immich unreachable, storage low. Can wait. | amber |
-| **Not showing** | Should be showing and isn't. One fix offered. | red |
-| **Can't tell** | No report since [time]. No guessing ([U6](requirements.md#failure-visibility-and-recovery)). | grey, hatched |
-
-Colour means status and nothing else; the accent colour is for actions only.
-
-**How errors read:** what is wrong in plain words, since when, what Photo Wall is doing about it, and one button. **Details** shows the layer, where the evidence came from and its time.
-
-> "Living room left: Not showing since 21:04. The Pi is fine but the display stopped answering on HDMI. Photo Wall retried 3 times. [Check the display is on this input] Details ›"
-
-No internal words (Node API link, claimed/reported, effect gate, lease); the evidence labels move one click down, under Details. Never claim what the display is lighting up, and never offer a fix the system cannot perform.
-
-### 0.11 Settings catalogue
-
-Every setting a power user expects, with exactly one home. **Lives on** is page › section. **P** is priority (M must, S should, N nice). **Today** is the state on 2026-10-09: exists (perhaps in a poor form, noted), built, no controls, or missing. Of 144 settings, 29 exist, 8 are built with no controls and 107 are missing. The review page listed 146; two rows are reconciled here: its two Night off power rows are one setting on the Power lane, and "Hide also archives in Immich" is dropped because Hidden photos write nothing back to Immich.
-
-#### House
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 1 | House name | Settings › House | "Home" | N | missing |
-| 2 | Timezone | Settings › House | from browser at setup | M | missing |
-| 3 | Location (for sunrise/sunset) | Settings › House | unset; set at setup | S | missing |
-| 4 | Units (cm/in) | Settings › House | from locale | S | missing |
-| 5 | Clock format 12/24 h | Settings › House | from locale | S | missing |
-| 6 | Language | Settings › House | from browser | N | missing |
-| 7 | Show setup checklist | Settings › House | auto-hide when done | S | missing |
-
-#### Photo library
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 8 | Immich server URL | Settings › Photo library | none | M | missing |
-| 9 | API key (stored server-side, masked) | Settings › Photo library | none | M | missing |
-| 10 | Test connection + counts | Settings › Photo library | n/a | M | missing |
-| 11 | Additional Immich users/connections | Settings › Photo library | none | S | missing |
-| 12 | Look for new photos every | Settings › Photo library | 15 min | N | missing |
-
-#### Photo source
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 13 | Name | Scenes › Photo sources › editor | from first chip | M | exists |
-| 14 | Connection (which Immich) | Photo source editor › top | the only one | S | missing |
-| 15 | Include albums | Photo source editor › Include | none | M | missing |
-| 16 | Include people | Photo source editor › Include | none | M | missing |
-| 17 | People must all appear (any/all) | Photo source editor › Include | any | N | missing |
-| 18 | Include places | Photo source editor › Include | none | S | missing |
-| 19 | Date range (fixed) | Photo source editor › Include | none | M | exists |
-| 20 | Relative dates ("last 2 years") | Photo source editor › Include | none | S | missing |
-| 21 | On this day | Photo source editor › Include | off | S | missing |
-| 22 | Favourites only | Photo source editor › Include | off | M | exists |
-| 23 | Tags | Photo source editor › Include | none | M | exists |
-| 24 | Minimum rating | Photo source editor › Include | none | N | missing |
-| 25 | Media types (photos / videos / live photos) | Photo source editor › Include | photos + videos | M | exists |
-| 26 | Exclude albums | Photo source editor › Exclude | none | M | missing |
-| 27 | Exclude people | Photo source editor › Exclude | none | M | missing |
-| 28 | Exclude tags | Photo source editor › Exclude | none | S | missing |
-| 29 | Exclude archived | Photo source editor › Exclude | on | M | missing |
-| 30 | Exclude hidden/locked | Photo source editor › Exclude | on | M | missing |
-| 31 | Exclude screenshots | Photo source editor › Exclude | on | M | missing |
-| 32 | Include partners' photos | Photo source editor › Include | off | N | missing |
-| 33 | Skip blurry/duplicates | Photo source editor › Exclude | off | N | missing |
-
-#### Scene
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 34 | Name | Scene editor › header | "New Scene" | M | exists |
-| 35 | Kind (Slideshow / Hand-placed / Dark) | Scene editor › header | Slideshow | M | exists (Dark: none) |
-| 36 | Photo sources (several) | Scene editor › What | one | M | exists (one only) |
-| 37 | Frames / Groups targeted | Scene editor › Where | All | M | exists (Frames only) |
-| 38 | Hand-placed photo per Frame | Scene editor › What (Hand-placed) | none | S | exists |
-| 39 | Seconds per photo | Scene editor › Timing | 30 s | M | exists |
-| 40 | Transition type (crossfade / cut / slide) | Scene editor › Timing | crossfade | M | missing |
-| 41 | Transition length | Scene editor › Timing | 1.5 s | M | built, no controls |
-| 42 | Stagger between Frames | Scene editor › Timing | on, spread over the duration | S | missing |
-| 43 | Order (shuffle / newest / oldest / chronological) | Scene editor › Order | shuffle | M | missing (newest fixed) |
-| 44 | Don't repeat within N days | Scene editor › Order | 7 days | S | missing |
-| 45 | Favourite weighting | Scene editor › Order | medium | S | missing |
-| 46 | Keep events together | Scene editor › Order | off | N | missing |
-| 47 | Same photo on all Frames (sync) | Scene editor › Order | off | N | missing |
-| 48 | Fit (Fill crop / Fit with blur / Fit with colour mat) | Scene editor › Photo fit | Fit with blur | M | missing |
-| 49 | Mat colour | Scene editor › Photo fit | black | S | missing |
-| 50 | Mat padding | Scene editor › Photo fit | 0 | S | missing |
-| 51 | Portraits on landscape Frames (show / pair two / hide) | Scene editor › Photo fit | pair two | S | missing |
-| 52 | Face-aware crop | Scene editor › Photo fit | on (when Fill) | S | missing |
-| 53 | Video share | Scene editor › Video | 10 % | S | missing |
-| 54 | Video sound | Scene editor › Video | muted | M | missing |
-| 55 | Video length rule (play to end / cap at N s) | Scene editor › Video | cap 30 s | M | missing |
-| 56 | Captions on | Scene editor › Captions | off | S | missing |
-| 57 | Caption fields (date/place/people) | Scene editor › Captions | date + place | S | missing |
-| 58 | Caption corner | Scene editor › Captions | bottom-left | S | missing |
-| 59 | Caption auto-hide after | Scene editor › Captions | 5 s | N | missing |
-| 60 | Ken Burns (slow pan/zoom) | Scene editor › Timing | off | N | missing |
-| 61 | Clock/weather overlay | Scene editor › Captions | off | N | missing |
-| 62 | Outro at end (fade to black / dissolve) | Scene editor › Ending | dissolve 3 s | S | built, no controls |
-| 63 | Black vs see-through when fading (opacity) | Scene editor › Ending | black | N | built, no controls |
-| 64 | When nothing is eligible: keep last photo / fallback | Scene editor › Advanced | keep last photo | M | built, no controls |
-| 65 | Keep Frames visible together (protection) | Scene editor › Advanced | off | N | built, no controls |
-| 66 | If started again while playing (ignore/restart/queue) | Scene editor › Advanced | ignore | N | missing |
-| 67 | Child Scenes | Scene editor › Advanced | none | N | built, no controls |
-| 68 | Burn-in protection (pixel shift) | Scene editor › Advanced | off | N | missing |
-| 69 | Show in Home Assistant (as an HA scene) | Scene editor › header | off | S | missing |
-| 70 | Displays during this Scene (on / off / leave as scheduled) | Scene editor › Ending | leave as scheduled | S | missing |
-
-#### Schedule and Show now
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 71 | Scene to play | Schedule › editor | n/a | M | exists |
-| 72 | Days of week | Schedule › editor | every day | M | exists (makes up to 60 copies) |
-| 73 | Start/end clock time | Schedule › editor | all day | M | exists (one window) |
-| 74 | Sunrise/sunset ± offset | Schedule › editor | off | S | missing |
-| 75 | Crosses midnight | Schedule › editor | automatic | M | missing |
-| 76 | Date range / yearly event | Schedule › editor | none | S | missing |
-| 77 | Priority (Normal / Special event / Always wins) | Schedule › editor | Normal | M | exists (number) |
-| 78 | At end: finish gracefully / stop now | Schedule › editor | finish gracefully | N | built, no controls |
-| 79 | Power schedule: displays on/off times (its own lane, not a Scene) | Schedule › Power lane | on 07:00, off 23:00 | M | missing |
-| 80 | Power schedule days and sunrise/sunset times | Schedule › Power lane | every day; clock times | M | missing |
-| 81 | Which Frames follow the power schedule | Schedule › Power lane | All | S | missing |
-| 82 | Night off turns displays off (vs black screen only) | Schedule › Power lane | power off where the display supports it | M | missing |
-| 83 | Show now default length | Show now sheet | 1 h | S | missing |
-| 84 | Show now default Frames | Show now sheet | All | S | exists (priority, not targets) |
-| 85 | Pause default length | Show now sheet › Pause | 1 h | S | missing |
-| 86 | Home Assistant may turn displays on during Night off | Schedule › Power lane › Rules | No | S | missing |
-| 87 | Home Assistant may turn displays off | Schedule › Power lane › Rules | Yes, any time | S | missing |
-| 88 | Scenes may turn displays on during Night off | Schedule › Power lane › Rules | No | S | missing |
-| 89 | A manual hold lasts until (next scheduled change / set time / until resumed) | Schedule › Power lane › Rules | next scheduled change | M | missing |
-| 90 | Holds shown with who set them ("Off — by Home Assistant (Away mode) until 18:00") and Resume schedule | Schedule › Power lane | n/a | M | missing |
-
-#### Wall and Frame
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 91 | Wall name + room label | Frames › Wall tab | "Wall 1" | S | missing (one Wall only) |
-| 92 | Wall photo backdrop | Frames › Wall tab | none | N | missing |
-| 93 | Frame name | Frame page › header | "Frame N" | M | missing (typed id only) |
-| 94 | Placement on the wall (where the Frame hangs) | Frames › wall layout | from Display size | M | exists |
-| 95 | Orientation | Frame page › Position (follows rotation) | from rotation | M | exists |
-| 96 | Corner positions (keystone) | Frame page › Position | full output | M | exists (expires 5 s idle) |
-| 97 | Rotation 0/90/180/270 | Frame page › Position | 0 | M | exists |
-| 98 | Overscan/crop per edge | Frame page › Position | 0 | M | exists |
-| 99 | Nudge step | Frame page › Position | 10 px | N | missing |
-| 100 | Test pattern on/off | Frame page › Position / Picture | on while editing | M | exists |
-| 101 | Fit override (per Frame) | Frame page › Photo fit | use Scene's | S | missing |
-| 102 | Minimum photo quality for this Frame | Frame page › Photo fit | strict (requirement); lenient needs a requirement change | S | missing |
-| 103 | Group name + members (manual or rule) | Frames › Groups | rooms automatic | S | missing |
-| 104 | Spanning (one picture across adjacent Frames, bezel gap) | Frames › canvas | off | N | missing |
-| 105 | Live view: what the Pi is presenting now | Frame page › header (and Home tiles) | on | M | missing |
-| 106 | Bulk actions on selected Frames (skip, restart, power test) | Frames › list | n/a | S | missing |
-
-#### Display (moves with the panel)
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 107 | Display size (diagonal) | Frame page › Hardware | from the display's report | M | exists (only while unbound) |
-| 108 | Resolution (detected + override) | Frame page › Hardware | detected | S | exists (only while unbound) |
-| 109 | HDMI mode / refresh rate | Frame page › Hardware | best detected | S | missing |
-| 110 | Brightness (display hardware where supported, else picture adjustment) | Frame page (stored on the display) › Picture | 50 % | M | exists (software gain, "draft") |
-| 111 | Contrast (display hardware where supported, else picture adjustment) | Frame page (stored on the display) › Picture | 50 % | M | missing |
-| 112 | Colour temperature | Frame page (stored on the display) › Picture | 6500 K | S | missing |
-| 113 | Gamma | Frame page (stored on the display) › Picture | 2.2 | S | missing |
-| 114 | Auto-dim with room light (from a Home Assistant sensor) | Home Assistant blueprint; native later | off | N | missing |
-| 115 | Power method: HDMI-CEC / DDC/CI / HDMI signal off (panel sleeps) / external switch via Home Assistant, with Test off/on | Frame page › Power (stored on the display) | best detected | M | missing |
-| 116 | Switch the display to this input on power-on | Frame page › Power (stored on the display) | on | S | missing |
-| 117 | Never power off a display that is showing another input | Frame page › Power (stored on the display) | on | S | missing |
-| 118 | Copy picture settings to other Frames | Frame page › Picture | n/a | S | missing |
-| 119 | Display moved or changed: picture and power follow it; re-check position | Frame page › Hardware (prompt) | prompted | M | missing |
-
-#### Pi
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 120 | Pi name | Pis › Pi page | serial short code | S | missing |
-| 121 | HDMI port → Frame (binding) | Frame page › Hardware (also shown on Pi page, read-only link) | unbound | M | exists |
-| 122 | Replace with… (move Frame to new Pi) | Frame page › Hardware | n/a | M | exists (via binding; not guided) |
-| 123 | Log level / debug bundle | Pis › Pi page › Logs | normal | S | missing |
-
-#### Settings
-
-| # | Setting | Lives on | Default | P | Today |
-|---|---|---|---|---|---|
-| 124 | Pi software release (selected) | Settings › Updates | newest stable (automatic at setup) | M | exists |
-| 125 | Apply new Pi software (you click Apply; new releases pre-download) | Settings › Updates | manual (owner's choice, 2026-10-04) | M | exists |
-| 126 | Maintenance window | Settings › Updates | 03:00-05:00 | S | missing |
-| 127 | Releases kept warm on Central | Settings › Storage and network boot | newest 3 + current + previous | N | built, no controls |
-| 128 | Central cache size limit | Settings › Storage and network boot | 80 % of disk | S | missing |
-| 129 | Network boot mode (proxy / full) | Settings › Storage and network boot | proxy | S | missing |
-| 130 | Notification channels (email/push/webhook) | Settings › Notifications | none; push at setup | N | missing |
-| 131 | Alert after Frame Not showing for | Settings › Notifications | 15 min (scheduled hours only) | S | missing |
-| 132 | Daily digest for "Needs a look" | Settings › Notifications | on, 09:00 | N | missing |
-| 133 | Quiet hours | Settings › Notifications | Night off window | N | missing |
-| 134 | Owner account | Settings › People and access | created at setup | M | missing (token from env var) |
-| 135 | Members and roles | Settings › People and access | owner only | N | missing |
-| 136 | OIDC sign-in | Settings › People and access | off | N | missing |
-| 137 | Session length | Settings › People and access | 30 days | N | missing |
-| 138 | Nightly backup | Settings › Backups | on | S | missing |
-| 139 | Backups kept | Settings › Backups | 7 | S | missing |
-| 140 | Hidden photos list | Scenes › Hidden photos | empty | M | missing |
-| 141 | Home Assistant: MQTT broker address, user, password, Test | Settings › Integrations | mqtt://homeassistant.local:1883 | M | missing |
-| 142 | Home Assistant can control Photo Wall | Settings › Integrations | on | S | missing |
-| 143 | Include Pi diagnostics in Home Assistant | Settings › Integrations | off | N | missing |
-| 144 | Remove from Home Assistant | Settings › Integrations | n/a | S | missing |
-
-### 0.12 What this design gives up
-
-- Picture and power settings move with the display. That needs each display to report a usable identity over HDMI; one that reports none is treated as new each time it is plugged in.
-- Rooms are labels that make automatic Groups, not separate objects; Home Assistant areas cover the rest.
-- Sensors and triggers arrive through Home Assistant rather than being built into Photo Wall; native auto-dim waits.
-- Hardware brightness and power depend on each display: many TVs take power commands but not brightness, and some panels take neither.
-- Deferred, with costs, in the [roadmap](roadmap.md#deferred-and-what-that-costs): roles, notification channels beyond the basics, change history, lights and other non-display controls, spanning, per-Pi software pins.
-
-### 0.13 Where a power user's expectation meets a written requirement
-
-Recommendations only; none changes a requirement.
-
-| Requirement | A power user expects | Recommendation |
-|---|---|---|
-| Authored edits default to the next Run ([live media](requirements.md#live-media-compatibility-and-preparation)) | Change seconds-per-photo and see it now | Keep the rule; add **Save and apply now** |
-| Landscape photos never on portrait Frames; cropping is no exception ([compatibility](requirements.md#live-media-compatibility-and-preparation)) | A fill option and portrait pairing | Fill crops only photos that already match; pairing two portraits is a layout, not an exception; the Photo fit section says so in one line |
-| A 720p video never on a 40-inch Frame ([compatibility](requirements.md#live-media-compatibility-and-preparation)) | An adjustable floor and a skipped count | Keep it strict and always show the skipped count; a lenient floor would be a requirement change |
-| The Installation owns policy and timezone ([installation model](requirements.md#installation-model)) | Location for sun times, units | Add location (optional) as house policy |
-| The operator selects the Player release ([provisioning](requirements.md#player-provisioning)); no auto-follow (owner, 2026-10-04) | Automatic updates | Keep the owner's choice: releases pre-download and he clicks Apply |
-| U2: photos within a couple of hours after a power cut | Minutes | Keep U2 as the bound; show per-Frame progress |
-| No playback guarantee after a cold reboot without Central ([stateless Players](requirements.md#central-authority-and-stateless-players)) | The wall survives a server reboot | Accept; the display says "Can't reach the Photo Wall server" |
-| U1: at minimum an error page | Last photo plus a small badge | Last photo plus a badge for photo problems; the error page for app or system faults |
-| Not a second general-purpose photo library ([purpose](requirements.md#purpose-and-experience)) | Hide this photo forever | A wall-only Hidden photos list; nothing written back to Immich |
-| Nothing on backup, phone use, captions, ordering, mats or a live view | All of them | [Operator experience](requirements.md#operator-experience) records what the owner stated; the rest stays design until he states it |
-
-### 0.14 What this section supersedes in this document
-
-- The sidebar, landing and Frame Inspector facets (Status · Binding · Calibration) in the 2026-10-02 notes above: the console opens on **Home**, the rail is Everyday / Set up, and a Frame has one page with the tabs of §0.5.
-- §2's "one row per box; one Player page each" and 0018's two pages per Frame and per Pi: one Frame page, one Pi page.
-- §3's rename of Display to **Panel** in the console: the console says **Display** again, now with identity (§0.3, §0.6).
-- §7 (the commissioning layer, already superseded on 2026-10-02): the Display has a stored identity, colour and power are designed here, and §7.5's open precedence question is answered by §0.7.
-- §8a's Wall-first and 0018's Screens-first landing: Home first.
-- §10 Q2 (recurrence deferred) and Q3 (no sensors, triggers or actuator registry): repeating Schedules come in roadmap delivery 2, and Home Assistant inputs in delivery 3.
-
----
-
 ## 1. The problem in plain words
 
 The console is the single source of truth for a Photo Wall installation, but its
@@ -702,7 +252,7 @@ Every row below was re-checked against source while writing this document.
 
 ## 2. The answer in one picture
 
-> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The diagram's "one row per box; one Player page each" no longer holds: Hardware and Software are the Fleet domains, each with a Pi page, and Screens carries the Frame's live state. **Superseded again (2026-10-09):** the target has one Frame page and one Pi page ([§0.5](#05-the-frame-page), [§0.9](#09-the-other-pages)).
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The diagram's "one row per box; one Player page each" no longer holds: Hardware and Software are the Fleet domains, each with a Pi page, and Screens carries the Frame's live state.
 
 ```mermaid
 graph TD
@@ -834,9 +384,6 @@ entries below that it changed say so; where the two differ, that glossary wins.
   requirements do, and no longer says "Display" for it. "Display" survives only in
   **Display Host** (the node layer, L1.5, that owns final scanout and reports
   `presented_to_compositor` per Output, which is not proof of Panel pixels).
-  *Superseded (2026-10-09):* the target console says **Display** again, for a
-  display recognised by its HDMI identity whose picture and power settings follow
-  it; the code keeps Panel ([§0.3](#03-new-terms), [§0.6](#06-display-identity)).
 - **Player** — a replaceable Raspberry Pi; `player_id` is a deterministic hash of
   its hardware serial; it re-enrolls fresh every boot with a new `authority_epoch`
   and holds no authoritative state. A disposable box behind a Frame. Since
@@ -1386,12 +933,6 @@ stateDiagram-v2
 > the Calibration facet, the equipment block is on Binding, and colour and power
 > are feature proposals without a console seam
 > ([pass 3](operator-console-ddd.md#19-screens)).
->
-> **Superseded again (2026-10-09).** Colour and power are now designed in §0: the
-> Display has a stored identity from its EDID ([§0.6](#06-display-identity)), its
-> brightness, contrast and colour act on the display where it accepts commands, and
-> §7.5's open precedence question is answered by the power rule and its guard
-> settings ([§0.7](#07-power)).
 
 This layer folds the owner's Display/hardware dimension into the existing shape.
 It adds R4, a Commissioning facet, and the Display as a first-class console
@@ -1597,7 +1138,7 @@ Two independent shape choices were each drafted twice: the console's overall sha
 
 ### 8a. Overall shape — Workspaces vs Wall-First (chosen: B)
 
-> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Wall-first becomes setup-first: the console opens on Screens once a Frame exists, and the Wall is where a Frame is placed, bound and calibrated. **Superseded again (2026-10-09)** by [§0.4](#04-navigation) and [decision 0019](decisions/0019-first-principles-console.md): the console opens on Home.
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Wall-first becomes setup-first: the console opens on Screens once a Frame exists, and the Wall is where a Frame is placed, bound and calibrated.
 
 **Shape A — Domain-Workspaces:** four peer workspaces (Equipment, Wall, Content,
 Schedule) behind a left rail. **Shape B — Wall-First Canvas** (chosen): the
@@ -1744,12 +1285,6 @@ The calibration lifecycle state machine is in
 ---
 
 ## 10. Decisions that are yours
-
-> **Superseded in part (2026-10-09).** Q2's deferral of recurrence and Q3's
-> deferral of sensors, triggers and an actuator registry no longer hold for the
-> target design: repeating Schedules arrive in [roadmap](roadmap.md#delivery-order)
-> delivery 2, and Home Assistant inputs and display power in deliveries 1b, 2 and 3
-> ([§0.7](#07-power), [§0.8](#08-home-assistant)).
 
 | # | Question | Recommendation | Cost of the recommendation | Alternative |
 |---|---|---|---|---|

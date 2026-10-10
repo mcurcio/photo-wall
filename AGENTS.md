@@ -71,7 +71,7 @@ Published-wire tests skip unless `PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR` names a 
 | Runtime, Planner, execution | [execution contract](docs/execution-contract.md) |
 | Player node lifecycle | [node architecture as built](docs/player-architecture.md), [Player node domain model](docs/player-node-domain-model.md), [fleet implementation map](docs/player-fleet-implementation-map.md), [display host](docs/display-host-backend.md) |
 | Node bus, hub, NodeLink, `nodeapi` | [0017](docs/decisions/0017-node-redesign-r3.md) (C3–C5, C13, C19, C20), [runbook](docs/runbook.md#the-node-bus-and-centrals-hub) |
-| Operator console | [UX design](docs/operator-console-ux-design.md) (target design: §0) |
+| Operator console | [console design](docs/operator-console-design.md) (target); [UX design](docs/operator-console-ux-design.md) (historical gate record) |
 | What to build next, product order | [roadmap](docs/roadmap.md) |
 | Launch, deploy, recovery | [runbook](docs/runbook.md#local-launch) |
 | A consequential choice | [design decisions](docs/design-decisions.md), [decision records](docs/decisions/) |
