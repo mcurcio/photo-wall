@@ -398,6 +398,31 @@ WHERE EXISTS (
     SELECT 1 FROM jsonb_each(snapshot->'admissions') WHERE value ? 'blocking_run_id');
 ```
 
+**Rolling Central back past the after-state (migration 069).** Migration
+`069_layer_after_end.sql` replaced each stored `retain_on_expiry` flag with `after_end`
+([what a Frame keeps](execution-contract.md#what-a-frame-keeps)) in runtime state, offered plans
+and locks. Builds before it forbid the key, so a previous Central build cannot restore runtime
+state (the same symptoms as above). Prefer rolling forward. Otherwise stop Central, then run this
+once before starting the previous build. It maps `keep_this_photo` back to the flag and every
+other after-state to no (an ending then no longer clears the kept photo, as before), and lets 069
+run again when you roll forward:
+
+```sql
+UPDATE runtime_state SET snapshot = replace(replace(replace(snapshot::text,
+    '"after_end": "keep_this_photo"', '"retain_on_expiry": true'),
+    '"after_end": "keep_nothing"', '"retain_on_expiry": false'),
+    '"after_end": "leave_as_is"', '"retain_on_expiry": false')::jsonb;
+UPDATE plan_offers SET manifest = replace(replace(replace(manifest::text,
+    '"after_end": "keep_this_photo"', '"retain_on_expiry": true'),
+    '"after_end": "keep_nothing"', '"retain_on_expiry": false'),
+    '"after_end": "leave_as_is"', '"retain_on_expiry": false')::jsonb;
+UPDATE assignment_locks SET layer = replace(replace(replace(layer::text,
+    '"after_end": "keep_this_photo"', '"retain_on_expiry": true'),
+    '"after_end": "keep_nothing"', '"retain_on_expiry": false'),
+    '"after_end": "leave_as_is"', '"retain_on_expiry": false')::jsonb;
+DELETE FROM schema_migrations WHERE name = '069_layer_after_end.sql';
+```
+
 ## Operator API: reposition, edit profile and remove Frames
 
 The operator console edits the wall plan through admin-authenticated routes on central (`Depends(admin)`, like every `/v1/operator/*` route). They change no schema and add no migration — placement and profile already exist on the `frames` row.
@@ -819,7 +844,7 @@ Playback also holds the Scene settings Central already played but the console co
 |---|---|---|
 | **Fade between photos** (0–5 s) | 1.5 s for a new Scene | Each photo fades out over half of it and the next fades in over the other half, through black or what plays beneath (every body Contribution's `fade_out_seconds` and `fade_in_seconds`). It must be no longer than **Seconds per cycle**. |
 | **How it ends**: Stops, Black or Fades out, with **Ending length** (0.5–10 s) | Stops; 3 s once chosen | The Scene's outro after a Finish or its Program's end: **Black** is opaque black covering the Frames for the length; **Fades out**: the last photo returns over half the fade between photos, then fades out over the rest of the length to reveal what plays beneath (the length must be at least half the fade). Either ending keeps nothing after it (`after_end: keep_nothing`): the Frame then shows what plays beneath, or black, never the kept photo again, during an outage too. |
-| **Keep the last photo up** (Advanced) | On | When nothing new can play on a Frame, even after the Scene stops, it keeps its last photo instead of going dark (`after_end: keep_this_photo`); Central plans the Scene's last cycle with no fade-out, so the kept photo never dips to black and snaps back. Central owns both rules and the Player applies them ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). |
+| **Keep the last photo up** (Advanced) | On | When nothing new can play on a Frame, even after the Scene stops, it keeps its last photo instead of going dark (`after_end: keep_this_photo`); when nothing else plays on the Frame after the Scene, Central plans its last cycle with no fade-out, so the kept photo never dips to black and snaps back. Central owns both rules and the Player applies them ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). |
 | **Keep these Frames together** (Advanced) | Off | While the Scene plays, Central turns away other Scenes that need any of its Frames, and does not start it while something more important covers them (`protect_frames`). |
 
 ### Viewing and editing a Scene

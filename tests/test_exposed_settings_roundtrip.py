@@ -454,3 +454,56 @@ def test_without_keep_the_last_photo_fades_out_to_black(registry, tmp_path):
         _play_one_cycle(client, frame, _scene("plain", fade=3, keep_last=False))
         assert _shown(frame.advance(9.5)) == (False, [("photo", 0.33)])
         assert _shown(frame.advance(1)) == BLACK
+
+
+def test_the_shortest_fading_ending_keeps_nothing(registry, tmp_path):
+    """Ending length at its minimum, half the fade: the ending's photo fades in for its whole
+    length and never reaches full strength, yet it still keeps nothing (from its first draw).
+    Mutation probe: apply keep_nothing only after the fade-in (the kept photo comes back)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _scene("fade-end", ending=("fade", 1), fade=2, keep_last=True))
+        outro = [layer for layer in _layers(coordinator, player) if layer.after_end == "keep_nothing"]
+        assert [(layer.fade_in, layer.fade_out) for layer in outro] == [(1, 0)]
+        assert _shown(frame.advance(10.5)) == (False, [("photo", 0.5)])
+        assert _shown(frame.advance(1)) == BLACK
+        assert _shown(frame.lose_central(60)) == BLACK
+
+
+def _program(client, frame, scene_id, starts, ends):
+    program = {"program_id": "p-" + scene_id, "scene_id": scene_id, "starts_at": starts,
+               "ends_at": ends}
+    scheduled = client.put(f"/v1/operator/programs/{program['program_id']}", json=program,
+                           headers=AUTH)
+    assert scheduled.status_code == 200, scheduled.text
+
+
+def test_back_to_back_programs_keep_their_fade(registry, tmp_path):
+    """A kept photo whose Program is followed at once by another on the same Frame fades into
+    it as authored: the hold is only for a photo nothing follows. Mutation probe: ignore what
+    follows (full strength at 19.5 s)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        for body in (_scene("first", fade=3, keep_last=True), _scene("second", fade=3, keep_last=True)):
+            saved = client.put(f"/v1/operator/scenes/{body['scene_id']}", json=body, headers=AUTH)
+            assert saved.status_code == 200, saved.text
+        now = registry.clock.utc()
+        _program(client, frame, "first", now, now + 20)
+        _program(client, frame, "second", now + 20, now + 40)
+        frame.sync()
+        assert _shown(frame.advance(19.5)) == (False, [("photo", 0.33)])
+        assert _shown(frame.advance(1)) == (False, [("photo", 0.33)])  # the next one fading in
+
+
+def test_a_kept_photo_over_a_scene_beneath_fades_to_reveal_it(registry, tmp_path):
+    """A kept photo on top of a Scene that plays on beneath fades out to reveal it, as
+    authored, and the Scene beneath stays."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _save_and_start(client, _scene("beneath", keep_last=False))
+        _play_one_cycle(client, frame, _scene("top", fade=3, keep_last=True))
+        assert _shown(frame.advance(9.5)) == (False, [("photo", 1.0), ("photo", 0.33)])
+        assert _shown(frame.advance(1)) == (False, [("photo", 1.0)])

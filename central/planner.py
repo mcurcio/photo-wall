@@ -101,9 +101,11 @@ def eligible(candidate: Candidate, profile: FrameProfile) -> bool:
 
 
 # What Central may revise on a layer it has already offered (each offered layer is a lock:
-# its content and interval are fixed): the arbitration, and the fade-out, which a Finish
-# revises to hold a kept photo in what became its final cycle (`runtime._holds_to_the_end`).
-REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out"})
+# its content and interval are fixed): the arbitration; the fade-out, which a Finish or a
+# follower revises (`runtime._may_hold_to_the_end`); and the after-state, which is not content
+# (a Run's after-states are fixed by its Scene; migration 069 left in-flight endings'
+# offered layers at "leave_as_is" while their Scene says "keep_nothing").
+REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end"})
 
 
 def same_execution(first: Layer, second: Layer) -> bool:
@@ -314,14 +316,14 @@ class _ProjectionBuilder:
             if any(
                 getattr(locked, field) != value
                 for field, value in fields.items() if field not in REVISABLE
-            ) or locked.presentation != expected_kind or locked.after_end != _after_end(
-                intent, still=locked.variant is not None and locked.variant.media_type != "video/mp4"
-            ):
+            ) or locked.presentation != expected_kind:
                 self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
                 return
             self.used_locks.add(identity)
+            revised = {**fields, "after_end": _after_end(
+                intent, still=locked.variant is not None and locked.variant.media_type != "video/mp4")}
             self.layers[player].append(Layer.model_validate({
-                **locked.model_dump(), **{field: fields[field] for field in REVISABLE},
+                **locked.model_dump(), **{field: revised[field] for field in REVISABLE},
             }))
             self.selections.append(AssignmentSelection(assignment_id=identity, locked=True))
             return

@@ -450,13 +450,14 @@ class Executor:
                           _alpha(assignment.layer, now))
 
     def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
-        """A drawn layer whose fade-in is over sets what its Frame keeps for when nothing plays
-        (`Layer.after_end`, planned by Central): this photo, at full strength, or nothing."""
+        """A drawn layer sets what its Frame keeps for when nothing plays (`Layer.after_end`,
+        planned by Central): nothing, from its first draw; or this photo, at full strength,
+        from the first draw after its fade-in."""
         layer = local.layer
-        if now < layer.start + layer.fade_in or layer.after_end == "leave_as_is":
-            return
         if layer.after_end == "keep_nothing":
             self._retained.pop(binding.output_id, None)
+            return
+        if layer.after_end == "leave_as_is" or now < layer.start + layer.fade_in:
             return
         identity = (f"{binding.output_id}:{binding.frame_id}:"
                     f"{binding.generation}:{layer.assignment_id}")

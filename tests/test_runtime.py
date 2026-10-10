@@ -1041,3 +1041,29 @@ def test_a_kept_photo_plans_no_fade_out_in_its_final_cycle_only():
         media(fade_in_seconds=1, fade_out_seconds=2),)))
     plain.activate("plain", "plain", 0)
     assert _fades(plain.advance(5)) == [("body", 1, 2)]
+
+
+def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
+    """The final-cycle hold is only for a photo nothing follows: a Program starting at its end,
+    or a Run playing beneath it, keeps the authored fade-out; a follower that appears later
+    revises the hold away. Mutation probe: ignore what follows (the fade-out is 0)."""
+    def kept(runtime):
+        return [(i.fade_in_seconds, i.fade_out_seconds) for i in runtime.advance(
+            runtime._state.now).contributions if i.scene_id == "kept"]
+
+    following = Runtime()
+    following.set_scene(_kept_scene())
+    following.set_scene(Scene(scene_id="next", cycle_seconds=10, contributions=(media(),)))
+    following.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
+    following.advance(5)
+    assert kept(following) == [(1, 0)]
+    following.set_program(Program(program_id="night", scene_id="next", starts_at=10, ends_at=20))
+    assert kept(following) == [(1, 2)]
+
+    beneath = Runtime()
+    beneath.set_scene(_kept_scene())
+    beneath.set_scene(Scene(scene_id="under", cycle_seconds=10, loop=True, contributions=(media(),)))
+    beneath.activate("under", "under", 0)
+    beneath.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
+    beneath.advance(5)
+    assert kept(beneath) == [(1, 2)]

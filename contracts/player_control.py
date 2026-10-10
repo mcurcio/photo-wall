@@ -85,8 +85,8 @@ def plan_from_selection(plan: dict, selection: ControlSelection) -> dict:
         return plan
     layers = []
     for layer in plan["layers"]:
-        if not isinstance(layer, dict):
-            layers.append(layer)  # unparseable either way; the plan's validation refuses it
+        if not isinstance(layer, dict) or "after_end" in layer:
+            layers.append(layer)  # unparseable, or already explicit: read as sent
             continue
         current = {key: value for key, value in layer.items() if key != "retain_on_expiry"}
         current["after_end"] = ("keep_this_photo" if layer.get("retain_on_expiry")

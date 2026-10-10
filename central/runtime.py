@@ -272,12 +272,14 @@ class _Run(_MutableModel):
         return min((t for t in times if t is not None), default=None)
 
 
-def _holds_to_the_end(run: _Run, contribution: Contribution) -> bool:
-    """A kept photo in its Run's final body cycle plans no fade-out: nothing on its Frame
-    follows it (the Scene has no ending there), so fading out would dip to black and snap back
-    to the kept photo. The cycle is final when the Scene does not loop, or when the Run's stop
-    (Program end, duration, scheduled finish or Finish) falls within it; a Finish revises the
-    current cycle, which the planner allows on an offered layer (`planner.REVISABLE`)."""
+def _may_hold_to_the_end(run: _Run, contribution: Contribution) -> bool:
+    """A kept photo in its Run's final body cycle, with no ending of its Scene on its Frame:
+    it plans no fade-out unless another Run plays on the Frame at the cycle's end
+    (`Runtime._followed_at`), so it never dips to black and snaps back to itself. The cycle is
+    final when the Scene does not loop, or when the Run's stop (Program end, duration,
+    scheduled finish or Finish) falls within it; a Finish, or a follower that appears later,
+    revises the cycle's fade-out, which the planner allows on an offered layer
+    (`planner.REVISABLE`)."""
     if run.phase != "body" or contribution.after_end != "keep_this_photo":
         return False
     if any(ending.target == contribution.target for ending in run.scene.outro_contributions):
@@ -724,7 +726,7 @@ class Runtime:
     def advance(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self._advance(now, _TransitionBudget(max_events))
 
-    def _advance(self, now: float, budget: _TransitionBudget) -> RuntimeView:
+    def _advance(self, now: float, budget: _TransitionBudget, *, holds: bool = True) -> RuntimeView:
         now = _finite(now)
         if self._state.now is not None and now < self._state.now:
             raise ValueError("Runtime cannot move backwards in UTC")
@@ -743,7 +745,7 @@ class Runtime:
             budget.consume()
             self._process(event, budget)
         self._state.now = now
-        return self._view(now)
+        return self._view(now, holds=holds)
 
     def _matching(self, scene_id: str) -> list[_Run]:
         return [
@@ -955,9 +957,18 @@ class Runtime:
                 )
             self._state.queue.remove(item)
 
-    def _view(self, now: float) -> RuntimeView:
+    def _followed_at(self, run: _Run, at: float) -> frozenset[str]:
+        """The targets another Run contributes to at `at`, from a detached projection without
+        the final-cycle rule (so it never recurses)."""
+        view = self._copy()._advance(at, _TransitionBudget(10000), holds=False)
+        return frozenset(intent.target for intent in view.contributions
+                         if intent.run_id != run.run_id
+                         and intent.interval_start <= at < intent.interval_end)
+
+    def _view(self, now: float, *, holds: bool = True) -> RuntimeView:
         intents: list[Intent] = []
         runs = sorted(self._state.runs.values(), key=lambda r: r.order)
+        followed: dict[str, frozenset[str]] = {}
         for run in runs:
             if not run.active or (run.phase == "body" and run.body_done_at is not None):
                 continue
@@ -966,7 +977,12 @@ class Runtime:
             definitions = run.scene.outro_contributions if run.phase == "outro" else run.scene.contributions
             position = max(0.0, now - start)
             for contribution in definitions:
-                fade_out = 0 if _holds_to_the_end(run, contribution) else contribution.fade_out_seconds
+                fade_out = contribution.fade_out_seconds
+                if fade_out and holds and _may_hold_to_the_end(run, contribution):
+                    if run.run_id not in followed:
+                        followed[run.run_id] = self._followed_at(run, end)
+                    if contribution.target not in followed[run.run_id]:
+                        fade_out = 0
                 opacity = contribution.opacity
                 if contribution.fade_in_seconds:
                     opacity *= min(1.0, position / contribution.fade_in_seconds)

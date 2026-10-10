@@ -350,3 +350,6 @@ def test_only_a_player_that_offers_it_is_sent_the_after_state():
         "keep_this_photo", "leave_as_is", "leave_as_is"]
     service = SimpleNamespace(_control_selection=CURRENT)
     assert PlayerService._state(service, after_end_state(CURRENT)).plan == plan
+    # An explicit after-state is read as sent, whatever the selection says.
+    service = SimpleNamespace(_control_selection=IDENTIFY_ONLY)
+    assert PlayerService._state(service, after_end_state(CURRENT)).plan == plan

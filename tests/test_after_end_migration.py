@@ -1,13 +1,24 @@
 """069 moves stored Scenes, Runs, offered plans and locks from `retain_on_expiry` to `after_end`.
 
 The rows are written as the previous build stored them (the yes/no flag, the console's endings
-changing nothing), into temporary tables of the real shape, and the migration's SQL runs on them.
+changing nothing), into temporary tables of the real shape, and the migration's SQL runs on them;
+and the runbook's reverse SQL followed by 069 again, with an ending in flight.
 """
 
 import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
+from test_exposed_settings_roundtrip import (
+    BLACK,
+    _Frame,
+    _layers,
+    _play_one_cycle,
+    _rig,
+    _shown,
+)
+from test_exposed_settings_roundtrip import _scene as _console_scene
 from test_player_control_protocol import after_end_plan
 
 from central.runtime import Contribution, Program, Runtime, Scene
@@ -78,3 +89,39 @@ def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
         "keep_this_photo", "leave_as_is"]
     assert Layer.model_validate(lock).after_end == "keep_this_photo"
     assert functions["n"] == 0
+
+
+RUNBOOK = Path(__file__).parents[1] / "docs/runbook.md"
+
+
+def _rollback_sql() -> str:
+    """The runbook's reverse of 069, exactly as an operator would copy it."""
+    text = RUNBOOK.read_text()
+    section = text[text.index("**Rolling Central back past the after-state"):]
+    start = section.index("```sql\n") + len("```sql\n")
+    return section[start:section.index("\n```", start)]
+
+
+def test_an_ending_in_flight_across_rollback_and_069_still_keeps_nothing(registry, tmp_path):
+    """The black ending is offered and committed when Central is rolled back with the runbook's
+    SQL (the previous build's shape) and then forward again: 069 gives the stored ending
+    `keep_nothing` but its offered layer `leave_as_is`, and the planner revises it rather than
+    dropping it as stale. Mutation probe: make the after-state not revisable (the ending is
+    dropped and the kept photo comes back)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _console_scene("black-end", ending=("black", 4)))
+        assert _shown(frame.advance(9)) == (False, [("photo", 1.0)])  # 19 s: ending committed
+        with registry.db.transaction() as conn:
+            conn.execute(_rollback_sql())
+            stored = json.dumps([conn.execute(f"SELECT {column} FROM {table}").fetchall()
+                                 for table, column in (("runtime_state", "snapshot"),
+                                                       ("plan_offers", "manifest"),
+                                                       ("assignment_locks", "layer"))])
+        assert "retain_on_expiry" in stored and "after_end" not in stored
+        registry.db.migrate()  # rolling forward: 069 runs again
+        assert _shown(frame.advance(2)) == (False, [("black", 1.0)])  # 21 s: the ending
+        assert [layer.after_end for layer in _layers(coordinator, player)
+                if layer.presentation == "black"] == ["keep_nothing"]
+        assert _shown(frame.lose_central(60)) == BLACK
