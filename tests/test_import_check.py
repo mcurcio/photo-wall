@@ -228,9 +228,9 @@ def launcher(path: tuple[str, ...], entry: str) -> str:
 def roots(tmp_path, *, player_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/player"),
           player_source="import lib.wire\n",
           manager_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/low",
-                        "/usr/lib/photo-wall/top")):
+                        "/usr/lib/photo-wall/top"), source=None):
     repo, staged = build(tmp_path, source={"player/__init__.py": "",
-                                           "player/service.py": player_source},
+                                           "player/service.py": player_source} | (source or {}),
                          depends=DEPENDS | PLAYER_DEPENDS)
     player = staged / "photo-wall-player/usr/lib/photo-wall/player"
     (player / "player").mkdir(parents=True)
@@ -269,6 +269,20 @@ def test_the_app_root_holds_no_node_context(tmp_path):
             "/usr/lib/photo-wall/low (a Node context in the app root)", "player") in kinds(refusals)
     assert ("photo-wall-player", "undeclared-sibling", "appliance.low.core",
             "player.service") in kinds(refusals)
+
+
+# The shared rule: the package Central shares with the Node (here lib) installs only modules a
+# Node program reaches.
+def test_the_shared_package_installing_only_reached_modules_passes(tmp_path, monkeypatch):
+    monkeypatch.setattr(import_check, "SHARED", "photo-wall-lib")
+    assert roots(tmp_path) == []
+
+
+def test_a_shared_module_no_node_program_reaches_is_refused(tmp_path, monkeypatch):
+    """A module only Central imports (here imported by nothing) must not ship to the Node."""
+    monkeypatch.setattr(import_check, "SHARED", "photo-wall-lib")
+    assert kinds(roots(tmp_path, source={"lib/central_only.py": "import json\n"})) == {
+        ("photo-wall-lib", "unreached-module", "lib.central_only", "no Node program")}
 
 
 # The composition (photo-wall-node): no module of its own, one launcher per directory under

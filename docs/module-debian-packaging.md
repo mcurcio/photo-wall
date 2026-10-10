@@ -8,7 +8,7 @@ One source package, `photo-wall` (`debian/`, `3.0 (native)`, `debhelper-compat (
 
 | Package | Holds | Installed in |
 |---|---|---|
-| `photo-wall-common` | `contracts`, `nodeapi` | base, app root, manager root |
+| `photo-wall-common` | `contracts`, `nodeapi`, less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`, `contracts/os_attempt_report.py`) | base, app root, manager root |
 | `photo-wall-uplink` | `uplink` (stdlib-only) | base, app root, manager root |
 | `photo-wall-node-kernel`, `-central-session`, `-host`, `-display`, `-health`, `-apps`, `-boot`, `-manager` | one Node context each; `-display` is the one architecture-dependent context (the Meson-built shell, the diagnostic client and `abi.json`) | base; the manager root takes the manager's imports |
 | `photo-wall-frame-client` | the frame client's `.so` | app root |
@@ -22,7 +22,7 @@ Also in the local repo, built or fetched but not part of the source package: `py
 Rules the build enforces:
 
 - **Versions are content-derived.** Each binary's version is `0+<12 hex>` over its installed tree and its Depends (`debian/content-versions`, run from `override_dh_gencontrol`), so an unchanged part keeps its version, its image keeps its bytes and a Central-only release gives no Node a new digest.
-- **Depends cannot drift from imports.** `scripts/import_check.py` runs inside the build (`execute_after_dh_install`; it is not a test target, so `nocheck` cannot skip it). It refuses a build when a package's declared Depends differ from what its modules directly import, when a third-party import root's owning Debian package is missing from Depends, or when a Depends entry is unused. The edges the `layers` contract in `pyproject.toml` lists as `ignore_imports` (the retiring upward edges) are exempt.
+- **Depends cannot drift from imports.** `scripts/import_check.py` runs inside the build (`execute_after_dh_install`; it is not a test target, so `nocheck` cannot skip it). It refuses a build when a package's declared Depends differ from what its modules directly import, when a third-party import root's owning Debian package is missing from Depends, or when a Depends entry is unused. It also refuses a `photo-wall-common` module that no Node program (a launcher's entry or stage 1) reaches, so a module only Central imports cannot ship to the Node and a Central-only edit keeps every Node package's version. The edges the `layers` contract in `pyproject.toml` lists as `ignore_imports` (the retiring upward edges) are exempt.
 - **Each launcher sees only its graph.** `appliance/launchers/<name>/__main__.py` puts on `sys.path` its own context and the lower layers import-linter allows; programs run as `python3 -I -B <dir>` ([0014](decisions/0014-reaching-central-from-every-boot-stage.md)), so no `.pyc` lands in the RAM root.
 - **ABI ids have one writer each.** `photo-wall-node` writes `base_abi` (a hash of its expanded Depends and `debian-packaging/image-format.env`); `photo-wall-node-display` writes `graphics_abi` (`debian/graphics-abi`, over the Meson outputs of the display and frame client and the third-party runtime they resolve to, never the context's Python) and the declared `plugin_abi`.
 

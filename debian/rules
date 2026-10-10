@@ -9,6 +9,16 @@ include debian-packaging/nats-server.env
 %:
 	dh $@ --buildsystem=meson --sourcedirectory=appliance/display_host
 
+# Central's modules in the directories photo-wall-common shares with it (contracts, nodeapi) that
+# no Node program reaches stay out of the package, so a Central-only edit keeps every Node
+# package's version and the base's bytes (0019 Q1). The import check's shared rule refuses a
+# common module no Node program reaches, and its module rule one a Node program reaches that is
+# listed here.
+CENTRAL_ONLY := nodeapi/hub.py contracts/node_release.py contracts/os_attempt_report.py
+
+override_dh_install:
+	dh_install $(addprefix -X,$(CENTRAL_ONLY))
+
 # Every package's declared Depends against what its modules import, once each binary package's
 # tree is staged (scripts/import_check.py). Not a test target: nocheck cannot skip it.
 execute_after_dh_install:

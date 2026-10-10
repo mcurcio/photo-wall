@@ -68,6 +68,14 @@ The stage-1 rule judges that package besides the module rule:
 - Stage 1 is stdlib-only: a module stage 1 reaches that imports a top-level name neither
   first-party nor stdlib is `stage-1-third-party` (netboot-init Depends on no Python provider).
 
+The shared rule: photo-wall-common (`SHARED`) is the one package whose directories Central's
+code shares with the Node (`contracts`, `nodeapi`). Each module it installs must be reached by
+some Node program, a launcher's ENTRY or stage 1's, over every edge; one that none reaches is
+`unreached-module`. A module only Central imports (nodeapi.hub, the release manifest) is kept
+out of the package by debian/rules, so a Central-only edit keeps every Node package's version
+and the base's bytes (0019 Q1); a module a Node program reaches that the package does not
+install is the module rule's `unowned-module`.
+
 Build tooling: stdlib only, runs on the build root's python3.
 """
 
@@ -95,7 +103,7 @@ Edge = tuple[str, str]  # (importer, imported), dotted module names
 RefusalKind = Literal['undeclared-sibling', 'unowned-module', 'undeclared-provider',
                       'unresolved-import', 'unused-depends', 'unjudgeable-depends',
                       'exemption-invalid', 'launcher-path', 'undeclared-launcher-directory',
-                      'stage-1-third-party']
+                      'stage-1-third-party', 'unreached-module']
 
 PREFIX: Final = "photo-wall-"
 PRIVATE_ROOT: Final = PurePosixPath("/usr/lib/photo-wall")
@@ -112,6 +120,8 @@ LAUNCHERS: Final = {COMPOSITION: "*/__main__.py", APP_ROOT: "__main__.py",
 STAGE1: Final = "photo-wall-netboot-init"
 STAGE1_ENTRY: Final = "appliance.netboot_init"
 STAGE1_PATH_FILE: Final = "path"
+# The package Central's code shares with the Node: it installs only what a Node program reaches.
+SHARED: Final = "photo-wall-common"
 # The Node contexts' import root, which the app root never holds.
 NODE_CONTEXT: Final = "appliance"
 # The exemption list's one home: this contract of pyproject.toml's import-linter tables.
@@ -454,6 +464,24 @@ def _stage1_rule(staged: Path, depends: Mapping[str, Declared], exempt: frozense
     return refusals
 
 
+def _shared_rule(staged: Path, depends: Mapping[str, Declared], edges: frozenset[Edge],
+                 installed: Mapping[str, str]) -> set[Refusal]:
+    """The shared rule's refusals (see the module docstring). A launcher whose constants cannot
+    be read is the launcher rule's refusal, so it adds no entry here."""
+    entries = {STAGE1_ENTRY} if STAGE1 in depends else set()
+    for package in set(LAUNCHERS) & set(depends):
+        for _, path in _launcher_files(staged, package):
+            try:
+                entries.add(_read_launcher(path)[0])
+            except ImportCheckError:
+                continue
+    reached: set[str] = set()
+    for entry in sorted(entries & set(installed)):
+        reached |= _reached(entry, edges=edges, installed=installed)
+    return {Refusal(SHARED, "unreached-module", module, "no Node program")
+            for module, package in installed.items() if package == SHARED and module not in reached}
+
+
 def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
           owner: Callable[[str], str | None],
           roots_of: Callable[[str], frozenset[str] | None]) -> list[Refusal]:
@@ -482,6 +510,8 @@ def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
         refusals |= _launcher_rule(package, staged, depends, exempt, edges, installed)
     if STAGE1 in depends:
         refusals |= _stage1_rule(staged, depends, exempt, edges, installed, first_party)
+    if SHARED in depends:
+        refusals |= _shared_rule(staged, depends, edges, installed)
     for edge in sorted(edges):
         importer, imported = edge
         package = installed.get(importer)
