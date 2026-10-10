@@ -10,7 +10,8 @@ the interpreter's stdlib directory and the root's CA bundle to /etc/ssl/certs. T
 archives and the bundle; what stage 1 must find is computed here from the repository, never
 restated.
 
-Stdlib-only and importable (``check_listing`` and ``check_ca_bundle`` are the unit-tested seams).
+Stdlib-only and importable (``check_listing``, ``check_module_tree`` and ``check_ca_bundle`` are
+the unit-tested seams).
 
 POSITIVE -- every one of these must be present:
   * in the cached archive: a python3 interpreter (``usr/bin/python3*``), the ``_ssl`` /
@@ -19,9 +20,10 @@ POSITIVE -- every one of these must be present:
     file-level proxy for "the initrd can open TCP and TLS sockets"), the boot script
     ``scripts/photowall-netboot`` and initramfs-tools' ``scripts/functions`` (its
     configure_networking helper, which appliance.netboot_init sources -- load-bearing), the
-    ``mount`` / ``umount`` / ``modprobe`` stage 1 execs, the display modules, the CA bundle, and
+    ``mount`` / ``umount`` / ``modprobe`` stage 1 execs, the Player's modules, the CA bundle, and
     every file stage 1 reaches (`stage1_files`) under the interpreter's own stdlib dir, where
     ``python3 -I`` finds it;
+  * in the cached archive: the kernel's whole module tree, every module its modules.order names;
   * in the layer: the clock floor, and nothing else;
   * the CA bundle byte for byte the built base's (R5).
 
@@ -42,7 +44,7 @@ import fnmatch
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -69,14 +71,21 @@ CA_BUNDLE_PATH: Final = "etc/ssl/certs/ca-certificates.crt"
 _PANIC_DEFINITION = re.compile(r"(?m)^\s*panic\s*\(\s*\)\s*\{")
 _REBOOT_TOKEN = re.compile(r"(?<![\w-])reboot(?![\w-])")
 
-# The Player's display drivers (vc4: KMS and HDMI, for weston's DRM backend; v3d: Mesa's GL),
-# which initramfs-tools' MODULES=most leaves out. The base has no kernel and no modules, so they
-# travel in this initrd with the kernel they were built for; stage 1's udev loads them, and stage 1
-# copies its module tree onto the new root (appliance.netboot_init.hand_over_modules). v0.9.1's
-# initrd had neither. The hook's own list (appliance/netboot_initramfs/hooks/photo-wall-netboot)
-# is bound to this one by tests/test_verify_netboot_initrd.py; that they RESOLVE on the new root
-# is scripts/initrd_mount_probe.py's job.
-DISPLAY_MODULES: tuple[str, ...] = ("vc4", "v3d")
+# The base has no kernel and no modules, so the initrd carries the kernel package's WHOLE module
+# tree (the hook's `copy_modules_dir kernel`); stage 1 copies it onto the new root
+# (appliance.netboot_init.hand_over_modules), where udev loads each device's driver by alias.
+# `check_module_tree` requires every module the kernel's own modules.order names, so no device can
+# be left without its driver by a filter (issue 64: MODULES=most plus a hand list shipped no HEVC
+# decoder). PLAYER_MODULES are the drivers the Player's devices need, by module file name: vc4 (KMS
+# and HDMI, for weston's DRM backend), v3d (Mesa's GL) and rpi-hevc-dec (the Pi 5's stateless HEVC
+# decoder, /dev/video* named `rpi-hevc-dec`, appliance.apps.device_grants.DECODER_NAME). They are
+# required by name too, so a kernel package that stops building one (the Raspberry Pi archive is
+# unpinned) fails here; that they RESOLVE on the new root is scripts/initrd_mount_probe.py's job.
+PLAYER_MODULES: tuple[str, ...] = ("vc4", "v3d", "rpi-hevc-dec")
+# The kernel build's list of every module it produced, relative to the release directory, which
+# mkinitramfs copies into the initrd.
+MODULES_ORDER: Final = "modules.order"
+_MODULES_ORDER_PATH = re.compile(r"(?:usr/)?lib/modules/([^/]+)/modules\.order")
 
 # Present-or-fail globs for the CACHED archive, matched against normalised member paths.
 REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
@@ -96,8 +105,8 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("umount helper", "*bin/umount"),
     ("modprobe helper", "*bin/modprobe"),
     ("the modules' depmod index", "*lib/modules/*/modules.dep"),
-    *((f"display module {name}", f"*lib/modules/*/kernel/*/{name}.ko*")
-      for name in DISPLAY_MODULES),
+    *((f"Player module {name}", f"*lib/modules/*/kernel/*/{name}.ko*")
+      for name in PLAYER_MODULES),
     ("CA bundle", CA_BUNDLE_PATH),
 )
 
@@ -242,6 +251,30 @@ def check_listing(layer_files: Iterable[str] | str, cached: Iterable[str] | str,
     return violations
 
 
+def check_module_tree(cached: Mapping[str, bytes]) -> list[str]:
+    """The cached archive must hold exactly one kernel release's modules.order, and every module
+    it names (`kernel/.../x.ko`, as a `.ko` or compressed `.ko.*` file): the whole tree, never a
+    filtered subset."""
+    orders = {match[1]: content for path, content in cached.items()
+              if (match := _MODULES_ORDER_PATH.fullmatch(path))}
+    if len(orders) != 1:
+        return [f"the initrd carries {len(orders)} kernel releases' {MODULES_ORDER} "
+                f"({', '.join(sorted(orders)) or 'none'}), not exactly one"]
+    (release, order), = orders.items()
+    shipped = {path.split(f"/modules/{release}/", 1)[1].split(".ko", 1)[0]
+               for path in cached if f"/modules/{release}/" in path and ".ko" in path}
+    wanted = [line.strip() for line in order.decode("utf-8", "replace").splitlines()
+              if line.strip()]
+    missing = [entry for entry in wanted if entry.split(".ko", 1)[0] not in shipped]
+    if not wanted:
+        return [f"the initrd's {MODULES_ORDER} for {release} names no module"]
+    if missing:
+        return [f"the initrd lacks {len(missing)} of the {len(wanted)} modules {release}'s "
+                f"{MODULES_ORDER} names (a filtered tree leaves devices without a driver): "
+                f"{', '.join(missing[:5])}{', ...' if len(missing) > 5 else ''}"]
+    return []
+
+
 def check_ca_bundle(initrd_bundle: bytes | None, base_bundle: bytes) -> list[str]:
     """The initrd's CA bundle must be the base's, byte for byte (R5), and hold a certificate."""
     if initrd_bundle is None:
@@ -324,6 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ClosureError as error:
         return _report([f"stage 1 does not import from {args.repo}: {error}"])
     violations = check_listing(layer, cached, stage1=stage1)
+    violations += check_module_tree(cached)
     violations += check_ca_bundle(cached.get(CA_BUNDLE_PATH), args.ca_bundle.read_bytes())
     violations += check_boot_script(args.boot_script.read_text())
     return _report(violations)

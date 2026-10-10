@@ -914,8 +914,9 @@ jobs:
       # squashfs, tmpfs, overlay) with the initrd's own python3 and klibc
       # mount/umount against a tiny probe squashfs. v0.9.1's `-o loop`, which
       # klibc mount hands to the kernel, failed only on a Pi; this fails here. It then runs
-      # stage 1's module hand-over and requires the initrd's own modprobe to resolve vc4 and
-      # v3d against the new root (resolvable, not loaded: this runner boots its own kernel).
+      # stage 1's module hand-over and requires the initrd's own modprobe to resolve the
+      # Player's modules (verify_netboot_initrd.PLAYER_MODULES: vc4, v3d, rpi-hevc-dec) against
+      # the new root (resolvable, not loaded: this runner boots its own kernel).
       # Not gated by a cache hit: it reads the assembled bundle. The runner is
       # arm64, so the initrd's binaries run natively.
       - name: Mount a probe squashfs through the built initrd's stage-1 path
