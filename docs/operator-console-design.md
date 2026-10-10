@@ -199,7 +199,7 @@ Continuous viewer tracking stays out of scope ([operations](requirements.md#oper
 
 ## 10. How it behaves
 
-How the console saves, speaks status and words its errors is the [design language](design-language.md), the one home for UI rules: the four save models and which page uses which ([§5](design-language.md#save-models)), the six status words and their place on 0018's severity scale ([§6](design-language.md#6-status-and-severity)), and the error template with its plain-words rules ([§7](design-language.md#the-error-template)). Each journey step's page template, patterns and save model are in its [concept → UX table](design-language.md#8-concept--ux-translation).
+How the console saves, speaks status and words its errors is the [design language](design-language.md), the one home for UI rules: the save models ([§5](design-language.md#save-models)), the six status words and their place on 0018's severity scale ([§6](design-language.md#6-status-and-severity)), and the error template with its plain-words rules ([§7](design-language.md#the-error-template)). Each journey step's page template, patterns and save model are in its [concept → UX table](design-language.md#8-concept--ux-translation).
 
 ## 11. Settings catalogue
 
