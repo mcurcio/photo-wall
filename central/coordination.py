@@ -294,10 +294,10 @@ class Coordinator:
                 cue["ends"][assignment_id(intent)] = intent.interval_end
         assignments = {}
         cue_keys = {identity("cue-", list(key)) for key in cues}
-        # A pending future cue is a forecast; one the timeline no longer holds is withdrawn
-        # now rather than surfacing later as a not_ready skip.
+        # A future cue is a forecast until it starts; one the timeline no longer holds is
+        # withdrawn now rather than surfacing later as a not_ready skip.
         for orphan in conn.execute(
-            "SELECT id,cue_key FROM coordination_groups WHERE status='pending' "
+            "SELECT id,cue_key FROM coordination_groups WHERE status IN ('pending','committed') "
             "AND starts_at>%s AND starts_at<%s ORDER BY starts_at,id",
             (now, horizon_end),
         ).fetchall():
@@ -311,30 +311,30 @@ class Coordinator:
                 (cue_key,),
             ).fetchone()
             if previous:
+                grows = not cue["members"].keys() <= previous["members"].keys()
+                moved = not grows and any(
+                    (tuple(previous["members"][a]) if previous["members"][a] else None) != owner
+                    for a, owner in cue["members"].items()
+                )
                 if (
-                    cue["members"].keys() != previous["members"].keys()
-                    and previous["status"] == "pending"
-                    and starts > now
+                    starts > now
+                    and previous["status"] != "skipped"
+                    and (moved or cue["members"].keys() != previous["members"].keys())
                 ):
-                    # An operator edit rewrote the forecast: a fresh cohort replaces it.
-                    self._skip_group(conn, previous["id"], "superseded")
-                elif not cue["members"].keys() <= previous["members"].keys():
-                    # A committed or started cue is immutable. Growth invalidates this one
-                    # cue, never the tick that offers every other Frame its plan.
+                    # An edit rewrote a cue that has not started: a fresh cohort replaces it,
+                    # and skipping the old one withdraws any commit it had already granted.
+                    self._skip_group(conn, previous["id"], "superseded", root=root)
+                elif grows:
+                    # A started cue is immutable. Growth invalidates this one cue, never
+                    # the tick that offers every other Frame its plan.
                     if previous["status"] != "skipped":
-                        self._skip_group(conn, previous["id"], "cue_membership_changed")
+                        self._skip_group(conn, previous["id"], "cue_membership_changed", root=root)
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
-                else:
+                elif not moved:
                     # A child completing cannot shrink a skipped cue into a new successful one.
-                    changed_authority = any(
-                        (tuple(previous["members"][a]) if previous["members"][a] else None)
-                        != owner
-                        for a, owner in cue["members"].items()
-                    )
-                    if not changed_authority:
-                        assignments.update({a: previous["id"] for a in cue["members"]})
-                        continue
+                    assignments.update({a: previous["id"] for a in cue["members"]})
+                    continue
             # The previous cohort names the new one, so a forecast that returns to an
             # earlier membership never collides with that earlier, skipped cohort.
             group_id = identity(
@@ -384,8 +384,14 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code, *, cancel=False):
-        sequence = self._event(conn, "group_skipped", detail={"group_id": group_id, "code": code})
+    def _skip_group(self, conn, group_id, code, *, cancel=False, root=None):
+        cue_key = conn.execute(
+            "SELECT cue_key FROM coordination_groups WHERE id=%s", (group_id,)
+        ).fetchone()["cue_key"]
+        detail = {"group_id": group_id, "code": code, "cue_key": cue_key}
+        if root is not None:
+            detail["root"] = root
+        sequence = self._event(conn, "group_skipped", detail=detail)
         conn.execute(
             "UPDATE coordination_groups SET status='skipped',skip_sequence=%s,drain_cancel=%s "
             "WHERE id=%s",
