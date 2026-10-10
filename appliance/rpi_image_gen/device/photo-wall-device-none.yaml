@@ -18,10 +18,9 @@
 #  appliance/initramfs + appliance/provisioning concern, and this build
 #  emits a bare rootfs squashfs, not a bootable Pi image.
 #
-#  Dropping rpi-device-base also drops its udev, which the Player needs (the
-#  render and input groups, the device nodes' groups): the Debian
-#  declaration (scripts/debian_packages.py) names udev as a Player Depends,
-#  so the base gets it with the rest of the device set.
+#  Dropping rpi-device-base also drops its udev, which the display needs (the
+#  render and input groups, the device nodes' groups): the node base `.deb`
+#  Depends on udev, so the base gets it with the Node's software.
 #
 #  rpi-image-gen ships no hardware-agnostic/"none" device layer of its own.
 #  Its own documented pattern for this exact situation is a small custom

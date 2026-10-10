@@ -125,7 +125,7 @@ def test_a_package_change_with_fix_releases_a_patch(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.8.1", "PATCH", "commitizen")
     assert plan.since == "v0.8.0"
-    assert {"player-deb", "bootstrapper-deb", "base-bundle", "central-image"} <= set(plan.packages)
+    assert {"player-deb", "player-environment", "central-image"} <= set(plan.packages)
     assert set(RELEASE_JOBS) <= set(ReleaseRun(plan).jobs)
 
 
@@ -135,25 +135,17 @@ def test_feat_releases_a_minor(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
     assert plan.packages == ("central-image", "media-worker-image")
-    # The composition root mounts the packaged OS-agent's v2 route and the node routes, so it
-    # runs the netboot tracer and the node scenarios; a pull request still needs no base-image
-    # rebuild.
-    assert plan.suites == ("checks", "e2e", "netboot-e2e", "node-pid1")
-    assert PullRequestRun(plan).jobs == ("checks", "e2e", "netboot-e2e", "node-pid1")
+    # The composition root mounts the node routes, so it runs the node scenarios; a pull request
+    # still needs no base-image rebuild.
+    assert plan.suites == ("checks", "e2e", "node-pid1")
+    assert PullRequestRun(plan).jobs == ("checks", "e2e", "node-pid1")
     assert "base-image" in ReleaseRun(plan).jobs
 
 
 @needs_uvx
-@pytest.mark.parametrize("path", ("central/db.py", "Dockerfile", "uv.lock"))
-def test_packaged_os_agent_gate_runs_for_central_database_and_image_inputs(scratch, path):
-    scratch.commit("fix(central): preserve check-in startup", {path: "changed\n"})
-    assert "netboot-e2e" in scratch.plan().suites
-
-
-@needs_uvx
-def test_resident_agent_probe_change_runs_the_built_base_gate(scratch):
-    scratch.commit("fix(base): keep OS reports through package failure",
-                   {"scripts/os_agent_service_probe.py": "PROBE = 1\n"})
+def test_a_base_check_change_runs_the_built_base_gate(scratch):
+    scratch.commit("fix(base): refuse a stray unit",
+                   {"scripts/device_root_checks.py": "CHECK = 1\n"})
     plan = scratch.plan()
     assert "base-bundle" in plan.packages
     assert "base-image" in plan.suites
@@ -224,9 +216,9 @@ def test_the_real_history_releases_0_9_0(scratch):
     scratch.commit("feat(netboot): every boot stage reaches the configured Central (0014, #28)")
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
-    assert {"base-bundle", "bootstrapper-deb", "player-deb"} <= set(plan.packages)
+    assert {"base-bundle", "node-debs"} <= set(plan.packages)
     assert "release-assets" not in plan.packages          # pipeline.yml is not a release input
-    assert {"base-image", "netboot-e2e"} <= set(plan.suites)
+    assert "base-image" in plan.suites
 
 
 @needs_uvx
@@ -268,7 +260,7 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     # The report: what merging releases.
     assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, player-deb, "
-            "player-environment, player-payload, bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
+            "player-environment, increment: MINOR (commitizen), from commits: 2 "
             "since v0.8.0)") in summary.read_text()
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
@@ -276,9 +268,8 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
         "false", "", "", "")
     # The Player is the sealed environment the node scenarios boot.
-    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e",
-                                          "node-pid1"]
-    assert "Jobs: base-image, checks, e2e, netboot-e2e, node-pid1\n" in summary.read_text()
+    assert json.loads(values["jobs"]) == ["checks", "e2e", "node-pid1"]
+    assert "Jobs: checks, e2e, node-pid1\n" in summary.read_text()
 
 
 @needs_uvx
@@ -465,7 +456,6 @@ def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_a
         assert claimed_by(path) == () and any(matches(pattern, path) for pattern in NOT_SHIPPED)
     assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
                                                 "contracts/release.py",
-                                                "contracts/player_payload.py",
                                                 "contracts/node_release.py",
                                                 "scripts/node_release_artifacts.py")
     assert "release-assets" in claimed_by("contracts/release.py")
@@ -482,7 +472,7 @@ def _needs(jobs, **results):
 
 def test_the_gate_passes_when_every_listed_job_succeeded_and_the_rest_skipped():
     assert gate(_needs(["checks", "e2e"], checks="success", e2e="success", tested="success",
-                       **{"base-image": "skipped", "netboot-e2e": "skipped",
+                       **{"base-image": "skipped", "node-pid1": "skipped",
                           "seal": "skipped"})) == []
 
 
@@ -576,8 +566,6 @@ def test_no_path_is_both_shipped_and_declared_unshipped():
 
 
 @pytest.mark.parametrize("policy, packages", [("initrd", ["base-bundle"]),
-                                              ("bootstrapper", ["bootstrapper-deb",
-                                                                "base-bundle"]),
                                               ("player", ["player-deb"])])
 def test_every_computed_closure_file_is_claimed_by_its_package(policy, packages):
     files = [path.as_posix() for path in closure_for(POLICIES[policy]).files]
@@ -813,9 +801,7 @@ def _job(workflow: str, job: str) -> str:
                     flags=re.MULTILINE)[0]
 
 
-@pytest.mark.parametrize("builder, package", [("scripts/build_player_deb.py", "player-deb"),
-                                              ("scripts/build_bootstrapper_deb.py",
-                                               "bootstrapper-deb")])
+@pytest.mark.parametrize("builder, package", [("scripts/build_player_deb.py", "player-deb")])
 def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, package):
     assert [path for path in _with_imports({builder}) if not _package(package).claims(path)] == []
 
@@ -823,8 +809,7 @@ def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, pac
 def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
-    assert [path for path in base if not (_package("base-bundle").claims(path)
-                                         or _package("player-payload").claims(path))] == []
+    assert [path for path in base if not _package("base-bundle").claims(path)] == []
     # The seal and the plan it imports decide whether and how a release is written; they shape
     # no artefact byte. The packager does, and ships as release-assets.
     seal = {path for path in _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
@@ -839,6 +824,10 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     assert ".venv/bin/python -m scripts.build_node_components" in components
     assert [path for path in _with_imports({"scripts/build_node_components.py"})
             if not _package("base-bundle").claims(path)] == []
+    # Stage 1's uplink on the device runtime runs in the debs job (decision 0014 §11).
+    debs = _job("node-components.yml", "debs")
+    assert "scripts/uplink_device_harness.py" in debs and "photo-wall-debian-builder" in debs
+    assert _package("node-debs").claims("scripts/uplink_device_harness.py")
 
 
 def _harness(suite: Suite) -> list[str]:
@@ -859,17 +848,15 @@ def test_a_suite_is_due_for_every_file_its_harness_imports(suite):
             if suite.job not in due_suites(release_plan.changed_packages([path]), [path])] == []
 
 
-def test_base_cache_and_content_check_include_base_owned_player_contract():
+def test_the_base_cache_and_content_check_carry_no_v1_lane():
     workflow = (WORKFLOWS / "base-image.yml").read_text()
     key = next(line for line in workflow.splitlines() if "key: squashfs-" in line)
-    for path in ("appliance/systemd/photo-wall-os-agent.service",
-                 "appliance/systemd/player.service",
-                 "appliance/systemd/weston.service",
-                 "appliance/systemd/weston.ini", "player/output_discovery.py"):
+    for path in ("appliance/rpi_image_gen/**", "debian-packaging/snapshot.list",
+                 "scripts/device_root_checks.py"):
         assert path in key
-    for path in ("$bootstrapper_dir/os-agent.py", "$bootstrapper_dir/player-launch.py",
-                 "$bootstrapper_dir/base-abi.txt", "$bootstrapper_dir/weston.ini"):
-        assert path in workflow
+    for word in ("bootstrapper", "player.service", "weston", "os-agent", "payload"):
+        assert word not in key, word
+    assert "--base-os; then" in workflow
     assert "forbid_substring 'squashfs-root/usr/lib/photo-wall-player/'" in workflow
 
 

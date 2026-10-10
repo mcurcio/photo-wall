@@ -1,4 +1,4 @@
-"""The device-runtime harness, run here exactly as the netboot-e2e leg runs it in trixie
+"""The device-runtime harness, run here exactly as node-components.yml's debs job runs it in trixie
 (`python3 -I -S`, only the staged closure on sys.path), on this interpreter: it passes on the
 real closure, and fails the leg on a failing row or a missing closure module."""
 

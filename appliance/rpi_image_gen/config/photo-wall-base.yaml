@@ -6,14 +6,10 @@
 #
 # Produces ONLY the "Base OS bundle" rootfs described in
 # docs/decisions/0009-minimal-base-and-app-package.md: a Debian trixie arm64
-# minbase, systemd, the device set and the photo-wall-bootstrapper `.deb`
-# (scripts/build_bootstrapper_deb.py: the bootstrapper's computed module
-# closure under /usr/lib/photo-wall-bootstrapper and its systemd unit). The
-# device set is every Debian package the base OS itself, the bootstrapper and
-# the Player need, rendered from the one declaration, scripts/debian_packages.py: provisioning
-# installs the Player `.deb` with dpkg alone, so the base must carry its
-# Depends. No application code and no origin: 0009 rule #1 is "the base OS
-# carries no application and no origin." Kernel/initramfs/PXE-TFTP staging are
+# minbase, systemd, the Node's software (the node base `.deb` and the display
+# from the local repo, layer/photo-wall-device.yaml) and the OS packages and
+# settings its layers name. No application code and no origin: 0009 rule #1 is
+# "the base OS carries no application and no origin." Kernel/initramfs/PXE-TFTP staging are
 # the separate appliance/initramfs + appliance/provisioning concern and are
 # out of scope for this config -- this emits the rootfs squashfs artifact only
 # (see image/photo-wall-squashfs.yaml).
@@ -22,14 +18,14 @@
 # rpi-image-gen tree owns none of it, only the install step (the owner
 # directive behind this rework: portable code must migrate cleanly across
 # build tool chains, never be baked in as a tool-coupled raw-file overlay).
-# Nor does it name a Debian package: the declaration does (a test checks).
+# The OS packages the base needs beyond those `.deb`s' Depends are named in
+# its layers (decision 0019, R4).
 #
 # Build (see .github/workflows/base-image.yml for the full recipe, including
-# building the `.deb` and rendering the device set and the apt sources before
-# invoking this):
+# rendering the apt sources before invoking this):
 #   rpi-image-gen build -S appliance/rpi_image_gen -c photo-wall-base.yaml \
-#     -- IGconf_app_bootstrapper_deb=/path/to/photo-wall-bootstrapper_<version>_all.deb \
-#        IGconf_app_device_packages=/path/to/device.list \
+#     -- IGconf_app_node_base_deb=/path/to/node-base.deb \
+#        IGconf_app_node_debs=/path/to/local-repo \
 #        IGconf_app_debian_sources=/path/to/photo-wall-debian.list
 #
 # Reproducibility: the Debian arm64 base is pulled from the declaration's
@@ -61,18 +57,18 @@ layer:
   # not used: its snapshot follows the build's clock, not the pin.
   base: photo-wall-debian
   # systemd + systemd-sysv as PID 1 and `systemctl` -- required both to boot
-  # this rootfs at all and to run photo-wall-provision.service
-  # (Type=notify, WantedBy=multi-user.target, already enabled by a symlink
-  # the bootstrapper `.deb` bakes as data -- no enable-units hook needed).
+  # this rootfs at all and to run the node's units (photo-wall-node.target,
+  # enabled by a symlink the node base `.deb` bakes as data).
   init: systemd-min
-  # Our own layer: apt-get installs the rendered device set and the prebuilt
-  # photo-wall-bootstrapper `.deb`, after the declaration's "bootstrap" stage
-  # (the CA bundle) is in place. See layer/photo-wall-device.yaml.
+  # Our own layer: apt-get installs the node base `.deb` and the display from
+  # the local repo, after the CA bundle is in place. See
+  # layer/photo-wall-device.yaml.
   app: photo-wall-device
   # Our own OS configuration, set in the OS itself (layer/photo-wall-os.yaml):
-  # the binfmt units masked (the Pi kernel has no binfmt_misc) and a C.UTF-8
-  # default locale. The Node's name is stage 1's (photo-wall-<serial> at boot);
-  # the image bakes only a neutral one (device/photo-wall-device-none.yaml).
+  # the binfmt units masked (the Pi kernel has no binfmt_misc), a C.UTF-8
+  # default locale and libnss-myhostname. The Node's name is stage 1's
+  # (photo-wall-<serial> at boot); the image bakes only a neutral one
+  # (device/photo-wall-device-none.yaml).
   os: photo-wall-os
   # rpi-image-gen's own SSH server layer (layer/net-misc/openssh-server.yaml at
   # the pinned commit): Debian's openssh-server, enabled for boot, with the

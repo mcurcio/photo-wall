@@ -176,7 +176,7 @@ def test_materializer_preserves_absolute_loader_link_bytes_and_rejects_cycle(tmp
         materialize(archive, tmp_path / "bad")
 
 
-def test_node_base_packaging_has_separate_host_closure_and_opt_in(tmp_path):
+def test_node_base_packaging_has_separate_host_closure_and_no_boot_switch(tmp_path):
     source = REPO
     stage_tree(source, tmp_path / "package")
     root = tmp_path / "package"
@@ -185,7 +185,9 @@ def test_node_base_packaging_has_separate_host_closure_and_opt_in(tmp_path):
     assert (root / "usr/lib/photo-wall-host-core/appliance/host/host_runner.py").exists()
     control = (root / "DEBIAN/control").read_text()
     assert "login" in control and "libpam-systemd" in control
-    assert (root / "lib/systemd/system/photo-wall-provision.service.d/node-cohort.conf").read_text().endswith("ConditionKernelCommandLine=!photowall.node=v2\n")
+    units = [path for path in (root / "lib/systemd/system").rglob("*") if path.is_file()]
+    assert units and not any("ConditionKernelCommandLine" in path.read_text() for path in units)
+    assert not any(path.name.endswith(".d") for path in (root / "lib/systemd/system").iterdir())
 
 
 def test_manager_package_has_executable_without_effect_closure(tmp_path):

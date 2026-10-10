@@ -1,6 +1,7 @@
 """The Debian declaration (Project 2 design §2.9): its invariants hold at import, it renders the
-same lists every consumer used to keep by hand, and it is the one place a Debian package list or
-mirror is written."""
+same lists every consumer used to keep by hand, and it is the one place a mirror is written. The
+base's own OS packages live in its rpi-image-gen layers (decision 0019, R4), never beside a
+package a Photo Wall `.deb` already names."""
 
 import ast
 import re
@@ -13,7 +14,6 @@ import pytest
 from scripts import debian_packages
 from scripts.debian_packages import (
     DEBIAN_KEYRING,
-    DEVICE_CONSUMERS,
     PACKAGES,
     PIN,
     SNAPSHOT_FORMAT,
@@ -38,12 +38,8 @@ PLAYER_DEB_DEPENDS_BEFORE = (
     "python3-pydantic", "python3-httpx", "python3-websockets", "python3-cryptography",
     "python3-zeroconf",
 )
-DEVICE_INCLUDE = (
-    "--include=ca-certificates,gir1.2-gst-plugins-base-1.0,gir1.2-gtk-3.0,gstreamer1.0-libav,"
-    "gstreamer1.0-plugins-bad,gstreamer1.0-plugins-base,gstreamer1.0-plugins-good,libegl1,"
-    "libgl1-mesa-dri,libwayland-client0,passwd,python3,python3-cryptography,python3-gi,python3-gst-1.0,"
-    "python3-httpx,python3-opengl,python3-pydantic,python3-websockets,python3-zeroconf,udev,"
-    "weston")
+INITRD_INCLUDE = (
+    "--include=ca-certificates,device-tree-compiler,gnupg,initramfs-tools,kmod,python3,zstd")
 SNAPSHOT_LINES = (
     "deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg check-valid-until=no] "
     "https://snapshot.debian.org/archive/debian/20260904T000000Z "
@@ -57,8 +53,8 @@ RASPBERRY_PI_LINE = "deb [trusted=yes] http://archive.raspberrypi.com/debian tri
 
 # --- AC1: the invariants, checked at import --------------------------------------------------
 
-ZEROCONF = DebianPackage("python3-zeroconf", frozenset({"bootstrapper"}), imports=("zeroconf",))
-CA = DebianPackage("ca-certificates", frozenset({"bootstrapper", "player", "initrd-build"}),
+ZEROCONF = DebianPackage("python3-zeroconf", frozenset({"player"}), imports=("zeroconf",))
+CA = DebianPackage("ca-certificates", frozenset({"player", "initrd-build"}),
                    why="the CA bundle", stage="bootstrap")
 
 
@@ -73,7 +69,7 @@ def test_the_shipped_declaration_is_valid():
     (PIN, [ZEROCONF, replace(ZEROCONF, name="python3-zeroconf-fork")], "given by both"),
     (PIN, [replace(ZEROCONF, imports=())], "no import and no reason"),
     (PIN, [replace(ZEROCONF, archive="raspberrypi")], "unpinned raspberrypi"),
-    (PIN, [replace(ZEROCONF, consumers=frozenset({"player"}), archive="raspberrypi")],
+    (PIN, [replace(ZEROCONF, consumers=frozenset({"node-base"}), archive="raspberrypi")],
      "unpinned raspberrypi"),
     (PIN, [replace(ZEROCONF, consumers=frozenset({"playr"}))], "unknown or no consumers"),
     (replace(PIN, snapshot="2026-09-04T00:00:00Z"), [ZEROCONF], "is not %Y%m%dT%H%M%SZ"),
@@ -89,11 +85,11 @@ def test_validate_refuses_a_broken_declaration(pin, declared, message):
         validate(pin, declared)
 
 
-def test_a_device_package_moved_to_the_unpinned_archive_is_refused():
+def test_a_package_outside_the_initrd_build_moved_to_the_unpinned_archive_is_refused():
     """Mutation probe (e): weston on the Raspberry Pi archive is an import-time error."""
     moved = tuple(replace(package, archive="raspberrypi") if package.name == "weston"
                   else package for package in PACKAGES)
-    with pytest.raises(DeclarationError, match="weston is on the device"):
+    with pytest.raises(DeclarationError, match="weston is outside the initrd build root"):
         validate(PIN, moved)
 
 
@@ -105,7 +101,7 @@ def test_an_initrd_build_package_may_come_from_the_raspberry_pi_archive():
 def test_the_ca_bundle_is_the_bootstrap_stage():
     """Mutation probe: ca-certificates moved to the "apt" stage empties the bootstrap stage,
     an import-time error (apt inside a root could not fetch the https pin)."""
-    assert packages(*DEVICE_CONSUMERS, stage="bootstrap") == ("ca-certificates",)
+    assert packages("node-base", stage="bootstrap") == ("ca-certificates",)
     assert packages("initrd-build", stage="bootstrap") == ("ca-certificates",)
     moved = tuple(replace(package, stage="apt") if package.stage == "bootstrap" else package
                   for package in PACKAGES)
@@ -177,17 +173,10 @@ def test_a_snapshot_list_that_is_not_exactly_the_pin_is_refused(text):
 
 
 def test_each_consumer_gets_its_list():
-    assert packages("bootstrapper") == (
-        "ca-certificates", "python3", "python3-cryptography", "python3-pydantic",
-        "python3-zeroconf")
     assert packages("player") == tuple(sorted(
         (*PLAYER_DEB_DEPENDS_BEFORE, "ca-certificates", "passwd", "udev", "libwayland-client0")))
-    assert packages("base-os") == ("libnss-myhostname",)
-    assert packages(*DEVICE_CONSUMERS) == tuple(sorted(
-        {*packages("base-os"), *packages("bootstrapper"), *packages("player")}))
-    # The base OS's own set goes straight into the OS: no .deb names it in its Depends.
-    assert not set(packages("base-os")) & set(
-        packages("bootstrapper", "player", "node-base", "node-manager"))
+    assert packages("node-base") == ("ca-certificates", "libpam-systemd", "login", "mount",
+                                     "python3", "systemd", "udev")
     assert packages("initrd-build") == (
         "ca-certificates", "device-tree-compiler", "gnupg", "initramfs-tools", "kmod", "python3",
         "zstd")
@@ -203,10 +192,7 @@ def test_an_unknown_consumer_is_refused_rather_than_rendering_nothing():
         packages("playr")
 
 
-def test_the_import_tables_are_read_only_and_cover_the_device_imports():
-    assert dict(import_table("bootstrapper")) == {
-        "cryptography": "python3-cryptography", "pydantic": "python3-pydantic",
-        "zeroconf": "python3-zeroconf"}
+def test_the_import_tables_are_read_only_and_cover_the_player_imports():
     assert sorted(import_table("player")) == [
         "OpenGL", "cryptography", "gi", "httpx", "pydantic", "websockets", "zeroconf"]
     assert import_table("initrd-build") == {}
@@ -216,22 +202,21 @@ def test_the_import_tables_are_read_only_and_cover_the_device_imports():
 
 # --- AC4: mmdebstrap and the CLI ------------------------------------------------------------
 
-DEVICE_ROOT_ARGV = (
+INITRD_ROOT_ARGV = (
     "mmdebstrap", "--arch=arm64", "--variant=minbase",
-    '--aptopt=Acquire::Check-Valid-Until "false"', DEVICE_INCLUDE, "trixie", "-",
+    '--aptopt=Acquire::Check-Valid-Until "false"', INITRD_INCLUDE, "trixie", "-",
     *SNAPSHOT_LINES)
 
 
-def test_mmdebstrap_builds_the_device_root_at_the_pin():
+def test_mmdebstrap_builds_the_initrd_root_at_the_pin():
     assert mmdebstrap_argv(arch="arm64", target="-",
-                           consumers=("bootstrapper", "player")) == DEVICE_ROOT_ARGV
+                           consumers=("initrd-build",)) == INITRD_ROOT_ARGV
 
 
 @pytest.mark.parametrize(("argv", "printed"), [
     (["epoch"], ["1788480000"]),
-    (["packages", "bootstrapper"], ["ca-certificates", "python3", "python3-cryptography",
-                                   "python3-pydantic", "python3-zeroconf"]),
-    (["packages", "base-os", "bootstrapper", "player"], list(packages(*DEVICE_CONSUMERS))),
+    (["packages", "node-base"], list(packages("node-base"))),
+    (["packages", "player", "node-base"], list(packages("player", "node-base"))),
     (["packages", "--archive", "raspberrypi", "initrd-build"],
      ["linux-image-rpi-2712", "raspi-firmware", "rpi-eeprom"]),
     (["sources"], list(SNAPSHOT_LINES)),
@@ -246,9 +231,8 @@ def test_the_cli_execs_mmdebstrap_with_the_same_argv(monkeypatch):
     execs = []
     monkeypatch.setattr(debian_packages.os, "execvp", lambda file, args: execs.append(
         (file, tuple(args))))
-    assert main(["mmdebstrap", "--arch", "arm64", "--target", "-", "bootstrapper",
-                 "player"]) == 0
-    assert execs == [("mmdebstrap", DEVICE_ROOT_ARGV)]
+    assert main(["mmdebstrap", "--arch", "arm64", "--target", "-", "initrd-build"]) == 0
+    assert execs == [("mmdebstrap", INITRD_ROOT_ARGV)]
 
 
 def test_the_cli_refuses_an_unknown_consumer():
@@ -270,36 +254,31 @@ def _statements(path: Path):
             yield line
 
 
-def _second_lists_and_mirrors() -> set[tuple[str, str]]:
+def _second_mirrors() -> set[tuple[str, str]]:
     found = set()
-    for path in sorted(IMAGE_TREE.rglob("*")):
-        if path.is_file():
-            for line in _statements(path):
-                if (re.search(r"(^|[\s{,-])packages\s*:", line)
-                        or any(host in line for host in MIRROR_HOSTS)):
-                    found.add((path.relative_to(REPO).as_posix(), line))
-    for path in (*sorted((REPO / ".github/workflows").glob("*.yml")),
-                 REPO / "scripts/test_netboot_e2e.py"):
+    for path in (*sorted(path for path in IMAGE_TREE.rglob("*") if path.is_file()),
+                 *sorted((REPO / ".github/workflows").glob("*.yml"))):
         for line in _statements(path):
             if any(host in line for host in MIRROR_HOSTS):
                 found.add((path.relative_to(REPO).as_posix(), line))
     return found
 
 
-def test_no_image_layer_workflow_or_e2e_line_writes_a_package_list_or_a_mirror():
-    assert _second_lists_and_mirrors() == set(), "a second package list or mirror appeared"
+def test_no_image_layer_or_workflow_line_writes_a_mirror():
+    assert _second_mirrors() == set(), "a second mirror appeared"
 
 
 # --- the base is built from the declaration (design §2.10) ----------------------------------
 
-def test_the_image_tree_names_no_device_package():
-    """The base installs the device set from the rendered file; a package named in the
-    rpi-image-gen tree (a hook's apt-get line, an mmdebstrap list) would be a second list."""
-    device_set = set(packages(*DEVICE_CONSUMERS))
+def test_the_image_tree_names_no_package_the_node_base_depends_on():
+    """The base's OS packages are its layers' (R4), but a package the node base `.deb` already
+    Depends on, named again in the rpi-image-gen tree (a hook's apt-get line, an mmdebstrap
+    list), would be a second home for one fact."""
+    node_base = set(packages("node-base"))
     named = {(path.relative_to(REPO).as_posix(), line)
              for path in sorted(IMAGE_TREE.rglob("*")) if path.is_file()
              for line in _statements(path)
-             if set(re.findall(r"[a-z0-9][a-z0-9+.-]+", line)) & device_set}
+             if set(re.findall(r"[a-z0-9][a-z0-9+.-]+", line)) & node_base}
     assert named == set()
 
 
@@ -311,17 +290,21 @@ def _layer_metadata(text: str) -> dict[str, str]:
 INIT_LAYER = "systemd-min"
 
 
-def test_the_base_installs_the_rendered_device_set_at_the_pin():
+def test_the_base_installs_the_node_packages_and_nothing_of_the_v1_lane():
     layer = (IMAGE_TREE / "layer/photo-wall-device.yaml").read_text()
     metadata = _layer_metadata(layer)
     assert metadata["X-Env-Layer-Name"] == "photo-wall-device"
-    for variable in ("bootstrapper_deb", "device_packages"):
-        assert metadata[f"X-Env-Var-{variable}-Valid"] == "file"
+    for variable, valid in (("node_base_deb", "file"), ("node_debs", "dir")):
+        assert metadata[f"X-Env-Var-{variable}-Valid"] == valid
         assert metadata[f"X-Env-Var-{variable}-Required"] == "y"
+    assert {name.removeprefix("X-Env-Var-").partition("-")[0] for name in metadata
+            if name.startswith("X-Env-Var-")} == {"node_base_deb", "node_debs"}
     hook = layer.partition("customize-hooks:")[2]
-    assert '$(cat "$IGconf_app_device_packages")' in hook
-    assert '"$IGconf_app_bootstrapper_deb"' in hook
+    assert '"$IGconf_app_node_base_deb"' in hook and '"$IGconf_app_node_debs"' in hook
+    assert "photo-wall-node-display" in hook
     assert "apt-get install -y --no-install-recommends" in hook
+    for word in ("bootstrapper", "device_packages"):
+        assert word not in layer, word
     config = (IMAGE_TREE / "config/photo-wall-base.yaml").read_text()
     layers = dict(re.findall(r"^  (base|init|app): *(\S+)$", config, flags=re.MULTILINE))
     assert layers == {"base": "photo-wall-debian", "init": INIT_LAYER,
@@ -330,14 +313,14 @@ def test_the_base_installs_the_rendered_device_set_at_the_pin():
 
 def test_the_bootstrap_stage_is_installed_before_apt_runs_in_the_base():
     """The hook's apt-get runs inside the chroot over https, so the CA bundle must be there
-    first: every "bootstrap" device package is a required rpi-image-gen layer of the same name
-    (installed by mmdebstrap's own package list, with the host's apt), and nothing else is
-    required but the init layer. A bootstrap package added to the declaration, or the layer
+    first: every "bootstrap" package of the node base is a required rpi-image-gen layer of the
+    same name (installed by mmdebstrap's own package list, with the host's apt), and nothing else
+    is required but the init layer. A bootstrap package added to the declaration, or the layer
     requirement dropped (the PR #28 regression), fails here."""
     metadata = _layer_metadata((IMAGE_TREE / "layer/photo-wall-device.yaml").read_text())
     required = metadata["X-Env-Layer-Requires"].split(",")
     assert required[0] == INIT_LAYER
-    assert sorted(required[1:]) == list(packages(*DEVICE_CONSUMERS, stage="bootstrap"))
+    assert sorted(required[1:]) == list(packages("node-base", stage="bootstrap"))
 
 
 def test_the_base_is_built_from_the_rendered_pin_not_the_environment():
@@ -363,8 +346,7 @@ def test_the_base_is_built_from_the_rendered_pin_not_the_environment():
 def test_no_deb_builder_writes_a_depends_list():
     declared = {package.name for package in PACKAGES}
     builders = sorted((REPO / "scripts").glob("build_*_deb.py"))
-    assert [path.name for path in builders] == ["build_bootstrapper_deb.py",
-                                                "build_node_base_deb.py",
+    assert [path.name for path in builders] == ["build_node_base_deb.py",
                                                 "build_node_manager_deb.py",
                                                 "build_player_deb.py"]
     for path in builders:

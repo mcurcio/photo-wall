@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall health judge (node facts to one verdict)
-ConditionKernelCommandLine=photowall.node=v2
 After=photo-wall-app-broker.service
 
 [Service]

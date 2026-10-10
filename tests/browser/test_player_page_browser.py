@@ -376,7 +376,6 @@ def test_the_boot_section_holds_node_records_only(page, registry):
         expect(boot.locator("p[data-truth]")).to_have_count(2)
         # No V1 boot record, no kernel command line advice: every Pi boots by node path.
         expect(boot).not_to_contain_text("deprecated")
-        expect(boot).not_to_contain_text("photowall.node")
         expect(boot.get_by_role("note")).to_have_count(0)
 
 

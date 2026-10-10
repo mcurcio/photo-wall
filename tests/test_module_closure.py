@@ -12,7 +12,6 @@ import pytest
 
 from scripts import debian_packages, module_closure
 from scripts.module_closure import (
-    BOOTSTRAPPER_POLICY,
     INITRD_FORBIDDEN,
     INITRD_POLICY,
     INITRD_ROOTS,
@@ -186,32 +185,16 @@ def test_main_stages_writes_the_manifest_and_names_the_offender(tmp_path, capsys
 
 
 def test_the_policy_table():
-    assert tuple(POLICIES) == ("initrd", "bootstrapper", "player")
+    assert tuple(POLICIES) == ("initrd", "player")
     assert (INITRD_ROOTS, INITRD_FORBIDDEN) == (INITRD_POLICY.roots, INITRD_POLICY.forbidden)
     assert INITRD_POLICY.roots == ("appliance.netboot_init",)
     assert INITRD_POLICY.forbidden == ("player", "central", "media", "zeroconf", "ifaddr", "gi")
     assert INITRD_POLICY.third_party == {}
-    assert BOOTSTRAPPER_POLICY.roots == ("appliance.provision", "appliance.os_agent",
-                                         "appliance.app_launcher", "appliance.app_proof_service")
     assert PLAYER_POLICY.roots == ("player.service",)
-    # The .deb tables are the declaration's, never hand-written.
-    assert BOOTSTRAPPER_POLICY.third_party == debian_packages.import_table("bootstrapper")
+    # The .deb table is the declaration's, never hand-written.
     assert PLAYER_POLICY.third_party == debian_packages.import_table("player")
     with pytest.raises(TypeError):
         PLAYER_POLICY.third_party["requests"] = "python3-requests"
-
-
-def test_proof_service_and_player_client_are_packaged_on_opposite_sides():
-    bootstrapper = closure_for(BOOTSTRAPPER_POLICY)
-    player = closure_for(PLAYER_POLICY)
-    assert {"appliance.app_proof_service", "appliance.app_process_proof",
-            "appliance.linux_app_proof", "contracts.app_process_proof"} <= set(
-                bootstrapper.modules)
-    assert "player.local_app_proof" in player.modules
-    assert "appliance.app_proof_service" not in player.modules
-    assert "player.local_app_proof" not in bootstrapper.modules
-    assert bootstrapper.third_party == ("cryptography", "pydantic", "zeroconf")
-    assert unreached_imports(bootstrapper, BOOTSTRAPPER_POLICY) == ()
 
 
 DECLARED = MappingProxyType({"pydantic": "python3-pydantic", "gi": "python3-gi"})
@@ -258,13 +241,13 @@ def test_closure_for_applies_the_policy(tmp_path):
 
 
 def test_main_prints_only_the_policy_digest(capsys):
-    assert main(["--policy", "bootstrapper", "--digest"]) == 0
-    assert capsys.readouterr().out == closure_for(BOOTSTRAPPER_POLICY).digest + "\n"
+    assert main(["--policy", "player", "--digest"]) == 0
+    assert capsys.readouterr().out == closure_for(PLAYER_POLICY).digest + "\n"
 
 
 # --- the directory application and its isolated import --------------------------------------
 
-POLICY = ClosurePolicy("bootstrapper", ("pkg_a.main",), (),
+POLICY = ClosurePolicy("player", ("pkg_a.main",), (),
                        MappingProxyType({"_pw_absent_lib": "python3-absent"}))
 
 

@@ -464,6 +464,24 @@ def test_an_unconfigured_base_os_is_refused(tmp_path, break_it, refused):
     assert base_os(root) == [refused]
 
 
+@pytest.mark.parametrize("remnant, refused", [
+    ("usr/lib/systemd/system/photo-wall-provision.service",
+     "v1 unit: usr/lib/systemd/system/photo-wall-provision.service"),
+    ("lib/systemd/system/photo-wall-os-agent.service",
+     "v1 unit: lib/systemd/system/photo-wall-os-agent.service"),
+    ("etc/systemd/system/multi-user.target.wants/photo-wall-provision.service",
+     "v1 unit: etc/systemd/system/multi-user.target.wants/photo-wall-provision.service"),
+    ("usr/lib/photo-wall-bootstrapper/__main__.py",
+     "v1 directory: usr/lib/photo-wall-bootstrapper"),
+])
+def test_a_base_carrying_the_v1_lane_is_refused(tmp_path, remnant, refused):
+    """Every Pi boots the node path (decision 0019): a base still carrying the provisioner, the
+    OS agent or the bootstrapper's directory is refused, wherever systemd would find the unit."""
+    root = base_os_root(tmp_path)
+    write(root, remnant, "[Unit]\n")
+    assert base_os(root) == [refused]
+
+
 def test_no_hostname_file_is_not_a_baked_one(tmp_path):
     root = base_os_root(tmp_path)
     (root / "etc/hostname").unlink()
@@ -496,6 +514,8 @@ def test_the_base_is_built_with_its_os_configuration_and_ci_checks_it():
     assert [tuple(line.removeprefix(command).split()) for line in hook
             if line.startswith(command)] == [MASKED_UNITS]
     assert """printf 'LANG=C.UTF-8\\n' > "$1/etc/locale.conf\"""" in hook
+    # libnss-myhostname is the OS's own package, in this layer's list (decision 0019, R4).
+    assert re.search(r"^  packages:\n    - libnss-myhostname$", layer, flags=re.MULTILINE)
     device = (IMAGE_TREE / "device/photo-wall-device-none.yaml").read_text()
     hostname = re.search(r"^# X-Env-Var-hostname: (\S+)$", device, flags=re.MULTILINE)
     assert hostname and hostname[1] == "localhost" != BUILD_HOSTNAME
@@ -503,5 +523,5 @@ def test_the_base_is_built_with_its_os_configuration_and_ci_checks_it():
     assert "--base-os; then" in workflow
     extract = workflow.partition('unsquashfs -no-xattrs -d "$extract"')[2].partition(">/dev/null")[0]
     for path in ("etc/systemd", "etc/hostname", "etc/nsswitch.conf", "etc/default/locale",
-                 "etc/locale.conf"):
+                 "etc/locale.conf", "usr/lib/systemd/system", "usr/lib/photo-wall-bootstrapper"):
         assert re.search(rf"(^|\s){re.escape(path)}(\s|$)", extract), path

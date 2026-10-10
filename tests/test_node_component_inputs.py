@@ -113,8 +113,8 @@ def reads(tmp_path_factory, fetched):
             base.stage_tree(tree, work / "base")
             manager.stage_tree(tree, work / "manager")
             (work / "player").mkdir()
-            deb = player.build_tree(tree, work / "player", by_content=True,
-                                    architecture="arm64", native_client=client)
+            deb = player.build_tree(tree, work / "player", architecture="arm64",
+                                    native_client=client)
             deb.write_bytes(b"deb")
             with pytest.raises(_DockerReached):
                 environment.build(deb, work / "environment", builder_image=BUILDER_IMAGE,
@@ -265,8 +265,7 @@ def _staged_app(repository: Path, revision: str, work: Path, monkeypatch) -> tup
     client = work / "client.so"
     client.write_bytes(ARM64_ELF)
     (work / "out").mkdir()
-    output = player.build_tree(tree, work / "out", by_content=True, architecture="arm64",
-                               native_client=client)
+    output = player.build_tree(tree, work / "out", architecture="arm64", native_client=client)
     return output.name, built
 
 
@@ -284,13 +283,6 @@ def test_the_node_app_deb_is_named_and_staged_by_its_content_alone(repository, t
     _edit(repository / "player/service.py")
     third = _commit(repository, "player")
     assert _staged_app(repository, third, tmp_path / "c", monkeypatch)[0] != name
-
-
-def test_the_published_player_deb_keeps_its_revision_version():
-    with pytest.raises(player.BuildError, match="player_deb_version_scheme"):
-        player.build_tree(REPO, REPO, revision="a" * 40, by_content=True)
-    with pytest.raises(player.BuildError, match="player_deb_version_scheme"):
-        player.build_tree(REPO, REPO)
 
 
 def _components(path: Path, inputs_sha256: str) -> Path:

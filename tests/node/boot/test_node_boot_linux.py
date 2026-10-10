@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import functools
 import json
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from support.repo import REPO
 from test_netboot_init import (
     BODY,
+    BOOT_ID,
     PROVENANCE,
     RECORD,
     ROOT,
@@ -17,27 +18,37 @@ from test_netboot_init import (
     FakeKeeper,
     Ops,
     RecordingLog,
+    base_reply,
+    node_offer,
 )
-from test_netboot_offer_flow import BOOT_ID, ORIGIN, SHA256, OfferTransport, base_reply
 from uplink_fakes import FakeReply, central
 
 import appliance.netboot_init as netboot
 from appliance.boot import node_bootstrap as bootstrap
-from appliance.central_post import UnsupportedRoute
 from appliance.node_boot_handoff import node_nonce
-from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_boot import NodeBaseRefV2, NodeBootOfferV2, encode_node_boot_offer
+from contracts.node_boot import encode_node_boot_offer
+from uplink.origin import Origin
+from uplink.transport import HOP_TIMEOUT
+
+ORIGIN = Origin.parse_root(ROOT)
 
 
 def offer(*, app=False):
-    manager = AppEnvironmentRefV2("b" * 64, 123, "c" * 64, "photo-wall-node-manager", "2.0", "arm64",
-        "d" * 64, "e" * 64, "/usr/lib/photo-wall-node-manager/entry", "base-v2", "graphics-v2", "frame-v1")
-    player = AppEnvironmentRefV2("a" * 64, 123, "c" * 64, "photo-wall-player", "2.0", "arm64",
-        "d" * 64, "e" * 64, "/usr/lib/photo-wall-environment/entry", "base-v2", "graphics-v2", "frame-v1")
-    return NodeBootOfferV2(uuid4(), "site", SERIAL, "device-" + "f" * 64, 1, UUID(BOOT_ID), "9" * 64,
-        1, uuid4(), 1, 9999999999999,
-        NodeBaseRefV2("v2", "8" * 64, SHA256, len(BODY), "base-v2", "graphics-v2", "frame-v1"),
-        "selected" if app else "unconfigured", player if app else None, manager, None)
+    return node_offer(app=app, offer_id=uuid4())
+
+
+class OfferTransport:
+    """Answers by (method, url); records every request."""
+
+    def __init__(self, answers):
+        self.answers = answers
+        self.requests = []
+
+    def send(self, url, *, headers, deadline, status_timeout=HOP_TIMEOUT,
+             method="GET", body=None):
+        self.requests.append((method, str(url), body, deadline))
+        answer = self.answers[(method, str(url))]
+        return answer() if callable(answer) else answer
 
 
 def run(tmp_path, monkeypatch, transport):
@@ -47,15 +58,15 @@ def run(tmp_path, monkeypatch, transport):
     monkeypatch.setattr(netboot, "hand_over_resolver", functools.partial(netboot.hand_over_resolver, source=resolver))
     monkeypatch.setattr(netboot, "node_nonce", lambda *_: "9" * 64)
     ops = Ops(tmp_path)
-    netboot.netboot({"photowall.central": ROOT, "photowall.node": "v2"}, tmp_path / "root", ops=ops,
+    netboot.netboot({"photowall.central": ROOT}, tmp_path / "root", ops=ops,
         transport=transport, clock_gate=FakeClockGate(RECORD), keeper=FakeKeeper(),
         trust_provenance=PROVENANCE, serial_reader=lambda: SERIAL, log=RecordingLog(),
-        offer_mode=True, boot_id_reader=lambda: BOOT_ID)
+        boot_id_reader=lambda: BOOT_ID)
     return ops
 
 
 @pytest.mark.parametrize("app", [False, True])
-def test_v2_boot_uses_exact_base_and_protected_handoff_without_legacy_route(tmp_path, monkeypatch, app):
+def test_the_boot_uses_the_offers_exact_base_and_a_protected_handoff(tmp_path, monkeypatch, app):
     selected = offer(app=app)
     base = f"/v2/node/boot-offers/{selected.offer_id}/artifacts/base"
     transport = OfferTransport({
@@ -73,12 +84,12 @@ def test_v2_boot_uses_exact_base_and_protected_handoff_without_legacy_route(tmp_
     assert not (tmp_path / "root/etc/photo-wall/boot-handoff.json").exists()
 
 
-def test_selected_v2_never_falls_back_to_legacy_on_404(tmp_path, monkeypatch):
+def test_a_404_on_the_offer_route_fails_the_boot(tmp_path, monkeypatch):
     transport = OfferTransport({
         ("GET", str(ORIGIN.url("/v1/locate"))): central,
         ("POST", str(ORIGIN.url("/v2/node/boot-offers"))): lambda: FakeReply(404, body=b'{"detail":"Not Found"}'),
     })
-    with pytest.raises(UnsupportedRoute):
+    with pytest.raises(netboot.NetbootError, match="node_boot_route_unsupported"):
         run(tmp_path, monkeypatch, transport)
     assert len(transport.requests) == 2
 

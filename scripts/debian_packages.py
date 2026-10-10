@@ -5,10 +5,11 @@ it comes from (decision 0014, Project 2 design §2.9).
 This module is the only place a Debian package name is written for the builders it serves. The
 snapshot pin is written once, in debian-packaging/snapshot.list (decision 0019, rule 1), which `PIN`
 is read from at import: the file must be exactly the two sources `DebianPin.sources()` renders,
-so it cannot carry a second mirror. Every consumer is rendered from this module: the base's
-device set and apt sources (rpi-image-gen, from `packages` and `sources`), the initrd build root
-and the CI device root (`mmdebstrap_argv`), each `.deb`'s `Depends` (`packages`), and each
-closure policy's third-party table (`import_table`, read by `scripts/module_closure.py`).
+so it cannot carry a second mirror. Every consumer is rendered from this module: the base's apt
+sources (rpi-image-gen, from `sources`), the initrd build root (`mmdebstrap_argv`), each
+remaining builder's `Depends` (`packages`), and each closure policy's third-party table
+(`import_table`, read by `scripts/module_closure.py`). The base's own OS packages are not here:
+they live in its rpi-image-gen layers (decision 0019, R4).
 `validate` runs at import, so no build can use a declaration that breaks an invariant.
 
 A pin bump is one edit to debian-packaging/snapshot.list: every cache keyed on that file misses and
@@ -31,7 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
-Consumer = Literal["base-os", "bootstrapper", "player", "initrd-build", "node-base", "node-manager"]
+Consumer = Literal["player", "initrd-build", "node-base", "node-manager"]
 Archive = Literal["debian", "raspberrypi"]
 # When a package lands in a root. Every root fetches the pin over https, and apt inside a root
 # cannot do that until the CA bundle is there, so:
@@ -41,10 +42,6 @@ Archive = Literal["debian", "raspberrypi"]
 #                the device layer's requirements to this stage);
 #   "apt"        anything else: apt inside the root may install it once "bootstrap" is there.
 Stage = Literal["bootstrap", "apt"]
-# "base-os" is the base OS's own set: rpi-image-gen installs it straight into the OS with the
-# rest of the device set, and no .deb names it in its Depends (owner, 2026-10-09: OS
-# dependencies go into the OS, never through a Photo Wall package).
-DEVICE_CONSUMERS: Final[tuple[Consumer, ...]] = ("base-os", "bootstrapper", "player")
 
 SNAPSHOT_FORMAT: Final = "%Y%m%dT%H%M%SZ"
 _PACKAGE_NAME: Final = re.compile(r"[a-z0-9][a-z0-9+.-]+")   # Debian Policy §5.6.1
@@ -147,11 +144,8 @@ PIN: Final = read_pin(SNAPSHOT_LIST.read_text())
 RASPBERRY_PI: Final = AptSource("http://archive.raspberrypi.com/debian", "trixie", ("main",),
                                 trusted=True)
 
-_EVERY_STAGE: Final[frozenset[Consumer]] = frozenset({"bootstrapper", "player", "initrd-build"})
-_DEVICE: Final[frozenset[Consumer]] = frozenset(DEVICE_CONSUMERS)
-_DEVICE_APPS: Final[frozenset[Consumer]] = frozenset({"bootstrapper", "player"})
+_EVERY_STAGE: Final[frozenset[Consumer]] = frozenset({"player", "initrd-build"})
 _PLAYER: Final[frozenset[Consumer]] = frozenset({"player"})
-_BASE_OS: Final[frozenset[Consumer]] = frozenset({"base-os"})
 _INITRD_BUILD: Final[frozenset[Consumer]] = frozenset({"initrd-build"})
 _NODE_MANAGER: Final[frozenset[Consumer]] = frozenset({"node-manager"})
 _NODE_BASE: Final[frozenset[Consumer]] = frozenset({"node-base"})
@@ -164,12 +158,12 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("ca-certificates", _EVERY_STAGE | _NODE_BASE | _NODE_MANAGER,
                   why="Trust.public() reads the Debian bundle (R5); apt over https in the build "
                       "root", stage="bootstrap"),
-    DebianPackage("python3-zeroconf", _DEVICE_APPS, imports=("zeroconf",)),
+    DebianPackage("python3-zeroconf", _PLAYER, imports=("zeroconf",)),
     DebianPackage("python3-gi", _PLAYER, imports=("gi",)),
     DebianPackage("python3-opengl", _PLAYER, imports=("OpenGL",)),
-    DebianPackage("python3-cryptography", _DEVICE_APPS, imports=("cryptography",)),
+    DebianPackage("python3-cryptography", _PLAYER, imports=("cryptography",)),
     DebianPackage("python3-httpx", _PLAYER, imports=("httpx",)),
-    DebianPackage("python3-pydantic", _DEVICE_APPS, imports=("pydantic",)),
+    DebianPackage("python3-pydantic", _PLAYER, imports=("pydantic",)),
     DebianPackage("python3-websockets", _PLAYER, imports=("websockets",)),
     DebianPackage("python3-gst-1.0", _PLAYER, why=_RENDER_STACK),
     DebianPackage("gir1.2-gtk-3.0", _PLAYER, why=_RENDER_STACK),
@@ -192,10 +186,6 @@ PACKAGES: Final[tuple[DebianPackage, ...]] = (
     DebianPackage("passwd", _PLAYER,
                   why="the Player postinst runs useradd/usermod (Debian Policy: a maintainer "
                       "script's non-essential tool is a Depends)"),
-    DebianPackage("libnss-myhostname", _BASE_OS,
-                  why="resolves the Node's own name, photo-wall-<serial>, which stage 1 sets at "
-                      "every boot and no /etc/hosts line names (sudo, and anything else that "
-                      "looks its host up)"),
     DebianPackage("systemd", _NODE_BASE, why="isolated base unit manager"),
     DebianPackage("login", _NODE_BASE, why="base Weston PAMName=login session configuration"),
     DebianPackage("libpam-systemd", _NODE_BASE,
@@ -220,8 +210,8 @@ def validate(pin: DebianPin, packages: Sequence[DebianPackage]) -> None:
     """DeclarationError unless: the snapshot is exactly SNAPSHOT_FORMAT; every name follows
     Debian's package-name rule; names are unique; each import root belongs to exactly one
     package; a package with no imports says why; consumers, archive and stage are known ones;
-    every package a DEVICE_CONSUMER uses comes from the pinned "debian" archive (the device set
-    is fully pinned); a "bootstrap" package is pinned and serves every consumer (every root
+    every package outside the initrd build root comes from the pinned "debian" archive; a
+    "bootstrap" package is pinned and serves every consumer (every root
     fetches the pin over https); and when the pin is fetched over https, the "bootstrap" stage
     is not empty (nothing else can bring the CA bundle apt inside a root needs)."""
     try:
@@ -250,9 +240,9 @@ def validate(pin: DebianPin, packages: Sequence[DebianPackage]) -> None:
             owners[root] = package.name
         if not package.imports and not package.why:
             raise DeclarationError(f"{package.name} names no import and no reason")
-        if package.archive != "debian" and package.consumers & _DEVICE:
-            raise DeclarationError(f"{package.name} is on the device but comes from the "
-                                   f"unpinned {package.archive} archive")
+        if package.archive != "debian" and package.consumers - _INITRD_BUILD:
+            raise DeclarationError(f"{package.name} is outside the initrd build root but comes "
+                                   f"from the unpinned {package.archive} archive")
         if package.stage not in get_args(Stage):
             raise DeclarationError(f"{package.name}: unknown stage {package.stage!r}")
         if package.stage == "bootstrap" and (package.archive != "debian"
@@ -274,11 +264,8 @@ def _checked(consumers: Sequence[str], archive: str) -> None:
 def packages(*consumers: Consumer, archive: Archive = "debian",
              stage: Stage | None = None) -> tuple[str, ...]:
     """Sorted, unique names used by any of `consumers` from `archive` (in `stage`, when given):
-      packages("bootstrapper")             the bootstrapper .deb's Depends
       packages("player")                   the Player .deb's Depends
-      packages(*DEVICE_CONSUMERS)          the device set the base installs
-      packages("base-os")                  the base OS's own packages (no .deb's Depends)
-      packages(*DEVICE_CONSUMERS, stage="bootstrap")   the base's rpi-image-gen layer requirements
+      packages("node-base")                the node base .deb's Depends
       packages("initrd-build")             the initrd build root's --include
       packages("initrd-build", archive="raspberrypi")   its kernel/firmware/eeprom install"""
     _checked(consumers, archive)
@@ -303,8 +290,7 @@ def mmdebstrap_argv(*, arch: str, target: str,
     """The one way a root outside rpi-image-gen is built at the pin: minbase, the consumers'
     packages, and only the pinned snapshot sources. Every package is in mmdebstrap's own
     --include, fetched by the host's apt, so the "bootstrap" stage is there before apt runs
-    inside the root. Consumers: the initrd build root (base-image.yml) and the e2e device root
-    (scripts/test_netboot_e2e.py)."""
+    inside the root. Consumer: the initrd build root (base-image.yml)."""
     return ("mmdebstrap", f"--arch={arch}", "--variant=minbase",
             '--aptopt=Acquire::Check-Valid-Until "false"',
             f"--include={','.join(packages(*consumers))}",

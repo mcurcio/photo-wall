@@ -9,8 +9,8 @@ the snapshot it was built from.
 - Time daemon: a package that Provides `time-daemon` would step the clock stage 1 settled
   (rule 3).
 - Resolver writer: a package in RESOLVER_WRITERS would replace the resolver stage 1 hands over.
-- Missing package: `dpkg --install` of the Player refuses to configure when its `Depends` are
-  not installed, so the base must carry them.
+- Missing package (`--require-installed FILE`): every named package is installed (dpkg's own
+  database).
 - Pinned sources (`--pinned-sources`): the apt sources are exactly the declaration's
   `PIN.sources()` -- no foreign source, and none of the pin's missing.
 - Agent SSH (`--agent-key FILE`): rpi-image-gen's openssh-server layer left the server and its
@@ -18,11 +18,12 @@ the snapshot it was built from.
   that key, and sshd's effective settings key-only (docs/runbook.md, "Reaching a Node over SSH").
 - Base OS configuration (`--base-os`): the binfmt units masked (the Pi kernel has no
   binfmt_misc), no build-time hostname baked in (stage 1 names the Node photo-wall-<serial> at
-  boot), the hosts database resolving the machine's own name (libnss-myhostname), and a default
-  locale pam_env can read (rpi_image_gen/layer/photo-wall-os.yaml).
+  boot), the hosts database resolving the machine's own name (libnss-myhostname), a default
+  locale pam_env can read (rpi_image_gen/layer/photo-wall-os.yaml), and nothing of the retired
+  V1 Pi lane (V1_UNITS, V1_DIRECTORY): every Pi boots the node path (decision 0019).
 
-Run over the base squashfs extract (all six), both `.deb` staging trees (watchdog only, from the
-builders) and the e2e device root after provisioning (watchdog, time daemon, resolver writer).
+Run over the base squashfs extract (all six) and the Player `.deb` staging tree (watchdog only,
+from the builder).
 Every file is read inside the root: a symlink with an absolute target is followed from the root,
 never from the build host.
 
@@ -58,6 +59,11 @@ RESOLVER_WRITERS: Final = frozenset({"systemd-resolved", "resolvconf", "openreso
                                      "isc-dhcp-client", "udhcpc"})
 TIME_DAEMON: Final = "time-daemon"     # the virtual package every Debian NTP client Provides
 DPKG_STATUS: Final = "var/lib/dpkg/status"
+# The retired V1 Pi lane's units and the bootstrapper's directory (decision 0019): a base carrying
+# any of them is refused, wherever systemd would read the unit from.
+V1_UNITS: Final = ("photo-wall-provision.service", "photo-wall-os-agent.service")
+V1_DIRECTORY: Final = "usr/lib/photo-wall-bootstrapper"
+UNIT_DIRECTORIES: Final = ("etc/systemd/system", "usr/lib/systemd/system", "lib/systemd/system")
 INSTALLED: Final = "install ok installed"
 APT_SOURCES: Final = ("etc/apt/sources.list", "etc/apt/sources.list.d")
 _MAX_LINKS: Final = 8
@@ -314,8 +320,14 @@ def base_os(root: Path) -> list[str]:
     """Violations of the base's OS configuration: MASKED_UNITS each masked; etc/hostname not
     BUILD_HOSTNAME (stage 1 writes the Node's own name at boot); `myhostname` in the hosts line of
     etc/nsswitch.conf, so that name resolves with no /etc/hosts line; etc/default/locale,
-    followed through its link, setting LANG (pam_env reads it at every login)."""
+    followed through its link, setting LANG (pam_env reads it at every login); and no V1_UNITS
+    file or link under any UNIT_DIRECTORIES (a `.wants` link included) nor V1_DIRECTORY."""
     found = [f"not masked: {unit}" for unit in MASKED_UNITS if not _masked(root, unit)]
+    found += [f"v1 unit: {path.relative_to(root).as_posix()}"
+              for directory in UNIT_DIRECTORIES if (root / directory).is_dir()
+              for path in sorted((root / directory).rglob("*")) if path.name in V1_UNITS]
+    if (root / V1_DIRECTORY).is_symlink() or (root / V1_DIRECTORY).exists():
+        found.append(f"v1 directory: {V1_DIRECTORY}")
     if (_read(root, root / "etc/hostname") or "").strip() == BUILD_HOSTNAME:
         found.append(f"baked hostname: {BUILD_HOSTNAME}")
     hosts = [line.partition("#")[0].split()[1:]
@@ -347,7 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="the agent's SSH public key: the root must admit it, and only it")
     parser.add_argument("--base-os", action="store_true",
                         help="the base's OS configuration: binfmt masked, no build hostname, "
-                             "myhostname, a default locale")
+                             "myhostname, a default locale, nothing of the V1 lane")
     args = parser.parse_args(argv)
     root: Path = args.root
     violations = [f"watchdog override: {line}" for line in watchdog_overrides(root)]

@@ -110,7 +110,7 @@ def build(repository: Path, revision: str, output: Path, *, debs: Path,
         manager_deb = run_dpkg_deb(work / "manager", output / "manager-primary.deb")
         player_dir = work / "player"
         player_dir.mkdir()
-        player_deb = build_player(tree, player_dir, by_content=True, architecture=ARCHITECTURE,
+        player_deb = build_player(tree, player_dir, architecture=ARCHITECTURE,
                                   native_client=display_root / FRAME_CLIENT)
         shutil.copyfile(player_deb, output / "app.deb")
         refs = {}

@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall base-owned Weston display policy
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/usr/lib/photo-wall/node-display/photo-wall-shell.so
 After=systemd-user-sessions.service systemd-logind.service
 Wants=systemd-logind.service
@@ -9,7 +8,7 @@ Conflicts=photo-wall-weston.service getty@tty1.service
 # docs/display-host-backend.md#units-and-weston-incarnations.
 Wants=photo-wall-display-controller.service
 # A crash loop leaves the unit failed and reported, never a reboot: recovery is
-# operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
+# operator-driven (no StartLimitAction).
 StartLimitIntervalSec=10min
 StartLimitBurst=10
 

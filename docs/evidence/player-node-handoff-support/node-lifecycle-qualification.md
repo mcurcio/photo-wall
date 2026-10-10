@@ -19,8 +19,8 @@ acceptance, PXE boot or the absolute U1 graphics/kernel/panel/pre-display cases.
 
 ## Inputs and exact image checks
 
-[`scripts/build_node_pid1_fixture.py`](../../../scripts/build_node_pid1_fixture.py) takes one
-[`scripts/build_node_components.py`](../../../scripts/build_node_components.py) output (the
+`scripts/build_node_pid1_fixture.py` takes one
+`scripts/build_node_components.py` output (the
 builder base-image runs) and writes the nonrelease `success` target (the component Player at a
 higher version), the `failure` target (an entrypoint that exits), both sealed for the same ABI,
 and an arm64 image built FROM the node-display build image with exactly the supplied base

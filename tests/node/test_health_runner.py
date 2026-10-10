@@ -343,7 +343,6 @@ def test_the_judge_closure_is_small_and_the_base_ships_its_unit(tmp_path):
                  "RestrictAddressFamilies=AF_UNIX", "ProtectSystem=strict", "PrivateDevices=yes",
                  "NoNewPrivileges=yes", "CapabilityBoundingSet=", "MemoryMax=64M",
                  "Restart=always", "RestartSec=2", "Slice=photowallbase.slice",
-                 "ConditionKernelCommandLine=photowall.node=v2",
                  "After=photo-wall-app-broker.service",
                  "ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-health-judge"):
         assert line in unit, line

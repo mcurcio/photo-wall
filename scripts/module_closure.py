@@ -48,7 +48,7 @@ from scripts import debian_packages  # noqa: E402
 
 @dataclass(frozen=True, slots=True)
 class ClosurePolicy:
-    name: Literal["initrd", "bootstrapper", "player"]
+    name: Literal["initrd", "player"]
     roots: tuple[str, ...]
     forbidden: tuple[str, ...]              # top-level names, or dotted first-party modules/packages
     third_party: Mapping[str, str]          # import root -> Debian package; never hand-written
@@ -60,16 +60,11 @@ class ClosurePolicy:
 INITRD_POLICY: Final = ClosurePolicy(
     "initrd", ("appliance.netboot_init",),
     ("player", "central", "media", "zeroconf", "ifaddr", "gi"), MappingProxyType({}))
-BOOTSTRAPPER_POLICY: Final = ClosurePolicy(
-    "bootstrapper", ("appliance.provision", "appliance.os_agent",
-                     "appliance.app_launcher", "appliance.app_proof_service"),
-    ("central", "media"),
-    debian_packages.import_table("bootstrapper"))
 PLAYER_POLICY: Final = ClosurePolicy(
     "player", ("player.service",), ("central", "media", "appliance"),
     debian_packages.import_table("player"))
 POLICIES: Final[Mapping[str, ClosurePolicy]] = MappingProxyType(
-    {policy.name: policy for policy in (INITRD_POLICY, BOOTSTRAPPER_POLICY, PLAYER_POLICY)})
+    {policy.name: policy for policy in (INITRD_POLICY, PLAYER_POLICY)})
 INITRD_ROOTS: Final = INITRD_POLICY.roots
 INITRD_FORBIDDEN: Final = INITRD_POLICY.forbidden
 
@@ -432,7 +427,7 @@ def isolated_import(into: Path, modules: Sequence[str], *, policy: ClosurePolicy
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """--policy {initrd,bootstrapper,player} (default initrd) --root M (repeatable) --stage DIR
+    """--policy {initrd,player} (default initrd) --root M (repeatable) --stage DIR
     --manifest FILE --digest; exit 1 with the offending import named. --digest prints only the
     closure's digest (a cache key)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])

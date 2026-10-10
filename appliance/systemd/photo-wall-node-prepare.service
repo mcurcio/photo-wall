@@ -1,6 +1,5 @@
 [Unit]
 Description=Prepare frozen exact V2 app and manager environments
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/etc/photo-wall/node-boot.json
 Requires=photo-wall-node-storage.service photo-wall-node-handoff.service
 After=photo-wall-node-handoff.service photo-wall-node-storage.service network-online.target

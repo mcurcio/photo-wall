@@ -1,6 +1,5 @@
 [Unit]
 Description=Validate frozen V2 boot handoff and prepare owner configurations
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/etc/photo-wall/node-boot.json
 Before=photo-wall-host-core.service photo-wall-node-prepare.service photo-wall-app-broker.service photo-wall-manager-supervisor.service photo-wall-display-controller.service
 

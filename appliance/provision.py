@@ -158,7 +158,7 @@ _ExecutorResult = TypeVar("_ExecutorResult")
 # systemd's own exit statuses: the unit's process failed while systemd was setting it up
 # (user, groups, namespaces, directories, exec), before the program itself ran. Named as
 # `systemd-analyze exit-status` prints them for systemd 257, the base's (systemd.exec(5),
-# "Process Exit Codes"). scripts/player_start_probe.py fails the base build on any of them.
+# "Process Exit Codes").
 SYSTEMD_EXIT_STATUSES: Final[Mapping[int, str]] = MappingProxyType({
     200: "CHDIR", 201: "NICE", 202: "FDS", 203: "EXEC", 204: "MEMORY", 205: "LIMITS",
     206: "OOM_ADJUST", 207: "SIGNAL_MASK", 208: "STDIN", 209: "STDOUT", 210: "CHROOT",

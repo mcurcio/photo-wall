@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Build separately isolated node launchers as an opt-in portable Debian base package.
+"""Build separately isolated node launchers as a portable Debian base package.
 
-Install this .deb in an image build root. Kernel flag photowall.node=v2 selects the
-new units and disables legacy app/provision/watchdog reboot policy for that cohort.
-The default/legacy boot is unchanged. The base handoff must provide protected V2
-configuration; missing handoff refuses node effects rather than inventing authority.
+Install this .deb in an image build root; its units run on every boot. The base handoff must
+provide protected node configuration; missing handoff refuses node effects rather than
+inventing authority.
 
 The package also carries the Node bus (E3c): the pinned linux-arm64 nats-server and the shipped
 `node-bus.conf` under BUS_DIRECTORY, run by photo-wall-bus.service, so the package is arm64; the
@@ -118,10 +117,6 @@ def stage_tree(tree: Path, destination: Path) -> str:
     wants = destination / "etc/systemd/system/multi-user.target.wants"
     wants.mkdir(parents=True)
     (wants / "photo-wall-node.target").symlink_to("/lib/systemd/system/photo-wall-node.target")
-    for name in ("photo-wall-provision.service", "photo-wall-player.service", "photo-wall-os-agent.service", "photo-wall-weston.service"):
-        override = unit_dir / (name + ".d")
-        override.mkdir()
-        (override / "node-cohort.conf").write_text("[Unit]\nConditionKernelCommandLine=!photowall.node=v2\n")
     users = destination / "usr/lib/sysusers.d"
     users.mkdir(parents=True)
     (users / "photo-wall-node.conf").write_text('u pw-manager 10003 "Photo Wall manager" /nonexistent\nu pw-player 10004 "Photo Wall Player" /nonexistent\nu pw-display 10005 "Photo Wall display" /nonexistent\n'
@@ -135,7 +130,7 @@ def stage_tree(tree: Path, destination: Path) -> str:
                                                      "d /run/photo-wall-app-feed 0750 root pw-node-feeds -\n"
                                                      "d /run/photo-wall-display-feed 0750 pw-display pw-node-feeds -\n"
                                                      "d /run/photo-wall-display-wayland 0750 pw-display pw-display -\n")
-    # Include units, generated cohort policy and UID/tmpfiles contracts in identity.
+    # Include units and UID/tmpfiles contracts in identity.
     for path in sorted(destination.rglob("*")):
         if path.is_file() and not path.is_symlink():
             digests.extend((path.relative_to(destination).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))

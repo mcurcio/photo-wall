@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Uplink on the device's runtime (decision 0014 §11): the Pi runs Debian trixie's python3
 (3.13) and OpenSSL (3.5) with nothing but the stdlib and stage 1's closure, while CI runs 3.12
-with a venv. This harness proves the seam there, in the CI device root (the device set at
-the declared pin, `scripts/test_netboot_e2e.py device-root`):
+with a venv. This harness proves the seam there, in the pinned build container
+(photo-wall-debian-builder, node-components.yml's debs job):
 
   mint DIR                        on the runner (the repo's venv): write the test CA bundle and
                                   the leaves tests/tls_fixture.py mints (no key kept in-tree)

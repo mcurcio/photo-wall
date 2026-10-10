@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall independent host observation and scoped reboot
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/run/photo-wall-node/host.json
 After=network-online.target
 

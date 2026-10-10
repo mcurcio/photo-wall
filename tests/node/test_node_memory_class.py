@@ -289,7 +289,5 @@ def test_host_core_is_the_last_global_oom_victim():
 
 def test_no_node_unit_sets_a_reboot_start_limit_action():
     for path in SYSTEMD.glob("photo-wall-*.service"):
-        if path.name == "photo-wall-provision.service":
-            continue  # the pre-node bootstrapper, rebooting into PXE by design
         unit = _unit(path.name)
         assert not any("StartLimitAction" in section for section in unit.values()), path.name

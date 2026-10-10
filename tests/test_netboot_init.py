@@ -1,9 +1,9 @@
 """Stage 1 (`appliance/netboot_init.py`) over a scripted Transport, a fake ClockSettler, fake ops
 and a fake watchdog keeper; generated local bytes, no physical boot claim.
 
-resolve -> clock -> locate -> direct base fetch -> mount -> resolver -> hand-over, the fail-closed
-content rows, the watchdog pets, and design §7's worked examples with their exact console
-lines."""
+resolve -> clock -> locate -> node boot offer -> the offer's base -> mount -> resolver ->
+hand-over, the fail-closed content rows, the watchdog pets, and design §7's worked examples with
+their exact console lines. Every boot takes the node path; there is no other."""
 
 import ast
 import base64
@@ -16,6 +16,7 @@ import stat
 import sys
 import time
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 import tls_fixture as tls
@@ -26,7 +27,7 @@ from appliance.bootstrap import BootstrapError, LinuxOps, read_pi_serial
 from appliance.netboot_init import (
     BASE_FETCH_SECONDS,
     MAX_RESOLVER_BYTES,
-    NETBOOT_BASE_PATH,
+    NODE_BOOT_OFFERS_PATH,
     SERIAL_HEADER,
     STAGE1_SEND_SECONDS,
     STAGE2_HOSTNAME,
@@ -42,12 +43,15 @@ from appliance.netboot_init import (
     node_hostname,
     parse_digest_header,
 )
+from contracts.app_environment import AppEnvironmentRefV2
 from contracts.clock_record import ClockRecord, ClockState
+from contracts.node_boot import NodeBaseRefV2, NodeBootOfferV2, encode_node_boot_offer
 from uplink.causes import Cause, UplinkError
 from uplink.clock import DHCP_NTP_SERVERS
 from uplink.fetch import MAX_FETCH_SECONDS
 from uplink.lookup import LookupTimeout
-from uplink.transport import LOOKUP_TIMEOUT
+from uplink.origin import Origin
+from uplink.transport import HOP_TIMEOUT, LOOKUP_TIMEOUT
 
 BODY = b"generated base squashfs bytes"
 SHA256 = hashlib.sha256(BODY).hexdigest()
@@ -55,8 +59,36 @@ DIGEST_HEADER = "sha-256=" + base64.b64encode(bytes.fromhex(SHA256)).decode()
 ROOT = "http://photo-wall.localdomain/"
 FIRST = "http://photo-wall.localdomain/v1/locate"
 LOCATED = "https://photo-wall.example/v1/locate"
-BASE = "https://photo-wall.example/v1/netboot/base"
 SERIAL = "10000000abcd1234"
+BOOT_ID = "11111111-2222-3333-4444-555555555555"
+NONCE = "9" * 64
+OFFER_ID = UUID("12345678-1234-1234-1234-123456789abc")
+
+
+def node_offer(*, app=False, offer_id=OFFER_ID, sha256=SHA256, size=len(BODY)):
+    """Central's node boot offer for SERIAL's boot BOOT_ID with NONCE: the base of `sha256`."""
+    manager = AppEnvironmentRefV2("b" * 64, 123, "c" * 64, "photo-wall-node-manager", "2.0", "arm64",
+        "d" * 64, "e" * 64, "/usr/lib/photo-wall-node-manager/entry", "base-v2", "graphics-v2", "frame-v1")
+    player = AppEnvironmentRefV2("a" * 64, 123, "c" * 64, "photo-wall-player", "2.0", "arm64",
+        "d" * 64, "e" * 64, "/usr/lib/photo-wall-environment/entry", "base-v2", "graphics-v2", "frame-v1")
+    return NodeBootOfferV2(offer_id, "site", SERIAL, "device-" + "f" * 64, 1, UUID(BOOT_ID), NONCE,
+        1, UUID(int=7), 1, 9999999999999,
+        NodeBaseRefV2("v2", "8" * 64, sha256, size, "base-v2", "graphics-v2", "frame-v1"),
+        "selected" if app else "unconfigured", player if app else None, manager, None)
+
+
+def offers(origin="https://photo-wall.example"):
+    """The offer route on `origin`."""
+    return f"{origin}{NODE_BOOT_OFFERS_PATH}"
+
+
+def base_url(origin="https://photo-wall.example", offer_id=OFFER_ID):
+    """The offer's base on `origin`."""
+    return f"{origin}{NODE_BOOT_OFFERS_PATH}/{offer_id}/artifacts/base"
+
+
+OFFERS = offers()
+BASE = base_url()
 PROVENANCE = "bundle=sha256:0123456789ab anchors=140 floor=2026-09-26"
 RECORD = ClockRecord(state=ClockState.SYNCED, floor=1790380800, raised_to_floor=True,
                      tier="dhcp", source="192.0.2.1", offset=3605.2, stepped=True,
@@ -173,13 +205,22 @@ class FakeClockGate:
         return self.record
 
 
-class OrderedTransport(FakeTransport):
+class ScriptTransport(FakeTransport):
+    """FakeTransport that also takes stage 1's POST (the offer), answered by URL like a GET."""
+
+    def send(self, url, *, headers, deadline, status_timeout=HOP_TIMEOUT, method="GET",
+             body=None):
+        return super().send(url, headers=headers, deadline=deadline,
+                            status_timeout=status_timeout)
+
+
+class OrderedTransport(ScriptTransport):
     def __init__(self, script, events):
         super().__init__(script)
         self.events = events
 
     def send(self, url, **kwargs):
-        self.events.append(f"GET {url}")
+        self.events.append(f"{kwargs.get('method', 'GET')} {url}")
         return super().send(url, **kwargs)
 
 
@@ -190,12 +231,28 @@ def base_reply(body=BODY, digest=DIGEST_HEADER, **kwargs):
     return FakeReply(200, body=body, headers=headers, **kwargs)
 
 
+def offer_reply(offer=None):
+    return lambda: FakeReply(200, body=encode_node_boot_offer(offer or node_offer()))
+
+
+def node_answers(origin):
+    """Central at `origin`: located directly, its offer, and the offer's base."""
+    return {f"{origin}/v1/locate": central(), offers(origin): offer_reply(),
+            base_url(origin): base_reply()}
+
+
 def script(**overrides):
     """The Pi's real case (design §7 example 1): the http root 301s to the https origin."""
     answers = {FIRST: FakeReply(301, location="https://photo-wall.example:443/v1/locate"),
-               LOCATED: central(), BASE: base_reply()}
+               LOCATED: central(), OFFERS: offer_reply(), BASE: base_reply()}
     answers.update(overrides)
     return answers
+
+
+@pytest.fixture(autouse=True)
+def fixed_nonce(monkeypatch):
+    """The boot's nonce is the offer's (node_nonce is proven in tests/node/boot)."""
+    monkeypatch.setattr(netboot_module, "node_nonce", lambda *_: NONCE)
 
 
 @pytest.fixture(autouse=True)
@@ -217,9 +274,10 @@ def run(cmd, tmp_path, *, answers=None, transport=None, ops=None, keeper=None, c
         serial_reader=lambda: SERIAL, log=None):
     log = log or RecordingLog()
     netboot(cmd, tmp_path / "root", ops=ops or Ops(tmp_path),
-            transport=transport or FakeTransport(answers or script()),
+            transport=transport or ScriptTransport(answers or script()),
             clock_gate=clock_gate or FakeClockGate(), keeper=keeper or FakeKeeper(),
-            trust_provenance=PROVENANCE, serial_reader=serial_reader, log=log)
+            trust_provenance=PROVENANCE, serial_reader=serial_reader, log=log,
+            boot_id_reader=lambda: BOOT_ID)
     return log
 
 
@@ -236,14 +294,14 @@ def failed(cmd, tmp_path, error=UplinkError, **kwargs):
 
 def test_the_pi_real_case_locates_through_the_301_and_mounts_the_verified_base(tmp_path):
     ops, keeper = Ops(tmp_path), FakeKeeper()
-    transport = FakeTransport(script())
+    transport = ScriptTransport(script())
     log = run(cmdline(), tmp_path, ops=ops, keeper=keeper, transport=transport)
-    assert [sent[0] for sent in transport.sent] == [FIRST, LOCATED, BASE]
-    assert transport.sent[2][1] == {"Accept-Encoding": "identity", SERIAL_HEADER: SERIAL}
+    assert [sent[0] for sent in transport.sent] == [FIRST, LOCATED, OFFERS, BASE]
+    assert transport.sent[3][1] == {"Accept-Encoding": "identity", SERIAL_HEADER: SERIAL}
     assert ops.calls == ["configure_networking", "network_info", "ram", "mount_root",
                          "hand_over_modules"]
     assert ops.mounted == [(BODY, tmp_path / "root")]
-    assert not (ops.run_root / "boot.json").exists()
+    assert (tmp_path / "root/etc/photo-wall/node-boot.json").is_file()
     assert keeper.handed_over
     # Example 1: the located origin drops :443, and the note keys on the configured http root.
     assert "phase 5/7 located https://photo-wall.example (Central api 1)" in log.lines
@@ -265,15 +323,13 @@ def test_the_setup_line_carries_provenance_keeper_and_missing_kernel_parameters(
 
 
 def test_an_https_root_gets_no_http_note(tmp_path):
-    answers = {LOCATED: central(), BASE: base_reply()}
     log = run(cmdline(**{"photowall.central": "https://photo-wall.example/"}), tmp_path,
-              answers=answers)
+              answers=node_answers("https://photo-wall.example"))
     assert not any(line.startswith("note: configured root") for line in log.lines)
 
 
 def test_example_8_an_http_root_that_never_redirects_still_gets_the_no_pin_note(tmp_path):
-    answers = {FIRST: central(), "http://photo-wall.localdomain/v1/netboot/base": base_reply()}
-    log = run(cmdline(), tmp_path, answers=answers)
+    log = run(cmdline(), tmp_path, answers=node_answers("http://photo-wall.localdomain"))
     assert "note: configured root is http: the first hop is unauthenticated" in log.lines
     assert not any("set photowall.central" in line for line in log.lines)
 
@@ -297,10 +353,11 @@ def test_the_option_42_servers_show_in_debug_only(tmp_path):
     assert DHCP_NTP_SERVERS.as_posix() == "/proc/net/ipconfig/ntp_servers"
 
 
-def test_serial_is_sent_as_request_header_and_absent_serial_sends_none(tmp_path):
-    transport = FakeTransport(script())
-    run(cmdline(), tmp_path, transport=transport, serial_reader=lambda: None)
-    assert transport.sent[2][1] == {"Accept-Encoding": "identity"}
+def test_without_a_serial_no_offer_is_asked_and_nothing_is_fetched(tmp_path):
+    transport, ops = ScriptTransport(script()), Ops(tmp_path)
+    assert failed(cmdline(), tmp_path, NetbootError, transport=transport, ops=ops,
+                  serial_reader=lambda: None) == "FAILED phase=6 code=node_boot_serial_unavailable"
+    assert [sent[0] for sent in transport.sent] == [FIRST, LOCATED] and ops.mounted == []
 
 
 def test_the_base_uses_the_generous_deadline(tmp_path, monkeypatch):
@@ -319,7 +376,7 @@ def test_the_base_uses_the_generous_deadline(tmp_path, monkeypatch):
 # --- the watchdog (S0-AC6 on the rewritten netboot) -------------------------------------------
 
 def test_every_collaborator_is_required(tmp_path):
-    kwargs = dict(ops=Ops(tmp_path), transport=FakeTransport(script()),
+    kwargs = dict(ops=Ops(tmp_path), transport=ScriptTransport(script()),
                   clock_gate=FakeClockGate(), keeper=FakeKeeper(), trust_provenance=PROVENANCE,
                   serial_reader=lambda: SERIAL, log=RecordingLog())
     for name in kwargs:
@@ -333,8 +390,9 @@ def test_a_pet_for_every_phase_line_block_send_and_read_and_hand_over_last(tmp_p
     and every read (the stage-1 transport). Mutation probe: drop either transport pet and the
     count is short."""
     keeper = FakeKeeper()
-    answers = script(**{BASE: base_reply(step=8)})
-    transport = FakeTransport(answers)
+    answers = script(**{BASE: base_reply(step=8), OFFERS: FakeReply(
+        200, body=encode_node_boot_offer(node_offer()))})
+    transport = ScriptTransport(answers)
     log = run(cmdline(), tmp_path, keeper=keeper, transport=transport)
     phase_lines = [line for line in log.lines if line.startswith("phase ") and
                    "hash compare" not in line]
@@ -351,7 +409,7 @@ def test_every_send_waits_at_most_the_stage1_send_cap(tmp_path):
     netboot() holds every send's absolute deadline to STAGE1_SEND_SECONDS from when it starts,
     whatever the caller asked (the base's DirectFetch asks for BASE_FETCH_SECONDS). Mutation
     probe: hand _run_netboot the bare transport and the base send gets the whole 300 s."""
-    transport = FakeTransport(script())
+    transport = ScriptTransport(script())
     before = time.monotonic()
     run(cmdline(), tmp_path, transport=transport)
     after = time.monotonic()
@@ -365,7 +423,7 @@ def test_hand_over_never_runs_on_a_failed_boot_and_the_failed_line_pets(tmp_path
     wrong = "sha-256=" + base64.b64encode(bytes(32)).decode()
     line = failed(cmdline(), tmp_path, NetbootError, keeper=keeper,
                   answers=script(**{BASE: base_reply(digest=wrong)}))
-    assert line == "FAILED phase=6 code=netboot_integrity"
+    assert line == "FAILED phase=6 code=netboot_offer_header_mismatch"
     assert not keeper.handed_over and keeper.pets > 0
 
 
@@ -381,10 +439,11 @@ def test_the_failed_line_pets_before_the_debug_pause(tmp_path, monkeypatch):
 # --- fail closed: content ---------------------------------------------------------------------
 
 @pytest.mark.parametrize(("reply", "code"), [
-    (base_reply(digest="sha-256=" + base64.b64encode(bytes(32)).decode()), "netboot_integrity"),
-    (base_reply(digest=None), "netboot_no_digest"),
-    (base_reply(body=b"not the expected bytes at all!", digest=DIGEST_HEADER),
-     "netboot_integrity"),
+    (base_reply(digest="sha-256=" + base64.b64encode(bytes(32)).decode()),
+     "netboot_offer_header_mismatch"),
+    (base_reply(digest=None), "netboot_offer_header_mismatch"),
+    (base_reply(body=b"x" * len(BODY), digest=DIGEST_HEADER), "netboot_integrity"),
+    (base_reply(body=BODY[:-1], digest=DIGEST_HEADER), "netboot_size_mismatch"),
 ])
 def test_a_bad_base_fails_closed_without_mounting(tmp_path, reply, code):
     ops = Ops(tmp_path)
@@ -397,14 +456,14 @@ def test_a_bad_base_fails_closed_without_mounting(tmp_path, reply, code):
 # --- design §7 worked examples: the exact FAILED line ----------------------------------------
 
 def test_example_2_an_https_to_http_redirect_is_a_downgrade_and_b_is_never_contacted(tmp_path):
-    transport = FakeTransport({"https://a/v1/locate": FakeReply(302, location="http://b/v1/locate")})
+    transport = ScriptTransport({"https://a/v1/locate": FakeReply(302, location="http://b/v1/locate")})
     line = failed(cmdline(**{"photowall.central": "https://a/"}), tmp_path, transport=transport)
     assert line == "FAILED phase=5 cause=redirect reason=downgrade host=b"
     assert [sent[0] for sent in transport.sent] == ["https://a/v1/locate"]
 
 
 def test_example_3_a_loop_is_named_before_a_is_contacted_again(tmp_path):
-    transport = FakeTransport({
+    transport = ScriptTransport({
         "https://a/v1/locate": FakeReply(301, location="https://b/v1/locate"),
         "https://b/v1/locate": FakeReply(301, location="https://a:443/v1/locate")})
     line = failed(cmdline(**{"photowall.central": "https://a/"}), tmp_path, transport=transport)
@@ -414,15 +473,15 @@ def test_example_3_a_loop_is_named_before_a_is_contacted_again(tmp_path):
 
 def test_example_5_the_eleventh_redirect_is_the_limit(tmp_path):
     chain = [f"https://h{index}/v1/locate" for index in range(12)]
-    transport = FakeTransport({url: FakeReply(301, location=chain[index + 1])
-                               for index, url in enumerate(chain[:-1])})
+    transport = ScriptTransport({url: FakeReply(301, location=chain[index + 1])
+                                 for index, url in enumerate(chain[:-1])})
     line = failed(cmdline(**{"photowall.central": "https://h0/"}), tmp_path, transport=transport)
     hops = ",".join(f"h{index}" for index in range(11))
     assert line == f"FAILED phase=5 cause=redirect reason=limit host=h11 detail=hops={hops}"
 
 
 def test_example_6_a_sub_path_move_is_refused(tmp_path):
-    transport = FakeTransport({FIRST: FakeReply(301, location="https://b/central/v1/locate")})
+    transport = ScriptTransport({FIRST: FakeReply(301, location="https://b/central/v1/locate")})
     assert failed(cmdline(), tmp_path, transport=transport) == \
         "FAILED phase=5 cause=redirect reason=path_changed host=b"
 
@@ -447,7 +506,7 @@ def test_example_11_an_older_central_without_locate_is_not_central(tmp_path):
      "FAILED phase=1 cause=configuration reason=invalid"),
 ], ids=["12-absent", "no-cmdline", "12b-placeholder"])
 def test_examples_12_and_12b_no_usable_root_fails_before_any_network(tmp_path, cmd, line):
-    ops, transport = Ops(tmp_path), FakeTransport({})
+    ops, transport = Ops(tmp_path), ScriptTransport({})
     assert failed(cmd, tmp_path, ops=ops, transport=transport) == line
     assert ops.calls == [] and transport.sent == []
 
@@ -466,11 +525,9 @@ def test_an_invalid_root_never_reaches_the_network(tmp_path, bad):
 
 @pytest.mark.parametrize("good", ["http://boot.test", "http://boot.test/", "https://photo-wall/"])
 def test_root_forms_are_accepted(tmp_path, good):
-    origin = good.rstrip("/")
-    answers = {f"{origin}/v1/locate": central(),
-               f"{origin}/v1/netboot/base": base_reply()}
     ops = Ops(tmp_path)
-    run(cmdline(**{"photowall.central": good}), tmp_path, ops=ops, answers=answers)
+    run(cmdline(**{"photowall.central": good}), tmp_path, ops=ops,
+        answers=node_answers(good.rstrip("/")))
     assert ops.mounted == [(BODY, tmp_path / "root")]
 
 
@@ -496,7 +553,7 @@ def test_example_7_a_date_failure_carries_the_unsynced_clock(tmp_path):
 
 
 def test_example_14_a_redirect_on_the_base_fetch_is_refused(tmp_path):
-    answers = script(**{BASE: FakeReply(307, location="https://elsewhere.example/v1/netboot/base")})
+    answers = script(**{BASE: FakeReply(307, location="https://elsewhere.example/base")})
     ops = Ops(tmp_path)
     assert failed(cmdline(), tmp_path, answers=answers, ops=ops) == (
         "FAILED phase=6 cause=redirect reason=unexpected host=photo-wall.example "
@@ -696,14 +753,6 @@ def test_the_name_replaces_the_bases_symlink_without_following_it(tmp_path):
     assert target.read_text() == "localhost\n"
 
 
-def test_without_a_pi_serial_the_bases_name_stays_and_the_boot_goes_on(tmp_path):
-    keeper = FakeKeeper()
-    log = run(cmdline(), tmp_path, keeper=keeper, serial_reader=lambda: None)
-    assert not (tmp_path / "root" / STAGE2_HOSTNAME).exists()
-    assert "phase 7/7 mount + handoff: hostname=unchanged (no Pi serial)" in log.lines
-    assert keeper.handed_over
-
-
 # --- phase 7: the kernel modules travel to stage 2 ------------------------------------------
 
 RELEASE = "6.18.50+rpt-rpi-2712"
@@ -866,8 +915,8 @@ def test_read_pi_serial_normalizes_and_rejects_control_chars(tmp_path, raw, expe
     assert read_pi_serial(str(path)) == expected
 
 
-def test_netboot_path_is_the_code_constant_not_from_cmdline():
-    assert NETBOOT_BASE_PATH == "/v1/netboot/base"
+def test_the_offer_route_is_the_code_constant_not_from_cmdline():
+    assert NODE_BOOT_OFFERS_PATH == "/v2/node/boot-offers"
 
 
 def test_mount_root_is_reused_verbatim_not_reimplemented():
@@ -945,21 +994,67 @@ def test_fetch_verified_rejects_oversized_chunk(tmp_path):
     from appliance.bootstrap import CHUNK
 
     with pytest.raises(NetbootError, match="netboot_chunk"):
-        fetch_verified([b"x" * (CHUNK + 1)], tmp_path / "img", lambda: SHA256)
+        fetch_verified([b"x" * (CHUNK + 1)], tmp_path / "img", SHA256)
     assert not (tmp_path / "img").exists()
 
 
 def test_fetch_verified_rejects_total_size_over_rootfs_bound(tmp_path, monkeypatch):
     monkeypatch.setattr(netboot_module, "MAX_ROOTFS_BYTES", 10)
     with pytest.raises(NetbootError, match="netboot_limit"):
-        fetch_verified([b"x" * 6, b"y" * 6], tmp_path / "img", lambda: SHA256)
+        fetch_verified([b"x" * 6, b"y" * 6], tmp_path / "img", SHA256)
     assert not (tmp_path / "img").exists()
 
 
-def test_fetch_verified_missing_digest_callable_fails_closed(tmp_path):
-    with pytest.raises(NetbootError, match="netboot_no_digest"):
-        fetch_verified([BODY], tmp_path / "img", lambda: None)
-    assert not (tmp_path / "img").exists()
+# --- phase 6: the node boot offer is the only way to a base -----------------------------------
+
+def test_a_central_without_the_offer_route_is_a_failure_and_nothing_is_fetched(tmp_path):
+    transport, ops = ScriptTransport(script(**{OFFERS: FakeReply(
+        404, body=b'{"detail":"Not Found"}')})), Ops(tmp_path)
+    assert failed(cmdline(), tmp_path, NetbootError, transport=transport, ops=ops) == (
+        "FAILED phase=6 code=node_boot_route_unsupported")
+    assert BASE not in transport.urls and ops.mounted == []
+
+
+@pytest.mark.parametrize("offer", [node_offer(sha256="0" * 64), None],
+                         ids=["other-base", "another-boot"])
+def test_an_offer_for_other_bytes_or_another_boot_never_mounts(tmp_path, monkeypatch, offer):
+    if offer is None:   # an offer for another boot's nonce
+        monkeypatch.setattr(netboot_module, "node_nonce", lambda *_: "8" * 64)
+        offer, code = node_offer(), "node_boot_offer_binding"
+    else:
+        code = "netboot_offer_header_mismatch"
+    ops = Ops(tmp_path)
+    assert failed(cmdline(), tmp_path, NetbootError, ops=ops,
+                  answers=script(**{OFFERS: offer_reply(offer)})) == f"FAILED phase=6 code={code}"
+    assert ops.mounted == []
+
+
+def test_the_offer_is_handed_to_the_new_root(tmp_path):
+    run(cmdline(), tmp_path)
+    handoff = tmp_path / "root/etc/photo-wall/node-boot.json"
+    assert handoff.stat().st_mode & 0o777 == 0o600
+    assert str(OFFER_ID) in handoff.read_text()
+
+
+def test_paced_post_forwards_body_and_preserves_deadline_and_pets(tmp_path):
+    seen = []
+
+    class Recording:
+        def send(self, url, *, headers, deadline, status_timeout=HOP_TIMEOUT, method="GET",
+                 body=None):
+            seen.append((method, str(url), body, deadline))
+            return FakeReply(200, body=b"ok")
+
+    keeper = FakeKeeper()
+    paced = netboot_module._PacedTransport(Recording(), keeper)
+    before = time.monotonic()
+    url = Origin.parse_root("https://photo-wall.example/").url(NODE_BOOT_OFFERS_PATH)
+    reply = paced.send(url, headers={}, deadline=before + 999, method="POST", body=b"{}")
+    assert seen[0][:3] == ("POST", OFFERS, b"{}")
+    assert seen[0][3] <= before + STAGE1_SEND_SECONDS + 1
+    assert keeper.pets == 1
+    assert reply.read(2, timeout=1) == b"ok" and keeper.pets == 2
+    reply.close()
 
 
 def test_stage_1_no_longer_imports_the_provisioner_or_the_ticket_path():

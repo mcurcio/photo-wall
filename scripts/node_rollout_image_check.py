@@ -30,7 +30,7 @@ SUITES = {
         "test_player_control_protocol.py::test_first_state_seals_hello_and_new_epoch_can_negotiate",
         "test_player_control_protocol.py::test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_result",
         "test_player_control_protocol.py::test_older_central_writer_cannot_leave_a_replayable_receipt",
-        "test_published_player_wire.py", "test_node_protocol.py", "test_node_boot.py"),
+        "test_node_protocol.py", "test_node_boot.py"),
     "fence_contract": ("test_node_lifecycle.py", "test_node_runtime_reconciliation.py"),
     "readiness_contract": ("test_readiness_diagnostics.py", "test_coordination.py", "test_node_central.py"),
 }
@@ -103,7 +103,6 @@ def check(images: list[str], revision: str, output: Path):
     sys.path.insert(0, str(ROOT))
     from contracts.node_rollout import canonical, image_digest, validate_qualification
     from scripts.node_rollout_ci_evidence import report_result
-    from scripts.published_player_wire import prepare
     from scripts.registry_pull import pull_image
 
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -122,9 +121,6 @@ def check(images: list[str], revision: str, output: Path):
     with tempfile.TemporaryDirectory(prefix="pw-image-qualification-") as scratch:
         scratch = Path(scratch)
         _test_dependencies(scratch / "deps")
-        prepare(scratch / "published-player-wire")
-        (scratch / "scripts").mkdir()
-        shutil.copy2(ROOT / "scripts/published_player_wire.py", scratch / "scripts/published_player_wire.py")
         _run("docker", "network", "create", "--internal", identity, stdout=subprocess.DEVNULL)
         try:
             _run("docker", "run", "-d", "--name", identity, "--network", identity,
@@ -148,11 +144,8 @@ def check(images: list[str], revision: str, output: Path):
                     "--network", identity, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                     "--tmpfs", "/tmp:rw,nosuid,nodev", "--workdir", "/app",
                     "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
-                    "-e", "PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR=/published-player-wire",
                     "-e", "PHOTO_WALL_TEST_DATABASE_URL=postgresql://postgres:isolated-test-only@database/postgres",
                     "-v", f"{ROOT / 'tests'}:/qualification/tests:ro",
-                    "-v", f"{scratch / 'scripts'}:/qualification/scripts:ro",
-                    "-v", f"{scratch / 'published-player-wire'}:/published-player-wire:ro",
                     "-v", f"{Path(__file__).resolve()}:/qualification/check.py:ro",
                     "-v", f"{scratch / 'deps'}:/test-deps:ro", "-v", f"{result.resolve()}:/reports:rw",
                     "--entrypoint", "/app/.venv/bin/python", reference, "-I", "/qualification/check.py", "--inside")

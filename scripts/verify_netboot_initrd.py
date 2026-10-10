@@ -65,8 +65,7 @@ _REBOOT_TOKEN = re.compile(r"(?<![\w-])reboot(?![\w-])")
 # copies its module tree onto the new root (appliance.netboot_init.hand_over_modules). v0.9.1's
 # initrd had neither. The hook's own list (appliance/netboot_initramfs/hooks/photo-wall-netboot)
 # is bound to this one by tests/test_verify_netboot_initrd.py; that they RESOLVE on the new root
-# is scripts/initrd_mount_probe.py's job, and that the base's own libkmod reads them is
-# scripts/player_start_probe.py's.
+# is scripts/initrd_mount_probe.py's job.
 DISPLAY_MODULES: tuple[str, ...] = ("vc4", "v3d")
 
 # Present-or-fail globs for the CACHED archive, matched against normalised member paths.

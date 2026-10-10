@@ -1,12 +1,11 @@
 [Unit]
 Description=Photo Wall base-owned exact manager recovery
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/run/photo-wall-node/manager.json
 
 After=photo-wall-node-handoff.service photo-wall-node-prepare.service
 Requires=photo-wall-node-prepare.service
 # A crash loop leaves the unit failed and reported, never a reboot: recovery is
-# operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
+# operator-driven (no StartLimitAction).
 StartLimitIntervalSec=10min
 StartLimitBurst=10
 

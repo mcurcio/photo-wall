@@ -23,7 +23,8 @@ name: V2 node components
 # which name every .deb's sha256, must agree) and proved by installing the whole set through it
 # (tests/debs/test_local_repo.py), by the display and frame client's installed files and ABI
 # identity (tests/debs/test_display_packages.py) and by each Python context importing from its
-# runtime directories alone (tests/debs/test_context_packages.py). It uploads the repo as
+# runtime directories alone (tests/debs/test_context_packages.py); it also runs stage 1's uplink
+# on the device's runtime in that container (scripts/uplink_device_harness.py). It uploads the repo as
 # photo-wall-node-debs-<revision>, which the `build` job takes the display (node-display.deb,
 # byte for byte) and the frame client (inside app.deb) from.
 #
@@ -109,6 +110,23 @@ jobs:
 
       - name: Install the locked environment
         run: uv sync --frozen
+
+      # Uplink on the device's runtime (decision 0014 §11): stage 1's computed initrd closure,
+      # imported and run under the pinned trixie python3 and OpenSSL of the build container with
+      # nothing but the stdlib (`python3 -I -S`), against stdlib stand-in servers over verified
+      # TLS (scripts/uplink_device_harness.py). The runner's venv mints the test certificates.
+      - name: Run uplink on the device's runtime (stage 1's closure in the build container)
+        run: |
+          set -eu
+          work="$RUNNER_TEMP/uplink-device"
+          .venv/bin/python scripts/module_closure.py --stage "$work/closure"
+          .venv/bin/python -m scripts.uplink_device_harness mint "$work/certs"
+          docker run --rm --platform linux/arm64 --network none \
+            -v "$work:/work:ro" \
+            -v "$GITHUB_WORKSPACE/scripts/uplink_device_harness.py:/harness.py:ro" \
+            photo-wall-debian-builder sh -ec '
+              python3 --version
+              python3 -I -S /harness.py run --closure /work/closure --certs /work/certs'
 
       - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports)
         env:

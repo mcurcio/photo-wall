@@ -333,7 +333,7 @@ only from `main`, whose scope every pull request can read.
 **Node components.** [`node-components.yml`](../.github/workflows/node-components.yml)
 builds the V2 node component set once per pipeline run, for `base-image` and every
 `node-pid1` leg, which download it (and the PID1 fixture image, `docker save`d).
-Its builders ([`node_build_inputs.py`](../scripts/node_build_inputs.py)) use the
+Its builders (`scripts/node_build_inputs.py`) use the
 same policy with one scope per role (`photo-wall-node-<role>-arm64-v<epoch>`:
 `display`, `environment-app`, `environment-manager-primary`); the fixture's
 environments read the app's scope and write none. A sealed environment installs
@@ -352,7 +352,7 @@ packages (the published Player `.deb` keeps `+g<revision>`), and
 caches the whole output (`actions/cache`, exact key only), and the PID1 fixture
 together with the set it was derived from. The key is the digest of the input
 manifest
-([`node_component_inputs.py`](../scripts/node_component_inputs.py)) that the
+(`scripts/node_component_inputs.py`) that the
 build records in `build-provenance.json`: the fetched tree pruned to exactly the
 paths each builder declares it reads (so a builder that reads anything else
 fails), the first-party modules the build and fixture processes import, `uv.lock`,

@@ -109,9 +109,6 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
     for job in ('db', 'browser'):
         assert 'compose.test-database.yml up -d --wait' in selections[job]
     assert 'PHOTO_WALL_RELEASE_TOKEN' in selections['db']
-    for job in ('unit', 'db'):  # both tiers hold tests of the published Player wire
-        assert 'published_player_wire.py prepare' in selections[job]
-        assert 'PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR' in selections[job]
     assert '--env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI' in selections['browser']
 
 
@@ -200,21 +197,6 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert 'uses: ./.github/workflows/node-components.yml' in build
     assert 'revision: ${{ needs.plan.outputs.revision }}' in build
     assert "pid1-fixture: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1') }}" in build
-
-
-def test_the_base_probes_run_at_once_and_every_failure_fails_the_step():
-    """The three systemd probes of the built base run concurrently, each in its own work
-    directory (their containers and images carry random names), and the step waits for every
-    one, shows every log and fails when any failed."""
-    workflow = (WORKFLOWS / 'base-image.yml').read_text()
-    step = workflow.split('      - name: Start the Player, the Player payload and the OS-agent')[1]
-    step = step.split('\n      - name: ')[0]
-    works = re.findall(r'--work "\$RUNNER_TEMP/([\w-]+)"', step)
-    assert len(works) == len(set(works)) == 3
-    assert step.count('    probe ') == 3 and '"$@" > "$logs/$name.log" 2>&1 &' in step
-    assert 'for name in player-deb player-payload os-agent; do' in step
-    assert 'wait "${probes[$name]}" || status=$?' in step
-    assert 'if [ "${#failed[@]}" -ne 0 ]; then' in step and 'exit 1' in step
 
 
 def test_a_pull_request_uploads_no_release_artifact_but_keeps_failure_diagnostics():

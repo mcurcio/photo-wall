@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall Node bus (nats-server on loopback; every start is empty)
-ConditionKernelCommandLine=photowall.node=v2
 After=photo-wall-node-handoff.service
 StartLimitIntervalSec=0
 

@@ -25,7 +25,7 @@ V2_POSTURE = {
     "routes": ("/v1/operator/fleet", "maintenance-requests", "app-override", "app-policy",
                "base-baseline", "/v1/netboot/", "/v1/operator/netboot", "/pin"),
     "words": ("V1", "netboot base", "release frontier", "maintenance request",
-              "node management is off", "photowall.node", "deprecated path"),
+              "node management is off", "deprecated path"),
     "exemptions": {"nodeControl.js": ("node management is off",)},
     "reader": ("transport_enabled", "nodeControl.js"),
 }

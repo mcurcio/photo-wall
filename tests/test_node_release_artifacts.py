@@ -1,71 +1,50 @@
+"""The node release the packager writes into a release (scripts/node_release_artifacts.py): one
+boot tree with manifest.json, the component set byte for byte, refused when anything differs."""
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import pytest
 from support.release_build import (
+    COMPONENT_INPUTS,
     EPOCH,
     IMAGE_REFERENCES,
     REVISION,
+    TAG,
     base_bundle,
-    bootstrapper_deb,
-    player_deb,
+    cmdline_template,
+    node_components,
 )
 
-from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_release import NODE_RELEASE_MANIFEST, encode_node_release, parse_node_release
-from scripts.node_release_artifacts import COMPONENTS_SCHEMA, STAMP, cohort_bundle, write_stamp
+from contracts.release import MANIFEST
+from scripts.node_release_artifacts import STAMP
 from scripts.package_release_artifacts import PackagingError, package, verify
-
-INPUTS = "c" * 64
 
 
 def inputs(tmp_path):
-    legacy = base_bundle(tmp_path)
-    node = tmp_path / "node-bundle"
-    cohort_bundle(legacy, node)
-    components = tmp_path / "components"
-    components.mkdir()
-    abi = {"base_abi": "node-v2-test", "graphics_abi": "weston14-test", "plugin_abi": "frame-v2"}
-    refs = {}
-    for role, name in (("manager-primary", "photo-wall-node-manager"), ("app", "photo-wall-player")):
-        deb = (role + "-deb").encode()
-        archive = (role + "-root").encode()
-        (components / (role + ".deb")).write_bytes(deb)
-        (components / (role + ".squashfs")).write_bytes(archive)
-        refs[role] = asdict(AppEnvironmentRefV2(hashlib.sha256(archive).hexdigest(), len(archive),
-            hashlib.sha256(deb).hexdigest(), name, "2.0", "arm64", "a" * 64, "b" * 64,
-            "/usr/bin/entry", **abi))
-    for role in ("node-base", "node-display"):
-        (components / (role + ".deb")).write_bytes(role.encode())
-    (components / "components.json").write_text(json.dumps({"schema": COMPONENTS_SCHEMA, "abi": abi,
-        "app_environment": refs["app"], "manager_primary": refs["manager-primary"], "manager_fallback": None}))
-    (components / "build-provenance.json").write_text(json.dumps(
-        {"schema": COMPONENTS_SCHEMA, "abi": abi, "inputs_sha256": INPUTS}))
-    write_stamp(components, revision=REVISION, inputs_sha256=INPUTS)
+    bundle, components = base_bundle(tmp_path), node_components(tmp_path)
     output = tmp_path / "release"
-    package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), output,
-            revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-            node_components=components, node_bundle=node, release_tag="v2.0.0")
-    return legacy, node, output
+    package(bundle, components, output, revision=REVISION, tag=TAG, images=IMAGE_REFERENCES,
+            source_date_epoch=EPOCH)
+    return bundle, components, output
 
 
-def test_one_publisher_contains_separate_exact_node_and_legacy_trees(tmp_path):
-    legacy, node, output = inputs(tmp_path)
+def test_the_node_release_names_the_releases_own_base_and_boot_tarballs(tmp_path):
+    bundle, _, output = inputs(tmp_path)
     result = verify(output, revision=REVISION)
     manifest = parse_node_release((output / NODE_RELEASE_MANIFEST).read_bytes())
-    legacy_words = (legacy / "boot/cmdline.txt").read_text().split()
-    assert "photowall.node=v2" not in legacy_words
-    # The general template owns the memory controller enable; the cohort inherits it, appends
-    # only its own flag, and so carries each exactly once.
-    assert legacy_words.count("cgroup_enable=memory") == 1
-    words = (node / "boot/cmdline.txt").read_text().split()
-    assert words.count("photowall.node=v2") == words.count("cgroup_enable=memory") == 1
-    assert words == [*legacy_words, "photowall.node=v2"]
-    assert set(x.filename for x in manifest.artifacts) <= set(x.name for x in result.assets)
-    assert manifest.base.content_key == next(x.sha256 for x in manifest.artifacts if x.role == "base")
+    released = json.loads((output / MANIFEST).read_bytes())
+    tree = {x.role: {"filename": x.filename, "sha256": x.sha256, "size": x.size_bytes}
+            for x in manifest.artifacts if x.role in ("base", "boot")}
+    assert tree == {"base": released["base_image"], "boot": released["boot_image"]}
+    assert manifest.base.content_key == released["base_image"]["sha256"]
+    # One tree: no second copy of either tarball, and no cmdline token added to it.
+    assert not any("node-base" in path.name or "node-boot" in path.name
+                   for path in output.iterdir() if path.name.endswith(".tar.gz"))
+    assert (bundle / "boot/cmdline.txt").read_text() == cmdline_template()
+    assert {x.filename for x in manifest.artifacts} <= {x.name for x in result.assets}
     # The release roots ship as their images (E2c), never as tar archives.
     roots = {x.role: x.filename for x in manifest.artifacts if x.role in ("app", "manager-primary")}
     assert len(roots) == 2 and all(name.endswith(".squashfs") for name in roots.values())
@@ -89,48 +68,39 @@ def test_self_consistent_manifest_cannot_relabel_squashfs(tmp_path):
         verify(output, revision=REVISION)
 
 
-def test_cohort_bundle_refuses_symlink_input(tmp_path):
-    legacy = base_bundle(tmp_path)
-    (legacy / "boot/unsafe").symlink_to("/etc/passwd")
-    with pytest.raises(ValueError, match="node_bundle_link"):
-        cohort_bundle(legacy, tmp_path / "node")
-
-
-@pytest.mark.parametrize("line", ["console=tty1 photowall.node=v2",
-                                  "console=tty1 photowall.node=v2 cgroup_enable=memory cgroup_enable=memory"])
-def test_a_node_bundle_without_exactly_one_memory_controller_enable_is_refused(tmp_path, line):
-    legacy, node, _ = inputs(tmp_path)
-    (node / "boot/cmdline.txt").write_text(line + "\n")
-    with pytest.raises((PackagingError, ValueError), match="node_bundle_flag_missing"):
-        package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), tmp_path / "again",
-                revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-                node_components=tmp_path / "components", node_bundle=node, release_tag="v2.0.0")
+def test_a_node_release_naming_another_boot_tree_is_refused(tmp_path):
+    _, _, output = inputs(tmp_path)
+    manifest = parse_node_release((output / NODE_RELEASE_MANIFEST).read_bytes())
+    boot = next(x for x in manifest.artifacts if x.role == "boot")
+    other = output / ("other-" + boot.filename)
+    other.write_bytes((output / boot.filename).read_bytes())
+    forged = replace(manifest, artifacts=tuple(
+        replace(x, filename=other.name) if x.role == "boot" else x for x in manifest.artifacts))
+    (output / NODE_RELEASE_MANIFEST).write_bytes(encode_node_release(forged))
+    with pytest.raises(PackagingError, match="node_release_tree_mismatch"):
+        verify(output, revision=REVISION)
 
 
 def _restamp(tmp_path, **stamp):
-    """The components of `inputs`, packaged again under another stamp."""
-    legacy, node, _ = inputs(tmp_path)
-    components = tmp_path / "components"
+    """A component set stamped as `stamp` says."""
+    components = node_components(tmp_path)
     (components / STAMP).write_text(json.dumps({"schema": 1, "revision": REVISION,
-                                                "inputs_sha256": INPUTS, **stamp}))
-    return legacy, node, components
+                                                "inputs_sha256": COMPONENT_INPUTS, **stamp}))
+    return components
 
 
 @pytest.mark.parametrize("stamp", [{"revision": "f" * 40}, {"inputs_sha256": "d" * 64}])
 def test_components_stamped_for_another_revision_or_inputs_are_refused(tmp_path, stamp):
     """A restored component set is released only under the stamp its own revision wrote."""
-    legacy, node, components = _restamp(tmp_path, **stamp)
-    with pytest.raises((PackagingError, ValueError), match="node_component_revision_mismatch"):
-        package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), tmp_path / "again",
-                revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-                node_components=components, node_bundle=node, release_tag="v2.0.0")
+    components = _restamp(tmp_path, **stamp)
+    with pytest.raises(PackagingError, match="node_component_revision_mismatch"):
+        package(base_bundle(tmp_path), components, tmp_path / "again", revision=REVISION,
+                tag=TAG, images=IMAGE_REFERENCES, source_date_epoch=EPOCH)
 
 
 def test_unstamped_components_are_refused(tmp_path):
-    legacy, node, _ = inputs(tmp_path)
-    components = tmp_path / "components"
+    components = node_components(tmp_path)
     (components / STAMP).unlink()
-    with pytest.raises((PackagingError, ValueError), match="node_component_revision_mismatch"):
-        package(legacy, player_deb(tmp_path), bootstrapper_deb(tmp_path), tmp_path / "again",
-                revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-                node_components=components, node_bundle=node, release_tag="v2.0.0")
+    with pytest.raises(PackagingError, match="node_component_revision_mismatch"):
+        package(base_bundle(tmp_path), components, tmp_path / "again", revision=REVISION,
+                tag=TAG, images=IMAGE_REFERENCES, source_date_epoch=EPOCH)

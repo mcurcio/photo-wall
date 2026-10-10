@@ -1,6 +1,5 @@
 [Unit]
 Description=Admit and mount bounded diskless V2 node storage
-ConditionKernelCommandLine=photowall.node=v2
 Before=photo-wall-node-prepare.service
 
 [Service]

@@ -1,19 +1,16 @@
-"""The Player `.deb` staging/metadata logic (0009; p4-deb-full-depends; Project 2 design §2.7
-rule 2, S5).
+"""The component set's Player `.deb` (app.deb) staging/metadata logic (0009;
+p4-deb-full-depends; Project 2 design §2.7 rule 2, S5).
 
 The package ships the computed closure of `player.service` privately under
 /usr/lib/photo-wall-player (a directory application with a generated `__main__.py` and
 `closure.json`), with Depends from the Debian declaration, all computed over the sources
-`git archive`d at the given revision (`fetch_tree`, shared with
-tests/test_build_bootstrapper_deb.py). Everything here runs on any host (pure Python, no venv, no
-chroot): a real git repository and, for the gated Tier 2 test, `dpkg-deb`.
+`git archive`d at the given revision (`fetch_tree`). Everything here runs on any host (pure
+Python, no venv, no chroot): a real git repository.
 """
 
-import inspect
 import os
 import shutil
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 from types import MappingProxyType
@@ -100,27 +97,24 @@ def test_the_depends_come_from_the_declaration_not_the_retiring_os_definition():
 # --- version derivation ------------------------------------------------------
 
 
-def test_package_version_matches_the_pyproject_plus_revision_scheme():
-    assert deb.package_version("0.1.0", "a" * 40) == "0.1.0+g" + "a" * 40
-
-
-def test_package_version_rejects_a_local_version_segment():
+def test_the_content_version_names_the_staged_tree_and_rejects_a_local_segment(tmp_path):
+    (tmp_path / "file").write_text("one")
+    first = deb.content_version("0.1.0", tmp_path)
+    assert first.startswith("0.1.0+") and len(first) == len("0.1.0+") + 12
+    (tmp_path / "file").write_text("two")
+    assert deb.content_version("0.1.0", tmp_path) != first
     with pytest.raises(BuildError, match="unsupported project version"):
-        deb.package_version("0.1.0+local", "a" * 40)
+        deb.content_version("0.1.0+local", tmp_path)
 
 
-def test_control_file_version_field_carries_whatever_package_version_returns():
-    """Mutation probe: emit the wrong version in control -> this fails.
-
-    control_file has no version logic of its own; it writes what it is given.
-    """
-    version = deb.package_version("0.1.0", "a" * 40)
-    control = deb.control_file(version, packages("player")).decode()
-    assert f"Version: {version}\n" in control
-    assert f"Version: {version}-corrupt\n" not in control
+def test_control_file_version_field_carries_the_version_it_is_given():
+    """Mutation probe: emit the wrong version in control -> this fails."""
+    control = deb.control_file(VERSION, packages("player")).decode()
+    assert f"Version: {VERSION}\n" in control
+    assert f"Version: {VERSION}-corrupt\n" not in control
 
 
-# --- fetch_tree and the declaration check (shared with the bootstrapper builder) --------------
+# --- fetch_tree and the declaration check --------------------------------------------------
 
 
 def test_fetch_tree_rejects_a_non_full_commit_revision(tmp_path):
@@ -138,9 +132,7 @@ def _git(repository, *args):
 def committed(tmp_path):
     """A repository holding this checkout's first-party packages, the declaration and
     pyproject.toml (the files git would commit from the working tree) as one commit, plus
-    files the package must never see. Imitates tests/test_build_bootstrapper_deb.py's fixture
-    of the same name (a pytest-fixture import across test modules trips ruff's F811 on the
-    parameter that receives it)."""
+    files the package must never see."""
     repository = tmp_path / "repository"
     listed = _git(REPO, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
                   *first_party_packages(REPO), deb.DECLARATION, "pyproject.toml")
@@ -164,8 +156,10 @@ def test_build_refuses_a_revision_whose_declaration_differs(committed, tmp_path)
     declaration.write_text(declaration.read_text() + "\n# a different pin\n")
     _git(repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
          "commit", "-qam", "edit the declaration")
+    tree = tmp_path / "tree"
+    deb.fetch_tree(repository, _git(repository, "rev-parse", "HEAD"), tree)
     with pytest.raises(BuildError, match="declaration_differs_from_revision"):
-        deb.build(repository, _git(repository, "rev-parse", "HEAD"), tmp_path)
+        deb.build_tree(tree, tmp_path)
 
 
 def test_build_stages_the_committed_closure(committed, tmp_path, monkeypatch, closure):
@@ -179,11 +173,13 @@ def test_build_stages_the_committed_closure(committed, tmp_path, monkeypatch, cl
         return output
 
     monkeypatch.setattr(deb, "run_dpkg_deb", fake_dpkg_deb)
-    output = deb.build(repository, revision, tmp_path)
+    tree = tmp_path / "tree"
+    deb.fetch_tree(repository, revision, tree)
+    output = deb.build_tree(tree, tmp_path)
     project_version = tomllib.loads((repository / "pyproject.toml").read_text())[
         "project"]["version"]
-    version = deb.package_version(project_version, revision)
-    assert output == tmp_path.resolve() / f"photo-wall-player_{version}_all.deb"
+    version = output.name.removeprefix("photo-wall-player_").removesuffix("_all.deb")
+    assert version.startswith(project_version + "+") and revision not in version
     assert {f"{PRIVATE_DIR}/{path.as_posix()}" for path in closure.files} | {
         f"{PRIVATE_DIR}/__main__.py", f"{PRIVATE_DIR}/closure.json"} <= built["files"]
     assert f"Version: {version}\n" in built["control"]
@@ -229,8 +225,7 @@ def test_the_player_closure_holds_the_old_hand_list_and_uplink(closure):
 
 
 def test_a_declared_import_no_player_code_reaches_is_refused(tmp_path, closure, monkeypatch):
-    """Mutation probe: a declaration that gives the Player python3-yaml (imitates
-    tests/test_build_bootstrapper_deb.py's equivalent probe)."""
+    """Mutation probe: a declaration that gives the Player python3-yaml."""
     stale = ClosurePolicy("player", PLAYER_POLICY.roots, PLAYER_POLICY.forbidden,
                           MappingProxyType({**PLAYER_POLICY.third_party, "yaml": "python3-yaml"}))
     monkeypatch.setattr(deb, "PLAYER_POLICY", stale)
@@ -304,7 +299,7 @@ def test_assert_no_deployment_config_catches_a_leaked_venv(tmp_path):
 
 def test_assert_no_deployment_config_refuses_dist_packages(tmp_path):
     """The private-directory rule: a leaked `usr/lib/python3/dist-packages` file would be a file
-    the bootstrapper `.deb` could also own."""
+    another package could also own."""
     deb_root = tmp_path / "deb-root"
     (deb_root / "usr/lib/python3/dist-packages").mkdir(parents=True)
     with pytest.raises(BuildError, match="dist_packages_in_deb"):
@@ -367,45 +362,3 @@ def test_stage_tree_control_file_depends_are_the_declarations_player_list(tmp_pa
     control = (deb_root / "DEBIAN/control").read_bytes()
     assert control == deb.control_file(VERSION, packages("player"))
     assert f"Depends: {', '.join(packages('player'))}\n".encode() in control
-
-
-# --- the builder needs no --root (runs on any host with dpkg-deb) -----------
-
-
-def test_build_takes_no_root_argument():
-    """The re-architected builder drops the arm64-chroot `--root`: `build()`
-    is (repository, revision, output_dir) only, like the bootstrapper's."""
-    params = list(inspect.signature(deb.build).parameters)
-    assert params == ["repository", "revision", "output_dir", "native_client", "architecture"]
-    assert inspect.signature(deb.build).parameters["native_client"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert inspect.signature(deb.build).parameters["architecture"].kind is inspect.Parameter.KEYWORD_ONLY
-    assert "root" not in params
-
-
-def test_main_argparser_has_no_root_flag():
-    src = Path(deb.__file__).read_text()
-    assert '"--root"' not in src
-    assert "'--root'" not in src
-
-
-# --- Tier 2 (gated, not run here) -------------------------------------------
-
-linux_tools = pytest.mark.skipif(
-    sys.platform != "linux" or os.environ.get("PHOTO_WALL_IMAGE_TOOL_TESTS") != "1",
-    reason="real dpkg-deb build/inspection requires a Linux host with dpkg-deb; "
-           "gated exactly like tests/test_build_bootstrapper_deb.py's "
-           "linux_tools tests (CI job only). Unlike the old Player .deb, this "
-           "build needs no arm64 chroot -- pure staging, no venv.")
-
-
-@linux_tools
-def test_real_dpkg_deb_build_and_inspection_finds_the_closure_and_control(tmp_path):
-    """CI Linux runner only -- UNVERIFIED on this host (no dpkg-deb here).
-    Exercises `build()` end to end: a real `dpkg-deb --build` plus
-    `dpkg-deb -c`/`-I` inspection proving the computed closure lands privately under
-    /usr/lib/photo-wall-player (with its generated `__main__.py` and `closure.json`) and the
-    control Depends match. The companion verification runs scripts/device_root_checks.py with
-    --require-installed against the Debian declaration in scripts/debian_packages.py,
-    confirming every Depends resolves in the target environment.
-    """
-    pytest.skip("requires dpkg-deb; CI-only")

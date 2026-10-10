@@ -16,7 +16,7 @@ def closure():
 
 
 def test_stage_1_reaches_uplink_and_the_stdlib_only_contracts(closure):
-    assert {"appliance.netboot_init", "appliance.boot_offer", "appliance.central_post",
+    assert {"appliance.netboot_init", "appliance.node_boot_handoff", "appliance.central_post",
             "appliance.bootstrap", "uplink.locate", "uplink.fetch",
             "uplink.clock", "uplink.trust", "contracts.central_identity",
             "contracts.clock_record"} <= set(closure.modules)
@@ -24,6 +24,7 @@ def test_stage_1_reaches_uplink_and_the_stdlib_only_contracts(closure):
 
 def test_stage_1_reaches_no_provisioner_and_no_forbidden_package(closure):
     assert "appliance.provision" not in closure.modules
+    assert "appliance.boot_offer" not in closure.modules   # the retired V1 offer path
     assert not [name for name in closure.modules if name.partition(".")[0] in INITRD_FORBIDDEN]
     assert not [name for name in closure.modules
                 if name in ("contracts.models", "contracts.enrollment")]   # pydantic

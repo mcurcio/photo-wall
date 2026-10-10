@@ -3,30 +3,30 @@ and the real app then answers none of the V1 routes and reads no V1 file from a 
 
 One database at 068, seeded with a row of every V1 kind 069 drops beside a real node boot (its
 deployment, offer, admission and sessions, through Central's own boot service), is migrated to
-head by `Database.migrate()`. The real `create_app` then serves it. A release packaged by the
-real packager from `tests/support/release_build.py` still carries the Player `.deb`, the payload
-and `manifest.v2.json`; the real sync ingests it next to its node manifest. Real PostgreSQL;
-skips without PHOTO_WALL_TEST_DATABASE_URL (CI runs it).
+head by `Database.migrate()`. The real `create_app` then serves it. A release as published before
+the V1 files left the build (today's packager output from `tests/support/release_build.py` plus
+the Player `.deb`, the bootstrapper `.deb`, the payload and `manifest.v2.json`) is ingested by the
+real sync next to its node manifest. Real PostgreSQL; skips without
+PHOTO_WALL_TEST_DATABASE_URL (CI runs it).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from uuid import UUID, uuid4
 
 import psycopg
 import pytest
 from content_db import schema_before
 from fastapi.testclient import TestClient
-from support.release_build import EPOCH, IMAGE_REFERENCES, REVISION, with_base_abi
+from support.release_build import EPOCH, IMAGE_REFERENCES, REVISION, node_components
 from support.release_build import base_bundle as synthetic_base_bundle
-from support.release_build import bootstrapper_deb as synthetic_bootstrapper_deb
-from support.release_build import player_deb as synthetic_player_deb
 from test_content_catalog_sync import make_world
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_boot import claim_for, cold_setup
 from test_node_release_ingest import Upstream, node_upload
-from test_player_payload import _payload
 from test_registry import ADMIN
 
 from central.app import create_app
@@ -187,17 +187,27 @@ def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path)
 
 
 def _release_files(tmp_path, tag: str) -> dict[str, bytes]:
-    """A release as the packager writes it today: manifest.json (with the Player `.deb`),
-    manifest.v2.json, the payload, both `.deb`s and the base and boot tarballs."""
-    payload, inner = _payload(tmp_path)
-    bundle = with_base_abi(synthetic_base_bundle(tmp_path), inner["base_abi"])
+    """A release as the packager wrote it before the V1 files left the build: manifest.json
+    naming the Player and bootstrapper `.deb`s beside the base and boot tarballs,
+    manifest.v2.json naming the payload, those three files and the two tarballs (today's
+    packager writes the tarballs; the V1 records and files are added here as they were)."""
     destination = tmp_path / "release"
-    package(bundle, synthetic_player_deb(tmp_path), synthetic_bootstrapper_deb(tmp_path),
-            destination, revision=REVISION, images=IMAGE_REFERENCES, source_date_epoch=EPOCH,
-            player_payload=payload)
-    files = {path.name: path.read_bytes() for path in destination.iterdir()}
-    assert {"manifest.json", "manifest.v2.json", payload.name} <= set(files)
-    assert b"player_deb" in files["manifest.json"]
+    package(synthetic_base_bundle(tmp_path), node_components(tmp_path), destination,
+            revision=REVISION, tag=tag, images=IMAGE_REFERENCES, source_date_epoch=EPOCH)
+    manifest = json.loads((destination / "manifest.json").read_bytes())
+    files = {manifest[key]["filename"]: (destination / manifest[key]["filename"]).read_bytes()
+             for key in ("base_image", "boot_image")}
+    for key, name in (("player_deb", "photo-wall-player_0.1.0+gdeadbeef_arm64.deb"),
+                      ("bootstrapper_deb", "photo-wall-bootstrapper_0.1.0+gdeadbeef_arm64.deb"),
+                      ("player_payload", f"photo-wall-player-payload-{REVISION}.tar.gz")):
+        data = f"fake {key} bytes".encode() * 100
+        files[name] = data
+        manifest[key] = {"filename": name, "sha256": hashlib.sha256(data).hexdigest(),
+                         "size": len(data)}
+    payload = manifest.pop("player_payload")
+    files["manifest.json"] = json.dumps(manifest, sort_keys=True).encode()
+    files["manifest.v2.json"] = json.dumps({**manifest, "schema": 2,
+                                            "player_payload": payload}).encode()
     return files
 
 

@@ -32,25 +32,6 @@ write_node_handoff(
     central=ready["central"],
     offer=parse_node_boot_offer(json.dumps(ready["offer"]).encode()),
 )
-# Container has no real boot command line. Only the node cohort condition is removed;
-# every production service command, sandbox and capability remains otherwise exact.
-units = [
-    "photo-wall-node.target",
-    "photo-wall-node-storage.service",
-    "photo-wall-node-handoff.service",
-    "photo-wall-node-prepare.service",
-    "photo-wall-display.service",
-    "photo-wall-display-controller.service",
-    "photo-wall-host-core.service",
-    "photo-wall-app-broker.service",
-    "photo-wall-health.service",
-    "photo-wall-manager-supervisor.service",
-    "photo-wall-bus.service",
-]
-for unit in units:
-    d = Path("/etc/systemd/system") / (unit + ".d")
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "fixture-cohort.conf").write_text("[Unit]\nConditionKernelCommandLine=\n")
 shutil.copy2("/var/tmp/fixture-head.so", "/usr/lib/photo-wall-fixture-head.so")
 d = Path("/etc/systemd/system/photo-wall-display.service.d")
 # The installed unit's own command with only the hardware swapped: headless instead of DRM, and

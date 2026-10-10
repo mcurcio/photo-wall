@@ -40,6 +40,7 @@ from node_pid1_central_fixture import (
     assert_phase_completed,
     central_fixture,
 )
+from node_pid1_container import BOOTED, HOST_ACTING_UNITS, Container, cpuinfo_text, docker_run_argv
 from test_fleet_attempts import DEVICE_ID, SERIAL
 
 from appliance.kernel.capacity import LINES
@@ -59,13 +60,6 @@ from contracts.node_link import (
 )
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from nodeapi.hub import WallWriter
-from scripts.player_start_probe import (
-    BOOTED,
-    HOST_ACTING_UNITS,
-    Container,
-    cpuinfo_text,
-    docker_run_argv,
-)
 
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
@@ -74,9 +68,6 @@ SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join")
 
 MASKS = (
     *HOST_ACTING_UNITS,
-    "photo-wall-player.service",
-    "photo-wall-weston.service",
-    "photo-wall-os-agent.service",
     "reboot.target",
     "poweroff.target",
     "halt.target",
