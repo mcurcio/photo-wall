@@ -310,6 +310,7 @@ class Coordinator:
                 "ORDER BY cohort_sequence DESC LIMIT 1",
                 (cue_key,),
             ).fetchone()
+            superseding = False
             if previous:
                 grows = not cue["members"].keys() <= previous["members"].keys()
                 moved = not grows and any(
@@ -324,6 +325,7 @@ class Coordinator:
                     # An edit rewrote a cue that has not started: a fresh cohort replaces it,
                     # and skipping the old one withdraws any commit it had already granted.
                     self._skip_group(conn, previous["id"], "superseded", root=root)
+                    superseding = True
                 elif grows:
                     # A started cue is immutable. Growth invalidates this one cue, never
                     # the tick that offers every other Frame its plan.
@@ -340,7 +342,13 @@ class Coordinator:
             group_id = identity(
                 "group-", [cue_key, cue["members"], *([previous["id"]] if previous else [])]
             )
-            deadline = now + self.limits.prepare_seconds if starts <= now else starts
+            # A late join keeps preparation grace. So does a superseding cohort: a Player that
+            # fetches the new plan only after the start may already be playing the old commit,
+            # and must be able to commit the new cohort rather than be revoked at the start.
+            if starts <= now or superseding:
+                deadline = max(starts, now) + self.limits.prepare_seconds
+            else:
+                deadline = starts
             conn.execute(
                 "INSERT INTO coordination_groups(id,members,starts_at,deadline,valid_until,status,cue_key,member_ends) "
                 "VALUES(%s,%s,%s,%s,%s,'pending',%s,%s) "
