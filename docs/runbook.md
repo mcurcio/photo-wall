@@ -148,41 +148,16 @@ The baseline Player path (0008) is flash-and-go: no boot ticket, no pre-registra
 
 Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [PXE service module](module-pxe-service.md). Certificate-based identity and pinned/explicit transport trust are further opt-in enhancements described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md); they are designed but not yet implemented, so do not rely on them today. Physical Pi boot of either the flash image or the netboot tree is not yet hardware-qualified.
 
-## Player provisioning: netboot and promote the app (0009, in progress)
+## Player provisioning: the V1 netboot and promote path (removed)
 
-> **Deprecated lane.** This section describes the V1 boot path (the netboot base without a node offer and the promoted `.deb`). The supported configuration is [Node control](#node-control): Pis boot by node path and Central ingests releases and you select them in the console. The V1 lane is kept until the [V1 follow-up](player-fleet-implementation-map.md) removes it; the console shows none of it.
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) is the adopted target for the netboot tier: a minimal base OS image that carries no application, plus the Player shipped as a downloadable `.deb` that central serves. Nothing is signed — the owner ruled a home LAN has no threat model, so the sha256 published alongside the `.deb` is a corruption check, not an authenticity proof. Once the boot-chain wiring below lands, the operator flow is:
-
-1. **Stage the boot files in your TFTP tree.** From a published release's boot tarball, `photo-wall-boot-<revision>.tar.gz`, stage `photo-wall-boot/boot/` (kernel, DTBs, initramfs) beneath the boot-server root, as [staging the netboot bundle](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014) describes — see [PXE service setup](module-pxe-service.md). It is the same tree as the base tarball's `photo-wall-base/boot/`, without the base squashfs, which Central serves over HTTP ([decision 0012](decisions/0012-netboot-base-auto-mirror.md)). The base carries no Player code and no deployment config; it exists to run the bootstrapper (`appliance/provision.py`) that fetches everything else. The kernel command line must name Central with `photowall.central=http://photo-wall.localdomain/` or your deployment's Central root (see step 2 of [decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md)).
-2. **Boot the Pi and watch the pending queue.** The bootstrapper reads `photowall.central` from the kernel command line, locates Central (following the gateway's redirects for `GET /v1/locate` only), downloads the manifest and `.deb` from the located Central, checks the sha256, installs it with `dpkg --install` alone (no apt, nothing downloaded from Debian), writes `/etc/photo-wall/public.json` and starts the Player, which locates Central the same way and enrolls by serial — it appears **unbound** in the same operator inventory (`/v1/operator/inventory`) as the flash path.
-3. **Check which app is promoted.** Central serves the `.deb` of the one promoted release, taken
-   from the GitHub release list ([below](#player-provisioning-promote-a-release-from-github-0010)).
-   The release sync promotes the newest deployable release by itself (`promoted_by: "auto"`)
-   until a Player is bound and a `.deb` has been downloaded; after that it holds the promotion.
-   To choose a release, promote it yourself:
-
-   ```sh
-   curl -X POST -H 'Authorization: Bearer <admin-token>' \
-     http://<central>/v1/operator/app/releases/<tag>/promote
-   ```
-
-   The release sync never moves an operator promotion. Every Player fetches the newly promoted
-   `.deb` on its next reboot; already-running Players are unaffected until then.
-4. **Bind** the pending Player to a Frame and calibrate, exactly as in the flash-and-go flow above.
-5. **Update the app later** by promoting a newer release tag, as in step 3 — no re-imaging, no
-   re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot,
-   the dark screen is the signal, and recovery is re-promoting the previous tag.
-
-**Where this actually stands.** Central's app manifest and package routes (`central/content_routes.py`, over the release
-catalog in `central/content_catalog/catalog.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
+[Decision 0009](decisions/0009-minimal-base-and-app-package.md) shipped the Player as a `.deb` that a base-owned bootstrapper downloaded and installed with `dpkg --install`. That path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): the bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes, the `.deb` promotion and the Player `.deb`, bootstrapper `.deb` and Player payload release files no longer exist. A Node boots by [stage 1](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014), mounts its base, and its release roots (the Player app root and the AppManager root) arrive as squashfs images through [Node control](#node-control). A Pi enrolls by serial and appears **unbound** in the operator inventory (`/v1/operator/inventory`); bind it to a Frame and calibrate it as in the flash-and-go flow above.
 
 ## Player provisioning: stage the netboot bundle and read its console (0014)
 
 [Decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md) changes how the netboot's first stage reaches Central and how it stays alive. None of this is hardware-qualified yet. Its first Pi observations (the M0 and M1 milestones) are still to be recorded.
 
 1. **Stage the kernel, `initrd.img` and DTBs together, from one release.** Download a published GitHub Release's boot tarball, `photo-wall-boot-<revision>.tar.gz` (automation reads its name from the release's `manifest.json`, `boot_image.filename`), check it against the release's `SHA256SUMS`, and take `photo-wall-boot/boot/` from it whole: `kernel_2712.img`, `initrd.img`, `bcm2712-rpi-5-b.dtb`, `overlays/`, `config.txt`, the `cmdline.txt` template, `pieeprom.upd` and `pieeprom.sig`. It is byte for byte the `photo-wall-base/boot/` of the same release's base tarball, `photo-wall-base-<revision>.tar.gz`, which still carries it, without that tarball's base squashfs: the release's seal refuses to publish the two with different trees. Never stage from a CI (Actions) artifact: one exists for every build, including unreleased pull requests, and expires after seven days, while a published release is complete by construction and is what Central mirrors the base squashfs from. `initrd.img` carries that build's stage-1 code, its CA list (copied from that build's base) and its clock floor, all in front of the cached initrd ([`tests/test_build_netboot_bundle.py`](../tests/test_build_netboot_bundle.py)). The kernel package is not pinned, so an initrd from one build must not be paired with a kernel from another. The CA list is as old as that build's Debian snapshot pin and stays that old until you stage again. Stage again when the gateway's certificate chain changes.
-2. **Set the cmdline.** `cmdline.txt` is one line. Replace its one `@@PHOTOWALL_CENTRAL@@` placeholder (in `photowall.central=@@PHOTOWALL_CENTRAL@@`) with Central's root and change nothing else: the firmware passes the file to the kernel verbatim, so never add a line or a comment ([`contracts/release.py`](../contracts/release.py) declares the template; the release seal refuses any other shape). The root may be http: stage 1 follows the gateway's redirects to https across hosts (up to ten), refuses any https→http step, and verifies TLS ([`tests/test_uplink_tls.py`](../tests/test_uplink_tls.py)). On failure the console prints the named cause and the redirect hops, never a value to set, because the located origin can come from an unauthenticated first hop ([decision 0014, U7](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)). Stage 1 no longer prints a `set photowall.central=…` note; on an http root it logs only `note: configured root is http: the first hop is unauthenticated`. Keep `watchdog.stop_on_reboot=0 hung_task_panic=1` beside `panic=10`. **Keep `cgroup_enable=memory`; never remove it.** Every release's `cmdline.txt` from the 4 GB tracer release on carries it, so do not add it again; a boot tree staged from an earlier release does not, and must be restaged. The Pi 5's device tree puts `cgroup_disable=memory` in the command line the firmware builds, before `cmdline.txt` ([raspberrypi/linux#6980](https://github.com/raspberrypi/linux/issues/6980)); the kernel's later `cgroup_enable=memory` wins ([raspberrypi/linux commit ab520ab14d64](https://github.com/raspberrypi/linux/commit/ab520ab14d64)). Without it every memory limit on the node is ignored. The base still mounts its store and the Player runs, because the boot tree is staged separately from Central's boot selection and Select is fleet-wide ([Releases](#releases-stage-app-and-update-the-wall)): refusing would darken every Player on an older tree. Host Management reports the absence, and the console's Memory limits item warns "memory controller absent: memory limits not enforced". The release seal refuses a `cmdline.txt` that lacks it or repeats it ([`scripts/package_release_artifacts.py`](../scripts/package_release_artifacts.py), [`tests/test_package_release_artifacts.py`](../tests/test_package_release_artifacts.py)); a node release's `cmdline.txt` is that line plus `photowall.node=v2`, and its seal also refuses a tree that lacks either token or repeats one ([`scripts/node_release_artifacts.py`](../scripts/node_release_artifacts.py), [`tests/test_node_release_artifacts.py`](../tests/test_node_release_artifacts.py)). If either liveness parameter is missing, stage 1 boots on and names it (`note: kernel liveness missing: …`; [`tests/test_netboot_liveness.py`](../tests/test_netboot_liveness.py)).
+2. **Set the cmdline.** `cmdline.txt` is one line. Replace its one `@@PHOTOWALL_CENTRAL@@` placeholder (in `photowall.central=@@PHOTOWALL_CENTRAL@@`) with Central's root and change nothing else: the firmware passes the file to the kernel verbatim, so never add a line or a comment ([`contracts/release.py`](../contracts/release.py) declares the template; the release seal refuses any other shape). The root may be http: stage 1 follows the gateway's redirects to https across hosts (up to ten), refuses any https→http step, and verifies TLS ([`tests/test_uplink_tls.py`](../tests/test_uplink_tls.py)). On failure the console prints the named cause and the redirect hops, never a value to set, because the located origin can come from an unauthenticated first hop ([decision 0014, U7](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)). Stage 1 no longer prints a `set photowall.central=…` note; on an http root it logs only `note: configured root is http: the first hop is unauthenticated`. Keep `watchdog.stop_on_reboot=0 hung_task_panic=1` beside `panic=10`. **Keep `cgroup_enable=memory`; never remove it.** Every release's `cmdline.txt` from the 4 GB tracer release on carries it, so do not add it again; a boot tree staged from an earlier release does not, and must be restaged. The Pi 5's device tree puts `cgroup_disable=memory` in the command line the firmware builds, before `cmdline.txt` ([raspberrypi/linux#6980](https://github.com/raspberrypi/linux/issues/6980)); the kernel's later `cgroup_enable=memory` wins ([raspberrypi/linux commit ab520ab14d64](https://github.com/raspberrypi/linux/commit/ab520ab14d64)). Without it every memory limit on the node is ignored. The base still mounts its store and the Player runs, because the boot tree is staged separately from Central's boot selection and Select is fleet-wide ([Releases](#releases-stage-app-and-update-the-wall)): refusing would darken every Player on an older tree. Host Management reports the absence, and the console's Memory limits item warns "memory controller absent: memory limits not enforced". The release seal refuses a `cmdline.txt` that lacks it or repeats it ([`scripts/package_release_artifacts.py`](../scripts/package_release_artifacts.py), [`tests/test_package_release_artifacts.py`](../tests/test_package_release_artifacts.py)); a node release carries that one boot tree, and the node release's seal refuses a release whose `cmdline.txt` differs from it ([`scripts/node_release_artifacts.py`](../scripts/node_release_artifacts.py), [`tests/test_node_release_artifacts.py`](../tests/test_node_release_artifacts.py)). If either liveness parameter is missing, stage 1 boots on and names it (`note: kernel liveness missing: …`; [`tests/test_netboot_liveness.py`](../tests/test_netboot_liveness.py)).
 3. **The EEPROM step is the two `pieeprom` files.** On its next boot, the Pi's bootloader updates itself from the TFTP directory to `BOOT_ORDER=0xf21` (SD, then network, then start again) and `BOOT_WATCHDOG_TIMEOUT=120`, and resets once. No SD card is needed ([`tests/test_eeprom_update.py`](../tests/test_eeprom_update.py)). To keep a Pi's bootloader as it is, leave the two files out. The Pi must already boot from the network: its factory boot order has no network entry.
 4. **Read a failed boot on the console.** Every stage-1 failure prints one line, `photo-wall[netboot] FAILED phase=<n> cause=<cause> reason=<reason> host=<host> detail=<detail>` ([`tests/test_netboot_init.py`](../tests/test_netboot_init.py)). Some lines to know:
    - `cause=tls reason=untrusted … bundle=sha256:… anchors=… floor=…`: the initrd's CA list does not trust the served chain. Stage a newer bundle.
@@ -196,189 +171,39 @@ catalog in `central/content_catalog/catalog.py`), the minimal base image build (
    After the line, the boot script restarts the Pi. It uses a sysrq emergency restart, not `reboot`; the hardware watchdog armed at stage 1's start is the backstop. `photowall.debug=1` holds the console for 60 s first.
 5. **If a Pi is found stalled, look at its HDMI screen before resetting it.** The bootloader's diagnostics page with `order` other than `0xf21` means the EEPROM self-update did not apply. Kernel text with no `photo-wall[netboot]` line and no panic is a hang that nothing in the product resets. `sysrq: Resetting` as the last line means the emergency restart hung and the watchdog did not fire. Record what the screen shows in the evidence. The owner of each boot segment is listed in the [execution contract](execution-contract.md#netboot-stage-1-boot-data-the-clock-record-and-liveness).
 
-6. **Reading provisioning and Player failures.**
-   - Read the provisioning unit's logs: `journalctl -u photo-wall-provision`. Provisioning logs one line per failed attempt with format `cause=<cause> reason=<reason> host=<host> detail=<detail>`. For `cause=time` or `cause=tls reason=untrusted` it appends the stage-1 clock record: `clock=<state> floor=<date> tried=...`.
-   - Read the Player's logs: `journalctl -u photo-wall-player`. The Player logs `player fault: <cause>_<reason>` on enrollment or connection failure, e.g. `tls_untrusted`, `redirect_unexpected`, `connect_refused`, `dns_failed`, `central_error`, followed by the same `host`, `detail` and `clock` fields as provisioning.
-   - A Player unit that does not start logs `cause=unit reason=<systemd result> detail=photo-wall-player.service/status=<n>/<NAME>`, and provisioning exits into the restart limit. A named status such as `216/GROUP`, `217/USER` or `203/EXEC` means systemd could not set up the Player's process, so the booted base cannot run it. v0.9.1's base had no udev, so it had no `render` group and failed with `216/GROUP`. Stage a base whose CI passed the Player start check ([`scripts/player_start_probe.py`](../scripts/player_start_probe.py)). A bare `status=1` means the Player itself exited; read `journalctl -u photo-wall-player`. `reason=timeout detail=…/state=activating/<substate>` means the Player was still starting when provisioning stopped waiting (90 s). It never sent READY; `start-pre` means it was still waiting for the compositor's socket.
-   - `cause=time` is not retried in place: the provisioning unit exits, and after 10 exits in 10 minutes the systemd service reboots the Pi. On reboot, stage 1 re-steps the clock.
-   - A dpkg dependency failure during provisioning looks like `photo-wall-player depends on python3-foo; however: Package python3-foo is not installed`. It means the promoted Player requires a Debian package the booted base lacks. Fix it by staging a base built from a declaration that includes it, or by promoting an older Player. The Pi reboot-loops until fixed. **Operator rule:** stage the base first, then promote a Player that adds a Debian package.
-   - Bumping the Debian snapshot pin (developers): edit `PIN.snapshot` in `scripts/debian_packages.py` (format `YYYYMMDDTHHMMSSZ`). Every artifact keyed on the declaration rebuilds at the new snapshot: the base, the initrd build root, and the CI device root. Re-stage the whole TFTP bundle from that new build.
+6. **Reading Node failures after stage 1.** The V1 provisioner and its `photo-wall-provision.service` are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)); a Node's programs are the units of `photo-wall-node.target`, read over [SSH](#reaching-a-node-over-ssh) (`journalctl -b -u <unit>`) or on the Player page's host facts and boot report. A unit that systemd could not start logs a status such as `216/GROUP`, `217/USER` or `203/EXEC`: the booted base cannot run it; stage a base whose `base-image` CI leg and [PID1 scenarios](evidence/player-node-handoff-support/node-lifecycle-qualification.md) passed. `cause=time` is a stage 1 fault: it reboots and re-steps the clock on the next boot.
+   - Bumping the Debian snapshot pin (developers): see [Changing it](module-debian-packaging.md#changing-it). Every artifact keyed on the pin rebuilds: the base, the initrd build root, the release roots and the CI device root. Re-stage the whole TFTP bundle from that new build.
 
-**Console success on phase 7.** After a successful mount, stage 1 prints `phase 7/7 mount + handoff: modules=<release> files=<n> bytes=<b>`. That line means the initrd's kernel modules were copied onto the base, which carries none of its own. The display drivers (`vc4`, `v3d`) already loaded in stage 1, because `config.txt`'s `dtoverlay=vc4-kms-v3d-pi5` turns the display on. A bundle without that line has no `/dev/dri`. It then prints `phase 7/7 mount + handoff: success dns=<a,b> search=<x>` (where `dns=none` if stage 1 had no resolver discovered). Stage 1 copies its resolver state to the new root's `/etc/resolv.conf`, and the base carries none. Stage 1 then writes `/run/systemd/system.conf.d/90-photo-wall-watchdog.conf` (`RuntimeWatchdogSec=30s`, `RebootWatchdogSec=300s`), so systemd in the base keeps petting the watchdog stage 1 armed. The provisioning unit reboots the Pi after 10 exits in 10 minutes, and the Pi then netboots again. The clock step stage 1 took is recorded in `/run/photo-wall-clock.json`.
+**Console success on phase 7.** After a successful mount, stage 1 prints `phase 7/7 mount + handoff: modules=<release> files=<n> bytes=<b>`. That line means the initrd's kernel modules were copied onto the base, which carries none of its own. The display drivers (`vc4`, `v3d`) already loaded in stage 1, because `config.txt`'s `dtoverlay=vc4-kms-v3d-pi5` turns the display on. A bundle without that line has no `/dev/dri`. It then prints `phase 7/7 mount + handoff: success dns=<a,b> search=<x>` (where `dns=none` if stage 1 had no resolver discovered). Stage 1 copies its resolver state to the new root's `/etc/resolv.conf`, and the base carries none. Stage 1 then writes `/run/systemd/system.conf.d/90-photo-wall-watchdog.conf` (`RuntimeWatchdogSec=30s`, `RebootWatchdogSec=300s`), so systemd in the base keeps petting the watchdog stage 1 armed. The clock step stage 1 took is recorded in `/run/photo-wall-clock.json`.
 
-## Player provisioning: promote a release from GitHub (0010)
+## Release sourcing from GitHub (0010)
 
-> **Deprecated lane, shared configuration.** Promoting a `.deb` is the V1 boot path; the supported configuration is [Node control](#node-control), where Central ingests releases and you select them in the console. The worker's GitHub polling and its `PHOTO_WALL_RELEASE_*` settings below are shared: the same sync records node publications into the node release catalog that Fleet › Releases shows. The V1 promotion is kept until the [V1 follow-up](player-fleet-implementation-map.md) removes it.
+[Decision 0010](decisions/0010-github-release-sourcing.md): Central **watches the project's GitHub Releases** and records every semver release as a candidate. The worker's sync records each valid release as a node publication in the node release catalog that Fleet › Releases shows, and downloads the bytes the fleet needs (the base squashfs and the node components) into the cache root. Nothing is signed; the sha256 is a corruption check only. The V1 `.deb` promotion (`GET /v1/operator/app/releases`, `POST …/{tag}/promote`, `GET /v1/app/manifest`, the Player `.deb` and the bootstrapper) was removed with the V1 path ([0019](decisions/0019-debian-packaging-with-debhelper.md)); put a release on the wall from the console ([Releases](#releases-stage-app-and-update-the-wall)).
 
-[Decision 0010](decisions/0010-github-release-sourcing.md) removed 0009's manual sha256 dance: central **watches the project's GitHub Releases**, records every semver release as a candidate, and downloads the `.deb`s the fleet needs (the promoted release's among them) into the shared `.deb` store Players fetch from. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic. So is promotion on a fresh install: the release sync promotes the newest
-deployable release until a Player is bound and a `.deb` has been downloaded, then holds it; an
-operator promotion overrides it and is never moved by the sync. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
-
-**Configuration.** Release sourcing is **always-on** (0013 retired the opt-in gate): the worker polls GitHub and mirrors bytes into `<cache-root>/apps/` unconditionally; central serves them RO. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)); there is no separate `.deb`-store env to wire.
+**Configuration.** Release sourcing is always-on ([decision 0013](decisions/0013-unified-cache-root.md)): the worker polls GitHub and mirrors bytes into the cache root unconditionally; Central serves them read-only. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)).
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `PHOTO_WALL_CACHE_ROOT` | central (RO) + worker (RW) | `/var/cache/photo-wall` | The one cache root; the `.deb` store is its derived `apps/` subdir. Optional (baked default) |
+| `PHOTO_WALL_CACHE_ROOT` | central (RO) + worker (RW) | `/var/cache/photo-wall` | The one cache root. Optional (baked default) |
 | `PHOTO_WALL_RELEASE_REPO` | worker | `mcurcio/photo-wall` | `owner/name` of the GitHub repo whose releases are polled |
 | `PHOTO_WALL_RELEASE_TOKEN` | worker | (unset) | Optional GitHub token; unauthenticated polling is rate-limited to ~60 requests/hour |
-| `PHOTO_WALL_RELEASE_PRERELEASES` | worker | off | Truthy to also track GitHub prereleases (drafts are always skipped) |
 | `PHOTO_WALL_RELEASE_POLL_SECONDS` | worker | `900` | Poll cadence in seconds |
 | `PHOTO_WALL_RELEASE_API_BASE` | worker | `https://api.github.com` | Base URL of the releases API; unset or empty means the default, an invalid URL fails at boot. Tests point it at a fake origin |
 
-**List, promote, refresh (all admin-authenticated).** These reach central's operator API; substitute your central origin and admin token:
+**Poll now (admin-authenticated).** Poll GitHub instead of waiting for the next cadence (coalesced; 202 `{"status": "polling"}`):
 
 ```sh
-# List tracked releases, newest first: tag / is_prerelease / deployable / promoted /
-# promoted_by ("auto" | "operator", null unless promoted) / has_os_image.
-curl --fail -H 'Authorization: Bearer <admin-token>' \
-  http://<central>/v1/operator/app/releases
-
-# Promote a version: 200 {"status": "promoted"}, and central starts downloading its .deb;
-# 404 unknown tag; 409 no .deb (undeployable); 422 not a version tag.
-curl -X POST -H 'Authorization: Bearer <admin-token>' \
-  http://<central>/v1/operator/app/releases/<tag>/promote
-
-# Poll GitHub now instead of waiting for the next cadence (coalesced; 202 {"status": "polling"}).
 curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/refresh
 ```
 
-All three routes are always available: release sourcing is unconditional as of [decision 0013](decisions/0013-unified-cache-root.md), so the former **503 `release_sourcing_unconfigured`** branch (gated on the old `PHOTO_WALL_APP_ROOT`) has been removed.
+## Base-image auto-mirror (0012, removed)
 
-**Promoted vs. served.** A promote records your tag at once (`promoted_by: "operator"`) and, in
-the same transaction, queues the download of its `.deb`. `GET /v1/app/manifest` names the promoted
-`.deb` once its bytes are on disk; until then it names the last-good one (the latest earlier
-promotion whose `.deb` was on disk when it was replaced) if that is on disk, so Players are never
-broken. With neither on disk it names the promoted one, and the package route downloads it on
-request. A failed download is retried: a Player's next request asks again, and the five-minute
-`Prefetch` tick re-queues it after a transient failure; no re-promote is needed. Watch `promoted`
-and `promoted_by` in the list.
-
-**Offline / air-gapped.** There is no manual stage path: the hand-staging routes
-(`POST /v1/operator/app`, `PUT /v1/operator/app/current`) no longer exist, and central downloads
-every `.deb` from the download link of the GitHub release that lists it. A `.deb` already on disk
-keeps serving while the uplink is down.
-
-## Base-image auto-mirror (0012)
-
-> **Deprecated lane.** This section describes the V1 boot path (the netboot base without a node offer and the promoted `.deb`). The supported configuration is [Node control](#node-control): Pis boot by node path and Central ingests releases and you select them in the console. The V1 lane is kept until the [V1 follow-up](player-fleet-implementation-map.md) removes it; the console shows none of it.
-
-[Decision 0012](decisions/0012-netboot-base-auto-mirror.md) extends the same discover-and-mirror model to the **base squashfs**, so you no longer hand-stage it into a served directory. The fleet is heterogeneous: central serves **several base images at once**, one per version some Pi needs, resolved **per device**. There is **no fleet default and no promote-the-base action** — rollout is emergent (see *pin a canary* below).
-
-**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tarball sha256>.squashfs`** (named by the sha256 of the release's base tarball, so a re-cut is a new file) under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a missing file at the serve seam (a read that finds no file publishes its fetch) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
-
-| Variable | Where | Default | Meaning |
-|---|---|---|---|
-| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; `base-<tarball sha256>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
-| `PHOTO_WALL_PER_DEVICE_DEB` | Pi provisioner (`photo-wall-provision.service`) | (unset) | Opt-in: the Pi fetches the `.deb` of the exact tag its base was served this boot (`GET /v1/netboot/manifest`, serial-keyed) and posts base-health. Unset ⇒ unchanged 0010 global `.deb`, no base-health |
-
-This setting must be present in the Pi's base-image provisioner environment
-before it starts. Setting it only on the Kubernetes Central Deployment does not
-change an already booted Pi or cause that Pi to report base-health.
-
-**Discovery.** Automatic, on the same poll as the `.deb`: the worker reads each release's `manifest.json` `base_image` + `revision` and records the base facts on the catalog row. Discovery moves **no bytes** and changes **no device's target**. The heavy squashfs is downloaded only when a device actually needs a version.
-
-**A `503` is transient and self-heals — it is never a dead end.** The design does **not** promise "never `503`"; it promises a `503` is **bounded and self-heals**. A base a device needs but that is not yet cached returns a `503`, the worker fetches it in the background, and the diskless Pi retries on its next boot (fails-closed-and-reboots). A boot re-hydrate refills any file that went missing. The one accepted exception: a **fresh cluster's very first image** is `latest-discovered` and therefore **unverified** — a bad first image bricks initial bring-up until you pin a known-good version.
-
-**Per-device selection.** A Pi sends its serial; central resolves **one** tag by precedence: the device's **pin**, else **latest-verified** (the highest semver any device row not marked retired has reported base-healthy — a live query, never a stored pointer), else — empty cluster only — **latest-discovered**. Both the base and (with `PHOTO_WALL_PER_DEVICE_DEB`) the `.deb` come from that one tag. **Retiring a Player does not retire its device row**: nothing in Central marks a netboot device retired today, so a retired Pi's last healthy tag still counts toward latest-verified and its serial still netboots. Whether retire should also retire the device row is an open owner question ([slice 2, Question 4](operator-console-ux-pass2-onboarding.md#12-costs-deferrals-and-questions)).
-
-**Pin a canary / recover a device (admin-authenticated).** Rollout is emergent: pin one device to a candidate version; when it boots and posts base-health, `latest-verified` climbs and unpinned devices follow on their next boot — no separate promote step. The same route rolls a broken device back by pinning it to a known-good tag.
-
-```sh
-# Pin device <device-id> to <tag> (a canary, or a manual rollback). Proactively
-# fetches that tag's base (and .deb) so the device comes up on its next netboot.
-curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-  -d '{"tag":"<tag>"}' http://<central>/v1/operator/devices/<device-id>/pin
-
-# Clear the pin: the device falls back to latest-verified.
-curl -X DELETE -H 'Authorization: Bearer <admin-token>' \
-  http://<central>/v1/operator/devices/<device-id>/pin
-```
-
-**Server-side rollback (the Pi is diskless).** The Pi persists nothing and cannot choose a tag, so rollback lives on central. When a device is served a target (a 200) but never posts it base-healthy and re-netboots, central marks that boot failed, fences the tag, and serves the device its own **known-good** on the next boot — **sticking** there (never re-serving the failing tag) until a newer tag appears or you pin it, so it cannot oscillate. A device with **no** prior known-good that cannot boot its served image boot-loops until you pin it (accepted).
-
-**Garbage collection.** `MaintainCache` runs hourly as an eager keep-set sweep, hourly, with no byte budget: it removes every release file under `os-images/` and `apps/` whose key is not desired (the window of the 3 newest stable node releases, the selected and the previous deployment, and the V1 roots: pins, known-goods, served tags, policy tags and fleet reservations), re-checking the desired set immediately before each unlink (mark and sweep, no lock; a root committed in the remaining instant costs one read-through re-download), sparing a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file on the cache filesystem, or whose `last_served_at` is within 1 h of the database's clock, and a temp file not idle past `TEMP_GRACE` (1 h), at most 50 unlinks per run; `previews/` and `media/` are never touched ([`central/assets/maintenance.py`](../central/assets/maintenance.py)). So a re-cut's old
-`base-<tarball sha256>.squashfs` (about 1 GiB) is removed once nothing desires it. Asset rows,
-references and produced facts are never removed, so a key that becomes wanted again re-fetches. A wiped cache refills on demand: a read that
-finds no file publishes its fetch, and the five-minute `Prefetch` publishes the fetch of every
-desired asset missing from disk. A device row marked retired names no tag, so it keeps nothing desired; no operator action marks one today, and retiring a Player leaves its device row active (above).
-
-**Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason. (An operator UI over these fields is deferred; the backend fields ship here.)
-
-```sh
-curl --fail -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/netboot
-```
-
-**Two assumptions worth stating (0012 errata E9).** (1) Base-health's server-side `running_tag == last_served_tag` check binds to the **live** `devices.last_served_tag`, relying on no concurrent re-serve of the same device interleaving between the per-device manifest fetch and the base-health post — which holds on the diskless target, since a genuine reboot restarts the whole squashfs fetch. (2) The appliance's origin-handoff writer preserves existing keys and does not explicitly clear the served tag on a global-path boot; this is harmless on the RAM-overlay netboot target (rebuilt fresh each boot), but a persistent-disk reuse of that path would need to clear it.
+[Decision 0012](decisions/0012-netboot-base-auto-mirror.md) served several base images per device, selected by a per-device pin or the latest base-healthy version, with server-side rollback. That whole path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): `/v1/netboot/base`, `/v1/netboot/manifest`, `GET /v1/operator/netboot`, the device pin routes, base-health and `PHOTO_WALL_PER_DEVICE_DEB` no longer exist, and migrations 069 and 070 drop their tables. A Node's base now comes from the release it is offered through its node boot offer, and the operator selects the release in the console ([Node control](#node-control)). The worker still mirrors each needed release's base squashfs into the cache root's `os-images/` subdirectory and the hourly `MaintainCache` sweep keeps the desired ones ([Central cache subsystem](module-central-cache.md)).
 
 ## Upgrading to content-keyed OS images (migration 028)
 
-Migration 028 re-keys every OS image from its release tag to the sha256 of its base tarball
-([idempotent jobs](central-idempotent-jobs.md) §8). It carries **no produced facts**: the owner
-decided that each desired OS image downloads once more after the upgrade, rather than trusting a
-file whose tag may have been re-cut since it was fetched. The cost, stated plainly:
-
-- A Pi that reboots before its image lands fails its fetch (`503`) and reboots again.
-- If GitHub is unreachable, or a wanted tarball was deleted upstream, Pis loop on `503` and reboot
-  until a download succeeds.
-- A device pinned to a deleted release stays stuck until you re-pin it.
-
-1. **Preflight, before upgrading.** Confirm the worker reaches the release origin
-   (`PHOTO_WALL_RELEASE_API_BASE`, default `https://api.github.com`). Then, for every desired
-   tag, check that its tarball URL answers. The desired tags are every active device's pin and
-   known-good, every tag served in the last 30 days, and, while no device has a known-good, the
-   newest release with an OS image (`GET /v1/operator/app/releases`, `has_os_image`). This lists
-   the device-named ones with their URLs:
-
-   ```sh
-   docker compose exec -T database psql -U photo_wall photo_wall -At -F ' ' -c "
-     SELECT DISTINCT r.tag, r.base_tarball_url FROM app_releases r JOIN devices d
-       ON d.retired_at IS NULL AND r.tag IN (d.attached_tag, d.known_good_tag,
-          CASE WHEN d.last_served_at >= EXTRACT(EPOCH FROM now()) - 30 * 86400
-               THEN d.last_served_tag END)
-     WHERE r.base_tarball_url IS NOT NULL ORDER BY r.tag"
-   # For each URL, fetch one byte: 206 or 200 means it answers; 404 means deleted upstream.
-   curl -sL -r 0-0 -o /dev/null -w '%{http_code}\n' '<base_tarball_url>'
-   ```
-
-   A tag whose tarball is gone will not boot after the upgrade. Re-pin its devices first.
-2. **Upgrade Central and the workers together** (Compose replaces both). 028 runs at start-up.
-3. **Delete the old `os-images/base-<tag>.squashfs` files.** Nothing reads them any more, and
-   they double the OS-image disk until removed. A new-style name is 64 hex digits; a tag name
-   starts with `v`:
-
-   ```sh
-   docker compose exec -T worker sh -c 'rm -f /var/cache/photo-wall/os-images/base-v*.squashfs'
-   ```
-
-   (Use your `PHOTO_WALL_CACHE_ROOT` if it is not the default.)
-4. **Watch the first downloads.** Each desired OS image downloads once, on the next `Prefetch`
-   (every five minutes) or on the first Pi that asks for it.
-
-**Rollback.** Migrations are forward-only. From 028's header, in this order:
-
-```text
-  a. End the new-shape deliveries, which the old code cannot decode:
-       UPDATE procrastinate_jobs SET status = 'cancelled'
-       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'todo';
-       UPDATE procrastinate_jobs SET status = 'failed'
-       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'doing';
-  b. Drop the CHECK, which the old code's tag-keyed references violate:
-       ALTER TABLE asset_references DROP CONSTRAINT asset_references_locator_names_the_key;
-  c. Revert the code.
-  d. UPDATE app_release_poll SET etag = NULL;
-     so the next sync lists every release again and re-references each OS image under its
-     tag: one download per desired OS image.
-```
-
-**Roll forward after a rollback:** repeat (a) for the old-shape deliveries, then
-
-```sql
-DELETE FROM schema_migrations WHERE name = '028_os_image_content_key.sql';
-```
-
-and deploy the new code: 028 runs again and re-keys every OS image from `app_releases`. It is
-safe to run twice.
+Migration 028 re-keyed every OS image from its release tag to the sha256 of its base tarball ([idempotent jobs](central-idempotent-jobs.md) §8) and carried no produced facts, so each desired OS image downloaded once more after that upgrade. Its upgrade and rollback procedure (a preflight over `app_releases` and the device pins, a rollback of `asset_references` and the release poll's ETag) is **withdrawn**: migration 070 drops `app_releases`, the device pins and the V1 fleet tables ([0019](decisions/0019-debian-packaging-with-debhelper.md)), so the queries cannot run, and a rollback past 070 is not supported (forward-only: restore a database backup instead). A deployment older than migration 028 must first upgrade on a release that predates 0019. The key naming survives: OS images are `os-images/base-<tarball sha256>.squashfs` in the cache root, and a wanted tarball that was deleted upstream is a transient `503` until a download succeeds ([Release sourcing](#release-sourcing-from-github-0010)).
 
 **Rolling Central back past stored protection refusals.** Runtime state (`runtime_state.snapshot`)
 records the Run that refused a protected activation or Program as `blocking_run_id` on that
@@ -421,7 +246,7 @@ The design, its protocol and its failure table are owned by [pass A](operator-co
 
 **Changing the admin token.** Change `PHOTO_WALL_ADMIN_TOKEN` in `.env` (or the deployment secret) and restart every Central process.
 - Every browser is signed out within 5 s and must sign in with the new token. This is the only "log out everywhere".
-- Every script still using the old token gets 401 until it is given the new one: the `curl` examples in this runbook, `scripts/demo_wall.py` (`DEMO_ADMIN_TOKEN`) and the netboot end-to-end harness (`scripts/test_netboot_e2e.py`).
+- Every script still using the old token gets 401 until it is given the new one: the `curl` examples in this runbook and `scripts/demo_wall.py` (`DEMO_ADMIN_TOKEN`).
 - Players are not affected; they authenticate with their own enrollment credentials.
 
 **Scripts keep using the bearer header.** `curl`, the demo and the test harnesses send `Authorization: Bearer <admin-token>` and need no cookie, marker header or `Origin`. A Bearer header decides alone: a wrong one gets 401 even if the request also carries a valid cookie.
@@ -560,7 +385,7 @@ The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**),
 - **Header**: name, standing, the serial **labelled as a claim** (the console cannot confirm which physical box sent it), **Enrollment** ("Player app enrolled N s ago (authority epoch N)", Central's enrollment record), links to bound Frames, the full device and Player ids under **Identifiers**, and a link to the Pi's Hardware page.
 - **Layers**: one row per node layer, each naming its source. Host Management and App Manager show when they **last reported**. App Effect Broker shows its app-process fact and when Central **first received** it; its last report reads "Unknown: App Effect Broker sends evidence only on change, and Central stores no receipt of its polls". Display Host shows when it **last reported** (its newest display exchange on this boot) and, for each Output, three facts it reported: the Panel connector (connected or not), the admitted surface ("the app's surface for Frame … (binding generation g)" or "Display Host reported no app surface admitted"), and the compositor receipt for that surface with its age on Display Host's own clock. A compositor receipt is not proof of Panel pixels, and the console judges no staleness. When Display Host has reported no Output on this boot, the row says so. The Player app shows its last-reported readiness. "Panel pixels: Unknown: no layer observes them" closes the list. A silent Player app with a reporting host shows both ages, so a crashed app reads differently from a dead box.
 - **Outputs**: each Output's state ("Bound to Frame …", "Free", "No Panel listed at the last enrollment", or "Retired with its Player"; "No outputs reported" when there are none), **Bind to a frame…**, **Identify Panel**, and the Panel record at the Player app's last enrollment, labelled "may be stale". A bound Output also shows its [Output interruption](#operator-console-wall-health-and-the-attention-strip) when Central records one.
-- **Boot**: the current node session's boot as a claim (or "No current node session"), then the latest node boot offer ("not proof the Player booted"). A later boot never says what caused it. If Central's newest boot record for this box is not a node boot, one warning line says so: "Booted by the deprecated path: Central's newest boot record for this box is a deprecated boot offer (or a base image served without an offer) · recorded N ago; its kernel command line lacks `photowall.node=v2`; Select and Stage do not reach it." Fix that Pi's command line ([Node control](#node-control)).
+- **Boot**: the current node session's boot as a claim (or "No current node session"), then the latest node boot offer ("not proof the Player booted"). A later boot never says what caused it.
 - **App**: the node app operations, each with its named state (for example "Rejected by App Effect Broker", or "Ended by a later boot" for a stage that ran before the Player rebooted). **Stage app** switches this Player's app for this boot only (see [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall)). **Qualified fallback** shows the app environment the Player app linked, lets you qualify it, and lists the stored acceptances.
 - **Danger zone**: **Unbind all outputs** (Bound only). Retire is on the Pi's Hardware page.
 
@@ -662,7 +487,7 @@ While a write is in flight, Esc and Cancel do nothing. Then the dialog shows one
 
 **To replace a Pi, unbind it; do not retire it.** Unbind the old Pi's Frames (or use **Unbind all outputs**), then bind the new Pi's Output to each Frame. The old Pi returns to Unbound and can be bound again later. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) changes no Player record.
 
-**To revoke a compromised bound Pi, unbind it, then retire it immediately.** Unbind alone leaves its session token valid and its serial free to enroll. Retire (`POST /v1/operator/players/{player_id}/retire`) revokes its authority and refuses its serial from then on. Its netboot device row is **not** retired: its last healthy tag still counts toward the release frontier and its serial still netboots ([base-image selection](#base-image-auto-mirror-0012); owner Question 4 of the [slice 2 design](operator-console-ux-pass2-onboarding.md#12-costs-deferrals-and-questions) is pending).
+**To revoke a compromised bound Pi, unbind it, then retire it immediately.** Unbind alone leaves its session token valid and its serial free to enroll. Retire (`POST /v1/operator/players/{player_id}/retire`) revokes its authority and refuses its serial from then on. Its serial can still netboot ([the removed V1 base selection](#base-image-auto-mirror-0012-removed); owner Question 4 of the [slice 2 design](operator-console-ux-pass2-onboarding.md#12-costs-deferrals-and-questions) is pending).
 
 ### Returning known Pi
 
@@ -987,7 +812,7 @@ If an Output moves, bind the destination persistent Frame. Returning recognized 
 
 Preview carries a 30-second expiry and both proposed/committed settings in current process memory so the Executor can revert during a running-process outage. Commit and revert use optimistic revision and binding-generation checks. A stale browser must refresh before retrying. Partitioned equipment respects the bounded plan lease and rejects obsolete work when it obtains fresh session authority. Cold reboot requires central time/release/enrollment/control/media connectivity. A surviving cache file can avoid a media request only after the new process validates it against the current assignment; it cannot restore authority.
 
-The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [central release contract](module-appliance-release.md) provide commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md), [GitHub ARM image workflow](module-appliance-ci.md), and [headless image e2e gate](module-appliance-e2e.md) describe exact-artifact checks and their limits. Earlier signed image and hosted boot evidence remains useful for artifact identity and generic-VM behavior, but its durable-Player/local-update assumptions are superseded. Complete current-image native rendering, valid-cache reuse, corrupt-cache reacquisition, real automatic reboot/central rollback, and physical measurements remain pending until recorded against the final revision.
+The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player package](module-player-package.md) and [Debian packaging module](module-debian-packaging.md), and [central release contract](module-appliance-release.md) provide commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md), [GitHub ARM image workflow](module-appliance-ci.md), and [headless image e2e gate](module-appliance-e2e.md) describe exact-artifact checks and their limits. Earlier signed image and hosted boot evidence remains useful for artifact identity and generic-VM behavior, but its durable-Player/local-update assumptions are superseded. Complete current-image native rendering, valid-cache reuse, corrupt-cache reacquisition, real automatic reboot/central rollback, and physical measurements remain pending until recorded against the final revision.
 
 
 ## Node control
@@ -1011,15 +836,13 @@ The ordinary `central.app:create_app` factory (still the default image and Compo
 command until the [V1 follow-up](player-fleet-implementation-map.md) switches them)
 keeps node transport disabled. That is a **misconfiguration**: Players that boot by
 node path are refused, and the console shows one banner ("Node management is off on
-this Central") above every page. Each Pi must also boot by node path: its kernel
-command line must carry `photowall.node=v2`. A Pi without it boots by the deprecated
-path, and its Player page shows one warning line; Select and Stage do not reach it.
-The release default command line does not carry the flag yet, so add it per Pi (for
-example through iac `cmdline_extra`). Do not add `cgroup_enable=memory`: release
-command lines from the 4 GB tracer release on carry it, once, and it must stay. Boot
-trees staged from an earlier release do not; restage them. Without the memory
-controller, which the Pi 5's device tree turns off, the base still mounts its store but
-no memory limit is enforced, and the console warns
+this Central") above every page. Every Pi boots by the node path: the V1 boot offer
+and the `photowall.node=v2` switch are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)),
+so the command line needs no flag. Do not add `cgroup_enable=memory`: every release's
+command line carries it, once, and it must stay. Boot trees staged from an earlier
+release do not; restage them. Without the memory controller, which the Pi 5's device
+tree turns off, the base still mounts its store but no memory limit is enforced, and
+the console warns
 ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
 A node release's boot tree carries both. The node factory enables observation, explicit session enrollment, immutable V2 boot
 offers and scoped command routes; it does **not** open the durable effect gate.
@@ -1038,8 +861,7 @@ have exact catalog provenance; manager primary and any accepted fallback are
 pinned to that base digest. Environment sources feed the existing content worker.
 A missing byte artifact is reported unavailable until the worker acquires and
 verifies it. An explicit no-app deployment still boots the independent base.
-Only the V2 cohort (`photowall.node=v2`) uses these frozen offers; it cannot silently
-fall back to a legacy manifest.
+Every Node boots by the node path; there is no other boot offer and no legacy manifest to fall back to.
 
 For ambiguity, `GET /v1/operator/node/devices/{device_id}` separates current and
 historical scoped credentials, observation sample/receipt ages, reboot requests,

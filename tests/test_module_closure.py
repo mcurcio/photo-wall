@@ -1,8 +1,8 @@
 """The computed first-party closure on synthetic package trees: imports at module level and
 inside functions are both followed; an undeclared third-party import, a missing first-party
 module or a forbidden package is refused with the importer named; a declared third-party import
-is recorded and an unreached one reported; the stdlib's own imports are not judged; the search
-path never includes site-packages; a staged directory application imports on its own."""
+is recorded; the stdlib's own imports are not judged; the search path never includes
+site-packages."""
 
 import sys
 from pathlib import Path
@@ -10,27 +10,13 @@ from types import MappingProxyType
 
 import pytest
 
-from scripts import debian_packages, module_closure
+from scripts import module_closure
 from scripts.module_closure import (
-    BOOTSTRAPPER_POLICY,
-    INITRD_FORBIDDEN,
-    INITRD_POLICY,
-    INITRD_ROOTS,
-    PLAYER_POLICY,
-    POLICIES,
     ClosureError,
-    ClosurePolicy,
-    closure_for,
     compute_closure,
-    entry_point,
+    first_party_files,
     first_party_packages,
-    isolated_import,
-    main,
-    read_manifest,
     search_path,
-    stage,
-    stage_application,
-    unreached_imports,
 )
 
 FIRST_PARTY = ("pkg_a", "pkg_b", "pkg_c", "pkg_d")
@@ -156,12 +142,14 @@ def test_the_search_path_is_the_stdlib_only(tmp_path):
         assert not any(entry.startswith(sys.prefix) for entry in path)
 
 
-def test_stage_copies_the_closure_files(tmp_path):
+def test_first_party_files_are_the_closures_files_unjudged(tmp_path):
+    """pkg_d.unused's pydantic import is not judged; a missing first-party module is."""
     closure = closure_of(tmp_path / "repo")
-    stage(closure, repo=tmp_path / "repo", into=tmp_path / "staged")
-    staged = sorted(path.relative_to(tmp_path / "staged")
-                    for path in (tmp_path / "staged").rglob("*.py"))
-    assert tuple(staged) == closure.files
+    assert first_party_files(["pkg_a.main"], repo=tmp_path / "repo") == closure.files
+    assert Path("pkg_d/unused.py") in first_party_files(["pkg_d.unused"], repo=tmp_path / "repo")
+    tree(tmp_path / "repo", {"pkg_b/helper.py": "import pkg_b.absent\n"})
+    with pytest.raises(ClosureError, match="pkg_b.absent, which does not exist"):
+        first_party_files(["pkg_a.main"], repo=tmp_path / "repo")
 
 
 def test_first_party_packages_are_the_top_level_packages(tmp_path):
@@ -169,52 +157,20 @@ def test_first_party_packages_are_the_top_level_packages(tmp_path):
     assert first_party_packages(tmp_path) == FIRST_PARTY
 
 
-def test_main_stages_writes_the_manifest_and_names_the_offender(tmp_path, capsys):
-    repo = tree(tmp_path / "repo", {**BASE, "pkg_a/bad.py": "import player\n",
-                                    "player/__init__.py": ""})
-    manifest = tmp_path / "manifest.json"
-    assert main(["--repo", str(repo), "--root", "pkg_a.main", "--stage", str(tmp_path / "out"),
-                 "--manifest", str(manifest)]) == 0
-    written = read_manifest(manifest)
-    assert written.modules[0] == "pkg_a" and written.forbidden == INITRD_FORBIDDEN
-    assert (tmp_path / "out" / "pkg_c" / "deferred.py").is_file()
-    assert main(["--repo", str(repo), "--root", "pkg_a.bad"]) == 1
-    assert "pkg_a.bad imports player" in capsys.readouterr().err
-
-
-# --- policies and the third-party table (Project 2 design §2.7) ----------------------------
-
-
-def test_the_policy_table():
-    assert tuple(POLICIES) == ("initrd", "bootstrapper", "player")
-    assert (INITRD_ROOTS, INITRD_FORBIDDEN) == (INITRD_POLICY.roots, INITRD_POLICY.forbidden)
-    assert INITRD_POLICY.roots == ("appliance.netboot_init",)
-    assert INITRD_POLICY.forbidden == ("player", "central", "media", "zeroconf", "ifaddr", "gi")
-    assert INITRD_POLICY.third_party == {}
-    assert BOOTSTRAPPER_POLICY.roots == ("appliance.provision", "appliance.os_agent",
-                                         "appliance.app_launcher", "appliance.app_proof_service")
-    assert PLAYER_POLICY.roots == ("player.service",)
-    # The .deb tables are the declaration's, never hand-written.
-    assert BOOTSTRAPPER_POLICY.third_party == debian_packages.import_table("bootstrapper")
-    assert PLAYER_POLICY.third_party == debian_packages.import_table("player")
-    with pytest.raises(TypeError):
-        PLAYER_POLICY.third_party["requests"] = "python3-requests"
-
-
-def test_proof_service_and_player_client_are_packaged_on_opposite_sides():
-    bootstrapper = closure_for(BOOTSTRAPPER_POLICY)
-    player = closure_for(PLAYER_POLICY)
-    assert {"appliance.app_proof_service", "appliance.app_process_proof",
-            "appliance.linux_app_proof", "contracts.app_process_proof"} <= set(
-                bootstrapper.modules)
-    assert "player.local_app_proof" in player.modules
-    assert "appliance.app_proof_service" not in player.modules
-    assert "player.local_app_proof" not in bootstrapper.modules
-    assert bootstrapper.third_party == ("cryptography", "pydantic", "zeroconf")
-    assert unreached_imports(bootstrapper, BOOTSTRAPPER_POLICY) == ()
+# --- the third-party table -------------------------------------------------------------------
 
 
 DECLARED = MappingProxyType({"pydantic": "python3-pydantic", "gi": "python3-gi"})
+
+
+def test_third_party_not_judged_here_allows_and_records_every_root(tmp_path):
+    """None: another check judges third-party imports (the build's import check, against
+    Depends); a first-party module that does not exist is still refused."""
+    extra = {"pkg_b/helper.py": "import pydantic\nimport nats.aio\n"}
+    assert closure_of(tmp_path, extra, third_party=None).third_party == ("nats", "pydantic")
+    with pytest.raises(ClosureError, match="pkg_b.absent, which does not exist"):
+        closure_of(tmp_path / "missing", {"pkg_b/helper.py": "import pkg_b.absent\n"},
+                   third_party=None)
 
 
 @pytest.mark.parametrize("statement", ["import pydantic", "from gi.repository import GLib"])
@@ -237,92 +193,22 @@ def test_a_forbidden_name_is_refused_even_when_declared(tmp_path):
                    forbidden=("pydantic",))
 
 
-def test_unreached_imports_are_the_declared_roots_no_code_reaches(tmp_path):
-    closure = closure_of(tmp_path, {"pkg_b/helper.py": "import pydantic\n"},
-                         third_party=DECLARED)
-    policy = ClosurePolicy("player", ("pkg_a.main",), (), DECLARED)
-    assert closure.third_party == ("pydantic",)
-    assert unreached_imports(closure, policy) == ("gi",)
-    assert unreached_imports(closure, ClosurePolicy(
-        "player", ("pkg_a.main",), (), MappingProxyType({"pydantic": "python3-pydantic"}))) == ()
-
-
-def test_closure_for_applies_the_policy(tmp_path):
-    tree(tmp_path, {**BASE, "pkg_b/helper.py": "import pydantic\n"})
-    policy = ClosurePolicy("player", ("pkg_a.main",), ("pkg_d",), DECLARED)
-    closure = closure_for(policy, repo=tmp_path)
-    assert closure.third_party == ("pydantic",) and "pkg_c.deferred" in closure.modules
-    with pytest.raises(ClosureError, match="pkg_d is forbidden"):
-        closure_for(ClosurePolicy("player", ("pkg_d.unused",), ("pkg_d",), DECLARED),
-                    repo=tmp_path)
-
-
-def test_main_prints_only_the_policy_digest(capsys):
-    assert main(["--policy", "bootstrapper", "--digest"]) == 0
-    assert capsys.readouterr().out == closure_for(BOOTSTRAPPER_POLICY).digest + "\n"
-
-
-# --- the directory application and its isolated import --------------------------------------
-
-POLICY = ClosurePolicy("bootstrapper", ("pkg_a.main",), (),
-                       MappingProxyType({"_pw_absent_lib": "python3-absent"}))
-
-
-def test_entry_point_runs_the_root_module_as_main():
-    source = entry_point("appliance.provision").decode()
-    compile(source, "__main__.py", "exec")
-    assert ("runpy.run_module('appliance.provision', run_name=\"__main__\", alter_sys=True)"
-            in source)
-
-
-def application(root: Path, extra: dict[str, str] | None = None) -> Path:
-    repo = tree(root / "repo", {**BASE, **(extra or {})})
-    closure = compute_closure(POLICY.roots, repo=repo, first_party=FIRST_PARTY,
-                              third_party=POLICY.third_party)
-    stage_application(closure, POLICY, repo=repo, into=root / "app")
-    return root / "app"
-
-
-def test_stage_application_writes_the_files_the_entry_point_and_the_manifest(tmp_path):
-    into = application(tmp_path)
-    manifest = read_manifest(into / "closure.json")
-    staged = sorted(path.relative_to(into).as_posix() for path in into.rglob("*")
-                    if path.is_file())
-    assert staged == sorted([*manifest.files, "__main__.py", "closure.json"])
-    assert (into / "__main__.py").read_bytes() == entry_point("pkg_a.main")
-
-
-def test_stage_application_refuses_a_closure_without_the_policy_root(tmp_path):
-    closure = closure_of(tmp_path / "repo")
-    other = ClosurePolicy("player", ("pkg_d.unused",), (), MappingProxyType({}))
-    with pytest.raises(ClosureError, match="does not contain player's root pkg_d.unused"):
-        stage_application(closure, other, repo=tmp_path / "repo", into=tmp_path / "app")
-
-
-def test_isolated_import_imports_every_module_from_the_staged_tree(tmp_path):
-    into = application(tmp_path)
-    modules = read_manifest(into / "closure.json").modules
-    report = isolated_import(into, modules, policy=POLICY)
-    assert report.imported == modules and report.unavailable == ()
-    assert not list(into.rglob("__pycache__"))
-
-
-def test_a_declared_import_missing_on_this_host_is_unavailable_not_failed(tmp_path):
-    into = application(tmp_path, {"pkg_b/helper.py": "import _pw_absent_lib\n"})
-    report = isolated_import(into, ("pkg_a", "pkg_b.helper"), policy=POLICY)
-    assert report == module_closure.ImportReport(("pkg_a",),
-                                                 (("pkg_b.helper", "_pw_absent_lib"),))
-
-
-def test_a_file_missing_from_the_staged_tree_fails_the_isolated_import(tmp_path):
-    into = application(tmp_path)
-    (into / "pkg_c/deferred.py").unlink()
-    with pytest.raises(ClosureError, match="pkg_c.deferred: ModuleNotFoundError"):
-        isolated_import(into, ("pkg_a.main", "pkg_c.deferred"), policy=POLICY)
-
-
-def test_an_undeclared_missing_import_fails_the_isolated_import(tmp_path):
-    into = application(tmp_path)
-    (into / "pkg_b/helper.py").write_text("import _pw_undeclared_lib\n")
-    with pytest.raises(ClosureError, match="pkg_b.helper: ModuleNotFoundError"):
-        isolated_import(into, ("pkg_b.helper",), policy=POLICY)
+def test_the_finder_records_each_direct_import_with_its_ancestors_found_or_not(tmp_path):
+    tree(tmp_path, {
+        **BASE,
+        "pkg_a/main.py": "import json\nimport pkg_b.helper\nfrom pkg_c import deferred, VALUE\n"
+                         "from . import sibling\nfrom .sibling import thing\n\n"
+                         "def later():\n    import _pw_absent_lib.sub\n",
+        "pkg_a/sibling.py": "thing = 1\n",
+    })
+    finder = module_closure.Finder([str(tmp_path), *search_path()], frozenset(FIRST_PARTY))
+    finder.import_hook("pkg_a.main")
+    assert {edge for edge in finder.edges if edge[0] == "pkg_a.main"} == {
+        ("pkg_a.main", "json"), ("pkg_a.main", "pkg_b"), ("pkg_a.main", "pkg_b.helper"),
+        ("pkg_a.main", "pkg_c"), ("pkg_a.main", "pkg_c.deferred"), ("pkg_a.main", "pkg_a"),
+        ("pkg_a.main", "pkg_a.sibling"), ("pkg_a.main", "_pw_absent_lib"),
+        ("pkg_a.main", "_pw_absent_lib.sub")}
+    # Direct, never transitive: the helper's import is the helper's edge; the stdlib is not
+    # scanned, so every importer is first-party.
+    assert ("pkg_b.helper", "hashlib") in finder.edges
+    assert {importer.partition(".")[0] for importer, _ in finder.edges} <= set(FIRST_PARTY)

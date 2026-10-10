@@ -1,0 +1,53 @@
+name: Node package builder
+description: >-
+  The BuildKit builder and cache the Node's Debian builds use (debian-packaging/build-container.sh,
+  decision 0019): the Docker Hub mirror (run first, as every job's first Docker contact; it
+  restarts the daemon), a buildx builder behind it, not made current (a fixture or
+  harness image built FROM a local image needs the daemon's own default builder), the GHA cache
+  service exposed to `docker buildx build`, and the arm64 `node-{role}` cache scope. Its outputs
+  are what build-container.sh reads as PHOTO_WALL_NODE_BUILDER and
+  PHOTO_WALL_NODE_BUILD_CACHE_FROM / _TO.
+
+inputs:
+  write:
+    description: Write the cache too ('true'); anything else reads only (`cache-to` is empty)
+    required: false
+    default: 'true'
+
+outputs:
+  builder:
+    description: The buildx builder's name (PHOTO_WALL_NODE_BUILDER)
+    value: ${{ steps.buildx.outputs.name }}
+  cache-from:
+    description: The --cache-from value (PHOTO_WALL_NODE_BUILD_CACHE_FROM)
+    value: ${{ steps.cache.outputs.from }}
+  cache-to:
+    description: The --cache-to value, empty when this build only reads (PHOTO_WALL_NODE_BUILD_CACHE_TO)
+    value: ${{ steps.cache.outputs.to }}
+
+runs:
+  using: composite
+  steps:
+    - id: docker-hub-mirror
+      uses: ./.github/actions/docker-hub-mirror
+
+    - name: Set up the container build cache
+      id: buildx
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      with:
+        buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+        driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
+        use: false
+
+    # The node scripts run `docker buildx build` themselves, which reads the GHA cache service's
+    # URL and token from the ACTIONS_* environment that only actions see: this exports it.
+    - name: Expose the GHA cache service to the build
+      uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
+    - name: Resolve the node build cache scope
+      id: cache
+      uses: ./.github/actions/buildkit-cache
+      with:
+        name: node-{role}
+        architecture: arm64
+        write: ${{ inputs.write }}

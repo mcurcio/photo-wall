@@ -11,7 +11,6 @@ import logging
 import signal
 import sys
 import types
-from pathlib import Path
 
 import httpx
 import pytest
@@ -29,10 +28,8 @@ from test_player_service import (
 from test_player_uplink_faults import _BrokenBody
 from uplink_fakes import FakeTransport, central, finding, located
 
-from player.central_link import REQUEST_TIMEOUT, Session
-from player.mdns_discovery import DEFAULT_TIMEOUT as MDNS_TIMEOUT
+from player.central_link import Session
 from player.service import (
-    BACKOFF,
     PlayerConfig,
     PlayerService,
     Registration,
@@ -45,7 +42,6 @@ from player.service import (
 from player.service import main as player_main
 from uplink.causes import Cause, UplinkError
 from uplink.finder import find_central
-from uplink.locate import LOCATE_DEADLINE
 from uplink.resolver import Unconfigured
 
 TOKEN = "1" * 32
@@ -510,23 +506,6 @@ def test_main_signals_ready_once_the_service_has_started(tmp_path, monkeypatch):
     so WatchdogSec runs from a started Player. Without it systemd times the start out."""
     events = _main_until_the_loop(tmp_path, monkeypatch, saved="http://192.0.2.20:8000")
     assert events == ["start", "ready", "loop"]
-
-def _unit() -> dict[str, str]:
-    text = Path("appliance/systemd/player.service").read_text()
-    return dict(line.split("=", 1) for line in text.splitlines()
-                if "=" in line and not line.startswith("#"))
-
-
-def test_the_player_unit_owns_a_watchdog_sized_for_a_slow_healthy_cycle():
-    """The longest healthy gap between pets: one backoff, then a full reconnect up to the
-    first completed control exchange (locate + mDNS, challenge, register, base-health, clock,
-    state, then state + readiness + a stale re-poll)."""
-    unit = _unit()
-    assert unit["Type"] == "notify" and unit["NotifyAccess"] == "main"
-    watchdog_sec = float(unit["WatchdogSec"])
-    slowest = BACKOFF[-1] + LOCATE_DEADLINE + MDNS_TIMEOUT + 5 * REQUEST_TIMEOUT \
-        + 3 * REQUEST_TIMEOUT
-    assert watchdog_sec >= 1.25 * slowest
 
 
 def test_a_steady_session_and_every_cycle_pet_the_watchdog(monkeypatch):

@@ -1,6 +1,5 @@
 [Unit]
 Description=Photo Wall base display evidence controller
-ConditionKernelCommandLine=photowall.node=v2
 ConditionPathExists=/run/photo-wall-node/display.json
 # One controller per Weston incarnation: it starts after Weston's READY=1 (control.sock bound),
 # stops when that Weston ends and comes back with the next (the display unit Wants= it), so it
@@ -10,7 +9,7 @@ After=photo-wall-display.service
 
 After=photo-wall-node-handoff.service
 # A crash loop leaves the unit failed and reported, never a reboot: recovery is
-# operator-driven (prior art photo-wall-provision.service, minus its StartLimitAction).
+# operator-driven (no StartLimitAction).
 StartLimitIntervalSec=10min
 StartLimitBurst=10
 
@@ -21,7 +20,7 @@ Group=pw-display
 # membership, which Weston's login session (and so the overlay client) would inherit.
 SupplementaryGroups=pw-node-feeds
 LoadCredential=node-config:/run/photo-wall-node/display.json
-ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-display-controller --config=%d/node-config
+ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/display-controller --config=%d/node-config
 Restart=always
 RestartSec=2
 Slice=photowallbase.slice

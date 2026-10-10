@@ -6,9 +6,7 @@ and `test_netboot_init.py` covers `netboot()`'s wiring of a `Keeper`."""
 
 import ast
 import os
-import shutil
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -32,16 +30,6 @@ from appliance.netboot_init import (
     DEBUG_PAUSE_SECONDS,
     NETWORKING_TIMEOUT_SECONDS,
     STAGE1_SEND_SECONDS,
-)
-from appliance.provision import (
-    DISCOVERY_SECONDS,
-    INSTALL_SECONDS,
-    LOCAL_STEPS_SECONDS,
-    MANIFEST_SECONDS,
-    MAX_BACKOFF_SECONDS,
-    PACKAGE_SECONDS,
-    PROVISION_ATTEMPT_TIMEOUT_SECONDS,
-    START_UNIT_SECONDS,
 )
 from uplink.clock import GATE_BUDGET
 from uplink.fetch import READ_TIMEOUT, STATUS_TIMEOUT
@@ -271,7 +259,7 @@ def test_the_stage1_send_cap_still_covers_a_dual_stack_host():
     assert STAGE1_SEND_SECONDS >= LOOKUP_TIMEOUT + 2 * STATUS_TIMEOUT
 
 
-# --- S0-AC10: the provisioning unit's start-limit keys; watchdog.conf gone --
+# --- S0-AC10: watchdog.conf gone ------------------------------------------
 
 def test_watchdog_conf_no_longer_exists():
     assert not Path("appliance/systemd/watchdog.conf").exists()
@@ -294,49 +282,3 @@ def _parse_unit(text: str) -> dict[str, dict[str, list[str]]]:
         if sep and section is not None:
             sections[section].setdefault(key.strip(), []).append(value.strip())
     return sections
-
-
-def test_provision_unit_parses_with_the_three_start_limit_keys():
-    path = Path("appliance/systemd/photo-wall-provision.service")
-    if shutil.which("systemd-analyze"):
-        result = subprocess.run(["systemd-analyze", "verify", str(path)],
-                                capture_output=True, text=True, timeout=20)
-        assert result.returncode == 0, result.stderr
-        return
-    unit = _parse_unit(path.read_text()).get("Unit", {})
-    assert unit.get("StartLimitIntervalSec") == ["10min"]
-    assert unit.get("StartLimitBurst") == ["10"]
-    assert unit.get("StartLimitAction") == ["reboot-force"]
-
-
-def test_provision_unit_has_exactly_one_deadline_owner():
-    """M5: the unit's own deadline mechanism (Type=notify + TimeoutStartSec, extended by
-    appliance.provision.Bootstrapper.run() via uplink.watchdog.extend_start()) must stay
-    wired the way the unit file's own comment describes, or the guarantee it documents --
-    a hung attempt is killed, a healthy long-running provision is not -- silently regresses.
-    Runs independently of systemd-analyze (which validates unit syntax, not this value's
-    link to the Python constant it must equal)."""
-    path = Path("appliance/systemd/photo-wall-provision.service")
-    unit = _parse_unit(path.read_text())
-    service = unit.get("Service", {})
-    assert service.get("Type") == ["notify"]
-    assert service.get("NotifyAccess") == ["main"]
-    assert "WatchdogSec" not in service
-    assert service.get("TimeoutStartSec") == [str(int(PROVISION_ATTEMPT_TIMEOUT_SECONDS))]
-
-
-def test_provision_unit_outlasts_the_longest_healthy_attempt_by_the_margin():
-    """M5: Bootstrapper.run() renews TimeoutStartSec as each attempt begins, so the longest wait
-    between two renewals is one whole attempt plus the backoff after it: the SUM of every
-    blocking step at the bound it runs under (tests/test_provision.py pins each bound to its
-    step). The unit's TimeoutStartSec, and the constant it must equal, exceed that sum by at
-    least 1.25x, or a healthy but slow attempt is killed mid-install. Summed here from the
-    constants, independently of provision.py's own derivation. Mutation probe: raise any term
-    (e.g. PACKAGE_SECONDS to 250) without raising TimeoutStartSec and this fails."""
-    longest_attempt = (DISCOVERY_SECONDS + LOCATE_DEADLINE + MANIFEST_SECONDS + PACKAGE_SECONDS
-                       + LOCAL_STEPS_SECONDS + INSTALL_SECONDS + START_UNIT_SECONDS
-                       + MAX_BACKOFF_SECONDS)
-    service = _parse_unit(Path("appliance/systemd/photo-wall-provision.service").read_text())
-    [timeout] = service["Service"]["TimeoutStartSec"]
-    assert float(timeout) >= 1.25 * longest_attempt
-    assert PROVISION_ATTEMPT_TIMEOUT_SECONDS >= 1.25 * longest_attempt

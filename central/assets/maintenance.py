@@ -6,8 +6,8 @@ whose key is not desired and that is past its grace is removed, whatever the fre
 cache stays ephemeral: rows, references and produced facts stay, so a key that becomes wanted
 again re-fetches by Prefetch or read-through.
 
-* **Scope.** Only `os-images/` (OS images) and `apps/` (sealed environments, Player `.deb`s and
-  payloads). Never `previews/` (library thumbnails) and never `media/` (`central/media_store.py`).
+* **Scope.** Only `os-images/` (OS images) and `apps/` (sealed environments and Player
+  `.deb`s). Never `previews/` (library thumbnails) and never `media/` (`central/media_store.py`).
 * **Never a desired file: mark and sweep, no lock.** A run reads the desired set once to pick
   its candidates, then reads it again immediately before each unlink and spares a key that
   became desired meanwhile (the repo's old orphan sweep re-confirmed each owner the same way,
@@ -62,7 +62,7 @@ CLOCK_MARKER: Final = ".maintain-cache-clock"
 # the cleaner never touches them.
 RELEASE_KINDS: Final[tuple[tuple[AssetKind, ...], ...]] = (
     (AssetKind.OS_IMAGE,),
-    (AssetKind.SEALED_ENVIRONMENT, AssetKind.PLAYER_DEB, AssetKind.PLAYER_PAYLOAD),
+    (AssetKind.SEALED_ENVIRONMENT,),
 )
 
 

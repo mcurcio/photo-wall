@@ -3,7 +3,8 @@
 # X-Env-Layer-Category: sys
 # X-Env-Layer-Desc: The base's OS configuration, set in the OS itself (owner,
 #  2026-10-09: OS configuration goes straight into the OS through
-#  rpi-image-gen, never through a Photo Wall package). Two settings:
+#  rpi-image-gen, never through a Photo Wall package). Two settings and one
+#  package:
 #
 #  binfmt: Debian's python3.13-minimal ships /usr/lib/binfmt.d/python3.13.conf,
 #  so systemd-binfmt.service and the binfmt_misc mount start at every boot and
@@ -19,15 +20,20 @@
 #  locale-base layer writes the same file but also installs console-setup and
 #  preseeds a keyboard and time zone this headless base has no use for.
 #
-#  base-image.yml checks both on the built image (scripts/device_root_checks.py).
-#  The Node's name is not here: stage 1 writes photo-wall-<serial> at boot
-#  (appliance/netboot_init.py hand_over_hostname); the device layer bakes only
-#  a neutral one.
-# X-Env-Layer-Version: 1.0.0
+#  libnss-myhostname: resolves the Node's own name, photo-wall-<serial>, which
+#  stage 1 writes at every boot (appliance/netboot_init.py hand_over_hostname)
+#  and no /etc/hosts line names (sudo, and anything else that looks its host
+#  up). The device layer bakes only a neutral name.
+#
+#  base-image.yml checks all three on the built image
+#  (scripts/device_root_checks.py).
+# X-Env-Layer-Version: 1.1.0
 # X-Env-Layer-Requires: systemd-min
 # METAEND
 ---
 mmdebstrap:
+  packages:
+    - libnss-myhostname
   customize-hooks:
     - |-
       set -eu

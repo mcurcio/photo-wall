@@ -1,6 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 
-import { deprecatedBootFact } from "./bootFacts.js";
 import { unbindAllRequest, useConfirm } from "./ConfirmAction.jsx";
 import { bind, identifyOutput } from "./equipmentApi.js";
 import { FactLine } from "./domain/fact-line.tsx";
@@ -89,8 +88,7 @@ function LayersSection({ node, snapshot, playerId, retired }) {
 
 /**
  * The Boot section (Part E §25): the current node session's boot, then the latest node boot
- * offer record. When Central serves `deprecated_boot` (G5), one warning line above them says
- * this box's newest boot record is not a node boot; the console shows none of those records.
+ * offer record.
  */
 function BootSection({ node, retired }) {
   if (retired) {
@@ -112,25 +110,13 @@ function BootSection({ node, retired }) {
       });
     }
   }
-  const deprecated = read == null ? null : deprecatedBootFact(read.deprecated_boot, read.read_at);
   return (
     <>
-      {deprecated !== null && (
-        <div className="player__warning" role="note">
-          <FactLine label="Booted by the deprecated path" fact={deprecated}
-            suffix="its kernel command line lacks photowall.node=v2; Select and Stage do not reach it" />
-        </div>
-      )}
       <FactLine label="Current node session's boot" fact={current.fact ?? current.none} />
       {offer === null ? (
         <p className="roster__empty">No node boot offer recorded for this box.</p>
       ) : (
         <FactLine label="Node boot offer" fact={offer} />
-      )}
-      {deprecated === null && (
-        <p className="roster__note">
-          A Pi boots by node path when its kernel command line carries <code>photowall.node=v2</code>.
-        </p>
       )}
     </>
   );

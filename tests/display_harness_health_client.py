@@ -2,7 +2,7 @@
 """Harness-only private client: B5's overlay client plus one health layer per Output.
 
 tests/native_display_smoke.py installs this file over the shell's spawn path
-(/usr/lib/photo-wall-display/diagnostic-client) inside the harness container, so the shell spawns
+(/usr/lib/photo-wall/node-display/diagnostic-client) inside the harness container, so the shell spawns
 it as its private client. It composes `overlay.client` unchanged (slate, ack, trial: the harness's
 handoff needs the slate's `diagnostic_presented`) through its `OutputHook`, binds the manager v3
 and, per Output, takes the health layer and commits one buffer: transparent except a known tint

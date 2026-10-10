@@ -11,7 +11,7 @@ from pydantic import ConfigDict, ValidationError
 
 from central.kernel import jobs as jobs_module
 from central.kernel.assets import AssetKey, AssetKind, AssetReady
-from central.kernel.job_types import CATALOG, FetchOsImage, FetchPackage, SyncReleases
+from central.kernel.job_types import CATALOG, FetchOsImage, FetchSealedEnvironment, SyncReleases
 from central.kernel.jobs import (
     Delivery,
     Job,
@@ -240,7 +240,7 @@ def test_asset_key_matches_the_lock():
     job = FetchOsImage(tarball_sha256=sha)
     assert asset_key(job) == AssetKey(AssetKind.OS_IMAGE, sha)
     assert job_keys(job).lock == f'os_image.fetch["{sha}"]'
-    assert asset_key(FetchPackage(sha256=sha)) == AssetKey(AssetKind.PLAYER_DEB, sha)
+    assert asset_key(FetchSealedEnvironment(sha256=sha)) == AssetKey(AssetKind.SEALED_ENVIRONMENT, sha)
 
 
 def test_asset_key_refuses_non_asset_jobs_and_keys_refuse_unregistered():
@@ -262,7 +262,7 @@ def test_catalog_jobs_validate_their_fields():
     with pytest.raises(ValidationError):
         FetchOsImage(tarball_sha256="v1.0.0")  # a tag no longer names an OS image
     with pytest.raises(ValidationError):
-        FetchPackage(sha256="XYZ")
+        FetchSealedEnvironment(sha256="XYZ")
 
 
 def test_jobs_are_frozen_and_reject_extra_fields():

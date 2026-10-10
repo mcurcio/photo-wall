@@ -1,26 +1,35 @@
 name: V2 node components
 
 # Builds the exact V2 node component set ONCE per pipeline run, for every job that needs it:
-# base-image.yml bakes node-base.deb and node-display.deb into the squashfs and the seal ships
-# the set (the photo-wall-node-components-<revision> artifact), and each node-pid1.yml leg boots
-# it under real systemd from the PID1 fixture derived here (the -node-pid1-fixture- artifact:
-# the stage targets, fixture.json and the fixture image as a `docker save` archive). Called by
-# pipeline.yml (its `node-components` job) when the plan lists either consumer, and by
-# base-image.yml and node-pid1.yml themselves only when dispatched by hand. Native arm64
-# (ubuntu-24.04-arm): the components and the fixture image are arm64.
+# base-image.yml installs photo-wall-node from the same run's local repo into the squashfs and
+# the seal ships the set (the photo-wall-node-components-<revision> artifact), software-e2e.yml
+# runs the Player from its app root, and each node-pid1.yml leg boots it under real systemd from
+# the PID1 fixture derived here (the -node-pid1-fixture- artifact: the stage targets, fixture.json
+# and the fixture image as a `docker save` archive). Called by pipeline.yml (its `node-components`
+# job) when the plan lists a consumer, and by base-image.yml and node-pid1.yml themselves only
+# when dispatched by hand. Native arm64 (ubuntu-24.04-arm): everything here is arm64.
 #
-# The component builds run on a docker-container builder with a GHA BuildKit cache per role
-# (the buildkit-cache action; scripts/node_build_inputs.py): the display build, and each sealed
-# environment's dependency layer, are reused across commits; only what changed rebuilds. A hit
-# reuses exactly the layer a cold build recorded, so the cache changes no byte: node-display.deb
-# is reproducible (SOURCE_DATE_EPOCH) and a sealed environment's digest names its image ID,
-# which BuildKit derives from the layers and the pin's SOURCE_DATE_EPOCH.
+# The `debs` job is step 1 of decision 0019: the one source package (debian/) built by
+# dpkg-buildpackage in the pinned build container (its import check refusing any Depends that
+# drifts from the imports, scripts/import_check.py), and the local repo beside upstream's
+# nats-server .deb and python3-nats (debian-packaging/build-repo.sh), built twice (the two indexes,
+# which name every .deb's sha256, must agree) and proved by installing the whole set through it
+# (tests/debs/test_local_repo.py), by the display and frame client's installed files and ABI
+# identity (tests/debs/test_display_packages.py), by each Python context importing from its
+# runtime directories alone (tests/debs/test_context_packages.py) and by photo-wall-node's
+# launchers, units, users and base ABI (tests/debs/test_node_package.py), and by stage 1's package,
+# whose initramfs-tools hook's tree imports stage 1 and runs its uplink on the device's runtime in
+# that container (tests/debs/test_netboot_init.py, scripts/uplink_device_harness.py). It uploads
+# the repo as photo-wall-node-debs-<revision>.
 #
-# Above that, the whole output is cached: the set is a function of its inputs alone and names
-# no commit (scripts/node_component_inputs.py), so the key is the digest of the very input
-# manifest the build records, computed by the same code before building. A hit restores the set
-# (and, when asked, its PID1 fixture) instead of building; either way the set is then stamped
-# with this revision, which refuses a set whose recorded inputs are not this revision's.
+# The `build` job is steps 3 and 4: the release roots, each a squashfs image mmdebstrap builds
+# from the snapshot pin and the repo and the seal hook seals (debian-packaging/build-root.sh, the
+# app root from photo-wall-player and the manager root from photo-wall-app-manager), then the
+# release writer (scripts/node_release_writer.py), which writes components.json and ships the
+# repo's .debs byte for byte. The roots are cached whole under a key over their inputs (the
+# recipe, the ABI and the Package=Version lines each root resolves), written from main only; on
+# a miss each root is built twice and two digests must agree. The writer and its proofs run on
+# every run, so the set's .debs and ABI are always this run's.
 on:
   workflow_call:
     inputs:
@@ -42,11 +51,11 @@ defaults:
     shell: bash
 
 jobs:
-  build:
+  debs:
     runs-on: ubuntu-24.04-arm
-    # Cold about 9 min (components 6, fixture 3); with the BuildKit caches warm, a few minutes;
-    # on a whole-output hit, the restore and the stamp.
-    timeout-minutes: 40
+    # The container's layers come from the BuildKit cache; each build of the tree is about a
+    # minute, the install proof under one.
+    timeout-minutes: 20
     env:
       REVISION: ${{ inputs.revision }}
     steps:
@@ -55,151 +64,182 @@ jobs:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
-      - id: docker-hub-mirror
-        uses: ./.github/actions/docker-hub-mirror
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
+
+      - name: Build the Debian packages and the local repo, twice
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
+        run: |
+          set -eu
+          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs"
+          debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs-again"
+          # Content-derived versions are only as good as the bytes behind them.
+          if ! cmp "$RUNNER_TEMP/node-debs/Packages" "$RUNNER_TEMP/node-debs-again/Packages"; then
+            diff "$RUNNER_TEMP/node-debs/Packages" "$RUNNER_TEMP/node-debs-again/Packages" || true
+            echo "::error::two builds of $REVISION gave different packages"
+            exit 1
+          fi
 
       - uses: ./.github/actions/python-uv
 
       - name: Install the locked environment
         run: uv sync --frozen
 
-      - name: Compute the component input digest
+      # tests/debs/test_netboot_init.py also runs uplink on the device's runtime (decision 0014
+      # §11): stage 1's tree as photo-wall-netboot-init's initramfs hook copies it, imported and
+      # run under the pinned trixie python3 and OpenSSL of the build container with nothing but
+      # the stdlib (`python3 -I -S`), against stdlib stand-in servers over verified TLS
+      # (scripts/uplink_device_harness.py). The runner's venv mints the test certificates.
+      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports, the composition, stage 1)
+        env:
+          PHOTO_WALL_LOCAL_REPO: ${{ runner.temp }}/node-debs
+        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py tests/debs/test_context_packages.py tests/debs/test_node_package.py tests/debs/test_netboot_init.py
+
+      - name: Upload the local repo
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: photo-wall-node-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-debs/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
+
+  build:
+    needs: debs
+    runs-on: ubuntu-24.04-arm
+    # On a roots cache miss, each root built twice (the app about 2 min a build, the manager
+    # under 1); on a hit, the resolution, the restore and the writer, about 2 min.
+    timeout-minutes: 30
+    env:
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/python-uv
+
+      - name: Install the locked environment
+        run: uv sync --frozen
+
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-debs
+
+      # The roots container (mmdebstrap and squashfs-tools at the pin) comes from its BuildKit
+      # cache; build-root.sh loads it, for the resolution and for a build.
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
+
+      # The roots' cache key (scripts/node_release_writer.py `key`): the recipe, the ABI the
+      # repo's photo-wall-node and photo-wall-node-display write, and the Package=Version lines
+      # mmdebstrap resolves for each root from the pin and this run's repo.
+      - name: Compute the roots' cache key
         id: inputs
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
         run: |
           set -eu
-          digest=$(.venv/bin/python -m scripts.node_component_inputs key \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION")
+          work="$RUNNER_TEMP/roots-key"
+          mkdir -p "$work"
+          unpack() {
+            deb=$(debian-packaging/repo-file.sh "$RUNNER_TEMP/node-debs" "$1")
+            dpkg-deb --fsys-tarfile "$deb" | tar -xO "./$2" > "$3"
+          }
+          unpack photo-wall-node usr/lib/photo-wall/node/abi.json "$work/base.json"
+          unpack photo-wall-node-display usr/lib/photo-wall/node-display/abi.json "$work/display.json"
+          for package in photo-wall-player photo-wall-app-manager; do
+            debian-packaging/build-root.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
+              --package "$package" --resolve > "$work/$package.resolved"
+          done
+          digest=$(.venv/bin/python -m scripts.node_release_writer key \
+            --abi "$work/base.json" "$work/display.json" \
+            --resolved "photo-wall-player=$work/photo-wall-player.resolved" \
+                       "photo-wall-app-manager=$work/photo-wall-app-manager.resolved")
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # Exact keys only, never a prefix fallback: a set built from other inputs is not this one.
-      # The fixture is derived from the set it was built with, so it is cached WITH that set.
-      - name: Restore the component set
-        id: restore-components
-        if: ${{ !inputs.pid1-fixture }}
+      # Exact keys only, never a prefix fallback: roots built from other inputs are not these.
+      - name: Restore the release roots
+        id: restore
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: ${{ runner.temp }}/node-components
-          key: node-components-v1-${{ steps.inputs.outputs.digest }}
+          path: ${{ runner.temp }}/node-roots
+          key: node-roots-v1-${{ steps.inputs.outputs.digest }}
 
-      - name: Restore the component set and its PID1 fixture
-        id: restore-pid1
-        if: inputs.pid1-fixture
-        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ${{ runner.temp }}/node-components
-            ${{ runner.temp }}/node-pid1-fixture.tar.zst
-          key: node-pid1-v1-${{ steps.inputs.outputs.digest }}
-
-      - name: Resolve the cache outcome
-        id: cached
+      - name: Build the release roots, each twice
+        if: steps.restore.outputs.cache-hit != 'true'
         env:
-          HIT: ${{ steps.restore-components.outputs.cache-hit == 'true' || steps.restore-pid1.outputs.cache-hit == 'true' }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
         run: |
           set -eu
-          echo "hit=$HIT" >> "$GITHUB_OUTPUT"
-          # A failed restore can leave part of an output behind; the build refuses an existing one.
-          if [ "$HIT" != true ]; then
-            rm -rf "$RUNNER_TEMP/node-components" "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
-          fi
+          # A failed restore can leave part of an output behind; build-root.sh refuses one.
+          rm -rf "$RUNNER_TEMP/node-roots"
+          mkdir "$RUNNER_TEMP/node-roots"
+          for pair in photo-wall-player:app photo-wall-app-manager:manager-primary; do
+            debian-packaging/build-root.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
+              --package "${pair%%:*}" --output "$RUNNER_TEMP/node-roots/${pair#*:}.squashfs"
+          done
 
-      # Not made current (use: false): the fixture image builds FROM a local image, on Docker's
-      # daemon-backed default builder (scripts/container_build.py), which this must not replace.
-      - name: Set up the container build cache
-        if: steps.cached.outputs.hit != 'true'
-        id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
-        with:
-          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
-          use: false
-
-      # The builders run `docker buildx build` themselves, which reads the GHA cache service's
-      # URL and token from the ACTIONS_* environment that only actions see: this exports it.
-      - name: Expose the GHA cache service to the builders
-        if: steps.cached.outputs.hit != 'true'
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
-
-      - name: Resolve the node build cache scopes
-        if: steps.cached.outputs.hit != 'true'
-        id: cache
-        uses: ./.github/actions/buildkit-cache
-        with:
-          name: node-{role}
-          architecture: arm64
-
-      - name: Build the immutable V2 node components
-        if: steps.cached.outputs.hit != 'true'
-        env:
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
-          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.cache.outputs.to }}
-        run: |
-          set -eu
-          SOURCE_DATE_EPOCH=$(python3 scripts/debian_packages.py epoch)
-          export SOURCE_DATE_EPOCH
-          .venv/bin/python -m scripts.build_node_components \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --output "$RUNNER_TEMP/node-components"
-
-      # The targets are the app repacked: their environments read the app's cache (the same
-      # dependency layer) and write none, so the app's scope keeps the app's own index.
-      - name: Build the stage targets and the PID1 fixture image
-        if: steps.cached.outputs.hit != 'true' && inputs.pid1-fixture
-        env:
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
-        run: |
-          set -eu
-          fixture="$RUNNER_TEMP/node-pid1-fixture"
-          .venv/bin/python -m scripts.build_node_pid1_fixture \
-            --components "$RUNNER_TEMP/node-components" --output "$fixture"
-          image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' \
-            "$fixture/fixture.json")
-          docker save "$image" -o "$fixture/image.tar"
-          # One archive, zstd on every core: the targets' environments and the image are about
-          # 3 GB raw, a third of that compressed.
-          tar -C "$RUNNER_TEMP" -cf - node-pid1-fixture \
-            | zstd -T0 -3 -q -o "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
-
-      # Written only from main, before the stamp (the cached set names no commit): every pull
-      # request reads main's entries (docs/module-appliance-ci.md, "Limits"), and its own, about
-      # 1 GB a set and 2 with the fixture, would only crowd them out.
-      - name: Save the component set
-        if: steps.cached.outputs.hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      # Written only from main (the roots name no commit): every pull request reads main's
+      # entries (docs/module-appliance-ci.md, "Limits"), and its own would crowd them out.
+      - name: Save the release roots
+        if: steps.restore.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
-          path: ${{ runner.temp }}/node-components
-          key: node-components-v1-${{ steps.inputs.outputs.digest }}
+          path: ${{ runner.temp }}/node-roots
+          key: node-roots-v1-${{ steps.inputs.outputs.digest }}
 
-      - name: Save the component set and its PID1 fixture
-        if: steps.cached.outputs.hit != 'true' && inputs.pid1-fixture && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ${{ runner.temp }}/node-components
-            ${{ runner.temp }}/node-pid1-fixture.tar.zst
-          key: node-pid1-v1-${{ steps.inputs.outputs.digest }}
-
-      # The only record of the commit: written after the build or the restore, and refused when
-      # the set's recorded inputs are not this revision's (the release seal checks it).
-      - name: Stamp the component set with this revision
+      # Always this run's: the .debs, the ABI and the references, refused unless the roots were
+      # sealed for this repo's packages and ABI and fit their lines; stamped with this revision.
+      - name: Write the component set
+        env:
+          DIGEST: ${{ steps.inputs.outputs.digest }}
         run: |
-          .venv/bin/python -m scripts.node_component_inputs stamp \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --components "$RUNNER_TEMP/node-components"
+          .venv/bin/python -m scripts.node_release_writer write \
+            --repo "$RUNNER_TEMP/node-debs" --images "$RUNNER_TEMP/node-roots" \
+            --output "$RUNNER_TEMP/node-components" --revision "$REVISION" \
+            --inputs-sha256 "$DIGEST"
 
-      # The shipped squashfs images (E2c; the build already refused two builds with different
-      # digests): each is its ref's digest and size, has the contract's format, and, mounted
-      # read-only, passes the full verify_root (the per-file proof's one home).
-      - name: Prove the shipped environment images (ref, format, mount, verify_root)
+      - name: Prove the set ships the local repo's packages and their ABI
+        run: |
+          set -eu
+          for pair in photo-wall-node:node-base.deb photo-wall-node-display:node-display.deb \
+                      photo-wall-player:app.deb photo-wall-app-manager:manager-primary.deb; do
+            deb=$(debian-packaging/repo-file.sh "$RUNNER_TEMP/node-debs" "${pair%%:*}")
+            cmp "$deb" "$RUNNER_TEMP/node-components/${pair#*:}"
+          done
+          python3 - "$RUNNER_TEMP/roots-key/base.json" "$RUNNER_TEMP/roots-key/display.json" \
+            "$RUNNER_TEMP/node-components/components.json" <<'PYCODE'
+          import json, sys
+          packaged = {**json.load(open(sys.argv[1])), **json.load(open(sys.argv[2]))}
+          shipped = json.load(open(sys.argv[3]))["abi"]
+          if shipped != packaged:
+              raise SystemExit(f"components.json abi {shipped} is not the packages' {packaged}")
+          PYCODE
+
+      # The shipped squashfs images, mounted read-only: each is its ref's digest and size, has
+      # the contract's format and passes the full verify_root; no setid file, no .pyc, an empty
+      # /etc/hostname, the inventory the image's own (tests/debs/test_roots.py).
+      - name: Prove the release roots (ref, format, mount, verify_root, the seal)
         env:
           PHOTO_WALL_IMAGE_MOUNT_TESTS: "1"
           PHOTO_WALL_NODE_COMPONENTS: ${{ runner.temp }}/node-components
-        run: .venv/bin/python -m pytest -q tests/node/apps/test_environment_image.py
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+        run: .venv/bin/python -m pytest -q tests/node/apps/test_environment_image.py tests/debs/test_roots.py
 
       # The seal ships these bytes on a release; a pull request's consumers need them for a day.
-      # About 1 GB, mostly the environments: the fastest zip level.
       - name: Upload exact V2 node components
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -209,9 +249,60 @@ jobs:
           compression-level: 1
           retention-days: ${{ github.event_name == 'pull_request' && 1 || 7 }}
 
+  # The real-PID1 scenarios' fixture (tests/node_pid1_fixture/build.sh): the image, FROM the
+  # build container, installing photo-wall-node from this run's repo, and two stage targets
+  # built like the app root, once each. Not cached: it derives from the repo and the set.
+  pid1-fixture:
+    if: inputs.pid1-fixture
+    needs: [debs, build]
+    runs-on: ubuntu-24.04-arm
+    # The Player target about 2 min, the failing stub and the image about 1 each.
+    timeout-minutes: 30
+    env:
+      REVISION: ${{ inputs.revision }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-debs
+
+      # The fixture names its components by the absolute path node-pid1.yml downloads them to.
+      - name: Download the V2 node components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-components-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-components
+
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
+        with:
+          write: 'false'
+
+      - name: Build the stage targets and the PID1 fixture image
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+        run: |
+          set -eu
+          fixture="$RUNNER_TEMP/node-pid1-fixture"
+          tests/node_pid1_fixture/build.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
+            --components "$RUNNER_TEMP/node-components" --output "$fixture"
+          image=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' \
+            "$fixture/fixture.json")
+          docker save "$image" -o "$fixture/image.tar"
+          # One archive, zstd on every core.
+          tar -C "$RUNNER_TEMP" -cf - node-pid1-fixture \
+            | zstd -T0 -3 -q -o "$RUNNER_TEMP/node-pid1-fixture.tar.zst"
+
       # Already compressed: stored, not zipped again.
       - name: Upload the PID1 fixture
-        if: inputs.pid1-fixture
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: photo-wall-node-pid1-fixture-${{ inputs.revision }}

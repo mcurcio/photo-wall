@@ -12,6 +12,8 @@ The [roadmap](roadmap.md) orders product work by the power user's journey, from 
 
 The [Player node architecture](player-architecture.md) describes the node as built: processes, supervision, the guarantee and liveness signal of each layer, telemetry to Central, and observed gaps.
 
+The [Debian packaging module](module-debian-packaging.md) describes how the Node's software is built as Debian packages, put into images and proved ([decision 0019](decisions/0019-debian-packaging-with-debhelper.md)).
+
 The [4 GB node memory design](node-4gb-memory-design.md) makes a 4 GB Raspberry Pi 5 a supported Player: memory classes, the memory controller, boot-stage reporting to Central and the console, and the image-format roots recorded for a later gate.
 
 ## Reading order and ownership

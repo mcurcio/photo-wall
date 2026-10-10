@@ -1,7 +1,6 @@
-"""Allowlist extraction of the netboot base squashfs from a release's base tarball.
+"""Allowlist extraction of the base squashfs from a release's base tarball (a node offer's base).
 
-Ported from `central/netboot_base.py` (`_extract_squashfs` and its helpers). The tarball's member
-layout is contracts/release.py's (`BASE_ROOT` and the names within it), which the packager
+The tarball's member layout is contracts/release.py's (`BASE_ROOT` and the names within it), which the packager
 writes. Only two exact member names are read -- never `extractall` -- and only the FIRST
 occurrence of each, so a hostile archive (traversal, symlink, device, duplicate name) writes
 nothing. `extract_squashfs` blocks (gzip + sha256 over up to 1 GiB): call it in a thread.

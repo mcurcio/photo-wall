@@ -252,22 +252,19 @@ def test_the_controller_serves_the_kernel_listener_at_the_display_feed_path():
 # -- packaging -----------------------------------------------------------------------------
 
 
-def test_the_base_declares_the_display_feed_directory_and_group(tmp_path):
-    from scripts.build_node_base_deb import POLICIES, stage_tree
-    from scripts.module_closure import closure_for
+def test_the_base_declares_the_display_feed_directory_and_group():
+    from node.launcher_closures import closure
 
-    modules = set(closure_for(POLICIES["display-controller"], repo=REPO).modules)
+    modules = set(closure("display-controller").modules)
     assert {"appliance.feed", "appliance.feed_socket"} <= modules
     assert not [module for module in modules if module.startswith("appliance.node")]
-    root = tmp_path / "package"
-    stage_tree(REPO, root)
-    tmpfiles = (root / "usr/lib/tmpfiles.d/photo-wall-node.conf").read_text().splitlines()
+    tmpfiles = (REPO / "debian/photo-wall-node.tmpfiles").read_text().splitlines()
     assert "d /run/photo-wall-display-feed 0750 pw-display pw-node-feeds -" in tmpfiles
-    users = (root / "usr/lib/sysusers.d/photo-wall-node.conf").read_text().splitlines()
+    users = (REPO / "debian/photo-wall-node.sysusers").read_text().splitlines()
     # The group comes from the controller's unit only: Weston (PAMName=login) and the overlay
     # client would inherit a sysusers membership (E-AP1-2).
     assert not [line for line in users if line.startswith("m pw-display ")]
-    unit = (root / "lib/systemd/system/photo-wall-display-controller.service").read_text()
+    unit = (REPO / "appliance/systemd/photo-wall-display-controller.service").read_text()
     lines = unit.splitlines()
     assert "SupplementaryGroups=pw-node-feeds" in lines
     assert any(line.startswith("ReadWritePaths=")
@@ -275,15 +272,12 @@ def test_the_base_declares_the_display_feed_directory_and_group(tmp_path):
                for line in lines)
 
 
-def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare(tmp_path):
+def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare():
     """appliance.kernel.display_paths is the one home the broker and the controller read; the
     packaged units and tmpfiles.d must say the same, so a unit edit cannot strand a reader."""
     from appliance.kernel import display_paths as paths
-    from scripts.build_node_base_deb import stage_tree
 
-    root = tmp_path / "package"
-    stage_tree(REPO, root)
-    units = root / "lib/systemd/system"
+    units = REPO / "appliance/systemd"
     display = (units / paths.DISPLAY_UNIT).read_text().splitlines()
     (execstart,) = [line for line in display if line.startswith("ExecStart=")]
     arguments = execstart.split()
@@ -292,7 +286,7 @@ def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare(tmp_
     assert f"RuntimeDirectory={paths.RUNTIME.name}" in display
     (writable,) = [line for line in display if line.startswith("ReadWritePaths=")]
     assert {str(paths.RUNTIME), str(paths.WAYLAND_DIRECTORY)} <= set(writable.split("=", 1)[1].split())
-    tmpfiles = (root / "usr/lib/tmpfiles.d/photo-wall-node.conf").read_text().splitlines()
+    tmpfiles = (REPO / "debian/photo-wall-node.tmpfiles").read_text().splitlines()
     assert f"d {paths.WAYLAND_DIRECTORY} 0750 pw-display pw-display -" in tmpfiles
     controller = (units / "photo-wall-display-controller.service").read_text().splitlines()
     assert f"BindsTo={paths.DISPLAY_UNIT}" in controller

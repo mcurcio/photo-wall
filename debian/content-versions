@@ -1,0 +1,64 @@
+#!/bin/sh
+# dh_gencontrol for every binary package at its content-derived version, 0+<12 hex>
+# (decision 0019 Q1), so an unchanged package keeps its version and its bytes.
+#
+# The hex is the start of a sha256 over what the package installs: every entry of its staged
+# tree, debian/<package>/ (type, mode, path, link target, file bytes), with its control file as
+# a first dh_gencontrol pass writes it, less the Version line, so its expanded Depends count.
+#
+# A package names a sibling at its exact version as `<sibling> (= ${pw-version:<sibling>})`.
+# Packages are visited leaves first, so each such substvar is set before the package that uses
+# it; a pin no visit can satisfy (a cycle, or a sibling this build does not produce) is refused.
+# Every argument is passed on to each dpkg-gencontrol call (debian/rules passes ${nats:Version}).
+#
+# A package may carry a hook, debian/<package>.pre-identity: if that file is executable, it runs
+# after the package's first pass and before its identity hash, given the package name, so what it
+# writes (the base's abi.json, from the expanded Depends) counts in the version. It may write only
+# under debian/<package>/.
+set -eu
+
+identity() {
+	( cd "debian/$1"
+	  find . -printf '%y %m %p -> %l\n' | LC_ALL=C sort
+	  find . -type f ! -path ./DEBIAN/control -print0 | LC_ALL=C sort -z | xargs -0r sha256sum
+	  sed '/^Version:/d' DEBIAN/control ) | sha256sum | cut -c1-12
+}
+
+# The siblings a package's stanza pins with ${pw-version:...}.
+pins() {
+	awk -v RS= -v package="$1" '$0 ~ ("(^|\n)Package: " package "(\n|$)")' debian/control |
+		grep -o 'pw-version:[a-z0-9.+-]*' | cut -d: -f2 | LC_ALL=C sort -u || true
+}
+
+versions=""            # -Vpw-version:<package>=<version>, for every package visited
+visited=" "
+pending=$(dh_listpackages)
+while [ -n "$pending" ]; do
+	waiting=""
+	for package in $pending; do
+		ready=yes
+		for sibling in $(pins "$package"); do
+			case "$visited" in *" $sibling "*) ;; *) ready=no ;; esac
+		done
+		if [ "$ready" = no ]; then
+			waiting="$waiting $package"
+			continue
+		fi
+		# shellcheck disable=SC2086 # $versions is a list of arguments
+		dh_gencontrol -p"$package" -- "$@" $versions
+		if [ -x "debian/$package.pre-identity" ]; then
+			"debian/$package.pre-identity" "$package"
+		fi
+		version="0+$(identity "$package")"
+		# shellcheck disable=SC2086
+		dh_gencontrol -p"$package" -- -v"$version" "$@" $versions
+		versions="$versions -Vpw-version:$package=$version"
+		visited="$visited$package "
+	done
+	# shellcheck disable=SC2086 # word splitting normalises the two lists
+	if [ "$(echo $waiting)" = "$(echo $pending)" ]; then
+		echo "content-versions: no package can be visited among:$waiting" >&2
+		exit 1
+	fi
+	pending=$waiting
+done

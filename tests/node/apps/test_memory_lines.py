@@ -25,12 +25,15 @@ from appliance.kernel.capacity import (
     content_line,
     line,
 )
-from scripts.build_node_base_deb import UNITS
-from scripts.build_node_components import check_image_lines
+from scripts.node_release_writer import WriterError, check_line
 
 SYSTEMD = REPO / "appliance/systemd"
-# The unit files node-base-deb ships (scripts/release_plan.py, its systemd globs).
-NODE_UNITS: Final = tuple(sorted((*SYSTEMD.glob("photo-wall-*.service"), *SYSTEMD.glob("photowall*.slice"))))
+# The unit files photo-wall-node installs (debian/photo-wall-node.install, its systemd globs).
+NODE_UNITS: Final = tuple(sorted(
+    path for line in (REPO / "debian/photo-wall-node.install").read_text().splitlines()
+    if line.split()[1:] == ["usr/lib/systemd/system"]
+    for path in REPO.glob(line.split()[0])))
+UNITS: Final = frozenset(path.name for path in NODE_UNITS)
 SIZES = {"K": 1024, "M": MIB, "G": GIB}
 
 
@@ -61,7 +64,7 @@ def test_every_line_unit_ships_and_sits_in_its_lines_slice() -> None:
     # The base ships every line's file (a slice PID1 made up from a Slice= alone would carry no cap),
     # and a member unit's Slice= is its parent line's slice, so cgroup_path is where PID1 puts it.
     for item in (entry for entry in LINES if entry.cgroup is not None):
-        assert item.cgroup in UNITS, f"line {item.name}: node-base-deb does not ship {item.cgroup}"
+        assert item.cgroup in UNITS, f"line {item.name}: photo-wall-node does not ship {item.cgroup}"
         if item.parent is not None:
             unit = _parse_unit((SYSTEMD / item.cgroup).read_text())
             assert unit["Service"]["Slice"] == [line(item.parent).cgroup], (item, unit["Service"].get("Slice"))
@@ -114,7 +117,9 @@ def test_a_line_table_that_leaves_no_content_line_is_refused() -> None:
 
 
 def test_a_shipped_image_over_its_line_fails_the_component_build() -> None:
-    check_image_lines({"app": line("app-image").cap_bytes, "manager-primary": line("manager-image").cap_bytes})
-    for sizes in ({"app": 321 * MIB}, {"manager-primary": line("manager-image").cap_bytes + 1}):
-        with pytest.raises(ValueError, match="^node_components_image_over_line$"):
-            check_image_lines(sizes)
+    """The release writer (scripts/node_release_writer.py) ships no image over its line."""
+    check_line("app", line("app-image").cap_bytes)
+    check_line("manager-primary", line("manager-image").cap_bytes)
+    for role, size in (("app", 321 * MIB), ("manager-primary", line("manager-image").cap_bytes + 1)):
+        with pytest.raises(WriterError, match="^node_components_image_over_line$"):
+            check_line(role, size)

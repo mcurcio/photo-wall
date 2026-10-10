@@ -49,6 +49,19 @@ from scripts.demo_wall import (
 from scripts.harness_bundle import IMMICH_RUNTIME_BUNDLE, WALL_HELPER_BUNDLE
 
 
+def _app_image(directory: Path, revision: str, data: bytes = b"app root") -> Path:
+    """A node component set's app image as node_release_writer leaves it: app.squashfs beside
+    components.json (its ref) and revision.json (the stamp)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    image = directory / "app.squashfs"
+    image.write_bytes(data)
+    write_json(directory / "components.json", {"app_environment": {
+        "environment_sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data)}})
+    write_json(directory / "revision.json", {"schema": 1, "revision": revision,
+                                             "inputs_sha256": "a" * 64})
+    return image
+
+
 def test_daemon_image_build_explicitly_selects_and_loads_default_builder(tmp_path):
     assert daemon_image_build("wall:local", tmp_path) == [
         "docker", "buildx", "build", "--builder", "default", "--load",
@@ -468,7 +481,7 @@ def test_core_image_override_requires_paired_lowercase_sha256_ids(central, worke
 def test_invalid_core_image_override_is_rejected_before_state_creation(tmp_path):
     state = tmp_path / "state"
     with pytest.raises(DemoError, match="core_images_must_be_paired"):
-        DemoHost.create(state, tmp_path / "fixture", tmp_path / "wheelhouse", "baseline",
+        DemoHost.create(state, tmp_path / "fixture", tmp_path / "components/app.squashfs", "baseline",
                         central_image="sha256:" + "a" * 64)
     assert not state.exists()
 
@@ -481,27 +494,22 @@ def test_core_image_override_defaults_are_historical_and_persisted(tmp_path, mon
             self.project = "pw-immich-fixture-123456abcdef"
 
     monkeypatch.setattr(immich_fixture, "FixtureHost", FakeFixture)
-    wheelhouse = tmp_path / "wheelhouse"
-    (wheelhouse / "wheels").mkdir(parents=True)
-    requirements = wheelhouse / "requirements.txt"
-    requirements.write_text("")
-    write_json(wheelhouse / "inventory.json", {
-        "revision": "dda8e98c5c54dc8ca9c007599f8a919eadbd5248",
-        "requirements_sha256": hashlib.sha256(b"").hexdigest(), "wheels": [],
-    })
+    app_image = _app_image(tmp_path / "components", "dda8e98c5c54dc8ca9c007599f8a919eadbd5248")
     override = {"central": "sha256:" + "c" * 64, "worker": "sha256:" + "d" * 64}
-    host = DemoHost.create(tmp_path / "state", tmp_path / "fixture", wheelhouse, "baseline",
+    host = DemoHost.create(tmp_path / "state", tmp_path / "fixture", app_image, "baseline",
                            central_image=override["central"], worker_image=override["worker"])
     assert host.core_images == override
     marker = json.loads((host.state / "demo.json").read_text())
     assert marker["core_images"] == override
     assert marker["revision"] == PLAYER_REVISION
+    assert marker["app_image_ref"] == json.loads(
+        (app_image.parent / "components.json").read_text())["app_environment"]
 
     old_state = tmp_path / "old-state"
     old_state.mkdir()
     write_json(old_state / "demo.json", {
         "schema": 1, "project": "pw-wall-demo-123456abcdef", "state": str(old_state),
-        "immich_state": str(tmp_path / "fixture"), "wheelhouse": str(wheelhouse),
+        "immich_state": str(tmp_path / "fixture"), "app_image": str(app_image),
         "scenario": "baseline", "capture_start": 0,
     })
     old_host = DemoHost(old_state)
@@ -509,25 +517,36 @@ def test_core_image_override_defaults_are_historical_and_persisted(tmp_path, mon
     assert old_host.revision == PLAYER_REVISION
 
 
-def test_nonhistorical_revision_requires_paired_images_and_matching_wheelhouse(tmp_path, monkeypatch):
+def test_nonhistorical_revision_requires_paired_images_and_matching_app_image(tmp_path, monkeypatch):
     revision = "e" * 40
     monkeypatch.setattr("scripts.demo_wall._git_output",
                         lambda *args: "commit" if args[:2] == ("cat-file", "-t") else "")
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    write_json(wheelhouse / "inventory.json", {"revision": PLAYER_REVISION})
+    app_image = _app_image(tmp_path / "components", PLAYER_REVISION)
     with pytest.raises(DemoError, match="revision_requires_core_images"):
-        validate_selected_revision(revision, wheelhouse)
+        validate_selected_revision(revision, app_image)
     with pytest.raises(DemoError, match="player_revision_mismatch"):
-        validate_selected_revision(revision, wheelhouse, "sha256:" + "a" * 64,
+        validate_selected_revision(revision, app_image, "sha256:" + "a" * 64,
                                    "sha256:" + "b" * 64)
+
+
+def test_an_app_image_that_is_not_its_components_ref_is_refused_before_state(tmp_path, monkeypatch):
+    import scripts.immich_fixture as immich_fixture
+
+    class FakeFixture:
+        def __init__(self, state):
+            self.project = "pw-immich-fixture-123456abcdef"
+
+    monkeypatch.setattr(immich_fixture, "FixtureHost", FakeFixture)
+    app_image = _app_image(tmp_path / "components", PLAYER_REVISION)
+    app_image.write_bytes(b"another root")
+    with pytest.raises(DemoError, match="player_image_mismatch"):
+        DemoHost.create(tmp_path / "state", tmp_path / "fixture", app_image, "baseline")
+    assert not (tmp_path / "state").exists()
 
 
 def test_nonhistorical_source_mismatch_is_rejected_before_demo_creation(tmp_path, monkeypatch):
     revision = "f" * 40
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    write_json(wheelhouse / "inventory.json", {"revision": revision})
+    app_image = _app_image(tmp_path / "components", revision)
     called = False
 
     def create(*args, **kwargs):
@@ -538,16 +557,14 @@ def test_nonhistorical_source_mismatch_is_rejected_before_demo_creation(tmp_path
     monkeypatch.setattr(DemoHost, "create", create)
     with pytest.raises(DemoError, match="core_revision_mismatch"):
         run_demo(
-            tmp_path / "state", tmp_path / "fixture", wheelhouse, "baseline", True,
+            tmp_path / "state", tmp_path / "fixture", app_image, "baseline", True,
             "sha256:" + "a" * 64, "sha256:" + "b" * 64, revision)
     assert not (tmp_path / "state").exists()
     assert not called
 
 
 def test_selected_historical_revision_rejects_tracked_core_drift(tmp_path, monkeypatch):
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    write_json(wheelhouse / "inventory.json", {"revision": PLAYER_REVISION})
+    app_image = _app_image(tmp_path / "components", PLAYER_REVISION)
 
     def git_probe(*args):
         if args[:2] == ("cat-file", "-t"):
@@ -558,14 +575,12 @@ def test_selected_historical_revision_rejects_tracked_core_drift(tmp_path, monke
 
     monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
     with pytest.raises(DemoError, match="core_dirty"):
-        validate_selected_revision(PLAYER_REVISION, wheelhouse)
+        validate_selected_revision(PLAYER_REVISION, app_image)
 
 
 def test_selected_revision_rejects_untracked_core_drift(tmp_path, monkeypatch):
     revision = "2" * 40
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    write_json(wheelhouse / "inventory.json", {"revision": revision})
+    app_image = _app_image(tmp_path / "components", revision)
 
     def git_probe(*args):
         if args[:2] == ("cat-file", "-t"):
@@ -576,15 +591,13 @@ def test_selected_revision_rejects_untracked_core_drift(tmp_path, monkeypatch):
 
     monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
     with pytest.raises(DemoError, match="core_dirty"):
-        validate_selected_revision(revision, wheelhouse,
+        validate_selected_revision(revision, app_image,
                                    "sha256:" + "a" * 64, "sha256:" + "b" * 64)
 
 
 def test_valid_selected_commit_allows_later_noncore_checkout_changes(tmp_path, monkeypatch):
     revision = "3" * 40
-    wheelhouse = tmp_path / "wheelhouse"
-    wheelhouse.mkdir()
-    write_json(wheelhouse / "inventory.json", {"revision": revision})
+    app_image = _app_image(tmp_path / "components", revision)
     probes = []
 
     def git_probe(*args):
@@ -594,7 +607,7 @@ def test_valid_selected_commit_allows_later_noncore_checkout_changes(tmp_path, m
         return ""
 
     monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
-    images = validate_selected_revision(revision, wheelhouse,
+    images = validate_selected_revision(revision, app_image,
                                         "sha256:" + "a" * 64, "sha256:" + "b" * 64)
     assert images == {"central": "sha256:" + "a" * 64, "worker": "sha256:" + "b" * 64}
     assert probes[0][:2] == ("cat-file", "-t")
@@ -611,7 +624,7 @@ def test_revision_must_be_lowercase_40_hex_before_git_or_filesystem_access(tmp_p
 
     monkeypatch.setattr("scripts.demo_wall._git_output", git_probe)
     with pytest.raises(DemoError, match="exact_revision_required"):
-        validate_selected_revision("G" * 40, tmp_path / "missing-wheelhouse")
+        validate_selected_revision("G" * 40, tmp_path / "missing/app.squashfs")
     assert not called
 
 
@@ -905,12 +918,9 @@ def _mock_audit_host(tmp_path, monkeypatch, mutation=None):
         "demo_wall.py": hashlib.sha256(harness.read_bytes()).hexdigest(),
     }}
     write_json(state / "contexts/helper/bundle.json", bundle)
-    wheelhouse = tmp_path / "wheelhouse"
-    (wheelhouse).mkdir()
-    write_json(wheelhouse / "inventory.json", {})
     host = object.__new__(DemoHost)
     host.state = state
-    host.marker = {"wheelhouse": str(wheelhouse)}
+    host.marker = {"app_image_ref": {"environment_sha256": "e" * 64, "size_bytes": 1}}
     expected = local_source_inventory()
     harness_sha = hashlib.sha256(harness.read_bytes()).hexdigest()
 
@@ -939,6 +949,7 @@ def test_source_audit_requires_exact_inventory_for_both_roles_and_retains_worker
     assert audit["files"] == audit["role_audits"]["worker"]["files"]
     assert audit["adapter_sha256"] == audit["role_audits"]["worker"]["adapter_sha256"]
     assert audit["harness_sha256"] == audit["role_audits"]["worker"]["harness_sha256"]
+    assert audit["player_image"] == {"environment_sha256": "e" * 64, "size_bytes": 1}
     assert json.loads((tmp_path / "state/runtime-provenance.json").read_text()) == audit
 
 

@@ -486,18 +486,11 @@ def test_observation_rows_pass_through_valid_metrics(monkeypatch):
 
 
 # The HostCore closure and the record directory's package line.
-def test_host_core_closure_carries_the_boot_report_reader_and_no_forbidden_module(tmp_path):
-    from scripts.build_node_base_deb import POLICIES, stage_tree
-    from scripts.module_closure import closure_for
-    modules = closure_for(POLICIES["host-core"], repo=REPO).modules
-    assert "appliance.kernel.boot_stage" in modules
-    forbidden = (*POLICIES["host-core"].forbidden, "appliance.apps.process_linux",
-                 "appliance.apps.environment", "appliance.apps.lifecycle_storage", "appliance.node.preparer")
-    assert not [module for module in modules
-                if any(module == name or module.startswith(name + ".") for name in forbidden)]
-    stage_tree(REPO, tmp_path / "package")  # the host-core deny list refuses a forbidden module itself
-    root = tmp_path / "package"
-    assert (root / "usr/lib/photo-wall-host-core/appliance/kernel/boot_stage.py").exists()
-    assert (root / "usr/lib/photo-wall-node-bootstrap/appliance/kernel/boot_stage.py").exists()
-    tmpfiles = (root / "usr/lib/tmpfiles.d/photo-wall-node.conf").read_text().splitlines()
+def test_host_core_closure_carries_the_boot_report_reader_and_no_forbidden_module():
+    from node.launcher_closures import closure
+
+    # Refused (ClosureError) when HostCore reaches the app lifecycle or the manager's modules.
+    assert "appliance.kernel.boot_stage" in closure("host-core").modules
+    assert "appliance.kernel.boot_stage" in closure("node-bootstrap").modules
+    tmpfiles = (REPO / "debian/photo-wall-node.tmpfiles").read_text().splitlines()
     assert f"d {boot_stage.DIRECTORY} 0755 root root -" in tmpfiles

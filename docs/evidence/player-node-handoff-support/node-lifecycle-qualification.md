@@ -5,7 +5,7 @@ actual sealed Player and manager, production base units and effect driver, real 
 owners and a disposable test database. Each scenario boots a fresh privileged arm64 container
 with systemd as PID 1, masks host and reboot actions, and removes only its own containers,
 database and archive copies. The [node-pid1 workflow](../../../.github/workflows/node-pid1.yml)
-runs the five scenarios as a parallel matrix whenever the release plan finds a node package,
+runs the six scenarios as a parallel matrix whenever the release plan finds a node package,
 a file the harness imports (Central's Python included) or the scenarios' own paths changed; the
 pipeline gate requires it. Every leg boots the one component set and fixture the run's
 [node-components workflow](../../../.github/workflows/node-components.yml) built.
@@ -19,12 +19,16 @@ acceptance, PXE boot or the absolute U1 graphics/kernel/panel/pre-display cases.
 
 ## Inputs and exact image checks
 
-[`scripts/build_node_pid1_fixture.py`](../../../scripts/build_node_pid1_fixture.py) takes one
-[`scripts/build_node_components.py`](../../../scripts/build_node_components.py) output (the
-builder base-image runs) and writes the nonrelease `success` target (the component Player at a
-higher version), the `failure` target (an entrypoint that exits), both sealed for the same ABI,
-and an arm64 image built FROM the node-display build image with exactly the supplied base and
-display packages and the compiled [headless module](../../../tests/node_pid1_fixture_head.c).
+`tests/node_pid1_fixture/build.sh` takes the run's local repo
+([`debian-packaging/build-repo.sh`](../../../debian-packaging/build-repo.sh)'s output) and the
+component set the release writer ([`scripts/node_release_writer.py`](../../../scripts/node_release_writer.py))
+wrote from it, and writes the nonrelease `success` target (the component Player at a higher
+version), the `failure` target (an `equivs` stub Player whose entry exits), both built by
+[`debian-packaging/build-root.sh`](../../../debian-packaging/build-root.sh) from the repo and so
+sealed for the same ABI, and an arm64 image built FROM the pinned Debian build container with
+`photo-wall-node` and the packages it pins installed by name from the repo
+([`tests/node_pid1_fixture/Dockerfile`](../../../tests/node_pid1_fixture/Dockerfile)) and the compiled
+[headless module](../../../tests/node_pid1_fixture_head.c).
 `PHOTO_WALL_NODE_PID1_FIXTURE` names that output; the tests skip without it, and fail instead
 under `PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1` (the CI job).
 
@@ -37,16 +41,23 @@ shared parent-directory metadata is not attributed to one package.
 
 ```sh
 docker compose -f tests/integration/compose.test-database.yml up -d --wait
-.venv/bin/python -m scripts.build_node_components --repository "$PWD" \
-  --revision "$(git rev-parse HEAD)" --output "$WORK/components"   # Linux: needs dpkg-deb
-.venv/bin/python -m scripts.build_node_pid1_fixture --components "$WORK/components" \
-  --output "$WORK/fixture"
+debian-packaging/build-repo.sh --output "$WORK/debs"
+mkdir "$WORK/roots"
+for pair in photo-wall-player:app photo-wall-app-manager:manager-primary; do
+  debian-packaging/build-root.sh --repo "$WORK/debs" --package "${pair%%:*}" \
+    --output "$WORK/roots/${pair#*:}.squashfs"
+done
+.venv/bin/python -m scripts.node_release_writer write --repo "$WORK/debs" --images "$WORK/roots" \
+  --output "$WORK/components" --revision "$REVISION" --inputs-sha256 "$INPUTS_SHA256"
+tests/node_pid1_fixture/build.sh --repo "$WORK/debs" --components "$WORK/components" --output "$WORK/fixture"
 PHOTO_WALL_NODE_PID1_FIXTURE="$WORK/fixture" PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 \
   .venv/bin/python scripts/test_local.py -q -m node_pid1 -k "$SCENARIO" \
   --basetemp "$WORK/run" tests/test_node_pid1.py
 ```
 
-`SCENARIO` is `success`, `failure`, `outage`, `reboot` or `refused`. Put `$WORK` on a volume
+`REVISION` is the commit the packages were built from (`build-repo.sh` and `build-root.sh` read the committed tree at `HEAD`) and `INPUTS_SHA256` any 64-hex digest naming the inputs (CI passes the roots' cache key from `node_release_writer key`).
+
+`SCENARIO` is `success`, `failure`, `outage`, `reboot`, `refused` or `join`. Put `$WORK` on a volume
 with about 10 GB free. Collection alone does not execute privileged Docker work.
 
 ## Scenarios, evidence and limits
