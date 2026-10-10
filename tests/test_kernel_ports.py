@@ -67,21 +67,14 @@ def test_value_invariants():
 
 
 def test_published_release_invariants():
-    release = PublishedRelease(tag="v1.0.0", is_prerelease=False, os_image=LOCATOR,
-                               upstream_version=UpstreamVersion(1.0, 1))
+    release = PublishedRelease(tag="v1.0.0", is_prerelease=False,
+                               node_problem="node_release_invalid",
+                               node_version=UpstreamVersion(1.0, 1))
     assert ReleaseListing((release,), etag='"e"', unchanged=False).releases == (release,)
-    assert PublishedRelease(tag="v1.0.0", is_prerelease=False, os_image=None,
-                            upstream_version=None).os_image is None
     with pytest.raises(ValueError):
-        PublishedRelease(tag="1.0.0", is_prerelease=False, os_image=LOCATOR, upstream_version=None)
-    with pytest.raises(ValueError):
-        PublishedRelease(tag="v1.0.0", is_prerelease=False,
-                         os_image=OriginLocator(url="https://x.test/a", sha256=None, size=1),
-                         upstream_version=None)
-    with pytest.raises(ValueError, match="invalid_unlisted_legacy"):
-        PublishedRelease(tag="v1.0.0", is_prerelease=True, os_image=LOCATOR,
-                         upstream_version=None, node_problem="node_release_invalid",
-                         legacy=False)
+        PublishedRelease(tag="1.0.0", is_prerelease=False, node_problem="node_release_invalid")
+    with pytest.raises(ValueError, match="invalid_is_prerelease"):
+        PublishedRelease(tag="v1.0.0", is_prerelease=None)
     with pytest.raises(ValueError):
         ReleaseListing((release,), etag=None, unchanged=True)
 

@@ -110,9 +110,8 @@ class Upstream:
         data = self.files.get(path)
         return httpx.Response(404) if data is None else httpx.Response(200, content=data)
 
-    def origin(self, *, include_prereleases: bool = False) -> GitHubReleaseOrigin:
-        return GitHubReleaseOrigin(REPO, transport=httpx.MockTransport(self.handle),
-                                   include_prereleases=include_prereleases)
+    def origin(self) -> GitHubReleaseOrigin:
+        return GitHubReleaseOrigin(REPO, transport=httpx.MockTransport(self.handle))
 
 
 def listed(upstream: Upstream, **options):
@@ -170,17 +169,14 @@ def test_a_transport_failure_still_aborts_the_whole_listing():
         listed(upstream)
 
 
-@pytest.mark.parametrize("include_prereleases", [False, True])
-def test_a_node_prerelease_is_listed_whatever_the_legacy_flag(include_prereleases):
+def test_a_node_prerelease_is_listed():
     upstream = Upstream()
     upstream.put(node_upload("v2.1.0-rc.1"), prerelease=True)
-    release = listed(upstream, include_prereleases=include_prereleases)["v2.1.0-rc.1"]
+    release = listed(upstream)["v2.1.0-rc.1"]
     assert release.is_prerelease and release.node_publication is not None
-    # With the legacy flag off its legacy facts were not read: no V1 row is ever written.
-    assert release.legacy is include_prereleases
 
 
-def test_a_prerelease_without_a_node_manifest_stays_unlisted_when_the_flag_is_off():
+def test_a_prerelease_without_a_node_manifest_stays_unlisted():
     upstream = Upstream()
     upstream.entries["v2.1.0-rc.1"] = {"tag_name": "v2.1.0-rc.1", "draft": False,
                                        "prerelease": True, "assets": []}

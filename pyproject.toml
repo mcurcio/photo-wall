@@ -163,7 +163,7 @@ ignore_imports = [
   "appliance.host.host_runner -> appliance.node.recovery_linux",
   "appliance.boot.node_bootstrap -> appliance.node.preparer",
 ]
-exhaustive_ignores = ["app_launcher", "process_identity"]
+exhaustive_ignores = ["process_identity"]
 
 [[tool.importlinter.contracts]]
 # E3b design §7.1: siblings (`|`) never import each other; `epoch` is the bottom.

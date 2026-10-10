@@ -40,7 +40,7 @@ NOW = 10_000.0
 
 def published(tag: str, *, pre: bool = False, node_problem: str | None = None) -> PublishedRelease:
     """`tag` as listed; with `node_problem`, a release whose attached node manifest was refused."""
-    return PublishedRelease(tag, pre, None, None, node_problem=node_problem)
+    return PublishedRelease(tag, pre, node_problem=node_problem)
 
 
 def listing(*releases: PublishedRelease, etag: str | None = "e1") -> ReleaseListing:

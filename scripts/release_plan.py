@@ -236,7 +236,7 @@ _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian
                      "appliance/feed.py", "appliance/feed_socket.py",
                      "appliance/central_session/**", "appliance/host/**",
                      "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
-                     "appliance/app_launcher.py", "appliance/process_identity.py",
+                     "appliance/process_identity.py",
                      "appliance/boot/**", "appliance/node_boot_handoff.py",
                      "appliance/netboot_init.py", "appliance/bootstrap.py",
                      "appliance/central_post.py", "appliance/netboot_initramfs/**",

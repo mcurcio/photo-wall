@@ -1,5 +1,5 @@
-"""The GitHub Releases gateway: the kernel `ReleaseOrigin` for the releases' OS images and node
-release manifests.
+"""The GitHub Releases gateway: the kernel `ReleaseOrigin` for the releases' node release
+manifests and the files they declare.
 
 A port of `central/github_releases.py` (which stays until P2 deletes it). The discipline is
 unchanged: identity encoding pinned and enforced, every read bounded while streaming, an exact
@@ -37,20 +37,14 @@ from central.kernel.ports import (
     ReleaseListing,
     UpstreamVersion,
 )
-from central.kernel.types import release_version, require_sha256
+from central.kernel.types import release_version
 from contracts.node_release import (
     MAX_NODE_RELEASE_BYTES,
     NODE_RELEASE_MANIFEST,
     encode_node_release,
     parse_node_release,
 )
-from contracts.release import (
-    BASE_IMAGE,
-    MANIFEST,
-    MANIFEST_SCHEMA,
-    MAX_MANIFEST_BYTES,
-    MAX_ROOTFS_BYTES,
-)
+from contracts.release import MAX_ROOTFS_BYTES
 
 GITHUB_API_BASE: Final = "https://api.github.com"
 MAX_DOWNLOAD_BYTES: Final = MAX_ROOTFS_BYTES  # 1024**3: the largest artifact Central serves
@@ -72,7 +66,6 @@ NODE_ARTIFACT_MISSING: Final = "node_artifact_missing"
 _REPO = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
 _CONTENT_LENGTH = re.compile(r"[0-9]{1,20}")
 _RETRY_AFTER = re.compile(r"[0-9]{1,6}")
-_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 class _BodyTooLarge(Exception):
@@ -88,15 +81,6 @@ class _BodyEncoded(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class _Manifest:
-    """What one release's `manifest.json` yields: the OS image and the upstream version, set
-    only by `_parse_manifest`, for a valid and complete manifest."""
-
-    os_image: OriginLocator | None = None
-    upstream_version: UpstreamVersion | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class _Asset:
     """One attached release asset: its download URL, and its GitHub `id` and `updated_at`
     (None when absent or invalid)."""
@@ -109,7 +93,7 @@ class GitHubReleaseOrigin:
     """Implements kernel `ReleaseOrigin` against the GitHub Releases API; inject `transport`
     for offline tests."""
 
-    def __init__(self, repo: str, *, token: str | None = None, include_prereleases: bool = False,
+    def __init__(self, repo: str, *, token: str | None = None,
                  transport: httpx.AsyncBaseTransport | None = None, api_base: str = GITHUB_API_BASE,
                  timeout: timedelta = timedelta(seconds=30), max_download_bytes: int = MAX_DOWNLOAD_BYTES) -> None:
         if not isinstance(repo, str) or _REPO.fullmatch(repo) is None:
@@ -120,7 +104,6 @@ class GitHubReleaseOrigin:
             raise ValueError("invalid_max_download_bytes")
         self._max_download_bytes = max_download_bytes
         self.repo = repo
-        self.include_prereleases = bool(include_prereleases)
         self._api_base = _require_api_base(api_base)
         self._transport = transport
         self._timeout = timeout.total_seconds()
@@ -136,14 +119,12 @@ class GitHubReleaseOrigin:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> GitHubReleaseOrigin:
-        """The rules of `AppReleaseService.from_env`: repo, optional token, prerelease opt-in,
-        and the API base (`PHOTO_WALL_RELEASE_API_BASE`, default GitHub's; an unset or empty
+        """Repo, optional token, and the API base (`PHOTO_WALL_RELEASE_API_BASE`, default GitHub's; an unset or empty
         value is the default, an invalid one is `ValueError("invalid_api_base")` at boot)."""
         env = os.environ if env is None else env
         return cls(
             env.get("PHOTO_WALL_RELEASE_REPO", DEFAULT_REPO),
             token=env.get("PHOTO_WALL_RELEASE_TOKEN") or None,
-            include_prereleases=env.get("PHOTO_WALL_RELEASE_PRERELEASES", "").lower() in _TRUTHY,
             api_base=env.get("PHOTO_WALL_RELEASE_API_BASE") or GITHUB_API_BASE,
             max_download_bytes=8 * 1024**3,
         )
@@ -207,35 +188,23 @@ class GitHubReleaseOrigin:
         return False, page_etag, data
 
     async def _resolve(self, client: httpx.AsyncClient, entry: object) -> PublishedRelease | None:
-        """One listed release, or None (a draft, a non-semver tag, or a pre-release with neither
-        pre-releases enabled nor a node manifest).
+        """One listed release, or None (a draft, a non-semver tag, or a release that attaches no
+        node manifest).
 
         A node release is observed whether or not it is a pre-release: the node path lists
-        pre-releases (the console labels them) and never downloads them in the background. With
-        `include_prereleases` off a pre-release's `manifest.json` is not read (`legacy=False`),
-        so no `app_releases` row is written for it."""
+        pre-releases (the console labels them) and never downloads them in the background."""
         if not isinstance(entry, dict) or entry.get("draft") is True:
             return None
-        is_prerelease = bool(entry.get("prerelease"))
         tag = entry.get("tag_name")
         try:
             release_version(tag)  # type: ignore[arg-type]
         except ValueError:
             return None  # non-semver tag: skipped, no record
         assets = _asset_urls(entry.get("assets"))
-        legacy = self.include_prereleases or not is_prerelease
-        if not legacy and NODE_RELEASE_MANIFEST not in assets:
+        if NODE_RELEASE_MANIFEST not in assets:
             return None
         node, node_problem, node_version = await self._node_manifest(client, assets, tag)
-        if not legacy:
-            return PublishedRelease(tag=tag, is_prerelease=True, os_image=None,
-                                    upstream_version=None, node_publication=node,
-                                    node_problem=node_problem, node_version=node_version,
-                                    legacy=False)
-        manifest = await self._manifest(client, assets)
-        return PublishedRelease(tag=tag, is_prerelease=is_prerelease,
-                                os_image=manifest.os_image,
-                                upstream_version=manifest.upstream_version,
+        return PublishedRelease(tag=tag, is_prerelease=bool(entry.get("prerelease")),
                                 node_publication=node, node_problem=node_problem,
                                 node_version=node_version)
 
@@ -245,7 +214,7 @@ class GitHubReleaseOrigin:
         """(publication, problem, version) of the attached node manifest; all None when none is
         attached. A deterministic refusal is this release's `problem`, never an exception: one
         malformed manifest must not stop discovery of every other release. A transport failure
-        (`OriginUnavailable`) still aborts the listing, as for `manifest.json`.
+        (`OriginUnavailable`) still aborts the listing.
 
         An attached malformed node manifest never falls back to similarly named assets."""
         manifest = assets.get(NODE_RELEASE_MANIFEST)
@@ -276,21 +245,7 @@ class GitHubReleaseOrigin:
             return None, NODE_RELEASE_INVALID, manifest.version
         return publication, None, manifest.version
 
-    async def _manifest(self, client: httpx.AsyncClient, assets: dict[str, _Asset]) -> _Manifest:
-        """`manifest.json` read as schema 1: only its OS image. Every other record it carries
-        (the retired Player `.deb`, bootstrapper and payload) is neither read nor required."""
-        manifest_asset = assets.get(MANIFEST)
-        if manifest_asset is None:
-            return _Manifest()
-        try:
-            body = await self._fetch_manifest(client, manifest_asset.url)
-        except (_BodyTooLarge, _BodyEncoded):
-            return _Manifest()  # deterministic: this release only
-        if body is None:  # listed, but gone upstream (404/410): no body, so no version
-            return _Manifest()
-        return _parse_manifest(body, assets, manifest_asset.version)
-
-    async def _fetch_manifest(self, client: httpx.AsyncClient, url: str, *, maximum: int = MAX_MANIFEST_BYTES) -> bytes | None:
+    async def _fetch_manifest(self, client: httpx.AsyncClient, url: str, *, maximum: int) -> bytes | None:
         """The manifest bytes; None when absent (404/410). A transient failure aborts the whole
         listing (`manifest_unavailable`) rather than recording the release as broken."""
         try:
@@ -391,31 +346,6 @@ def _require_api_base(api_base: object) -> str:
     return api_base.rstrip("/")
 
 
-def _parse_manifest(body: bytes, assets: dict[str, _Asset],
-                    version: UpstreamVersion | None) -> _Manifest:
-    """The OS image a schema-1 manifest declares. The version is set only for a valid manifest
-    whose OS image is declared and attached.
-
-    This is the one place a version is set. An invalid manifest or an incomplete upload
-    (typically a release caught mid-upload) is unversioned like an unread one, so the sync
-    refuses it over any stored observation: a broken or partial upload never takes a working
-    release's OS image away.
-    """
-    try:
-        manifest = json.loads(body)
-    except (ValueError, UnicodeError):
-        return _Manifest()
-    if not isinstance(manifest, dict):
-        return _Manifest()
-    schema = manifest.get("schema")
-    if type(schema) is not int or schema != MANIFEST_SCHEMA:
-        return _Manifest()
-    os_image = _locator(manifest.get(BASE_IMAGE), assets, suffix="", max_size=None)
-    if os_image is None:  # malformed, or not attached (yet)
-        return _Manifest()
-    return _Manifest(os_image, version)  # valid and complete
-
-
 def _asset_urls(raw_assets: object) -> dict[str, _Asset]:
     assets: dict[str, _Asset] = {}
     if isinstance(raw_assets, list):
@@ -440,40 +370,6 @@ def _asset_version(asset: dict) -> UpstreamVersion | None:
     if moment.tzinfo is None:
         return None  # a naive time would be read in the host's zone
     return UpstreamVersion(moment.timestamp(), asset_id)
-
-
-def _declared_file(record: object, *, suffix: str,
-                   max_size: int | None) -> tuple[str, str, int] | None:
-    """(filename, sha256, size) of a manifest file record, or None when malformed."""
-    if not isinstance(record, dict):
-        return None
-    filename, sha256, size = record.get("filename"), record.get("sha256"), record.get("size")
-    if not isinstance(filename, str) or not filename.endswith(suffix):
-        return None
-    try:
-        require_sha256(sha256)  # type: ignore[arg-type]
-    except ValueError:
-        return None
-    if type(size) is not int or size <= 0 or (max_size is not None and size > max_size):
-        return None
-    return filename, sha256, size
-
-
-def _locator(record: object, assets: dict[str, _Asset], *, suffix: str,
-             max_size: int | None) -> OriginLocator | None:
-    """The download locator for a manifest file record: its filename joined to the release's
-    attached assets (the manifest carries no URL). None when malformed or not attached."""
-    declared = _declared_file(record, suffix=suffix, max_size=max_size)
-    if declared is None:
-        return None
-    filename, sha256, size = declared
-    asset = assets.get(filename)
-    if asset is None:
-        return None
-    try:
-        return OriginLocator(url=asset.url, sha256=sha256, size=size)
-    except ValueError:
-        return None  # an unusable asset URL is the same as no asset
 
 
 def _raise_rate_limit(response: httpx.Response) -> None:

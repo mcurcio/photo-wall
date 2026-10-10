@@ -271,6 +271,44 @@ def test_the_app_root_holds_no_node_context(tmp_path):
             "player.service") in kinds(refusals)
 
 
+# The composition (photo-wall-node): no module of its own, one launcher per directory under
+# usr/lib/photo-wall/node/, each on the contexts it pins.
+NODE = "/usr/lib/photo-wall/"
+NODE_PINS = {name: f"photo-wall-{name} (= ${{pw-version:photo-wall-{name}}})"
+             for name in ("lib", "low", "top")}
+
+
+def composition(tmp_path, *, pins=("low", "top"), entry="appliance.top.run",
+                path=(NODE + "lib", NODE + "low", NODE + "top")) -> list[Refusal]:
+    node_depends = ", ".join(NODE_PINS[each] for each in pins) + ", systemd"
+    repo, staged = build(tmp_path, depends=DEPENDS | {"photo-wall-node": node_depends})
+    into = staged / "photo-wall-node/usr/lib/photo-wall/node/top-run"  # no module name
+    into.mkdir(parents=True)
+    (into / "__main__.py").write_text(launcher(path, entry))
+    return import_check.check(repo=repo, staged=staged, control=tmp_path / "control",
+                              pyproject=tmp_path / "pyproject.toml", owner=OWNERS.get,
+                              roots_of=ROOTS.get)
+
+
+def test_a_composition_launcher_on_its_pinned_contexts_passes(tmp_path):
+    assert composition(tmp_path) == []
+
+
+def test_a_composition_launcher_reaching_a_context_it_does_not_pin_is_refused(tmp_path):
+    """Its PATH is its entry's reach, but low is no runtime directory of a composition pinning
+    only lib (low's exempt edge would bring top: a pin on low brings both)."""
+    assert kinds(composition(tmp_path, pins=("lib",), entry="appliance.low.core",
+                             path=(NODE + "lib", NODE + "low"))) == {
+        ("photo-wall-node", "undeclared-launcher-directory", NODE + "low", "top-run")}
+
+
+def test_a_composition_pin_on_no_launchers_path_is_refused(tmp_path):
+    """top installs modules, yet no launcher of the composition runs it."""
+    assert kinds(composition(tmp_path, entry="appliance.low.core",
+                             path=(NODE + "lib", NODE + "low"))) == {
+        ("photo-wall-node", "unused-depends", "photo-wall-top", "debian/control")}
+
+
 # Stage 1 (decision 0019 P4): appliance.netboot_init reaches lib's package (not its pydantic
 # module); its package names the directories it reaches in a path file the initramfs hook copies
 # into the initrd.

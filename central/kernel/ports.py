@@ -201,21 +201,13 @@ NODE_RELEASE_INVALID: Final = "node_release_invalid"
 class PublishedRelease:
     tag: str  # release_version-valid
     is_prerelease: bool
-    os_image: OriginLocator | None  # the base tarball; url, sha256 and size set when present
-    # Set only for a `manifest.json` that was read, valid and complete (its base tarball
-    # attached); None otherwise (absent, 404/410, invalid, or not attached yet): an observation
-    # with no version is refused over a stored one, so it can never wipe the tag.
-    upstream_version: UpstreamVersion | None
     node_publication: NodePublication | None = None
     # Why the attached node manifest was refused (deterministic, this release only); never set
     # with `node_publication`. Both None: the release attaches no node manifest.
     node_problem: str | None = None
     # The node manifest asset's own `(updated_at, id)`: the version of `node_publication` or of
-    # `node_problem`, guarded independently of `manifest.json`'s `upstream_version`.
+    # `node_problem`.
     node_version: UpstreamVersion | None = None
-    # False only for a pre-release listed while pre-releases are off: its node facts are
-    # observed, its `manifest.json` was not read, and no `app_releases` row is written for it.
-    legacy: bool = True
 
     def __post_init__(self) -> None:
         release_version(self.tag)
@@ -227,13 +219,6 @@ class PublishedRelease:
                 raise ValueError("node_publication_with_problem")
         if self.node_version is not None and not isinstance(self.node_version, UpstreamVersion):
             raise ValueError("invalid_node_version")
-        if type(self.legacy) is not bool:
-            raise ValueError("invalid_legacy")
-        if not self.legacy and (self.os_image is not None or self.upstream_version is not None
-                                or (self.node_publication is None and self.node_problem is None)):
-            raise ValueError("invalid_unlisted_legacy")
-        if self.os_image is not None:
-            _complete_locator(self.os_image)
 
 
 @dataclass(frozen=True, slots=True)

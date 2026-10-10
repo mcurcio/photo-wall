@@ -175,7 +175,7 @@ The design above is kept as approved. Building it found these differences, each 
 
 - The check runs at `execute_after_dh_install`, not `override_dh_auto_test`: no `debian/<package>/` tree exists earlier (RECUT-5), and `nocheck` cannot skip it. Depends name **direct** imports, not closures (RECUT-4).
 - The Depends cycle through the retiring ignore lines is resolved by the owner's pick, "Exempt listed edges": an edge listed in `pyproject.toml`'s `layers` `ignore_imports` gives no Depends (OWNER-1, RECUT-12). Costs: a launcher's `PATH` exposes every module of the package directories it reaches (P2B-4); installing `photo-wall-uplink` pulls `python3-pydantic` and `python3-nats` through `photo-wall-common` (P2A-8).
-- The record's table had no home for the `appliance/*.py` modules the launchers reach: `feed.py` and `feed_socket.py` are in `photo-wall-node-kernel`, `app_launcher.py` and `process_identity.py` in `photo-wall-node-apps`, `node_boot_handoff.py` in `photo-wall-node-boot` (P1A-11, P2A-2).
+- The record's table had no home for the `appliance/*.py` modules the launchers reach: `feed.py` and `feed_socket.py` are in `photo-wall-node-kernel`, `process_identity.py` in `photo-wall-node-apps`, `node_boot_handoff.py` in `photo-wall-node-boot` (P1A-11, P2A-2).
 
 **Roots, seal and fixture**
 
@@ -190,7 +190,8 @@ The design above is kept as approved. Building it found these differences, each 
 
 - The V1 builders, the bootstrapper, the OS agent, the Player `.deb` and payload, the V1 release files, Central's V1 routes (migrations 069 and 070) and the `photowall.node=v2` switch are deleted in this PR (OWNER-2, RECUT-6; [runbook](../runbook.md#player-provisioning-the-v1-netboot-and-promote-path-removed)). Deleted, not ported: no dual path remains.
 - Coverage lost: the V1 start probe also proved that the base's own libkmod finds `vc4` and `v3d` by device alias; nothing replaces it yet (V1B-2).
-- Not done: the GitHub origin's `manifest.json` read and the `PHOTO_WALL_RELEASE_PRERELEASES` gate have no reader left and stay for a follow-up (V1P-5, V1P-6); the Dockerfile and Compose still default to `central.app:create_app`; `README.md` still describes the V1 promote flow and its removed runbook anchors (outside the docs pass's paths).
+- The GitHub origin lists a release only by its node manifest: its `manifest.json` read and the `PHOTO_WALL_RELEASE_PRERELEASES` gate are deleted (V1P-5, V1P-6, FIX-3), as are the V1 units `player.service`, `weston.service` and `weston.ini`, `app_launcher.py` and the process sampler (FIX-2).
+- Not done: the Dockerfile and Compose still default to `central.app:create_app`; `README.md` still describes the V1 promote flow and its removed runbook anchors (outside the docs pass's paths).
 
 **Not run**
 

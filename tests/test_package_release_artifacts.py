@@ -30,7 +30,6 @@ from support.release_build import (
 from support.release_build import base_bundle as _synthetic_base_bundle
 
 from central.assets.os_image import _SQUASHFS_MEMBER, _SUMS_MEMBER
-from central.origins.github import _asset_urls, _parse_manifest
 from contracts.node_release import NODE_RELEASE_MANIFEST, encode_node_release, parse_node_release
 from contracts.release import (
     BASE_BOOT,
@@ -495,12 +494,3 @@ def test_the_packaged_tarball_is_the_declared_layout_central_reads(tmp_path):
     assert (_SQUASHFS_MEMBER, _SUMS_MEMBER) == (base_member(BASE_SQUASHFS),
                                                 base_member(BASE_CHECKSUMS))
 
-
-def test_central_reads_the_packaged_manifest_as_a_deployable_release(tmp_path):
-    """The images block is additive: Central's parser (central/origins/github.py) ignores it and
-    finds the base tarball the packager attached."""
-    destination, manifest = _packaged(tmp_path)
-    assets = _asset_urls([{"name": path.name, "browser_download_url": f"https://x/{path.name}"}
-                          for path in destination.iterdir()])
-    parsed = _parse_manifest((destination / MANIFEST).read_bytes(), assets, None)
-    assert parsed.os_image.sha256 == manifest["base_image"]["sha256"]

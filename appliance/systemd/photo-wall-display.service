@@ -3,7 +3,7 @@ Description=Photo Wall base-owned Weston display policy
 ConditionPathExists=/usr/lib/photo-wall/node-display/photo-wall-shell.so
 After=systemd-user-sessions.service systemd-logind.service
 Wants=systemd-logind.service
-Conflicts=photo-wall-weston.service getty@tty1.service
+Conflicts=getty@tty1.service
 # Each Weston incarnation brings its controller (which BindsTo= it) back after READY=1; see
 # docs/display-host-backend.md#units-and-weston-incarnations.
 Wants=photo-wall-display-controller.service

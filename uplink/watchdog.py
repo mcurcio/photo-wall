@@ -38,11 +38,6 @@ def pet() -> bool:
     return notify("WATCHDOG=1")
 
 
-def extend_start(seconds: float) -> bool:
-    """Ask systemd for more start-up time, in whole microseconds."""
-    return notify(f"EXTEND_TIMEOUT_USEC={int(seconds * 1_000_000)}")
-
-
 def status(text: str) -> bool:
     """Publish a one-line human-readable status (newlines flattened to spaces)."""
     return notify(f"STATUS={text.replace(chr(10), ' ')}")

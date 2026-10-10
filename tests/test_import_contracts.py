@@ -82,7 +82,7 @@ FROZEN_EXEMPTIONS: Final[Mapping[str, frozenset[str]]] = {
 }
 
 # The modules the exhaustive layers contract may leave unlayered. Only shrinks.
-FROZEN_EXHAUSTIVE_IGNORES: Final[frozenset[str]] = frozenset({"app_launcher", "process_identity"})
+FROZEN_EXHAUSTIVE_IGNORES: Final[frozenset[str]] = frozenset({"process_identity"})
 
 # Each forbidden contract's frozen sources and targets. A contract may gain modules (that only
 # tightens it); dropping one fails.

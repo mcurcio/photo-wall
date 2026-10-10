@@ -41,11 +41,6 @@ def test_pet(notify_socket):
     assert _recv(notify_socket) == "WATCHDOG=1"
 
 
-def test_extend_start(notify_socket):
-    assert watchdog.extend_start(1.5) is True
-    assert _recv(notify_socket) == "EXTEND_TIMEOUT_USEC=1500000"
-
-
 def test_status_flattens_newlines(notify_socket):
     assert watchdog.status("line one\nline two") is True
     assert _recv(notify_socket) == "STATUS=line one line two"

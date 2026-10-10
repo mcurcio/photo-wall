@@ -32,7 +32,7 @@ CONTENTS = {
     "photo-wall-node-host": ("appliance.host",),
     "photo-wall-node-display": ("appliance.display_host",),
     "photo-wall-node-health": ("appliance.health",),
-    "photo-wall-node-apps": ("appliance.apps", "appliance.app_launcher", "appliance.process_identity"),
+    "photo-wall-node-apps": ("appliance.apps", "appliance.process_identity"),
     "photo-wall-node-boot": ("appliance.boot", "appliance.node_boot_handoff"),
     "photo-wall-node-manager": ("appliance.node",),
 }

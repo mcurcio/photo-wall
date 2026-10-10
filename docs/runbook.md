@@ -187,7 +187,6 @@ Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [P
 | `PHOTO_WALL_CACHE_ROOT` | central (RO) + worker (RW) | `/var/cache/photo-wall` | The one cache root. Optional (baked default) |
 | `PHOTO_WALL_RELEASE_REPO` | worker | `mcurcio/photo-wall` | `owner/name` of the GitHub repo whose releases are polled |
 | `PHOTO_WALL_RELEASE_TOKEN` | worker | (unset) | Optional GitHub token; unauthenticated polling is rate-limited to ~60 requests/hour |
-| `PHOTO_WALL_RELEASE_PRERELEASES` | worker | off | Still read, but nothing that acts on prereleases is left after the V1 removal; its removal is open ([errata E-0019-V1P-6](../.claude/errata.md)) |
 | `PHOTO_WALL_RELEASE_POLL_SECONDS` | worker | `900` | Poll cadence in seconds |
 | `PHOTO_WALL_RELEASE_API_BASE` | worker | `https://api.github.com` | Base URL of the releases API; unset or empty means the default, an invalid URL fails at boot. Tests point it at a fake origin |
 
