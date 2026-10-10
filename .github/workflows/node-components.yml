@@ -64,15 +64,9 @@ jobs:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
-      - id: docker-hub-mirror
-        uses: ./.github/actions/docker-hub-mirror
-
       - name: Set up the node package builder
         id: builder
         uses: ./.github/actions/node-builder
-        with:
-          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
 
       - name: Build the Debian packages and the local repo, twice
         env:
@@ -127,9 +121,6 @@ jobs:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
-      - id: docker-hub-mirror
-        uses: ./.github/actions/docker-hub-mirror
-
       - uses: ./.github/actions/python-uv
 
       - name: Install the locked environment
@@ -146,9 +137,6 @@ jobs:
       - name: Set up the node package builder
         id: builder
         uses: ./.github/actions/node-builder
-        with:
-          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
 
       # The roots' cache key (scripts/node_release_writer.py `key`): the recipe, the ABI the
       # repo's photo-wall-node and photo-wall-node-display write, and the Package=Version lines
@@ -278,9 +266,6 @@ jobs:
           ref: ${{ inputs.revision }}
           persist-credentials: false
 
-      - id: docker-hub-mirror
-        uses: ./.github/actions/docker-hub-mirror
-
       - name: Download the local repo
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -298,8 +283,6 @@ jobs:
         id: builder
         uses: ./.github/actions/node-builder
         with:
-          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
           write: 'false'
 
       - name: Build the stage targets and the PID1 fixture image

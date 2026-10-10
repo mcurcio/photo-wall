@@ -84,9 +84,6 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
 
-      - id: docker-hub-mirror
-        uses: ./.github/actions/docker-hub-mirror
-
       - uses: ./.github/actions/python-uv
 
       - name: Install the locked environment
@@ -103,9 +100,6 @@ jobs:
       - name: Set up the node package builder
         id: builder
         uses: ./.github/actions/node-builder
-        with:
-          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
 
       - name: Run the native display harness
         env:

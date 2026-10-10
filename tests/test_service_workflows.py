@@ -329,7 +329,7 @@ def test_every_buildx_builder_carries_the_mirror():
                 builders += 1
                 assert BUILDKIT_MIRROR in step, path
                 assert BUILDKIT_IMAGE in step, path
-    assert builders >= 6  # not vacuous: the six builders today
+    assert builders >= 5  # not vacuous: the five builders today (one is node-builder)
     for action in ACTIONS.glob('*/action.yml'):
         if 'docker/setup-buildx-action@' in action.read_text():
             assert action.parent.name in routed, action

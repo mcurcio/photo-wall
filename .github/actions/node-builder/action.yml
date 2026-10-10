@@ -1,19 +1,14 @@
 name: Node package builder
 description: >-
   The BuildKit builder and cache the Node's Debian builds use (debian-packaging/build-container.sh,
-  decision 0019): a buildx builder behind the Docker Hub mirror, not made current (a fixture or
+  decision 0019): the Docker Hub mirror (run first, as every job's first Docker contact; it
+  restarts the daemon), a buildx builder behind it, not made current (a fixture or
   harness image built FROM a local image needs the daemon's own default builder), the GHA cache
   service exposed to `docker buildx build`, and the arm64 `node-{role}` cache scope. Its outputs
   are what build-container.sh reads as PHOTO_WALL_NODE_BUILDER and
   PHOTO_WALL_NODE_BUILD_CACHE_FROM / _TO.
 
 inputs:
-  buildkitd-config:
-    description: The docker-hub-mirror action's buildkitd-config output
-    required: true
-  buildkit-image:
-    description: The docker-hub-mirror action's buildkit-image output
-    required: true
   write:
     description: Write the cache too ('true'); anything else reads only (`cache-to` is empty)
     required: false
@@ -33,12 +28,15 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: docker-hub-mirror
+      uses: ./.github/actions/docker-hub-mirror
+
     - name: Set up the container build cache
       id: buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
       with:
-        buildkitd-config-inline: ${{ inputs.buildkitd-config }}
-        driver-opts: image=${{ inputs.buildkit-image }}
+        buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+        driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
         use: false
 
     # The node scripts run `docker buildx build` themselves, which reads the GHA cache service's
