@@ -1235,7 +1235,10 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
         assert [(c["kind"], c["fade_in_seconds"], c["fade_out_seconds"], c["after_end"])
                 for c in stored["outro_contributions"]] == [("media", 1.5, 3, "keep_nothing")]
 
-        # Shown again after a reload: Review answers each value and Playback holds it.
+        # Shown again after a reload: Review answers each value and Playback holds it. The
+        # console goes back to the Scenes list after a save; a reload during that navigation
+        # is aborted, so wait for it first.
+        page.wait_for_url(re.compile(r"#/scenes$"))
         page.reload()
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Edit Scene evening-fade", exact=True).click()
