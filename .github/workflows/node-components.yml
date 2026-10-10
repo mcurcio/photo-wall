@@ -67,31 +67,18 @@ jobs:
       - id: docker-hub-mirror
         uses: ./.github/actions/docker-hub-mirror
 
-      - name: Set up the container build cache
-        id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
         with:
-          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
-          use: false
-
-      # build-repo.sh runs `docker buildx build` itself, which reads the GHA cache service's URL
-      # and token from the ACTIONS_* environment that only actions see: this exports it.
-      - name: Expose the GHA cache service to the build
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
-
-      - name: Resolve the build container's cache scope
-        id: cache
-        uses: ./.github/actions/buildkit-cache
-        with:
-          name: node-{role}
-          architecture: arm64
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
 
       - name: Build the Debian packages and the local repo, twice
         env:
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
-          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.cache.outputs.to }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
         run: |
           set -eu
           debian-packaging/build-repo.sh --revision "$REVISION" --output "$RUNNER_TEMP/node-debs"
@@ -156,23 +143,12 @@ jobs:
 
       # The roots container (mmdebstrap and squashfs-tools at the pin) comes from its BuildKit
       # cache; build-root.sh loads it, for the resolution and for a build.
-      - name: Set up the container build cache
-        id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
         with:
-          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
-          use: false
-
-      - name: Expose the GHA cache service to the build
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
-
-      - name: Resolve the roots container's cache scope
-        id: cache
-        uses: ./.github/actions/buildkit-cache
-        with:
-          name: node-{role}
-          architecture: arm64
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
 
       # The roots' cache key (scripts/node_release_writer.py `key`): the recipe, the ABI the
       # repo's photo-wall-node and photo-wall-node-display write, and the Package=Version lines
@@ -180,9 +156,9 @@ jobs:
       - name: Compute the roots' cache key
         id: inputs
         env:
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
-          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.cache.outputs.to }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
         run: |
           set -eu
           work="$RUNNER_TEMP/roots-key"
@@ -214,9 +190,9 @@ jobs:
       - name: Build the release roots, each twice
         if: steps.restore.outputs.cache-hit != 'true'
         env:
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
-          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.cache.outputs.to }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+          PHOTO_WALL_NODE_BUILD_CACHE_TO: ${{ steps.builder.outputs.cache-to }}
         run: |
           set -eu
           # A failed restore can leave part of an output behind; build-root.sh refuses one.
@@ -271,8 +247,8 @@ jobs:
         env:
           PHOTO_WALL_IMAGE_MOUNT_TESTS: "1"
           PHOTO_WALL_NODE_COMPONENTS: ${{ runner.temp }}/node-components
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
         run: .venv/bin/python -m pytest -q tests/node/apps/test_environment_image.py tests/debs/test_roots.py
 
       # The seal ships these bytes on a release; a pull request's consumers need them for a day.
@@ -318,31 +294,18 @@ jobs:
           name: photo-wall-node-components-${{ inputs.revision }}
           path: ${{ runner.temp }}/node-components
 
-      # Not made current (use: false): the fixture image builds FROM a local image, on Docker's
-      # daemon-backed default builder, which this must not replace.
-      - name: Set up the container build cache
-        id: buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
         with:
-          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
-          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
-          use: false
-
-      - name: Expose the GHA cache service to the builders
-        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
-
-      - name: Resolve the node build cache scopes
-        id: cache
-        uses: ./.github/actions/buildkit-cache
-        with:
-          name: node-{role}
-          architecture: arm64
+          buildkitd-config: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          buildkit-image: ${{ steps.docker-hub-mirror.outputs.buildkit-image }}
           write: 'false'
 
       - name: Build the stage targets and the PID1 fixture image
         env:
-          PHOTO_WALL_NODE_BUILDER: ${{ steps.buildx.outputs.name }}
-          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
         run: |
           set -eu
           fixture="$RUNNER_TEMP/node-pid1-fixture"

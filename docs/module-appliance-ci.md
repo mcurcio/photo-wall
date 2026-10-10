@@ -129,7 +129,9 @@ would change `pyproject.toml`, an input of every released package and of the
 base squashfs cache key.
 
 **Cache scopes.** The [`buildkit-cache`](../.github/actions/buildkit-cache/action.yml)
-action is the one scope policy. Each target reads and writes (`mode=max`) one GHA scope per
+action is the one scope policy; the [`node-builder`](../.github/actions/node-builder/action.yml)
+action is the Node builds' one setup over it (the buildx builder, the GHA cache service and the
+arm64 `node-{role}` scope). Each target reads and writes (`mode=max`) one GHA scope per
 architecture, its own: `photo-wall-<target>-<architecture>-v<epoch>`. An export
 replaces its scope's index, so the former shared scopes
 (`photo-wall-checks-amd64-v1`, `photo-wall-software-e2e-arm64-v1`) kept only

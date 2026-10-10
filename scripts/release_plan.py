@@ -316,6 +316,8 @@ NOT_SHIPPED: Final = (
     # the same owner ruling, how an image is built is not a release input. The cache scope policy
     # also serves the node component builds, where a hit reuses a recorded layer: no byte changes.
     ".github/actions/service-image/action.yml", ".github/actions/buildkit-cache/action.yml",
+    # The node builds' builder and cache wiring over that policy (the same ruling).
+    ".github/actions/node-builder/action.yml",
     # The test jobs' console build; the images build their own bundle (the Dockerfile).
     ".github/actions/console-bundle/action.yml",
     # The software e2e jobs' shared setup; it builds test images only.
@@ -420,6 +422,7 @@ SUITES: Final = (
                  "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",
                  ".github/workflows/node-pid1.yml",
                  ".github/actions/docker-hub-mirror/action.yml",
+                 ".github/actions/node-builder/action.yml",
                  "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
                  "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),
 )
