@@ -1,7 +1,7 @@
 """scripts/initrd_mount_probe.py, the CI guard that runs stage 1's real mount path out of the
 built initrd. Its real run needs root, loop devices and an arm64 kernel (base-image.yml); here
 every host command is faked, so these pin the probe's own logic: kernel-order unpacking, the
-chroot command, the in-initrd program, the display modules' resolution, deepest-first teardown,
+chroot command, the in-initrd program, the Player modules' resolution, deepest-first teardown,
 the AUTOCLEAR check, and that a tree with anything still mounted under it is never deleted."""
 
 from __future__ import annotations
@@ -36,9 +36,10 @@ FLOOR_LAYER = newc_archive({"usr/lib/photo-wall/clock-floor": b"1760000000\n"})
 EARLY = newc_archive({"kernel/x86/microcode/fake.bin": b"ucode"})
 CACHED = newc_archive({"usr/bin/mount": b"klibc"})
 RELEASE = "6.18.50+rpt-rpi-2712"
-# What the in-initrd program prints for a display module that resolves on the new root.
+# What the in-initrd program prints for each Player module that resolves on the new root.
 RESOLVED = ("resolve vc4 exit=0 files=16 missing=0 last=vc4.ko.xz\n"
-            "resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz\n")
+            "resolve v3d exit=0 files=7 missing=0 last=v3d.ko.xz\n"
+            "resolve rpi-hevc-dec exit=0 files=8 missing=0 last=rpi-hevc-dec.ko.xz\n")
 
 
 def completed(argv, stdout=b"", returncode=0):
@@ -99,7 +100,8 @@ def test_the_chroot_runs_the_initrds_own_python_with_inits_path_only(tmp_path):
     argv = chroot_argv(tmp_path, "/probe/i.squashfs", "/probe/root", RELEASE)
     assert argv[:5] == ["env", "-i", f"PATH={INITRAMFS_PATH}", "chroot", str(tmp_path)]
     assert argv[5:9] == ["/usr/bin/python3", "-I", "-c", PROBE_PROGRAM]
-    assert argv[9:] == ["/probe/i.squashfs", "/probe/root", MARKER, RELEASE, "vc4", "v3d"]
+    assert argv[9:] == ["/probe/i.squashfs", "/probe/root", MARKER, RELEASE, "vc4", "v3d",
+                        "rpi-hevc-dec"]
 
 
 def modprobe_shows(rootmnt, *, missing_file=False, unknown=()):
@@ -164,17 +166,18 @@ def test_the_program_reports_a_module_the_new_root_lacks(tmp_path, monkeypatch, 
     assert code == 0
     assert out.splitlines()[-2:] == ["resolve vc4 exit=0 files=2 missing=1 last=vc4.ko.xz",
                                      "resolve v3d exit=1 files=0 missing=0 last=none"]
-    assert resolution_violations(out) == [
+    assert resolution_violations(out, ("vc4", "v3d")) == [
         "vc4: does not resolve on the new root (exit=0 files=2 missing=1 last=vc4.ko.xz)",
         "v3d: does not resolve on the new root (exit=1 files=0 missing=0 last=none)"]
 
 
 def test_a_program_that_never_resolved_a_module_is_a_violation():
     assert resolution_violations(RESOLVED) == []
-    assert resolution_violations(RESOLVED.splitlines()[0]) == [
-        "v3d: not resolved on the new root (no result)"]
+    lines = RESOLVED.splitlines(keepends=True)
+    assert resolution_violations(lines[0] + lines[1]) == [
+        "rpi-hevc-dec: not resolved on the new root (no result)"]
     assert resolution_violations("resolve vc4 exit=0 files=3 missing=0 last=drm.ko.xz\n"
-                                 + RESOLVED.splitlines()[1]) == [
+                                 + "".join(lines[1:])) == [
         "vc4: does not resolve on the new root (exit=0 files=3 missing=0 last=drm.ko.xz)"]
 
 
@@ -287,7 +290,7 @@ def test_the_chroot_is_given_the_initrds_kernel_release(tmp_path, initrd):
     host = FakeHost(tmp_path)
     host.probe(initrd)
     [chroot] = [call for call in host.calls if call[0] == "env"]
-    assert chroot[-3:] == [RELEASE, "vc4", "v3d"]
+    assert chroot[-4:] == [RELEASE, "vc4", "v3d", "rpi-hevc-dec"]
     assert (host.work / "source/lib").readlink() == Path("usr/lib")   # the base is merged-/usr
 
 

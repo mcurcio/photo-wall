@@ -10,7 +10,6 @@ a gzip-compressed archive (the same decompress path as mkinitramfs's zstd, in th
 from __future__ import annotations
 
 import gzip
-import re
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -18,11 +17,12 @@ import pytest
 from scripts.verify_netboot_initrd import (
     CA_BUNDLE_PATH,
     DEFAULT_BOOT_SCRIPT,
-    DISPLAY_MODULES,
     FLOOR_PATH,
+    PLAYER_MODULES,
     check_boot_script,
     check_ca_bundle,
     check_listing,
+    check_module_tree,
     main,
     read_archive,
     stage1_files,
@@ -84,11 +84,19 @@ CACHED = [
     "etc/nsswitch.conf",
     "usr/lib/modules/6.12.0-rpi/kernel/fs/squashfs/squashfs.ko",
     "usr/lib/modules/6.12.0-rpi/kernel/fs/overlayfs/overlay.ko",
-    # Stage 2's display drivers, as the Pi 5 kernel package compresses its modules.
+    # The Player's drivers, as the Pi 5 kernel package compresses its modules.
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/vc4/vc4.ko.xz",
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz",
+    "usr/lib/modules/6.12.0-rpi/kernel/drivers/media/platform/raspberrypi/hevc_dec/"
+    "rpi-hevc-dec.ko.xz",
     "usr/lib/modules/6.12.0-rpi/modules.dep",
+    "usr/lib/modules/6.12.0-rpi/modules.order",
 ]
+MODULES = "usr/lib/modules/6.12.0-rpi/"
+ORDER_PATH = f"{MODULES}modules.order"
+# The kernel build's modules.order (uncompressed names), naming exactly the modules CACHED ships.
+ORDER = "".join(f"{path.removeprefix(MODULES).split('.ko')[0]}.ko\n"
+                for path in CACHED if ".ko" in path).encode()
 
 
 def check(layer=LAYER, cached=CACHED, stage1=STAGE1) -> list[str]:
@@ -134,18 +142,60 @@ REQUIRED_CACHED = [
 def test_v0_9_1s_initrd_without_the_display_drivers_is_refused():
     mutated = [m for m in CACHED if "/gpu/drm/" not in m]
     assert check(cached=mutated) == [
-        "missing required display module vc4 (pattern '*lib/modules/*/kernel/*/vc4.ko*')",
-        "missing required display module v3d (pattern '*lib/modules/*/kernel/*/v3d.ko*')"]
+        "missing required Player module vc4 (pattern '*lib/modules/*/kernel/*/vc4.ko*')",
+        "missing required Player module v3d (pattern '*lib/modules/*/kernel/*/v3d.ko*')"]
 
 
-def test_the_hook_adds_exactly_the_display_modules_the_verify_requires():
-    """The hook is shell and cannot import the list: bound here, so neither changes alone."""
+def test_v0_24_0s_initrd_without_the_hevc_decoder_is_refused():
+    """Issue 64: the Node had no driver for the Pi 5's HEVC decoder (codec@800000)."""
+    assert PLAYER_MODULES == ("vc4", "v3d", "rpi-hevc-dec")
+    mutated = [m for m in CACHED if "/hevc_dec/" not in m]
+    assert check(cached=mutated) == [
+        "missing required Player module rpi-hevc-dec "
+        "(pattern '*lib/modules/*/kernel/*/rpi-hevc-dec.ko*')"]
+
+
+def test_the_hook_ships_the_kernels_whole_module_tree():
+    """No hand-kept list for check_module_tree to drift from: one whole-tree copy, no single
+    module added or left out by name."""
     hook = (REPO / "appliance/netboot_initramfs/hooks/photo-wall-netboot").read_text()
-    loops = re.findall(r"^for module in ([^;]+); do\n    manual_add_modules \"\$module\"$",
-                       hook, flags=re.MULTILINE)
-    assert loops == ["squashfs overlay loop", " ".join(DISPLAY_MODULES)]
+    code = [line.strip() for line in hook.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+    assert "copy_modules_dir kernel" in code
+    assert not [line for line in code if "manual_add_modules" in line
+                or ("copy_modules_dir" in line and line != "copy_modules_dir kernel")]
     # No blacklist: with the KMS overlay, vc4's framebuffer is stage 1's console.
     assert "blacklist" not in hook
+
+
+# --- the whole module tree (issue 64) -----------------------------------------------------------
+
+def tree(cached=CACHED, order=ORDER) -> dict[str, bytes]:
+    return {path: (order if path == ORDER_PATH else b"x") for path in cached}
+
+
+def test_the_whole_module_tree_passes():
+    assert check_module_tree(tree()) == []
+
+
+def test_a_tree_filtered_below_modules_order_is_refused():
+    """v0.24.0's shape: MODULES=most plus a hand list, the decoder in modules.order only."""
+    filtered = tree(cached=[m for m in CACHED if "/media/" not in m and "/v3d/" not in m])
+    assert check_module_tree(filtered) == [
+        "the initrd lacks 2 of the 5 modules 6.12.0-rpi's modules.order names (a filtered tree "
+        "leaves devices without a driver): kernel/drivers/gpu/drm/v3d/v3d.ko, "
+        "kernel/drivers/media/platform/raspberrypi/hevc_dec/rpi-hevc-dec.ko"]
+
+
+def test_a_tree_without_one_releases_modules_order_is_refused():
+    assert check_module_tree(tree(cached=[m for m in CACHED if m != ORDER_PATH])) == [
+        "the initrd carries 0 kernel releases' modules.order (none), not exactly one"]
+    two = tree() | {"usr/lib/modules/6.13.0-rpi/modules.order": ORDER}
+    assert check_module_tree(two) == [
+        "the initrd carries 2 kernel releases' modules.order (6.12.0-rpi, 6.13.0-rpi), "
+        "not exactly one"]
+    assert check_module_tree(tree(order=b"\n")) == [
+        "the initrd's modules.order for 6.12.0-rpi names no module"]
 
 
 @pytest.mark.parametrize("label,member", REQUIRED_CACHED, ids=[r[0] for r in REQUIRED_CACHED])
@@ -218,7 +268,8 @@ def real_initrd(tmp_path: Path, *, layer=LAYER, cached=CACHED, compress=gzip.com
     """The layer, uncompressed, in front of the cached archive passed through `compress`, its
     stage-1 files the repository's own."""
     stage1 = [f"{_PREFIX}/{path}" for path in stage1_files(REPO)]
-    files = {path: b"x" for path in [*cached, *stage1]} | {CA_BUNDLE_PATH: bundle}
+    files = ({path: b"x" for path in [*cached, *stage1]} | {CA_BUNDLE_PATH: bundle}
+             | ({ORDER_PATH: ORDER} if ORDER_PATH in cached else {}))
     initrd = tmp_path / "initrd.img"
     initrd.write_bytes(newc_archive({path: b"1760000000\n" for path in layer})
                        + compress(newc_archive(files)))
@@ -249,10 +300,18 @@ def test_main_fails_an_initrd_missing_a_stage_1_module(tmp_path, capsys):
     initrd = real_initrd(tmp_path)
     stage1 = [f"{_PREFIX}/{path}" for path in stage1_files(REPO)
               if not path.startswith("contracts/")]
-    files = {path: b"x" for path in [*CACHED, *stage1]} | {CA_BUNDLE_PATH: BUNDLE}
+    files = ({path: b"x" for path in [*CACHED, *stage1]} | {CA_BUNDLE_PATH: BUNDLE}
+             | {ORDER_PATH: ORDER})
     initrd.write_bytes(newc_archive({FLOOR_PATH: b"1\n"}) + gzip.compress(newc_archive(files)))
     assert run_main(tmp_path, initrd) == 1
     assert "missing stage-1 module contracts/" in capsys.readouterr().out
+
+
+def test_main_fails_an_initrd_whose_module_tree_is_filtered(tmp_path, capsys):
+    initrd = real_initrd(tmp_path, cached=[m for m in CACHED if "/overlayfs/" not in m])
+    assert run_main(tmp_path, initrd) == 1
+    assert ("the initrd lacks 1 of the 5 modules 6.12.0-rpi's modules.order names"
+            in capsys.readouterr().out)
 
 
 def test_main_fails_an_initrd_without_the_layer_in_front(tmp_path, capsys):
