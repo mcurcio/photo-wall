@@ -165,12 +165,15 @@ def test_the_reference_names_the_shipped_root_package(mounted, components, metad
 
 def test_the_program_imports_from_the_root_alone(mounted) -> None:
     """The launcher's ENTRY imports under the root's own python3, from its PATH and the
-    interpreter's libraries alone (a chroot: nothing of the runner's)."""
+    interpreter's libraries alone (a chroot: nothing of the runner's). In a PID namespace of its
+    own, so a helper the import starts (GStreamer's plugin scanner) dies with it and never holds
+    the mount."""
     role, mount = mounted
     launcher = ROOTS[role][2]
     result = subprocess.run(
-        as_root(["chroot", str(mount / "rootfs"), "/usr/bin/python3", "-I", "-B", "-c", IMPORT,
-                 launcher]), capture_output=True, text=True)
+        as_root(["unshare", "--fork", "--pid", "--kill-child", "chroot", str(mount / "rootfs"),
+                 "/usr/bin/python3", "-I", "-B", "-c", IMPORT, launcher]),
+        capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert report["outside"] == []
