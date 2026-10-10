@@ -31,7 +31,7 @@ KERNEL_MAY_IMPORT: Final = ("contracts", "uplink", KERNEL)
 FROZEN_NODE_LAYERS: Final[list[str]] = [
     "node",
     "boot | netboot_init",
-    "bootstrap | boot_offer | central_post | node_boot_handoff",
+    "bootstrap | central_post | node_boot_handoff",
     "apps",
     "health",
     "display_host | host",
@@ -78,29 +78,18 @@ FROZEN_EXEMPTIONS: Final[Mapping[str, frozenset[str]]] = {
         "appliance.node.app_link -> appliance.central_session.*",
         "appliance.apps.online_broker -> appliance.central_session.*",
     }),
-    "The base never imports the guest": frozenset({
-        "appliance.os_agent -> player.mdns_discovery",
-        "appliance.provision -> player.mdns_discovery",
-    }),
-    "Node contexts never reach V1": frozenset({
-        "appliance.process_identity -> appliance.app_launcher",
-    }),
     FEED_CONTRACT: FROZEN_FEED_EXEMPTIONS,
 }
 
-# The V1 and stage-1 modules the exhaustive layers contract may leave unlayered. Only shrinks.
-FROZEN_EXHAUSTIVE_IGNORES: Final[frozenset[str]] = frozenset({
-    "app_evidence", "app_executor", "app_launcher", "app_payload", "app_process_proof",
-    "app_proof_service", "linux_app_proof", "online_activation", "os_agent", "provision",
-    "process_identity",
-})
+# The modules the exhaustive layers contract may leave unlayered. Only shrinks.
+FROZEN_EXHAUSTIVE_IGNORES: Final[frozenset[str]] = frozenset({"app_launcher", "process_identity"})
 
 # Each forbidden contract's frozen sources and targets. A contract may gain modules (that only
 # tightens it); dropping one fails.
 FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[str]]]] = {
     "Boot is an island": (
         frozenset({"appliance.boot", "appliance.netboot_init", "appliance.bootstrap",
-                   "appliance.boot_offer", "appliance.central_post", "appliance.node_boot_handoff"}),
+                   "appliance.central_post", "appliance.node_boot_handoff"}),
         frozenset({"appliance.apps", "appliance.health", "appliance.display_host", "appliance.host",
                    "appliance.central_session"}),
     ),
@@ -115,8 +104,8 @@ FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[s
     "Host core reaches no sibling context": (
         frozenset({"appliance.host"}),
         frozenset({"appliance.display_host", "appliance.health", "appliance.apps", "appliance.boot",
-                   "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
-                   "appliance.central_post", "appliance.node_boot_handoff"}),
+                   "appliance.netboot_init", "appliance.bootstrap", "appliance.central_post",
+                   "appliance.node_boot_handoff"}),
     ),
     "Display never reads the fault catalogue": (
         frozenset({"appliance.display_host"}),
@@ -125,17 +114,6 @@ FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[s
     "The base never imports the guest": (
         frozenset({"appliance"}),
         frozenset({"player"}),
-    ),
-    "Node contexts never reach V1": (
-        frozenset({"appliance.kernel", "appliance.feed", "appliance.feed_socket",
-                   "appliance.central_session", "appliance.host", "appliance.display_host",
-                   "appliance.health", "appliance.apps", "appliance.boot", "appliance.process_identity",
-                   "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
-                   "appliance.central_post", "appliance.node_boot_handoff"}),
-        frozenset({"appliance.app_evidence", "appliance.app_executor", "appliance.app_launcher",
-                   "appliance.app_payload", "appliance.app_process_proof",
-                   "appliance.app_proof_service", "appliance.linux_app_proof",
-                   "appliance.online_activation", "appliance.os_agent", "appliance.provision"}),
     ),
 }
 

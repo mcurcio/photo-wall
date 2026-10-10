@@ -22,6 +22,8 @@ SCANNED: Final = ("tests", "scripts")
 WORKFLOWS: Final = REPO / ".github" / "workflows"
 KNOWN_ABSENT: Final[frozenset[str]] = frozenset({  # deliberate fixtures
     "appliance/build.py", "appliance/updates.py", "appliance/sub/provision.py",
+    # tests/test_release_plan.py's glob fixture names a path no longer in the tree
+    "appliance/provision.py",
     # tests/test_import_check.py's synthetic source tree, written under tmp_path
     "appliance/low/__init__.py", "appliance/low/core.py", "appliance/low/runner.py",
     "appliance/top/__init__.py", "appliance/top/run.py"})

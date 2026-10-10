@@ -149,7 +149,7 @@ name = "Node contexts point down"
 type = "layers"
 containers = ["appliance"]
 # Siblings are `|` (independent), never `:`: a real dependency is its own layer.
-layers = ["node", "boot | netboot_init", "bootstrap | boot_offer | central_post | node_boot_handoff",
+layers = ["node", "boot | netboot_init", "bootstrap | central_post | node_boot_handoff",
           "apps", "health", "display_host | host", "central_session", "kernel | feed | feed_socket"]
 exhaustive = true
 ignore_imports = [
@@ -163,9 +163,7 @@ ignore_imports = [
   "appliance.host.host_runner -> appliance.node.recovery_linux",
   "appliance.boot.node_bootstrap -> appliance.node.preparer",
 ]
-exhaustive_ignores = ["app_evidence", "app_executor", "app_launcher", "app_payload",
-                      "app_process_proof", "app_proof_service", "linux_app_proof",
-                      "online_activation", "os_agent", "provision", "process_identity"]
+exhaustive_ignores = ["app_launcher", "process_identity"]
 
 [[tool.importlinter.contracts]]
 # E3b design §7.1: siblings (`|`) never import each other; `epoch` is the bottom.
@@ -179,7 +177,7 @@ exhaustive = true
 name = "Boot is an island"
 type = "forbidden"
 source_modules = ["appliance.boot", "appliance.netboot_init", "appliance.bootstrap",
-                  "appliance.boot_offer", "appliance.central_post", "appliance.node_boot_handoff"]
+                  "appliance.central_post", "appliance.node_boot_handoff"]
 forbidden_modules = ["appliance.apps", "appliance.health", "appliance.display_host",
                      "appliance.host", "appliance.central_session"]
 ignore_imports = [
@@ -206,8 +204,8 @@ name = "Host core reaches no sibling context"
 type = "forbidden"
 source_modules = ["appliance.host"]
 forbidden_modules = ["appliance.display_host", "appliance.health", "appliance.apps", "appliance.boot",
-                     "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
-                     "appliance.central_post", "appliance.node_boot_handoff"]
+                     "appliance.netboot_init", "appliance.bootstrap", "appliance.central_post",
+                     "appliance.node_boot_handoff"]
 
 [[tool.importlinter.contracts]]
 # The judge alone maps faults to household lines; Display draws the instruction it is given.
@@ -236,22 +234,6 @@ name = "The base never imports the guest"
 type = "forbidden"
 source_modules = ["appliance"]
 forbidden_modules = ["player"]
-ignore_imports = ["appliance.os_agent -> player.mdns_discovery",
-                  "appliance.provision -> player.mdns_discovery"]
-
-[[tool.importlinter.contracts]]
-name = "Node contexts never reach V1"
-type = "forbidden"
-source_modules = ["appliance.kernel", "appliance.feed", "appliance.feed_socket",
-                  "appliance.central_session", "appliance.host", "appliance.display_host",
-                  "appliance.health", "appliance.apps", "appliance.boot", "appliance.process_identity",
-                  "appliance.netboot_init", "appliance.bootstrap", "appliance.boot_offer",
-                  "appliance.central_post", "appliance.node_boot_handoff"]
-forbidden_modules = ["appliance.app_evidence", "appliance.app_executor", "appliance.app_launcher",
-                     "appliance.app_payload", "appliance.app_process_proof",
-                     "appliance.app_proof_service", "appliance.linux_app_proof",
-                     "appliance.online_activation", "appliance.os_agent", "appliance.provision"]
-ignore_imports = ["appliance.process_identity -> appliance.app_launcher"]
 
 [[tool.importlinter.contracts]]
 # The Node API library (nodeapi, created by E3) is the one NATS client (node redesign r3 §3.3.4).

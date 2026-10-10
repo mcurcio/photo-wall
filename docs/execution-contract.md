@@ -139,7 +139,7 @@ The EEPROM settings are a provisioning requirement, not a per-Pi step. The build
 
 - the root comes from the command line, else the saved root, else mDNS ([`tests/test_uplink_finder.py`](../tests/test_uplink_finder.py));
 - every Central request goes to the located origin and follows no redirect, and a refused redirect relocates on the next cycle;
-- provisioning installs with `dpkg --install` only and writes `/etc/photo-wall/public.json` atomically with mode 0644 in a 0755 directory, with `central_origin` only for an mDNS root ([`tests/test_provision.py`](../tests/test_provision.py));
+- provisioning installs with `dpkg --install` only and writes `/etc/photo-wall/public.json` atomically with mode 0644 in a 0755 directory, with `central_origin` only for an mDNS root (`tests/test_provision.py`);
 - a `time` failure exits provisioning (the unit's start limit reboots the Pi); other failures are retried with backoff, each logged as one `cause=` line;
 - stage 2's `/etc/resolv.conf` is stage 1's copy (0644, at most 4096 bytes) and the base carries none; only stage 1 writes the clock record.
 

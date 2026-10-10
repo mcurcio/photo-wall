@@ -1057,11 +1057,11 @@ def test_paced_post_forwards_body_and_preserves_deadline_and_pets(tmp_path):
     reply.close()
 
 
-def test_stage_1_no_longer_imports_the_provisioner_or_the_ticket_path():
+def test_stage_1_imports_no_player_and_no_ticket_path():
     tree = ast.parse(Path(netboot_module.__file__).read_text())
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
                  for alias in node.names}
-    assert not {name for name in imported if name.startswith(("appliance.provision", "player"))}
+    assert not {name for name in imported if name.startswith("player")}
     assert not hasattr(netboot_module, "BootTicket")
     assert not hasattr(netboot_module, "verify_release")

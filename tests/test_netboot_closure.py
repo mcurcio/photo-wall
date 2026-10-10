@@ -22,9 +22,7 @@ def test_stage_1_reaches_uplink_and_the_stdlib_only_contracts(closure):
             "contracts.clock_record"} <= set(closure.modules)
 
 
-def test_stage_1_reaches_no_provisioner_and_no_forbidden_package(closure):
-    assert "appliance.provision" not in closure.modules
-    assert "appliance.boot_offer" not in closure.modules   # the retired V1 offer path
+def test_stage_1_reaches_no_forbidden_package(closure):
     assert not [name for name in closure.modules if name.partition(".")[0] in INITRD_FORBIDDEN]
     assert not [name for name in closure.modules
                 if name in ("contracts.models", "contracts.enrollment")]   # pydantic
