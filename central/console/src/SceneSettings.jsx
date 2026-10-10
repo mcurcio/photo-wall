@@ -153,8 +153,8 @@ export function EndingRows({ value, patch, problems }) {
 
 /**
  * Advanced: "Keep the last photo up" (#64) and "Keep these Frames together" (#65). An ending
- * is shown to the end, then what plays beneath: the kept photo never comes back after it
- * (player/executor.py), so the two settings combine.
+ * is shown to the end, then what plays beneath: it keeps nothing after it (`after_end`,
+ * authoring.js `buildSave`), so the kept photo never comes back and the two settings combine.
  *
  * @param {RowsProps} props
  */

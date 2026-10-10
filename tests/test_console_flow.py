@@ -149,7 +149,7 @@ out.fieldSteps = ["mode", "source", "targets", "media:lobby", "cycle", "loop", "
 out.advanced = [...scene.SCENE_ADVANCED_FIELDS].sort();
 const stored = { evening: { scene_id: "evening", revision: 3, cycle_seconds: 20, loop: true,
   contributions: [{ target: "frame:lobby", role: "lobby", kind: "media",
-                    source_refs: ["holiday:1"], retain_on_expiry: true }] } };
+                    source_refs: ["holiday:1"], after_end: "keep_this_photo" }] } };
 const seedOf = scene.seedScene(stored);
 out.seedNew = seedOf("new");
 out.seedNewTarget = scene.seedScene(stored, "frame_one")("new");
@@ -345,8 +345,10 @@ def test_flow_kit_and_scene_flow_shape():
     assert (body["outro_seconds"], body["protect_frames"]) == (4.5, True)
     assert body["outro_contributions"] == [{
         "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
-        "fade_in_seconds": 1.5, "fade_out_seconds": 3}]  # back over half the fade, out over the rest
-    assert out["authoredOutro"] == [{"target": "frame:lobby", "role": "lobby", "kind": "black"}]
+        "fade_in_seconds": 1.5, "fade_out_seconds": 3,  # back over half the fade, out over the rest
+        "after_end": "keep_nothing"}]  # an ending keeps nothing after it
+    assert out["authoredOutro"] == [
+        {"target": "frame:lobby", "role": "lobby", "kind": "black", "after_end": "keep_nothing"}]
     # ...and Edit reads each back.
     settings = {"fadeSeconds": 3, "ending": "fade", "endingSeconds": 4.5,
                 "keepLastPhoto": False, "keepTogether": True}

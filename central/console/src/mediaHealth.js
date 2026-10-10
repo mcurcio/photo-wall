@@ -406,12 +406,13 @@ function endedStep(snapshot, run, frameId) {
     };
   }
   const once = cycleWording(scene) !== null ? " after one cycle" : "";
-  const retains = (scene?.contributions ?? []).some(
-    (entry) => entry.target === toTarget(frameId) && entry.retain_on_expiry,
-  );
-  const still = retains
+  // What the frame keeps after the Scene (each Contribution's `after_end`): its ending's,
+  // when it has one on this frame, else its photos'.
+  const on = (entries) => (entries ?? []).find((entry) => entry.target === toTarget(frameId));
+  const after = (on(scene?.outro_contributions) ?? on(scene?.contributions))?.after_end;
+  const still = after === "keep_this_photo"
     ? "; if its last item was a photo, the frame keeps that still (a video is not kept)"
-    : "";
+    : after === "keep_nothing" ? "; its ending left the frame black" : "";
   return {
     title: "Run ended?",
     state: "stop",

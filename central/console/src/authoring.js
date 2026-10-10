@@ -219,8 +219,10 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  * - `ending` and `endingSeconds` (#62, #63): the outro. "black" is one opaque black
  *   Contribution per Frame; "fade" is one more media Contribution per Frame, from the same
  *   photos: the last photo returns over half the fade between photos, then fades out over
- *   the rest of the outro (so `endingSeconds` must be at least half the fade);
- * - `keepLastPhoto` (#64): every body Contribution's `retain_on_expiry`;
+ *   the rest of the outro (so `endingSeconds` must be at least half the fade). Either keeps
+ *   nothing after it (`after_end: "keep_nothing"`): the Frame is black once it has shown;
+ * - `keepLastPhoto` (#64): every body Contribution keeps its photo after it
+ *   (`after_end: "keep_this_photo"`);
  * - `keepTogether` (#65): the Scene's `protect_frames`.
  *
  * @param {"live"|"authored"} mode
@@ -253,17 +255,17 @@ export function buildSave(
     kind: "media",
     ...media(frameId),
     ...(half > 0 ? { fade_in_seconds: half, fade_out_seconds: half } : {}),
-    ...(keepLastPhoto ? { retain_on_expiry: true } : {}),
+    ...(keepLastPhoto ? { after_end: "keep_this_photo" } : {}),
   }));
   const scene = { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions };
   if (ending !== "none") {
     const seconds = Number(endingSeconds);
     scene.outro_seconds = seconds;
     scene.outro_contributions = targetIds.map((frameId) => (ending === "black"
-      ? { target: toTarget(frameId), role: frameId, kind: "black" }
+      ? { target: toTarget(frameId), role: frameId, kind: "black", after_end: "keep_nothing" }
       : { target: toTarget(frameId), role: frameId, kind: "media", ...media(frameId),
           ...(half > 0 ? { fade_in_seconds: half } : {}),
-          fade_out_seconds: seconds - half }));
+          fade_out_seconds: seconds - half, after_end: "keep_nothing" }));
   }
   if (keepTogether) {
     scene.protect_frames = true;
@@ -305,7 +307,7 @@ export const CONTRIBUTION_DEFAULTS = {
   "opacity": 1,
   "fade_in_seconds": 0,
   "fade_out_seconds": 0,
-  "retain_on_expiry": false,
+  "after_end": "leave_as_is",
   "ramp_from": 0,
   "ramp_to": 0
 };
@@ -373,7 +375,7 @@ export function decodeScene(scene) {
     fadeSeconds: first ? first.fade_in_seconds + first.fade_out_seconds : 0,
     ending,
     endingSeconds: ending === "none" ? SCENE_SETTING_DEFAULTS.endingSeconds : outroSeconds,
-    keepLastPhoto: first ? first.retain_on_expiry : SCENE_SETTING_DEFAULTS.keepLastPhoto,
+    keepLastPhoto: first ? first.after_end === "keep_this_photo" : SCENE_SETTING_DEFAULTS.keepLastPhoto,
     keepTogether,
   };
 }
