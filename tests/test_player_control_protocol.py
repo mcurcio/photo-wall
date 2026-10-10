@@ -3,6 +3,7 @@
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,12 +12,15 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.player_control_protocol import project_state, state_digest
+from contracts.models import FrameProfile, Layer, OutputBinding, Plan, PlayerConfiguration, Variant
 from contracts.player_control import (
+    LAYER_AFTER_END,
     ControlAck,
     ControlHello,
     ControlSelection,
     select_control,
 )
+from player.service import PlayerService
 
 
 class _WireValue:
@@ -283,3 +287,69 @@ def test_control_expiry_is_sampled_after_waiting_for_player_lock(
     else:
         assert outcome["delivery_id"] != first["delivery_id"]
         assert outcome["delivery_sequence"] == first["delivery_sequence"] + 1
+
+
+def after_end_plan() -> tuple[PlayerConfiguration, Plan]:
+    """A kept photo, then a black ending that keeps nothing, then a plain overlay."""
+    binding = OutputBinding(output_id="HDMI-A-1", frame_id="frame-0", generation=1,
+                            profile=FrameProfile(width_px=1920, height_px=1080,
+                                                 diagonal_inches=24))
+    configuration = PlayerConfiguration(player_id="p-" + "a" * 32, authority_epoch=1,
+                                        configuration_revision=1, bindings=(binding,),
+                                        enabled_outputs=("HDMI-A-1",))
+    common = dict(run_id="run-1", output_id="HDMI-A-1", frame_id="frame-0", binding_generation=1)
+    photo = Variant(sha256="b" * 64, size=10, media_type="image/jpeg", width=10, height=10)
+    layers = (
+        Layer(assignment_id="kept", start=0, end=10, media_origin=0, variant=photo,
+              after_end="keep_this_photo", **common),
+        Layer(assignment_id="ending", start=10, end=14, media_origin=10, presentation="black",
+              after_end="keep_nothing", **common),
+        Layer(assignment_id="overlay", start=14, end=20, media_origin=14, variant=photo,
+              priority=5, **common),
+    )
+    return configuration, Plan(plan_id="plan-1", revision=1, player_id=configuration.player_id,
+                               authority_epoch=1, issued_at=0, valid_from=0, valid_until=20,
+                               bindings=(binding,), layers=layers)
+
+
+def after_end_state(selection: ControlSelection) -> dict:
+    configuration, plan = after_end_plan()
+    return project_state({"configuration": configuration, "plan": plan, "commits": (),
+                          "revocations": (), "identify_output": None}, selection)
+
+
+LEGACY = ControlSelection(authority_epoch=1, schema=1)
+IDENTIFY_ONLY = ControlSelection(authority_epoch=1, schema=2, capabilities=("identify_output",))
+CURRENT = ControlSelection(authority_epoch=1, schema=2,
+                           capabilities=("identify_output", LAYER_AFTER_END))
+
+
+def test_only_a_player_that_offers_it_is_sent_the_after_state():
+    """A plan layer's `after_end` reaches only a session that selected `layer_after_end`; any
+    other gets the yes/no flag its release parses (unknown fields forbidden), kept photo or
+    not. This Player reads either shape as the after-state. Mutation probe: send `after_end`
+    to every session (a released Player, whose models forbid unknown fields, would refuse the
+    state)."""
+    assert select_control(ControlHello(authority_epoch=1, schemas=(1, 2), capabilities=(
+        LAYER_AFTER_END, "identify_output"))) == CURRENT
+    assert select_control(ControlHello(authority_epoch=1, schemas=(1, 2),
+                                       capabilities=("identify_output",))) == IDENTIFY_ONLY
+    current = after_end_state(CURRENT)["plan"]["layers"]
+    assert [layer["after_end"] for layer in current] == [
+        "keep_this_photo", "keep_nothing", "leave_as_is"]
+    assert not any("retain_on_expiry" in layer for layer in current)
+    for selection in (LEGACY, IDENTIFY_ONLY):
+        legacy = after_end_state(selection)["plan"]["layers"]
+        assert [layer["retain_on_expiry"] for layer in legacy] == [True, False, False]
+        assert not any("after_end" in layer for layer in legacy)
+    # This Player, given a selection without the capability by an older Central.
+    _, plan = after_end_plan()
+    service = SimpleNamespace(_control_selection=IDENTIFY_ONLY)
+    state = PlayerService._state(service, after_end_state(IDENTIFY_ONLY))
+    assert [layer.after_end for layer in state.plan.layers] == [
+        "keep_this_photo", "leave_as_is", "leave_as_is"]
+    service = SimpleNamespace(_control_selection=CURRENT)
+    assert PlayerService._state(service, after_end_state(CURRENT)).plan == plan
+    # An explicit after-state is read as sent, whatever the selection says.
+    service = SimpleNamespace(_control_selection=IDENTIFY_ONLY)
+    assert PlayerService._state(service, after_end_state(CURRENT)).plan == plan

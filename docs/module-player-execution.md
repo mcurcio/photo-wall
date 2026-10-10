@@ -29,7 +29,7 @@ No local journal bridges a crash. A restarted process initially shows black, est
 
 Only active committed layers execute. Preparation is limited to current and imminent work. The authenticated `/v1/player/time` mapping gates readiness and local scheduling. A stale, stepped, or uncertain mapping prevents new clock-dependent work while already authorized visible output may remain until its lease expires.
 
-Layer start, end, media origin, fades, and ordering remain central facts. Covered video resumes at current logical position. A successful compatible opaque still may be retained for the current process and binding only when central authorizes retention. Cache presence or preroll alone cannot become fallback. Failed replacement preparation or presentation preserves a still-valid existing composition; expired or revoked authority falls through to an authorized retained still or black.
+Layer start, end, media origin, fades, and ordering remain central facts. Covered video resumes at current logical position. What a Frame keeps for when nothing plays is the after-state Central planned on each layer, which the Player applies for the current process and binding ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). Cache presence or preroll alone cannot become fallback. Failed replacement preparation or presentation preserves a still-valid existing composition; expired or revoked authority falls through to an authorized retained still or black.
 
 Running-process control outages may preserve the current authorized composition. Process restart and cold boot require central connectivity and fresh authority. The Executor makes no reboot-survival promise.
 

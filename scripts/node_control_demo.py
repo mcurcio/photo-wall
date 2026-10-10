@@ -138,20 +138,35 @@ class MemoryEffectJournal:
         self.latest = record
 
 
-class RecordingAppDriver:
+class MemoryRelaunchPacing:
+    """`RelaunchPacingStore` in memory; `puts` counts the writes."""
+
     def __init__(self):
+        self.pacing = None
+        self.puts = 0
+
+    def get(self):
+        return self.pacing
+
+    def put(self, pacing):
+        self.pacing, self.puts = pacing, self.puts + 1
+
+
+class RecordingAppDriver:
+    def __init__(self, clock=lambda: 0):
         self.running = None
         self.selected = None
         self.calls = []
         self.display = "weston-1"  # the running display incarnation (None: down)
-        self.launch_display = None  # the incarnation the last start recorded
+        self.launch = None  # the last start's Launch (epoch, display, started_ms)
         self.collected = True  # PID1 unloaded the old unit
+        self.clock = clock  # boottime ms, read at each start
 
     def display_incarnation(self):
         return self.display
 
-    def launched_display(self):
-        return self.launch_display
+    def launched(self):
+        return self.launch
 
     def unit_collected(self):
         return self.running is None and self.collected
@@ -169,13 +184,16 @@ class RecordingAppDriver:
         self.selected = environment
 
     def start(self, environment, operation_id):
-        from appliance.apps.broker import RunningApp
+        from appliance.apps.broker import Launch, RunningApp
         from contracts.node_protocol import NodeProcessIdentity
 
         self.calls.append("start_simulated_process")
-        self.launch_display = self.display
+        # Like the systemd driver, the launch is recorded before the spawn.
+        epoch = self.launch.epoch + 1 if self.launch else 1
+        self.launch = Launch(epoch, self.display, self.clock())
         self.running = RunningApp(
-            environment, NodeProcessIdentity(100, 50, UUID(int=6)), 1, operation_id,
+            environment, NodeProcessIdentity(99 + epoch, 49 + epoch, UUID(int=5 + epoch)), epoch,
+            operation_id,
         )
         return self.running
 
@@ -230,7 +248,8 @@ def run_demo() -> dict:
     )
     app_driver = RecordingAppDriver()
     broker = AppEffectBroker(boot_id=boot, offer_id=offer, authorized_environment=environment,
-                             journal=MemoryEffectJournal(), driver=app_driver)
+                             journal=MemoryEffectJournal(), driver=app_driver,
+                             pacing=MemoryRelaunchPacing(), now_ms=lambda: 0)
     cold = broker.cold_start(ColdStart(UUID(int=8), boot, offer, environment))
     running = cold.running
     if running is None:

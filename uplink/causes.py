@@ -31,6 +31,9 @@ class Cause(StrEnum):
     HTTP = "http"                # a non-200 not written by Central (gateway, proxy)
     CENTRAL = "central"          # a non-200 carrying Central's own {"error": <code>}
     TRANSFER = "transfer"        # body over its bound, short, misencoded, broken or too late
+    # this machine ran out of a resource (descriptors, memory); nothing about the network was
+    # learned
+    LOCAL = "local"
 
 
 REASONS: Mapping[Cause, frozenset[str]] = MappingProxyType({
@@ -46,6 +49,7 @@ REASONS: Mapping[Cause, frozenset[str]] = MappingProxyType({
     Cause.HTTP: frozenset({"status"}),
     Cause.CENTRAL: frozenset({"error"}),
     Cause.TRANSFER: frozenset({"limit", "short", "encoding", "deadline", "tls"}),
+    Cause.LOCAL: frozenset({"descriptors", "memory"}),
 })
 
 CONSOLE_LIMIT = 512
@@ -108,9 +112,21 @@ def _of(*types: type[BaseException]) -> Callable[[BaseException], bool]:
     return lambda error: isinstance(error, types)
 
 
-# design §2.1 rules 1-16 in order; the first rule that matches any link of the chain wins.
-# Rule 17 (anything else) is classify returning None.
+def _errno_in(*codes: int) -> Callable[[BaseException], bool]:
+    return lambda error: isinstance(error, OSError) and error.errno in codes
+
+
+# A local exhaustion is tried first in both phases (1b P1a): EMFILE once read as connect_other.
+_LOCAL_RULES: tuple[tuple[Callable[[BaseException], bool], Cause, str], ...] = (
+    (_errno_in(errno.EMFILE, errno.ENFILE), Cause.LOCAL, "descriptors"),
+    (_errno_in(errno.ENOMEM), Cause.LOCAL, "memory"),
+)
+
+# design §2.1 rules 1-16 in order, after the local rules; the first rule that matches any link
+# of the chain wins. Rule 17 (anything else) is classify returning None.
 _RULES: tuple[tuple[Phase, Callable[[BaseException], bool], Cause, str], ...] = (
+    *((phase, matches, cause, reason) for phase in ("connect", "transfer")
+      for matches, cause, reason in _LOCAL_RULES),
     ("connect", lambda error: _verify_code(error) == 9, Cause.TIME, "not_yet_valid"),
     ("connect", lambda error: _verify_code(error) == 10, Cause.TIME, "expired"),
     ("connect", lambda error: _verify_code(error) in (62, 64), Cause.TLS, "hostname"),

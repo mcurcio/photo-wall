@@ -152,6 +152,14 @@ class PlayerTime(Model):
     server_time: Instant
 
 
+# What a Frame keeps once a layer has been shown, for when nothing plays on it (the Player's
+# fallback, an outage included). The layer takes effect once its fade-in is over:
+# "keep_this_photo" keeps this opaque still up; "keep_nothing" keeps nothing (black);
+# "leave_as_is" changes nothing (an earlier layer's after-state still holds). Central plans it
+# (docs/execution-contract.md "What a Frame keeps"); the Player only applies it.
+AfterEnd = Literal["leave_as_is", "keep_this_photo", "keep_nothing"]
+
+
 class Layer(Model):
     assignment_id: Identifier
     run_id: Identifier
@@ -170,7 +178,7 @@ class Layer(Model):
     fade_in: float = Field(default=0, ge=0)
     fade_out: float = Field(default=0, ge=0)
     required: bool = True
-    retain_on_expiry: bool = False
+    after_end: AfterEnd = "leave_as_is"
 
     @model_validator(mode="after")
     def interval(self) -> Self:
@@ -182,10 +190,10 @@ class Layer(Model):
             raise ValueError("black layer cannot carry media")
         if self.fade_in + self.fade_out > self.end - self.start:
             raise ValueError("fades exceed layer interval")
-        if self.retain_on_expiry and (
+        if self.after_end == "keep_this_photo" and (
             self.variant is None or self.variant.media_type == "video/mp4" or self.opacity != 1
         ):
-            raise ValueError("only an opaque still may be retained")
+            raise ValueError("only an opaque still may be kept")
         return self
 
     def position(self, now: float) -> float:

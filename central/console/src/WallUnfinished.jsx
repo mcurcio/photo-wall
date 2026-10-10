@@ -7,6 +7,7 @@ import { wallUnfinished } from "./unfinished.js";
 const STEPS = Object.freeze({
   place: { text: "not on the plan", link: "Edit layout" },
   bind: { text: "needs a Player", link: "Hardware" },
+  display: { text: "display changed", link: "Hardware" },
   calibrate: { text: "needs calibration", link: "Position" },
 });
 

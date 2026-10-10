@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
-from contracts.models import TARGET_ID_PATTERN
+from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -53,7 +53,7 @@ class Contribution(FrozenModel):
     opacity: Unit = 1
     fade_in_seconds: Seconds = 0
     fade_out_seconds: Seconds = 0
-    retain_on_expiry: bool = False
+    after_end: AfterEnd = "leave_as_is"
     ramp_from: Unit = 0
     ramp_to: Unit = 0
 
@@ -65,8 +65,10 @@ class Contribution(FrozenModel):
             raise ValueError("media contributions need source or authored asset references")
         if self.kind != "media" and (self.source_refs or self.asset_refs):
             raise ValueError("only media contributions carry media references")
-        if self.retain_on_expiry and (self.kind != "media" or self.opacity != 1):
-            raise ValueError("only opaque media contributions may retain a still")
+        if self.after_end == "keep_this_photo" and (self.kind != "media" or self.opacity != 1):
+            raise ValueError("only opaque media contributions may keep a photo")
+        if self.after_end != "leave_as_is" and self.kind == "actuator":
+            raise ValueError("an actuator contribution keeps nothing on a Frame")
         return self
 
 
@@ -166,7 +168,7 @@ class Intent(FrozenModel):
     base_opacity: Unit
     fade_in_seconds: Seconds
     fade_out_seconds: Seconds
-    retain_on_expiry: bool = False
+    after_end: AfterEnd = "leave_as_is"
     actuator_value: Unit | None = None
     phase: Literal["body", "outro"]
 
@@ -268,6 +270,22 @@ class _Run(_MutableModel):
         if self.scene.duration_seconds is not None:
             times.append(self.started_at + self.scene.duration_seconds)
         return min((t for t in times if t is not None), default=None)
+
+
+def _may_hold_to_the_end(run: _Run, contribution: Contribution) -> bool:
+    """A kept photo in its Run's final body cycle, with no ending of its Scene on its Frame:
+    it plans no fade-out unless another Run plays on the Frame at the cycle's end
+    (`Runtime._playing_at`), so it never dips to black and snaps back to itself. The cycle is
+    final when the Scene does not loop, or when the Run's stop (Program end, duration,
+    scheduled finish or Finish) falls within it; a Finish, or a follower that appears later,
+    revises the cycle's fade-out, which the planner allows on an offered layer
+    (`planner.REVISABLE`)."""
+    if run.phase != "body" or contribution.after_end != "keep_this_photo":
+        return False
+    if any(ending.target == contribution.target for ending in run.scene.outro_contributions):
+        return False
+    stop = run.stop_at
+    return not run.scene.loop or (stop is not None and stop <= run.cycle_end)
 
 
 class _Queued(_MutableModel):
@@ -708,7 +726,7 @@ class Runtime:
     def advance(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self._advance(now, _TransitionBudget(max_events))
 
-    def _advance(self, now: float, budget: _TransitionBudget) -> RuntimeView:
+    def _advance(self, now: float, budget: _TransitionBudget, *, holds: bool = True) -> RuntimeView:
         now = _finite(now)
         if self._state.now is not None and now < self._state.now:
             raise ValueError("Runtime cannot move backwards in UTC")
@@ -727,7 +745,7 @@ class Runtime:
             budget.consume()
             self._process(event, budget)
         self._state.now = now
-        return self._view(now)
+        return self._view(now, budget=budget if holds else None)
 
     def _matching(self, scene_id: str) -> list[_Run]:
         return [
@@ -939,9 +957,34 @@ class Runtime:
                 )
             self._state.queue.remove(item)
 
-    def _view(self, now: float) -> RuntimeView:
+    def _playing_at(self, at: float, budget: _TransitionBudget) -> tuple[Intent, ...]:
+        """Every contribution playing at `at`, see-through ones included (the Player draws a
+        kept photo only as its fallback, never beneath a playing layer), from a detached
+        projection without the after-end rules (so it never recurses), spending the caller's
+        transition budget."""
+        view = self._copy()._advance(at, budget, holds=False)
+        return tuple(intent for intent in view.contributions
+                     if intent.interval_start <= at < intent.interval_end)
+
+    def _view(self, now: float, *, budget: _TransitionBudget | None) -> RuntimeView:
+        """The view at `now`. With a budget, spent on what plays at a layer's end
+        (`_playing_at`): a kept photo's final cycle is held when nothing else plays on its
+        Frame (`_may_hold_to_the_end`); and the owner's "When the top show ends, it gets out of
+        the way and the show underneath takes over": an ending keeps nothing only when no
+        other Run plays on its Frame at its end, and a photo is kept only when no Run beneath
+        it plays on its Frame at its cycle's end."""
         intents: list[Intent] = []
         runs = sorted(self._state.runs.values(), key=lambda r: r.order)
+        playing: dict[float, tuple[Intent, ...]] = {}
+
+        def others(run: _Run, at: float, *, beneath: bool = False) -> frozenset[str]:
+            if at not in playing:
+                playing[at] = self._playing_at(at, budget)
+            mine = (run.priority, run.root_order, run.local_order)
+            return frozenset(intent.target for intent in playing[at]
+                             if intent.run_id != run.run_id
+                             and (not beneath or intent.precedence < mine))
+
         for run in runs:
             if not run.active or (run.phase == "body" and run.body_done_at is not None):
                 continue
@@ -950,11 +993,23 @@ class Runtime:
             definitions = run.scene.outro_contributions if run.phase == "outro" else run.scene.contributions
             position = max(0.0, now - start)
             for contribution in definitions:
+                fade_out = contribution.fade_out_seconds
+                after_end = contribution.after_end
+                if budget is not None:
+                    if (fade_out and _may_hold_to_the_end(run, contribution)
+                            and contribution.target not in others(run, end)):
+                        fade_out = 0
+                    if (after_end == "keep_nothing" and run.phase == "outro"
+                            and contribution.target in others(run, end)):
+                        after_end = "leave_as_is"
+                    if (after_end == "keep_this_photo" and run.phase == "body"
+                            and contribution.target in others(run, end, beneath=True)):
+                        after_end = "leave_as_is"
                 opacity = contribution.opacity
                 if contribution.fade_in_seconds:
                     opacity *= min(1.0, position / contribution.fade_in_seconds)
-                if contribution.fade_out_seconds:
-                    opacity *= min(1.0, max(0.0, end - now) / contribution.fade_out_seconds)
+                if fade_out:
+                    opacity *= min(1.0, max(0.0, end - now) / fade_out)
                 fraction = min(1.0, position / (end - start))
                 value = (
                     contribution.ramp_from
@@ -972,8 +1027,8 @@ class Runtime:
                     interval_start=start, interval_end=end, opacity=opacity,
                     base_opacity=contribution.opacity,
                     fade_in_seconds=contribution.fade_in_seconds,
-                    fade_out_seconds=contribution.fade_out_seconds,
-                    retain_on_expiry=contribution.retain_on_expiry,
+                    fade_out_seconds=fade_out,
+                    after_end=after_end,
                     actuator_value=value, phase=run.phase,
                 ))
         winners: dict[str, Intent] = {}

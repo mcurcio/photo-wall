@@ -1157,3 +1157,113 @@ def test_a_changed_draft_after_an_unanswered_save_checks_its_name_again(page, re
         form.get_by_role("button", name="Save Scene", exact=True).click()
         expect(form.get_by_label("Scene name", exact=True)).to_have_attribute("aria-invalid", "true")
         expect(form.get_by_role("alert")).to_contain_text("already exists")
+
+
+# --- Roadmap 1x: the Scene settings Central already plays, set in the console.
+
+
+def _row(form, label):
+    """A setting's row (patterns/setting-row.tsx): its control, help, default and Reset."""
+    return form.locator(f'[data-setting="{label}"]')
+
+
+def _definition(page, origin, scene_id):
+    """The Scene Central stores, read through the public contract."""
+    response = page.request.get(origin + "/v1/operator/runtime",
+                                headers={"Authorization": "Bearer " + ADMIN})
+    return response.json()["definitions"][scene_id]
+
+
+def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
+    """Roadmap 1x: Fade between photos (#41), How it ends and its length (#62, #63), Keep
+    the last photo up (#64) and Keep these Frames together (#65) each show their catalogue
+    default, are set on Playback, are saved into the Scene Central stores, and show again
+    when the Scene is opened after a reload. The plan a Player gets from each value is
+    tests/test_exposed_settings_roundtrip.py. Mutation probes: drop any one value from
+    authoring.js `buildSave` (the stored Scene misses it) or from `decodeScene` (Edit shows
+    the default, or is withheld)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+
+        # Each row shows its default; a value at its default offers no Reset.
+        fade = _row(form, "Fade between photos")
+        expect(fade).to_contain_text("Default: 1.5 s")
+        expect(fade.get_by_role("button", name=re.compile("^Reset"))).to_have_count(0)
+        expect(_row(form, "How it ends")).to_contain_text("Default: Stops")
+        expect(form.get_by_label("Ending length", exact=True)).to_have_count(0)
+        fade.get_by_label("Fade between photos", exact=True).fill("3")
+        expect(fade.get_by_role("button", name="Reset Fade between photos (Default: 1.5 s)")).to_be_visible()
+        ending = _row(form, "How it ends")
+        ending.get_by_role("radio", name="Fades out", exact=True).check()
+        form.get_by_label("Ending length", exact=True).fill("4.5")
+        # Reset of How it ends resets its length too: back to Stops, and 3 s when chosen again.
+        ending.get_by_role("button", name="Reset How it ends (Default: Stops)").click()
+        expect(ending.get_by_role("radio", name="Stops", exact=True)).to_be_checked()
+        ending.get_by_role("radio", name="Fades out", exact=True).check()
+        expect(form.get_by_label("Ending length", exact=True)).to_have_value("3")
+        form.get_by_label("Ending length", exact=True).fill("4.5")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        expect(_row(form, "Keep the last photo up")).to_contain_text("Default: On")
+        expect(_row(form, "Keep these Frames together")).to_contain_text("Default: Off")
+        keep_last = form.get_by_role("switch", name="Keep the last photo up", exact=True)
+        expect(keep_last).to_be_checked()
+        keep_last.click()
+        form.get_by_role("switch", name="Keep these Frames together", exact=True).click()
+
+        scene_continue(page, "Review")
+        for answer in ("Fade between photos3 s", "How it endsFades out for 4.5 s",
+                       "Keep the last photo upOff", "Keep these Frames togetherOn"):
+            expect(form).to_contain_text(answer)
+        form.get_by_label("Scene name", exact=True).fill("evening-fade")
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/evening-fade")
+                                  and r.request.method == "PUT") as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.status == 200
+        stored = _definition(page, origin, "evening-fade")
+        body = stored["contributions"][0]
+        assert (body["fade_in_seconds"], body["fade_out_seconds"], body["after_end"]) == (
+            1.5, 1.5, "leave_as_is")
+        assert (stored["outro_seconds"], stored["protect_frames"]) == (4.5, True)
+        # Fades out: the last photo returns over half the 3 s fade, then fades out over the rest.
+        assert [(c["kind"], c["fade_in_seconds"], c["fade_out_seconds"], c["after_end"])
+                for c in stored["outro_contributions"]] == [("media", 1.5, 3, "keep_nothing")]
+
+        # Shown again after a reload: Review answers each value and Playback holds it. The
+        # console goes back to the Scenes list after a save; a reload during that navigation
+        # is aborted, so wait for it first.
+        page.wait_for_url(re.compile(r"#/scenes$"))
+        page.reload()
+        go(page, "scenes")
+        _scenes(page).get_by_role("button", name="Edit Scene evening-fade", exact=True).click()
+        for answer in ("Fade between photos3 s", "How it endsFades out for 4.5 s",
+                       "Keep the last photo upOff", "Keep these Frames togetherOn"):
+            expect(form).to_contain_text(answer)
+        form.get_by_role("button", name="Change How it ends", exact=True).click()
+        expect(_row(form, "How it ends").get_by_role("radio", name="Fades out", exact=True)).to_be_checked()
+        expect(form.get_by_label("Ending length", exact=True)).to_have_value("4.5")
+        expect(form.get_by_label("Fade between photos", exact=True)).to_have_value("3")
+        form.get_by_role("button", name="Advanced", exact=True).click()
+        expect(form.get_by_role("switch", name="Keep the last photo up", exact=True)).not_to_be_checked()
+        expect(form.get_by_role("switch", name="Keep these Frames together", exact=True)).to_be_checked()
+
+
+def test_a_fade_longer_than_the_cycle_is_the_fades_problem(page, registry):
+    """The planner refuses fades longer than a cycle, so the console says so on the fade."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "quick", SOURCE, (VALID_FRAME,), seconds=2, submit=False)
+        form.get_by_role("button", name="Change Fade between photos", exact=True).click()
+        form.get_by_label("Fade between photos", exact=True).fill("3")
+        scene_continue(page)
+        expect(_row(form, "Fade between photos").locator("xpath=..")).to_contain_text(
+            "Fade between photos must be no longer than Seconds per cycle.")
+        expect(form.get_by_label("Fade between photos", exact=True)).to_be_focused()

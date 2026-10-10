@@ -148,11 +148,11 @@ def _authored_photos(registry):
 
 
 def _seed(registry):
-    """Seed two placed frames with KNOWN calibration_valid:
+    """Seed two placed frames with KNOWN readiness:
 
-    - VALID_FRAME is bound then committed, so calibration_valid=true.
-    - INVALID_FRAME is bound only (bind sets calibration_valid=false) and never
-      committed, so calibration_valid=false.
+    - VALID_FRAME is bound then committed, so it is ready.
+    - INVALID_FRAME is bound only (bind raises the generation) and never
+      committed, so it needs its position.
 
     Two separate players so each frame binds a connected HDMI-A-1 of its own.
     """
@@ -166,14 +166,14 @@ def _seed(registry):
         id=INVALID_FRAME, surface_id="wall", x_mm=500, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
 
-    # VALID_FRAME: bind (generation 0->1, calibration_valid=false) then commit
-    # (calibration_valid=true, revision 2).
+    # VALID_FRAME: bind (generation 0->1, position needed) then commit
+    # (ready, revision 2).
     registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0)
     registry.calibrate(
         VALID_FRAME, "commit", expected_revision=1,
         calibration=Calibration(gain=1.5), expected_generation=1)
 
-    # INVALID_FRAME: bind only -> calibration_valid stays false.
+    # INVALID_FRAME: bind only -> it still needs its position.
     registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)
     return id_a["player_id"], id_b["player_id"]
 
@@ -1781,7 +1781,7 @@ def _console_scene(scene_id, frame=VALID_FRAME, **fields):
     """A live Scene in exactly the shape the console saves: only the fields it sends
     are set, so every other field is stored at its model default."""
     return Scene(scene_id=scene_id, **{"loop": True, **fields}, contributions=(Contribution(
-        target=f"frame:{frame}", role=frame, source_refs=(SOURCE,), retain_on_expiry=True),))
+        target=f"frame:{frame}", role=frame, source_refs=(SOURCE,), after_end="keep_this_photo"),))
 
 
 def _scene_row(page, scene_id):
@@ -1869,7 +1869,8 @@ def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, 
         expect(_scene_row(page, "plain").get_by_role("button", name="Edit Scene plain")).to_be_visible()
         evening = _scene_row(page, "evening")
         expect(evening).to_contain_text(
-            "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…).")
+            "Edit unavailable: Uses features the console can't edit yet (child Scenes, see-through "
+            "photos, different settings per Frame, or values outside its ranges).")
         expect(evening.get_by_role("button", name="Edit Scene evening")).to_have_count(0)
 
 
@@ -1905,7 +1906,7 @@ def _put_authored(page, origin, scene_id, choices):
     """Store an authored Scene through the public route, as the console saves one."""
     scene = {"scene_id": scene_id, "revision": 1, "cycle_seconds": 30, "loop": True,
              "contributions": [{"target": f"frame:{frame}", "role": frame, "kind": "media",
-                                "asset_refs": [asset], "retain_on_expiry": True}
+                                "asset_refs": [asset], "after_end": "keep_this_photo"}
                                for frame, asset in choices.items()]}
     response = page.request.put(
         origin + f"/v1/operator/scenes/{scene_id}/authored",
@@ -2185,7 +2186,7 @@ def _stop(chain):
 
 def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page, registry):
     """§14 step 2: nothing is intended any more because the one-cycle Run ended; the
-    frame keeps its last still if it was a photo (retain_on_expiry). Mutation probes:
+    frame keeps its last still if it was a photo (`after_end`). Mutation probes:
     drop the retained-still words; render the chain inside the ranked list."""
     _seed(registry)
     queue = _seed_source(registry)

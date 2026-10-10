@@ -88,6 +88,7 @@ FROM scratch AS source
 COPY --link contracts /app/contracts
 COPY --link media /app/media
 COPY --link player /app/player
+COPY --link uplink /app/uplink
 COPY --link central /app/central
 COPY --link nodeapi /app/nodeapi
 COPY --link --from=console-builder /console/dist /app/central/console/dist

@@ -171,13 +171,16 @@ interface TabsProps { label: string; tabs: readonly { value: string; label: stri
 interface InlineProps { label?: string; children: React.ReactNode }
 interface StackProps { label?: string; children: React.ReactNode }
 
-// Field — owns label, help and error wiring for one control (aria-describedby).
-interface FieldProps { label: string; help?: string; error?: string; children: React.ReactElement }
+// Field — owns label, help and error wiring for one control (aria-describedby). `notes` are short facts on one
+// line under the help (a setting's default, where it acts) that also describe the control. Its context gives the
+// control its id, its describedby and the label's id (`labelId`), so a control that is a group is named by the label.
+interface FieldProps { label: string; help?: string; error?: string; notes?: readonly string[]; children: React.ReactElement }
 
 // Slider — shows its value and unit as text; commits on release, previews on drag.
 interface SliderProps { value: number; min: number; max: number; step: number; unit: string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
 
-// SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit).
+// SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit). Alone it shows and carries its `label`;
+// inside a Field the Field's label names the group (aria-labelledby) and its help describes it, and `label` is unused.
 interface SegmentedControlProps<V extends string> { label: string; value: V; options: readonly { value: V; label: string }[]; onChange(v: V): void }
 
 // Switch — an on/off setting that applies at once.
@@ -218,7 +221,8 @@ type SettingRowProps = SettingRowBase & (
 interface SettingRowBase {
   label: string;
   help?: string;                  // one plain sentence
-  control: React.ReactNode;       // a ui control inside Field
+  control: React.ReactElement;    // an unlabelled ui control: the row's Field labels it, and help, actsOn and
+                                  // defaultLabel are the Field's help and notes
   defaultLabel?: string;          // "Default: 50 %"
   onReset?(): void;               // shown only when the value differs from the default
   state: "idle" | "saving" | "saved" | "error";
@@ -533,7 +537,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | B3 Name and place | Frames › wall layout (placement) | T6 | WallTile, Tabs (walls) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
 | B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl, AckBadge, LeaveGuard | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note |
 | B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | SettingRow (equipment, actsOn), Slider, Switch (grey ramp) | Live | each slider says where it acts | a display that refuses DDC/CI: rows switch to picture adjustment and say so |
-| B6 Power | Frame page › Power | T3 | SettingRow, Button (Test), AckBadge, LinkToOwner | Autosave (options); Action (Test) | "Display confirmed off" / "Display didn't answer" | no method detected: EmptyState naming the smart-plug option |
+| B6 Power | Frame page › Power | T3 | SettingRow, Button (Test), Note (live status, in place of `AckBadge`, whose words are the live editor's), LinkToOwner | Autosave (options), no Undo until `UndoToast` exists; Action (Test) | "Waiting for the Pi" until the Pi answers the change that carried the test, then "Display confirmed off" / "Display confirmed on" / "Picture stopped; the display may sleep" / "Display didn't answer" / "Left on: the display is showing another input"; Pi not linked: "Last heard from the Pi at …" | no method answered (`not-supported`): EmptyState naming the smart-plug option; unbound: "Choose which Pi and HDMI port feeds this Frame", linking to Hardware |
 | B7 First photos | Setup checklist › First photos | T7 | Checklist, MediaGrid | none | done when a Frame is Showing | Immich not connected → that step first |
 | C1 Wall layout | Frames › wall layout | T6 | WallTile, Field (size in house units) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
 | C2 Rooms and groups | Frames › Groups | T2 | EntityList, TargetPicker | Autosave | member count | rooms make groups by themselves |
@@ -571,7 +575,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | G3 Restart | Pis › Pi page | T3 | Button, StepProgress | Action | "Reboot requested → started → back online" | a failed step with its time and Retry |
 | G4 Replace a Pi | Frame page › Hardware › Replace with… | T3 + QuickActionSheet | Select (the waiting Pi), UndoToast | Action + Undo | "Living room left is now fed by pw-91c0" | no waiting Pi: "Plug in the new Pi" |
 | G4 Replace a Pi | Pis › New Pis waiting | T2 | EntityList, QuickActionSheet ("Which Frame did you plug this into?") | Action + Undo | one tap binds | EmptyState as in B1 |
-| G5 Display changed | Frame page › Hardware (prompt) | T3 | ProblemCard (`todo`) | none | Frame not ready until Position is re-checked | a display with no identity: "treated as new" |
+| G5 Display changed | Frame page › Hardware (prompt) | T3 | ProblemCard (`todo`) with two steps, FactRow | Action (step 1, **Confirm Frame profile**, pre-filled from the new display); step 2 links to Position | Frame not ready until Position is re-checked | a display with no usable serial: "Recognised by make and model on this Frame" ([design §6](operator-console-design.md#6-display-identity)); the display listed no modes: step 1 sends you to Edit Frame profile |
 | G5 Display changed | Frame page › Position (re-check) | T3 + LivePreviewEditor | as B4 | Live | Done clears the block | as B4 |
 | G6 Updates | Settings › Updates | T8 | SettingRow, StepProgress, ConfirmDangerous | Autosave (choice); Action (Apply) | "1.5.0 downloaded · Apply", then per-Pi progress | download failed: error template |
 | G7 Backup and restore | Settings › Backups | T8 | SettingRow, EntityList, ConfirmDangerous (with preview) | Autosave; Action (Restore, confirmed) | "Last backup 03:00 · 2.1 MB" | EmptyState with "Back up now" |

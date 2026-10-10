@@ -8,14 +8,16 @@ import { isUnplaced } from "./projection.js";
  *  - "place": the Frame is not on the plan (the Unplaced tray's rule, projection.js
  *    `isUnplaced`); fixed in Edit layout.
  *  - "bind": no Binding exists; fixed on the Frame page's Hardware tab.
- *  - "calibrate": bound, and `calibration_valid` is not true; fixed on the Frame page's
+ *  - "display": bound, and its `readiness` is "display-changed" (another display is on its
+ *    port); fixed on the Frame page's Hardware tab, whose card leads on to Position.
+ *  - "calibrate": bound, and its `readiness` is "position-needed"; fixed on the Frame page's
  *    Position tab. An unbound Frame has no position to save, so it is never asked for one.
  *
  * No `reported` or `derived` fact (liveness, readiness, host health) adds or removes an
  * item: those are Needs attention's incidents (health.js `wallAttention`). Nothing counts
  * this list and no route depends on it; it empties itself as the records arrive.
  *
- * @typedef {"place"|"bind"|"calibrate"} Step
+ * @typedef {"place"|"bind"|"display"|"calibrate"} Step
  * @typedef {{frameId: string, step: Step, route: import("./routes.js").Route}} Unfinished
  *
  * @param {object|null} snapshot
@@ -33,7 +35,10 @@ export function wallUnfinished(snapshot) {
     if (!isBound(frame)) {
       items.push({ frameId: frame.id, step: "bind",
         route: { section: "wall", id: frame.id, tab: "hardware" } });
-    } else if (frame.calibration_valid !== true) {
+    } else if (frame.readiness === "display-changed") {
+      items.push({ frameId: frame.id, step: "display",
+        route: { section: "wall", id: frame.id, tab: "hardware" } });
+    } else if (frame.readiness !== "ready") {
       items.push({ frameId: frame.id, step: "calibrate",
         route: { section: "wall", id: frame.id, tab: "position" } });
     }

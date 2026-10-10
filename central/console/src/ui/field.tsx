@@ -14,6 +14,9 @@ interface FieldWiring {
   id: string;
   describedBy: string | undefined;
   invalid: boolean;
+  /** The Field's label element, for a control that is a group rather than one input
+   * (SegmentedControl); undefined outside a Field. */
+  labelId: string | undefined;
 }
 
 const FieldContext = React.createContext<FieldWiring | null>(null);
@@ -21,7 +24,8 @@ const FieldContext = React.createContext<FieldWiring | null>(null);
 /** The wiring of the Field a control sits in; a control outside a Field gets its own id. */
 export function useFieldControl(): FieldWiring {
   const fallback = React.useId();
-  return React.useContext(FieldContext) ?? { id: fallback, describedBy: undefined, invalid: false };
+  return React.useContext(FieldContext)
+    ?? { id: fallback, describedBy: undefined, invalid: false, labelId: undefined };
 }
 
 /** The look every text-like control shares (an input, a select). */
@@ -39,21 +43,33 @@ export interface FieldProps {
   help?: string;
   /** What is wrong with the value, in words; the control is marked invalid. */
   error?: string;
+  /** Short facts on one line under the help, which also describe the control (a setting's
+   * default, where it acts). */
+  notes?: readonly string[];
   /** The control. */
   children: React.ReactElement;
 }
 
-/** Field: a label over one control, with its help line and its error. */
-export function Field({ label, help, error, children }: FieldProps) {
+/** Field: a label over one control, with its help line, its notes and its error. */
+export function Field({ label, help, error, notes = [], children }: FieldProps) {
   const id = React.useId();
   const helpId = help ? `${id}-help` : null;
+  const notesId = notes.length > 0 ? `${id}-notes` : null;
   const errorId = error ? `${id}-error` : null;
-  const describedBy = [helpId, errorId].filter(Boolean).join(" ") || undefined;
+  const describedBy = [helpId, notesId, errorId].filter(Boolean).join(" ") || undefined;
+  const labelId = `${id}-label`;
   return (
     <div className="flex min-w-0 flex-col gap-1 text-sm text-label">
-      <label htmlFor={id}>{label}</label>
-      <FieldContext.Provider value={{ id, describedBy, invalid: Boolean(error) }}>{children}</FieldContext.Provider>
+      <label id={labelId} htmlFor={id}>{label}</label>
+      <FieldContext.Provider value={{ id, describedBy, invalid: Boolean(error), labelId }}>
+        {children}
+      </FieldContext.Provider>
       {help ? <span id={helpId!} className="text-xs text-muted">{help}</span> : null}
+      {notesId ? (
+        <span id={notesId} className="flex flex-wrap gap-x-3 text-xs text-muted">
+          {notes.map((note) => <span key={note}>{note}</span>)}
+        </span>
+      ) : null}
       {error ? <span id={errorId!} className="text-xs font-medium text-text">{error}</span> : null}
     </div>
   );

@@ -223,6 +223,31 @@ WHERE EXISTS (
     SELECT 1 FROM jsonb_each(snapshot->'admissions') WHERE value ? 'blocking_run_id');
 ```
 
+**Rolling Central back past the after-state (migration 071).** Migration
+`071_layer_after_end.sql` replaced each stored `retain_on_expiry` flag with `after_end`
+([what a Frame keeps](execution-contract.md#what-a-frame-keeps)) in runtime state, offered plans
+and locks. Builds before it forbid the key, so a previous Central build cannot restore runtime
+state (the same symptoms as above). Prefer rolling forward. Otherwise stop Central, then run this
+once before starting the previous build. It maps `keep_this_photo` back to the flag and every
+other after-state to no (an ending then no longer clears the kept photo, as before), and lets 071
+run again when you roll forward:
+
+```sql
+UPDATE runtime_state SET snapshot = replace(replace(replace(snapshot::text,
+    '"after_end": "keep_this_photo"', '"retain_on_expiry": true'),
+    '"after_end": "keep_nothing"', '"retain_on_expiry": false'),
+    '"after_end": "leave_as_is"', '"retain_on_expiry": false')::jsonb;
+UPDATE plan_offers SET manifest = replace(replace(replace(manifest::text,
+    '"after_end": "keep_this_photo"', '"retain_on_expiry": true'),
+    '"after_end": "keep_nothing"', '"retain_on_expiry": false'),
+    '"after_end": "leave_as_is"', '"retain_on_expiry": false')::jsonb;
+UPDATE assignment_locks SET layer = replace(replace(replace(layer::text,
+    '"after_end": "keep_this_photo"', '"retain_on_expiry": true'),
+    '"after_end": "keep_nothing"', '"retain_on_expiry": false'),
+    '"after_end": "leave_as_is"', '"retain_on_expiry": false')::jsonb;
+DELETE FROM schema_migrations WHERE name = '071_layer_after_end.sql';
+```
+
 ## Operator API: reposition, edit profile and remove Frames
 
 The operator console edits the wall plan through admin-authenticated routes on central (`Depends(admin)`, like every `/v1/operator/*` route). They change no schema and add no migration — placement and profile already exist on the `frames` row.
@@ -460,7 +485,7 @@ You can bind from either end. Both write the same Frame binding, carry the Frame
 - **From a Frame.** Open the Frame's page, open its **Hardware** tab, and choose a Player's Output from "Choose an output". Nothing is pre-selected, even when there is one option. Then press "Bind to <frame>". If a refresh removes the Output you chose, the choice is cleared and announced. If the bind is refused ("That output was just bound elsewhere", "That Player is no longer available", or "This Frame changed — reload and review its binding."), your choice is cleared; choose again from the current list.
 - **From a free Output.** On the Player page, a Free Output offers a "Bind to a frame…" list: pick an unbound Frame and press Bind. On success the console opens that Frame's page at its Hardware tab.
 
-**After a bind, calibrate the Frame again.** A successful bind or unbind bumps the Frame's `generation`, clears any live calibration lease, and **invalidates calibration**, so the Hardware tab shows **"Review required"** with a **"Set its position"** button that opens the [Position tab](#operator-console-calibration-and-conflict-states). The Hardware tab also shows the bound Player and Output and the Panel record at the Player app's last enrollment. This is a forced re-validation, not data loss: bind and unbind set `calibration_valid=false` but never write the `calibration` column, so the committed calibration persists and is available to re-confirm. Only a fresh save overwrites it. Retire changes no binding and no calibration. If the Frame changed underneath you (a concurrent bind or unbind bumped its `generation`), the write is refused with **409 `binding_generation_conflict`** and nothing is applied.
+**After a bind, calibrate the Frame again.** A successful bind or unbind bumps the Frame's `generation`, clears any live calibration lease, and **invalidates calibration**, so the Hardware tab shows **"Review required"** with a **"Set its position"** button that opens the [Position tab](#operator-console-calibration-and-conflict-states). The Hardware tab also shows the bound Player and Output and the Panel record at the Player app's last enrollment. This is a forced re-validation, not data loss: a Frame's readiness is worked out, never stored, and a bind or unbind leaves its latest Position commit behind the new `generation`, so it reads not ready until Position is committed again. Neither writes the `calibration` column, so the committed calibration persists and is available to re-confirm. Only a fresh save overwrites it. Retire changes no binding and no calibration. If the Frame changed underneath you (a concurrent bind or unbind bumped its `generation`), the write is refused with **409 `binding_generation_conflict`** and nothing is applied.
 
 ### Confirmation dialogs
 
@@ -495,7 +520,7 @@ While a write is in flight, Esc and Cancel do nothing. Then the dialog shows one
 
 ## Operator console: calibration and conflict states
 
-Every Frame has **one page** (`#/wall/frames/<id>/<tab>`), opened with one click on its tile on the Wall plan (or its Unplaced tray entry, a To finish link, a Needs attention entry or a Player page's Frame link). Its heading is the Frame's name, with a link back to the Wall and its health. It has four tabs: **Overview** (what Photo Wall sends to it now and what waits underneath, how its Pi is, and how to put content on it; Central's own account, its Runs and their priorities, is under **Details**), **Position**, **Picture** and **Hardware**. Position and Picture are reachable **only from the Wall section**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health label ([R4](#operator-console-sections-links-and-drafts)). The page is `central/console/src/pages/frame-page.tsx`.
+Every Frame has **one page** (`#/wall/frames/<id>/<tab>`), opened with one click on its tile on the Wall plan (or its Unplaced tray entry, a To finish link, a Needs attention entry or a Player page's Frame link). Its heading is the Frame's name, with a link back to the Wall and its health. It has five tabs: **Overview** (what Photo Wall sends to it now and what waits underneath, how its Pi is, and how to put content on it; Central's own account, its Runs and their priorities, is under **Details**), **Position**, **Picture**, **Power** ([display identity and power](#display-identity-and-power)) and **Hardware**. Position and Picture are reachable **only from the Wall section**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health label ([R4](#operator-console-sections-links-and-drafts)). The page is `central/console/src/pages/frame-page.tsx`.
 
 **Position** sets where the picture sits on the Display: drag a corner of the drawing (or the square mid-way along an edge to trim that edge); or choose **Move** (the whole picture or one corner) and a **Step** of 1, 10 or 50 pixels and press the arrow buttons (or the arrow keys on the focused drawing). **Rotation** and **Reset to full screen** are below, and under **Exact values** each corner in pixels of the Pi's output and each edge's trim in percent. **Picture** has **Brightness — Photo Wall picture adjustment**: Photo Wall brightens or dims the picture it sends (the calibration's gain, 0–200 %); the Display's own brightness does not change.
 
@@ -510,17 +535,17 @@ A Frame whose Pi runs software without Display Host says "This Frame's Pi runs s
 | The Pi has not presented your latest change | Done stays disabled ("Previewing — waiting for the Pi"; "Done is offered once the Pi presents your latest change.") | Wait; check the Display and its Pi if it does not change. |
 | The Pi or its Display is not reporting | The refusal in plain words ("Retrying"), while the page keeps trying; Central's code under **Details** | Check the Pi is on and the Display plugged in; it clears by itself. |
 
-**Hardware** holds the Pi and HDMI port feeding the Frame (**Connect Frame …** from a free port, **Disconnect from this Pi**, **Identify display** on a free port, and the Display the Pi reported when its photo app last started; Central's record, the Player app's last enrollment, is under **Details**) and the **Frame profile** (pixel width and height, diagonal, video capable). The Frame profile is **operator-declared at Frame creation and persists across a Display swap**; **Edit Frame profile** works on a Frame with no Pi only and clears its position. When both resolutions are known, the Frame profile is compared with the resolution the Pi last reported, in the saved rotation when the position is set; a mismatch is a "Check the Display" card naming both values, with **Edit Frame profile** as its action and how to restart the photo app or change the profile under Details. The record may be stale; it never changes the profile.
+**Hardware** holds the Pi and HDMI port feeding the Frame (**Connect Frame …** from a free port, **Disconnect from this Pi**, **Identify display** on a free port, and the Display the Pi reported when its photo app last started; Central's record, the Player app's last enrollment, is under **Details**) the **Display** the Pi reports on that port (make, model, serial or "Recognised by make and model on this Frame", and the modes it lists, read-only; with a **Display changed** card when it is not the one the Position was set against), and the **Frame profile** (pixel width and height, diagonal, video capable). The Frame profile is **operator-declared at Frame creation and persists across a Display swap**; **Edit Frame profile** works on a Frame with no Pi, or while its display has changed, and clears its position. When both resolutions are known, the Frame profile is compared with the resolution the Pi last reported, in the saved rotation when the position is set; a mismatch is a "Check the Display" card naming both values, with **Edit Frame profile** as its action and how to restart the photo app or change the profile under Details. The record may be stale; it never changes the profile.
 
 Frames whose Pi reports only the older preview path (`legacy_preview`) cannot be positioned from the console: they are told so and linked to their Pi's software page. That is the V2-only cost of this page. The `POST /v1/operator/frames/{id}/calibration` route stays for scripts (`scripts/demo_wall.py`) and tests.
 
-The page has no colour or power controls yet: each arrives with its own served path in a later phase.
+The page has no colour or hardware brightness controls yet ([roadmap 1c](roadmap.md#1c-brightness-contrast-and-colour)); power is on the Power tab.
 
 ## Operator console: running the show
 
 The Show sections (**Now**, **Scenes**, **Schedule** and **Sources**) are the content-and-schedule layer: Sources, Scenes, Programs and Runs. The wording and states below are owned by the [slice 3 design](operator-console-ux-pass2-showrunner.md), and the step flows by [passes C and D](operator-console-ux-pass2-flow.md#7-the-flows-defaults-have-a-source); this section is how to use them, job by job.
 
-**Show sections never show a Frame's Position or Picture (R4).** Hardware setup (position, brightness and the Frame profile) lives only on [the Frame's page](#operator-console-calibration-and-conflict-states) on the Wall. The **only** hardware fact the Show sections see is each Frame's **health label**, the same one the Wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs calibration" when `calibration_valid` is false: a Frame that cannot present matters at show time. The label is **status, not a control**; you fix the cause on the Wall.
+**Show sections never show a Frame's Position or Picture (R4).** Hardware setup (position, brightness and the Frame profile) lives only on [the Frame's page](#operator-console-calibration-and-conflict-states) on the Wall. The **only** hardware fact the Show sections see is each Frame's **health label**, the same one the Wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs calibration" when the Frame is not ready (its worked-out `readiness` is not `ready`; [display identity and power](#display-identity-and-power)): a Frame that cannot present matters at show time. The label is **status, not a control**; you fix the cause on the Wall.
 
 ### Step flows: one question at a time
 
@@ -638,13 +663,22 @@ A Scene is a per-frame composition. Scenes lists every stored Scene as a card, t
 - **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Shown without a Program, it plays until you Finish or Cancel it.
 - **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run card reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
 
+Playback also holds the Scene settings Central already played but the console could not reach ([roadmap 1x](roadmap.md#1x-expose-what-already-exists)). Each row shows its default and offers **Reset** once changed; the flow's Save applies them like every other Scene value:
+
+| Setting | Default | What Central plays |
+|---|---|---|
+| **Fade between photos** (0–5 s) | 1.5 s for a new Scene | Each photo fades out over half of it and the next fades in over the other half, through black or what plays beneath (every body Contribution's `fade_out_seconds` and `fade_in_seconds`). It must be no longer than **Seconds per cycle**. |
+| **How it ends**: Stops, Black or Fades out, with **Ending length** (0.5–10 s) | Stops; 3 s once chosen | The Scene's outro after a Finish or its Program's end: **Black** is opaque black covering the Frames for the length; **Fades out**: the last photo returns over half the fade between photos, then fades out over the rest of the length to reveal what plays beneath (the length must be at least half the fade). Either ending keeps nothing after it (`after_end: keep_nothing`): the Frame is then black, never this Scene's kept photo again, during an outage too. When another Scene plays beneath, the ending gets out of its way instead: that Scene takes over, its own kept photo included ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). |
+| **Keep the last photo up** (Advanced) | On | When nothing new can play on a Frame, even after the Scene stops, it keeps its last photo instead of going dark (`after_end: keep_this_photo`); when nothing else plays on the Frame after the Scene, Central plans its last cycle with no fade-out, so the kept photo never dips to black and snaps back. While another Scene plays beneath it, the photo is that Scene's to keep: when this Scene ends, the one beneath takes over, its own kept photo included. Central owns these rules and the Player applies them ([what a Frame keeps](execution-contract.md#what-a-frame-keeps)). |
+| **Keep these Frames together** (Advanced) | Off | While the Scene plays, Central turns away other Scenes that need any of its Frames, and does not start it while something more important covers them (`protect_frames`). |
+
 ### Viewing and editing a Scene
 
 Each Scene card, `Scene X`, shows what feeds it ("live from `family`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), the Programs that use it, and a **Running now** chip while a Run of it is live. Its actions are **Edit**, **Show now**, **Schedule it** and **Delete**. Saved revision numbers are used by Central to protect concurrent work, but are not shown on Scene or Run cards.
 
 **Delete** confirms removal from future choices. It does not stop a Run or erase completed Run history. Central refuses deletion while a Program refers to the Scene, a live Run or queued activation has captured it, or another stored Scene embeds it. The refusal names the blockers; remove or edit those references first. The console checks that the Scene has not changed since its card was loaded. If the Scene being edited has unsaved changes, the confirmation says they will be discarded; a successful deletion closes that draft.
 
-**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the flow cannot author (child Scenes, an outro, fades, and similar) reads "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…)." instead; change that Scene through the API, since a save from the flow would silently drop those features.
+**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the flow cannot author (child Scenes, opacity, unequal fades, settings that differ per Frame, values the sliders cannot show exactly, and similar) reads "Edit unavailable: Uses features the console can't edit yet (child Scenes, see-through photos, different settings per Frame, or values outside its ranges)." instead; change that Scene through the API, since a save from the flow would silently drop those features.
 
 To edit:
 1. Press **Edit**. The flow opens at **Review** (`#/scenes/<id>/edit/review`), filled from the saved Scene: "Editing `evening`. Its name stays the same." To use a different name, make a new Scene. Back from Review goes to Playback.
@@ -1055,3 +1089,32 @@ export PHOTO_WALL_NATS_SERVER="$(python3 scripts/nats_server.py fetch --dest /tm
 ```
 
 `test_central_worker_hub.py` binds the deployed hub ports (4222, 8080 and 8222 on all interfaces), so it fails while a local Compose hub or anything else holds them. The memory fence (`tests/integration/test_bus_memory_fence.py`, `PHOTO_WALL_BUS_FENCE_SERVER`) needs Docker on linux-arm64; CI's `bus-fence` job runs it.
+
+## Display identity and power
+
+Roadmap 1b: each Pi reports the display on each HDMI port, Central recognises it, and a Frame's Power tab turns it off and on. The rules live in the [operator console design](operator-console-design.md#6-display-identity) (what the operator sees, the identity rule) and the [Player architecture](player-architecture.md#display-identity-and-power-1b) (the Node side); operating the tools on a Pi by hand is the repo skill [display-control](../.claude/skills/display-control/SKILL.md).
+
+**What moves where.** Both ride the Node bus's `display` line, per HDMI port (`output-HDMI-A-1`, …), through the fleet link ([the Node bus](#the-node-bus-and-centrals-hub)):
+
+| What | Writer | Reader | Kept in Central |
+|---|---|---|---|
+| Output report (connected, EDID identity and modes, methods that answered, request in force, last result) | the Pi's display controller | the worker's report judge | `node_link_records` (every report), `displays`, `shared_serials`, `output_displays` (the Display last seen per port) |
+| Power attempt (`display.record.power`) | the Pi's display controller | recorded only | `node_link_records` |
+| Output document (power request stack, method, switches) | the worker, from Displays, bindings and `power_requests` | the Pi's display controller | `output_documents` (the latest per port) |
+
+**Readiness.** Nothing stores whether a Frame is ready: `frames.position_generation` and `frames.position_display_id` record each Position commit, and readiness is worked out when read (`unbound`, `display-changed`, `position-needed`, `ready`; `central/displays/model.py`). Migration 073 dropped `frames.calibration_valid`, marking every Frame that was ready as committed at its current generation; at the first report each Frame adopts the display on its port. **Rolling Central back past 073 is not supported:** the previous build reads `calibration_valid`, which no longer exists, and no reverse SQL is kept.
+
+**A console test, end to end.** **Test: turn off** posts `POST /v1/operator/frames/{id}/power-tests` (no body); Central keeps one live test per Frame in `power_requests` for 5 minutes on its own clock and sends `pg_notify('photo_wall_output_documents', <device id>)` in the same transaction. The worker's one LISTEN connection (`DisplayWakes.listen`, reconnecting after a second, waking every Node at each connect) wakes that Pi's links, which put the new document; the Pi acts and reports, and `GET /v1/operator/frames/{id}/power` reads "Waiting for the Pi" until the report names the change that carried the test. **Turn on** is `DELETE` on the same path (204): it deletes the live test, so the request underneath (standing on) takes over, and the tab waits until the Pi reports that request in force on the change that dropped the test. Settings are `PUT /v1/operator/displays/{display_id}/power-settings`; the Hardware tab reads `GET /v1/operator/frames/{id}/display`. All are operator routes behind the admin token.
+
+| What you see | What it means | What to do |
+|---|---|---|
+| "Waiting for the Pi" does not go away | The Pi has not reported acting on the change. The tab says when it last heard from the Pi when the bus link is down. | Check the Pi's **Node API link** on its Player page; on the Pi, read the controller's journal (below). |
+| "Display didn't answer" | The method in use got no answer. | Check the display is on its HDMI input; try another power method. |
+| "Picture stopped; the display may sleep" | Signal off: the Pi stopped its picture; nothing is claimed about the display. | Expected when the display answers neither HDMI-CEC nor DDC/CI. |
+| "Picture back on" | Turn on through signal off: the Pi sent its picture again. | Expected after Turn on with signal off. |
+| No power method answered (`not-supported`) | Nothing the Pi can drive. | A smart plug through Home Assistant arrives in [roadmap 3](roadmap.md#3-home-assistant). |
+| The Frame reads **Display changed** | A readable, different display is on its port. | On Hardware, confirm or correct the Frame profile, then re-check Position. |
+
+**On the Pi.** The display controller (`photo-wall-display-controller.service`) runs the display session and the power methods. Read it with `sudo journalctl -b --no-pager -u photo-wall-display-controller.service` ([Reaching a Node over SSH](#reaching-a-node-over-ssh)). Its device access: `DevicePolicy=closed` with `DeviceAllow=char-cec rw` and `DeviceAllow=char-i2c rw`, the `video` group for `/dev/cecN` and the `i2c` group for `/dev/i2c-N` (declared by `debian/photo-wall-node.sysusers`; [gap G15](player-architecture.md#observed-gaps)). `id pw-display` does not list them: the groups are the unit's own, so check the running process with `grep Groups /proc/$(systemctl show -p MainPID --value photo-wall-display-controller.service)/status`. The base loads `i2c-dev` at boot (`/etc/modules-load.d/photo-wall-ddc.conf`); `ls /dev/i2c-*` shows `/dev/i2c-13` and `/dev/i2c-14` on a Pi 5 when it did.
+
+**Not built:** setting the HDMI mode, the power schedule, All off, holds and the smart plug ([roadmap 1b](roadmap.md#1b-display-identity-and-power)). The bench check (Test off and on against the test Pi's monitor) waits for a deployed release.

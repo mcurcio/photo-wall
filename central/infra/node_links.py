@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Collection
+from typing import Protocol
 
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_link import Pipe
@@ -21,11 +22,19 @@ from nodeapi.hub import DocumentSource, run_link
 log = logging.getLogger(__name__)
 
 
+class DocumentSources(Protocol):
+    """Central's desired-document projections, one `DocumentSource` per (Node, pipe) link, as
+    `PgLinkStores.store` is one LinkStore per link (roadmap 1b, slice C1): a projection is per Node,
+    and `nodeapi.hub.DocumentSource.documents(stream)` names no Node."""
+
+    def source(self, serial: str, pipe: Pipe) -> DocumentSource: ...
+
+
 class NodeLinks:
     """Every tracked Node's link on one pipe, each a long-lived task (never a job, never a process per
     Node): a serial that joins gets a link, one that leaves has its link stopped; records are kept."""
 
-    def __init__(self, pipe: Pipe, hub_url: str, stores: PgLinkStores, documents: DocumentSource) -> None:
+    def __init__(self, pipe: Pipe, hub_url: str, stores: PgLinkStores, documents: DocumentSources) -> None:
         self._pipe = Pipe(pipe)
         self._hub_url = hub_url
         self._stores = stores
@@ -41,7 +50,7 @@ class NodeLinks:
             stop = asyncio.Event()
             task = asyncio.create_task(
                 run_link(self._hub_url, serial, self._pipe, self._stores.store(serial, self._pipe),
-                         self._documents, stop), name=f"node-link {self._pipe} {serial}")
+                         self._documents.source(serial, self._pipe), stop), name=f"node-link {self._pipe} {serial}")
             task.add_done_callback(self._ended)
             self._links[serial] = (stop, task)
         await self._stop([serial for serial in self._links if serial not in wanted])

@@ -319,3 +319,28 @@ def test_source_health_remains_observable_when_entire_projection_is_locked():
     })
     assert layers(result) == (lock,)
     assert "source_unavailable" in {diagnostic.code for diagnostic in result.diagnostics}
+
+
+def test_a_locked_layer_takes_a_revised_fade_out_and_nothing_else():
+    """Central may revise only the fade-out and the after-state of a layer it already offered
+    (Finish makes the current cycle the last and holds a kept photo there; migration 071 left
+    in-flight endings at "leave_as_is"); any other change to it stays a stale lock. Mutation
+    probes: refuse the revised fade-out (the layer is dropped as stale); accept any change (the
+    revised fade-in is planned)."""
+    instance = runtime(contributions=(Contribution(
+        target="frame:left", source_refs=("holiday:1",), fade_in_seconds=1, fade_out_seconds=2,
+    ),))
+    offered = layers(propose(instance, now=3, horizon=5))[0]
+    assert offered.fade_out == 2
+    revised = propose(instance, now=4, horizon=5,
+                      locks={offered.assignment_id: offered.model_copy(update={"fade_out": 0})})
+    assert layers(revised)[0] == offered
+    assert not [d for d in revised.diagnostics if d.code == "lock_stale_authority"]
+    kept = propose(instance, now=4, horizon=5, locks={
+        offered.assignment_id: offered.model_copy(update={"after_end": "keep_nothing"})})
+    assert layers(kept)[0] == offered
+    stale = propose(instance, now=4, horizon=5,
+                    locks={offered.assignment_id: offered.model_copy(update={"fade_in": 0})})
+    assert offered.assignment_id not in {layer.assignment_id for layer in layers(stale)}
+    assert "lock_stale_authority" in {
+        d.code for d in stale.diagnostics if d.assignment_id == offered.assignment_id}

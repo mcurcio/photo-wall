@@ -17,9 +17,11 @@ acknowledgement was lost) gives Central its token; any other writer's value is a
 for that projection and logged (`document_adopted`), so Central never overwrites it until its
 projection changes again (C16). A key the bucket's table does not list (rollout skew), or a value
 past its size, is refused before sending and logged (`document_refused`); every reconcile tries it
-again, so the release that lists it (a new `birth`) gets it. When a bucket's table changes in an
-epoch Central has written, every key Central owns there is put again (an adopted key is left), so a
-shrink never leaves a listed key without its value (§9.2).
+again, so the release that lists it (a new `birth`) gets it. Besides every reconcile, a running link
+asserts every desired bucket of its pipe each time its `DocumentSource.changed()` returns, so a
+projection change reaches the Node without waiting for a reconcile (roadmap 1b, erratum E-1B-1).
+When a bucket's table changes in an epoch Central has written, every key Central owns there is put
+again (an adopted key is left), so a shrink never leaves a listed key without its value (§9.2).
 
 The link reconciles when it comes up, when a reader is lost or its stream goes absent, when a new
 `birth` is drained, and when the bus's stream names differ from those its last reconcile listed: a
@@ -102,7 +104,15 @@ class LinkStore(Protocol):
 
 
 class DocumentSource(Protocol):
+    """Central's projection of one Node's desired documents, one source per (Node, pipe) link."""
+
     async def documents(self, stream: str) -> Mapping[str, bytes]: ...   # Central's projection for one desired bucket
+
+    async def changed(self) -> None: ...
+        # returns once any of this source's projections may differ from its last `documents`
+        # answer (a hint: a spurious return costs one diff, a missed one waits for the next
+        # reconcile); a source that never changes never returns. NodeLink.run awaits it while
+        # attached and then asserts every desired bucket of its pipe (slice T1).
 
 
 DRAIN_BATCH: Final = 64
@@ -127,6 +137,7 @@ class NodeLink:
         self._state_streams: set[str] = set()
         self._listed: frozenset[str] = frozenset()        # the names the last reconcile listed
         self._tables: dict[str, tuple[str, str]] = {}      # desired bucket -> (epoch, table) last asserted against
+        self._desired: tuple[str, ...] = ()                 # the pipe's desired buckets the last reconcile listed
 
     async def reconcile(self) -> Mapping[str, str]:
         """Stream -> epoch for every events and state stream of this pipe. A cursor whose stream is
@@ -160,6 +171,7 @@ class NodeLink:
         for stream in epochs:
             if stream not in self._readers:
                 self._readers[stream] = CursorReader(self._client, stream, cursors.get(stream), domain=NODE_DOMAIN)
+        self._desired = tuple(desired)
         for stream in desired:
             with contextlib.suppress(NotFoundError):   # pruned meanwhile: nothing to assert into
                 await self.assert_documents(stream)
@@ -218,10 +230,11 @@ class NodeLink:
         await self._store.wrote(stream, key, digest, token)
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Reconcile, then drain every stream until `stop` or the client closes. Reconcile again when
-        a batch was `recreated`, a stream went absent, a new `birth` revision was drained, or the
-        bus's stream names changed. A store error propagates (Central's process is the thing that
-        failed); a link that is down is retried with backoff."""
+        """Reconcile, then drain every stream until `stop` or the client closes, asserting the pipe's
+        desired buckets whenever the document source changes. Reconcile again when a batch was
+        `recreated`, a stream went absent, a new `birth` revision was drained, or the bus's stream
+        names changed. A store error propagates (Central's process is the thing that failed); a link
+        that is down is retried with backoff."""
         delay = _BACKOFF[0]
         try:
             while not stop.is_set() and not self._client.is_closed:
@@ -240,16 +253,34 @@ class NodeLink:
                 drains = [asyncio.create_task(self._follow(stream, reader, stop, again))
                           for stream, reader in self._readers.items()]
                 looking = asyncio.create_task(self._look(stop, again))
+                asserting = asyncio.create_task(self._assert_on_change())
+                drained = asyncio.gather(*drains)
                 try:
-                    await asyncio.gather(*drains)
+                    await asyncio.wait((drained, asserting), return_when=asyncio.FIRST_COMPLETED)
+                    if asserting.done():
+                        asserting.result()   # a store error propagates as from the drains
+                    await drained
                 finally:
-                    for task in (*drains, looking):
+                    for task in (*drains, looking, asserting):
                         task.cancel()
-                    await asyncio.gather(*drains, looking, return_exceptions=True)
+                    await asyncio.gather(drained, looking, asserting, return_exceptions=True)
         finally:
             if not self._client.is_closed:
                 for reader in self._readers.values():
                     await reader.close()
+
+    async def _assert_on_change(self) -> None:
+        """Each time the source says its projections may have changed, assert every desired bucket of
+        this pipe the last reconcile listed. A hub that does not answer is logged and the next change
+        tries again (as does the next reconcile); a store error propagates. Runs until cancelled with
+        the drains."""
+        while True:
+            await self._documents.changed()
+            for stream in self._desired:
+                try:
+                    await self.assert_documents(stream)
+                except (nats.errors.Error, asyncio.TimeoutError) as error:   # pruned, or the link is down
+                    log.info("assert %s: %r", stream, error)
 
     async def _look(self, stop: asyncio.Event, again: asyncio.Event) -> None:
         """Set `again` once the bus's stream names differ from those the last reconcile listed: a line

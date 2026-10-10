@@ -169,8 +169,8 @@ _SHORT_SERIAL: Final = re.compile(r"[0-9a-f]{8}")
 # The running kernel's modules, as mkinitramfs staged them into this initrd (the modules and
 # depmod's indexes), and where stage 2's udev looks for them, relative to the new root. The base
 # carries no kernel and no modules: they come from the same TFTP staging as the kernel, so the
-# two always match, whichever base Central serves. The initramfs hook adds the display drivers
-# the Player needs (vc4, v3d). scripts/initrd_mount_probe.py imports INITRD_MODULES.
+# two always match, whichever base Central serves. The initramfs hook ships the kernel's whole
+# module tree. scripts/initrd_mount_probe.py imports INITRD_MODULES.
 INITRD_MODULES: Final = Path("/usr/lib/modules")
 STAGE2_MODULE_DIR: Final = Path("usr/lib/modules")
 # The copy lands in the RAM overlay's upper layer: bounded, so a malformed initrd cannot fill

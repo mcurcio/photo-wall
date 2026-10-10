@@ -8,6 +8,7 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_registry import enroll
 
+from central.displays.model import Readiness
 from central.registry import FrameCreate
 from contracts.models import FrameProfile
 
@@ -58,7 +59,7 @@ def test_profile_save_uses_generation_zero_and_invalidates_calibration(page, reg
         saved = registry.inventory().frames[0]
         assert saved.profile.width_px == 2560
         assert saved.generation == 1
-        assert saved.calibration_valid is False
+        assert saved.readiness is Readiness.UNBOUND
 
 
 def test_saving_identical_profile_does_not_claim_calibration_was_invalidated(page, registry):
@@ -72,7 +73,7 @@ def test_saving_identical_profile_does_not_claim_calibration_was_invalidated(pag
             "Frame profile already matches; its position was not changed.")
         frame = registry.inventory().frames[0]
         assert frame.generation == 0
-        assert frame.calibration_valid is False
+        assert frame.readiness is Readiness.UNBOUND
 
 
 def test_switching_frames_discards_the_previous_frame_profile_editor(page, registry):

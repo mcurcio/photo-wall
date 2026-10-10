@@ -29,6 +29,7 @@ from central.planner import (
     assignment_id,
     eligible,
     project,
+    same_execution,
 )
 from central.planner import (
     handle_execution_outcome as handle_planning_outcome,
@@ -75,12 +76,6 @@ class CoordinationError(RegistryError):
 def identity(prefix: str, parts) -> str:
     encoded = json.dumps(parts, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return prefix + hashlib.sha256(encoded.encode()).hexdigest()[:40]
-
-
-def same_execution(first: Layer, second: Layer) -> bool:
-    # Arbitration can change while the adopted media/interval remains immutable.
-    exclude = {"priority", "root_order", "admission_order"}
-    return first.model_dump(exclude=exclude) == second.model_dump(exclude=exclude)
 
 
 def offer_owner(plan: Plan) -> str:

@@ -184,11 +184,16 @@ static json_t *output_key(struct output *o) {
         "output_id", o->name, "connection_generation", (json_int_t)o->generation,
         "mode_generation", (json_int_t)o->generation);
 }
+/* The output's own power (DPMS), as the controller's `output_power` op left it. */
+static const char *output_power_state(struct output *o) {
+    return o->weston && o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF ? "off" : "on";
+}
 static void output_event(struct output *o) {
-    send_event(o->shell, json_pack("{s:s,s:o,s:b,s:i,s:i}", "event", "output",
+    send_event(o->shell, json_pack("{s:s,s:o,s:b,s:i,s:i,s:s}", "event", "output",
         "output", output_key(o), "connected", o->weston != NULL,
         "width", o->weston ? o->weston->width : 0,
-        "height", o->weston ? o->weston->height : 0));
+        "height", o->weston ? o->weston->height : 0,
+        "power", output_power_state(o)));
 }
 static void diagnostic_configure(struct output *o) {
     if (o->shell->diagnostic_resource)
@@ -712,6 +717,17 @@ static bool command(struct shell *s, json_t *j) {
     struct output *o = find_output(s, string(j, "output_id"));
     if (!op || !o || !o->weston || !same_key(o, json_object_get(j, "output"))) return false;
     if (!strcmp(op, "diagnostic")) { invalidate(o, "authorized_withdrawal"); return true; }
+    /* Signal off (1b D2): DPMS off/on on the named output, never disabling it, so the output,
+     * its views and the app's grant stay; base-only, like every op on this socket. */
+    if (!strcmp(op, "output_power")) {
+        const char *power = string(j, "power");
+        if (!power || (strcmp(power, "on") && strcmp(power, "off"))) return false;
+        if (!strcmp(power, "off")) weston_output_power_off(o->weston);
+        else weston_output_power_on(o->weston);
+        send_event(s, json_pack("{s:s,s:s,s:s}", "event", "output_power",
+            "output_id", o->name, "power", output_power_state(o)));
+        return true;
+    }
     if (!strcmp(op, "withdraw")) {
         json_t *identity = json_object_get(j, "identity");
         const char *decision = string(j, "decision_id");
@@ -960,6 +976,11 @@ static int lease_tick(void *data) {
         }
         if (o->trial_json[0] && boot_ms() >= o->trial_until) trial_end(o);
         if (o->revision_identity && now_ms() >= o->revision_until) revision_clear(o, true);
+        /* A forced-off output (signal off, `output_power`) presents nothing, so no presentation
+         * can renew the lease: it holds while the output is off and runs again from power on.
+         * The app's process is still checked. */
+        if (o->identity && o->weston && o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF)
+            o->lease_until = now_ms() + LEASE_MS;
         if (o->identity && (now_ms() >= o->lease_until || process_start(o->pid) != o->start_ticks))
             invalidate(o, "surface_lease_or_process_lost");
     }

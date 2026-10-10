@@ -10,10 +10,12 @@ import math
 import os
 import threading
 import time
+import weakref
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 from contracts.models import AppliedCalibration
 from player.geometry import cover_rect, homography, inverse
@@ -190,9 +192,21 @@ class _Decoder:
     eos: bool = False
     failure: str | None = None
     bus: Any = None
-    bus_handler: int = 0
+    # Every (GObject, handler id) and (Gst.Pad, probe id) this decoder made: _destroy_decoder
+    # undoes each, so no element keeps a callback once the decoder is gone.
+    handlers: list[tuple[Any, int]] = field(default_factory=list)
+    probes: list[tuple[Any, int]] = field(default_factory=list)
     retry_at: float = 0
     deadline: float = 0
+
+
+def _bus_message(Gst, decoder: _Decoder, message) -> None:
+    if message.type == Gst.MessageType.ERROR:
+        decoder.failure = "decode"
+        decoder.prepared = False
+        decoder.retry_at = time.monotonic()+1
+    elif message.type == Gst.MessageType.EOS:
+        decoder.eos = True
 
 
 @dataclass
@@ -218,12 +232,40 @@ class _Surface:
     identify_banner: Any = None
     pending: _Draw | None = None
     acknowledged: _Draw | None = None
+    # A failure lasts one episode: it ends when the window is mapped again or the display host
+    # hands the Output a new grant. Read it through failed(), write it through fail().
     failure: str | None = None
+    episode: int = 0
+    failed_episode: int | None = None
+    grant_key: tuple[UUID, int, int] | None = None
     textures: dict[str, tuple[int, int, int]] = field(default_factory=dict)
     targets: list[tuple[int, int]] = field(default_factory=list)
     size: tuple[int, int] = (0, 0)
     programs: tuple[int, int] | None = None
     vao: int = 0
+
+    def fail(self, reason: str) -> None:
+        self.failure, self.failed_episode = reason, self.episode
+
+    def failed(self) -> str | None:
+        """The failure of this episode; one from an earlier episode is cleared."""
+        if self.failed_episode == self.episode:
+            return self.failure
+        self.failure = self.failed_episode = None
+        return None
+
+    def begin_episode(self) -> None:
+        self.episode += 1
+
+
+def _observe_grant(surface: _Surface, grant) -> None:
+    """A grant other than the surface's last one begins a new episode."""
+    if grant is None:
+        return
+    key = (grant.grant_id, grant.binding_generation, grant.config_revision)
+    if key != surface.grant_key:
+        surface.grant_key = key
+        surface.begin_episode()
 
 
 _VERTEX = """#version 300 es
@@ -388,10 +430,10 @@ class NativeRenderer:
             window.connect("realize", self._window_realized, surface)
             # GtkWindow's default map handler resets the backend app ID. Restore
             # it after that handler, before GLib paints the first content buffer.
-            window.connect_after("map", self._window_realized, surface)
+            window.connect_after("map", self._window_mapped, surface)
             window.connect("delete-event", lambda *_: True)
             window.show_all()
-            if surface.failure:
+            if surface.failed():
                 self.close()
                 raise RuntimeError("cannot establish per-Output Wayland placement")
             window.fullscreen()
@@ -451,6 +493,11 @@ class NativeRenderer:
                 surface.area.queue_render()
         return True
 
+    def _window_mapped(self, window, surface) -> None:
+        """Every map begins a new episode: a remap (an output blip) gets a fresh surface."""
+        surface.begin_episode()
+        self._window_realized(window, surface)
+
     def _window_realized(self, window, surface) -> None:
         gdk_window = window.get_window()
         if "Wayland" in type(gdk_window).__name__:
@@ -470,7 +517,7 @@ class NativeRenderer:
                 setter.restype = None
                 setter(pointer, surface.output.app_id.encode("utf-8"))
             except (AttributeError, TypeError, ValueError, ImportError, OSError):
-                surface.failure = "wayland_app_id"
+                surface.fail("wayland_app_id")
                 return
         cursor = self.Gdk.Cursor.new_for_display(window.get_display(), self.Gdk.CursorType.BLANK_CURSOR)
         gdk_window.set_cursor(cursor)
@@ -499,6 +546,7 @@ class NativeRenderer:
         video = local.layer.variant.media_type == "video/mp4"
         if video:
             demux, parser, decode = (self._element(n) for n in ("qtdemux", "h264parse", "avdec_h264"))
+            parser.set_name("parse")    # pad_added finds it by name, never through a closure
             elements = (source, demux, parser, decode, convert, caps, sink)
         else:
             decode = self._element("jpegdec" if local.layer.variant.media_type == "image/jpeg"
@@ -509,13 +557,6 @@ class NativeRenderer:
         if video:
             if not source.link(demux) or not parser.link(decode):
                 raise RuntimeError("cannot link local H.264 decoder")
-            def pad_added(_demux, pad):
-                negotiated = pad.get_current_caps()
-                if negotiated and negotiated.get_structure(0).get_name() == "video/x-h264":
-                    target = parser.get_static_pad("sink")
-                    if not target.is_linked():
-                        pad.link(target)
-            demux.connect("pad-added", pad_added)
         elif not source.link(decode):
             raise RuntimeError("cannot link local image decoder")
         for a, b in ((decode, convert), (convert, caps), (caps, sink)):
@@ -524,43 +565,71 @@ class NativeRenderer:
         self._serial += 1
         decoder = _Decoder(local, pipeline, sink, incarnation=self._serial,
                            deadline=time.monotonic()+self.prepare_timeout)
+        # Every callback holds the decoder weakly: a strong one made the cycle pipeline -> sink
+        # -> callback -> decoder -> pipeline, which leaked each pipeline and its bus's two fds.
+        owner = weakref.ref(decoder)
+
+        def pad_added(_demux, pad):
+            current = owner()
+            if current is None:
+                return
+            negotiated = pad.get_current_caps()
+            if negotiated and negotiated.get_structure(0).get_name() == "video/x-h264":
+                target = current.pipeline.get_by_name("parse").get_static_pad("sink")
+                if not target.is_linked():
+                    pad.link(target)
+
         def sample_ready(appsink, preroll):
+            current = owner()
+            if current is None:
+                return Gst.FlowReturn.OK
             sample = appsink.emit("pull-preroll" if preroll else "pull-sample")
             if sample is not None:
-                decoder.mailbox.publish(sample)
+                current.mailbox.publish(sample)
             return Gst.FlowReturn.OK
-        sink.connect("new-preroll", sample_ready, True)
-        sink.connect("new-sample", sample_ready, False)
+
         def event_probe(_pad, info):
+            current = owner()
+            if current is None:
+                return Gst.PadProbeReturn.OK
             event = info.get_event()
             if event is not None and event.type == Gst.EventType.SEGMENT:
-                if event.get_seqnum() == decoder.seek_sequence:
-                    decoder.mailbox.segment(decoder.generation)
+                if event.get_seqnum() == current.seek_sequence:
+                    current.mailbox.segment(current.generation)
             return Gst.PadProbeReturn.OK
-        sink.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, event_probe)
+
+        def bus_message(_bus, message):
+            current = owner()
+            if current is not None:
+                _bus_message(Gst, current, message)
+
+        if video:
+            decoder.handlers.append((demux, demux.connect("pad-added", pad_added)))
+        decoder.handlers.append((sink, sink.connect("new-preroll", sample_ready, True)))
+        decoder.handlers.append((sink, sink.connect("new-sample", sample_ready, False)))
+        pad = sink.get_static_pad("sink")
+        decoder.probes.append((pad, pad.add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, event_probe)))
         decoder.bus = pipeline.get_bus()
         watch_bus(decoder.bus)
-        decoder.bus_handler = decoder.bus.connect("message", self._bus_message, decoder)
+        decoder.handlers.append((decoder.bus, decoder.bus.connect("message", bus_message)))
         if pipeline.set_state(Gst.State.PAUSED) == Gst.StateChangeReturn.FAILURE:
             self._destroy_decoder(decoder)
             raise RuntimeError("decoder refused PAUSED")
         return decoder
 
-    def _bus_message(self, _bus, message, decoder) -> None:
-        if message.type == self.Gst.MessageType.ERROR:
-            decoder.failure = "decode"
-            decoder.prepared = False
-            decoder.retry_at = time.monotonic()+1
-        elif message.type == self.Gst.MessageType.EOS:
-            decoder.eos = True
-
     def _destroy_decoder(self, decoder: _Decoder) -> None:
+        """The one teardown: undoes every handler, probe and bus watch the decoder made and stops
+        its pipeline. A second call is a no-op."""
         decoder.mailbox.close()
+        for instance, handler in decoder.handlers:
+            instance.disconnect(handler)
+        for pad, probe in decoder.probes:
+            pad.remove_probe(probe)
         if decoder.bus is not None:
-            decoder.bus.disconnect(decoder.bus_handler)
             decoder.bus.remove_signal_watch()
         decoder.pipeline.set_state(self.Gst.State.NULL)
-        decoder.sample = None
+        decoder.sample = decoder.bus = None
+        decoder.handlers, decoder.probes = [], []
 
     def _sample_position(self, sample) -> float | None:
         pts = sample.get_buffer().pts
@@ -633,7 +702,7 @@ class NativeRenderer:
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult:
         self._thread()
         count, size = self._estimate(compositions)
-        surfaces_ok = all(surface.programs is not None and not surface.failure
+        surfaces_ok = all(surface.programs is not None and not surface.failed()
                           for surface in self._surfaces.values())
         return CapacityResult(surfaces_ok and count <= self.decoder_limit
                               and size <= self.texture_budget, qualified=False)
@@ -644,7 +713,7 @@ class NativeRenderer:
                 or local.position < 0 or not math.isfinite(local.alpha) or not 0 <= local.alpha <= 1):
             return PrepareResult("failed", "decode")
         surface = self._surfaces[local.layer.output_id]
-        if surface.failure:
+        if surface.failed():
             return PrepareResult("failed", "decode")
         if local.layer.presentation == "black":
             return PrepareResult("prepared" if surface.programs else "pending")
@@ -699,11 +768,14 @@ class NativeRenderer:
     def present(self, composition: OutputComposition) -> PresentationResult:
         self._thread()
         surface = self._surfaces.get(composition.binding.output_id)
-        if surface is None or surface.failure:
+        if surface is None:
             return PresentationResult("failed", "decode")
         frames = getattr(self, "_frames", None)
+        grant = frames.grant(composition.binding.output_id, composition) if frames is not None else None
+        _observe_grant(surface, grant)
+        if surface.failed():
+            return PresentationResult("failed", "decode")
         if frames is not None:
-            grant = frames.grant(composition.binding.output_id, composition)
             if grant is None or not grant.admitted or not grant.matches(composition):
                 # Nothing drawn before admission stands: a cleared acknowledgment makes the
                 # first present() after admission draw. A pending draw needs no reset here:
@@ -779,7 +851,7 @@ class NativeRenderer:
         self._thread()
         return {"qualified": False, "resident_decoders": len(self._decoders),
                 "estimated_texture_bytes": self._estimate(())[1],
-                "outputs": {key: {"size": surface.size, "failure": surface.failure,
+                "outputs": {key: {"size": surface.size, "failure": surface.failed(),
                                   "draw_serial": surface.acknowledged.serial if surface.acknowledged else None,
                                   "draw_time": surface.acknowledged.completed_at if surface.acknowledged else None,
                                   "positions": {local.layer.assignment_id: local.position for local in
@@ -959,7 +1031,7 @@ class NativeRenderer:
         gl = self.GL
         area.make_current()
         if area.get_error() is not None:
-            surface.failure = "decode"
+            surface.fail("decode")
             return True
         if self.gl_renderer is None:  # reported on the probe channel: the judge flags software rendering
             self.gl_renderer = _gl_text(gl.glGetString(gl.GL_RENDERER))
@@ -968,6 +1040,7 @@ class NativeRenderer:
         height = max(1, area.get_allocated_height()*area.get_scale_factor())
         frames = getattr(self, "_frames", None)
         grant = frames.grant(surface.output.output_id) if frames is not None else None
+        _observe_grant(surface, grant)
         if frames is not None and (grant is None or not grant.admitted):
             # Before surface admission, show only a fixed synthetic handoff
             # colour. Authored layers remain in Executor under their own grant.
@@ -1070,7 +1143,7 @@ class NativeRenderer:
                                            surface.acknowledged.primitives)
         except Exception as error:
             surface.pending = None
-            surface.failure = type(error).__name__
+            surface.fail(type(error).__name__)
             gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, gtk_framebuffer)
             gl.glClearColor(0, 0, 0, 1)
             gl.glClear(gl.GL_COLOR_BUFFER_BIT)

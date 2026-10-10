@@ -729,7 +729,7 @@ def test_routes_parse_format_and_round_trip():
     assert out["oldFacets"] == [None] * 5
     # A Frame route with no tab opens Overview; it is never formatted.
     assert out["noTab"] == {"section": "wall", "id": "x", "tab": "overview"}
-    assert out["tabs"] == ["overview", "position", "picture", "hardware"]
+    assert out["tabs"] == ["overview", "position", "picture", "power", "hardware"]
     assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"
@@ -761,7 +761,12 @@ FRAME_PAGE_IMPORTS = {
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
     "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
+    # The Hardware tab's Display (1b K1, E-1B-K1-1): its read and polling, the profile write the
+    # display-changed card confirms, and the route change to Position.
+    "frame-display.tsx": {"displayApi.js", "framesApi.js", "polledRead.js", "projection.js", "useMutate.js",
+                          "useRoute.js", "useSnapshot.js"},
     "live-adjustment.tsx": {"liveAdjustment.js"},
+    "frame-power.tsx": {"polledRead.js", "powerApi.js"},
 }
 
 

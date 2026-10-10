@@ -351,6 +351,11 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       cycleSeconds: Number(value.cycleSeconds),
       loop: value.loop,
       selections: value.selections,
+      fadeSeconds: value.fadeSeconds,
+      ending: value.ending,
+      endingSeconds: value.endingSeconds,
+      keepLastPhoto: value.keepLastPhoto,
+      keepTogether: value.keepTogether,
       revision: editingId === null ? 1 : draft.baseRevision + 1,
     });
 
