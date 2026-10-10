@@ -264,8 +264,14 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         return await invoke(Registry(db, clock).calibration_capability, frame_id)
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
-    async def calibration_begin(frame_id: str):
-        return await invoke(trials.begin, frame_id)
+    async def calibration_begin(frame_id: str, request: Request):
+        # An empty body, or `{}`, begins at the saved calibration; `{"calibration": draft}` at
+        # the operator's draft, whose `revision` is the saved revision it was made from.
+        raw = await body(request, 4096)
+        value = loads_object(raw, max_bytes=4096) if raw.strip() else {}
+        if value is None or set(value) - {"calibration"}:
+            raise NodeControlError("node_trial_operation_invalid", 422)
+        return await invoke(trials.begin, frame_id, value.get("calibration"))
 
     @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
     async def calibration_operate(frame_id: str, trial_id: UUID, request: Request):

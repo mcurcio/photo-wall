@@ -178,8 +178,9 @@ def test_native_capability_survives_generation_revocation_without_current_boot(r
 
 def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
     """An open Position or Picture tab keeps its trial alive with `keepalive` (the console's
-    Frame page): the idle deadline slides, the candidate and its sequence stay, the Node is
-    handed the later deadline under the same hard one, and the hard deadline still ends it.
+    Frame page): the idle deadline slides, the candidate and its sequence stay, and the Node is
+    handed the later deadline under the same hard one. (The hard deadline ending it is
+    `test_keepalive_never_passes_the_hard_deadline`.)
 
     Mutation: make `keepalive` answer like `status` -> at 8 s the Node is handed no trial."""
     trials, request, exchange = setup_trial(registry)
@@ -205,10 +206,116 @@ def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
     assert later.expires_boottime_ms > first.expires_boottime_ms
     assert later.hard_expires_boottime_ms == first.hard_expires_boottime_ms
     assert trials.operate("node-f0", trial_id, operation="status", expected_sequence=1)["state"] == "active"
-    while registry.clock.utc() + 4 < row["hard_expires_at"]:
-        assert trials.operate("node-f0", trial_id, operation="keepalive",
-                              expected_sequence=1)["state"] == "active"
-        registry.clock.advance(4)
+
+
+def test_keepalive_never_passes_the_hard_deadline(registry):
+    """Keepalives a second apart keep a trial inside its idle window to the end, and the hard
+    deadline, fixed at begin, ends it: the last keepalive before it is capped at it.
+
+    Mutation: drop the `min(hard_expires_at, …)` cap from `keepalive` -> the capped deadline
+    assertion goes RED (and the trial outlives its hard deadline)."""
+    trials, request, exchange = setup_trial(registry)
+    row = trials.begin("node-f0")
+    trial_id = __import__("uuid").UUID(row["trial_id"])
+    began, hard = registry.clock.utc(), row["hard_expires_at"]
+
+    def sample():  # the Node's next display exchange, on its boot clock
+        at = 1500 + int((registry.clock.utc() - began) * 1000)
+        exchange(replace(
+            request, request_id=uuid4(), sampled_boottime_ms=at,
+            receipt=replace(request.receipt, sampled_boottime_ms=at, buffer_id=f"weston-{at}"),
+        ))
+
+    while registry.clock.utc() + 1 < hard:
+        registry.clock.advance(1)
         sample()
-    registry.clock.advance(4)
+        kept = trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)
+        assert kept["state"] == "active"
+        assert kept["expires_at"] == min(hard, registry.clock.utc() + trials.inactivity_seconds)
+    registry.clock.advance(hard - 0.5 - registry.clock.utc())
+    sample()
+    kept = trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)
+    assert kept["state"] == "active" and kept["expires_at"] == hard
+    registry.clock.advance(1)
+    sample()
     assert trials.operate("node-f0", trial_id, operation="keepalive", expected_sequence=1)["state"] == "expired"
+
+
+def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
+    """The console's handover before a trial's hard deadline: `renew` ends the trial and begins
+    the next generation at the operator's draft in one transaction, so the Node's very next
+    exchange is handed the draft (never the saved calibration in between) and nothing can
+    begin in a gap. A draft whose base is not the saved revision is refused, by `renew` and by
+    `begin`, and the trial stays as it was.
+
+    Mutation: have `renew` begin the next trial at the saved calibration -> the Node is handed
+    gain 1 -> RED. Mutation: drop the base check in `_open` -> the stale draft is accepted -> RED."""
+    trials, request, exchange = setup_trial(registry)
+    first = trials.begin("node-f0")
+    first_id = __import__("uuid").UUID(first["trial_id"])
+    draft = Calibration.model_validate(first["calibration"]).model_copy(update={"gain": 0.5})
+    trials.operate("node-f0", first_id, operation="edit", expected_sequence=1,
+                   calibration=draft.model_dump(mode="json"))
+    with pytest.raises(NodeControlError, match="trial_sequence_conflict"):
+        trials.operate("node-f0", first_id, operation="renew", expected_sequence=1,
+                       calibration=draft.model_dump(mode="json"))
+    second = trials.operate("node-f0", first_id, operation="renew", expected_sequence=2,
+                            calibration=draft.model_dump(mode="json"))
+    assert second["state"] == "active" and second["trial_id"] != first["trial_id"]
+    assert second["generation"] == first["generation"] + 1 and second["sequence"] == 1
+    assert second["calibration"]["gain"] == 0.5
+    assert second["calibration_revision"] == first["calibration_revision"]
+    assert second["hard_expires_at"] == registry.clock.utc() + trials.hard_seconds
+    assert trials.operate("node-f0", first_id, operation="status", expected_sequence=2)["state"] == "ended"
+    handed = parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial)
+    assert str(handed.trial_id) == second["trial_id"] and handed.generation == second["generation"]
+    assert Calibration.model_validate_json(handed.calibration_json).gain == 0.5
+
+    second_id = __import__("uuid").UUID(second["trial_id"])
+    stale = draft.model_copy(update={"revision": draft.revision + 1})
+    with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
+        trials.operate("node-f0", second_id, operation="renew", expected_sequence=1,
+                       calibration=stale.model_dump(mode="json"))
+    assert trials.operate("node-f0", second_id, operation="status", expected_sequence=1)["state"] == "active"
+    trials.operate("node-f0", second_id, operation="end", expected_sequence=1)
+    with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
+        trials.begin("node-f0", stale.model_dump(mode="json"))
+    third = trials.begin("node-f0", draft.model_dump(mode="json"))
+    assert third["state"] == "active" and third["calibration"]["gain"] == 0.5
+
+
+def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
+    """Through the real app: `begin` with no body starts at the saved calibration, with
+    `{"calibration": draft}` at the draft (a stale base is refused), and the operate route
+    takes `renew` with its draft; any other begin field is refused."""
+    from fastapi.testclient import TestClient
+    from test_registry import ADMIN
+
+    from central.app import create_app
+    from central.fleet.node_sessions import NodeControlConfig
+
+    trials, _request, _exchange = setup_trial(registry)
+    saved = trials.begin("node-f0")
+    trials.operate("node-f0", __import__("uuid").UUID(saved["trial_id"]), operation="end", expected_sequence=1)
+    draft = dict(saved["calibration"], gain=0.5)
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
+                     node_control=NodeControlConfig("node-test"))
+    path = "/v1/operator/frames/node-f0/calibration-trials"
+    with TestClient(app) as client:
+        headers = {"Authorization": "Bearer " + ADMIN}
+        stale = client.post(path, headers=headers, json={"calibration": dict(draft, revision=draft["revision"] + 1)})
+        assert stale.status_code == 409 and stale.json()["error"] == "trial_baseline_revision_changed"
+        assert client.post(path, headers=headers, json={"draft": draft}).status_code == 422
+        begun = client.post(path, headers=headers, json={"calibration": draft})
+        assert begun.status_code == 200, begun.text
+        assert begun.json()["calibration"]["gain"] == 0.5
+        renewed = client.post(f"{path}/{begun.json()['trial_id']}", headers=headers,
+                              json={"operation": "renew", "expected_sequence": 1, "calibration": draft})
+        assert renewed.status_code == 200, renewed.text
+        assert renewed.json()["trial_id"] != begun.json()["trial_id"]
+        assert renewed.json()["generation"] == begun.json()["generation"] + 1
+        client.post(f"{path}/{renewed.json()['trial_id']}", headers=headers,
+                    json={"operation": "end", "expected_sequence": 1})
+        plain = client.post(path, headers=headers)
+        assert plain.status_code == 200, plain.text
+        assert plain.json()["calibration"]["gain"] == saved["calibration"]["gain"]
