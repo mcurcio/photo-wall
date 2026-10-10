@@ -171,13 +171,16 @@ interface TabsProps { label: string; tabs: readonly { value: string; label: stri
 interface InlineProps { label?: string; children: React.ReactNode }
 interface StackProps { label?: string; children: React.ReactNode }
 
-// Field — owns label, help and error wiring for one control (aria-describedby).
-interface FieldProps { label: string; help?: string; error?: string; children: React.ReactElement }
+// Field — owns label, help and error wiring for one control (aria-describedby). `notes` are short facts on one
+// line under the help (a setting's default, where it acts) that also describe the control. Its context gives the
+// control its id, its describedby and the label's id (`labelId`), so a control that is a group is named by the label.
+interface FieldProps { label: string; help?: string; error?: string; notes?: readonly string[]; children: React.ReactElement }
 
 // Slider — shows its value and unit as text; commits on release, previews on drag.
 interface SliderProps { value: number; min: number; max: number; step: number; unit: string; onPreview?(v: number): void; onCommit(v: number): void; disabled?: boolean }
 
-// SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit).
+// SegmentedControl — 2 to 5 exclusive choices (rotation, nudge step, fit). Alone it shows and carries its `label`;
+// inside a Field the Field's label names the group (aria-labelledby) and its help describes it, and `label` is unused.
 interface SegmentedControlProps<V extends string> { label: string; value: V; options: readonly { value: V; label: string }[]; onChange(v: V): void }
 
 // Switch — an on/off setting that applies at once.
@@ -218,7 +221,8 @@ type SettingRowProps = SettingRowBase & (
 interface SettingRowBase {
   label: string;
   help?: string;                  // one plain sentence
-  control: React.ReactNode;       // a ui control inside Field
+  control: React.ReactElement;    // an unlabelled ui control: the row's Field labels it, and help, actsOn and
+                                  // defaultLabel are the Field's help and notes
   defaultLabel?: string;          // "Default: 50 %"
   onReset?(): void;               // shown only when the value differs from the default
   state: "idle" | "saving" | "saved" | "error";
