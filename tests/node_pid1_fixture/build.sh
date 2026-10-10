@@ -67,8 +67,9 @@ for role in success failure; do
 	find "$repo" -maxdepth 1 -name '*.deb' ! -name 'photo-wall-player_*' -exec cp {} "$work/$role-repo/" \;
 done
 docker run --rm -i --platform "linux/$ARCHITECTURE" --volume "$repo:/repo:ro" \
+	--volume "$root/debian-packaging/repo-file.sh:/repo-file.sh:ro" \
 	--volume "$work:/work" "$base" sh -ec '
-	player="/repo/$(sed -n "/^Package: photo-wall-player\$/,/^\$/s/^Filename: //p" /repo/Packages)"
+	player=$(/repo-file.sh /repo photo-wall-player)
 	version=$(dpkg-deb --field "$player" Version)
 	dpkg-deb -R "$player" /tmp/success
 	sed -i "s/^Version: .*/Version: $version+success/" /tmp/success/DEBIAN/control

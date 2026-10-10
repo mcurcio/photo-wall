@@ -164,8 +164,8 @@ jobs:
           work="$RUNNER_TEMP/roots-key"
           mkdir -p "$work"
           unpack() {
-            deb=$(sed -n "/^Package: $1\$/,/^\$/s/^Filename: //p" "$RUNNER_TEMP/node-debs/Packages")
-            dpkg-deb --fsys-tarfile "$RUNNER_TEMP/node-debs/$deb" | tar -xO "./$2" > "$3"
+            deb=$(debian-packaging/repo-file.sh "$RUNNER_TEMP/node-debs" "$1")
+            dpkg-deb --fsys-tarfile "$deb" | tar -xO "./$2" > "$3"
           }
           unpack photo-wall-node usr/lib/photo-wall/node/abi.json "$work/base.json"
           unpack photo-wall-node-display usr/lib/photo-wall/node-display/abi.json "$work/display.json"
@@ -228,8 +228,8 @@ jobs:
           set -eu
           for pair in photo-wall-node:node-base.deb photo-wall-node-display:node-display.deb \
                       photo-wall-player:app.deb photo-wall-app-manager:manager-primary.deb; do
-            deb=$(sed -n "/^Package: ${pair%%:*}\$/,/^\$/s/^Filename: //p" "$RUNNER_TEMP/node-debs/Packages")
-            cmp "$RUNNER_TEMP/node-debs/$deb" "$RUNNER_TEMP/node-components/${pair#*:}"
+            deb=$(debian-packaging/repo-file.sh "$RUNNER_TEMP/node-debs" "${pair%%:*}")
+            cmp "$deb" "$RUNNER_TEMP/node-components/${pair#*:}"
           done
           python3 - "$RUNNER_TEMP/roots-key/base.json" "$RUNNER_TEMP/roots-key/display.json" \
             "$RUNNER_TEMP/node-components/components.json" <<'PYCODE'

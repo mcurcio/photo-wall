@@ -101,7 +101,7 @@ build() {
 		set -a; . /src/debian-packaging/image-format.env; set +a
 		SOURCE_DATE_EPOCH=$(sh /src/debian-packaging/snapshot-epoch.sh)
 		export SOURCE_DATE_EPOCH
-		deb() { echo "/repo/$(sed -n "/^Package: $1\$/,/^\$/s/^Filename: //p" /repo/Packages)"; }
+		deb() { /src/debian-packaging/repo-file.sh /repo "$1"; }
 		mkdir /tmp/abi
 		dpkg-deb --fsys-tarfile "$(deb photo-wall-node)" |
 			tar -xO ./usr/lib/photo-wall/node/abi.json > /tmp/abi/base.json
