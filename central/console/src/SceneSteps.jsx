@@ -5,12 +5,15 @@ import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
-import { candidateLabels, sourceState } from "./mediaHealth.js";
+import { SourceProblem } from "./domain/source-problem.tsx";
+import { candidateLabels, sourceProblem, sourceState } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
-import { sourceRefreshMessage } from "./useSourceRefresh.js";
+import { Alert } from "./ui/alert.tsx";
+import { sourceRefreshFailed, sourceRefreshMessage } from "./useSourceRefresh.js";
+import { useTagListStatus } from "./useTagListStatus.js";
 
 /**
  * The Scene flow's step views (flow design §7 J4): views over the draft that
@@ -334,8 +337,11 @@ export function ReviewStep({
 
 /** Current Source health and its effect on the Scene, shared by Photos and Review. */
 function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onRefresh, onManage }) {
+  const failing = source != null && sourceProblem(source, now) !== null;
+  const tagLists = useTagListStatus(failing ? [source.spec?.connection_ref] : []);
   if (source === null && !historicalRef) return null;
   const state = source === null ? null : sourceState(source, now, false);
+  const problem = failing ? sourceProblem(source, now, tagLists[source.spec?.connection_ref] ?? null) : null;
   const consequence = state === null
     ? "Status is unavailable for this saved reference. Choose a current Source to check its media status."
     : state.state === "ok"
@@ -350,9 +356,13 @@ function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onR
   const message = sourceRefreshMessage(feedback, source, state);
   return (
     <section className={`notice scene-flow__source-readiness${state !== null && state.severity !== "ok" ? " notice--warn" : ""}`} aria-label="Source media status">
-      <p><strong>Source status:</strong> {state?.label ?? "No longer current"}</p>
+      {problem !== null
+        ? <SourceProblem problem={problem} />
+        : <p><strong>Source status:</strong> {state?.label ?? "No longer current"}</p>}
       <p>{consequence}</p>
-      {message !== null && <p role="status">{message}</p>}
+      {message !== null && (sourceRefreshFailed(feedback)
+        ? <Alert severity="alarm" title={message} />
+        : <p role="status">{message}</p>)}
       {state !== null && state.state !== "ok" && (
         <button type="button" disabled={refreshing} onClick={onRefresh}>
           {refreshing ? "Requesting refresh…" : "Refresh Source"}

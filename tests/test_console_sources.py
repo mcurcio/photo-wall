@@ -166,11 +166,12 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
         "Showing the newest 24."]
     assert out["many"][-1] == "Showing the newest 24."
     # A failure is never "nothing matches".
-    assert out["unreachableNone"] == ["Unknown: Photo Wall can't reach your photo library right now; retrying"]
-    assert out["unreachableEarlier"] == [reported, "Photo Wall can't reach your photo library right now."]
+    # Each failure names who refused (owner, 2026-10-09): the library by its provider.
+    assert out["unreachableNone"] == ["Unknown: Photo Wall can't reach Immich right now; retrying"]
+    assert out["unreachableEarlier"] == [reported, "Photo Wall can't reach Immich right now."]
     assert out["workerSilent"] == [
-        ["Unknown: The media worker hasn't answered this preview · check that it is running · retrying"],
-        [reported, "The media worker's refresh ran out of time · retrying."]]
+        ["Unknown: Photo Wall's media worker hasn't answered this preview · check that it is running · retrying"],
+        [reported, "Photo Wall's media worker ran out of time refreshing · retrying."]]
     assert out["overTime"] == ["Unknown: the preview failed",
                                "Over Photo Wall's current time limit for one refresh · narrow it with tags or dates"]
     for failure in ("unreachableNone", "unreachableEarlier", "key", "failed", "looking"):
@@ -179,14 +180,15 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
     assert out["updating"] == [reported, "Updating…"]
     assert out["stillLooking"] == ["Still looking. Photo Wall will keep trying."]
     assert out["key"] == [
-        "Your library connection's key isn't allowed to list tags or show previews. Add the "
+        "Immich refused Photo Wall's key: it isn't allowed to list tags or show previews. Add the "
         "permissions in the setup guide's library key step."]
-    assert out["failed"] == ["Unknown: the preview failed", "Connection is not configured in the media worker."]
+    assert out["failed"] == ["Unknown: the preview failed", "Photo Wall's media worker has no such connection configured."]
     assert out["named"] == [reported.replace("Your photo library", "Your photo library (connection home)")]
     assert out["noTime"] == ["Unknown: the time of your photo library's answer not served"]
     assert out["kinds"] == ["retrying", "key", "failed", "retrying", "failed", "retrying", "failed", "failed"]
     # A key that is another user's is not fixed by more permissions: the card's own sentence.
-    assert out["owner"] == ["Unknown: the preview failed", "The library key belongs to a different user."]
+    assert out["owner"] == ["Unknown: the preview failed",
+                            "Photo Wall refused its Immich key: it belongs to a different Immich user."]
     assert out["delays"] == [2000, 4000, 8000, 16000, 30000, 30000]
     assert out["tiles"] == ["Photo dated 12 Dec 2024", "Video, 0:32, dated 12 Dec 2024",
                             "Video, 1:02:03, dated 12 Dec 2024", "Video dated 12 Dec 2024"]
@@ -226,19 +228,19 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
     # or none reads neutrally. Mutation probe: restore a fall-through keyed on `status`.
     good = " · last good refresh 1 min ago"
     assert out["refusals"] == [
-        "This media worker can't read this Source's settings · update the media worker" + good,
-        "The media worker's library connection doesn't match this Source · check the worker's "
-        "connections" + good,
-        "Your photo library is unreachable" + good,
+        "Photo Wall's media worker can't read this Source's settings · update the media worker" + good,
+        "Photo Wall's media worker has a library connection that doesn't match this Source · check the "
+        "worker's connections" + good,
+        "Immich is unreachable" + good,
         "Refresh failed (brand new code)" + good,
         "Refresh failed (incompatible)" + good,
     ]
     # A tag deleted in the library: its own cause, never "unsupported" and never "nothing matches".
-    assert out["tagMissing"] == ("Your photo library no longer has a tag this Source uses · edit its tags"
+    assert out["tagMissing"] == ("Immich no longer has a tag this Source uses · edit its tags"
                                  " · last good refresh 1 min ago")
     assert out["tagMissingPreview"] == ["Unknown: the preview failed",
-                                        "A tag this Source uses no longer exists in your library."]
-    assert out["allRejected"] == ("No item this Source found could be used · see each item's reason"
+                                        "A tag this Source uses no longer exists in Immich."]
+    assert out["allRejected"] == ("Photo Wall could use no item this Source found · see each item's reason"
                                   " · never refreshed successfully")
     assert out["state"].endswith(" · 1 tag · favourites only · photos only · dated 2024")
 
@@ -310,8 +312,12 @@ def test_every_served_refusal_code_has_one_owner():
     script = r"""
 const words = await import(process.argv[1]);
 const issues = Object.fromEntries(Object.keys(words.SOURCE_REFUSALS).map((code) => [code, words.refusalIssue(code)]));
+const origins = Object.fromEntries(Object.keys(words.SOURCE_REFUSALS).map((code) => [code, words.refusalOrigin(code)]));
 console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRARY, words.PHOTO_WALL],
-  issues, unknownIssue: words.refusalIssue("brand_new_code") }));
+  issues, unknownIssue: words.refusalIssue("brand_new_code"), origins,
+  unknownOrigin: words.refusalOrigin("brand_new_code"),
+  limit: words.refusalProblem("source_limit", "incompatible", [], "permission"),
+  limitDated: words.refusalProblem("source_limit", "incompatible", ["dated 2024"], "ok") }));
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script, "--", (SRC / "sourceWords.js").as_uri()],
@@ -322,10 +328,33 @@ console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRAR
             "worker_internal", "tag_missing"} <= served
     assert sorted(served - set(out["table"])) == []
     library, photo_wall = out["owners"]
+    # Who refused (owner, 2026-10-09): a library row names the library's provider, a Photo
+    # Wall row names Photo Wall, in its state and its sentence alike; the origin is the row's
+    # owner. Mutation probe: give `source_limit` the library's owner.
+    name = {library: "Immich", photo_wall: "Photo Wall"}
     for code, entry in out["table"].items():
         assert entry["owner"] in (library, photo_wall), code
+        assert out["origins"][code] == name[entry["owner"]], code
+        for text in (entry["state"], entry.get("issue") or entry["state"]):
+            assert name[entry["owner"]] in text, (code, text)
         if entry["owner"] == photo_wall:
-            assert not entry["state"].startswith("Your photo library"), code
+            assert not entry["state"].startswith(("Your photo library", "Immich")), code
+    assert out["unknownOrigin"] is None
+    assert out["origins"]["upstream_permission"] == "Immich"
+    assert out["origins"]["source_limit"] == "Photo Wall"
+    # The refused-Source alert: Photo Wall's limit says Photo Wall; Immich's refused tag list
+    # says Immich, and why tags could not narrow it.
+    assert out["limit"] == {
+        "title": "Photo Wall refused this Source as too large (its current limit is at most 1,000 "
+                 "matches), so it selects nothing",
+        "lines": ["It has no tags and no dates, so it asks for your whole Immich library.",
+                  "Immich refused the tag list: Photo Wall's Immich key is missing the tag.read "
+                  "permission, so tags can't be picked until it is added (the setup guide's library "
+                  "key step).",
+                  "Until then, narrow it with dates: edit it in Sources."]}
+    assert out["limitDated"]["lines"] == [
+        "Its only filters are dated 2024, and that still matches too much.",
+        "Narrow it with tags or dates: edit it in Sources."]
     for code in ("spec_unsupported", "connection_mismatch", "connection_unknown", "source_limit",
                  "owner_mismatch", "worker_timeout", "unsupported_version", "item_over_limits",
                  "time_budget", "metadata_pending_or_invalid", "preview_expired"):
@@ -333,8 +362,8 @@ console.log(JSON.stringify({ table: words.SOURCE_REFUSALS, owners: [words.LIBRAR
     # The card's Issue line never names another owner than its Status: a row's own sentence
     # where it differs, else its state words; the code in words only outside the table
     # (B5-FC3-A1). One case per owner, then every row.
-    assert out["issues"]["upstream_timeout"] == "Your photo library is unreachable"
-    assert out["issues"]["worker_exited"] == "The media worker failed during the refresh · check its logs"
+    assert out["issues"]["upstream_timeout"] == "Immich is unreachable"
+    assert out["issues"]["worker_exited"] == "Photo Wall's media worker failed during the refresh · check its logs"
     assert out["unknownIssue"] == "brand new code"
     for code, entry in out["table"].items():
         assert out["issues"][code] == (entry.get("issue") or entry["state"]), code
@@ -417,9 +446,14 @@ def test_no_console_string_says_photo_source_album_or_the_librarys_vendor():
     modules = sorted(path for path in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
                      if "node_modules" not in path.parts)
     assert len(modules) > 50
+    # The library's provider is written once, where a failure the library produced names it
+    # (sourceWords.js LIBRARY_PROVIDER; owner, 2026-10-09); nowhere else.
+    provider = 'export const LIBRARY_PROVIDER = "Immich";'
+    assert (SRC / "sourceWords.js").read_text().count(provider) == 1
     offenders = sorted(f"{path.relative_to(SRC)}: {match.group(0)}" for path in modules
-                       for match in RETIRED.finditer(_console_strings_of(path.read_text())))
-    assert offenders == [], f"{offenders}: the console's noun is Source, and it names no vendor"
+                       for match in RETIRED.finditer(
+                           _console_strings_of(path.read_text()).replace(provider, "")))
+    assert offenders == [], f"{offenders}: the console's noun is Source, and only LIBRARY_PROVIDER names the vendor"
     # The scan sees strings: a comment-free probe line is caught.
     assert RETIRED.search(_console_strings_of('const label = "Photo sources";'))
     assert RETIRED.search(_console_strings_of("const label = `${kind} · taken ${day}`;"))

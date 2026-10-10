@@ -28,14 +28,29 @@ export function sourceRefreshResult(result) {
   };
 }
 
-/** Once a requested revision completes, replace the receipt with the served Source status. */
+/** The refresh that finished still failed: its problem is the Source's alert, said once. */
+export const REFRESH_STILL_FAILED = "Refresh finished, and the Source still failed.";
+
+/**
+ * Once a requested revision completes, replace the receipt with the served Source status; a
+ * failing one is the Source's alert (mediaHealth.js `sourceProblem`), so it is not repeated.
+ */
 export function sourceRefreshMessage(feedback, source, state) {
   if (feedback == null) return null;
   const completed = feedback.kind === "requested" && source !== null &&
     feedback.requestedRevision != null &&
     Number(source.refresh_completed_revision ?? 0) >= feedback.requestedRevision;
-  if (completed) return `Refresh finished. Current Source status: ${state.label}.`;
+  if (completed) {
+    return state.state === "failing"
+      ? REFRESH_STILL_FAILED
+      : `Refresh finished. Current Source status: ${state.label}.`;
+  }
   return feedback.message;
+}
+
+/** Whether a refresh receipt is a refused request (shown as an error, not a status). */
+export function sourceRefreshFailed(feedback) {
+  return feedback?.kind === "failed";
 }
 
 /**

@@ -47,7 +47,13 @@ from test_operator_showrunner_browser import (
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from contracts.time import ManualClock
-from media.models import SourcePreview, SourcePreviewResult, SourceSpec, StoredPreviewMember
+from media.models import (
+    MediaError,
+    SourcePreview,
+    SourcePreviewResult,
+    SourceSpec,
+    StoredPreviewMember,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -56,7 +62,7 @@ pytestmark = pytest.mark.skipif(
 
 NEW_SOURCE = "spring"
 NOTHING_MATCHES = "nothing matching"
-CANT_REACH = "Photo Wall can't reach your photo library right now."
+CANT_REACH = "Photo Wall can't reach Immich right now."
 INTRO = ("Photo Wall selects media that lives in your photo library. It never uploads, edits "
          "or deletes anything there.")
 # Two answers' polls apart, with the 400 ms settle: what a panel waits at most for one answer.
@@ -246,35 +252,56 @@ def test_failed_first_refresh_shows_its_issue_on_the_source_card(page, registry)
         connect(page, origin)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
-        expect(card).to_contain_text("No successful refresh")
-        # The supported-version list is Photo Wall's, so its Status names Photo Wall's release.
-        expect(card).to_contain_text(
-            "This Photo Wall release doesn't support your photo library's version · check the supported "
-            "versions · never refreshed successfully")
+        # A failed refresh is the card's error alert. The supported-version list is Photo
+        # Wall's, so it names Photo Wall's release.
+        alert = card.get_by_role("alert")
+        expect(alert).to_contain_text(
+            "This Photo Wall release doesn't support your Immich version · check the supported "
+            "versions")
+        expect(alert).to_contain_text("Never refreshed successfully.")
         expect(card).not_to_contain_text("Your photo library is unsupported")
         expect(card).not_to_contain_text("Awaiting refresh")
 
 
-def test_a_source_over_the_workers_ceiling_names_photo_walls_limit_not_the_library(page, registry):
+def test_a_source_over_the_workers_ceiling_is_an_error_alert_that_says_why_and_the_fix(page, registry):
     """A refresh over the worker's 1,000-match ceiling refuses the Source (`source_limit`,
-    status incompatible): the card says it is Photo Wall's limit, never that the library is
-    unsupported. Mutation probe: drop the `source_limit` row in sourceWords.js `SOURCE_REFUSALS`."""
+    status incompatible): the card shows an error alert (not plain text) that names Photo
+    Wall's current limit (never the library as unsupported), says why (no tags and no dates,
+    so the whole library) and, while the connection's stored tag list is refused for its key,
+    that the key lacks `tag.read`. Mutation probes: drop the `source_limit` branch of
+    sourceWords.js `refusalProblem`; render SourceFlow.jsx's Status as `state.label`."""
     _seed(registry)
     _set_source(registry, "all-photos:1", status="incompatible",
                 next_refresh=registry.clock.utc() + 30,
                 refresh_completed_revision=0, refresh_requested_revision=1,
                 diagnostics=[{"code": "source_limit"}])
+    _set_source(registry, "dated:1", status="incompatible",
+                next_refresh=registry.clock.utc() + 30,
+                refresh_completed_revision=0, refresh_requested_revision=1,
+                diagnostics=[{"code": "source_limit"}],
+                spec={"captured_from": DEC_12_2024 - 86400 * 365})
+    MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)
+                    ).record_library_tags("fixture-library", None,
+                                          MediaError("upstream_permission", "permission"))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         go(page, "sources")
         card = _sources(page).get_by_role("article", name="all-photos")
-        expect(card).to_contain_text(
-            "Over Photo Wall's current size limits for one Source (at most 1,000 matches) · narrow it "
-            "with tags or dates")
-        expect(card).to_contain_text(
-            "Photo Wall currently refuses a Source this large (at most 1,000 matches, within its size "
-            "limits); saved like this it selects nothing. Narrow it with tags or dates.")
+        alert = card.get_by_role("alert")
+        expect(alert).to_contain_text(
+            "Photo Wall refused this Source as too large (its current limit is at most 1,000 "
+            "matches), so it selects nothing")
+        expect(alert).to_contain_text(
+            "It has no tags and no dates, so it asks for your whole Immich library.")
+        expect(alert).to_contain_text(
+            "Immich refused the tag list: Photo Wall's Immich key is missing the tag.read "
+            "permission, so tags can't be picked until it is added")
+        expect(alert).to_contain_text("Until then, narrow it with dates: edit it in Sources.")
+        expect(alert).to_contain_text("Never refreshed successfully.")
+        assert alert.get_attribute("data-severity") == "alarm"
         expect(card).not_to_contain_text("unsupported")
+        dated = _sources(page).get_by_role("article", name="dated").get_by_role("alert")
+        expect(dated).to_contain_text("Its only filters are dated from ")
 
 
 def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_details(page, registry):
@@ -305,8 +332,8 @@ def test_partial_refresh_keeps_success_status_and_shows_bounded_skipped_item_det
             " · 3 items pending or rejected"
         )).to_be_visible()
         expect(mixed.get_by_text(
-            "Refresh succeeded with 3 items pending or rejected: Your photo library sent an item "
-            "Photo Wall can't read · Your photo library's item details are still settling. Usable "
+            "Refresh succeeded with 3 items pending or rejected: Immich sent an item "
+            "Photo Wall can't read · Immich's item details are still settling. Usable "
             "items remain available."
         )).to_be_visible()
         clean = _sources(page).get_by_role("article", name="clean")
@@ -340,14 +367,15 @@ def test_card_refresh_reports_accepted_request_and_blocks_duplicate_clicks(page,
 
 
 @pytest.mark.parametrize(
-    ("response", "expected"),
+    ("response", "role", "expected"),
     [
-        ((409, '{"error":"source_not_found"}'), "Refresh request failed: source not found."),
-        ((503, '{"error":"internal"}'),
+        # A refused request is an error alert; an unknown outcome is not (yet) a failure.
+        ((409, '{"error":"source_not_found"}'), "alert", "Refresh request failed: source not found."),
+        ((503, '{"error":"internal"}'), "status",
          "The refresh request outcome is unknown. Check the Source status before retrying."),
     ],
 )
-def test_card_refresh_reports_refused_or_unknown_request(page, registry, response, expected):
+def test_card_refresh_reports_refused_or_unknown_request(page, registry, response, role, expected):
     _seed(registry)
     _seed_source(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -361,7 +389,8 @@ def test_card_refresh_reports_refused_or_unknown_request(page, registry, respons
             lambda route: route.fulfill(status=status, content_type="application/json", body=body),
         )
         card.get_by_role("button", name="Refresh holiday", exact=True).click()
-        expect(card.get_by_role("status")).to_have_text(expected)
+        # An alert's text leads with its severity's mark (hidden from its accessible name).
+        expect(card.get_by_role(role)).to_contain_text(expected)
 
 
 def test_card_refresh_reports_unknown_transport_outcome(page, registry):
@@ -498,7 +527,7 @@ def test_a_failure_with_no_earlier_answer_reads_unknown_never_nothing_matches(pa
         start_source(page)
         status = _panel(page).get_by_role("status")
         expect(status).to_have_text(
-            "Unknown: Photo Wall can't reach your photo library right now; retrying", timeout=ANSWER_WAIT)
+            "Unknown: Photo Wall can't reach Immich right now; retrying", timeout=ANSWER_WAIT)
         expect(status.locator("[data-truth=unknown]")).to_have_count(1)
         expect(status).not_to_contain_text(NOTHING_MATCHES)
 
@@ -513,7 +542,7 @@ def test_a_stopped_worker_retries_in_its_own_words_never_as_the_library_unreacha
         start_source(page)
         status = _panel(page).get_by_role("status")
         expect(status).to_have_text(
-            "Unknown: The media worker hasn't answered this preview · check that it is running · retrying",
+            "Unknown: Photo Wall's media worker hasn't answered this preview · check that it is running · retrying",
             timeout=ANSWER_WAIT)
         expect(status).not_to_contain_text("can't reach your photo library")
 
@@ -525,7 +554,7 @@ def test_a_key_the_library_refuses_says_which_permissions_to_add(page, registry)
         _Library(page, answers={"preview-1": _failed("preview-1", "upstream_permission")})
         start_source(page)
         expect(_panel(page).get_by_role("status")).to_have_text(
-            "Your library connection's key isn't allowed to list tags or show previews. Add the "
+            "Immich refused Photo Wall's key: it isn't allowed to list tags or show previews. Add the "
             "permissions in the setup guide's library key step.", timeout=ANSWER_WAIT)
 
 
@@ -722,7 +751,7 @@ def test_a_source_card_says_when_a_tag_it_uses_is_gone(page, registry):
         pets = _sources(page).get_by_role("article", name="pets", exact=True)
         gone = _sources(page).get_by_role("article", name="gone", exact=True)
         expect(pets).to_contain_text("Selects media tagged Pets (and nested tags) · photos and videos")
-        expect(gone).to_contain_text("A tag this Source uses no longer exists in your library.")
+        expect(gone).to_contain_text("A tag this Source uses no longer exists in Immich.")
         expect(pets).not_to_contain_text("no longer exists")
         expect(gone.get_by_role("img")).to_have_count(0)  # no thumbnails on cards (§44)
 

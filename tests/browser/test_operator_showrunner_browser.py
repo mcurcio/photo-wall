@@ -291,7 +291,9 @@ def test_sources_render_name_rev_with_refresh(page, registry):
 def test_sources_have_no_immich_or_album_language(page, registry):
     """Immich boundary (design D-e): a Source is a saved live query, never a
     downloaded album, and no UI element may imply a Player browses or links to
-    Immich. The Sources region carries NO "Immich" / "album" / "open in" copy.
+    Immich. With nothing failing, the Sources region carries NO "Immich" / "album" /
+    "open in" copy: only a failure Immich produced names it (sourceWords.js
+    LIBRARY_PROVIDER; owner, 2026-10-09).
     """
     _seed(registry)
     queue = _seed_source(registry)
@@ -2097,7 +2099,7 @@ def test_the_media_pipeline_states_each_source(page, registry):
             "Your photo library last reported 1 min ago · the media worker accepted 790 in that refresh"
             " · 10 items pending or rejected · favourites only · photos only · dated 2024")
         expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
-        expect(state("failing:1")).to_contain_text("Your photo library is unreachable · last good refresh 2 h ago")
+        expect(state("failing:1")).to_contain_text("Immich is unreachable · last good refresh 2 h ago")
         expect(state("failing:1")).to_contain_text("upstream unavailable")
         expect(state("empty:1")).to_contain_text("nothing valid in the last refresh")
 
@@ -2105,10 +2107,13 @@ def test_the_media_pipeline_states_each_source(page, registry):
         page.clock.run_for(5000)
         expect(state("fresh:1")).to_contain_text("Refresh overdue by 6 min")
         expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
-        expect(state("failing:1")).to_contain_text("Your photo library is unreachable")
+        expect(state("failing:1")).to_contain_text("Immich is unreachable")
         copy = pipeline.inner_text()
-        for claim in ("LIVE", "online", "connected", "Immich"):
+        for claim in ("LIVE", "online", "connected"):
             assert claim not in copy
+        # The vendor is named only by the failure the library produced (sourceWords.js
+        # LIBRARY_PROVIDER; owner, 2026-10-09), never as a liveness claim.
+        assert "Immich" not in copy.replace(state("failing:1").inner_text(), "")
 
 
 def test_the_media_pipeline_states_each_worker_state(page, registry):
