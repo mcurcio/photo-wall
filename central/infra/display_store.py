@@ -10,6 +10,12 @@ display" and of the Output document's body:
   holds one Output document per Output the Node has (an `outputs` or `output_displays` row);
   `output_documents.change` rises only when the body's digest differs. Everything else is `{}`.
 - `PgDisplayQueries`: the operator API's reads (`DisplayQueries`).
+- `PgDisplayCommands`: the Power tab's writes (`DisplayCommands`, slice C3; migration 074): a
+  console test (`power_requests`, one per Frame, ending at `ends_at` on Central's clock) and a
+  Display's power settings. Each wakes the worker's document source in the same transaction by
+  `NOTIFY OUTPUT_DOCUMENTS_CHANNEL, '<device_id>'`, sent from app code (no trigger); the worker
+  `LISTEN`s on one connection (`DisplayWakes.listen`), and the source also wakes at the earliest
+  live `ends_at` of its Node, so a test leaves the document when it ends with no other write.
 
 Readiness (slice C2; migration 073) is worked out by `model.readiness` from facts read here and
 nowhere else: `POSITION_COLUMNS` over `SEEN_DISPLAY_JOIN` gives every reader (the Registry's
@@ -37,18 +43,24 @@ from collections.abc import Mapping
 from typing import Any, Final
 from uuid import UUID
 
+import psycopg
 from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database, DatabaseTransactionClock
 from central.displays.model import (
+    DEFAULT_SETTINGS,
+    TEST_SECONDS,
     DisplayKey,
     DisplaySettings,
     FramePosition,
+    PowerStatus,
+    PowerTest,
     Readiness,
     Sighting,
     adopts,
     display_key,
+    power_status,
     project_output,
     readiness,
     serial_usable,
@@ -58,9 +70,13 @@ from central.displays.views import (
     DisplayPowerSettings,
     DisplayView,
     FrameDisplayView,
+    FramePowerView,
+    InForceView,
     ModeView,
     PowerTestAccepted,
+    PowerTestView,
 )
+from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -71,6 +87,8 @@ from contracts.node_output import (
     OutputReport,
     Power,
     PowerMethod,
+    RequestReason,
+    decode_output_document,
     decode_output_report,
     encode_output_document,
     encode_output_report,
@@ -87,6 +105,9 @@ DOCUMENT_STREAM: Final = "KV_desired_display"   # the display line's desired buc
 _REPORT_SUBJECT: Final = "$KV.state_display."
 _KV_OPERATION: Final = "KV-Operation"            # a delete or purge marker carries no value
 _CLOCK: Final = DatabaseTransactionClock()
+OUTPUT_DOCUMENTS_CHANNEL: Final = "photo_wall_output_documents"   # payload: the Node's device id
+_LISTEN_RETRY_SECONDS: Final = 1.0
+_LISTEN_APPLICATION: Final = "photo-wall-output-documents"
 
 
 # --- Readiness facts -----------------------------------------------------------------------------
@@ -290,26 +311,56 @@ class OutputReportJudge:
 # --- The Output document source ------------------------------------------------------------------
 
 class DisplayWakes:
-    """Which Nodes' display facts changed in this process: `wake` from any thread (the judge runs in
-    a store worker thread), `after` on the event loop. A count per Node, so a waiter never misses a
-    wake that came between two waits."""
+    """Which Nodes' display facts changed: `wake` from any thread (the judge runs in a store worker
+    thread), `after` on the event loop; `listen` carries other processes' commands (the operator
+    API's NOTIFY). A count per Node, plus one for all, so a waiter never misses a wake that came
+    between two waits."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counts: dict[str, int] = {}
+        self._all = 0
         self._waiters: dict[str, list[tuple[asyncio.AbstractEventLoop, asyncio.Event]]] = {}
 
     def count(self, device_id: str) -> int:
         with self._lock:
-            return self._counts.get(device_id, 0)
+            return self._counts.get(device_id, 0) + self._all
 
     def wake(self, device_id: str) -> None:
         with self._lock:
             self._counts[device_id] = self._counts.get(device_id, 0) + 1
             waiters = self._waiters.pop(device_id, [])
+        self._set(waiters)
+
+    def wake_all(self) -> None:
+        """Every Node's facts may have changed (notifications may have been missed)."""
+        with self._lock:
+            self._all += 1
+            waiters = [waiter for waiting in self._waiters.values() for waiter in waiting]
+            self._waiters.clear()
+        self._set(waiters)
+
+    @staticmethod
+    def _set(waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Event]]) -> None:
         for loop, event in waiters:
             with contextlib.suppress(RuntimeError):   # that loop is closed: nobody waits there any more
                 loop.call_soon_threadsafe(event.set)
+
+    async def listen(self, dsn: str) -> None:
+        """Until cancelled: `LISTEN OUTPUT_DOCUMENTS_CHANNEL` on one connection of its own and wake
+        each notified Node. Every (re)connect wakes all, since notifications sent while no
+        connection listened are lost; a lost connection is logged and retried."""
+        while True:
+            try:
+                async with await psycopg.AsyncConnection.connect(
+                        dsn, autocommit=True, application_name=_LISTEN_APPLICATION) as conn:
+                    await conn.execute(f"LISTEN {OUTPUT_DOCUMENTS_CHANNEL}")
+                    self.wake_all()
+                    async for notify in conn.notifies():
+                        self.wake(notify.payload)
+            except Exception as error:   # the bus keeps running; a reconcile still asserts
+                log.warning("output documents LISTEN connection lost: %s", error)
+            await asyncio.sleep(_LISTEN_RETRY_SECONDS)
 
     async def after(self, device_id: str, seen: int) -> int:
         """The Node's count, once it differs from `seen`."""
@@ -317,7 +368,7 @@ class DisplayWakes:
         while True:
             event = asyncio.Event()
             with self._lock:
-                count = self._counts.get(device_id, 0)
+                count = self._counts.get(device_id, 0) + self._all
                 if count != seen:
                     return count
                 self._waiters.setdefault(device_id, []).append((loop, event))
@@ -369,7 +420,35 @@ class _OutputDocuments:
         return await self._stores.run(lambda conn: output_documents(conn, self._device_id))
 
     async def changed(self) -> None:
-        self._seen = await self._wakes.after(self._device_id, self._seen)
+        """When this Node's facts are woken, or at the earliest end of its live tests (measured
+        from Central's clock, slept on this process's)."""
+        seen = self._seen
+        remaining = await self._stores.run(lambda conn: _until_next_test_end(conn, self._device_id))
+        try:
+            self._seen = await asyncio.wait_for(self._wakes.after(self._device_id, seen), remaining)
+        except TimeoutError:
+            return
+
+
+def _until_next_test_end(conn: Any, device_id: str) -> float | None:
+    """Seconds until the earliest live console test on the Node's Outputs ends; None without one."""
+    now = _CLOCK.now_in(conn)
+    row = conn.execute("SELECT min(r.ends_at) AS ends_at FROM players p JOIN bindings b ON b.player_id=p.id "
+                       "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%s "
+                       "AND p.retired_at IS NULL AND r.ends_at > %s", (device_id, now)).fetchone()
+    return None if row["ends_at"] is None else row["ends_at"] - now
+
+
+def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
+    """The console test of a row selected with `r.id AS test_id, r.power AS test_power,
+    r.for_seconds, r.ends_at` from power_requests `r` (None when the row has none)."""
+    if row["test_id"] is None:
+        return None
+    return PowerTest(row["test_id"], Power(row["test_power"]), row["for_seconds"], row["ends_at"])
+
+
+_TEST_COLUMNS: Final = "r.id AS test_id, r.power AS test_power, r.for_seconds, r.ends_at"
+_TEST_JOIN: Final = "LEFT JOIN power_requests r ON r.frame_id=b.frame_id AND r.reason='console-test'"
 
 
 def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
@@ -381,20 +460,18 @@ def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
     now = _CLOCK.now_in(conn)
     rows = conn.execute(
         "SELECT o.output_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
-        "w.change, w.digest FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
+        f"w.change, w.digest, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
         "LEFT JOIN output_displays s ON s.player_id=%(player)s AND s.output_id=o.output_id "
         "LEFT JOIN displays d ON d.id=s.display_id "
         "LEFT JOIN output_documents w ON w.player_id=%(player)s AND w.output_id=o.output_id "
+        f"LEFT JOIN bindings b ON b.player_id=%(player)s AND b.output_id=o.output_id {_TEST_JOIN} "
         "ORDER BY o.output_id", {"player": player_id}).fetchall()
     documents: dict[str, bytes] = {}
     for row in rows:
         if row["output_id"] not in OUTPUT_IDS:
             continue
-        settings = None if row["switch_input_on_power_on"] is None else DisplaySettings(
-            None if row["power_method"] is None else PowerMethod(row["power_method"]),
-            row["switch_input_on_power_on"], row["never_off_on_other_input"])
-        projected = project_output(row["output_id"], test=None, settings=settings, now=now)
+        projected = project_output(row["output_id"], test=_power_test(row), settings=_settings(row), now=now)
         digest = projected.digest()
         change = row["change"] or 0
         if row["digest"] != digest:
@@ -409,8 +486,23 @@ def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
     return documents
 
 
+def _settings(row: Mapping[str, Any]) -> DisplaySettings | None:
+    """The power settings of a displays row's columns (None when the row has none)."""
+    if row["switch_input_on_power_on"] is None:
+        return None
+    return DisplaySettings(None if row["power_method"] is None else PowerMethod(row["power_method"]),
+                           row["switch_input_on_power_on"], row["never_off_on_other_input"])
+
+
 def _document_json(document: OutputDocument) -> dict[str, Any]:
     return json.loads(encode_output_document(document))
+
+
+def _notify(conn: Any, device_ids_sql: str, params: tuple[Any, ...]) -> None:
+    """Wake the worker's document source of each Node `device_ids_sql` selects (column device_id),
+    delivered when the caller's transaction commits."""
+    conn.execute(f"SELECT pg_notify(%s, n.device_id) FROM ({device_ids_sql}) n",  # noqa: S608 (module SQL)
+                 (OUTPUT_DOCUMENTS_CHANNEL, *params))
 
 
 # --- The operator API's reads --------------------------------------------------------------------
@@ -446,22 +538,101 @@ class PgDisplayQueries:
             position_display=None if position_display is None else _display_view(position_display),
             connected=frame["connected"], reported_at=frame["reported_at"])
 
+    def frame_power(self, frame_id: str) -> FramePowerView:
+        with self._db.transaction() as conn:
+            frame = conn.execute(
+                f"SELECT b.player_id, b.output_id, p.device_id, seen.display_id, seen.report, seen.reported_at, "  # noqa: S608
+                f"d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, w.document, "
+                f"{_TEST_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+                f"LEFT JOIN players p ON p.id=b.player_id {SEEN_DISPLAY_JOIN} "
+                f"LEFT JOIN displays d ON d.id=seen.display_id LEFT JOIN output_documents w "
+                f"ON w.player_id=b.player_id AND w.output_id=b.output_id "
+                f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='console-test' WHERE f.id=%s",
+                (frame_id,)).fetchone()
+            if frame is None:
+                raise DisplayRefused("unknown_frame", 404)
+            now = _CLOCK.now_in(conn)
+            linked = None if frame["device_id"] is None else (
+                bus_links_in(conn, (frame["device_id"],))[frame["device_id"]]["linked"])
+        test = _power_test(frame)
+        live = test if test is not None and now < test.ends_at else None
+        document = None if frame["document"] is None else decode_output_document(_json_bytes(frame["document"]))
+        report = None if frame["report"] is None else decode_output_report(_json_bytes(frame["report"]))
+        status = power_status(bound=frame["player_id"] is not None, test=test, document=document,
+                              report=report, now=now)
+        settings = _settings(frame) or DEFAULT_SETTINGS
+        return FramePowerView(
+            frame_id=frame_id, status=status, player_id=frame["player_id"], output_id=frame["output_id"],
+            display_id=frame["display_id"], power_method=settings.power_method,
+            switch_input_on_power_on=settings.switch_input_on_power_on,
+            never_off_on_other_input=settings.never_off_on_other_input,
+            answers=() if report is None else report.answers,
+            method_in_use=None if report is None else report.method,
+            test=None if live is None else PowerTestView(request_id=live.request_id, power=live.power,
+                                                         for_seconds=live.for_seconds, ends_at=live.ends_at),
+            result=report.result if status is PowerStatus.ANSWERED and report is not None else None,
+            in_force=_in_force_view(report, document), linked=linked, last_heard_at=frame["reported_at"])
+
+
+def _json_bytes(value: Mapping[str, Any]) -> bytes:
+    """A wire record stored as JSONB, back to bytes its strict decoder reads."""
+    return json.dumps(value, ensure_ascii=False).encode()
+
+
+def _in_force_view(report: OutputReport | None, document: OutputDocument | None) -> InForceView | None:
+    """The request the Pi says it carries out, named from the latest document's stack (None when the
+    Pi names none, or a request that document no longer holds)."""
+    if report is None or report.in_force is None or document is None:
+        return None
+    for request in document.power:
+        if request.request_id == report.in_force.request_id:
+            return InForceView(request_id=request.request_id, reason=request.reason, power=request.power,
+                               remaining_seconds=report.in_force.remaining_seconds)
+    return None
+
 
 class PgDisplayCommands:
-    """`DisplayCommands` over PostgreSQL. Slice C3 implements both and mounts their routes; until
-    then no route reaches them."""
+    """`DisplayCommands` over PostgreSQL. Each command wakes the worker's document source of every
+    Node it changes, in its own transaction (`_notify`)."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
 
     def request_power_test(self, frame_id: str, power: Power) -> PowerTestAccepted:
-        raise NotImplementedError
+        request_id = uuid.uuid4()
+        with self._db.transaction() as conn:
+            frame = conn.execute("SELECT b.player_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+                                 "WHERE f.id=%s FOR NO KEY UPDATE OF f", (frame_id,)).fetchone()
+            if frame is None:
+                raise DisplayRefused("unknown_frame", 404)
+            if frame["player_id"] is None:
+                raise DisplayRefused("frame_unbound", 409)
+            now = _CLOCK.now_in(conn)
+            conn.execute(
+                "INSERT INTO power_requests(id, frame_id, power, reason, for_seconds, created_at, ends_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (frame_id, reason) DO UPDATE SET "
+                "id=EXCLUDED.id, power=EXCLUDED.power, for_seconds=EXCLUDED.for_seconds, "
+                "created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at",
+                (request_id, frame_id, Power(power).value, RequestReason.CONSOLE_TEST.value, TEST_SECONDS, now,
+                 now + TEST_SECONDS))
+            _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
+        return PowerTestAccepted(request_id=request_id, power=power, for_seconds=TEST_SECONDS)
 
     def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:
-        raise NotImplementedError
+        with self._db.transaction() as conn:
+            row = conn.execute(
+                "UPDATE displays SET power_method=%s, switch_input_on_power_on=%s, never_off_on_other_input=%s "
+                "WHERE id=%s RETURNING power_method, switch_input_on_power_on, never_off_on_other_input",
+                (None if settings.power_method is None else PowerMethod(settings.power_method).value,
+                 settings.switch_input_on_power_on, settings.never_off_on_other_input, display_id)).fetchone()
+            if row is None:
+                raise DisplayRefused("unknown_display", 404)
+            _notify(conn, "SELECT DISTINCT p.device_id FROM output_displays o JOIN players p ON p.id=o.player_id "
+                          "WHERE o.display_id=%s", (display_id,))
+        return DisplayPowerSettings(**row)
 
 
-__all__ = ["DOCUMENT_STREAM", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
+__all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
            "DisplayDocuments", "DisplayWakes", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
            "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "output_documents",
            "record_report", "resolve_output"]

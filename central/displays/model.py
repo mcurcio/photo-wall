@@ -30,7 +30,7 @@ import hashlib
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final
+from typing import Final, TypeGuard
 from uuid import UUID
 
 from contracts.node_output import (
@@ -188,13 +188,27 @@ def project_output(output_id: str, *, test: PowerTest | None, settings: DisplayS
                    now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: `test` (when given and now < ends_at) on top
     of standing on; `settings` or DEFAULT_SETTINGS."""
-    if test is not None:
-        raise NotImplementedError("console tests join the stack in slice C3")
-    return ProjectedOutput(output_id, (standing_on(),), DEFAULT_SETTINGS if settings is None else settings)
+    power: tuple[PowerRequest, ...] = (standing_on(),)
+    if _live(test, now):
+        power = (PowerRequest(str(test.request_id), test.power, RequestReason.CONSOLE_TEST, test.for_seconds),
+                 *power)
+    return ProjectedOutput(output_id, power, DEFAULT_SETTINGS if settings is None else settings)
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,
                  report: OutputReport | None, now: float) -> PowerStatus:
     """UNBOUND without an Output; IDLE without a live test; ANSWERED when the report's for_change is
     the document's change and that document carries the test's request; else WAITING."""
-    raise NotImplementedError
+    if not bound:
+        return PowerStatus.UNBOUND
+    if not _live(test, now):
+        return PowerStatus.IDLE
+    if (document is not None and report is not None and report.for_change == document.change
+            and any(request.request_id == str(test.request_id) for request in document.power)):
+        return PowerStatus.ANSWERED
+    return PowerStatus.WAITING
+
+
+def _live(test: PowerTest | None, now: float) -> TypeGuard[PowerTest]:
+    """Whether `test` is still on the stack at Central's `now` (it ends at its own `ends_at`)."""
+    return test is not None and now < test.ends_at

@@ -10,8 +10,8 @@ slices C1-C3; a composition-root module like library_routes.py). One route per q
 
 Every route takes the operator `admin` dependency, as every /v1/operator route does. A refusal
 answers {"error": code} with its status, the shape apiWrite.js reads. create_app mounts them through
-`mount_display_routes`: slice C1 mounts GET display; the other three are declared in
-`_mount_power_routes`, which slice C3 implements and calls from `mount_display_routes`.
+`mount_display_routes`: GET display (slice C1) and the Power tab's three, `_mount_power_routes`
+(slice C3).
 """
 from __future__ import annotations
 
@@ -47,21 +47,22 @@ def mount_display_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, c
     def frame_display(frame_id: Identifier) -> FrameDisplayView:
         return queries.frame_display(frame_id)
 
+    _mount_power_routes(app, admin=admin, queries=queries, commands=commands)
+
 
 def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, commands: DisplayCommands) -> None:
-    """The Power tab's three routes: slice C3 implements them and mounts them from
-    `mount_display_routes`."""
+    """The Power tab's three routes (slice C3)."""
 
     @app.get(FRAMES + "{frame_id}/power", dependencies=[Depends(admin)], response_model=FramePowerView)
     def frame_power(frame_id: Identifier) -> FramePowerView:
-        raise NotImplementedError
+        return queries.frame_power(frame_id)
 
     @app.post(FRAMES + "{frame_id}/power-tests", dependencies=[Depends(admin)], status_code=202,
               response_model=PowerTestAccepted)
     def power_test(frame_id: Identifier, request: PowerTestRequest) -> PowerTestAccepted:
-        raise NotImplementedError
+        return commands.request_power_test(frame_id, request.power)
 
     @app.put(DISPLAYS + "{display_id}/power-settings", dependencies=[Depends(admin)],
              response_model=DisplayPowerSettings)
     def power_settings(display_id: UUID, request: DisplayPowerSettings) -> DisplayPowerSettings:
-        raise NotImplementedError
+        return commands.set_power_settings(display_id, request)
