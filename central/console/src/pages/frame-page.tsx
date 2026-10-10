@@ -5,6 +5,7 @@ import { FrameDisplay } from "../domain/frame-display";
 import { FrameOverview } from "../domain/frame-overview";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
+import { FramePower } from "../domain/frame-power";
 import { FrameProfile, type Readiness } from "../domain/frame-profile";
 import type { HostsRead } from "../domain/hosts-read";
 import { frameHealth } from "../health.js";
@@ -46,6 +47,7 @@ const TABS = [
   { value: "overview", label: "Overview" },
   { value: "position", label: "Position" },
   { value: "picture", label: "Picture" },
+  { value: "power", label: "Power" },
   { value: "hardware", label: "Hardware" },
 ] as const;
 
@@ -70,7 +72,8 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize {
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why; Position is where the
- * picture sits on the Display (corners, nudges, trims, rotation); Picture is its brightness;
+ * picture sits on the Display (corners, nudges, trims, rotation); Picture is its brightness; Power
+ * is how the Pi turns its display off and on, with Test: turn off and Turn on;
  * Hardware is which Pi and HDMI output feed it (bind, unbind, Identify), the Display the Pi reports
  * there (with the display-changed card) and its Frame profile.
  *
@@ -143,6 +146,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} softwareHref={softwareHref} />
         )}
         {tab === "picture" && <FramePicture adjustment={adjustment} softwareHref={softwareHref} />}
+        {tab === "power" && <FramePower key={`${frameId}:power`} frameId={frameId} />}
         {tab === "hardware" && (
           <>
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}

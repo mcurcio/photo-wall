@@ -1,5 +1,5 @@
 """The Frame page at /console: one page per Frame, reached in one click from its Wall tile, with
-Overview, Position, Picture and Hardware tabs (pages/frame-page.tsx).
+Overview, Position, Picture, Power and Hardware tabs (pages/frame-page.tsx).
 
 The live adjustment (liveAdjustment.js) talks to Central's calibration session routes. A real
 session needs a Node's Display Host exchanging with Central (tests/test_node_calibration.py
@@ -273,7 +273,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         expect(page.get_by_role("heading", level=1)).to_have_count(1)
         assert page.evaluate("location.hash") == f"#/wall/frames/{FRAME}/overview"
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
-        expect(tabs.get_by_role("tab")).to_have_text(["Overview", "Position", "Picture", "Hardware"])
+        expect(tabs.get_by_role("tab")).to_have_text(["Overview", "Position", "Picture", "Power", "Hardware"])
 
         tabs.get_by_role("tab", name="Position", exact=True).click()
         assert page.evaluate("location.hash") == f"#/wall/frames/{FRAME}/position"
@@ -335,7 +335,7 @@ def test_every_tab_speaks_plain_words(page, registry, sessions):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        for tab in ("overview", "position", "picture", "hardware"):
+        for tab in ("overview", "position", "picture", "power", "hardware"):
             frame = open_frame(page, FRAME, tab)
             expect(frame).not_to_contain_text(re.compile(
                 r"SDR gain|lease|trial|acknowledg|claimed|derived|\bRun\b|\bPanel\b|\bPlayer\b|\blayer\b|"
@@ -790,6 +790,6 @@ def test_the_side_rail_stays_put_and_the_tabs_never_wrap(page, registry, session
         page.set_viewport_size({"width": 320, "height": 700})
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
         rows = {round(tabs.get_by_role("tab", name=name, exact=True).bounding_box()["y"])
-                for name in ("Overview", "Position", "Picture", "Hardware")}
+                for name in ("Overview", "Position", "Picture", "Power", "Hardware")}
         assert len(rows) == 1, rows
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
