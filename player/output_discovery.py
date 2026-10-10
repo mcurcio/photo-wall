@@ -8,8 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from contracts.enrollment import OutputReport
-
-CONFIGURED_OUTPUT_IDS = ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
+from contracts.node_output import OUTPUT_IDS
 
 
 @dataclass(frozen=True)
@@ -30,7 +29,7 @@ def weston_ini() -> str:
     """Return the bounded compositor routing for every configured connector."""
     sections = ["[core]", "idle-time=0", "require-input=false", "xwayland=false",
                 "", "[shell]", "background-color=0xff000000"]
-    for output_id in CONFIGURED_OUTPUT_IDS:
+    for output_id in OUTPUT_IDS:
         sections.extend(("", "[output]", f"name={output_id}",
                          f"app-ids={output_app_id(output_id)}"))
     return "\n".join(sections) + "\n"

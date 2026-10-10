@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the native display harnesses (tests/native_display_smoke.py, then
-tests/native_player_mainloop_harness.py) in a Linux arm64 container.
+tests/native_player_mainloop_harness.py, then tests/native_player_resource_harness.py) in a
+Linux arm64 container.
 
 The harness runs a real headless Weston with the built `photo-wall-shell.so`, a stub app and the
 private diagnostic client, and reads output pixels through Weston's own `weston_capture_v1`. It
@@ -12,7 +13,8 @@ photo-wall-node-display and photo-wall-frame-client installed from the local rep
 overlay client's pywayland and pycairo, which the harness also reads pixels and checks the
 private protocol with), plus photo-wall-player, whose Depends are the Player's Debian runtime
 (GTK, GStreamer, PyGObject, PyOpenGL, pydantic), which the Player main-loop harness drives on
-real GLib and GL. Nothing of
+real GLib and GL; the resource harness then holds the Player to releasing every decoder's
+descriptors and to presenting again after a remap or a new grant (1b P1a). Nothing of
 appliance/display_host is compiled here: the harness proves the packages.
 
 The image is tagged `photo-wall-display-harness:<digest>`, the digest being the sha256 of its
@@ -128,7 +130,8 @@ def run_argv(tag: str, name: str, repository: Path = REPOSITORY) -> list[str]:
             "-v", f"{repository / 'player'}:/repo/player:ro",
             "-v", f"{repository / 'contracts'}:/repo/contracts:ro",
             tag, "/bin/sh", "-c", "/usr/bin/python3 /smoke/native_display_smoke.py"
-            " && /usr/bin/python3 /smoke/native_player_mainloop_harness.py"]
+            " && /usr/bin/python3 /smoke/native_player_mainloop_harness.py"
+            " && /usr/bin/python3 /smoke/native_player_resource_harness.py"]
 
 
 def main(argv: list[str] | None = None) -> int:
