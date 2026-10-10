@@ -36,7 +36,9 @@ write_node_handoff(
     offer=parse_node_boot_offer(json.dumps(ready["offer"]).encode()),
 )
 shutil.copy2("/var/tmp/fixture-head.so", "/usr/lib/photo-wall-fixture-head.so")
+# Each drop-in directory is made where it is written: nothing else in the image makes them.
 d = Path("/etc/systemd/system/photo-wall-display.service.d")
+d.mkdir(parents=True, exist_ok=True)
 # The installed unit's own command with only the hardware swapped: headless instead of DRM, and
 # the fixture head loaded before the production modules, so READY=1 (systemd-notify.so, Type=)
 # and every other argument stay the package's.
@@ -73,6 +75,7 @@ d.mkdir(parents=True, exist_ok=True)
 )
 if config.get("stop_diagnostics"):
     diagnostic = Path("/etc/systemd/system/photo-wall-app-broker.service.d/fixture-diagnostic.conf")
+    diagnostic.parent.mkdir(parents=True, exist_ok=True)
     diagnostic.write_text(
         "[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-stop-diagnostic.py\n"
     )
@@ -85,6 +88,7 @@ if scenario == "refused":
         "MemTotal:        2097152 kB\nMemFree:         1048576 kB\nMemAvailable:    1572864 kB\n"
     )
     d = Path("/etc/systemd/system/photo-wall-node-storage.service.d")
+    d.mkdir(parents=True, exist_ok=True)
     (d / "fixture-memory-class.conf").write_text(
         "[Service]\nBindReadOnlyPaths=/var/lib/node-fixture-meminfo:/proc/meminfo\n"
     )
