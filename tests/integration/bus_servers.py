@@ -532,6 +532,10 @@ class Projection:
         await self._changed.wait()
         self._changed.clear()
 
+    def source(self, serial: str, pipe: str) -> Projection:
+        """Central's `DocumentSources` (central/infra/node_links.py): every link shares this one."""
+        return self
+
 
 async def reload_hub(hub: BusServer, serials: Sequence[str], *, requests: int = 2) -> None:
     """Rewrite the hub's configuration for `serials` in place and reload it through the system

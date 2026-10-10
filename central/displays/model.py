@@ -26,6 +26,7 @@ One home each for:
 """
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
@@ -33,21 +34,25 @@ from typing import Final
 from uuid import UUID
 
 from contracts.node_output import (
+    BEST_DETECTED,
     DisplayIdentity,
     OutputDocument,
     OutputReport,
     Power,
     PowerMethod,
     PowerRequest,
+    RequestReason,
+    encode_output_document,
 )
 
 TEST_SECONDS: Final = 300                    # owner q1, 2026-10-10
 STANDING_REQUEST_ID: Final = "standing"
+_DIGEST_CHANGE: Final = 1                    # any fixed change number: the digest covers everything but it
 
 
 def standing_on() -> PowerRequest:
     """The bottom of every 1b stack: PowerRequest(STANDING_REQUEST_ID, Power.ON, RequestReason.STANDING)."""
-    raise NotImplementedError
+    return PowerRequest(STANDING_REQUEST_ID, Power.ON, RequestReason.STANDING)
 
 
 class Readiness(StrEnum):
@@ -76,7 +81,8 @@ class DisplayKey:
 
     def __post_init__(self) -> None:
         """ValueError("display_key") unless exactly one of serial and frame_id is set."""
-        raise NotImplementedError
+        if (self.serial is None) == (self.frame_id is None):
+            raise ValueError("display_key")
 
 
 @dataclass(frozen=True)
@@ -92,12 +98,22 @@ def serial_usable(sighting: Sighting, others: Collection[Sighting],
     """Whether `sighting`'s serial counts: present, not in `shared` ((maker, product, serial)
     recorded as shared), and reported by no other Output in `others` (every other Output's current
     identity, Pi-wide and wall-wide)."""
-    raise NotImplementedError
+    identity = sighting.identity
+    if identity.serial is None or (identity.maker, identity.product, identity.serial) in shared:
+        return False
+    here = (sighting.player_id, sighting.output_id)
+    return not any((other.player_id, other.output_id) != here
+                   and (other.identity.maker, other.identity.product, other.identity.serial)
+                   == (identity.maker, identity.product, identity.serial) for other in others)
 
 
 def display_key(identity: DisplayIdentity, *, serial_counts: bool, bound_frame_id: str | None) -> DisplayKey | None:
     """The key `identity` is recognised by; None = pending (no usable serial, Output unbound)."""
-    raise NotImplementedError
+    if serial_counts:
+        return DisplayKey(identity.maker, identity.product, identity.serial, None)
+    if bound_frame_id is None:
+        return None
+    return DisplayKey(identity.maker, identity.product, None, bound_frame_id)
 
 
 @dataclass(frozen=True)
@@ -151,17 +167,22 @@ class ProjectedOutput:
 
     def digest(self) -> str:
         """sha256 hex of the canonical body; the projector raises the change when it differs."""
-        raise NotImplementedError
+        return hashlib.sha256(encode_output_document(self.at_change(_DIGEST_CHANGE))).hexdigest()
 
     def at_change(self, change: int) -> OutputDocument:
-        raise NotImplementedError
+        settings = self.settings
+        return OutputDocument(self.output_id, change, self.power,
+                              BEST_DETECTED if settings.power_method is None else settings.power_method,
+                              settings.switch_input_on_power_on, settings.never_off_on_other_input)
 
 
 def project_output(output_id: str, *, test: PowerTest | None, settings: DisplaySettings | None,
                    now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: `test` (when given and now < ends_at) on top
     of standing on; `settings` or DEFAULT_SETTINGS."""
-    raise NotImplementedError
+    if test is not None:
+        raise NotImplementedError("console tests join the stack in slice C3")
+    return ProjectedOutput(output_id, (standing_on(),), DEFAULT_SETTINGS if settings is None else settings)
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,

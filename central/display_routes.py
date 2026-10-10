@@ -9,17 +9,19 @@ slices C1-C3; a composition-root module like library_routes.py). One route per q
 | PUT | /v1/operator/displays/{display_id}/power-settings | DisplayPowerSettings | DisplayPowerSettings | 404 unknown_display |
 
 Every route takes the operator `admin` dependency, as every /v1/operator route does. A refusal
-answers {"error": code} with its status, the shape apiWrite.js reads. create_app mounts these when
-slice C1 lands (the GETs) and C3 (the writes).
+answers {"error": code} with its status, the shape apiWrite.js reads. create_app mounts them through
+`mount_display_routes`: slice C1 mounts GET display; the other three are declared in
+`_mount_power_routes`, which slice C3 implements and calls from `mount_display_routes`.
 """
 from __future__ import annotations
 
 from typing import Any, Final
 from uuid import UUID
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from central.displays.ports import DisplayCommands, DisplayQueries
+from central.displays.ports import DisplayCommands, DisplayQueries, DisplayRefused
 from central.displays.views import (
     DisplayPowerSettings,
     FrameDisplayView,
@@ -35,11 +37,20 @@ DISPLAYS: Final = OPERATOR_PREFIX + "displays/"
 
 
 def mount_display_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, commands: DisplayCommands) -> None:
-    """Declare the four routes above on `app`; DisplayRefused becomes {"error": code} at its status."""
+    """Declare the routes above on `app`; DisplayRefused becomes {"error": code} at its status."""
+
+    @app.exception_handler(DisplayRefused)
+    async def refused(request: Request, exc: DisplayRefused) -> JSONResponse:
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
 
     @app.get(FRAMES + "{frame_id}/display", dependencies=[Depends(admin)], response_model=FrameDisplayView)
     def frame_display(frame_id: Identifier) -> FrameDisplayView:
-        raise NotImplementedError
+        return queries.frame_display(frame_id)
+
+
+def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, commands: DisplayCommands) -> None:
+    """The Power tab's three routes: slice C3 implements them and mounts them from
+    `mount_display_routes`."""
 
     @app.get(FRAMES + "{frame_id}/power", dependencies=[Depends(admin)], response_model=FramePowerView)
     def frame_power(frame_id: Identifier) -> FramePowerView:

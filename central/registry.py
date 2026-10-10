@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 
 from central.db import Database
 from central.infra.asset_roots import lock_fleet_assets_in
+from central.infra.display_store import resolve_output
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -527,6 +528,7 @@ class Registry:
                     raise RegistryError("binding_generation_conflict")
                 conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
                 conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)", (frame_id, player_id, output_id))
+                resolve_output(conn, player_id, output_id)   # the display there, under this binding
                 row = conn.execute("UPDATE frames SET generation=generation+1,calibration_valid=false,"
                                    "configuration_revision=configuration_revision+1,"
                                    "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",

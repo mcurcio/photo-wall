@@ -23,12 +23,14 @@ from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
+from central.display_routes import mount_display_routes
 from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.rollout_gate import ServingImageVerifier
+from central.infra.display_store import PgDisplayCommands, PgDisplayQueries
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.mdns_advertise import MdnsCentralAdvertiser
@@ -815,6 +817,7 @@ def create_app(
         return coordinator.runtime.command_current(operation, run_id)
 
     mount_library_routes(app, admin=admin, media=media_application, content=content)
+    mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
     if content is not None:
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
