@@ -337,11 +337,11 @@ def test_broker_closure_has_no_host_module_and_the_base_declares_the_feed():
 
 
 def test_a_host_module_in_the_broker_closure_is_refused() -> None:
-    from node.launcher_closures import FORBIDDEN, THIRD_PARTY
+    from node.launcher_closures import FORBIDDEN
 
     from scripts.module_closure import ClosureError, compute_closure, first_party_packages
 
     with pytest.raises(ClosureError, match="appliance.host is forbidden here"):
         compute_closure(("appliance.apps.broker_runner", "appliance.host.host_linux"), repo=REPO,
                         first_party=first_party_packages(REPO), forbidden=FORBIDDEN["app-broker"],
-                        third_party=THIRD_PARTY)
+                        third_party=None)

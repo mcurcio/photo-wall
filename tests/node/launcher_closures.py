@@ -6,7 +6,8 @@ their entry module; the build holds each one's PATH to the package directories t
 imports reach (scripts/import_check.py, decision 0019). What a program must not reach inside those
 directories (the broker never imports a host module, HostCore never the app lifecycle) is a
 property of its closure, held here per launcher and judged by module_closure's refusal of a
-forbidden module. Not a test module: the context tests import it.
+forbidden module. Third-party imports are not judged here: the build's import check holds each
+to its package's Depends (debian/control). Not a test module: the context tests import it.
 """
 from __future__ import annotations
 
@@ -38,8 +39,6 @@ FORBIDDEN: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({
     "manager-supervisor": _EVERY,
     "health-judge": _EVERY,
 })
-# The third-party roots a closure may reach (Debian packages, judged by the build's import check).
-THIRD_PARTY: Final = MappingProxyType({"nats": "python3-nats", "pydantic": "python3-pydantic"})
 
 
 def entries() -> Mapping[str, str]:
@@ -56,4 +55,4 @@ def closure(launcher: str) -> Closure:
     """The launcher's entry closure; ClosureError when it reaches a forbidden module."""
     return compute_closure((entries()[launcher],), repo=REPO,
                            first_party=first_party_packages(REPO),
-                           forbidden=FORBIDDEN[launcher], third_party=THIRD_PARTY)
+                           forbidden=FORBIDDEN[launcher], third_party=None)

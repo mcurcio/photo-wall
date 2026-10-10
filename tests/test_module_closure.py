@@ -163,6 +163,16 @@ def test_first_party_packages_are_the_top_level_packages(tmp_path):
 DECLARED = MappingProxyType({"pydantic": "python3-pydantic", "gi": "python3-gi"})
 
 
+def test_third_party_not_judged_here_allows_and_records_every_root(tmp_path):
+    """None: another check judges third-party imports (the build's import check, against
+    Depends); a first-party module that does not exist is still refused."""
+    extra = {"pkg_b/helper.py": "import pydantic\nimport nats.aio\n"}
+    assert closure_of(tmp_path, extra, third_party=None).third_party == ("nats", "pydantic")
+    with pytest.raises(ClosureError, match="pkg_b.absent, which does not exist"):
+        closure_of(tmp_path / "missing", {"pkg_b/helper.py": "import pkg_b.absent\n"},
+                   third_party=None)
+
+
 @pytest.mark.parametrize("statement", ["import pydantic", "from gi.repository import GLib"])
 def test_a_declared_third_party_import_is_allowed_and_recorded(tmp_path, statement):
     extra = {"pkg_b/helper.py": f"def lazily():\n    {statement}\n"}

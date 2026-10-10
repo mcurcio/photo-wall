@@ -143,10 +143,13 @@ def _names_a_module(repo: Path, dotted: str) -> bool:
 
 def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[str],
                     forbidden: Sequence[str] = (),
-                    third_party: Mapping[str, str] = MappingProxyType({})) -> Closure:
+                    third_party: Mapping[str, str] | None = MappingProxyType({})) -> Closure:
     """The first-party modules `roots` import, directly or not, at module level or inside a
     function. A top-level name in `third_party` is allowed and recorded in `third_party` (its
-    own imports are the Debian package's business, as the stdlib's are the interpreter's).
+    own imports are the Debian package's business, as the stdlib's are the interpreter's);
+    `third_party=None` allows and records every top-level name that is neither first-party nor
+    stdlib, for a caller whose third-party imports another check judges (the build's import
+    check judges each against its package's Depends).
     Raises ClosureError naming the importer and the import when the closure reaches a top-level
     name that is neither first-party, stdlib nor declared, a first-party module that does not
     exist, or any name under `forbidden`. A `forbidden` entry matches a module that equals it or
@@ -158,7 +161,12 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
         if "." in entry and entry.partition(".")[0] in first_party and not _names_a_module(
                 repo, entry):
             raise ClosureError(f"forbidden entry {entry} names no module under {repo}")
-    declared, reached_third_party = frozenset(third_party), set()
+    declared, reached_third_party = frozenset(third_party or ()), set()
+
+    def allowed(top: str) -> bool:
+        return top in declared or (third_party is None and top not in first_party
+                                   and top not in sys.stdlib_module_names)
+
     finder = Finder([str(repo), *search_path()], first_party)
     for root in roots:
         try:
@@ -175,7 +183,7 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
                            f"{_forbidden_entry(name, forbidden)} is forbidden here")
     for name in sorted(finder.modules):
         top = name.partition(".")[0]
-        if top in declared:
+        if allowed(top):
             reached_third_party.add(top)
         elif top not in first_party and top not in sys.stdlib_module_names:
             raise ClosureError(f"{finder.importers(name)} imports {name}, which is neither "
@@ -192,7 +200,7 @@ def compute_closure(roots: Sequence[str], *, repo: Path, first_party: Sequence[s
             if name in missing:
                 raise ClosureError(f"{finder.importers(name)} imports {name}, which does not "
                                    "exist")
-        elif top in declared:
+        elif allowed(top):
             reached_third_party.add(top)
         elif top not in sys.stdlib_module_names:
             raise ClosureError(f"{finder.importers(name)} imports {name}, which is neither "
