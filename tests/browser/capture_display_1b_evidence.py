@@ -91,10 +91,13 @@ def test_after_hardware(page, registry, scheme):
     _bind(registry, ready, pi, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _commit_position(registry, ready)
-    _bind(registry, changed, pi, "HDMI-A-2")
-    _report(registry, "pi-a", "HDMI-A-2", SERIAL_DISPLAY)
+    # On its own Pi: the same serial on another port of pi-a would be shared (E-1B-FIX-3), and the
+    # ready Frame's display would read as recognised by make and model.
+    swapped = enroll_pi(registry, "pi-c")
+    _bind(registry, changed, swapped, "HDMI-A-1")
+    _report(registry, "pi-c", "HDMI-A-1", SERIAL_DISPLAY)
     _commit_position(registry, changed)
-    _report(registry, "pi-a", "HDMI-A-2", OTHER_DISPLAY)
+    _report(registry, "pi-c", "HDMI-A-1", OTHER_DISPLAY)
     other = enroll_pi(registry, "pi-b")
     _bind(registry, no_serial, other, "HDMI-A-1")
     _report(registry, "pi-b", "HDMI-A-1", NO_SERIAL)
