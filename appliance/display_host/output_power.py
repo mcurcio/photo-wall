@@ -306,6 +306,11 @@ class OutputPowerController:
         with self._wake:
             port = self._ports.setdefault(output_id, _Port())
             document, now = port.document, self._clock.monotonic()
+            # This look reads the latest document, so a change that arrived while it probed is
+            # carried out here: its pending look would be a second attempt for the same change.
+            # (A pending APPEARED stays: the display came back after this look's probes.)
+            if self._due.get(output_id) is Trigger.CHANGE:
+                del self._due[output_id]
             decision = in_force(document, port.started, now)
             request = decision.in_force
             if document is None or request is None:   # no document: leave the display as it is
