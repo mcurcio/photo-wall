@@ -398,7 +398,9 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
         form.get_by_role("button", name=action, exact=True).click()
     if info.value.ok:
         # Listed before anything can use it (the refresh after the save landed): the
-        # answer arrives before the console's refresh read does.
+        # answer arrives before the console's refresh read does. The card is visible only
+        # for a window not yet ended: a past Program renders inside the closed "Past (N)"
+        # disclosure (ProgramsRegion.jsx), so this wait suits future windows only.
         program_id = unquote(info.value.url.rsplit("/", 1)[-1])
         expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
             f"Program {program_id}", exact=True)).to_be_visible()
