@@ -503,6 +503,28 @@ try:
     print("PASS handed_off_app_pixel_captured", assert_pixel(320, 240, PROBE_APP), flush=True)
     print("PASS health_layer_above_live_app_after_handoff",
           assert_pixel(*HEALTH, health_over(PROBE_APP)), flush=True)
+    # Signal off (1b D2): a forced-off output presents nothing, so the app's surface lease (renewed
+    # only by a presentation, LEASE_MS 5 s) must hold while it is off; on again, the same grant
+    # presents. Mutation probe: drop the lease hold in lease_tick (invalidated after 5 s).
+    def output_power(power):
+        """The op, and the shell's `output_power` event (sent ahead of the op's response)."""
+        sent = len(events)
+        assert request("output_power", power=power)["accepted"]
+        said = [e for e in events[sent:] if e["event"] == "output_power"]
+        assert (said or [read_until(lambda e: e["event"] == "output_power")])[0]["power"] == power
+
+    powered = len(events)
+    output_power("off")
+    quiet = time.monotonic() + 6.5
+    while time.monotonic() < quiet:
+        time.sleep(0.25)
+        drain()
+    off_events = events[powered:]
+    assert not any(e["event"] == "invalidated" for e in off_events), off_events[-12:]
+    output_power("on")
+    resumed = read_until(lambda e: e["event"] == "presented" and e["frame_tag"] == "authored-probe")
+    assert resumed["grant_id"] == grant and not any(e["event"] == "invalidated" for e in events[powered:])
+    print("PASS signal_off_holds_the_apps_grant_past_its_lease", flush=True)
     revision = {**identity, "config_revision": 2}
     revision_grant = str(uuid.uuid4())
     assert request(

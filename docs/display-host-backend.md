@@ -118,8 +118,8 @@ binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
 `WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
 ([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
 READY=1 and it stops with that Weston. Each launch records the display's
-`InvocationID`. One rule, `relaunch_for_display`
-([`broker.py`](../appliance/apps/broker.py)), serves whichever launch is current:
+`InvocationID`. One rule, `relaunch_absent`
+([`broker.py`](../appliance/apps/broker.py); [the restart rule](player-architecture.md)), serves whichever launch is current:
 the boot's (`AppEffectBroker.reconcile`) or an online switch's
 (`OnlineEffectBroker.reconcile`, for its target or fallback). When the Player is
 absent while a newer incarnation runs, the same environment starts again under the

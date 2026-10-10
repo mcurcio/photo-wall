@@ -96,6 +96,10 @@ CONTROLLER_UNIT = "photo-wall-display-controller.service"
 PLAYER_UNIT = "photo-wall-node-player.service"
 # Weston's RestartSec and READY=1, the broker's next turn, the Player's start and its app link.
 PLAYER_RELAUNCH_SECONDS = 60
+# A Player that dies on its own: the broker's first paced relaunch (1 s), its next turn, the
+# collection of the old unit and the new unit's start.
+PLAYER_CRASH_RELAUNCH_SECONDS = 15
+BROKER_LAUNCH = "/run/photo-wall-app-broker/launch.json"  # the broker's current launch record
 CONTROL_SOCKET = str(RUNTIME / "control.sock")
 # The controller's journal must never hold these: its connect to a control.sock not yet bound
 # (started before Weston's READY=1), or a sandbox set up on a vanished runtime directory.
@@ -350,6 +354,29 @@ class Node:
             time.sleep(0.5)
         (self.work / "player-after-display.json").write_text(
             json.dumps({"before": before, "after": now, "linked": current}, sort_keys=True))
+
+    def player_restarts_after_a_crash(self):
+        """The Player dies on its own (SIGSEGV), Weston untouched: the broker starts it again on
+        its relaunch pacing, as a new launch epoch, within the same kernel boot (1b P1b)."""
+        boot = self.run("cat", "/proc/sys/kernel/random/boot_id").strip()
+        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
+        epoch = json.loads(self.run("cat", BROKER_LAUNCH))["epoch"]
+        assert before["ActiveState"] == "active", before
+        self.run("systemctl", "kill", "--signal=SIGSEGV", PLAYER_UNIT)
+        deadline = time.monotonic() + PLAYER_CRASH_RELAUNCH_SECONDS
+        while True:
+            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
+            launch = json.loads(self.run("cat", BROKER_LAUNCH))
+            if (now["ActiveState"] == "active"
+                    and now["InvocationID"] not in ("", before["InvocationID"])
+                    and launch["running"]):
+                break
+            assert time.monotonic() < deadline, ("no Player after its crash", before, now, launch)
+            time.sleep(0.5)
+        evidence = {"before": before, "after": now, "epochs": [epoch, launch["epoch"]]}
+        (self.work / "player-after-crash.json").write_text(json.dumps(evidence, sort_keys=True))
+        assert launch["epoch"] == epoch + 1, evidence
+        assert self.run("cat", "/proc/sys/kernel/random/boot_id").strip() == boot, evidence
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -911,6 +938,7 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 # After assert_memory_lines, whose every slice reads oom_kill 0.
                 node.induce_bus_oom()
                 assert_bus_oom_reported(fixture, node, reported)
+                node.player_restarts_after_a_crash()
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:

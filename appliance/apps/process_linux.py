@@ -9,13 +9,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
 
-from appliance.apps.broker import RunningApp
+from appliance.apps.broker import Launch, RunningApp
 from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
 from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.capacity import ROOT_IMAGES, line
+from appliance.kernel.clock import boottime_ms
 from appliance.kernel.display_paths import DISPLAY_UNIT, WAYLAND_DIRECTORY, WAYLAND_SOCKET
 from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.process_identity import read_proc_start_ticks
@@ -75,8 +76,10 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
     """Single production sandbox definition, also exercised by real PID1 probes.
 
     The Player runs bound to one Weston incarnation (`BindsTo=` + `After=` the display unit):
-    its start waits for Weston's READY=1, and it stops when that Weston does; the broker starts
-    it again for the next incarnation (`AppEffectBroker.reconcile`). It reaches Weston through
+    its start waits for Weston's READY=1, and it stops when that Weston does. `Restart=no`: the
+    broker alone starts it again, at once for a new Weston incarnation and on its relaunch pacing
+    after any other exit (`appliance.apps.broker.relaunch_absent`). `PYTHONFAULTHANDLER=1` puts
+    the Python stack of a crash in its journal. It reaches Weston through
     WAYLAND_DIRECTORY, bound in whole at the same path (the directory outlives every Weston, so
     the bind never holds a stale socket), with WAYLAND_DISPLAY the socket's absolute path; its
     XDG_RUNTIME_DIR stays its own private tmpfs.
@@ -103,7 +106,7 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
         *grants,
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",
         f"TimeoutStopSec={STOP_TIMEOUT_SECONDS}", "Delegate=no",
-        f"Environment=HOME=/tmp XDG_RUNTIME_DIR=/run/photo-wall-wayland WAYLAND_DISPLAY={WAYLAND_SOCKET} GDK_BACKEND=wayland PHOTO_WALL_DISPLAY_HOST=1 PYTHONNOUSERSITE=1 GST_REGISTRY=/tmp/gst-registry.bin",
+        f"Environment=HOME=/tmp XDG_RUNTIME_DIR=/run/photo-wall-wayland WAYLAND_DISPLAY={WAYLAND_SOCKET} GDK_BACKEND=wayland PHOTO_WALL_DISPLAY_HOST=1 PYTHONNOUSERSITE=1 PYTHONFAULTHANDLER=1 GST_REGISTRY=/tmp/gst-registry.bin",
         "UnsetEnvironment=PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD GI_TYPELIB_PATH GST_PLUGIN_PATH GST_PLUGIN_PATH_1_0 GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0",
     )
 
@@ -132,10 +135,13 @@ class SystemdAppProcessDriver:
         rows = systemctl_show(DISPLAY_UNIT, DISPLAY_PROPERTIES)
         return (rows["InvocationID"] or None) if rows["ActiveState"] == "active" else None
 
-    def launched_display(self) -> str | None:
-        """The Weston incarnation recorded when the current launch was spawned."""
+    def launched(self) -> Launch | None:
+        """The current launch: its epoch, the Weston incarnation and the boottime recorded when
+        it was spawned (records are per boot, so every one carries `started_ms`)."""
         launch = self.store.read("launch")
-        return None if launch is None else launch.get("display")
+        if launch is None:
+            return None
+        return Launch(launch["epoch"], launch.get("display"), launch["started_ms"])
 
     def unit_collected(self) -> bool:
         """PID1 unloaded the fixed unit name (after --collect) and no app or job remains."""
@@ -192,7 +198,9 @@ class SystemdAppProcessDriver:
         The pidfd pins one process before its identity is checked, so a pid reused after the
         check cannot receive the signal: kernel birth (start ticks) and systemd's MainPID and
         InvocationID must all match. KillMode=control-group takes the rest of the unit;
-        Restart=no keeps it down. An unavailable observation raises (nothing was sent).
+        Restart=no leaves its restart to the broker, which relaunches on its pacing
+        (`appliance.apps.broker.relaunch_absent`). An unavailable observation raises (nothing
+        was sent).
         """
         pid = expected.process.pid
         try:
@@ -334,7 +342,8 @@ class SystemdAppProcessDriver:
         # Read before the spawn: a Weston that restarts in between costs one spare relaunch,
         # never a missed one.
         launch = {"environment": primitive(environment), "operation_id": str(operation_id),
-                  "epoch": epoch, "running": None, "display": self.display_incarnation()}
+                  "epoch": epoch, "running": None, "display": self.display_incarnation(),
+                  "started_ms": boottime_ms()}
         self.store.write("launch", launch)
         root = self.roots / environment.environment_sha256 / "rootfs"
         # All paths visible to the process are inside RootDirectory except these exact

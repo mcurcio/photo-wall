@@ -373,7 +373,8 @@ jobs:
           # Only what scripts/device_root_checks.py reads: the systemd manager
           # config and units, the apt sources, the dpkg database, sshd's config,
           # the logins' authorized keys, the hostname, the hosts database, the
-          # default locale and where the V1 bootstrapper lived. An extract path
+          # default locale, where the V1 bootstrapper lived, and display power's
+          # tools, modules-load file and groups. An extract path
           # the image lacks is skipped, not an error; xattrs are not needed and
           # an unprivileged extract cannot set them.
           extract="$RUNNER_TEMP/photo-wall-base-extract"
@@ -382,7 +383,8 @@ jobs:
             etc/systemd usr/lib/systemd/system.conf.d lib/systemd/system.conf.d \
             usr/lib/systemd/system usr/lib/photo-wall-bootstrapper \
             etc/apt etc/passwd etc/ssh home root/.ssh var/lib/dpkg/status \
-            etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf >/dev/null
+            etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf \
+            usr/bin/ddcutil usr/bin/cec-ctl etc/modules-load.d etc/group >/dev/null
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
           # photo-wall-node (dpkg installs it only with every Depends: the
@@ -394,7 +396,9 @@ jobs:
           # key, by key only, with the server and its per-boot host-key
           # generator enabled; the binfmt units are masked, no build hostname is
           # baked in, the hosts database has myhostname, the default locale
-          # sets LANG, and no V1 unit or bootstrapper directory is left.
+          # sets LANG, no V1 unit or bootstrapper directory is left, and
+          # ddcutil, cec-ctl, the DDC/CI modules-load file and the i2c group
+          # are there.
           { echo photo-wall-node
             sed -n '/^  packages:$/,/^  [^ ]/s/^    - //p' appliance/rpi_image_gen/layer/*.yaml
           } > "$RUNNER_TEMP/base-packages.list"

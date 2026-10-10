@@ -24,6 +24,7 @@ from appliance.kernel.boot_store import BootStore
 from central.fleet.node_sessions import NodeControlError
 from contracts.node_commands import encode_session_grant, parse_session_claim
 from contracts.node_lifecycle import parse_app_effect_event
+from scripts.node_control_demo import MemoryRelaunchPacing
 
 
 class Central:
@@ -77,6 +78,7 @@ def test_late_first_post_and_outage_after_accept_converge_and_report(registry, t
     prepared = tmp_path / "prepared.json"
     runner = OnlineRunner(store, driver, session, SimpleNamespace(arm=lambda o: o.receipt, advance=lambda *a: None),
                           worker=SimpleNamespace(advance=lambda command: None, ready=lambda command: True),
+                          pacing=MemoryRelaunchPacing(), now_ms=lambda: node_ms["v"],
                           prepared=prepared)
 
     runner.tick()  # Central reachable: the stage is accepted while preparation is still running.

@@ -9,9 +9,21 @@ facts carry no time the judge compares. Rules for `app_unresponsive` (the one M1
 - a `probe_answered` while raised starts the clear hold; any unanswered fact restarts it;
   the condition **clears** once the hold has elapsed with no unanswered fact;
 - `app_killed` (reason `unresponsive`) raises the run's condition at once and pins it: answers
-  for the killed run never start the hold (M1 has no restart; a new run's answers do);
+  for the killed run never start the hold (a new run's answers do);
 - a feed gap (`forget`) withdraws a pending condition and restarts a running clear hold, but
   keeps a raised one: the wall is not untinted on evidence the judge did not see.
+
+`app_absent` (display-affecting) follows the broker's run facts (`appliance.kernel.app_facts`):
+`app_exited` opens it pending for that run (a new pending window if it was open for another
+run), raised after the catalogue's raise window; `app_started` for any other run withdraws a
+pending one (a paced relaunch inside the window is never shown) or clears a raised one at once.
+Whether the new run answers is `app_unresponsive`'s question (E-1B-16).
+
+`app_resource_exhausted` (degraded) follows `app_descriptors` for the run that holds it, or for
+any run while none is open: a run holding at least RESOURCE_PRESSURE_PERCENT of its soft
+open-file limit raises it at once and stops a running clear hold; a sample below that starts the
+hold, and it clears (`descriptor_relief`) once the catalogue's clear hold has passed with no
+sample under pressure, or when that run exits.
 
 `software_renderer` (degraded, never display-affecting) follows the run's `app_renderer` fact:
 a software rasterizer (llvmpipe, softpipe, swrast) raises it at once for that run; a GPU
@@ -47,10 +59,18 @@ from appliance.display_host.overlay.instruction import (
     PresentedReport,
 )
 from appliance.feed import FeedEvent
+from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_STARTED
 from contracts.node_faults import Fault
 
 APP_UNRESPONSIVE = "app_unresponsive"
 SOFTWARE_RENDERER = "software_renderer"
+APP_ABSENT = "app_absent"  # 1b P1b: no app process (the broker's app_exited .. app_started)
+APP_RESOURCE_EXHAUSTED = "app_resource_exhausted"  # 1b P1b: the run near its open-file limit
+# A run holding at least this share of its soft open-file limit raises app_resource_exhausted
+# (1b P1b). At the leak root-caused in 1b (about 240 an hour against 1,024), 80 % left ~50 minutes.
+RESOURCE_PRESSURE_PERCENT = 80
+# A raised condition whose clear hold elapsed clears for this reason (default `hold_elapsed`).
+_RELIEF = {APP_RESOURCE_EXHAUSTED: "descriptor_relief"}
 # Mesa's CPU rasterizers, as GL_RENDERER names them (zink over lavapipe reports "llvmpipe" too).
 _SOFTWARE_RENDERERS = ("llvmpipe", "softpipe", "software rasterizer", "swrast")
 RING_CAPACITY = 256
@@ -105,7 +125,8 @@ class Transition:
     run: dict
     state: Literal["pending", "raised", "cleared", "withdrawn"]
     reason: str  # unanswered | window_elapsed | app_killed | run_changed | answered | hold_elapsed | feed_gap
-    # | software_renderer | gpu_renderer
+    # | software_renderer | gpu_renderer | app_exited | started | descriptor_pressure
+    # | descriptor_relief
     at_ms: int
 
 
@@ -132,6 +153,17 @@ def software_renderer(renderer: str) -> bool:
     """True iff `renderer` (a GL_RENDERER string) names a CPU rasterizer, not a GPU."""
     lowered = renderer.lower()
     return any(name in lowered for name in _SOFTWARE_RENDERERS)
+
+
+def descriptor_pressure(open_descriptors: int, soft_limit: int) -> bool:
+    """PURE (1b P1b). True iff `open_descriptors` is at least RESOURCE_PRESSURE_PERCENT of
+    `soft_limit`, in integer arithmetic (`open * 100 >= percent * limit`). Both are the broker's
+    `app_descriptors` fact; a non-int, a negative count or a limit below 1 is ValueError
+    ("descriptor_fact") and the judge ignores that fact, as it ignores any malformed one."""
+    if (type(open_descriptors) is not int or type(soft_limit) is not int
+            or open_descriptors < 0 or soft_limit < 1):
+        raise ValueError("descriptor_fact")
+    return open_descriptors * 100 >= RESOURCE_PRESSURE_PERCENT * soft_limit
 
 
 def _positive(*values: object) -> bool:
@@ -209,6 +241,12 @@ class HealthJudge:
                 self.player = (run, value["player_id"])
             elif event.kind == "app_renderer" and isinstance(value.get("renderer"), str):
                 self._renderer(run, value["renderer"], now)
+            elif event.kind == APP_EXITED:
+                self._exited(run, now)
+            elif event.kind == APP_STARTED:
+                self._started(run, now)
+            elif event.kind == APP_DESCRIPTORS:
+                self._descriptors(run, value.get("open"), value.get("soft_limit"), now)
         self._advance(now)
 
     def observe_outputs(self, snapshot: object, now_ms: int) -> None:
@@ -375,6 +413,45 @@ class HealthJudge:
             condition.run = run
             self._record(SOFTWARE_RENDERER, run, "raised", "run_changed", now)
 
+    def _exited(self, run: dict, now: int) -> None:
+        condition = self._open.get(APP_ABSENT)
+        if condition is None:
+            self._begin(APP_ABSENT, _Open(run, now), "pending", "app_exited", now)
+        elif condition.run != run:
+            if condition.raised:  # still absent, now as a later run
+                condition.run, condition.clearing_ms = run, None
+                self._record(APP_ABSENT, run, "raised", "run_changed", now)
+            else:  # an older run's window does not carry over
+                self._close(APP_ABSENT, condition, "withdrawn", "run_changed", now)
+                self._begin(APP_ABSENT, _Open(run, now), "pending", "app_exited", now)
+        exhausted = self._open.get(APP_RESOURCE_EXHAUSTED)
+        if exhausted is not None and exhausted.run == run:
+            self._close(APP_RESOURCE_EXHAUSTED, exhausted, "cleared", "run_changed", now)
+
+    def _started(self, run: dict, now: int) -> None:
+        condition = self._open.get(APP_ABSENT)
+        if condition is None or condition.run == run:
+            return
+        self._close(APP_ABSENT, condition, "cleared" if condition.raised else "withdrawn",
+                    "started", now)
+
+    def _descriptors(self, run: dict, open_descriptors: object, soft_limit: object,
+                     now: int) -> None:
+        try:
+            pressure = descriptor_pressure(open_descriptors, soft_limit)
+        except ValueError:
+            return
+        condition = self._open.get(APP_RESOURCE_EXHAUSTED)
+        if condition is None:
+            if pressure:
+                self._begin(APP_RESOURCE_EXHAUSTED, _Open(run, now, raised=True), "raised",
+                            "descriptor_pressure", now)
+        elif condition.run == run:
+            if pressure:
+                condition.clearing_ms = None
+            elif condition.clearing_ms is None:
+                condition.clearing_ms = now
+
     def _advance(self, now: int) -> None:
         for code, condition in list(self._open.items()):
             fault = self._fault(code)
@@ -383,7 +460,7 @@ class HealthJudge:
                 self._record(code, condition.run, "raised", "window_elapsed", now)
             elif (condition.raised and condition.clearing_ms is not None
                   and now - condition.clearing_ms >= fault.clear_hold_ms):
-                self._close(code, condition, "cleared", "hold_elapsed", now)
+                self._close(code, condition, "cleared", _RELIEF.get(code, "hold_elapsed"), now)
 
     def _begin(self, code: str, condition: _Open, state: str, reason: str, now: int) -> None:
         self._fault(code)
@@ -404,6 +481,7 @@ class HealthJudge:
         self._ring.append(entry)
 
 
-__all__ = ["APP_UNRESPONSIVE", "MAX_OUTPUTS", "RING_CAPACITY", "SOFTWARE_RENDERER", "Condition",
+__all__ = ["APP_ABSENT", "APP_RESOURCE_EXHAUSTED", "APP_UNRESPONSIVE", "MAX_OUTPUTS",
+           "RESOURCE_PRESSURE_PERCENT", "RING_CAPACITY", "SOFTWARE_RENDERER", "Condition",
            "DisplayOutput", "HealthJudge", "OutputVerdict", "Presented", "Transition", "Verdict",
-           "display_outputs", "software_renderer"]
+           "descriptor_pressure", "display_outputs", "software_renderer"]

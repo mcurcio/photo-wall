@@ -16,6 +16,7 @@ import pytest
 
 from scripts.verify_netboot_initrd import (
     CA_BUNDLE_PATH,
+    DDC_MODULES,
     DEFAULT_BOOT_SCRIPT,
     FLOOR_PATH,
     PLAYER_MODULES,
@@ -89,6 +90,8 @@ CACHED = [
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz",
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/media/platform/raspberrypi/hevc_dec/"
     "rpi-hevc-dec.ko.xz",
+    # The DDC/CI driver ddcutil talks through (spike 2026-10-10).
+    "usr/lib/modules/6.12.0-rpi/kernel/drivers/i2c/i2c-dev.ko.xz",
     "usr/lib/modules/6.12.0-rpi/modules.dep",
     "usr/lib/modules/6.12.0-rpi/modules.order",
 ]
@@ -134,6 +137,7 @@ REQUIRED_CACHED = [
     # v0.9.1's initrd carried neither, so /dev/dri never appeared in stage 2.
     ("vc4 module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/vc4/vc4.ko.xz"),
     ("v3d module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz"),
+    ("i2c-dev module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/i2c/i2c-dev.ko.xz"),
     ("depmod index", "usr/lib/modules/6.12.0-rpi/modules.dep"),
     ("CA bundle", CA_BUNDLE_PATH),
 ]
@@ -144,6 +148,15 @@ def test_v0_9_1s_initrd_without_the_display_drivers_is_refused():
     assert check(cached=mutated) == [
         "missing required Player module vc4 (pattern '*lib/modules/*/kernel/*/vc4.ko*')",
         "missing required Player module v3d (pattern '*lib/modules/*/kernel/*/v3d.ko*')"]
+
+
+def test_an_initrd_without_the_ddc_driver_is_refused():
+    """Without i2c-dev there is no /dev/i2c-N, so DDC/CI cannot turn a display off. The whole
+    tree carries it, and it is still required by name, so a kernel that drops it fails here."""
+    assert DDC_MODULES == ("i2c-dev",)
+    mutated = [m for m in CACHED if not m.endswith("/i2c-dev.ko.xz")]
+    assert check(cached=mutated) == [
+        "missing required DDC/CI module i2c-dev (pattern '*lib/modules/*/kernel/*/i2c-dev.ko*')"]
 
 
 def test_v0_24_0s_initrd_without_the_hevc_decoder_is_refused():
@@ -182,7 +195,7 @@ def test_a_tree_filtered_below_modules_order_is_refused():
     """v0.24.0's shape: MODULES=most plus a hand list, the decoder in modules.order only."""
     filtered = tree(cached=[m for m in CACHED if "/media/" not in m and "/v3d/" not in m])
     assert check_module_tree(filtered) == [
-        "the initrd lacks 2 of the 5 modules 6.12.0-rpi's modules.order names (a filtered tree "
+        "the initrd lacks 2 of the 6 modules 6.12.0-rpi's modules.order names (a filtered tree "
         "leaves devices without a driver): kernel/drivers/gpu/drm/v3d/v3d.ko, "
         "kernel/drivers/media/platform/raspberrypi/hevc_dec/rpi-hevc-dec.ko"]
 
@@ -310,7 +323,7 @@ def test_main_fails_an_initrd_missing_a_stage_1_module(tmp_path, capsys):
 def test_main_fails_an_initrd_whose_module_tree_is_filtered(tmp_path, capsys):
     initrd = real_initrd(tmp_path, cached=[m for m in CACHED if "/overlayfs/" not in m])
     assert run_main(tmp_path, initrd) == 1
-    assert ("the initrd lacks 1 of the 5 modules 6.12.0-rpi's modules.order names"
+    assert ("the initrd lacks 1 of the 6 modules 6.12.0-rpi's modules.order names"
             in capsys.readouterr().out)
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 
+from central.displays.model import Readiness
+from central.infra.display_store import POSITION_COLUMNS, SEEN_DISPLAY_JOIN, frame_readiness
 from contracts.models import Calibration, FrameProfile, OutputBinding
 from contracts.time import Clock
 
@@ -78,7 +80,8 @@ class PostgresInstallationRepository:
             (self.clock.utc(),),
         )
         rows = conn.execute(
-            "SELECT f.*,b.output_id FROM bindings b JOIN frames f ON f.id=b.frame_id "
+            f"SELECT f.*,b.output_id,{POSITION_COLUMNS} FROM bindings b "  # noqa: S608
+            f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} "
             "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
             (player_id,),
         ).fetchall()
@@ -100,6 +103,6 @@ class PostgresInstallationRepository:
             "execution_bindings": [
                 binding
                 for binding, row in zip(bindings, rows, strict=True)
-                if row["calibration_valid"]
+                if frame_readiness(row) is Readiness.READY
             ],
         }

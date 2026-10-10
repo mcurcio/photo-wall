@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from central.app import create_app
+from central.displays.model import Readiness
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -104,9 +105,9 @@ def _replacement_portrait_profile():
 def test_put_profile_preserves_frame_identity_geometry_and_invalidates_calibration(registry):
     _portrait(registry)
     # Seed the persisted state to prove the operation clears both calibration
-    # validity and an active preview, and fences in-flight calibration requests.
+    # validity (its Position, now at a stale generation) and an active preview, and fences in-flight calibration requests.
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE frames SET calibration_valid=true,preview=calibration,"
+        conn.execute("UPDATE frames SET position_generation=generation,preview=calibration,"
                      "preview_expires=2000 WHERE id='portrait'")
     before = registry.inventory().frames[0]
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
@@ -119,7 +120,7 @@ def test_put_profile_preserves_frame_identity_geometry_and_invalidates_calibrati
     assert (after.id, after.surface_id, after.x_mm, after.y_mm, after.width_mm, after.height_mm) == (
         before.id, before.surface_id, before.x_mm, before.y_mm, before.width_mm, before.height_mm)
     assert after.profile.model_dump() == _replacement_portrait_profile()
-    assert after.calibration_valid is False
+    assert after.readiness is Readiness.UNBOUND and after.generation == 1   # its Position (at 0) is stale
     assert after.preview is None and after.preview_expires is None
     assert after.calibration.revision == before.calibration.revision + 1
     assert after.configuration_revision == before.configuration_revision + 1

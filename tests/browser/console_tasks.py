@@ -56,7 +56,8 @@ LABELS = {
 }
 
 # The Frame page's tab keys (routes.js TABS) and their labels.
-TABS = {"overview": "Overview", "position": "Position", "picture": "Picture", "hardware": "Hardware"}
+TABS = {"overview": "Overview", "position": "Position", "picture": "Picture", "power": "Power",
+        "hardware": "Hardware"}
 
 
 def go(page, section):
@@ -470,7 +471,7 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
 
 
 def open_frame(page, frame_id, tab):
-    """Open frame `frame_id`'s page at `tab` ("overview", "position", "picture" or
+    """Open frame `frame_id`'s page at `tab` ("overview", "position", "picture", "power" or
     "hardware", the Frame page's keys); returns the page on screen.
 
     Follows the frame's route, `#/wall/frames/<id>/<tab>`, as a typed URL would, and waits for

@@ -7,6 +7,7 @@ from typing import Literal, Self
 
 from pydantic import Field, JsonValue, model_validator
 
+from central.displays.model import Readiness
 from contracts.enrollment import OutputReport
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
 from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model
@@ -46,7 +47,7 @@ class FrameInventory(Model):
     profile: FrameProfile
     generation: int = Field(ge=0)
     calibration: Calibration
-    calibration_valid: bool
+    readiness: Readiness                      # worked out (central/displays/model.py), never stored
     preview: Calibration | None = None
     preview_expires: Instant | None = None
     configuration_revision: int = Field(ge=1)

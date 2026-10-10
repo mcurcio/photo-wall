@@ -119,4 +119,10 @@ printf '%s\n' '127.0.0.1 localhost' '::1 localhost' > "${DESTDIR}/etc/hosts"
 # not installed here or in the base, so those two drivers bind nothing).
 # scripts/verify_netboot_initrd.py requires every module the kernel's
 # modules.order names, and the Player's drivers by name (PLAYER_MODULES).
+#
+# i2c-dev is display power's DDC/CI driver: it gives each HDMI port's DDC bus
+# (vc4's i2c-13 and i2c-14) a /dev/i2c-N node for ddcutil (spike, 2026-10-10).
+# The whole tree carries it, but nothing matches it by alias, so the base loads
+# it at boot from etc/modules-load.d (rpi_image_gen/layer/photo-wall-os.yaml).
+# scripts/verify_netboot_initrd.py requires it by name as DDC_MODULES.
 copy_modules_dir kernel

@@ -16,6 +16,7 @@ from test_node_runtime_reconciliation import rig
 from test_registry import enroll
 
 from central.coordination import CoordinationError
+from central.displays.model import Readiness
 from central.fleet.node_acceptance import current_cohort_in
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService, parse_node_deployment
@@ -381,7 +382,7 @@ def test_a_finished_stage_reads_ended_by_a_later_boot_and_unchanged_without_one(
 def _bound_state(registry):
     with registry.db.transaction() as conn:
         bindings = conn.execute('SELECT frame_id,player_id,output_id FROM bindings ORDER BY frame_id').fetchall()
-        frames = conn.execute('SELECT id,generation,configuration_revision,calibration,calibration_valid '
+        frames = conn.execute('SELECT id,generation,configuration_revision,calibration,position_generation,position_display_id '
                               'FROM frames ORDER BY id').fetchall()
         losses = conn.execute('SELECT frame_id,authority_epoch FROM node_output_losses '
                               'WHERE resolved_at IS NULL ORDER BY frame_id').fetchall()
@@ -401,7 +402,8 @@ def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
     coordinator = fixture.coordinator
     player_id = fixture.proof.challenge.player_id
     bindings, frames, losses = _bound_state(registry)
-    assert len(bindings) == 2 and all(row['calibration_valid'] for row in frames) and losses == []
+    assert len(bindings) == 2 and losses == []
+    assert {frame.readiness for frame in registry.inventory().frames} == {Readiness.READY}
     both = {('node-f0', 'HDMI-A-1'), ('node-f1', 'HDMI-A-2')}
     assert _committed(coordinator, player_id, 1) == both
     runtime = coordinator.runtime.read().export_state()
