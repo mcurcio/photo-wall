@@ -55,14 +55,15 @@ class NodeUpload:
 
 
 def node_upload(tag: str, *, revision: str = "a" * 40, salt: str = "", app: bool = True,
-                size: int = 0) -> NodeUpload:
-    """A valid node release for `tag`; `salt` re-cuts every artifact (new digests)."""
+                size: int = 0, manager_package: str = "photo-wall-app-manager") -> NodeUpload:
+    """A valid node release for `tag`; `salt` re-cuts every artifact (new digests);
+    `manager_package` is the manager root's deb_name."""
     roles = _ROLES if app else _ROLES[:-2]
     bodies = {role: f"{tag}{salt}:{role}".encode() + b"x" * size for role in roles}
     artifacts = tuple(NodeReleaseAssetV2(role, f"{role}.bin", sha256(data).hexdigest(), len(data))
                       for role, data in bodies.items())
     refs = {asset.role: asset for asset in artifacts}
-    manager = replace(environment("2", "photo-wall-app-manager"),
+    manager = replace(environment("2", manager_package),
                       environment_sha256=refs["manager-primary"].sha256,
                       size_bytes=refs["manager-primary"].size_bytes,
                       deb_sha256=refs["manager-primary-deb"].sha256)

@@ -104,8 +104,8 @@ def test_manager_pins_and_environment_identity_are_immutable(registry):
     with pytest.raises(NodeReleaseRefused, match="manager_pins_immutable"):
         publish_deployment(registry.db, replace(deployment, deployment_id=uuid4(),
                            manager_primary=changed, environment_sources=sources), registry.clock)
-    with pytest.raises(ValueError, match="role_invalid"):
-        replace(deployment, manager_primary=environment()).offer(offer_id=uuid4(), audience="a",
+    with pytest.raises(ValueError, match="role_invalid"):  # a fallback must be another root
+        replace(deployment, manager_fallback=deployment.manager_primary).offer(offer_id=uuid4(), audience="a",
             request=NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64), device_id=DEVICE_ID,
             generation=1, revision=1, now=1)
 

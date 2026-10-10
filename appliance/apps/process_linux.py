@@ -20,6 +20,7 @@ from appliance.kernel.display_paths import DISPLAY_UNIT, WAYLAND_DIRECTORY, WAYL
 from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
+from contracts.node_boot import APP_PACKAGE
 from contracts.node_protocol import NodeProcessIdentity
 
 UNIT = "photo-wall-node-player.service"
@@ -119,7 +120,7 @@ class SystemdAppProcessDriver:
         self.abi = dict(base_abi=base_abi, graphics_abi=graphics_abi, plugin_abi=plugin_abi)
 
     def verify(self, environment: AppEnvironmentRefV2) -> bool:
-        if environment.deb_name != "photo-wall-player":
+        if environment.deb_name != APP_PACKAGE:
             raise ValueError("app_package_kind_mismatch")
         # C3 as amended (errata E-E2C-DR-2): the root is staged for this Node's measured ABI; the
         # image digest proved its tree at staging, so no walk here.

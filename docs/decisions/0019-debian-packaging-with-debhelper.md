@@ -172,6 +172,7 @@ The design above is kept as approved. Building it found these differences, each 
 - Build-time Python that stays is larger than listed: `scripts/import_check.py`, `scripts/seal_root.py` and `scripts/node_release_writer.py` (the check, the seal and the release contract), plus `scripts/module_closure.py`'s finder, which stage 1's device harness also uses (FIX-7).
 - `photo-wall-common` installs `contracts` and `nodeapi` less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`, `contracts/os_attempt_report.py`), and the import check refuses a common module no Node program reaches, so a Central-only edit keeps every Node package's version, as Q1 asks (FIX-5).
 - The release roles keep their contract names for the root packages' `.deb`s (RECUT-2): `node-base-deb` carries `photo-wall-node`, `node-display-deb` `photo-wall-node-display`, `app-deb` `photo-wall-player` and `manager-primary-deb` `photo-wall-app-manager` (FIX-11).
+- A root's package is judged where the root is built (the seal, the release writer) and launched (the manager launcher, the app driver), not by the release, deployment and boot offer contracts: Central re-parses the rows an earlier build stored, whose manager root was `photo-wall-node-manager` (FIX-1, FIX-16).
 
 **Packages and the import check**
 
@@ -200,7 +201,6 @@ The design above is kept as approved. Building it found these differences, each 
 
 **Open for the owner**
 
-- **Stored node releases from before this PR.** The release, deployment and boot offer contracts refuse a manager reference not named `photo-wall-app-manager`, and Central re-parses its stored rows, so after this Central is deployed every release, deployment and offer an earlier build stored is refused: boot offers fail and the release page and the release sync's tail raise. The choice is the owner's: a forward migration that retires the earlier rows (the new release re-ingests), or the package names judged only where a root is built and run, not on Central's stored documents (FIX-1).
 - **Changes from the approved design.** `base_abi` no longer hashes the base's units and launchers (P2B-5), and a launcher can import every module of the directories it reaches, with the forbidden lists a CI test (P2B-4).
 - **Which needs are Depends.** `photo-wall-node` Depends on `systemd` and `udev` (this record's shape), while its unit's `libpam-systemd` and the display's `libgl1-mesa-dri` are layer packages under the brief's rule that OS dependencies never enter a Photo Wall package (FIX-6).
 - **The Player's watchdog.** The node Player still sends `READY=1` and watchdog pets, but its transient unit sets no `WatchdogSec`, so a hung Player is not restarted (FIX-2).
