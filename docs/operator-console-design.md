@@ -1,6 +1,6 @@
 # Operator console design (2026-10-09)
 
-**Status:** Journey adopted as the roadmap by the owner, 2026-10-09; decisions 1–8 proposed, pending this PR. Nothing here is built. The [roadmap](roadmap.md) owns the delivery order, each journey step's status today, and the deferred list; [decision 0019](decisions/0019-first-principles-console.md) records the decisions and what they replace. The earlier [console UX design](operator-console-ux-design.md) is the historical gate record this document supersedes. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) stand: every page here is built from that catalog.
+**Status:** Journey adopted as the roadmap by the owner, 2026-10-09; decisions 1–8 proposed, pending this PR. Nothing here is built. The [roadmap](roadmap.md) owns the delivery order, each journey step's status today, and the deferred list; [decision 0019](decisions/0019-first-principles-console.md) records the decisions and what they replace. The earlier [console UX design](operator-console-ux-design.md) is the historical gate record this document supersedes. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) stand: every page here is built from that catalog, following the [design language](design-language.md) (principles, page templates, patterns, save models, status words and voice).
 
 **Review page:** [Console Setup Review](https://claude.ai/artifact/EwjdvEcM82HyLDb4BrDSdC).
 
@@ -197,35 +197,7 @@ Continuous viewer tracking stays out of scope ([operations](requirements.md#oper
 
 ## 10. How it behaves
 
-**Saving.**
-
-| Kind | Applies to | Model |
-|---|---|---|
-| Position and picture | Frame page › Position, Picture | Live on the real display, then **Done** or **Revert**. Done unlocks once the Pi confirms the display shows the latest change ([U9](requirements.md#failure-visibility-and-recovery)). |
-| Toggles and values | Power options, names, Settings pages, Groups, the Never show list | Saved as you change them, with a 10-second Undo |
-| Show content | Scenes and Photo sources | **Save** applies from the next start ([requirements](requirements.md#live-media-compatibility-and-preparation): edits default to the next Run), plus **Save and apply now** |
-| Schedules | Schedules, the Power lane | Apply to future blocks; if the current block changes, choose **Change now** or **From the next block** |
-
-Position, picture and power are equipment settings, so applying them live does not conflict with the next-Run rule, which covers authored content only.
-
-**Six status words, used everywhere** (per Frame, rolled up to the house as the worst Frame state; Resting never counts as a problem). The words are the domain's verdict; the pattern layer draws them on 0018's severity scale, which stays as it is:
-
-| Word | Meaning | Severity (0018 scale) |
-|---|---|---|
-| **Showing** | The Pi reports it is presenting what was planned. (It cannot see a display someone switched off with the remote.) | `ok` |
-| **Resting** | Dark on purpose: Night off, paused, all off. Nothing wrong. | `ok` |
-| **Getting ready** | Starting, updating or downloading. It will show photos by itself. | `notice` |
-| **Needs a look** | Playing, but degraded: old photos, Immich unreachable, storage low. Can wait. | `notice` |
-| **Not showing** | Should be showing and isn't. One fix offered. | `alarm` |
-| **Can't tell** | No report since [time]. No guessing ([U6](requirements.md#failure-visibility-and-recovery)). | `unknown` |
-
-The scale's fifth level, `todo`, stays for unfinished setup (no Pi yet, Position not checked), which is not a status word: 0018's split of a Frame's live health from its setup state stays as two facts, both now on the one Frame page. Colour means status and nothing else; the accent colour is for actions only.
-
-**How errors read:** what is wrong in plain words, since when, what Photo Wall is doing about it, and one button. **Details** shows the layer, where the evidence came from and its time.
-
-> "Living room left: Not showing since 21:04. The Pi is fine but the display stopped answering on HDMI. Photo Wall retried 3 times. [Check the display is on this input] Details ›"
-
-No internal words (Node API link, claimed/reported, effect gate, lease); the evidence labels move one click down, under Details. Never claim what the display is lighting up, and never offer a fix the system cannot perform.
+How the console saves, speaks status and words its errors is the [design language](design-language.md), the one home for UI rules: the four save models and which page uses which ([§5](design-language.md#save-models)), the six status words and their place on 0018's severity scale ([§6](design-language.md#6-status-and-severity)), and the error template with its plain-words rules ([§7](design-language.md#the-error-template)). Each journey step's page template, patterns and save model are in its [concept → UX table](design-language.md#8-concept--ux-translation).
 
 ## 11. Settings catalogue
 
