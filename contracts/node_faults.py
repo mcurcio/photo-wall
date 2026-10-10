@@ -55,6 +55,16 @@ FAULTS: Mapping[str, Fault] = _catalogue(
     # window: raised when the run reports a software renderer, cleared when one reports the GPU.
     Fault("software_renderer", False, "Photos are drawn without the graphics processor",
           raise_window_ms=0, clear_hold_ms=0),
+    # 1b P1b: no app process. Opened when the broker reports the run exited, withdrawn or cleared
+    # when it reports a new run started (a paced relaunch inside the window is never shown);
+    # whether that run answers is app_unresponsive's question, not this one's.
+    Fault("app_absent", True, "Photos paused — the player stopped",
+          raise_window_ms=5000, clear_hold_ms=0),
+    # 1b P1b: degraded, content still shows. Raised at once when the run holds at least 80 % of
+    # its open-file limit (appliance.health.judge.RESOURCE_PRESSURE_PERCENT); clears after a
+    # minute below it, or when that run exits.
+    Fault("app_resource_exhausted", False, "The player is running out of open files",
+          raise_window_ms=0, clear_hold_ms=60000),
 )
 
 

@@ -15,6 +15,8 @@ from appliance.display_host.overlay.instruction import (
 from appliance.feed import FeedEvent
 from appliance.health import runner
 from appliance.health.judge import (
+    APP_ABSENT,
+    APP_RESOURCE_EXHAUSTED,
     APP_UNRESPONSIVE,
     MAX_OUTPUTS,
     RING_CAPACITY,
@@ -58,12 +60,15 @@ def states(judge, now):
 # -- catalogue -----------------------------------------------------------------------------
 
 
-def test_the_catalogue_has_the_m1_row_and_the_degraded_renderer_row():
+def test_the_catalogue_has_the_m1_row_the_degraded_rows_and_the_absent_app_row():
     assert dict(FAULTS) == {
         APP_UNRESPONSIVE: Fault(
             APP_UNRESPONSIVE, True, "Photos paused — the player stopped responding", 5000, 10000),
         SOFTWARE_RENDERER: Fault(
-            SOFTWARE_RENDERER, False, "Photos are drawn without the graphics processor", 0, 0)}
+            SOFTWARE_RENDERER, False, "Photos are drawn without the graphics processor", 0, 0),
+        APP_ABSENT: Fault(APP_ABSENT, True, "Photos paused — the player stopped", 5000, 0),
+        APP_RESOURCE_EXHAUSTED: Fault(
+            APP_RESOURCE_EXHAUSTED, False, "The player is running out of open files", 0, 60000)}
     with pytest.raises(TypeError):
         FAULTS["other"] = FAULTS[APP_UNRESPONSIVE]
 

@@ -51,6 +51,11 @@ from contracts.node_faults import Fault
 
 APP_UNRESPONSIVE = "app_unresponsive"
 SOFTWARE_RENDERER = "software_renderer"
+APP_ABSENT = "app_absent"  # 1b P1b: no app process (the broker's app_exited .. app_started)
+APP_RESOURCE_EXHAUSTED = "app_resource_exhausted"  # 1b P1b: the run near its open-file limit
+# A run holding at least this share of its soft open-file limit raises app_resource_exhausted
+# (1b P1b). At the leak root-caused in 1b (about 240 an hour against 1,024), 80 % left ~50 minutes.
+RESOURCE_PRESSURE_PERCENT = 80
 # Mesa's CPU rasterizers, as GL_RENDERER names them (zink over lavapipe reports "llvmpipe" too).
 _SOFTWARE_RENDERERS = ("llvmpipe", "softpipe", "software rasterizer", "swrast")
 RING_CAPACITY = 256
@@ -132,6 +137,14 @@ def software_renderer(renderer: str) -> bool:
     """True iff `renderer` (a GL_RENDERER string) names a CPU rasterizer, not a GPU."""
     lowered = renderer.lower()
     return any(name in lowered for name in _SOFTWARE_RENDERERS)
+
+
+def descriptor_pressure(open_descriptors: int, soft_limit: int) -> bool:
+    """PURE (1b P1b). True iff `open_descriptors` is at least RESOURCE_PRESSURE_PERCENT of
+    `soft_limit`, in integer arithmetic (`open * 100 >= percent * limit`). Both are the broker's
+    `app_descriptors` fact; a non-int, a negative count or a limit below 1 is ValueError
+    ("descriptor_fact") and the judge ignores that fact, as it ignores any malformed one."""
+    raise NotImplementedError
 
 
 def _positive(*values: object) -> bool:
@@ -404,6 +417,7 @@ class HealthJudge:
         self._ring.append(entry)
 
 
-__all__ = ["APP_UNRESPONSIVE", "MAX_OUTPUTS", "RING_CAPACITY", "SOFTWARE_RENDERER", "Condition",
+__all__ = ["APP_ABSENT", "APP_RESOURCE_EXHAUSTED", "APP_UNRESPONSIVE", "MAX_OUTPUTS",
+           "RESOURCE_PRESSURE_PERCENT", "RING_CAPACITY", "SOFTWARE_RENDERER", "Condition",
            "DisplayOutput", "HealthJudge", "OutputVerdict", "Presented", "Transition", "Verdict",
-           "display_outputs", "software_renderer"]
+           "descriptor_pressure", "display_outputs", "software_renderer"]

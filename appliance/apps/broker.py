@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from threading import RLock
-from typing import Protocol
+from typing import Final, Protocol
 from uuid import UUID
 
 from contracts.app_environment import AppEnvironmentRefV2
@@ -111,6 +111,95 @@ def relaunch_for_display(driver: AppProcessDriver, environment: AppEnvironmentRe
     if running.environment != environment or running.operation_id != operation_id:
         raise ValueError("started_environment_mismatch")
     return running
+
+
+# -- 1b P1b: the paced relaunch (frozen; bodies in P1b) ----------------------------------------
+# The Player's death becomes a timely restart with one owner, the broker, paced like Kubernetes'
+# CrashLoopBackOff: consecutive short runs wait 1 s, 5 s, 30 s, then 5 minutes each; a run that
+# lasted STABLE_RUN_MS starts the count again. systemd's Restart= is not used: it would start
+# runs the broker never journaled (a second supervisor, and a launch record whose process no
+# longer matches: `app_process_incarnation_mismatch`).
+RELAUNCH_BACKOFF_MS: Final[tuple[int, ...]] = (1_000, 5_000, 30_000, 300_000)
+STABLE_RUN_MS: Final = 600_000
+
+
+@dataclass(frozen=True)
+class Launch:
+    """The driver's record of the current launch (its boot-store `launch`): the app epoch it
+    started, the display incarnation current at the spawn, and the spawn's boottime in ms
+    (`appliance.kernel.clock.boottime_ms`, the clock every `now_ms` here is read on)."""
+
+    epoch: int
+    display: str | None
+    started_ms: int
+
+    def __post_init__(self) -> None:
+        """ValueError("launch_invalid") unless epoch >= 1, display is None or a non-empty str,
+        and started_ms is an int >= 0."""
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class RelaunchPacing:
+    """When the next relaunch may start. Durable for this boot (the boot store), one for the app
+    unit, shared by the cold-start and the online owner."""
+
+    epoch: int  # the launch whose exit this pacing judged (an exit is counted once)
+    exits: int  # consecutive short exits counted, >= 0
+    not_before_ms: int  # boottime ms before which no relaunch starts
+
+    def __post_init__(self) -> None:
+        """ValueError("relaunch_pacing_invalid") unless epoch >= 1, exits >= 0 and
+        not_before_ms >= 0, all ints."""
+        raise NotImplementedError
+
+
+class RelaunchPacingStore(Protocol):
+    def get(self) -> RelaunchPacing | None: ...
+
+    def put(self, pacing: RelaunchPacing) -> None:
+        """Persist before returning."""
+        ...
+
+
+def display_took_app(launch: Launch | None, display: str | None) -> bool:
+    """PURE. True iff a display is up (`display` not None) and it is not the incarnation
+    `launch` was spawned under (the app is bound to its Weston and stopped with it). False when
+    `launch` is None."""
+    raise NotImplementedError
+
+
+def pace_relaunch(prior: RelaunchPacing | None, launch: Launch, *, display_changed: bool,
+                  now_ms: int) -> RelaunchPacing:
+    """PURE. The one pacing rule, judging the exit of `launch` first seen at `now_ms`.
+
+    - `prior` judged this launch (`prior.epoch == launch.epoch`): `prior`, unchanged.
+    - `display_changed`: the display took the app, not its own failure: exits stay
+      `prior.exits` (0 without a prior), not_before_ms = now_ms.
+    - the run lasted at least STABLE_RUN_MS (`now_ms - launch.started_ms`): exits = 1.
+    - otherwise: exits = (prior.exits if prior else 0) + 1.
+    Then not_before_ms = now_ms + RELAUNCH_BACKOFF_MS[min(exits, len) - 1] (exits >= 1).
+    """
+    raise NotImplementedError
+
+
+def relaunch_absent(driver: AppProcessDriver, pacing: RelaunchPacingStore,
+                    environment: AppEnvironmentRefV2, operation_id: UUID, *,
+                    now_ms: Callable[[], int], intent: Callable[[], None] = lambda: None,
+                    ) -> RunningApp | None:
+    """The one relaunch rule (replaces `relaunch_for_display`), for whichever launch is current.
+
+    Its owner holds a settled record saying `environment` should be running and calls this every
+    turn the app is absent. In order: no display up (`driver.display_incarnation()` None) ->
+    None; no launch recorded (`driver.launched()` None) -> ValueError("relaunch_without_launch");
+    the exit is paced (`pace_relaunch` with display_changed = `display_took_app(...)`, stored
+    through `pacing` when it differs from `pacing.get()`); the old unit not yet collected, or
+    `now_ms()` before `not_before_ms` -> None (the owner's next turn asks again); else `intent`
+    runs, then `driver.start(environment, operation_id)`, whose identity must match
+    (ValueError("started_environment_mismatch")). A failed start raises; the owner records it,
+    and its next turn paces that launch's exit like any other.
+    """
+    raise NotImplementedError
 
 
 class AppEffectBroker:
