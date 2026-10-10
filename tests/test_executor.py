@@ -445,6 +445,70 @@ def test_overlay_and_video_expire_to_retained_still_in_warm_outage(tmp_path):
     assert rig.cache.stats()["pinned_bytes"] == len(b"picture")
 
 
+def _kept_then_black_ending(rig):
+    """A kept still, then a Scene's black ending (101-160), shown from 101."""
+    rig.play(layer(retain_on_expiry=True, end=101))
+    rig.executor.maintain_cache()
+    rig.advance(1)
+    ending = layer("ending", presentation="black", variant=None, start=101, end=160, media_origin=101)
+    rig.offer(ending, revision=2)
+    rig.executor.prepare_imminent()
+    rig.commit("ending")
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["ending"]
+
+
+def _shown(rig):
+    composition = rig.renderer.outputs["hdmi1"]
+    return composition.fallback, [local.layer.assignment_id for local in composition.layers]
+
+
+def test_an_ending_cut_short_by_losing_central_leaves_the_kept_photo_as_fallback(tmp_path):
+    """The kept photo is dropped only when the ending plays to its planned end under Central's
+    plan. Central lost partway (its time mapping goes stale after 30 s; the Player keeps the
+    picture it was showing until that layer's end) leaves the kept photo as the outage
+    fallback once the ending is over. Mutation probe: drop the kept photo when the ending is
+    first shown (the Frame goes black at 166)."""
+    rig = Rig(tmp_path)
+    _kept_then_black_ending(rig)
+    rig.advance(35, refresh=False)  # 136: Central lost mid-ending
+    rig.executor.tick()
+    assert _shown(rig) == (False, ["ending"])
+    rig.advance(30, refresh=False)  # 166: past the ending's planned end, still lost
+    rig.executor.tick()
+    assert _shown(rig) == (True, ["picture"])
+
+
+def test_an_ending_played_to_its_end_replaces_the_kept_photo(tmp_path):
+    rig = Rig(tmp_path)
+    _kept_then_black_ending(rig)
+    for _ in range(5):  # 101 to 151 with Central's time held
+        rig.advance(10)
+        rig.executor.tick()
+    assert _shown(rig) == (False, ["ending"])
+    rig.advance(10)  # 161: the ending reached its planned end under the plan
+    rig.executor.tick()
+    assert _shown(rig) == (True, [])
+
+
+def test_a_kept_still_under_a_see_through_overlay_after_it_holds_full_strength(tmp_path):
+    """Only an opaque layer after a kept still is something that follows it; a see-through
+    overlay leaves the still showing beneath, so the still must not fade to black and snap
+    back. Mutation probe: count any later layer as following (alpha 0.25 at 109.5)."""
+    rig = Rig(tmp_path)
+    still = layer(retain_on_expiry=True, end=110, fade_out=2)
+    overlay = layer("overlay", start=110, end=120, media_origin=110, data=b"overlay",
+                    opacity=.5, priority=10)
+    rig.offer(still, overlay)
+    rig.secure()
+    rig.secure("overlay", b"overlay")
+    rig.executor.prepare_imminent()
+    rig.commit("picture")
+    rig.advance(9.5)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].layers[0].alpha == 1
+
+
 def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     rig = Rig(tmp_path)
     rig.play(layer(video=True, end=105))
