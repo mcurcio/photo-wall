@@ -34,9 +34,15 @@ across machines.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
-from typing import Final, Literal
+import json
+import re
+from collections.abc import Callable
+from dataclasses import dataclass, fields, is_dataclass
+from enum import Enum, StrEnum
+from typing import Any, Final, Literal, TypeVar
+
+from contracts.node_protocol import token
+from contracts.strict_json import loads_object
 
 SCHEMA_MAJOR: Final = 1                         # the display line's schema major (birth, envelope)
 
@@ -103,7 +109,9 @@ class PowerRequest:
     def __post_init__(self) -> None:
         """ValueError("power_request") unless request_id is a node token, power and reason are
         members, and for_seconds is None or 1..MAX_REQUEST_SECONDS."""
-        raise NotImplementedError
+        _require(_is_token(self.request_id) and isinstance(self.power, Power)
+                 and isinstance(self.reason, RequestReason)
+                 and (self.for_seconds is None or _count(self.for_seconds, 1, MAX_REQUEST_SECONDS)), "power_request")
 
 
 @dataclass(frozen=True)
@@ -122,7 +130,15 @@ class OutputDocument:
         """ValueError("output_document") unless output_id is in OUTPUT_IDS, change >= 1, power has
         1..MAX_POWER_REQUESTS requests with unique request_ids and an untimed last one, and method
         is a PowerMethod or BEST_DETECTED."""
-        raise NotImplementedError
+        power = self.power
+        _require(self.output_id in OUTPUT_IDS and _count(self.change, 1)
+                 and isinstance(power, tuple) and 1 <= len(power) <= MAX_POWER_REQUESTS
+                 and all(isinstance(request, PowerRequest) for request in power)
+                 and len({request.request_id for request in power}) == len(power)
+                 and power[-1].for_seconds is None
+                 and (isinstance(self.method, PowerMethod) or _is_best_detected(self.method))
+                 and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool,
+                 "output_document")
 
 
 @dataclass(frozen=True)
@@ -139,7 +155,9 @@ class DisplayIdentity:
     def __post_init__(self) -> None:
         """ValueError("display_identity") unless maker matches [A-Z]{3}, 0 <= product <= 65535,
         name is printable and <= 13 characters, serial is None or 1..32 printable characters."""
-        raise NotImplementedError
+        _require(isinstance(self.maker, str) and _MAKER.fullmatch(self.maker) is not None
+                 and _count(self.product, 0, 65535) and _printable(self.name, 0, 13)
+                 and (self.serial is None or _printable(self.serial, 1, 32)), "display_identity")
 
 
 @dataclass(frozen=True)
@@ -153,7 +171,8 @@ class DisplayMode:
     def __post_init__(self) -> None:
         """ValueError("display_mode") unless 1 <= width, height <= 16384 and
         1000 <= refresh_millihertz <= 1_000_000."""
-        raise NotImplementedError
+        _require(_count(self.width, 1, 16384) and _count(self.height, 1, 16384)
+                 and _count(self.refresh_millihertz, 1000, 1_000_000) and type(self.preferred) is bool, "display_mode")
 
 
 @dataclass(frozen=True)
@@ -163,7 +182,10 @@ class InForce:
     remaining_seconds: int | None
 
     def __post_init__(self) -> None:
-        raise NotImplementedError
+        """ValueError("in_force") unless request_id is a node token and remaining_seconds is None or
+        0..MAX_REQUEST_SECONDS."""
+        _require(_is_token(self.request_id) and (
+            self.remaining_seconds is None or _count(self.remaining_seconds, 0, MAX_REQUEST_SECONDS)), "in_force")
 
 
 @dataclass(frozen=True)
@@ -189,7 +211,17 @@ class OutputReport:
         """ValueError("output_report") unless output_id is in OUTPUT_IDS, modes has at most
         MAX_DISPLAY_MODES entries, answers are unique and in METHOD_PRECEDENCE order, method is in
         answers when set, and for_change >= 1 when set."""
-        raise NotImplementedError
+        answers = self.answers
+        _require(self.output_id in OUTPUT_IDS and type(self.connected) is bool
+                 and (self.identity is None or isinstance(self.identity, DisplayIdentity))
+                 and isinstance(self.modes, tuple) and len(self.modes) <= MAX_DISPLAY_MODES
+                 and all(isinstance(mode, DisplayMode) for mode in self.modes)
+                 and isinstance(answers, tuple) and all(isinstance(method, PowerMethod) for method in answers)
+                 and list(answers) == sorted(set(answers), key=METHOD_PRECEDENCE.index)
+                 and (self.method is None or self.method in answers)
+                 and (self.for_change is None or _count(self.for_change, 1))
+                 and (self.result is None or isinstance(self.result, PowerResult))
+                 and (self.in_force is None or isinstance(self.in_force, InForce)), "output_report")
 
 
 @dataclass(frozen=True)
@@ -204,7 +236,11 @@ class PowerAttempt:
     elapsed_ms: int
 
     def __post_init__(self) -> None:
-        raise NotImplementedError
+        """ValueError("power_attempt") unless output_id is in OUTPUT_IDS, for_change >= 1, request_id
+        is a node token, power, method (when set) and result are members, and elapsed_ms >= 0."""
+        _require(self.output_id in OUTPUT_IDS and _count(self.for_change, 1) and _is_token(self.request_id)
+                 and isinstance(self.power, Power) and (self.method is None or isinstance(self.method, PowerMethod))
+                 and isinstance(self.result, PowerResult) and _count(self.elapsed_ms, 0), "power_attempt")
 
 
 def output_document_key(output_id: str) -> str:
@@ -225,33 +261,141 @@ def output_report_key(output_id: str) -> str:
 def encode_output_document(document: OutputDocument) -> bytes:
     """Canonical JSON (sorted keys, no spaces, snake_case field names, enums as their values) of at
     most OUTPUT_DOCUMENT_BYTES; ValueError("output_document_too_large") past it."""
-    raise NotImplementedError
+    return _encode(document, OUTPUT_DOCUMENT_BYTES, "output_document_too_large")
 
 
 def decode_output_document(raw: bytes) -> OutputDocument:
     """The document `raw` encodes (contracts.strict_json rules: no duplicate keys, no NaN, no
     unknown field); ValueError("output_document") for anything else."""
-    raise NotImplementedError
+    def build(value: dict[str, Any]) -> OutputDocument:
+        method = value["method"]
+        return OutputDocument(**{
+            **value, "power": tuple(_power_request(request) for request in _list(value["power"])),
+            "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method)})
+    return _decode(raw, OUTPUT_DOCUMENT_BYTES, OutputDocument, build, "output_document")
 
 
 def encode_output_report(report: OutputReport) -> bytes:
     """Canonical JSON of at most OUTPUT_REPORT_BYTES; ValueError("output_report_too_large")."""
-    raise NotImplementedError
+    return _encode(report, OUTPUT_REPORT_BYTES, "output_report_too_large")
 
 
 def decode_output_report(raw: bytes) -> OutputReport:
     """ValueError("output_report") for anything but a valid encoding."""
-    raise NotImplementedError
+    def build(value: dict[str, Any]) -> OutputReport:
+        identity, in_force = value["identity"], value["in_force"]
+        return OutputReport(**{
+            **value,
+            "identity": None if identity is None else DisplayIdentity(**_fields(DisplayIdentity, identity)),
+            "modes": tuple(DisplayMode(**_fields(DisplayMode, mode)) for mode in _list(value["modes"])),
+            "answers": tuple(PowerMethod(method) for method in _list(value["answers"])),
+            "method": _optional(PowerMethod, value["method"]),
+            "result": _optional(PowerResult, value["result"]),
+            "in_force": None if in_force is None else InForce(**_fields(InForce, in_force))})
+    return _decode(raw, OUTPUT_REPORT_BYTES, OutputReport, build, "output_report")
 
 
 def encode_power_attempt(attempt: PowerAttempt) -> bytes:
-    """Canonical JSON of at most POWER_ATTEMPT_BYTES."""
-    raise NotImplementedError
+    """Canonical JSON of at most POWER_ATTEMPT_BYTES; ValueError("power_attempt_too_large")."""
+    return _encode(attempt, POWER_ATTEMPT_BYTES, "power_attempt_too_large")
 
 
 def decode_power_attempt(raw: bytes) -> PowerAttempt:
     """ValueError("power_attempt") for anything but a valid encoding."""
-    raise NotImplementedError
+    def build(value: dict[str, Any]) -> PowerAttempt:
+        return PowerAttempt(**{**value, "power": Power(value["power"]),
+                               "method": _optional(PowerMethod, value["method"]),
+                               "result": PowerResult(value["result"])})
+    return _decode(raw, POWER_ATTEMPT_BYTES, PowerAttempt, build, "power_attempt")
+
+
+# The checks and the codec above share these: one home for the wire's rules.
+
+_MAKER: Final = re.compile(r"[A-Z]{3}")
+
+
+def _require(condition: bool, code: str) -> None:
+    if not condition:
+        raise ValueError(code)
+
+
+def _count(value: object, minimum: int, maximum: int = 2**63 - 1) -> bool:
+    """An int (never a bool) in minimum..maximum."""
+    return type(value) is int and minimum <= value <= maximum
+
+
+def _is_token(value: object) -> bool:
+    """A node token (contracts.node_protocol.token)."""
+    try:
+        token(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_best_detected(value: object) -> bool:
+    return type(value) is str and value == BEST_DETECTED
+
+
+def _printable(value: object, shortest: int, longest: int) -> bool:
+    return isinstance(value, str) and shortest <= len(value) <= longest and value.isprintable()
+
+
+def _plain(value: object) -> object:
+    """A wire value as JSON types: a dataclass as an object of its field names, a tuple as a list,
+    an enum as its value; None stays null."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _plain(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, tuple):
+        return [_plain(item) for item in value]
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _encode(value: object, limit: int, too_large: str) -> bytes:
+    raw = json.dumps(_plain(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                     allow_nan=False).encode()
+    if len(raw) > limit:
+        raise ValueError(too_large)
+    return raw
+
+
+def _fields(cls: type, value: object) -> dict[str, Any]:
+    """`value` as `cls`'s keyword arguments: an object holding exactly its field names."""
+    if not isinstance(value, dict) or set(value) != {field.name for field in fields(cls)}:
+        raise ValueError(cls.__name__)
+    return value
+
+
+def _list(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError("list")
+    return value
+
+
+def _optional(kind: type[StrEnum], value: object) -> Any:
+    return None if value is None else kind(value)
+
+
+def _power_request(value: object) -> PowerRequest:
+    request = _fields(PowerRequest, value)
+    return PowerRequest(**{**request, "power": Power(request["power"]), "reason": RequestReason(request["reason"])})
+
+
+_Wire = TypeVar("_Wire")
+
+
+def _decode(raw: bytes, limit: int, cls: type[_Wire], build: Callable[[dict[str, Any]], _Wire], code: str) -> _Wire:
+    """The `cls` that `raw` encodes, built by `build` from its checked fields; ValueError(code) for
+    anything else (too large, not strict JSON, a missing or unknown field, a wrong type or value)."""
+    value = loads_object(raw, max_bytes=limit) if isinstance(raw, bytes) else None
+    try:
+        if value is None:
+            raise ValueError(code)
+        return build(_fields(cls, value))
+    except (ValueError, TypeError, KeyError) as error:
+        raise ValueError(code) from error
 
 
 __all__ = [
