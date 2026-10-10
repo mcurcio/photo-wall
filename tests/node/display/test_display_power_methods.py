@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -376,6 +377,37 @@ def test_a_blip_after_a_ddc_standby_writes_nothing(display, running):
     assert second.result is PowerResult.CONFIRMED
     assert len(display.writes()) == 1            # read standby: no write, no loop
     assert subject.controller.report(OUTPUT).identity == IDENTITY
+
+
+class HeldProbe:
+    """An adapter whose first probe waits until the test lets it go: a look still probing."""
+
+    def __init__(self, adapter) -> None:
+        self.adapter = adapter
+        self.method = adapter.method
+        self.probing = threading.Event()
+        self.go = threading.Event()
+
+    def probe(self, output_id, *, timeout):
+        if not self.probing.is_set():
+            self.probing.set()
+            assert self.go.wait(15)
+        return self.adapter.probe(output_id, timeout=timeout)
+
+    def __getattr__(self, name):
+        return getattr(self.adapter, name)
+
+
+def test_a_change_that_arrives_while_a_look_probes_is_acted_on_once(display, running):
+    held = HeldProbe(ddc(display))
+    subject = running([held])
+    subject.connect()                            # the start look begins probing ...
+    assert held.probing.wait(15)
+    subject.controller.document(OUTPUT, document(1, console_off()))   # ... and the document lands
+    held.go.set()
+    assert subject.attempts(1)[0].request_id == "17"
+    time.sleep(1.5)                              # longer than a worker tick: no second look acts
+    assert len(subject.sink.attempts) == 1 and len(display.writes()) == 1
 
 
 def test_a_console_test_off_ends_on_the_pis_clock_and_the_standing_on_comes_back(display, running):
