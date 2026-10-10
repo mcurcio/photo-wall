@@ -34,6 +34,7 @@ pytestmark = pytest.mark.skipif(
 
 FRAME = "hall-frame"
 OUTPUT = "HDMI-A-1"
+DEVICE = "device-frame-page-pi"  # its Player id ends "d89500"
 GAIN = 1.5
 # The fake's idle window: shorter than Central's 5 s, so a page that stopped keeping its session
 # would see it end within the test.
@@ -56,7 +57,9 @@ PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 def _seed(registry, profile=LANDSCAPE, rotation=0):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
     saved calibration (gain 1.5, revision 2); returns the Player's id."""
-    identity, _key, _request = enroll(registry, count=1)
+    # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
+    # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
+    identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
     landscape = profile.width_px > profile.height_px
     registry.create_frame(FrameCreate(
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,

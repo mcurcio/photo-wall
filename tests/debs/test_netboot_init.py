@@ -105,8 +105,8 @@ def test_the_hook_copies_the_roots_ca_bundle(report):
     assert report["ca_equal"]
 
 
-def test_the_hook_asks_for_the_mount_and_display_modules(report):
-    assert set(report["modules"]) == {"squashfs", "overlay", "loop", "vc4", "v3d"}
+def test_the_hook_asks_for_the_mount_display_and_ddc_modules(report):
+    assert set(report["modules"]) == {"squashfs", "overlay", "loop", "vc4", "v3d", "i2c-dev"}
 
 
 def test_stage_1_imports_from_the_hooks_tree_alone(report):
