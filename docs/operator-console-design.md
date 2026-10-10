@@ -1,6 +1,6 @@
 # Operator console design (2026-10-09)
 
-**Status:** as recorded in [decision 0019](decisions/0019-first-principles-console.md). Nothing here is built. The [roadmap](roadmap.md) owns the delivery order, each journey step's status today, and the deferred list; [decision 0019](decisions/0019-first-principles-console.md) records the decisions and what they replace. The earlier [console UX design](operator-console-ux-design.md) is the historical gate record this document supersedes. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) stand: every page here is built from that catalog.
+**Status:** as recorded in [decision 0019](decisions/0019-first-principles-console.md). Nothing here is built. The [roadmap](roadmap.md) owns the delivery order, each journey step's status today, and the deferred list; [decision 0019](decisions/0019-first-principles-console.md) records the decisions and what they replace. The earlier [console UX design](operator-console-ux-design.md) is the historical gate record this document supersedes. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) stand: every page here is built from that catalog, following the [design language](design-language.md) (principles, page templates, patterns, save models, status words and voice).
 
 **Review page:** [Console Setup Review](https://claude.ai/artifact/EwjdvEcM82HyLDb4BrDSdC).
 
@@ -88,14 +88,16 @@ One home for one spot on the wall, and the page every Home tile, Frames row and 
 
 **Header:** the Frame name (editable inline), its Wall and room, the status word, a live view of what the Pi is presenting (labelled as that, never "on screen"), what is playing and until when, and the buttons **Identify** and **Skip**.
 
-| Tab | What it holds | Saves |
-|---|---|---|
-| **Overview** | Today's timeline for this Frame with a now line; Why this is playing; its Groups; recent problems; anything unfinished in its setup | nothing to save |
-| **Position** | The display shows a test pattern with the Frame name, edges, corner positions and actual output mode. Drag four corners, or nudge with arrow keys in 1, 10 or 50 pixel steps; rotation 0/90/180/270 (which sets the orientation); crop per edge; Reset to full screen. No session timeout while the tab is open. | Live, then **Done** or **Revert**; Done unlocks only when the Pi confirms the display shows the latest change |
-| **Picture** | Brightness, contrast, colour temperature (warm, 6500 K, cool), gamma (2.2), Show grey ramp, Copy to other Frames… The values belong to the display and say so ("These settings belong to the display (Samsung 55", serial …4K2) and move with it"). Each slider says where it acts: **On the display** (DDC/CI) or **Photo Wall picture adjustment**. | Live, then Done or Revert |
-| **Power** | Power method: HDMI-CEC, DDC/CI, HDMI signal off (the panel sleeps) or a smart plug through Home Assistant, the detected one chosen. **Test: turn off / turn on**, reading "Display confirmed off" or "Display didn't answer". Switch the display to this input on power-on (on). Never power off while the display shows another input (on). Then, read-only: "Now on · next off 23:00, set by Schedule › Power lane", and any hold ("Off — by Home Assistant (Away mode)"). | Autosave with Undo; when displays are on is not set here |
-| **Photo fit** | Use the Scene's setting, or override it for this Frame; minimum quality (strict, per [compatibility](requirements.md#live-media-compatibility-and-preparation)); what was skipped here and why ("312 too small · 1,204 wrong orientation"), each clickable | Autosave with Undo |
-| **Hardware** | The Frame's display profile (size, resolution, detected with an override); the Display (model, serial, HDMI mode); "Fed by Pi pw-3f2a · HDMI 1" with **Replace with…**; when a different display appears, the [display-changed flow](#6-display-identity) | Autosave with Undo |
+| Tab | What it holds |
+|---|---|
+| **Overview** | Today's timeline for this Frame with a now line; Why this is playing; its Groups; recent problems; anything unfinished in its setup |
+| **Position** | The display shows a test pattern with the Frame name, edges, corner positions and actual output mode. Drag four corners, or nudge with arrow keys in 1, 10 or 50 pixel steps; rotation 0/90/180/270 (which sets the orientation); crop per edge; Reset to full screen. No session timeout while the tab is open. |
+| **Picture** | Brightness, contrast, colour temperature (warm, 6500 K, cool), gamma (2.2), Show grey ramp, Copy to other Frames… The values belong to the display and say so ("These settings belong to the display (Samsung 55", serial …4K2) and move with it"). Each slider says where it acts: **On the display** (DDC/CI) or **Photo Wall picture adjustment**. |
+| **Power** | Power method: HDMI-CEC, DDC/CI, HDMI signal off (the panel sleeps) or a smart plug through Home Assistant, the detected one chosen. **Test: turn off / turn on**, reading "Display confirmed off" or "Display didn't answer". Switch the display to this input on power-on (on). Never power off while the display shows another input (on). Then, read-only: "Now on · next off 23:00, set by Schedule › Power lane", and any hold ("Off — by Home Assistant (Away mode)"). When displays are on is not set here. |
+| **Photo fit** | Use the Scene's setting, or override it for this Frame; minimum quality (strict, per [compatibility](requirements.md#live-media-compatibility-and-preparation)); what was skipped here and why ("312 too small · 1,204 wrong orientation"), each clickable |
+| **Hardware** | The Frame's display profile (size, resolution, detected with an override); the Display (model, serial, HDMI mode); "Fed by Pi pw-3f2a · HDMI 1" with **Replace with…**; when a different display appears, the [display-changed flow](#6-display-identity) |
+
+How each tab saves is assigned in the [design language's concept → UX table](design-language.md#8-concept--ux-translation) (rows B4, B5, B6, D3, G4); the models themselves are its [save models](design-language.md#save-models).
 
 **Unbound Frame:** every tab shows, and Position, Picture and Power say "Choose which Pi and HDMI port feeds this Frame" with a picker. Binding happens only here (unchanged from 0018).
 
@@ -197,35 +199,7 @@ Continuous viewer tracking stays out of scope ([operations](requirements.md#oper
 
 ## 10. How it behaves
 
-**Saving.**
-
-| Kind | Applies to | Model |
-|---|---|---|
-| Position and picture | Frame page › Position, Picture | Live on the real display, then **Done** or **Revert**. Done unlocks once the Pi confirms the display shows the latest change ([U9](requirements.md#failure-visibility-and-recovery)). |
-| Toggles and values | Power options, names, Settings pages, Groups, the Never show list | Saved as you change them, with a 10-second Undo |
-| Show content | Scenes and Photo sources | **Save** applies from the next start ([requirements](requirements.md#live-media-compatibility-and-preparation): edits default to the next Run), plus **Save and apply now** |
-| Schedules | Schedules, the Power lane | Apply to future blocks; if the current block changes, choose **Change now** or **From the next block** |
-
-Position, picture and power are equipment settings, so applying them live does not conflict with the next-Run rule, which covers authored content only.
-
-**Six status words, used everywhere** (per Frame, rolled up to the house as the worst Frame state; Resting never counts as a problem). The words are the domain's verdict; the pattern layer draws them on 0018's severity scale, which stays as it is:
-
-| Word | Meaning | Severity (0018 scale) |
-|---|---|---|
-| **Showing** | The Pi reports it is presenting what was planned. (It cannot see a display someone switched off with the remote.) | `ok` |
-| **Resting** | Dark on purpose: Night off, paused, all off. Nothing wrong. | `ok` |
-| **Getting ready** | Starting, updating or downloading. It will show photos by itself. | `notice` |
-| **Needs a look** | Playing, but degraded: old photos, Immich unreachable, storage low. Can wait. | `notice` |
-| **Not showing** | Should be showing and isn't. One fix offered. | `alarm` |
-| **Can't tell** | No report since [time]. No guessing ([U6](requirements.md#failure-visibility-and-recovery)). | `unknown` |
-
-The scale's fifth level, `todo`, stays for unfinished setup (no Pi yet, Position not checked), which is not a status word: 0018's split of a Frame's live health from its setup state stays as two facts, both now on the one Frame page. Colour means status and nothing else; the accent colour is for actions only.
-
-**How errors read:** what is wrong in plain words, since when, what Photo Wall is doing about it, and one button. **Details** shows the layer, where the evidence came from and its time.
-
-> "Living room left: Not showing since 21:04. The Pi is fine but the display stopped answering on HDMI. Photo Wall retried 3 times. [Check the display is on this input] Details ›"
-
-No internal words (Node API link, claimed/reported, effect gate, lease); the evidence labels move one click down, under Details. Never claim what the display is lighting up, and never offer a fix the system cannot perform.
+How the console saves, speaks status and words its errors is the [design language](design-language.md), the one home for UI rules: the save models ([§5](design-language.md#save-models)), the six status words and their place on 0018's severity scale ([§6](design-language.md#6-status-and-severity)), and the error template with its plain-words rules ([§7](design-language.md#the-error-template)). Each journey step's page template, patterns and save model are in its [concept → UX table](design-language.md#8-concept--ux-translation).
 
 ## 11. Settings catalogue
 
