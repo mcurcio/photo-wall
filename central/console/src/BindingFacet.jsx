@@ -14,6 +14,7 @@ import {
   outputLabel,
   playerHandle,
   playerLiveness,
+  portName,
 } from "./health.js";
 import { boundOutput } from "./join.js";
 import { BOOT_FACTS_UNAVAILABLE, identifyOffer, panelAtEnrollment, playerPageHref } from "./players.js";
@@ -116,7 +117,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
     );
     if (!offered) {
       setChoice(null);
-      setAnnouncement(`${choice.label} is no longer available. Choose another output.`);
+      setAnnouncement(`${choice.label} is no longer available. Choose another HDMI port.`);
     }
   }, [snapshot]);
 
@@ -137,7 +138,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
     setChoice({
       playerId: option.playerId,
       outputId: option.outputId,
-      label: outputLabel(snapshot, bootFacts, option.playerId, option.outputId),
+      label: outputLabel(snapshot, bootFacts, option.playerId, option.outputId, { port: true }),
       generation: frame.generation,
     });
   };
@@ -174,7 +175,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
     setBusy(false);
     setIdentified(result.outcome === "done"
       ? { kind: "status",
-        text: `Identify requested for ${option.outputId}. Check the Display; this request expires in 15 seconds.` }
+        text: `Identify requested for ${portName(option.outputId)}. Check the Display; this request expires in 15 seconds.` }
       : { kind: "alert", text: result.message });
   };
 
@@ -200,7 +201,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
             {playerHref === null
               ? `Pi ${playerHandle(snapshot, bootFacts, frame.player_id)}`
               : <Link href={playerHref}>{`Pi ${playerHandle(snapshot, bootFacts, frame.player_id)}`}</Link>}
-            {` · ${frame.output_id}`}
+            {` · ${portName(frame.output_id)}`}
           </FactRow>
           <FactRow label="The Pi" tone="reported">
             {heard}
@@ -270,7 +271,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
                         onChange={() => choose(option)}
                         aria-describedby={livenessId}
                       />
-                      {outputLabel(snapshot, bootFacts, option.playerId, option.outputId)}
+                      {outputLabel(snapshot, bootFacts, option.playerId, option.outputId, { port: true })}
                     </label>
                     <span id={livenessId} className="chooser__liveness">
                       {playerLiveness(snapshot, option.playerId)?.label}
@@ -283,7 +284,7 @@ export function BindingFacet({ snapshot, bootFacts = null, frameId, onTab }) {
                           aria-describedby={identify.offer ? undefined : identifyReasonId}
                           onClick={() => doIdentify(option)}
                         >
-                          Identify display<span className="visually-hidden">{` ${option.outputId}`}</span>
+                          Identify display<span className="visually-hidden">{` ${portName(option.outputId)}`}</span>
                         </button>
                         {!identify.offer && (
                           <span id={identifyReasonId} className="chooser__note">{identify.reason}</span>

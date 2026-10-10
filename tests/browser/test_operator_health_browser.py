@@ -308,7 +308,7 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         reads = RequestGate(page, SNAPSHOT)
         writes.holding = True
         handle = identity["player_id"][-6:]
-        inspector.get_by_role("radio", name=f"{handle} · HDMI-A-1 · Free", exact=True).check()
+        inspector.get_by_role("radio", name=f"{handle} · HDMI 1 · Free", exact=True).check()
         inspector.get_by_role("button", name=f"Connect Frame {FRAME}", exact=True).click()
         writes.wait_held()
 

@@ -65,10 +65,15 @@ def _placed_frame(registry, frame_id):
         width_mm=400, height_mm=300, profile=LANDSCAPE))
 
 
+def _port(output_id):
+    """The Frame page's name for an HDMI connector (health.js `portName`): HDMI-A-1 is HDMI 1."""
+    return re.sub(r"^HDMI-[A-Z]-(\d+)$", r"HDMI \1", output_id)
+
+
 def _option(scope, player_id, output_id="HDMI-A-1"):
     """A free Output in the chooser, by its one wording: handle · output id · Free (the
     handle is the Player id's last six characters when there is no netboot record)."""
-    return scope.get_by_role("radio", name=f"{player_id[-6:]} · {output_id} · Free", exact=True)
+    return scope.get_by_role("radio", name=f"{player_id[-6:]} · {_port(output_id)} · Free", exact=True)
 
 
 def _poll(page):
@@ -395,7 +400,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
         _poll(page)
 
         expect(inspector.get_by_role("status")).to_contain_text(
-            f"{player_id[-6:]} · HDMI-A-1 · Free is no longer available")
+            f"{player_id[-6:]} · HDMI 1 · Free is no longer available")
         expect(inspector.get_by_role("radio")).to_have_count(0)
         expect(inspector.get_by_role("button", name="Connect Frame mine", exact=True)).to_be_disabled()
 
@@ -476,9 +481,9 @@ def test_a_bound_players_free_second_output_can_be_identified_from_both_homes(pa
         inspector = open_frame(page, "spare", "hardware")
         expect(inspector.get_by_role("radio")).to_have_count(1)
         picker = inspector.get_by_role("radiogroup", name="Choose a Pi and HDMI port", exact=True)
-        picker.get_by_role("button", name="Identify display HDMI-A-2", exact=True).click()
+        picker.get_by_role("button", name="Identify display HDMI 2", exact=True).click()
         expect(inspector.get_by_role("status").filter(
-            has_text="Identify requested for HDMI-A-2")).to_be_visible()
+            has_text="Identify requested for HDMI 2")).to_be_visible()
         assert [url.endswith(f"/v1/operator/players/{player_id}/outputs/HDMI-A-2/identify")
                 for url in sent] == [True, True]
 
@@ -650,7 +655,7 @@ def _netbooted_player(registry, serial=SERIAL):
 
 
 def _serial_option(scope, serial=SERIAL, output_id="HDMI-A-1"):
-    return scope.get_by_role("radio", name=f"{serial[-6:]} · {output_id} · Free", exact=True)
+    return scope.get_by_role("radio", name=f"{serial[-6:]} · {_port(output_id)} · Free", exact=True)
 
 
 def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, registry):

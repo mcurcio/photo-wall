@@ -77,7 +77,7 @@ export function LiveAdjustment({ adjustment, noun, softwareHref, children }: Liv
       latestRevision={adjustment.latest}
       ack={adjustment.ack === null ? null : {
         revision: adjustment.ack.revision,
-        at: adjustment.ack.at === null ? "" : timeOfDay(adjustment.ack.at),
+        at: adjustment.ack.at === null ? null : timeOfDay(adjustment.ack.at),
       }}
       dirty={adjustment.dirty}
       busy={adjustment.busy}

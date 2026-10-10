@@ -179,7 +179,7 @@ def test_clicking_a_frame_opens_its_page_at_overview_with_hardware_and_position(
 
         # Hardware: the bound Player and Output, read through the frame's FrameInventory row.
         inspector.get_by_role("tab", name="Hardware", exact=True).click()
-        expect(inspector).to_contain_text("HDMI-A-1")
+        expect(inspector).to_contain_text("HDMI 1")
         inspector.get_by_role("region", name="Pi and HDMI port", exact=True).get_by_role(
             "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(player_id)

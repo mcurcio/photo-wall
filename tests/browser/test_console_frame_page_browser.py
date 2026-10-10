@@ -92,6 +92,9 @@ class FakeSessions:
         self.bodies = []
         self.began_with = []
         self.fail = {}
+        self.hold_end = False
+        self.held = []
+        self.refused_busy = 0
         self.row = None
         self.touched = 0.0
         self.began = 0.0
@@ -139,6 +142,9 @@ class FakeSessions:
     def _answer(self, route):
         body = route.request.post_data_json or {}
         operation = body.get("operation", "begin")
+        if operation == "end" and self.hold_end:
+            self.held.append(route)  # answered (and applied) by `release`
+            return
         self.sent.append(operation)
         self.bodies.append(body)
         now = time.monotonic()
@@ -149,6 +155,7 @@ class FakeSessions:
             return
         if operation == "begin":
             if self.row is not None and self.row["state"] == "active":
+                self.refused_busy += 1
                 route.fulfill(status=409, json={"error": "trial_already_active"})
                 return
             if self._open(now, body.get("calibration")) is None:
@@ -200,6 +207,12 @@ class FakeSessions:
 
     def count(self, operation):
         return self.sent.count(operation)
+
+    def release(self):
+        """Answer, and apply, every `end` held so far."""
+        held, self.held, self.hold_end = self.held, [], False
+        for route in held:
+            self._answer(route)
 
 
 @pytest.fixture
@@ -357,7 +370,7 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
 
     Mutation: render a Frame profile field inside the Pi and HDMI port section -> the
     not_to_contain_text assertion goes RED."""
-    _seed(registry, PORTRAIT)
+    player_id = _seed(registry, PORTRAIT)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
@@ -366,7 +379,8 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
         expect(port.get_by_role("link", name=re.compile(r"^Pi "))).to_have_attribute(
             "href", re.compile(r"^#/players/device-"))
         expect(port).to_contain_text("Fed by: Pi")
-        expect(port).to_contain_text(OUTPUT)
+        expect(port).to_contain_text(f"Pi {player_id[-6:]} · HDMI 1")  # the port, not "HDMI-A-1"
+        expect(port).not_to_contain_text(OUTPUT)
         expect(port).to_contain_text("Display, when the Pi last started: Connected, 1920 × 1080")
         expect(port).not_to_contain_text("24")
         # Central's own words are under Details.
@@ -719,3 +733,60 @@ def test_the_position_tab_fits_a_phone(page, registry, sessions, scheme):
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")
         expect(_bar(page).get_by_role("button", name="Done", exact=True)).to_be_in_viewport()
+
+
+@pytest.mark.parametrize("how", ["revert", "tab"])
+def test_a_revert_or_a_quick_return_never_races_its_own_end(page, registry, sessions, how):
+    """Revert (or leaving the tab and coming straight back) ends the session; the next session
+    is begun only once that end is answered, so the page never reads its own session as someone
+    else's. The fake holds the `end` unanswered for a while, as a slow network would.
+
+    Mutation: begin without waiting for this page's own end -> Central refuses the begin
+    (`trial_already_active`) and the page says someone else is adjusting -> RED."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        open_frame(page, FRAME, "picture")
+        bar = _bar(page)
+        tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        sessions.hold_end = True
+        if how == "revert":
+            _brighten(page)
+            expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+            bar.get_by_role("button", name="Revert", exact=True).click()
+        else:
+            tabs.get_by_role("tab", name="Overview", exact=True).click()
+            tabs.get_by_role("tab", name="Picture", exact=True).click()
+            bar = _bar(page)
+        page.wait_for_timeout(1500)  # long enough for a begin that did not wait
+        assert sessions.refused_busy == 0, sessions.sent
+        sessions.release()
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        expect(page.get_by_text("Someone else is adjusting this Frame")).to_have_count(0)
+        assert sessions.refused_busy == 0, sessions.sent
+        assert sessions.state_now() == "active"
+
+
+def test_the_side_rail_stays_put_and_the_tabs_never_wrap(page, registry, sessions):
+    """Desktop: the section rail sits at the same height on every tab, however tall the tab.
+    Phone: the tabs are one row that scrolls sideways."""
+    _seed(registry)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        rail = page.get_by_role("navigation", name="Sections", exact=True)
+        tops = {}
+        for tab in ("overview", "position", "picture", "hardware"):
+            open_frame(page, FRAME, tab)
+            if tab in ("position", "picture"):
+                expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+            tops[tab] = rail.bounding_box()["y"]
+        assert len(set(tops.values())) == 1, tops
+
+        page.set_viewport_size({"width": 320, "height": 700})
+        tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
+        rows = {round(tabs.get_by_role("tab", name=name, exact=True).bounding_box()["y"])
+                for name in ("Overview", "Position", "Picture", "Hardware")}
+        assert len(rows) == 1, rows
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1")

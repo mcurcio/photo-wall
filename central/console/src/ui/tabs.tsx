@@ -22,9 +22,10 @@ export interface TabsProps {
 }
 
 /**
- * Tabs: one row of tabs over the selected tab's panel (Base UI Tabs, controlled). Arrow keys
- * move between tabs; only the selected panel is mounted, so a panel's effects run only while
- * it is shown.
+ * Tabs: one row of tabs over the selected tab's panel (Base UI Tabs, controlled). The row never
+ * wraps: on a narrow screen it scrolls sideways (its focus ring is drawn inside each tab, so the
+ * scrolling row does not clip it). Arrow keys move between tabs; only the selected panel is
+ * mounted, so a panel's effects run only while it is shown.
  */
 export function Tabs({ label, tabs, value, onValueChange, children }: TabsProps) {
   const selected = tabs.find((tab) => tab.value === value);
@@ -34,15 +35,16 @@ export function Tabs({ label, tabs, value, onValueChange, children }: TabsProps)
       onValueChange={(next) => onValueChange(String(next))}
       className="flex min-w-0 flex-col gap-4"
     >
-      <BaseTabs.List aria-label={label} className="flex flex-wrap gap-1 border-b border-line">
+      <BaseTabs.List aria-label={label} className="flex flex-nowrap gap-1 overflow-x-auto border-b border-line">
         {tabs.map((tab) => (
           <BaseTabs.Tab
             key={tab.value}
             value={tab.value}
             className={cn(
-              "-mb-px cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-4 py-2",
+              "shrink-0 cursor-pointer border-0 border-b-2 border-transparent bg-transparent px-4 py-2",
+              "whitespace-nowrap",
               "font-sans text-sm text-muted hover:text-text",
-              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
+              "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus",
               "data-active:border-accent data-active:font-medium data-active:text-text",
             )}
           >

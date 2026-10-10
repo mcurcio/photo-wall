@@ -13,3 +13,5 @@ type Story = StoryObj<typeof meta>;
 
 export const Requested: Story = {};
 export const Acknowledged: Story = { args: { state: "acknowledged", at: "21:04:07" } };
+/** Central served no time for the acknowledgement: no dangling separator. */
+export const AcknowledgedNoTime: Story = { args: { state: "acknowledged", at: null } };

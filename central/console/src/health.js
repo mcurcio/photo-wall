@@ -496,19 +496,34 @@ export function playerSerial(snapshot, bootFacts, playerId) {
 }
 
 /**
+ * An HDMI port in the console's words (design language glossary, "HDMI port"): the DRM
+ * connector `HDMI-A-1` reads "HDMI 1". Any other connector name is shown as it is.
+ *
+ * @param {string} outputId
+ * @returns {string}
+ */
+export function portName(outputId) {
+  const match = /^HDMI-[A-Z]-(\d+)$/.exec(outputId);
+  return match === null ? outputId : `HDMI ${match[1]}`;
+}
+
+/**
  * The one Output wording (chooser, Player page and dialogs): handle · output id ·
- * state label.
+ * state label. `port: true` names the output as an HDMI port ({@link portName}), as the
+ * Frame page does.
  *
  * @param {object|null} snapshot
  * @param {{devices?: Map<string, object>}|null} bootFacts
  * @param {string} playerId
  * @param {string} outputId
+ * @param {{port?: boolean}} [options]
  * @returns {string}
  */
-export function outputLabel(snapshot, bootFacts, playerId, outputId) {
+export function outputLabel(snapshot, bootFacts, playerId, outputId, { port = false } = {}) {
   const handle = playerHandle(snapshot, bootFacts, playerId);
+  const name = port ? portName(outputId) : outputId;
   const standing = outputStates(snapshot, playerId).find((output) => output.outputId === outputId);
   return standing === undefined
-    ? `${handle} · ${outputId}`
-    : `${handle} · ${outputId} · ${standing.label}`;
+    ? `${handle} · ${name}`
+    : `${handle} · ${name} · ${standing.label}`;
 }

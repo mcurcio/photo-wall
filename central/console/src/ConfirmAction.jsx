@@ -2,7 +2,7 @@ import React, { useEffect, useId, useRef, useState } from "react";
 
 import { ALREADY_MESSAGE, retirePlayer, unbind, unbindSequence } from "./equipmentApi.js";
 import { deleteFrame } from "./framesApi.js";
-import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
+import { isBound, outputLabel, outputStates, playerHandle, portName } from "./health.js";
 import { liveRunsFor } from "./join.js";
 import { usePageHidden } from "./pageVisibility.js";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./sendOutcome.js";
@@ -458,7 +458,7 @@ export function unbindRequest(snapshot, bootFacts, frameId) {
     (candidate) => candidate.id !== frameId && candidate.player_id === playerId,
   );
   const runs = liveRunsFor(snapshot?.runtime, frameId);
-  const output = `${playerHandle(snapshot, bootFacts, playerId)} · ${outputId}`;
+  const output = `${playerHandle(snapshot, bootFacts, playerId)} · ${portName(outputId)}`;
   return {
     key: `unbind:${frameId}`,
     title: `Disconnect Frame ${frameId} from its Pi?`,

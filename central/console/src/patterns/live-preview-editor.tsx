@@ -10,7 +10,7 @@ export interface LivePreviewEditorProps {
   /** The number of the change last made; null while no live session shows the changes. */
   latestRevision: number | null;
   /** The newest change the Pi acknowledged presenting, and when (already worded). */
-  ack: { revision: number; at: string } | null;
+  ack: { revision: number; at: string | null } | null;
   /** The changes differ from the saved values. */
   dirty: boolean;
   /** Done or Revert is running. */

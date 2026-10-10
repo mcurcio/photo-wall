@@ -82,6 +82,10 @@ const BUSY = "trial_already_active";
 // The pages left with changes not kept, by Frame, and when (this browser's clock, epoch
 // seconds, only ever shown): the next visit says the Display went back to the saved values then.
 const leftUnsaved = new Map();
+// The `end` this browser last sent for each Frame's sessions, until it is answered: a `begin`
+// for the same Frame waits for it, so a Revert or a quick return to the tab (or the page) never
+// races its own end and reads it as someone else's session.
+const ending = new Map();
 
 /** The browser tab is shown (the Page Visibility API). */
 function useVisible() {
@@ -165,9 +169,13 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     setError(problem);
   }, []);
   const end = useCallback((session) => {
-    apiWrite(`${path}/${session.trial_id}`, {
+    const done = apiWrite(`${path}/${session.trial_id}`, {
       method: "POST", body: { operation: "end", expected_sequence: session.sequence },
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => {
+      if (ending.get(path) === done) ending.delete(path);
+    });
+    ending.set(path, done);
+    return done;
   }, [path]);
 
   /** The draft as Central takes it: the saved calibration it was made from, changed, and its base. */
@@ -245,6 +253,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
       const session = current.row;
       if (session === null || session.state !== "active") {
         if (performance.now() < current.waitUntil) return;
+        while (ending.has(path)) await ending.get(path);
+        if (!state.current.live) return;
         const changed = current.dirty;
         const begun = await send("begin", changed ? payload() : undefined);
         // A session begun for an unchanged draft is at the saved calibration: adopt it.
@@ -268,7 +278,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
       }
       await send("keepalive");
     });
-  }, [fly, send, adopt]);
+  }, [fly, send, adopt, path]);
 
   useEffect(() => {
     if (!live) return undefined;
@@ -357,8 +367,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   // draft adopts.
   const revert = useCallback(() => act(async () => {
     const session = state.current.row;
-    if (session?.state === "active") end(session);
     keep(null);
+    if (session?.state === "active") await end(session);
     clearDraft();
     state.current.error = null;
     setError(null);
