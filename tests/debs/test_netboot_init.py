@@ -1,7 +1,8 @@
 """photo-wall-netboot-init as the local repo holds it (decision 0019 P4), proved on the built
 artifact: apt installs it through the local repo; its initramfs-tools hook, run through
-initramfs-tools' own hook-functions with DESTDIR a scratch directory (no kernel needed: the
-modules it asks for are only listed), copies stage 1's package directories into the
+initramfs-tools' own hook-functions with DESTDIR a scratch directory and MODULESDIR a fake
+kernel module tree (no kernel needed: the modules it asks for are only listed), asks for every
+module in that tree (the whole tree, issue 64), copies stage 1's package directories into the
 interpreter's stdlib directory and the root's CA bundle beside them; `python3 -I -S` imports
 appliance.netboot_init with only that directory added to its path; and stage 1's uplink runs on
 the device's runtime against that tree (scripts/uplink_device_harness.py, decision 0014 §11). The
@@ -28,8 +29,9 @@ LIBDIR = "usr/lib/python3.13"
 pytestmark = pytest.mark.skipif(not BUILT, reason="set PHOTO_WALL_LOCAL_REPO to a "
                                                   "debian-packaging/build-repo.sh output directory")
 
-# In the container: install through the local repo, run the hook as mkinitramfs would (its
-# DESTDIR, its module list file), then report on the tree. A second run, from a path file without
+# In the container: install through the local repo, run the hook as mkinitramfs would (the
+# environment initramfs-tools(7) gives a hook: DESTDIR, MODULESDIR, version, verbose, and its module
+# list file), then report on the tree. A second run, from a path file without
 # common's directory, is the negative case.
 SCRIPT = r"""
 set -eu
@@ -40,8 +42,19 @@ DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends \
     photo-wall-netboot-init >/dev/null
 hook=/usr/share/initramfs-tools/hooks/photo-wall-netboot
 path_file=/usr/lib/photo-wall/netboot-init/path
+# A fake kernel's module tree: the hook must ask for every module in it, nested or not,
+# compressed or not.
+version=6.18.0-fake
+modules=/tmp/lib/modules/$version
+for module in kernel/fs/squashfs/squashfs.ko.xz kernel/drivers/gpu/drm/vc4/vc4.ko.xz \
+        kernel/drivers/media/platform/raspberrypi/hevc_dec/rpi-hevc-dec.ko.xz \
+        kernel/drivers/hwmon/raspberrypi-hwmon.ko; do
+    mkdir -p "$modules/$(dirname "$module")"
+    : > "$modules/$module"
+done
 run_hook() {
-    DESTDIR=$1 verbose=n __MODULES_TO_ADD=$1.modules sh "$hook" >/dev/null
+    DESTDIR=$1 MODULESDIR=$modules version=$version verbose=n __MODULES_TO_ADD=$1.modules \
+        sh "$hook" >/dev/null
 }
 mkdir /tmp/initrd /tmp/partial
 : > /tmp/initrd.modules
@@ -105,8 +118,9 @@ def test_the_hook_copies_the_roots_ca_bundle(report):
     assert report["ca_equal"]
 
 
-def test_the_hook_asks_for_the_mount_and_display_modules(report):
-    assert set(report["modules"]) == {"squashfs", "overlay", "loop", "vc4", "v3d"}
+def test_the_hook_asks_for_the_kernels_whole_module_tree(report):
+    """Every module in MODULESDIR's kernel/ tree, none named by hand (issue 64)."""
+    assert sorted(report["modules"]) == ["raspberrypi-hwmon", "rpi-hevc-dec", "squashfs", "vc4"]
 
 
 def test_stage_1_imports_from_the_hooks_tree_alone(report):
