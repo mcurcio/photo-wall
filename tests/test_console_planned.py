@@ -230,15 +230,16 @@ def test_only_time_words_formats_an_instant_for_display():
 
 # Modules whose Date.now() compares only with another Date.now() of the same browser.
 _OWN_CLOCK_ONLY = {"useSnapshot.js",  # the snapshot's arrival age: both ends are this browser's
-                   "authoring.js"}    # a request id's entropy, never compared with anything
+                   "authoring.js",    # a request id's entropy, never compared with anything
+                   "liveAdjustment.js"}  # when a Done or a leave happened, shown, never compared
 
 
 def test_the_browser_clock_is_never_compared_with_a_served_time():
     """R10: clocks compare only to themselves. A served absolute time (Central's, a node's)
     is aged only against a served read time on the same clock; a browser counts a served
-    duration on its own monotonic clock (useCalibration.js `lease_seconds`). Date.now() is
-    allowed only where both ends are the browser's own. Mutation probe: restore
-    `expiresAt - Date.now() / 1000` in useCalibration.js and this fails."""
+    duration on its own monotonic clock (liveAdjustment.js: the session's hard deadline). Date.now() is
+    allowed only where both ends are the browser's own. Mutation probe: age the session as
+    `hard_expires_at - Date.now() / 1000` in liveAdjustment.js and this fails."""
     offenders = sorted(str(path.relative_to(SRC)) for path in _console_modules()
                        if path.name not in _OWN_CLOCK_ONLY and "Date.now()" in path.read_text())
     assert offenders == [], f"{offenders} read the browser's clock; see R10"

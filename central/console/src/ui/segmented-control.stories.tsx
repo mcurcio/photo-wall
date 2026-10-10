@@ -1,32 +1,20 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import * as React from "react";
 
-import { SegmentedControl, type SegmentedControlProps } from "./segmented-control";
-
-type Ending = "none" | "black" | "fade";
-const OPTIONS = [
-  { value: "none", label: "Stops" },
-  { value: "black", label: "Black" },
-  { value: "fade", label: "Fades out" },
-] as const;
-
-function Controlled(args: SegmentedControlProps<Ending>) {
-  const [value, setValue] = React.useState(args.value);
-  return <SegmentedControl {...args} value={value} onValueChange={setValue} />;
-}
+import { SegmentedControl } from "./segmented-control";
 
 const meta = {
   title: "Primitives/SegmentedControl",
-  component: Controlled,
-  args: { label: "How it ends", value: "none", options: OPTIONS, onValueChange: () => {} },
-} satisfies Meta<typeof Controlled>;
+  component: SegmentedControl,
+  args: {
+    label: "Step",
+    value: "10",
+    options: [{ value: "1", label: "1 px" }, { value: "10", label: "10 px" }, { value: "50", label: "50 px" }],
+    onChange: () => {},
+  },
+} satisfies Meta<typeof SegmentedControl>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const FirstChosen: Story = {};
-export const LastChosen: Story = { args: { value: "fade" } };
-export const WithHint: Story = {
-  args: { value: "black", hint: "Black covers these Frames for the ending's length." },
-};
+export const Default: Story = {};
 export const Disabled: Story = { args: { disabled: true } };

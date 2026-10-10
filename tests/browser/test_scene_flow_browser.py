@@ -234,8 +234,8 @@ def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page,
     _seed_source(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, VALID_FRAME, "calibration")
-        inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
+        inspector = open_frame(page, VALID_FRAME, "overview")
+        inspector.get_by_role("link", name="Make a Scene", exact=True).click()
         assert current_hash(page) == f"#/scenes/new/kind?target={VALID_FRAME}"
         form = scene_form(page)
         expect(form.get_by_role("heading", name="What kind of Scene?", exact=True)).to_be_visible()
@@ -274,8 +274,8 @@ def test_commissioning_link_keeps_an_existing_dirty_scene_draft(page, registry):
         form = start_scene(page)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         go(page, "wall")
-        inspector = open_frame(page, VALID_FRAME, "calibration")
-        inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
+        inspector = open_frame(page, VALID_FRAME, "overview")
+        inspector.get_by_role("link", name="Make a Scene", exact=True).click()
         expect(form.get_by_role("status")).to_contain_text(
             f"Your open Scene draft was kept. Frame {VALID_FRAME} was not added.")
         form.get_by_role("button", name="Choose Frames", exact=True).click()
@@ -1200,7 +1200,14 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
         expect(form.get_by_label("Ending length", exact=True)).to_have_count(0)
         fade.get_by_label("Fade between photos", exact=True).fill("3")
         expect(fade.get_by_role("button", name="Reset Fade between photos (Default: 1.5 s)")).to_be_visible()
-        _row(form, "How it ends").get_by_label("Fades out", exact=True).check()
+        ending = _row(form, "How it ends")
+        ending.get_by_role("radio", name="Fades out", exact=True).check()
+        form.get_by_label("Ending length", exact=True).fill("4.5")
+        # Reset of How it ends resets its length too: back to Stops, and 3 s when chosen again.
+        ending.get_by_role("button", name="Reset How it ends (Default: Stops)").click()
+        expect(ending.get_by_role("radio", name="Stops", exact=True)).to_be_checked()
+        ending.get_by_role("radio", name="Fades out", exact=True).check()
+        expect(form.get_by_label("Ending length", exact=True)).to_have_value("3")
         form.get_by_label("Ending length", exact=True).fill("4.5")
         form.get_by_role("button", name="Advanced", exact=True).click()
         expect(_row(form, "Keep the last photo up")).to_contain_text("Default: On")
@@ -1224,8 +1231,9 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
         assert (body["fade_in_seconds"], body["fade_out_seconds"], body["retain_on_expiry"]) == (
             1.5, 1.5, False)
         assert (stored["outro_seconds"], stored["protect_frames"]) == (4.5, True)
-        assert [(c["kind"], c["fade_out_seconds"]) for c in stored["outro_contributions"]] == [
-            ("media", 4.5)]
+        # Fades out: the last photo returns over half the 3 s fade, then fades out over the rest.
+        assert [(c["kind"], c["fade_in_seconds"], c["fade_out_seconds"])
+                for c in stored["outro_contributions"]] == [("media", 1.5, 3)]
 
         # Shown again after a reload: Review answers each value and Playback holds it.
         page.reload()
@@ -1235,7 +1243,7 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
                        "Keep the last photo upOff", "Keep these Frames togetherOn"):
             expect(form).to_contain_text(answer)
         form.get_by_role("button", name="Change How it ends", exact=True).click()
-        expect(_row(form, "How it ends").get_by_label("Fades out", exact=True)).to_be_checked()
+        expect(_row(form, "How it ends").get_by_role("radio", name="Fades out", exact=True)).to_be_checked()
         expect(form.get_by_label("Ending length", exact=True)).to_have_value("4.5")
         expect(form.get_by_label("Fade between photos", exact=True)).to_have_value("3")
         form.get_by_role("button", name="Advanced", exact=True).click()

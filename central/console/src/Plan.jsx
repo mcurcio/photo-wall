@@ -113,7 +113,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
   // Plane B: the LIVE in-progress drag (create or move). Held in a ref, not state,
   // because a full pointerdown->move->up sequence can fire before React re-renders
   // — the move/up handlers must read the drag synchronously (cf. tryingRef in
-  // useCalibration). `draft` mirrors it purely to render the in-progress rectangle.
+  // liveAdjustment.js). `draft` mirrors it purely to render the in-progress rectangle.
   const dragRef = useRef(/** @type {object|null} */ (null));
   const [draft, setDraft] = useState(/** @type {object|null} */ (null));
   // The pending new-frame drag rect awaiting a profile from the form (px).

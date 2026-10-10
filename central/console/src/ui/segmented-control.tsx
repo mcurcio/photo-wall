@@ -1,69 +1,56 @@
-import * as React from "react";
+import { Radio } from "@base-ui/react/radio";
+import { RadioGroup } from "@base-ui/react/radio-group";
 
 import { cn } from "./cn";
+import { useFieldControl } from "./field";
 
 export interface SegmentedControlProps<V extends string> {
-  /** The group's name, shown above the choices and its accessible name. */
+  /** The choice's visible name and the group's accessible one. */
   label: string;
   value: V;
   /** Two to five exclusive choices. */
   options: readonly { value: V; label: string }[];
-  onValueChange: (value: V) => void;
-  /** One plain sentence under the choices: the group's description. */
-  hint?: string;
+  onChange: (value: V) => void;
   disabled?: boolean;
 }
 
 /**
- * SegmentedControl (design language §4): two to five exclusive choices side by side. Native
- * radios in a `radiogroup` named by the label, so arrow keys move the choice and each choice
- * is a radio named by its own label. (A group element, not a fieldset, so no page's fieldset
- * rule restyles it.)
+ * SegmentedControl (design language §4): two to five exclusive choices side by side (Base UI
+ * RadioGroup: a radio group to a screen reader, arrow keys move the choice). The chosen segment
+ * is drawn in the accent, as a selection.
  */
-export function SegmentedControl<V extends string>({
-  label,
-  value,
-  options,
-  onValueChange,
-  hint,
-  disabled,
-}: SegmentedControlProps<V>) {
-  const id = React.useId();
+export function SegmentedControl<V extends string>({ label, value, options, onChange, disabled }: SegmentedControlProps<V>) {
+  // Inside a Field the Field's label names the group (and is the one shown), and its help
+  // describes it; alone, the control shows and carries its own label.
+  const { labelId, describedBy } = useFieldControl();
   return (
     <div className="flex min-w-0 flex-col gap-1 text-sm text-label">
-      <span id={`${id}-label`}>{label}</span>
-      <span
-        role="radiogroup"
-        aria-labelledby={`${id}-label`}
-        aria-describedby={hint ? `${id}-hint` : undefined}
-        aria-disabled={disabled || undefined}
-        className="inline-flex w-fit flex-wrap overflow-hidden rounded-input border border-line-input"
+      {labelId ? null : <span aria-hidden="true">{label}</span>}
+      <RadioGroup
+        aria-label={labelId ? undefined : label}
+        aria-labelledby={labelId}
+        aria-describedby={describedBy}
+        value={value}
+        disabled={disabled}
+        onValueChange={(next) => onChange(next as V)}
+        className="inline-flex w-fit overflow-hidden rounded-input border border-line-input"
       >
         {options.map((option) => (
-          <label
+          <Radio.Root
             key={option.value}
+            value={option.value}
             className={cn(
-              "relative cursor-pointer px-3 py-1.5 text-text",
-              "not-first:border-l not-first:border-line-input",
-              "has-checked:bg-accent has-checked:text-on-accent",
-              "has-focus-visible:outline-2 has-focus-visible:-outline-offset-2 has-focus-visible:outline-focus",
-              "has-disabled:cursor-not-allowed has-disabled:opacity-60",
+              "cursor-pointer border-0 border-l border-line-input bg-surface-input px-3 py-1.5 first:border-l-0",
+              "font-sans text-sm text-text",
+              "focus-visible:relative focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
+              "data-checked:bg-accent data-checked:text-on-accent",
+              "data-disabled:cursor-not-allowed data-disabled:opacity-60",
             )}
           >
-            <input
-              type="radio"
-              className="absolute inset-0 m-0 cursor-pointer opacity-0"
-              name={id}
-              value={option.value}
-              checked={option.value === value}
-              disabled={disabled}
-              onChange={() => onValueChange(option.value)}
-            />
             {option.label}
-          </label>
+          </Radio.Root>
         ))}
-      </span>
-      {hint ? <span id={`${id}-hint`} className="text-xs text-muted">{hint}</span> : null}
+      </RadioGroup>
     </div>
   );
 }

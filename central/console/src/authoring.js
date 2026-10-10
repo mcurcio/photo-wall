@@ -124,6 +124,17 @@ export const ENDINGS = Object.freeze(["none", "black", "fade"]);
  * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
  * together (#65).
  */
+export const SETTING_RANGES = Object.freeze({
+  fadeSeconds: Object.freeze({ min: 0, max: 5, step: 0.5 }),
+  endingSeconds: Object.freeze({ min: 0.5, max: 10, step: 0.5 }),
+});
+
+/** Whether `value` is one the setting's slider can show exactly (in range, on a step). */
+export function inRange(value, { min, max, step }) {
+  const number = Number(value);
+  return number >= min && number <= max && Number.isInteger((number - min) / step);
+}
+
 export const SCENE_SETTING_DEFAULTS = Object.freeze({
   fadeSeconds: 1.5,
   ending: "none",
@@ -165,6 +176,13 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
       message: `${PLAYBACK_LABELS.fade} must be no longer than ${PLAYBACK_LABELS.cycle}.`,
     });
   }
+  if (draft.ending === "fade" && Number(draft.endingSeconds) < Number(draft.fadeSeconds) / 2) {
+    // "Fades out" brings the last photo back over half the fade, inside the ending.
+    problems.push({
+      field: "endingSeconds",
+      message: `${PLAYBACK_LABELS.endingSeconds} must be at least half of ${PLAYBACK_LABELS.fade}.`,
+    });
+  }
   if (draft.mode === "authored") {
     for (const frameId of draft.targets) {
       if (draft.selections[frameId]) {
@@ -200,7 +218,8 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  *   the other half (every body Contribution's `fade_out_seconds` and `fade_in_seconds`);
  * - `ending` and `endingSeconds` (#62, #63): the outro. "black" is one opaque black
  *   Contribution per Frame; "fade" is one more media Contribution per Frame, from the same
- *   photos, fading out over the whole outro;
+ *   photos: the last photo returns over half the fade between photos, then fades out over
+ *   the rest of the outro (so `endingSeconds` must be at least half the fade);
  * - `keepLastPhoto` (#64): every body Contribution's `retain_on_expiry`;
  * - `keepTogether` (#65): the Scene's `protect_frames`.
  *
@@ -243,7 +262,8 @@ export function buildSave(
     scene.outro_contributions = targetIds.map((frameId) => (ending === "black"
       ? { target: toTarget(frameId), role: frameId, kind: "black" }
       : { target: toTarget(frameId), role: frameId, kind: "media", ...media(frameId),
-          fade_out_seconds: seconds }));
+          ...(half > 0 ? { fade_in_seconds: half } : {}),
+          fade_out_seconds: seconds - half }));
   }
   if (keepTogether) {
     scene.protect_frames = true;
@@ -292,7 +312,7 @@ export const CONTRIBUTION_DEFAULTS = {
 
 export const UNAUTHORABLE_REASON =
   "Uses features the console can't edit yet (child Scenes, see-through photos, " +
-  "or different settings per Frame).";
+  "different settings per Frame, or values outside its ranges).";
 
 /** A Scene with every omitted Scene and Contribution field at its model default. */
 export function normalizeScene(scene) {
@@ -371,6 +391,12 @@ export function decodeScene(scene) {
  */
 export function editableDraft(scene) {
   const draft = decodeScene(scene);
+  // A value the sliders cannot show exactly (a 12 s ending, a 1.3 s fade) would be moved by
+  // the first touch, so such a Scene is not the console's to edit.
+  if (!inRange(draft.fadeSeconds, SETTING_RANGES.fadeSeconds)
+      || (draft.ending !== "none" && !inRange(draft.endingSeconds, SETTING_RANGES.endingSeconds))) {
+    return null;
+  }
   const { body } = buildSave(draft.mode, { ...draft, sceneId: scene.scene_id });
   const rebuilt = draft.mode === "authored" ? body.scene : body;
   const comparable = (value) => canonical({ ...normalizeScene(value), revision: 0 });

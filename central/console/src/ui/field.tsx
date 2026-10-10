@@ -3,160 +3,106 @@ import * as React from "react";
 import { cn } from "./cn";
 
 /*
- * Form fields: a label over one native control, in the console's input style. The label (and
- * only the label) is the control's accessible name; a `hint` below it is its description.
+ * Field (design language §4): one control with its label, a help line and an error. The Field
+ * owns the wiring: its label names the control, and the help and the error describe it
+ * (`aria-describedby`). The control is the Field's one child (Slider, Select, Switch,
+ * NumberInput), which reads the wiring from the Field's context, as Base UI's Field does for
+ * its own controls; these are native inputs, so the console keeps a small context of its own.
  */
 
-const control = cn(
+interface FieldWiring {
+  id: string;
+  describedBy: string | undefined;
+  invalid: boolean;
+  /** The Field's label element, for a control that is a group rather than one input
+   * (SegmentedControl); undefined outside a Field. */
+  labelId: string | undefined;
+}
+
+const FieldContext = React.createContext<FieldWiring | null>(null);
+
+/** The wiring of the Field a control sits in; a control outside a Field gets its own id. */
+export function useFieldControl(): FieldWiring {
+  const fallback = React.useId();
+  return React.useContext(FieldContext)
+    ?? { id: fallback, describedBy: undefined, invalid: false, labelId: undefined };
+}
+
+/** The look every text-like control shares (an input, a select). */
+export const controlClass = cn(
   "min-w-0 rounded-input border border-line-input bg-surface-input px-3 py-1.5",
   "font-sans text-sm text-text",
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
-  "disabled:cursor-not-allowed disabled:opacity-60",
+  "disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-alarm",
 );
 
-/** A field's control id, and its hint's id (the control's `aria-describedby`) if it has one. */
-function useField(hint?: string) {
-  const id = React.useId();
-  return { id, describedBy: hint ? `${id}-hint` : undefined };
-}
-
-interface FieldLabelProps {
-  id: string;
+export interface FieldProps {
+  /** The control's visible name and its accessible one. */
   label: string;
-  hint?: string;
-  children: React.ReactNode;
+  /** One plain sentence under the control. */
+  help?: string;
+  /** What is wrong with the value, in words; the control is marked invalid. */
+  error?: string;
+  /** Short facts on one line under the help, which also describe the control (a setting's
+   * default, where it acts). */
+  notes?: readonly string[];
+  /** The control. */
+  children: React.ReactElement;
 }
 
-function FieldLabel({ id, label, hint, children }: FieldLabelProps) {
+/** Field: a label over one control, with its help line, its notes and its error. */
+export function Field({ label, help, error, notes = [], children }: FieldProps) {
+  const id = React.useId();
+  const helpId = help ? `${id}-help` : null;
+  const notesId = notes.length > 0 ? `${id}-notes` : null;
+  const errorId = error ? `${id}-error` : null;
+  const describedBy = [helpId, notesId, errorId].filter(Boolean).join(" ") || undefined;
+  const labelId = `${id}-label`;
   return (
     <div className="flex min-w-0 flex-col gap-1 text-sm text-label">
-      <label htmlFor={id}>{label}</label>
-      {children}
-      {hint ? <span id={`${id}-hint`} className="text-xs text-muted">{hint}</span> : null}
+      <label id={labelId} htmlFor={id}>{label}</label>
+      <FieldContext.Provider value={{ id, describedBy, invalid: Boolean(error), labelId }}>
+        {children}
+      </FieldContext.Provider>
+      {help ? <span id={helpId!} className="text-xs text-muted">{help}</span> : null}
+      {notesId ? (
+        <span id={notesId} className="flex flex-wrap gap-x-3 text-xs text-muted">
+          {notes.map((note) => <span key={note}>{note}</span>)}
+        </span>
+      ) : null}
+      {error ? <span id={errorId!} className="text-xs font-medium text-text">{error}</span> : null}
     </div>
   );
 }
 
-export interface NumberFieldProps {
-  label: string;
+export interface NumberInputProps {
   value: number | string;
-  onValueChange: (value: string) => void;
+  /** What is typed, as typed: the caller parses and validates it. */
+  onChange: (value: string) => void;
   min?: number;
   max?: number;
   step?: number | "any";
-  /** A unit or a word on what is typed ("px", "%"): the field's description. */
-  hint?: string;
   disabled?: boolean;
   autoFocus?: boolean;
 }
 
-/** NumberField: a labelled number input; the caller parses and validates what is typed. */
-export function NumberField({ label, value, onValueChange, min, max, step, hint, disabled, autoFocus }: NumberFieldProps) {
-  const { id, describedBy } = useField(hint);
+/** NumberInput: a number typed in a Field. */
+export function NumberInput({ value, onChange, min, max, step, disabled, autoFocus }: NumberInputProps) {
+  const { id, describedBy, invalid } = useFieldControl();
   return (
-    <FieldLabel id={id} label={label} hint={hint}>
-      <input
-        id={id}
-        aria-describedby={describedBy}
-        type="number"
-        className={cn(control, "w-28")}
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        disabled={disabled}
-        autoFocus={autoFocus}
-        onChange={(event) => onValueChange(event.target.value)}
-      />
-    </FieldLabel>
-  );
-}
-
-export interface SelectFieldProps {
-  label: string;
-  value: string;
-  options: readonly { value: string; label: string }[];
-  onValueChange: (value: string) => void;
-  disabled?: boolean;
-}
-
-/** SelectField: a labelled native select. */
-export function SelectField({ label, value, options, onValueChange, disabled }: SelectFieldProps) {
-  const { id } = useField();
-  return (
-    <FieldLabel id={id} label={label}>
-      <select
-        id={id}
-        className={cn(control, "w-48")}
-        value={value}
-        disabled={disabled}
-        onChange={(event) => onValueChange(event.target.value)}
-      >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-    </FieldLabel>
-  );
-}
-
-export interface RangeFieldProps {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onValueChange: (value: number) => void;
-  /** How the value reads beside the slider ("120 %"). */
-  valueText: string;
-  hint?: string;
-  disabled?: boolean;
-}
-
-/** RangeField: a labelled slider with its value in words beside it. */
-export function RangeField({ label, value, min, max, step, onValueChange, valueText, hint, disabled }: RangeFieldProps) {
-  const { id, describedBy } = useField(hint);
-  return (
-    <FieldLabel id={id} label={label} hint={hint}>
-      <span className="flex min-w-0 items-center gap-3">
-        <input
-          id={id}
-          aria-describedby={describedBy}
-          type="range"
-          className="w-64 max-w-full accent-accent"
-          value={value}
-          min={min}
-          max={max}
-          step={step}
-          disabled={disabled}
-          aria-valuetext={valueText}
-          onChange={(event) => onValueChange(Number(event.target.value))}
-        />
-        <span aria-hidden="true" className="text-text tabular-nums">{valueText}</span>
-      </span>
-    </FieldLabel>
-  );
-}
-
-export interface CheckboxFieldProps {
-  label: string;
-  checked: boolean;
-  onCheckedChange: (checked: boolean) => void;
-  disabled?: boolean;
-}
-
-/** CheckboxField: a checkbox with its label beside it. */
-export function CheckboxField({ label, checked, onCheckedChange, disabled }: CheckboxFieldProps) {
-  return (
-    <label className="inline-flex items-center gap-2 text-sm text-label">
-      <input
-        type="checkbox"
-        className="accent-accent"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onCheckedChange(event.target.checked)}
-      />
-      {label}
-    </label>
+    <input
+      id={id}
+      aria-describedby={describedBy}
+      aria-invalid={invalid || undefined}
+      type="number"
+      className={cn(controlClass, "w-28")}
+      value={value}
+      min={min}
+      max={max}
+      step={step}
+      disabled={disabled}
+      autoFocus={autoFocus}
+      onChange={(event) => onChange(event.target.value)}
+    />
   );
 }

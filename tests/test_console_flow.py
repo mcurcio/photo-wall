@@ -216,6 +216,15 @@ out.authoredBack = pick(authoring.editableDraft(hands));
 // Unequal fades (or a setting that differs per Frame) are not the console's: Edit is withheld.
 out.unequal = authoring.editableDraft({ ...live, contributions: [
   { ...live.contributions[0], fade_in_seconds: 1 }] });
+// Values the sliders cannot show exactly are not the console's either (no silent snapping).
+const stretched = (fade, ending) => authoring.buildSave("live", { sceneId: "evening",
+  sourceRef: "holiday:1", targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings,
+  fadeSeconds: fade, endingSeconds: ending }).body;
+out.outOfRange = [stretched(3, 12), stretched(1.3, 4.5), stretched(6, 4.5), stretched(3, 4.5)]
+  .map((body) => authoring.editableDraft(body) !== null);
+// "Fades out" brings the last photo back over half the fade, inside the ending.
+out.endingProblem = authoring.sceneProblems({ ...hand, mode: "live", cycleSeconds: 20,
+  fadeSeconds: 3, ending: "fade", endingSeconds: 1 }, new Set()).map((p) => [p.field, p.message]);
 console.log(JSON.stringify(out));
 """
 
@@ -336,7 +345,7 @@ def test_flow_kit_and_scene_flow_shape():
     assert (body["outro_seconds"], body["protect_frames"]) == (4.5, True)
     assert body["outro_contributions"] == [{
         "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
-        "fade_out_seconds": 4.5}]
+        "fade_in_seconds": 1.5, "fade_out_seconds": 3}]  # back over half the fade, out over the rest
     assert out["authoredOutro"] == [{"target": "frame:lobby", "role": "lobby", "kind": "black"}]
     # ...and Edit reads each back.
     settings = {"fadeSeconds": 3, "ending": "fade", "endingSeconds": 4.5,
@@ -344,6 +353,10 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["liveBack"] == settings
     assert out["authoredBack"] == {**settings, "ending": "black"}
     assert out["unequal"] is None
+    # A 12 s ending, a 1.3 s fade or a 6 s fade would be snapped by the sliders: not editable.
+    assert out["outOfRange"] == [False, False, False, True]
+    assert out["endingProblem"] == [
+        ["endingSeconds", "Ending length must be at least half of Fade between photos."]]
 
 
 SOURCE_SCRIPT = r"""

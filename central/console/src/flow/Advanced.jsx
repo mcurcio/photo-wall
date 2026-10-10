@@ -6,7 +6,7 @@ import { ChevronIcon } from "../icons.jsx";
  * The values of a step that have a stated default (flow design §3 rule 1, §4;
  * presentational): a WAI-ARIA disclosure. The button is named "Advanced", carries
  * `aria-expanded` and `aria-controls`, and is described by `summary` (the values
- * inside, such as "Loop: on"), which stays visible while the panel is closed. The
+ * inside, such as "Loop: On"), which stays visible while the panel is closed. The
  * panel uses the `hidden` attribute, so closed values leave the accessibility tree;
  * Review lists them all the same.
  *

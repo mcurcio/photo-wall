@@ -26,7 +26,7 @@ export const Empty: Story = { args: { snapshot: { inventory: { read_at: 1000, pl
 
 /** One Pi's Health section. */
 export const Health: Story = { render: () => <HostHealthPanel hosts={HOSTS} deviceId="device-b" /> };
-/** A Frame's host link, as the Wall's Status facet shows it. */
+/** A Frame's host link, as the Frame page's Overview shows it. */
 export const HostLink: Story = {
   render: () => <HostHealthLink snapshot={SNAPSHOT} frameId="lobby-right" hosts={HOSTS} />,
 };

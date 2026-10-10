@@ -14,9 +14,9 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/schedule/new/<step>          {section: "schedule", flow: "new", step}
  *   #/schedule/<id>/edit/<step>    {section: "schedule", id, flow: "edit", step}
  *   #/wall/layout                  {section: "wall", mode: "layout"} Edit layout (console DDD §61)
- *   #/wall/frames/<id>/<facet>     {section: "wall", id, facet}
- *   #/wall/frames/<id>             {section: "wall", id, facet: "status"}: a Frame route with
- *                                  no facet opens Status (§61); never formatted
+ *   #/wall/frames/<id>/<tab>       {section: "wall", id, tab} one Frame's page at a tab
+ *   #/wall/frames/<id>             {section: "wall", id, tab: "overview"}: a Frame route with
+ *                                  no tab opens Overview; never formatted
  *   #/hardware                     {section: "hardware"} every Pi's health and link
  *   #/hardware?pi=<device-id>      {section: "hardware", pi} the list focused on one Pi (H2:
  *                                  focus lives only in the address)
@@ -28,14 +28,9 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/releases/update/<tag>[/try/<player-id>]/skip/<player-id>[/<player-id>…]  … and the
  *                                  Players the operator skipped in Keep's plan (Part E §25a)
  *   #/<section>                    {section} for every section but "players"
- *   #/wall/frames/<id>/commissioning  {section: "wall", id, facet: "calibration"}: the
- *                                  renamed facet's old bookmark (console DDD §19); never
- *                                  formatted
- *   #/wall/frames/<id>/nowshowing  {section: "wall", id, facet: "status"}: the Now-showing
- *                                  facet's old bookmark (console DDD §61); never formatted
  *
- * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Facets are
- * the Inspector's keys. Ids and steps are URI-encoded, so an id may hold any text.
+ * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Tabs are the
+ * Frame page's keys. Ids and steps are URI-encoded, so an id may hold any text.
  * Anything else parses to null, which the shell replaces with the landing route.
  *
  * `formatRoute` is the inverse: for every Route `r` it accepts,
@@ -44,9 +39,9 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *
  * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"attention"} Section
  * @typedef {"new"|"edit"|"show"|"update"} Flow
- * @typedef {"status"|"binding"|"calibration"} Facet
+ * @typedef {"overview"|"position"|"picture"|"hardware"} Tab
  * @typedef {"layout"} Mode
- * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, facet?: Facet,
+ * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, tab?: Tab,
  *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[],
  *            pi?: string}} Route
  *   `pi` is the Pi a Hardware list is focused on (its device id).
@@ -94,15 +89,11 @@ export const SECTIONS = Object.freeze([
   "attention",
 ]);
 
-/** The Inspector's facet keys, in its tab order (Inspector.jsx FACETS). */
-export const FACETS = Object.freeze(["status", "binding", "calibration"]);
+/** The Frame page's tabs, in their order (pages/frame-page.tsx). */
+export const TABS = Object.freeze(["overview", "position", "picture", "hardware"]);
 
-/** The facet a Frame opens on when nothing names one (console DDD §61, G3). */
-export const DEFAULT_FACET = "status";
-
-// Old facet names that parse to a current one, so their bookmarks keep working. No other
-// facet segment ever shipped, so there is no other alias.
-export const FACET_ALIASES = Object.freeze({ nowshowing: "status", commissioning: "calibration" });
+/** The tab a Frame page opens on when nothing names one. */
+export const DEFAULT_TAB = "overview";
 
 // The Wall's modes (`#/wall/<mode>`): Edit layout only.
 const WALL_MODES = new Set(["layout"]);
@@ -110,7 +101,7 @@ const WALL_MODES = new Set(["layout"]);
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "facet", "mode", "initialTarget", "tried", "skipped", "pi"];
+const KEYS = ["section", "id", "flow", "step", "tab", "mode", "initialTarget", "tried", "skipped", "pi"];
 
 // The sections that are only ever one instance's page: no route names the section alone.
 const INSTANCE_ONLY = new Set(["players"]);
@@ -159,11 +150,10 @@ export function parseRoute(hash) {
     return { section, mode: rest[0] };
   }
   if (section === "wall" && rest.length === 2 && rest[0] === "frames") {
-    return { section, id: rest[1], facet: DEFAULT_FACET };
+    return { section, id: rest[1], tab: DEFAULT_TAB };
   }
-  if (section === "wall" && rest.length === 3 && rest[0] === "frames") {
-    const facet = Object.hasOwn(FACET_ALIASES, rest[2]) ? FACET_ALIASES[rest[2]] : rest[2];
-    if (FACETS.includes(facet)) return { section, id: rest[1], facet };
+  if (section === "wall" && rest.length === 3 && rest[0] === "frames" && TABS.includes(rest[2])) {
+    return { section, id: rest[1], tab: rest[2] };
   }
   if ((section === "players" || section === "hardware") && rest.length === 1) {
     return { section, id: rest[0] };
@@ -218,17 +208,17 @@ function updateRoute(id, tail) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, facet, mode, initialTarget, tried, skipped, pi } = route ?? {};
+  const { section, id, flow, step, tab, mode, initialTarget, tried, skipped, pi } = route ?? {};
   if (initialTarget !== undefined &&
-      (section !== "scenes" || flow !== "new" || facet !== undefined ||
+      (section !== "scenes" || flow !== "new" || tab !== undefined ||
         !FRAME_ID_PATTERN.test(initialTarget))) {
     throw new Error(`not a console route: ${JSON.stringify(route)}`);
   }
   let parts;
   if (mode !== undefined) {
     parts = [section, mode];
-  } else if (facet !== undefined) {
-    parts = [section, "frames", id, facet];
+  } else if (tab !== undefined) {
+    parts = [section, "frames", id, tab];
   } else if (flow === "edit") {
     parts = [section, id, "edit", step];
   } else if (flow === "update") {

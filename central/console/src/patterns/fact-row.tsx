@@ -60,7 +60,8 @@ export function FactGroup({ title, children }: FactGroupProps) {
   );
 }
 
-/** Note: a plain line beside a page's facts (a read time, a read that failed). */
-export function Note({ children }: { children: React.ReactNode }) {
-  return <p className="m-0 mt-1 text-sm text-muted">{children}</p>;
+/** Note: a plain line beside a page's facts (a read time, a read that failed); `live` reads it
+ * out when it changes (a status line). */
+export function Note({ children, live = false }: { children: React.ReactNode; live?: boolean }) {
+  return <p role={live ? "status" : undefined} className="m-0 mt-1 text-sm text-muted">{children}</p>;
 }

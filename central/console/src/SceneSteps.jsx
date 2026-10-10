@@ -208,11 +208,6 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
   );
 }
 
-/** The loop value in words, as Advanced's summary and Review say it. */
-function loopWords(loop) {
-  return loop ? "on" : "off";
-}
-
 /**
  * Step 4, Playback: "Seconds per cycle" (default 30) and "Fade between photos"; how the
  * Scene ends; under Advanced, "Keep playing until the Program ends" (default on), "Keep
@@ -222,9 +217,9 @@ function loopWords(loop) {
  */
 export function PlaybackStep({ value, patch, problems, advanced }) {
   const summary = [
-    `Loop: ${loopWords(value.loop)}`,
-    `${PLAYBACK_LABELS.keepLastPhoto}: ${loopWords(value.keepLastPhoto)}`,
-    `${PLAYBACK_LABELS.keepTogether}: ${loopWords(value.keepTogether)}`,
+    `Loop: ${onOff(value.loop)}`,
+    `${PLAYBACK_LABELS.keepLastPhoto}: ${onOff(value.keepLastPhoto)}`,
+    `${PLAYBACK_LABELS.keepTogether}: ${onOff(value.keepTogether)}`,
   ].join(" · ");
   return (
     <>

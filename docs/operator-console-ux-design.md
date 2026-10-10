@@ -62,6 +62,22 @@ sold.
 > hardware ("Display" survives only in Display Host). The tier and Commissioning
 > text below is kept as the record of the 2026-09-13 gate, not as current design.
 
+> **One page per Frame (2026-10-09).** The owner, 2026-10-09: "I cant find some of the simple
+> config knobs, like how do i set the visible frame position on a display? ... how do i change
+> the brightness and contrast?" The Frame Inspector and its Status · Binding · Calibration
+> facets are replaced by **one Frame page** (`#/wall/frames/<id>/<tab>`,
+> `pages/frame-page.tsx`), opened with one click on a Frame's tile: **Overview** (the former
+> Status), **Position** (corners, nudges in 1, 10 or 50 pixel steps, trims, rotation), **Picture**
+> (Brightness — Photo Wall picture adjustment, the former SDR gain) and **Hardware** (the former
+> Binding, and the Frame profile). Position and Picture show each change on the Display while
+> the tab is open and offer **Done** once the Pi has shown the latest change, and **Revert**;
+> the live session no longer times out while the tab is open (`liveAdjustment.js`, Central's
+> `keepalive`, and `renew`, which hands a session over at the draft in one step; the draft
+> carries the saved revision it was made from, so a save made elsewhere is never overwritten). A Pi without Display Host cannot adjust live and is told so; the 30-second
+> preview path is no longer offered by the console. The old facet addresses are gone (no
+> aliases). How to use it: the [runbook](runbook.md#operator-console-calibration-and-conflict-states).
+> The facet text below is kept as the record of its gate, not as current design.
+
 > **Fleet releases and the V2-only console (2026-10-02).** [Part E of the
 > domain-driven console design](operator-console-ddd.md#24-what-part-e-covers-and-why)
 > owns these screens. The console assumes node control: when Central runs without
