@@ -88,14 +88,16 @@ One home for one spot on the wall, and the page every Home tile, Frames row and 
 
 **Header:** the Frame name (editable inline), its Wall and room, the status word, a live view of what the Pi is presenting (labelled as that, never "on screen"), what is playing and until when, and the buttons **Identify** and **Skip**.
 
-| Tab | What it holds | Saves |
-|---|---|---|
-| **Overview** | Today's timeline for this Frame with a now line; Why this is playing; its Groups; recent problems; anything unfinished in its setup | nothing to save |
-| **Position** | The display shows a test pattern with the Frame name, edges, corner positions and actual output mode. Drag four corners, or nudge with arrow keys in 1, 10 or 50 pixel steps; rotation 0/90/180/270 (which sets the orientation); crop per edge; Reset to full screen. No session timeout while the tab is open. | Live, then **Done** or **Revert**; Done unlocks only when the Pi confirms the display shows the latest change |
-| **Picture** | Brightness, contrast, colour temperature (warm, 6500 K, cool), gamma (2.2), Show grey ramp, Copy to other Frames… The values belong to the display and say so ("These settings belong to the display (Samsung 55", serial …4K2) and move with it"). Each slider says where it acts: **On the display** (DDC/CI) or **Photo Wall picture adjustment**. | Live, then Done or Revert |
-| **Power** | Power method: HDMI-CEC, DDC/CI, HDMI signal off (the panel sleeps) or a smart plug through Home Assistant, the detected one chosen. **Test: turn off / turn on**, reading "Display confirmed off" or "Display didn't answer". Switch the display to this input on power-on (on). Never power off while the display shows another input (on). Then, read-only: "Now on · next off 23:00, set by Schedule › Power lane", and any hold ("Off — by Home Assistant (Away mode)"). | Autosave with Undo; when displays are on is not set here |
-| **Photo fit** | Use the Scene's setting, or override it for this Frame; minimum quality (strict, per [compatibility](requirements.md#live-media-compatibility-and-preparation)); what was skipped here and why ("312 too small · 1,204 wrong orientation"), each clickable | Autosave with Undo |
-| **Hardware** | The Frame's display profile (size, resolution, detected with an override); the Display (model, serial, HDMI mode); "Fed by Pi pw-3f2a · HDMI 1" with **Replace with…**; when a different display appears, the [display-changed flow](#6-display-identity) | Autosave with Undo |
+| Tab | What it holds |
+|---|---|
+| **Overview** | Today's timeline for this Frame with a now line; Why this is playing; its Groups; recent problems; anything unfinished in its setup |
+| **Position** | The display shows a test pattern with the Frame name, edges, corner positions and actual output mode. Drag four corners, or nudge with arrow keys in 1, 10 or 50 pixel steps; rotation 0/90/180/270 (which sets the orientation); crop per edge; Reset to full screen. No session timeout while the tab is open. |
+| **Picture** | Brightness, contrast, colour temperature (warm, 6500 K, cool), gamma (2.2), Show grey ramp, Copy to other Frames… The values belong to the display and say so ("These settings belong to the display (Samsung 55", serial …4K2) and move with it"). Each slider says where it acts: **On the display** (DDC/CI) or **Photo Wall picture adjustment**. |
+| **Power** | Power method: HDMI-CEC, DDC/CI, HDMI signal off (the panel sleeps) or a smart plug through Home Assistant, the detected one chosen. **Test: turn off / turn on**, reading "Display confirmed off" or "Display didn't answer". Switch the display to this input on power-on (on). Never power off while the display shows another input (on). Then, read-only: "Now on · next off 23:00, set by Schedule › Power lane", and any hold ("Off — by Home Assistant (Away mode)"). When displays are on is not set here. |
+| **Photo fit** | Use the Scene's setting, or override it for this Frame; minimum quality (strict, per [compatibility](requirements.md#live-media-compatibility-and-preparation)); what was skipped here and why ("312 too small · 1,204 wrong orientation"), each clickable |
+| **Hardware** | The Frame's display profile (size, resolution, detected with an override); the Display (model, serial, HDMI mode); "Fed by Pi pw-3f2a · HDMI 1" with **Replace with…**; when a different display appears, the [display-changed flow](#6-display-identity) |
+
+How each tab saves is assigned in the [design language's concept → UX table](design-language.md#8-concept--ux-translation) (rows B4, B5, B6, D3, G4); the models themselves are its [save models](design-language.md#save-models).
 
 **Unbound Frame:** every tab shows, and Position, Picture and Power say "Choose which Pi and HDMI port feeds this Frame" with a picker. Binding happens only here (unchanged from 0018).
 
