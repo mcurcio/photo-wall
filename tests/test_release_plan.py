@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from contracts.release import IMAGES
-from scripts import build_node_manager_deb as node_manager_deb
 from scripts import release_plan
 from scripts.module_closure import POLICIES, closure_for, first_party_packages
 from scripts.release_plan import (
@@ -124,7 +123,7 @@ def test_a_package_change_with_fix_releases_a_patch(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.8.1", "PATCH", "commitizen")
     assert plan.since == "v0.8.0"
-    assert {"player-deb", "player-environment", "central-image"} <= set(plan.packages)
+    assert {"node-debs", "release-roots", "central-image"} <= set(plan.packages)
     assert set(RELEASE_JOBS) <= set(ReleaseRun(plan).jobs)
 
 
@@ -258,17 +257,18 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     # The report: what merging releases.
-    assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, player-deb, "
-            "player-environment, increment: MINOR (commitizen), from commits: 2 "
+    assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, node-debs, "
+            "release-roots, increment: MINOR (commitizen), from commits: 2 "
             "since v0.8.0)") in summary.read_text()
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
     assert values["revision"] == scratch.git("rev-parse", "HEAD")
     assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
         "false", "", "", "")
-    # The Player is the sealed environment the node scenarios boot.
-    assert json.loads(values["jobs"]) == ["checks", "e2e", "node-pid1"]
-    assert "Jobs: checks, e2e, node-pid1\n" in summary.read_text()
+    # The Player is a binary package of the one source package the base build installs from,
+    # and the app root the node scenarios boot.
+    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "node-pid1"]
+    assert "Jobs: base-image, checks, e2e, node-pid1\n" in summary.read_text()
 
 
 @needs_uvx
@@ -564,24 +564,13 @@ def test_no_path_is_both_shipped_and_declared_unshipped():
     assert [path for path in _tracked() if claimed_by(path) and _not_shipped(path)] == []
 
 
-@pytest.mark.parametrize("policy, packages", [("initrd", ["base-bundle"]),
-                                              ("player", ["player-deb"])])
+@pytest.mark.parametrize("policy, packages", [("initrd", ["base-bundle"])])
 def test_every_computed_closure_file_is_claimed_by_its_package(policy, packages):
     files = [path.as_posix() for path in closure_for(POLICIES[policy]).files]
     assert files
     for name in packages:
         package = next(package for package in PACKAGES if package.name == name)
         assert [path for path in files if not package.claims(path)] == [], name
-
-
-@pytest.mark.parametrize("policies, package", [((node_manager_deb.POLICY,), "node-manager-deb")])
-def test_every_node_deb_closure_file_is_claimed_by_its_package(policies, package):
-    """The node .debs stage their import closures (uplink included), so each closure file is an
-    input of the package: a change to it releases that .deb."""
-    claimer = next(each for each in PACKAGES if each.name == package)
-    files = [path.as_posix() for policy in policies for path in closure_for(policy).files]
-    assert files
-    assert [path for path in files if not claimer.claims(path)] == []
 
 
 def test_every_tree_file_a_debian_install_file_names_is_claimed_by_the_node_debs():
@@ -798,11 +787,6 @@ def _job(workflow: str, job: str) -> str:
                     flags=re.MULTILINE)[0]
 
 
-@pytest.mark.parametrize("builder, package", [("scripts/build_player_deb.py", "player-deb")])
-def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, package):
-    assert [path for path in _with_imports({builder}) if not _package(package).claims(path)] == []
-
-
 def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
@@ -816,11 +800,13 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
-    # The node components base-image.yml bakes and the seal ships are node-components.yml's.
+    # The node components base-image.yml bakes and the seal ships are node-components.yml's:
+    # the release roots (built, sealed and keyed there) and the writer, release-roots' inputs.
     components = _job("node-components.yml", "build")
-    assert ".venv/bin/python -m scripts.build_node_components" in components
-    assert [path for path in _with_imports({"scripts/build_node_components.py"})
-            if not _package("base-bundle").claims(path)] == []
+    assert "debian-packaging/build-root.sh" in components
+    assert ".venv/bin/python -m scripts.node_release_writer write" in components
+    roots = _with_imports({"scripts/seal_root.py", "scripts/node_release_writer.py"})
+    assert [path for path in roots if not _package("release-roots").claims(path)] == []
     # Stage 1's uplink on the device runtime runs in the debs job (decision 0014 §11).
     debs = _job("node-components.yml", "debs")
     assert "scripts/uplink_device_harness.py" in debs and "photo-wall-debian-builder" in debs

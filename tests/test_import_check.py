@@ -209,3 +209,63 @@ def test_the_repositorys_exemption_list_is_the_node_layers_ignore_lines():
     exempt = import_check.exemptions(REPO / "pyproject.toml")
     assert exempt and all(importer.startswith("appliance.") and imported.startswith("appliance.node.")
                           for importer, imported in exempt)
+
+
+# The release roots' packages (decision 0019): the Player, a launcher and a module package on
+# lib, beside a module-less sibling it loads by path (the frame client); the AppManager launcher.
+PLAYER_DEPENDS = {
+    "photo-wall-player": ("python3, photo-wall-lib (= ${pw-version:photo-wall-lib}),\n"
+                          " photo-wall-frame-client (= ${pw-version:photo-wall-frame-client})"),
+    "photo-wall-frame-client": "${shlibs:Depends}",
+    "photo-wall-app-manager": "python3, photo-wall-top (= ${pw-version:photo-wall-top})",
+}
+
+
+def launcher(path: tuple[str, ...], entry: str) -> str:
+    return f"import runpy, sys\nPATH: tuple[str, ...] = {path!r}\nENTRY: str = {entry!r}\n"
+
+
+def roots(tmp_path, *, player_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/player"),
+          player_source="import lib.wire\n",
+          manager_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/low",
+                        "/usr/lib/photo-wall/top")):
+    repo, staged = build(tmp_path, source={"player/__init__.py": "",
+                                           "player/service.py": player_source},
+                         depends=DEPENDS | PLAYER_DEPENDS)
+    player = staged / "photo-wall-player/usr/lib/photo-wall/player"
+    (player / "player").mkdir(parents=True)
+    for name in ("__init__.py", "service.py"):
+        (player / "player" / name).write_bytes((repo / "player" / name).read_bytes())
+    (player / "__main__.py").write_text(launcher(player_path, "player.service"))
+    (staged / "photo-wall-frame-client/usr/lib/photo-wall/frame-client").mkdir(parents=True)
+    manager = staged / "photo-wall-app-manager/usr/lib/photo-wall/app-manager"
+    manager.mkdir(parents=True)
+    (manager / "__main__.py").write_text(launcher(manager_path, "appliance.top.run"))
+    return import_check.check(repo=repo, staged=staged, control=tmp_path / "control",
+                              pyproject=tmp_path / "pyproject.toml", owner=OWNERS.get,
+                              roots_of=ROOTS.get)
+
+
+def test_the_release_roots_launchers_pass_with_their_reached_path(tmp_path):
+    """A root launcher's __main__.py is no module, its PATH is its entry's reach, and a sibling
+    that installs no module (the frame client) is not judged."""
+    assert roots(tmp_path) == []
+    assert set(import_check.launchers(tmp_path / "staged")) == {"player", "app-manager"}
+
+
+def test_a_root_launcher_path_that_is_not_its_reach_is_refused(tmp_path):
+    refusals = roots(tmp_path, manager_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/top"))
+    assert kinds(refusals) == {("photo-wall-app-manager", "launcher-path",
+                                "/usr/lib/photo-wall/low (missing from PATH)", "app-manager")}
+
+
+def test_the_app_root_holds_no_node_context(tmp_path):
+    """The Player reaching an appliance context: its PATH names the context's directory, which
+    the app root never holds, and which the Player's Depends do not give it."""
+    refusals = roots(tmp_path, player_source="import lib.wire\nimport appliance.low.core\n",
+                     player_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/low",
+                                  "/usr/lib/photo-wall/player"))
+    assert ("photo-wall-player", "launcher-path",
+            "/usr/lib/photo-wall/low (a Node context in the app root)", "player") in kinds(refusals)
+    assert ("photo-wall-player", "undeclared-sibling", "appliance.low.core",
+            "player.service") in kinds(refusals)

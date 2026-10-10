@@ -1,4 +1,10 @@
-appliance/launchers/* usr/lib/photo-wall/node
+appliance/launchers/app-broker usr/lib/photo-wall/node
+appliance/launchers/display-controller usr/lib/photo-wall/node
+appliance/launchers/health-judge usr/lib/photo-wall/node
+appliance/launchers/host-core usr/lib/photo-wall/node
+appliance/launchers/manager-supervisor usr/lib/photo-wall/node
+appliance/launchers/node-bootstrap usr/lib/photo-wall/node
+appliance/launchers/root-import usr/lib/photo-wall/node
 appliance/bus/node-bus.conf usr/lib/photo-wall/node/bus
 appliance/systemd/photo-wall-node.target usr/lib/systemd/system
 appliance/systemd/photo-wall-*.service usr/lib/systemd/system

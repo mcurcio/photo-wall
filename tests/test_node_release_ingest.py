@@ -62,7 +62,7 @@ def node_upload(tag: str, *, revision: str = "a" * 40, salt: str = "", app: bool
     artifacts = tuple(NodeReleaseAssetV2(role, f"{role}.bin", sha256(data).hexdigest(), len(data))
                       for role, data in bodies.items())
     refs = {asset.role: asset for asset in artifacts}
-    manager = replace(environment("2", "photo-wall-node-manager"),
+    manager = replace(environment("2", "photo-wall-app-manager"),
                       environment_sha256=refs["manager-primary"].sha256,
                       size_bytes=refs["manager-primary"].size_bytes,
                       deb_sha256=refs["manager-primary-deb"].sha256)

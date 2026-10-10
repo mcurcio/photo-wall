@@ -12,7 +12,7 @@ and after a hub restart WALL is current on the Node and its leaf relinked). Hard
 (sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
 DRM/HDMI/PXE claim.
 
-Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a scripts/build_node_pid1_fixture.py output. Without
+Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a tests/node_pid1_fixture/build.sh output. Without
 it these tests skip, unless PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 (the node-pid1 CI job), where
 they fail. Each test removes its own containers, database and archive copies.
 """
@@ -113,7 +113,7 @@ def node_pid1_inputs():
         if os.environ.get(REQUIRE_VARIABLE) == "1":
             pytest.fail(f"{REQUIRE_VARIABLE}=1 but {FIXTURE_VARIABLE} is unset", pytrace=False)
         pytest.skip(
-            f"set {FIXTURE_VARIABLE} (scripts/build_node_pid1_fixture.py) for the "
+            f"set {FIXTURE_VARIABLE} (tests/node_pid1_fixture/build.sh) for the "
             "real PID1 node scenarios; the node-pid1 CI job runs them"
         )
     root = Path(location).resolve(strict=True)

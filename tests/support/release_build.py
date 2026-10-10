@@ -3,7 +3,7 @@ pipeline's `images` job hand the packager (scripts/package_release_artifacts.py)
 (scripts/release_seal.py).
 
 The bundle is shaped like `scripts/build_netboot_bundle.sh`'s, the component set like
-`scripts/build_node_components.py`'s (stamped for REVISION), and each service image is a
+`scripts/node_release_writer.py`'s (stamped for REVISION), and each service image is a
 `<repository>@<digest>` reference.
 """
 
@@ -81,7 +81,7 @@ def node_components(root: Path, revision: str = REVISION) -> Path:
     components.mkdir(parents=True)
     abi = {"base_abi": "node-v2-test", "graphics_abi": "weston14-test", "plugin_abi": "frame-v2"}
     refs = {}
-    for role, name in (("manager-primary", "photo-wall-node-manager"), ("app", "photo-wall-player")):
+    for role, name in (("manager-primary", "photo-wall-app-manager"), ("app", "photo-wall-player")):
         deb = (role + "-deb").encode()
         archive = (role + "-root").encode()
         (components / (role + ".deb")).write_bytes(deb)

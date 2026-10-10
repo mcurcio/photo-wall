@@ -32,21 +32,29 @@ It exits 0 silently, or 1 with one line per refusal:
 `runtime_directories` is the package directories a program of a package needs on sys.path: its
 own, its photo-wall Depends' and the targets of its exempt edges, recursively.
 
-The composition, photo-wall-node, installs no module: it installs the launchers, one directory
-each under its own, /usr/lib/photo-wall/node/<launcher>/__main__.py, run as
-`python3 -I -B /usr/lib/photo-wall/node/<launcher>`. Each launcher declares two module-level
-literals, `ENTRY` (the module it runs as __main__) and `PATH` (the absolute directories it
-prepends to sys.path, sorted), read here with ast (`launchers`). The composition is judged by
-the launcher rule instead of the module rule:
+A *launcher package* installs programs (`LAUNCHERS`): the composition, photo-wall-node, one
+directory each under its own, /usr/lib/photo-wall/node/<launcher>/__main__.py, run as
+`python3 -I -B /usr/lib/photo-wall/node/<launcher>`; each release root's package (decision 0019,
+debian-packaging/build-root.sh), one at its own directory, /usr/lib/photo-wall/<name>/__main__.py,
+run as `python3 -I -B /usr/lib/photo-wall/<name>`: photo-wall-player (the app root) and
+photo-wall-app-manager (the manager root). A launcher's __main__.py is no module. Each launcher
+declares two module-level literals, `ENTRY` (the module it runs as __main__) and `PATH` (the
+absolute directories it prepends to sys.path, sorted), read here with ast (`launchers`). A
+launcher package is judged by the launcher rule, besides the module rule when it installs
+modules too (the Player):
 
 - PATH must be exactly `launcher_path(ENTRY)`: the package directories ENTRY's transitive
   closure reaches, over every edge, exempt ones included (a launcher runs the whole program).
   A PATH that differs either way, or a missing or non-literal constant, is `launcher-path`.
-- Each PATH directory's package must be one the composition Depends on at its exact version,
-  or the refusal is `undeclared-launcher-directory`.
-- Each photo-wall sibling the composition Depends on must lie on some launcher's PATH, or the
-  refusal is `unused-depends`. Its other Depends (systemd, udev, nats-server) are not judged:
-  no module of it imports anything.
+- Each PATH directory must be one of the package's `runtime_directories` (its own, its
+  photo-wall Depends' at their exact versions, recursively, and its exempt targets'), or the
+  refusal is `undeclared-launcher-directory`.
+- The app root holds no Node context: a PATH directory of photo-wall-player (`APP_ROOT`) whose
+  package installs an `appliance` module is `launcher-path`.
+- Each photo-wall sibling the package Depends on that installs a module must lie on some
+  launcher's PATH, or the refusal is `unused-depends`. A sibling that installs no module (the
+  frame client, a library loaded by path) and the other Depends that own no import root
+  (systemd, udev, nats-server, the render stack) are not judged.
 
 Build tooling: stdlib only, runs on the build root's python3.
 """
@@ -79,8 +87,16 @@ RefusalKind = Literal['undeclared-sibling', 'unowned-module', 'undeclared-provid
 PREFIX: Final = "photo-wall-"
 PRIVATE_ROOT: Final = PurePosixPath("/usr/lib/photo-wall")
 DIST_PACKAGES: Final = PurePosixPath("/usr/lib/python3/dist-packages")
-# The composition: the one package judged by the launcher rule, whose directory holds launchers.
+# The composition, whose directory holds the base's launchers, one subdirectory each.
 COMPOSITION: Final = "photo-wall-node"
+# The release roots' packages: one launcher each, at its directory (debian-packaging/build-root.sh).
+APP_ROOT: Final = "photo-wall-player"
+MANAGER_ROOT: Final = "photo-wall-app-manager"
+# Each launcher package -> where its launchers' __main__.py lie, as a glob under its directory.
+LAUNCHERS: Final = {COMPOSITION: "*/__main__.py", APP_ROOT: "__main__.py",
+                    MANAGER_ROOT: "__main__.py"}
+# The Node contexts' import root, which the app root never holds.
+NODE_CONTEXT: Final = "appliance"
 # The exemption list's one home: this contract of pyproject.toml's import-linter tables.
 EXEMPT_CONTRACT: Final = {"type": "layers", "containers": ["appliance"]}
 CONTROL: Final = "debian/control"
@@ -195,8 +211,8 @@ def installed_modules(staged: Path, packages: Iterable[str]) -> Mapping[str, str
         root = staged / package / directory(package).relative_to("/")
         for path in sorted(root.rglob("*.py")) if root.is_dir() else ():
             parts = path.relative_to(root).with_suffix("").parts
-            if not all(part.isidentifier() for part in parts):
-                continue    # no module: a launcher directory (root-import/__main__.py)
+            if not all(part.isidentifier() for part in parts) or parts == ("__main__",):
+                continue    # no module: a launcher (root-import/__main__.py, __main__.py)
             module = ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
             if module in owners:
                 raise ImportCheckError(f"{module} is installed by {owners[module]} and {package}")
@@ -274,9 +290,14 @@ def launcher_path(entry: str, *, edges: frozenset[Edge],
     return tuple(sorted({directory(installed[module]) for module in seen}))
 
 
-def _launcher_files(staged: Path) -> list[tuple[str, Path]]:
-    root = staged / COMPOSITION / directory(COMPOSITION).relative_to("/")
-    return sorted((path.parent.name, path) for path in root.glob("*/__main__.py"))
+def _launcher_files(staged: Path, package: str) -> list[tuple[str, Path]]:
+    """(name, __main__.py) of each launcher `package`'s staged tree installs, named by its own
+    directory. A launcher name is unique across packages, so the composition's launchers never
+    include one named like a release root's directory (`player`, `app-manager`)."""
+    root = staged / package / directory(package).relative_to("/")
+    roots = {directory(each).name for each in LAUNCHERS if each != COMPOSITION}
+    return sorted((path.parent.name, path) for path in root.glob(LAUNCHERS[package])
+                  if package != COMPOSITION or path.parent.name not in roots)
 
 
 def _literal(node: ast.expr | None, name: str, path: Path) -> object:
@@ -316,10 +337,12 @@ def _read_launcher(path: Path) -> tuple[str, tuple[str, ...]]:
 
 
 def launchers(staged: Path) -> Mapping[str, tuple[str, tuple[str, ...]]]:
-    """Each launcher the composition's staged tree installs, under
-    usr/lib/photo-wall/node/<launcher>/__main__.py -> (ENTRY, PATH), read with ast. Raises
-    ImportCheckError for a launcher whose constants are missing or not literals."""
-    return {name: _read_launcher(path) for name, path in _launcher_files(staged)}
+    """Each launcher the launcher packages' staged trees install (`LAUNCHERS`): the composition's
+    usr/lib/photo-wall/node/<launcher>/__main__.py and the release roots'
+    usr/lib/photo-wall/<name>/__main__.py, as launcher name -> (ENTRY, PATH), read with ast.
+    Raises ImportCheckError for a launcher whose constants are missing or not literals."""
+    return {name: _read_launcher(path) for package in LAUNCHERS
+            for name, path in _launcher_files(staged, package)}
 
 
 def _package_of(path: str) -> str | None:
@@ -328,37 +351,42 @@ def _package_of(path: str) -> str | None:
     return PREFIX + candidate.name if candidate.parent == PRIVATE_ROOT else None
 
 
-def _composition(staged: Path, siblings: frozenset[str], edges: frozenset[Edge],
-                 installed: Mapping[str, str]) -> set[Refusal]:
-    """The launcher rule's refusals for the composition (see the module docstring)."""
+def _launcher_rule(package: str, staged: Path, depends: Mapping[str, Declared],
+                   exempt: frozenset[Edge], edges: frozenset[Edge],
+                   installed: Mapping[str, str]) -> set[Refusal]:
+    """The launcher rule's refusals for one launcher package (see the module docstring)."""
     refusals: set[Refusal] = set()
+    allowed = {str(each) for each in runtime_directories(package, declared=depends,
+                                                         exempt=exempt, installed=installed)}
+    contexts = {str(directory(owner)) for module, owner in installed.items()
+                if module.partition(".")[0] == NODE_CONTEXT}
     on_path: set[str] = set()
-    for launcher, path in _launcher_files(staged):
+    for launcher, path in _launcher_files(staged, package):
         try:
             entry, declared_path = _read_launcher(path)
             expected = tuple(str(each) for each in launcher_path(entry, edges=edges,
                                                                   installed=installed))
         except ImportCheckError as error:
-            refusals.add(Refusal(COMPOSITION, "launcher-path", str(error), launcher))
+            refusals.add(Refusal(package, "launcher-path", str(error), launcher))
             continue
         for each in sorted(set(expected) - set(declared_path)):
-            refusals.add(Refusal(COMPOSITION, "launcher-path", f"{each} (missing from PATH)",
+            refusals.add(Refusal(package, "launcher-path", f"{each} (missing from PATH)",
                                  launcher))
         for each in sorted(set(declared_path) - set(expected)):
-            refusals.add(Refusal(COMPOSITION, "launcher-path", f"{each} (not reached)",
-                                 launcher))
+            refusals.add(Refusal(package, "launcher-path", f"{each} (not reached)", launcher))
         if set(declared_path) == set(expected) and declared_path != expected:
-            refusals.add(Refusal(COMPOSITION, "launcher-path", "PATH is not sorted and unique",
+            refusals.add(Refusal(package, "launcher-path", "PATH is not sorted and unique",
                                  launcher))
         for each in declared_path:
-            package = _package_of(each)
-            if package not in siblings:
-                refusals.add(Refusal(COMPOSITION, "undeclared-launcher-directory", each,
-                                     launcher))
-            elif package is not None:
-                on_path.add(package)
-    for sibling in sorted(siblings - on_path):
-        refusals.add(Refusal(COMPOSITION, "unused-depends", sibling, CONTROL))
+            if each not in allowed:
+                refusals.add(Refusal(package, "undeclared-launcher-directory", each, launcher))
+            elif (owner := _package_of(each)) is not None:
+                on_path.add(owner)
+            if package == APP_ROOT and each in contexts:
+                refusals.add(Refusal(package, "launcher-path",
+                                     f"{each} (a Node context in the app root)", launcher))
+    for sibling in sorted((depends[package].siblings & set(installed.values())) - on_path):
+        refusals.add(Refusal(package, "unused-depends", sibling, CONTROL))
     return refusals
 
 
@@ -386,8 +414,8 @@ def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
     providers: dict[str, str | None] = {}
     reached: dict[str, set[str]] = {package: set() for package in judged}
     edges = source_edges(repo, installed)
-    if COMPOSITION in depends:
-        refusals |= _composition(staged, depends[COMPOSITION].siblings, edges, installed)
+    for package in sorted(set(LAUNCHERS) & set(depends)):
+        refusals |= _launcher_rule(package, staged, depends, exempt, edges, installed)
     for edge in sorted(edges):
         importer, imported = edge
         package = installed.get(importer)
@@ -417,7 +445,7 @@ def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
                 reached[package].add(provider)
     roots: dict[str, frozenset[str] | None] = {}
     for package in judged:
-        for sibling in sorted(depends[package].siblings - reached[package]):
+        for sibling in sorted((depends[package].siblings & set(judged)) - reached[package]):
             refusals.add(Refusal(package, "unused-depends", sibling, CONTROL))
         for entry in sorted(depends[package].third_party - reached[package]):
             if entry not in roots:
@@ -433,11 +461,14 @@ def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
 
 # --- the build root: find_spec, dpkg -S, dpkg -L ------------------------------------------------
 
+# A regular package resolves to its __init__.py, whose one owner is the package's: a directory
+# several packages ship into (gi, which python3-gst-1.0 extends with gi/overrides) has many.
 _SPEC_PROBE: Final = """\
 import importlib.util, json, sys
 spec = importlib.util.find_spec(sys.argv[1])
 locations = list(spec.submodule_search_locations or ()) if spec else []
-print(json.dumps(locations[0] if locations else (spec.origin if spec else None)))
+origin = spec.origin if spec and spec.has_location else None
+print(json.dumps(origin or (locations[0] if locations else None)))
 """
 
 
@@ -447,8 +478,9 @@ def _dpkg(*args: str) -> str | None:
 
 
 def build_root_owner(root: str) -> str | None:
-    """The Debian package owning the file or directory find_spec resolves `root` to, asked of
-    this interpreter in isolation (no repository on its path), or None."""
+    """The Debian package owning the file find_spec resolves `root` to (a package's __init__.py),
+    or the directory of a namespace package, asked of this interpreter in isolation (no
+    repository on its path), or None."""
     probe = subprocess.run([sys.executable, "-I", "-B", "-c", _SPEC_PROBE, root], cwd="/",
                            capture_output=True, text=True, check=False)
     location = json.loads(probe.stdout) if probe.returncode == 0 else None
@@ -462,17 +494,22 @@ def build_root_owner(root: str) -> str | None:
 
 def build_root_roots(package: str) -> frozenset[str] | None:
     """The import roots `package` installs directly under /usr/lib/python3/dist-packages, or
-    None when the build root does not hold it."""
+    None when the build root does not hold it. A directory is its root when it ships the
+    directory's __init__.py, or the directory has none (a namespace package): a package that
+    only adds modules inside another's (python3-gst-1.0's gi/overrides) owns no root there."""
     if (listing := _dpkg("-L", package)) is None:
         return None
+    files = {line.strip() for line in listing.splitlines()}
     roots = set()
-    for line in listing.splitlines():
-        path = PurePosixPath(line.strip())
+    for line in sorted(files):
+        path = PurePosixPath(line)
         if path.parent != DIST_PACKAGES or path.suffix in (".pth", ".dist-info", ".egg-info"):
             continue
         if path.suffix in (".py", ".so"):
             roots.add(path.name.partition(".")[0])
-        elif not path.suffix and Path(path).is_dir() and path.name != "__pycache__":
+        elif (not path.suffix and Path(path).is_dir() and path.name != "__pycache__"
+              and (str(path / "__init__.py") in files
+                   or not Path(path / "__init__.py").exists())):
             roots.add(path.name)
     return frozenset(roots)
 

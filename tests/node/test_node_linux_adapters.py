@@ -2,10 +2,7 @@
 from __future__ import annotations
 
 import hashlib
-import io
-import json
 import os
-import tarfile
 from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
@@ -26,8 +23,6 @@ from appliance.kernel.boot_store import BootStore
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import reboot_digest
 from contracts.node_protocol import NodeProducerV2
-from scripts.build_app_environment import materialize
-from scripts.sealed_archive import stage_archive
 
 # A fixed replacement identity: a parameter value must be the same in every collection (xdist
 # workers each collect, and must agree).
@@ -95,7 +90,9 @@ def test_reboot_unknown_effect_cannot_repeat_after_service_restart(tmp_path):
     recovered.close()
 
 
-def fixture_archive(directory: Path, extra=None, *, deb_name: str = "player"):
+def fixture_root(directory: Path, *, deb_name: str = "player"):
+    """A sealed release root as the image's mount shows it (rootfs/ and the three metadata files),
+    and its reference, the digest and size placeholders standing for the image's."""
     source = directory / "source"
     root = source / "rootfs"
     root.mkdir(parents=True)
@@ -116,63 +113,10 @@ def fixture_archive(directory: Path, extra=None, *, deb_name: str = "player"):
     (source / "environment.json").write_bytes(canonical_bytes({"schema": 2, "format": FORMAT, "reference": fields, "files": inventory(root), "capacity": capacity(inventory(root))}))
     (source / "dependency-lock.json").write_bytes(lock)
     (source / "sources.json").write_bytes(snapshot)
-    archive = directory / "sealed.tar"
-    with tarfile.open(archive, "w", format=tarfile.GNU_FORMAT) as stream:
-        for path in sorted(source.rglob("*")):
-            stream.add(path, arcname=path.relative_to(source).as_posix(), recursive=False)
-        if extra is not None:
-            for member in extra if isinstance(extra, list) else [extra]:
-                stream.addfile(member)
-    return archive, replace(reference, environment_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), size_bytes=archive.stat().st_size)
-
-
-def test_environment_exact_staging_and_file_corruption_refusal(tmp_path):
-    archive, reference = fixture_archive(tmp_path)
-    roots = tmp_path / "roots"
-    roots.mkdir()
-    abi = dict(base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
-    target = stage_archive(archive, roots, reference, **abi)
-    assert verify_root(target, reference, **abi) == target / "rootfs"
-    (target / "rootfs/entry").write_text("corrupt")
-    with pytest.raises(ValueError, match="root_digest"):
-        stage_archive(archive, roots, reference, **abi)
-
-
-@pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE])
-def test_environment_rejects_links_and_special_members_before_publish(tmp_path, kind):
-    extra = tarfile.TarInfo("rootfs/escape")
-    extra.type, extra.linkname = kind, "../../../etc/passwd"
-    archive, reference = fixture_archive(tmp_path, extra)
-    roots = tmp_path / "roots"
-    roots.mkdir()
-    with pytest.raises(ValueError, match="archive_(member|link)|link_escape"):
-        stage_archive(archive, roots, reference, base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
-    assert list(roots.iterdir()) == []
-
-
-def test_materializer_preserves_absolute_loader_link_bytes_and_rejects_cycle(tmp_path):
-    archive = tmp_path / "root.tar"
-    with tarfile.open(archive, "w") as stream:
-        for name in ("usr", "usr/lib", "lib64"):
-            member = tarfile.TarInfo(name)
-            member.type = tarfile.DIRTYPE
-            stream.addfile(member)
-        data = tarfile.TarInfo("usr/lib/loader")
-        data.size, data.mode = 3, 0o755
-        stream.addfile(data, io.BytesIO(b"ELF"))
-        link = tarfile.TarInfo("lib64/ld.so")
-        link.type, link.linkname = tarfile.SYMTYPE, "/usr/lib/loader"
-        stream.addfile(link)
-    materialize(archive, tmp_path / "root")
-    assert (tmp_path / "root/lib64/ld.so").is_symlink()
-    assert os.readlink(tmp_path / "root/lib64/ld.so") == "/usr/lib/loader"
-    assert (tmp_path / "root/usr/lib/loader").read_bytes() == b"ELF"
-    with tarfile.open(archive, "w") as stream:
-        link = tarfile.TarInfo("cycle")
-        link.type, link.linkname = tarfile.SYMTYPE, "cycle"
-        stream.addfile(link)
-    with pytest.raises(ValueError, match="link_cycle"):
-        materialize(archive, tmp_path / "bad")
+    for path in (source, *source.rglob("*")):
+        if path.is_dir():
+            path.chmod(0o755)
+    return source, reference
 
 
 def test_node_base_units_have_no_boot_switch():
@@ -181,17 +125,6 @@ def test_node_base_units_have_no_boot_switch():
     assert NODE_UNITS and not any("ConditionKernelCommandLine" in path.read_text()
                                   for path in NODE_UNITS)
     assert not any(path.name.endswith(".d") for path in (REPO / "appliance/systemd").iterdir())
-
-
-def test_manager_package_has_executable_without_effect_closure(tmp_path):
-    from scripts.build_node_manager_deb import stage_tree as stage_manager
-    stage_manager(REPO, tmp_path / "package")
-    root = tmp_path / "package/usr/lib/photo-wall-node-manager"
-    assert (root / "entry").stat().st_mode & 0o111
-    assert (root / "appliance/node/manager_runner.py").exists()
-    for path in ("appliance/host/host.py", "appliance/host/host_linux.py", "appliance/apps/broker.py",
-                 "appliance/apps/process_linux.py"):
-        assert not (root / path).exists()
 
 
 def test_manager_no_fallback_exhausts_primary_once():
@@ -211,37 +144,6 @@ def test_manager_no_fallback_exhausts_primary_once():
     assert recovery.recover().fault == "manager_recovery_required"
     recovery.recover()
     assert launcher.calls == 1
-
-
-def test_stream_mutation_after_path_stat_never_publishes(tmp_path, monkeypatch):
-    from scripts import sealed_archive
-    archive, reference = fixture_archive(tmp_path)
-    roots = tmp_path / "roots"
-    roots.mkdir()
-    original = sealed_archive.os.open
-    def mutate_before_open(path, *args, **kwargs):
-        if path == archive:
-            data = bytearray(archive.read_bytes())
-            data[-1] = 1
-            archive.write_bytes(data)
-        return original(path, *args, **kwargs)
-    monkeypatch.setattr(sealed_archive.os, "open", mutate_before_open)
-    with pytest.raises(ValueError, match="digest_mismatch"):
-        stage_archive(archive, roots, reference, base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
-    assert not list(roots.iterdir())
-
-
-def test_link_parent_even_when_declared_after_child_never_publishes(tmp_path):
-    directory = tarfile.TarInfo("rootfs/alias/child")
-    directory.type = tarfile.DIRTYPE
-    link = tarfile.TarInfo("rootfs/alias")
-    link.type, link.linkname = tarfile.SYMTYPE, "/usr"
-    archive, reference = fixture_archive(tmp_path, [directory, link])
-    roots = tmp_path / "roots"
-    roots.mkdir()
-    with pytest.raises(ValueError, match="link_parent"):
-        stage_archive(archive, roots, reference, base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
-    assert not list(roots.iterdir())
 
 
 def test_safe_dangling_and_ancestor_alias_inventory_preserved(tmp_path):
@@ -267,7 +169,7 @@ def test_inventory_rejects_real_xattrs_but_accepts_unsupported_fs(tmp_path, monk
 
 def test_diskless_budget_deduplicates_exact_roots_and_refuses_small_memory(tmp_path):
     from appliance.kernel.capacity import GIB, MIB, admit_cold, cold_peak
-    _, reference = fixture_archive(tmp_path)
+    _, reference = fixture_root(tmp_path)
     reference = replace(reference, size_bytes=300 * MIB)
     # Each distinct image is held once: no unpack beside it, no second copy.
     assert cold_peak([reference, reference, None]) == 300 * MIB
@@ -320,84 +222,10 @@ def test_expected_process_root_is_pinned_and_symlink_replacement_refused(tmp_pat
     assert not process_root_matches(tmp_path / "proc", 12, root)
 
 
-@pytest.mark.parametrize("mask", [0o022, 0o077])
-def test_environment_directory_policy_ignores_umask_and_preserves_private_wrapper(tmp_path, mask):
-    archive, reference = fixture_archive(tmp_path)
-    source = tmp_path / "source"
-    root = source / "rootfs"
-    host_target = tmp_path / "host-directory"
-    host_target.mkdir(mode=0o700)
-    (root / "link-only").mkdir()
-    (root / "link-only/absolute").symlink_to(host_target)
-    (root / "private-file").write_bytes(b"private")
-    (root / "private-file").chmod(0o600)
-    metadata = json.loads((source / "environment.json").read_text())
-    metadata.update(files=inventory(root), capacity=capacity(inventory(root)))
-    (source / "environment.json").write_bytes(canonical_bytes(metadata))
-    # Omit all explicit directories, including link-only and implicit parents.
-    implicit = tmp_path / "implicit.tar"
-    with tarfile.open(implicit, "w", format=tarfile.GNU_FORMAT) as target:
-        for path in sorted(source.rglob("*")):
-            if path.is_symlink() or not path.is_dir():
-                target.add(path, arcname=path.relative_to(source).as_posix(), recursive=False)
-    reference = replace(reference, environment_sha256=hashlib.sha256(implicit.read_bytes()).hexdigest(), size_bytes=implicit.stat().st_size)
-    roots = tmp_path / "roots"
-    roots.mkdir(mode=0o700)
-    abi = dict(base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
-    previous = os.umask(mask)
-    try:
-        target = stage_archive(implicit, roots, reference, **abi)
-    finally:
-        os.umask(previous)
-    assert target.stat().st_mode & 0o777 == 0o700
-    assert roots.stat().st_mode & 0o777 == 0o700
-    assert host_target.stat().st_mode & 0o777 == 0o700
-    assert os.readlink(target / "rootfs/link-only/absolute") == str(host_target)
-    assert (target / "rootfs/private-file").stat().st_mode & 0o777 == 0o600
-    assert (target / "rootfs/link-only").stat().st_mode & 0o777 == 0o755
-    for path in [target / "rootfs", target / "rootfs/usr", target / "rootfs/usr/bin"]:
-        assert path.stat().st_mode & 0o777 == 0o755
-    (target / "rootfs/usr").chmod(0o700)
-    with pytest.raises(ValueError, match="environment_directory_mode"):
-        stage_archive(implicit, roots, reference, **abi)
-    assert (target / "rootfs/usr").stat().st_mode & 0o777 == 0o700
-    (target / "rootfs/usr").chmod(0o777)
-    with pytest.raises(ValueError, match="environment_directory_mode"):
-        verify_root(target, reference, **abi)
-
-
-@pytest.mark.parametrize("mask", [0o022, 0o077])
-def test_materializer_implicit_directory_modes_and_no_follow_links(tmp_path, mask):
-    host_target = tmp_path / "host-directory"
-    host_target.mkdir(mode=0o700)
-    archive = tmp_path / "root.tar"
-    with tarfile.open(archive, "w") as stream:
-        data = tarfile.TarInfo("private/implicit/file")
-        data.size, data.mode = 3, 0o600
-        stream.addfile(data, io.BytesIO(b"abc"))
-        link = tarfile.TarInfo("link-only/absolute")
-        link.type, link.linkname = tarfile.SYMTYPE, str(host_target)
-        stream.addfile(link)
-    root = tmp_path / "root"
-    previous = os.umask(mask)
-    try:
-        materialize(archive, root)
-    finally:
-        os.umask(previous)
-    assert host_target.stat().st_mode & 0o777 == 0o700
-    assert os.readlink(root / "link-only/absolute") == str(host_target)
-    assert (root / "private/implicit/file").stat().st_mode & 0o777 == 0o600
-    assert (root / "etc/photo-wall/public.json").stat().st_mode & 0o777 == 0o444
-    for path in [root, *(p for p in root.rglob("*") if not p.is_symlink() and p.is_dir())]:
-        assert path.stat().st_mode & 0o777 == 0o755
-
-
 def test_environment_rejects_rootfs_directory_with_wrong_owner(tmp_path, monkeypatch):
-    archive, reference = fixture_archive(tmp_path)
-    roots = tmp_path / "roots"
-    roots.mkdir()
+    target, reference = fixture_root(tmp_path)
     abi = dict(base_abi="base-v2", graphics_abi="graphics-v2", plugin_abi="plugins-v2", owner_uid=os.getuid())
-    target = stage_archive(archive, roots, reference, **abi)
+    assert verify_root(target, reference, **abi) == target / "rootfs"
     original = Path.lstat
 
     def wrong_root_owner(path, *args, **kwargs):
@@ -419,7 +247,7 @@ def stop_driver(tmp_path, monkeypatch):
     from appliance.apps.broker import RunningApp
     from contracts.node_protocol import NodeProcessIdentity
 
-    _, reference = fixture_archive(tmp_path)
+    _, reference = fixture_root(tmp_path)
     expected = RunningApp(reference, NodeProcessIdentity(321, 1234, uuid4()), 4, uuid4())
     driver = linux.SystemdAppProcessDriver(tmp_path / "roots", None, base_abi="base-v2",
         graphics_abi="graphics-v2", plugin_abi="plugins-v2", proc=tmp_path / "proc", cgroups=tmp_path / "cgroups")

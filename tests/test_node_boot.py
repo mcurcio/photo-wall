@@ -47,7 +47,7 @@ def publish_deployment(db, deployment, clock) -> bool:
 def cold_setup(registry, *, app=True):
     _seed(registry)
     sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
-    manager = environment("2", "photo-wall-node-manager")
+    manager = environment("2", "photo-wall-app-manager")
     selected = environment() if app else None
     refs = [manager] + ([selected] if selected else [])
     deployment = NodeDeployment(uuid4(), NodeBaseRefV2(BASE_TAG, BASE_TARBALL_SHA, BASE_SHA, 1024,
@@ -98,7 +98,7 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
 
 def test_manager_pins_and_environment_identity_are_immutable(registry):
     service, _, deployment = cold_setup(registry)
-    changed = environment("3", "photo-wall-node-manager")
+    changed = environment("3", "photo-wall-app-manager")
     sources = {**deployment.environment_sources, changed.environment_sha256: "https://example.invalid/new"}
     del sources[deployment.manager_primary.environment_sha256]
     with pytest.raises(NodeReleaseRefused, match="manager_pins_immutable"):

@@ -3,7 +3,6 @@ same lists every consumer used to keep by hand, and it is the one place a mirror
 base's own OS packages live in its rpi-image-gen layers (decision 0019, R4), never beside a
 package a Photo Wall `.deb` already names."""
 
-import ast
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -347,20 +346,12 @@ def test_the_base_is_built_from_the_rendered_pin_not_the_environment():
     assert "--pinned-sources" in workflow
 
 
-def test_no_deb_builder_writes_a_depends_list():
-    declared = {package.name for package in PACKAGES}
-    builders = sorted((REPO / "scripts").glob("build_*_deb.py"))
-    assert [path.name for path in builders] == ["build_node_manager_deb.py",
-                                                "build_player_deb.py"]
-    for path in builders:
-        tree = ast.parse(path.read_text())
-        assert "DEB_DEPENDS" not in {node.id for node in ast.walk(tree)
-                                     if isinstance(node, ast.Name)}, path.name
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-                literal = {element.value for element in node.elts
-                           if isinstance(element, ast.Constant) and isinstance(element.value, str)}
-                assert not literal & declared, (path.name, sorted(literal & declared))
+def test_no_python_builds_a_deb():
+    """Decision 0019 (R3): the Node's packages are debhelper's; no script stages a package tree,
+    writes a control file or calls dpkg-deb --build."""
+    assert sorted((REPO / "scripts").glob("build_*_deb.py")) == []
+    for path in sorted((REPO / "scripts").glob("*.py")):
+        assert '"dpkg-deb", "--build"' not in path.read_text(), path.name
 
 
 def test_the_manager_names_its_host_dependencies():

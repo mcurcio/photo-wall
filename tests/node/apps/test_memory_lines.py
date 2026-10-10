@@ -25,7 +25,7 @@ from appliance.kernel.capacity import (
     content_line,
     line,
 )
-from scripts.build_node_components import check_image_lines
+from scripts.node_release_writer import WriterError, check_line
 
 SYSTEMD = REPO / "appliance/systemd"
 # The unit files photo-wall-node installs (debian/photo-wall-node.install, its systemd globs).
@@ -117,7 +117,9 @@ def test_a_line_table_that_leaves_no_content_line_is_refused() -> None:
 
 
 def test_a_shipped_image_over_its_line_fails_the_component_build() -> None:
-    check_image_lines({"app": line("app-image").cap_bytes, "manager-primary": line("manager-image").cap_bytes})
-    for sizes in ({"app": 321 * MIB}, {"manager-primary": line("manager-image").cap_bytes + 1}):
-        with pytest.raises(ValueError, match="^node_components_image_over_line$"):
-            check_image_lines(sizes)
+    """The release writer (scripts/node_release_writer.py) ships no image over its line."""
+    check_line("app", line("app-image").cap_bytes)
+    check_line("manager-primary", line("manager-image").cap_bytes)
+    for role, size in (("app", 321 * MIB), ("manager-primary", line("manager-image").cap_bytes + 1)):
+        with pytest.raises(WriterError, match="^node_components_image_over_line$"):
+            check_line(role, size)

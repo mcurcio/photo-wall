@@ -357,7 +357,7 @@ build records in `build-provenance.json`: the fetched tree pruned to exactly the
 paths each builder declares it reads (so a builder that reads anything else
 fails), the first-party modules the build and fixture processes import, `uv.lock`,
 the workflow, the builder image, the Debian snapshot and its `SOURCE_DATE_EPOCH`.
-[`test_node_component_inputs.py`](../tests/test_node_component_inputs.py)
+`tests/test_node_component_inputs.py`
 fails when a builder reads a file the manifest omits. After a build or a hit,
 `node_component_inputs stamp` recomputes the digest, refuses a set that records
 another, and writes `revision.json`, the set's only record of the commit; the

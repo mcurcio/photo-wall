@@ -177,10 +177,13 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert f"\n  {REQUIRE_VARIABLE}: '1'\n" in workflow
     assert "\n  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'\n" in workflow
     assert 'compose.test-database.yml up -d --wait' in scenario
-    builds = _job((WORKFLOWS / 'node-components.yml').read_text(), 'build')
-    assert 'runs-on: ubuntu-24.04-arm\n' in builds
-    for builder in ('build_node_components', 'build_node_pid1_fixture'):
-        assert f'.venv/bin/python -m scripts.{builder}' in builds, builder
+    components = (WORKFLOWS / 'node-components.yml').read_text()
+    builds, fixture = _job(components, 'build'), _job(components, 'pid1-fixture')
+    assert 'runs-on: ubuntu-24.04-arm\n' in builds and 'runs-on: ubuntu-24.04-arm\n' in fixture
+    for builder, job in (('debian-packaging/build-root.sh', builds),
+                         ('.venv/bin/python -m scripts.node_release_writer write', builds),
+                         ('tests/node_pid1_fixture/build.sh', fixture)):
+        assert builder in job, builder
         assert builder not in scenario, builder
     components = 'name: photo-wall-node-components-${{ env.REVISION }}'
     assert components in scenario and components in (WORKFLOWS / 'base-image.yml').read_text()

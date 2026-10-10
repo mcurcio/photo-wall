@@ -67,8 +67,8 @@ OFFER_ID = UUID("12345678-1234-1234-1234-123456789abc")
 
 def node_offer(*, app=False, offer_id=OFFER_ID, sha256=SHA256, size=len(BODY)):
     """Central's node boot offer for SERIAL's boot BOOT_ID with NONCE: the base of `sha256`."""
-    manager = AppEnvironmentRefV2("b" * 64, 123, "c" * 64, "photo-wall-node-manager", "2.0", "arm64",
-        "d" * 64, "e" * 64, "/usr/lib/photo-wall-node-manager/entry", "base-v2", "graphics-v2", "frame-v1")
+    manager = AppEnvironmentRefV2("b" * 64, 123, "c" * 64, "photo-wall-app-manager", "2.0", "arm64",
+        "d" * 64, "e" * 64, "/usr/lib/photo-wall-environment/entry", "base-v2", "graphics-v2", "frame-v1")
     player = AppEnvironmentRefV2("a" * 64, 123, "c" * 64, "photo-wall-player", "2.0", "arm64",
         "d" * 64, "e" * 64, "/usr/lib/photo-wall-environment/entry", "base-v2", "graphics-v2", "frame-v1")
     return NodeBootOfferV2(offer_id, "site", SERIAL, "device-" + "f" * 64, 1, UUID(BOOT_ID), NONCE,

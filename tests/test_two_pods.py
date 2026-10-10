@@ -239,7 +239,7 @@ class TwoPods:
         self.origin.releases[release.tag] = release
         url = f"{self.origin.api_base}/dl/{release.tag}"
         manager = AppEnvironmentRefV2(deb_sha(release), len(release.deb), "e" * 64,
-                                      "photo-wall-node-manager", "1.0.0", "arm64", "f" * 64,
+                                      "photo-wall-app-manager", "1.0.0", "arm64", "f" * 64,
                                       "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1",
                                       "plugin-v1")
         base = NodeBaseRefV2(release.tag, release.tarball_sha, release.squashfs_sha,

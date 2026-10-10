@@ -3,7 +3,7 @@ verified there; never published on its own.
 
 Its `base` and `boot` records are the release's own base and boot tarballs, the very files
 `manifest.json` names (scripts/package_release_artifacts.py writes them once), so a release has
-one boot tree. The rest are the node component set (scripts/build_node_components.py), copied byte
+one boot tree. The rest are the node component set (scripts/node_release_writer.py), copied byte
 for byte.
 """
 from __future__ import annotations
@@ -27,11 +27,11 @@ from contracts.node_release import (
 )
 from contracts.release import BASE_ROOT, BASE_SQUASHFS
 
-# components.json and build-provenance.json (scripts/build_node_components.py): revision-free,
-# so a set built for equal inputs at another commit is the same set (node-components.yml's cache).
+# components.json and build-provenance.json (scripts/node_release_writer.py): revision-free; the
+# commit is the stamp's alone.
 COMPONENTS_SCHEMA = 3
 # The one record of which commit a component set was built or restored for, written beside it
-# after the build or the restore (scripts/node_component_inputs.py `stamp`), never cached.
+# by the release writer on every run, never cached.
 STAMP = "revision.json"
 # The release's own tarballs the node release names: role -> manifest.json's record of the file.
 TARBALL_ROLES = ("base", "boot")

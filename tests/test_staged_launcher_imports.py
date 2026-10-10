@@ -25,7 +25,7 @@ import pytest
 from node.launcher_closures import FORBIDDEN as NODE_LAUNCHERS
 from node.launcher_closures import closure as node_closure
 
-from scripts import build_node_manager_deb, module_closure
+from scripts import module_closure
 from scripts.module_closure import Closure, ClosurePolicy, closure_for
 
 REPO: Final = Path(__file__).resolve().parents[1]
@@ -46,7 +46,7 @@ class StagedImportSite:
 
 
 def launcher_policies() -> Mapping[str, ClosurePolicy]:
-    return {"node-manager": build_node_manager_deb.POLICY} | dict(module_closure.POLICIES)
+    return dict(module_closure.POLICIES)
 
 
 def _launcher(statement: ast.stmt) -> str | None:

@@ -20,9 +20,9 @@ name: Player node real-PID1 lifecycle scenarios
 #             Central records with its gap rows, and after a hub restart WALL is current on the
 #             Node within 60 s (erratum E-E3B-FR1) and its leaf relinked
 #
-# Each leg boots the components node-components.yml built ONCE for the run (the builder
-# base-image.yml's squashfs bakes, scripts/build_node_components.py) and the PID1 fixture it
-# derived from them (scripts/build_node_pid1_fixture.py): it downloads both and loads the fixture
+# Each leg boots the components node-components.yml built ONCE for the run (the release roots and
+# the release writer's set, scripts/node_release_writer.py) and the PID1 fixture it derived from
+# them (tests/node_pid1_fixture/build.sh): it downloads both and loads the fixture
 # image. PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 turns a missing fixture into a failure, never a skip.
 # Native arm64 (ubuntu-24.04-arm): the node components and the fixture image are arm64, and the
 # container is --privileged with systemd as PID 1, as base-image.yml's start probes run.

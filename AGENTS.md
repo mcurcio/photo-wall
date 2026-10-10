@@ -50,7 +50,7 @@ CI (`pipeline.yml`) is the full gate for every automated tier below. Locally, ru
 | Console catalog | `tests/browser/test_console_catalog_browser.py` walks the Storybook build (render, axe, screenshot diff) | CI (`console-catalog` leg) |
 | Images, Linux media | `image-smoke` (also checks the Compose hub: the worker's clients on it and WALL), `linux-media` jobs in `checks.yml` | CI only |
 | Wall e2e | `scripts/demo_wall.py` ([recipe](docs/module-wall-demo.md#reproducing-the-current-checkpoint)); refuses uncommitted changes to `central/`, `media/`, `contracts/`, `player/`, `Dockerfile`, `pyproject.toml`, `uv.lock` | CI (`software-e2e.yml`) |
-| PID1 node scenarios | `-m node_pid1` with `PHOTO_WALL_NODE_PID1_FIXTURE` from `scripts/build_node_pid1_fixture.py`; arm64 Docker, privileged ([guide](docs/evidence/player-node-handoff-support/node-lifecycle-qualification.md)) | CI (`node-pid1.yml`, one leg per scenario) + local |
+| PID1 node scenarios | `-m node_pid1` with `PHOTO_WALL_NODE_PID1_FIXTURE` from `tests/node_pid1_fixture/build.sh`; arm64 Docker, privileged ([guide](docs/evidence/player-node-handoff-support/node-lifecycle-qualification.md)) | CI (`node-pid1.yml`, one leg per scenario) + local |
 | Physical Pi, PXE, HDMI, timing | bench evidence ([which evidence](CONTRIBUTING.md#choose-the-right-evidence)) | nothing automated |
 
 Published-wire tests skip unless `PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR` names a directory built by `scripts/published_player_wire.py prepare`. Under `CI`, a skip outside `CI_SKIP_ALLOWLIST` fails. Details: [runbook tests](docs/runbook.md#tests-and-local-development).

@@ -19,18 +19,14 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from node.test_node_linux_adapters import fixture_archive
+from node.test_node_linux_adapters import fixture_root
 from support.image_mount import FakeImageMounter
 from support.repo import REPO
 
 from appliance.apps import environment
 from appliance.apps.environment import mounted_root, stage_image
 from appliance.kernel import image_mount
-from appliance.kernel.capacity import line
 from appliance.kernel.image_mount import IMAGE_MOUNT_OPTIONS, NO_IMAGE, SystemdImageMounter
-from scripts.build_environment_image import EnvironmentImage
-from scripts.build_node_components import reproducible_image
-from scripts.sealed_archive import stage_archive
 
 ABI = {"base_abi": "base-v2", "graphics_abi": "graphics-v2", "plugin_abi": "plugins-v2"}
 IMAGE_BYTES = b"a squashfs image stands here " * 64
@@ -42,13 +38,10 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(environment, "ROOT_UID", os.getuid())
     monkeypatch.setattr(environment, "ROOT_GID", os.getgid())
     # The Player's package name: the broker's launch check also checks the package kind.
-    archive, tar_reference = fixture_archive(tmp_path / "build", deb_name="photo-wall-player")
-    built = tmp_path / "built"
-    built.mkdir()
-    tree = stage_archive(archive, built, tar_reference, **ABI, owner_uid=os.getuid())
+    tree, sealed = fixture_root(tmp_path / "build", deb_name="photo-wall-player")
     sha = hashlib.sha256(IMAGE_BYTES).hexdigest()
     # The manifest's reference omits the digest and size: the image's ref pairs with the tree.
-    reference = replace(tar_reference, environment_sha256=sha, size_bytes=len(IMAGE_BYTES))
+    reference = replace(sealed, environment_sha256=sha, size_bytes=len(IMAGE_BYTES))
     store = tmp_path / "store"
     images, roots, downloads = store / "root-images", store / "app-roots", store / "downloads"
     for directory in (images, roots, downloads):
@@ -250,40 +243,6 @@ def test_host_core_cannot_read_the_image_pool():
     unit = (REPO / "appliance/systemd/photo-wall-host-core.service").read_text().splitlines()
     hidden = next(line for line in unit if line.startswith("InaccessiblePaths=")).split("=", 1)[1]
     assert "-/run/photo-wall-node-storage/root-images" in hidden.split()
-
-
-def _image_builder(built: list, *, differ: bool = False, size_bytes: int | None = None):
-    def build_image(archive, reference, output, *, tools, **abi):
-        output.mkdir(parents=True)
-        data = IMAGE_BYTES + (b"!" if differ and built else b"")
-        sha = hashlib.sha256(data).hexdigest()
-        (output / (sha + ".squashfs")).write_bytes(data)
-        built.append(output)
-        return EnvironmentImage(sha, size_bytes or len(data), output / (sha + ".squashfs"))
-    return build_image
-
-
-@pytest.mark.parametrize("differ", [False, True])
-def test_the_component_build_ships_an_image_only_when_two_builds_agree(tmp_path, world, differ):
-    built = []
-
-    def run() -> EnvironmentImage:
-        return reproducible_image(tmp_path / "app.tar", world.reference, tmp_path / "work", role="app",
-                                  abi=ABI, tools="tools", build_image=_image_builder(built, differ=differ))
-    if differ:
-        with pytest.raises(ValueError, match="^node_components_image_not_reproducible$"):
-            run()
-    else:
-        assert run().sha256 == world.sha
-    assert len(built) == 2 and built[0] != built[1]
-
-
-@pytest.mark.parametrize("role", ["app", "manager-primary"])
-def test_the_component_build_ships_no_image_over_its_line(tmp_path, world, role):
-    over = line("app-image" if role == "app" else "manager-image").cap_bytes + 1
-    with pytest.raises(ValueError, match="^node_components_image_over_line$"):
-        reproducible_image(tmp_path / "app.tar", world.reference, tmp_path / "work", role=role, abi=ABI,
-                           tools="tools", build_image=_image_builder([], size_bytes=over))
 
 
 # SystemdImageMounter over real-format mountinfo and sysfs fixtures.
@@ -518,7 +477,7 @@ def test_the_launch_check_refuses_a_root_that_is_not_staged_for_this_node(world,
 
 
 def test_no_node_module_parses_tar():
-    """B2 AC4: the Node stages images; tar extraction is build-side (scripts/sealed_archive.py)."""
+    """B2 AC4: the Node stages images and parses no tar."""
     import ast
     found = []
     for package in ("appliance/apps", "appliance/boot"):
