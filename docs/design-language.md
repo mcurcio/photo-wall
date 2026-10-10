@@ -87,7 +87,7 @@ Each template's stories include `Loading`, `Empty`, `Error`, `Ready`, `CantTell`
 
 ### T3 Object page
 
-- **Anatomy:** `EntityHeader` (editable name, where it sits, status, live view where one exists, two or three header actions) then `Tabs`; **one tab = one concern** (the Frame page's tabs are [design §5](operator-console-design.md#5-the-frame-page)). The first tab is Overview (read-only). Each tab has its own `LoadState`. Irreversible actions sit in a danger zone (a `Section` with `tone="danger"`) at the bottom of the last tab.
+- **Anatomy:** `EntityHeader` (editable name, where it sits, status, live view where one exists, two or three header actions) then `Tabs`. The header's title is the page's one top heading: the template's shell takes `ownsHeading={false}` and renders no section heading of its own, and `EntityHeader` takes `level` so the title is an `h1` here and an `h2` where a header sits inside another page; **one tab = one concern** (the Frame page's tabs are [design §5](operator-console-design.md#5-the-frame-page)). The first tab is Overview (read-only). Each tab has its own `LoadState`. Irreversible actions sit in a danger zone (a `Section` with `tone="danger"`) at the bottom of the last tab.
 - **Use** for anything the user manages as a thing. **Not** for authoring content (T4).
 - **States:** besides the contract, an unbound Frame shows every tab with the binding picker where equipment is needed (design §5); a Pi that is offline is a feature state, not an Error: the tab stays, controls that need the Pi are disabled with "Can't reach Pi pw-3f2a since 21:04".
 - **Phone:** tabs scroll as a strip; header collapses to name + status; header actions move to an overflow menu except the first.
@@ -150,7 +150,7 @@ Members load-bearing in deliveries 1a to 1c have a props sketch below; every oth
 | `StatusChip` | ui | Keep: the **one chip** for status. |
 | `Table` | ui | Keep, desktop only; `EntityList` switches to cards below `md`. |
 | `severity` helpers | ui | Keep; importable only by ui and patterns (S2 already). |
-| `EntityHeader` | patterns | Keep. Change: `status` (a `Verdict`), `live` slot, `actions`, inline-editable title; its links move to the `Link` primitive (accent rule). |
+| `EntityHeader` | patterns | Keep. Change: `level: 1 \| 2` (the title's heading level; T3 passes 1), `status` (a `Verdict`), `live` slot, `actions`, inline-editable title; its links move to the `Link` primitive (accent rule). |
 | `EntityList` | patterns | Keep. Change: cards below `md`; selection and bulk actions. |
 | `EntityPage` | patterns | Becomes `templates/object-page` (T3) with `tabs`; `EmptyState` moves to its own pattern. |
 | `FactRow`, `FactGroup`, `Note` | patterns | Keep, **for Details only**: truth kinds are evidence, not everyday labels. |
@@ -189,14 +189,18 @@ interface SheetProps { open: boolean; onOpenChange(open: boolean): void; title: 
 // Toast — transient, one action, role="status", never takes focus; pauses while hovered or focused.
 interface ToastProps { message: string; action?: { label: string; onAction(): void }; seconds: number }
 
-// Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…).
-interface SelectProps<V extends string> { label: string; value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
+// Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…). Field owns its label.
+interface SelectProps<V extends string> { value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
+
+// NumberInput — a number with its unit, for corner pixels, crop trims and the Frame display profile. Field owns its
+// label and error; arrow keys step by `step`, and the value commits on blur or Enter.
+interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
 // Tag — a neutral small label ("On the display", "Photo Wall picture adjustment"); never a severity colour.
 interface TagProps { children: string }
 ```
 
-Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overflow actions, 1a header on phone), `Skeleton` (1a, templates' loading), `Input` (1a, the display profile override), `Combobox` (4), `Icon` (3b-i).
+Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overflow actions, 1a header on phone), `Skeleton` (1a, templates' loading), `Input` (3b-i, sign-in), `Combobox` (4), `Icon` (3b-i).
 
 ### Patterns for deliveries 1a–1c (`src/patterns`)
 
@@ -237,22 +241,25 @@ Says what will be here and the one next step. Prior art: Polaris EmptyState. Sto
 The [error template](#the-error-template) as a type. Prior art: GOV.UK error summary; Atlassian section message.
 
 ```ts
+type ProblemAction = { label: string; onAction(): void } | { label: string; href: string };
 type ProblemCardProps = ProblemBase & (
-  | { scope: "live"; subject: string; since: string }   // a Frame or Pi problem: "Living room left", Central's receive time
-  | { scope: "central" }                                 // template-wide: "Central did not answer"
-  | { scope: "setup"; subject?: string }                 // an unfinished setup step: no "since"
+  | { scope: "live"; subject: string; since: string; action: ProblemAction }   // a Frame or Pi problem; since = Central's receive time
+  | { scope: "central"; action: ProblemAction }                                // template-wide: "Central did not answer"
+  | { scope: "setup"; subject?: string; action: ProblemAction }                // an unfinished setup step: no "since"
+  | { scope: "action"; subject?: string; action?: ProblemAction }              // a request just made was refused ("The Pi refused the new corners")
 );
 interface ProblemBase {
   verdict: Verdict;           // severity + plain words; a live Frame problem passes the domain's status verdict
   what: string;               // plain cause naming the failing part
   doing: string | null;       // "Photo Wall retried 3 times."; null when nothing is automatic
-  action: { label: string; onAction(): void } | { label: string; href: string };
   details?: React.ReactNode;  // FactRows inside Disclosure
   variant?: "card" | "inline" | "banner";   // banner = house-wide (Central or network down)
 }
 ```
 
-Stories: `NotShowing`, `NeedsALook`, `CantTell`, `SetupTodo`, `CentralUnreachable`, `Inline`, `HouseBanner`, `WithDetails`. A11y: `role="alert"` only for a problem that arrives while the page is open; otherwise a region with a heading.
+A value refused where it is typed (out of range, a duplicate name) is not a `ProblemCard`: it is the control's `Field` `error`, next to the value. A refused request (`scope: "action"`) needs no button of its own when trying the same control again is the fix; every other scope must offer one.
+
+Stories: `NotShowing`, `NeedsALook`, `CantTell`, `SetupTodo`, `CentralUnreachable`, `RefusedAction`, `Inline`, `HouseBanner`, `WithDetails`. A11y: `role="alert"` only for a problem that arrives while the page is open; otherwise a region with a heading.
 
 #### AckBadge
 
@@ -264,6 +271,8 @@ type AckBadgeProps =
   | { state: "acknowledged"; at: string };      // "Presented by the Pi · 21:04:07"
 ```
 
+`at` is Central's `presented_at` for that revision, written HH:MM:SS by the console's one time formatter (`timeWords.js`) in the browser's time zone; when the House timezone arrives (2b) the same formatter switches to it ([units and times](#units-times-and-numbers)).
+
 Stories: `Requested`, `Acknowledged`. A11y: `role="status"`, polite; announces only the change to acknowledged.
 
 #### LivePreviewEditor
@@ -272,6 +281,7 @@ The live device editor: a tab of T3 for anything that changes what a physical di
 
 ```ts
 interface LivePreviewEditorProps {
+  label: string;                 // the region's name ("Position of Living room left")
   latestRevision: number;
   ack: { revision: number; at: string } | null;   // the newest revision the Pi acknowledged presenting
   dirty: boolean;
@@ -279,15 +289,20 @@ interface LivePreviewEditorProps {
   onRevert(): void;
   controls: React.ReactNode;     // QuadEditor + NudgePad (Position), or picture sliders
   mirror?: React.ReactNode;      // a scaled outline of the output
-  unavailable?: { reason: string };   // unbound, or Pi offline: editor disabled with the reason
-  expired?: { at: string };      // the session ended while the console was away
+  busy?: boolean;                // a Done or Revert is in flight
+  status?: string;               // the words shown while no preview session runs ("Not previewing. Move a corner to start.")
+  problem?: ProblemCardProps;    // inline, e.g. no acknowledgement by the deadline
+  notes?: readonly React.ReactNode[];   // one-line notes, e.g. changes reverted after the editor was left
+  unavailable?: { reason: string; action?: React.ReactNode };   // unbound (with the binding picker), or Pi offline
 }
 ```
 
 - **Done** is enabled only when `ack?.revision === latestRevision` (P3); pages cannot pass an enabled flag.
 - **Leaving with changes** opens the `LeaveGuard` dialog (Keep or Revert).
-- **The console goes away** (tab closed, phone locked, network lost): the console holds the preview session open while the tab is open; when it stops, Central lets the session expire and the Pi returns to the last kept values ([U9](requirements.md#failure-visibility-and-recovery): the diagnostic "expires or is disabled"). On return the editor shows `expired`: "Your unsaved changes were reverted at 21:10 because the editor closed."
-- Stories: `Clean`, `Requested`, `Acknowledged`, `NoAckProblem`, `Unbound`, `PiOffline`, `Expired`, `Phone`. A11y: Done's disabled reason is visible text; the nudge pad has arrow-key bindings and labelled buttons.
+- **The tab is hidden** (another tab, phone locked): the draft stays in the page and resumes when the tab is shown again; nothing is reverted.
+- **The page is left or closed:** the console stops holding the preview session, Central lets it expire and the Pi returns to the last kept values ([U9](requirements.md#failure-visibility-and-recovery): the diagnostic "expires or is disabled"). The next visit shows a note: "Your unsaved changes were reverted at 21:10 because the editor was closed."
+- **The bottom bar** (AckBadge, Done, Revert) is sticky to the bottom of the screen only below `md`; above it, it sits under the controls.
+- Stories: `Clean`, `NoSession`, `Requested`, `Acknowledged`, `Busy`, `NoAckProblem`, `Unbound`, `PiOffline`, `RevertedNote`, `Phone`. A11y: Done's disabled reason is visible text; the nudge pad has arrow-key bindings and labelled buttons.
 
 Prior art: Apple HIG display arrangement; projector keystone menus.
 
@@ -320,13 +335,14 @@ Stories: `QuadEditor/Default`, `/CornerSelected`, `/Cropped`, `/Rotated`, `/Disa
 
 ```ts
 // LeaveGuard — leaving a live editor with unsaved changes. Plain, not dangerous: both choices are undoable.
-interface LeaveGuardProps { open: boolean; onKeep(): void; onRevert(): void; onStay(): void }
+// Keep waits for the Pi's acknowledgement like Done: keepBlocked disables it, with the reason shown.
+interface LeaveGuardProps { open: boolean; onKeep(): void; onRevert(): void; onStay(): void; keepBlocked?: { reason: string }; busy?: boolean }
 
 // ConfirmDangerous — only for what cannot be undone. The button repeats verb + object ("Retire Pi pw-3f2a").
 interface ConfirmDangerousProps { open: boolean; title: string; consequence: string; confirmLabel: string; preview?: React.ReactNode; onConfirm(): Promise<void>; onCancel(): void }
 ```
 
-Stories: `LeaveGuard/Default`; `ConfirmDangerous/Default`, `/WithPreview`, `/Busy`, `/Error`. Prior art: GitHub danger zone; Apple HIG destructive actions.
+Stories: `LeaveGuard/Default`, `/KeepBlocked`, `/Busy`; `ConfirmDangerous/Default`, `/WithPreview`, `/Busy`, `/Error`. Prior art: GitHub danger zone; Apple HIG destructive actions.
 
 #### UndoToast
 
@@ -490,7 +506,7 @@ Never claim what the display lights up, and never offer a fix the system cannot 
 
 | Kind | Format |
 |---|---|
-| Clock time | House clock format and timezone ([settings catalogue](operator-console-design.md#11-settings-catalogue) #2, #5): "21:04" or "9:04 pm" |
+| Clock time | One formatter (`timeWords.js`). Until the House timezone and clock format exist (2b, [settings catalogue](operator-console-design.md#11-settings-catalogue) #2, #5) it uses the browser's zone and 24-hour time; then the House's: "21:04" or "9:04 pm". Acknowledgement times carry seconds ("21:04:07") |
 | Since / last heard | Absolute beyond an hour ("since 21:04", "since Tue 09:12"); "3 min ago" only within the hour; always Central's receive time, never a Pi's clock |
 | Durations | "30 s", "1 h", "1 h 30 min" |
 | Lengths | House units (cm or in), one decimal at most |
@@ -580,11 +596,11 @@ Strongest guarantee first. "Enforced" holds on the branch today; "Add" is propos
 | Catalogue and pages type-check | compile (`npm run typecheck`) | enforced |
 | Six words ↔ severity, their order, the house word (P6) | **compile:** exhaustive `Record<StatusWord, Severity>` and the branded status verdict in `src/domain` ([§6](#6-status-and-severity)) | add |
 | Done only after the Pi acknowledges (P3) | **compile:** `LivePreviewEditor` derives Done from `ack` and `latestRevision` | add |
-| The error template has its parts | **compile:** `ProblemCard` requires `verdict`, `what`, `doing`, `action`, and for `scope: "live"` (a Frame or Pi problem) also `subject` and `since` | add |
+| The error template has its parts | **compile:** `ProblemCard` requires `verdict`, `what`, `doing`, `action` (except a refused request), and for `scope: "live"` (a Frame or Pi problem) also `subject` and `since` | add |
 | Equipment settings say where they act (P2) | **compile:** `SettingRow`'s discriminated union; `actsOn` a closed union, required for `kind: "equipment"` | add |
 | Templates render every state | **compile:** templates take `LoadState<T>`; **test:** each template's stories include `Loading`, `Empty`, `Error`, `CantTell` | add |
 | Every page is a template (P7) | **lint:** a custom rule that a `src/pages` file's default export renders a `patterns/templates/*` component at its root; the two listed exceptions carry an inline disable naming §3 | add |
-| Accent only for actions (P6) | **lint:** `better-tailwindcss/no-restricted-classes` refusing `(text\|bg\|border\|ring\|outline)-accent*` except in an allow list of primitives (`ui/button`, `ui/disclosure`, the new `ui/link`, `ui/tabs`, `ui/segmented-control`). `entity-header.tsx:23,31` and `focus-filter.tsx:21,24,32` must move to those primitives first | add |
+| Accent only for actions (P6) | **lint:** `better-tailwindcss/no-restricted-classes` refusing `(text\|bg\|border\|ring\|outline)-accent*` except in an allow list of primitives (`ui/button`, `ui/disclosure`, `ui/link`, `ui/tabs`, `ui/segmented-control`, `ui/slider`, `ui/switch`, and `patterns/quad-editor` for its draggable handles). `entity-header.tsx:23,31` and `focus-filter.tsx:21,24,32` must move to those primitives first | add |
 | Plain words (P5) | **lint:** a rule over JSX text, string props and string literals in `src/domain` and `src/pages` (including `.ts` helpers that build labels) refusing the bare [forbidden words](#forbidden-words), read from one list file, which then becomes the list's home and §7 links to it; qualified words stay review | add |
 | Type sizes only from roles | **lint:** clear Tailwind's size scale in `tokens.css` and define five role tokens, so `no-unknown-classes` refuses `text-sm`. Cost: the 25 size classes in `ui` and `patterns` are renamed in one sweep (no visual change if each role keeps today's value). Alternative: keep the scale and rely on S2 (sizes already appear only in `ui` and `patterns`), review-only | add (recommended at the DS sweep) |
 | Icons only through `ui/icon` | **lint:** `no-restricted-imports` of the icon package outside `src/ui` | add at 3b-i |
