@@ -74,7 +74,9 @@ Under `CI`, a skip outside `CI_SKIP_ALLOWLIST` fails. Details: [runbook tests](d
 | Runtime, Planner, execution | [execution contract](docs/execution-contract.md) |
 | Player node lifecycle | [node architecture as built](docs/player-architecture.md), [Player node domain model](docs/player-node-domain-model.md), [fleet implementation map](docs/player-fleet-implementation-map.md), [display host](docs/display-host-backend.md) |
 | Node bus, hub, NodeLink, `nodeapi` | [0017](docs/decisions/0017-node-redesign-r3.md) (C3–C5, C13, C19, C20), [runbook](docs/runbook.md#the-node-bus-and-centrals-hub) |
-| Operator console | [UX design](docs/operator-console-ux-design.md) |
+| Operator console | [console design](docs/operator-console-design.md) (target); [UX design](docs/operator-console-ux-design.md) (historical gate record) |
+| Operator console UI (a page, a pattern, a roadmap step's UX) | [design language](docs/design-language.md); the procedure is the project skill `.claude/skills/console-ux/SKILL.md` |
+| What to build next, product order | [roadmap](docs/roadmap.md) |
 | Launch, deploy, recovery | [runbook](docs/runbook.md#local-launch) |
 | A consequential choice | [design decisions](docs/design-decisions.md), [decision records](docs/decisions/) |
 | Acceptance, evidence | [validation](docs/validation.md), [evidence conventions](docs/evidence/README.md) |

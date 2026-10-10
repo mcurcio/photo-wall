@@ -26,7 +26,7 @@ from uuid import uuid4
 
 import pytest
 from console_tasks import connect, go
-from operator_harness import RequestGate, operator_server
+from operator_harness import RequestGate, operator_server, run_page_clock
 from playwright.sync_api import expect
 from test_fleet_attempts import BOOT_ID, SERIAL
 from test_fleet_rollout_gate import _certificate, _gate, _LocalImageVerifier
@@ -88,7 +88,7 @@ def _read_once(page, run_ms=30000):
     """
     status = page.get_by_role("status", name="Release read", exact=True)
     with page.expect_response(lambda response: RELEASE_READ in response.url):
-        page.clock.run_for(run_ms)
+        run_page_clock(page, run_ms)
     expect(status).not_to_have_attribute("aria-busy", "true")
 
 

@@ -11,7 +11,7 @@ through `wallRoutes.jsx`. The browser half (tests/browser/test_console_shell_bro
 visits every sample path.
 
 G1 (console DDD §49) by the same graph: the worklists (Needs attention, the Wall's To finish
-list), the one host classifier they read and the Status host chip import models, never a page
+list), the one host classifier they read and the Overview host chip import models, never a page
 module (a route table, the shell or a `*Page.jsx`) and never a write module (`WRITE_MODULES`),
 followed transitively. A worklist only links; the write lives in the home it links to.
 
@@ -57,10 +57,11 @@ SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
           "neutral": "neutralRoutes.jsx"}
-DISPLAY_CONTROLS = {"CalibrationFacet.jsx", "Inspector.jsx", "useCalibration.js"}
-# The display's calibration route (central/app.py `/v1/operator/frames/{frame_id}/calibration`):
-# only the Wall side may name it. Matched with the interpolated Frame id's closing brace, so the
-# Calibration facet's own hash (`#/wall/frames/<id>/calibration`, a route sample) is not it.
+# The Frame page, its Position tab and the live adjustment that writes a Frame's calibration.
+DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js"}
+# The display's calibration routes (central/fleet/node_routes.py
+# `/v1/operator/frames/{frame_id}/calibration-…`): only the Wall side may name them. Matched with
+# the interpolated Frame id's closing brace, so no hash route can be mistaken for one.
 CALIBRATION_ROUTE = "}/calibration"
 # Modules the Wall table reaches that the Show, fleet or neutral sides use too, besides the
 # shell's own. The
@@ -68,7 +69,7 @@ CALIBRATION_ROUTE = "}/calibration"
 # here, and none of these may be a display control or name the calibration route.
 SHARED_WITH_SHOW = {
     "ConfirmAction.jsx",  # every confirmation
-    "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Status facet and the Now page's Why
+    "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Frame Overview and the Now page's Why
     "equipmentApi.js",  # the equipment reads and writes
     "sendOutcome.js",  # the one outcome pattern: UNKNOWN_MESSAGE, CHANGED_MESSAGE, held requests
     "fact-line.tsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
@@ -86,7 +87,7 @@ SHARED_WITH_SHOW = {
 WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.js",
                  "equipmentApi.js"}
 # G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
-# Wall's To finish list and model, the one host classifier they read, and the Status host chip.
+# Wall's To finish list and model, the one host classifier they read, and the Overview host chip.
 G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "WallUnfinished.jsx",
                    "unfinished.js", "hostHealth.js", "domain/host-health-link.tsx"]
 # The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
@@ -536,8 +537,8 @@ def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, t
 
 
 def test_the_wall_routes_do_reach_display_controls(graph):
-    # Positive control: the closure holds the Calibration facet and the calibration write, where
-    # they are meant to be.
+    # Positive control: the closure holds the Frame page, its Position tab and the calibration
+    # write, where they are meant to be.
     assert DISPLAY_CONTROLS <= _wall_only(graph)
     assert any(CALIBRATION_ROUTE in module.read_text() for module in graph
                if module.name in _wall_only(graph))
@@ -595,7 +596,7 @@ def test_every_section_is_in_exactly_one_route_table():
 
 
 ROUND_TRIP = r"""
-const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS, FACETS, FACET_ALIASES } =
+const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS, TABS } =
   await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
 const out = {};
@@ -613,19 +614,15 @@ out.invalidRoutes = input.invalidRoutes.map((route) => {
   try { formatRoute(route); return "formatted"; } catch { return "refused"; }
 });
 out.landing = [landingRoute(), landingRoute(0), landingRoute(5)];
-out.nowshowing = parseRoute("#/wall/frames/x/nowshowing");
-out.noFacet = parseRoute("#/wall/frames/x");
-out.facets = FACETS;
-out.aliases = FACET_ALIASES;
+out.oldFacets = ["status", "binding", "calibration", "nowshowing", "commissioning"].map(
+  (facet) => parseRoute(`#/wall/frames/x/${facet}`));
+out.noTab = parseRoute("#/wall/frames/x");
+out.tabs = TABS;
 out.layout = { hash: formatRoute({ section: "wall", mode: "layout" }),
                route: parseRoute("#/wall/layout") };
 out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
                                 initialTarget: "frame_one" });
 out.equipment = parseRoute("#/equipment");
-out.commissioning = parseRoute("#/wall/frames/x/commissioning");
-out.commissioningRoute = (() => { try {
-  return formatRoute({ section: "wall", id: "x", facet: "commissioning" });
-} catch { return "refused"; } })();
 out.badTargetRoute = (() => { try {
   return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
 } catch { return "refused"; } })();
@@ -652,10 +649,10 @@ ROUTES = [
     {"section": "sources", "id": "all-photos", "flow": "edit", "step": "review"},
     {"section": "schedule", "flow": "new", "step": "when"},
     {"section": "schedule", "id": "evening/program", "flow": "edit", "step": "review"},
-    {"section": "wall", "id": "reception north", "facet": "calibration"},
-    {"section": "wall", "id": "a/b", "facet": "binding"},
-    {"section": "wall", "id": "frames", "facet": "status"},
-    {"section": "wall", "id": "layout", "facet": "status"},
+    {"section": "wall", "id": "reception north", "tab": "position"},
+    {"section": "wall", "id": "a/b", "tab": "hardware"},
+    {"section": "wall", "id": "frames", "tab": "overview"},
+    {"section": "wall", "id": "layout", "tab": "picture"},
     {"section": "wall", "mode": "layout"},
     {"section": "releases", "flow": "update", "id": "v0.15.0"},
     {"section": "releases", "flow": "update", "id": "v1/rc ç?#%", "tried": "player/one ç"},
@@ -666,9 +663,9 @@ ROUTES = [
 INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x/bogus",
     "#/wall/layout/x", "#/wall/bogus", "#/now/layout", "#/wall/layout?target=x",
-    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
+    "#/wall/x/hardware", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
     "#/equipment?target=x", "#/players/a/b", "#/players/x?target=y",
-    "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
+    "#/scenes/new", "#/wall/frames/%E0%A4%A/hardware",
     "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
     "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
     "#/sources/new/name?target=frame",
@@ -683,11 +680,11 @@ INVALID_HASHES = [
     "#/hardware/x?pi=y", "#/hardware/a/b", "#/now?pi=x", "#/releases?pi=x",
 ]
 INVALID_ROUTES = [
-    {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
-    {"section": "wall", "id": "x"}, {"section": "wall", "id": "x", "facet": "bogus"},
-    {"section": "wall", "id": "x", "facet": "nowshowing"},
+    {"section": "nope"}, {"section": "now", "tab": "hardware", "id": "x"},
+    {"section": "wall", "id": "x"}, {"section": "wall", "id": "x", "tab": "bogus"},
+    {"section": "wall", "id": "x", "tab": "status"}, {"section": "wall", "id": "x", "facet": "status"},
     {"section": "wall", "mode": "layout", "id": "x"}, {"section": "now", "mode": "layout"},
-    {"section": "wall", "mode": "bogus"}, {"section": "wall", "mode": "layout", "facet": "status"},
+    {"section": "wall", "mode": "bogus"}, {"section": "wall", "mode": "layout", "tab": "overview"},
     {"section": "now", "flow": "new", "step": "x"}, {"section": "scenes", "flow": "edit",
                                                     "step": "x"},
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
@@ -728,15 +725,11 @@ def test_routes_parse_format_and_round_trip():
     assert out["landing"] == [{"section": "wall"}] * 3
     # No aliases (owner rule): the retired Equipment page's bookmark parses to nothing.
     assert out["equipment"] is None
-    # The renamed facet's old bookmark opens Calibration, and is never formatted (§19).
-    assert out["commissioning"] == {"section": "wall", "id": "x", "facet": "calibration"}
-    assert out["commissioningRoute"] == "refused"
-    # The Now-showing facet's old bookmark, and a Frame route with no facet, open Status
-    # (console DDD §61); neither is ever formatted.
-    assert out["nowshowing"] == {"section": "wall", "id": "x", "facet": "status"}
-    assert out["noFacet"] == {"section": "wall", "id": "x", "facet": "status"}
-    assert out["facets"] == ["status", "binding", "calibration"]
-    assert out["aliases"] == {"nowshowing": "status", "commissioning": "calibration"}
+    # No aliases (owner rule): the retired Inspector facets' bookmarks parse to nothing.
+    assert out["oldFacets"] == [None] * 5
+    # A Frame route with no tab opens Overview; it is never formatted.
+    assert out["noTab"] == {"section": "wall", "id": "x", "tab": "overview"}
+    assert out["tabs"] == ["overview", "position", "picture", "hardware"]
     assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"
@@ -750,13 +743,26 @@ LAYERS = ("pages", "domain", "patterns", "ui", "design")
 MODEL_FREE = {"patterns", "ui", "design"}
 MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
 # What a page or a domain component may import from outside the catalog: the models, and the
-# node read (a hook, no markup). Anything else that renders markup is a legacy module.
-PAGE_IMPORTS = MODELS | {"nodeRead.js"}
+# node read (a hook, no markup) and the one time formatter (no markup). Anything else that
+# renders markup is a legacy module.
+PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js"}
 # Legacy modules that render markup the Hardware Pi page still composes: the confirmation
 # dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
 # Dialog primitive does not carry yet), the Reboot section and the node-control gate's notice.
 # Declared in .claude/errata.md E-CDS-FIX-1; the dialogs' migration (DS2) empties this set.
 LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
+# The Frame page's modules, each with the legacy modules it alone may import, until they move
+# to the catalog: the page composes the bind chooser and the live adjustment (a hook); the
+# Overview the two read-only explanations the Now page shares, the readiness report and the
+# Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
+# view the hook's type. No other page or domain module may import any of them.
+FRAME_PAGE_IMPORTS = {
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js"},
+    "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
+                           "frameIds.js"},
+    "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
+    "live-adjustment.tsx": {"liveAdjustment.js"},
+}
 
 
 def _layer(module, src=SRC):
@@ -848,11 +854,19 @@ def test_the_truth_kinds_token_list_is_the_fact_models():
 
 def test_pages_and_domain_components_import_only_models_and_declared_legacy_markup(layer_graph):
     # A page composes the catalog and reads models: it never imports a legacy module that
-    # renders markup (and styles it with the legacy sheet), except the declared ones.
-    imported = {imported.name for module, imports in layer_graph.items()
-                if _layer(module) in ("pages", "domain")
-                for imported in imports if _layer(imported) is None}
-    assert imported - PAGE_IMPORTS == LEGACY_MARKUP, sorted(imported - PAGE_IMPORTS)
+    # renders markup (and styles it with the legacy sheet), except the declared ones; each
+    # Frame page module imports exactly its own declared set, and no other module any of it.
+    legacy, frame = set(), {}
+    for module, imports in layer_graph.items():
+        if _layer(module) not in ("pages", "domain"):
+            continue
+        extra = {imported.name for imported in imports if _layer(imported) is None} - PAGE_IMPORTS
+        if module.name in FRAME_PAGE_IMPORTS:
+            frame[module.name] = extra
+        else:
+            legacy |= extra
+    assert legacy == LEGACY_MARKUP, sorted(legacy)
+    assert frame == FRAME_PAGE_IMPORTS, frame
 
 
 def test_reboot_and_retire_have_one_home_and_it_is_not_the_software_page(graph):

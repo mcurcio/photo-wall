@@ -15,7 +15,7 @@ import re
 import time
 
 import pytest
-from console_tasks import connect, current_hash, edit_layout
+from console_tasks import connect, current_hash, edit_layout, visible_page
 from operator_harness import (
     operator_server,
     pause_page_clock,
@@ -159,41 +159,44 @@ def test_tile_shows_the_planned_fact_frame_health_and_never_claims_live(page, re
         expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
 
 
-def test_selecting_frame_opens_inspector_at_status_with_binding_and_calibration(page, registry):
+def test_clicking_a_frame_opens_its_page_at_overview_with_hardware_and_position(page, registry):
     # Reuse the Bead 2 seeding: a placed frame bound to a connected output that a
     # live Run targets. `player_id` is the Player the frame is bound to.
     player_id = _seed_now_showing(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
 
-        # Selecting the frame on the plan (by identity) opens its Inspector at Status,
-        # the default facet (console DDD §61), scoped to that frame's identity.
+        # One click on the frame on the plan (by identity) opens its page at Overview.
         page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {SHOWING} inspector", exact=True)
-        expect(inspector).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name=f"Frame {SHOWING}", exact=True)).to_be_visible()
+        inspector = visible_page(page)
 
-        # The three facet tabs, Status first (console DDD §61).
-        expect(inspector.get_by_role("tab")).to_have_text(["Status", "Binding", "Calibration"])
-        expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
+        # The four tabs, Overview first.
+        expect(inspector.get_by_role("tab")).to_have_text(["Overview", "Position", "Picture", "Hardware"])
+        expect(inspector.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        assert current_hash(page) == f"#/wall/frames/{SHOWING}/status"
+        assert current_hash(page) == f"#/wall/frames/{SHOWING}/overview"
 
-        # Binding facet: the bound Player and Output, read through the frame's
-        # FrameInventory row.
-        inspector.get_by_role("tab", name="Binding", exact=True).click()
+        # Hardware: the bound Player and Output, read through the frame's FrameInventory row.
+        inspector.get_by_role("tab", name="Hardware", exact=True).click()
+        expect(inspector).to_contain_text("HDMI 1")
+        inspector.get_by_role("region", name="Pi and HDMI port", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(player_id)
-        expect(inspector).to_contain_text("HDMI-A-1")
 
-        # Status facet: the planned fact (the scene_id joined by the STRING
-        # "frame:<id>") plus the precedence-ranked "why" -- the frame's
-        # contributions ranked by (priority, root_order, admission_order).
-        inspector.get_by_role("tab", name="Status", exact=True).click()
+        # Overview: the planned fact (the scene_id joined by the STRING "frame:<id>") plus
+        # the precedence-ranked "why" -- the frame's contributions ranked by (priority,
+        # root_order, admission_order).
+        inspector.get_by_role("tab", name="Overview", exact=True).click()
+        expect(inspector).to_contain_text(f"Photo Wall is sending the Scene “{SCENE}” to this Frame.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(DIRECT_PLANNED)
         why = inspector.get_by_role("list", name="Why")
         expect(why).to_contain_text(SCENE)
         expect(why).to_contain_text("priority")
 
-        # Honesty (design §6a): the Inspector asserts intent, never confirmed
+        # Honesty (design §6a): the Frame page asserts intent, never confirmed
         # playback -- "LIVE" appears nowhere.
         expect(page.get_by_text(re.compile("LIVE"))).to_have_count(0)
 
@@ -201,7 +204,7 @@ def test_selecting_frame_opens_inspector_at_status_with_binding_and_calibration(
 def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, registry):
     """A Run on top of an unbound Frame is still Central's Runs, but the Planner gives an
     unbound Frame no layers (central/planner.py), so the basis says so, on the tile and on
-    Frame › Status (console DDD §35)."""
+    the Frame page's Overview (console DDD §35)."""
     registry.create_frame(FrameCreate(
         id="spare-frame", surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
@@ -216,24 +219,30 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
         connect(page, origin, "wall")
         expect(page.get_by_role("group", name="Frame spare-frame status", exact=True)).to_contain_text(planned)
         page.get_by_role("button", name="Frame spare-frame", exact=True).click()
-        inspector = page.get_by_role("region", name="Frame spare-frame inspector", exact=True)
+        expect(page.get_by_role("heading", level=1, name="Frame spare-frame", exact=True)).to_be_visible()
+        inspector = visible_page(page)
+        expect(inspector).to_contain_text("No Pi feeds this Frame yet, so Photo Wall sends it nothing.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(planned)
         expect(inspector).not_to_contain_text("media not checked")
 
 
-def test_frame_inspector_guides_content_authoring_from_the_selected_frame(page, registry):
+def test_the_frame_page_guides_content_authoring_from_its_frame(page, registry):
     registry.create_frame(FrameCreate(
         id="new-frame", surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         page.get_by_role("button", name="Frame new-frame", exact=True).click()
-        inspector = page.get_by_role(
-            "region", name="Frame new-frame inspector", exact=True)
-        # A plain tile click opens Status (console DDD §61), with no tab to pick.
-        expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
+        inspector = visible_page(page)
+        # A plain tile click opens Overview, with no tab to pick.
+        expect(inspector.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
             "aria-selected", "true")
 
+        expect(inspector).to_contain_text("No Pi feeds this Frame yet, so Photo Wall sends it nothing.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(NOTHING_PLANNED)
         expect(inspector).to_contain_text("Frame new-frame starts selected on its Frames step")
         expect(inspector).to_contain_text("Show now or Schedule it")
@@ -874,15 +883,15 @@ def test_a_drag_on_the_daily_wall_sends_no_write_and_edit_layout_sends_one_patch
 
         edit_layout(page)
         assert current_hash(page) == "#/wall/layout"
-        # No Inspector in Edit layout.
-        expect(page.get_by_role("region", name=re.compile("inspector$"))).to_have_count(0)
+        # No Frame page in Edit layout.
+        expect(page.get_by_role("tablist", name="Frame settings")).to_have_count(0)
         _drag(page, _plan_box(page), 180 / 960, 300 / 600, 540 / 960, 300 / 600)
         _wait_for(lambda: next(f for f in registry.inventory().frames if f.id == PLACED).x_mm != 100)
         page.wait_for_timeout(300)
         assert writes == [("PATCH", f"frames/{PLACED}")]
 
 
-def test_done_returns_to_the_selected_frames_status(page, registry):
+def test_done_returns_to_the_daily_face(page, registry):
     registry.create_frame(FrameCreate(
         id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
         width_mm=300, height_mm=500, profile=PORTRAIT))
@@ -892,23 +901,22 @@ def test_done_returns_to_the_selected_frames_status(page, registry):
         page.get_by_role("button", name=f"Frame {PLACED}", exact=True).click()
         expect(page.get_by_role("button", name=f"Delete frame {PLACED}", exact=True)).to_be_visible()
         bar.get_by_role("button", name="Done", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {PLACED} inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
-            "aria-selected", "true")
-        assert current_hash(page) == f"#/wall/frames/{PLACED}/status"
+        expect(page.get_by_role("button", name="Edit layout", exact=True)).to_be_visible()
+        assert current_hash(page) == "#/wall"
 
 
-def test_a_tray_entry_on_the_daily_wall_opens_its_inspector_and_offers_no_delete(page, registry):
+def test_a_tray_entry_on_the_daily_wall_opens_its_page_and_offers_no_delete(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         tray = page.get_by_role("group", name="Unplaced frames")
-        tray.get_by_role("button", name=ORIGIN, exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {ORIGIN} inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Status", exact=True)).to_have_attribute(
-            "aria-selected", "true")
         expect(tray.get_by_role("button", name=f"Delete frame {ORIGIN}", exact=True)
                ).to_have_count(0)
+        tray.get_by_role("button", name=ORIGIN, exact=True).click()
+        expect(page.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
+            "aria-selected", "true")
+        assert current_hash(page) == f"#/wall/frames/{ORIGIN}/overview"
+        page.go_back()
         edit_layout(page)
         expect(page.get_by_role("group", name="Unplaced frames").get_by_role(
             "button", name=f"Delete frame {ORIGIN}", exact=True)).to_be_visible()
@@ -921,14 +929,14 @@ def test_to_finish_lists_each_frames_missing_step_with_its_link(page, registry):
         listing = page.get_by_role("list", name="To finish", exact=True)
         expect(listing.get_by_role("listitem")).to_have_text([
             f"{ORIGIN} · not on the plan Edit layout",
-            f"{ORIGIN} · needs a Player Binding",
-            f"{PLACED} · needs a Player Binding",
-            f"{OTHER_SURFACE} · needs a Player Binding",
+            f"{ORIGIN} · needs a Player Hardware",
+            f"{PLACED} · needs a Player Hardware",
+            f"{OTHER_SURFACE} · needs a Player Hardware",
         ])
-        listing.get_by_role("link", name=f"Binding: {PLACED}", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {PLACED} inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+        listing.get_by_role("link", name=f"Hardware: {PLACED}", exact=True).click()
+        expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
+        page.go_back()
         listing.get_by_role("link", name=f"Edit layout: {ORIGIN}", exact=True).click()
         expect(page.get_by_role("group", name="Editing layout", exact=True)).to_be_visible()
         # Structural to-dos are not attention: the strip and the page never say "to set up".

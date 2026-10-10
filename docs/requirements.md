@@ -229,7 +229,7 @@ Fading to black differs from fading out an overlay. Opaque black continues cover
 | **Haunted portraits overlay** | Surrounding Frames darken while portraits animate. All affected targets participate explicitly. Underlying playback advances virtually and is revealed at its current state afterward. |
 | **Calendar change beneath an overlay** | The overlay runs independently to its natural conclusion. Background scheduling progresses from December to January, and its dissolve reveals the current scheduled background. Transition policy when the outgoing background is still finishing remains open. |
 | **Coordinated readiness** | A theatrical effect can wait or be skipped if required participants are unavailable, even after advance caching. Required-versus-optional participation and failure policy determine the outcome. |
-| **Good night** | Frames go dark even if an optional goodbye animation cannot play. Optional decoration cannot block the bedtime outcome. Persistent dark-state and wake-up policy remain open. |
+| **Good night** | Frames go dark even if an optional goodbye animation cannot play. Optional decoration cannot block the bedtime outcome. Persistent dark-state and wake-up policy: asked on 2026-10-09, the owner liked a native power schedule ([operator experience](#operator-experience)); the proposed design is the [Power lane](operator-console-design.md#7-power). |
 
 ## Operations and scope
 
@@ -240,3 +240,19 @@ Home Assistant/MQTT provides an integration boundary for requests and state. The
 Current Sensor scope covers environmental equipment adaptation and discrete Scene activation. Continuous viewer tracking that modifies an active Scene is outside scope. Several Surfaces and surrounding equipment can belong to one Installation; broader multi-Installation coordination is an open scope decision.
 
 The [design decisions](design-decisions.md) track unresolved arbitration, nested Effects/timing, referenced configuration revisions, calibration adoption, media history accounting, outage recovery, technical interfaces, numerical acceptance targets, and feature scope. These policies must preserve the requirements above. The [validation guide](validation.md) defines candidate budgets and how implementation evidence is collected.
+
+## Operator experience
+
+The owner said these on 2026-10-09 (chat) while reviewing the operator console. They are kept in his words, with the question each answered; where he wrote "could", "hoping" or "consider", that is how strongly they bind. The proposed design is the [operator console design](operator-console-design.md), its decisions are [0019](decisions/0019-first-principles-console.md), and the [roadmap](roadmap.md) orders the work.
+
+| Context | The owner's words | What it asks of Photo Wall |
+|---|---|---|
+| His broadest ask, unprompted | "Central needs another UI pass to make sure that all of the features are being exposed on the UI." | The console exposes every feature Photo Wall has. |
+| Unprompted, in the same message | "I cant find some of the simple config knobs, like how do i set the visible frame position on a display? how do i control the CEC power? how do i change the brightness and contrast?" | A Frame's visible position on its display, display power and brightness and contrast can be found and set in the console. |
+| Asked how Night off should work (a power window, or a dark Scene that turns displays off) | "I like the idea of a native power schedule, yeah. But I also want home automation inputs, so also consider how this system might be exposed to home assistant." | He likes a native power schedule. He wants home-automation inputs, and asks that exposing the system (not only display power) to Home Assistant be considered. |
+| Asked whether power is its own concept or part of Scenes | "I meant power as a unique concept, but it could go either way. Or both." | He meant power as its own concept; either way, or both, could work. |
+| Asked whether a display's hardware settings should follow it when it moves to another Frame | "Not all displays are TVs; some are just LCD or OLED panels. But to your question: yes, the display hardware settings could remain consistent to where the panel moves." | Not every display is a TV. Display hardware settings could follow the panel. |
+| Asked whether brightness should drive the display hardware or only adjust the picture | "As much as possible. The test pi is not connected to a TV — it's a portable monitor" | Control the display hardware as much as possible; the test display is a portable monitor. |
+| Asked who wins between the power schedule, Home Assistant and a person | "I don't know. I'm hoping for configuration options built in sensible defaults" | He does not know; he hopes for configuration options with sensible defaults. |
+
+Display power stays operational state under [operations and scope](#operations-and-scope). The Power lane, the hold rule, the guard defaults and Home Assistant through MQTT discovery are design choices, not owner statements.

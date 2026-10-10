@@ -195,6 +195,8 @@ A `reported` fact must say which receipt it carries; without that, it becomes `u
 
 ## 8. Roadmap of passes
 
+> **Superseded for what comes next (2026-10-09).** The product [roadmap](roadmap.md) orders the console work from here, by the user's journey; this table is the record of passes 1 to 5 and batches 2 to 4. See [decision 0019](decisions/0019-first-principles-console.md).
+
 ```mermaid
 flowchart LR
   P1["Pass 1 · Fleet: Players<br/>one home per box, layers,<br/>reboot, operation states,<br/>V1 lane labelled<br/>(removed in E)<br/>UI only"] --> P2["Pass 2 · Fleet: current layers<br/>Output interruption,<br/>Display Host presentation<br/>two backend reads (gate)"]
@@ -2771,7 +2773,7 @@ W1 is also high-tier, for regression.
 
 # Part I: the console by domain (0018)
 
-**Status:** approved 2026-10-09. This part holds the domain table; [decision 0018](decisions/0018-console-by-domain-and-design-system.md) holds the owner's words, the answers, the design-system layers and rules, the migration and the costs. Sections that milestones 2 and 3 change in detail are marked superseded above and rewritten when they land. The layouts are a starting point to be re-evaluated as capabilities grow.
+**Status:** approved 2026-10-09. This part holds the domain table; [decision 0018](decisions/0018-console-by-domain-and-design-system.md) holds the owner's words, the answers, the design-system layers and rules, the migration and the costs. Sections that milestones 2 and 3 change in detail are marked superseded above and rewritten when they land. The layouts are a starting point to be re-evaluated as capabilities grow. **Superseded in part (2026-10-09)** by [decision 0019](decisions/0019-first-principles-console.md): the target navigation and the one Frame page are in the [operator console design](operator-console-design.md).
 
 ## 70. The domain table
 

@@ -23,9 +23,10 @@
     "wall": [
       "#/wall",
       "#/wall/layout",
-      "#/wall/frames/sample-frame/status",
-      "#/wall/frames/sample-frame/binding",
-      "#/wall/frames/sample-frame/calibration"
+      "#/wall/frames/sample-frame/overview",
+      "#/wall/frames/sample-frame/position",
+      "#/wall/frames/sample-frame/picture",
+      "#/wall/frames/sample-frame/hardware"
     ]
   },
   "fleet": {

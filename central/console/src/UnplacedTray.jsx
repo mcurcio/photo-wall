@@ -18,7 +18,7 @@ import { project } from "./projection.js";
  * and tray can never disagree about a frame's fate.
  *
  * SELECT-ONLY BY DEFAULT (console DDD §61). Without `edit` an entry only selects
- * (on the Wall's daily face it opens the Frame's Inspector). This module imports
+ * (on the Wall's daily face it opens the Frame's page). This module imports
  * no write module; Edit layout (LayoutEditor.jsx) passes the writes as `edit`.
  *
  * DRAG-OUT (Bead 11, design J3/§12; Edit layout only): a pointer press on a tray

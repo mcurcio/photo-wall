@@ -4,7 +4,7 @@ import { runOrigin } from "./showState.js";
 /**
  * Planned-intent + bound-output joins (shared primitive #4).
  *
- * A pure module imported by Plan.jsx (tile facts), the Frame's Status facet, the
+ * A pure module imported by Plan.jsx (tile facts), the Frame page's Overview, the
  * precedence "why" panel and health.js. It carries the TWO load-bearing joins the
  * design pins down (design §1b, §6a), and `isBound`, the one definition of a bound
  * frame (health.js re-exports it for its consumers):
@@ -137,7 +137,7 @@ export function plannedFact(runtime, intent, bound) {
  * so the winning contribution sits at the top. The order is total and
  * deterministic (design J4/§6a: no ties).
  *
- * This is the ONE copy of the precedence ranking: the Status facet's "why"
+ * This is the ONE copy of the precedence ranking: the Frame page's Overview "why"
  * (Bead 3) and the Showrunner Runs "why" panel (Bead 16) both read through here,
  * so the ordering rule lives in exactly one place.
  *

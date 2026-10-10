@@ -85,9 +85,12 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         page.reload()
         expect(page.get_by_role("heading", name="Wall", exact=True)).to_be_visible()
 
-        # The Wall Inspector gives the same plain recovery wording.
+        # The Frame page's Overview gives the same plain recovery wording.
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {VALID_FRAME} inspector", exact=True)
+        inspector = page.locator("main > section:not([hidden])")
+        now = inspector.get_by_role("region", name="Now", exact=True)
+        expect(now).to_contain_text("The Pi reported a problem getting this Frame's content ready")
+        now.get_by_role("button", name="Details", exact=True).click()
         note = inspector.get_by_role("note", name=f"Player readiness for {VALID_FRAME}")
         expect(note).to_contain_text(DECODE_RECOVERY)
         expect(note).to_contain_text(UNKNOWN_RECOVERY)
@@ -120,4 +123,4 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         chain = why.get_by_role("group", name=f"Why nothing new on {VALID_FRAME}?", exact=True)
         expect(chain.get_by_role("note", name=f"Player readiness for {VALID_FRAME}")).to_contain_text(
             UNKNOWN_RECOVERY)
-        expect(page.get_by_role("tab", name="Calibration", exact=True)).to_have_count(0)
+        expect(page.get_by_role("tab", name="Position", exact=True)).to_have_count(0)

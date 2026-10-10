@@ -204,7 +204,7 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
 
 
-def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(page, registry):
+def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page, registry):
     """Show-now frame health offers the existing Wall recovery route, while an
     informational healthy chip stays plain text and the mounted activation draft/key
     survives a Wall visit."""
@@ -218,7 +218,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(pag
         form = show_now(page, SCENE_ID, submit=False)
         expect(form).to_contain_text(f"{INVALID_FRAME}: No report yet")
         expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
-            "href", f"#/wall/frames/{INVALID_FRAME}/binding")
+            "href", f"#/wall/frames/{INVALID_FRAME}/hardware")
 
         for player_id in players:
             report_readiness(registry, player_id)
@@ -226,12 +226,12 @@ def test_unhealthy_scene_frame_opens_its_recovery_facet_and_keeps_show_draft(pag
         expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
         recovery = form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)
         expect(recovery).to_have_attribute(
-            "href", f"#/wall/frames/{INVALID_FRAME}/calibration")
+            "href", f"#/wall/frames/{INVALID_FRAME}/position")
         expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
         recovery.click()
-        inspector = page.get_by_role("region", name=f"Frame {INVALID_FRAME} inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Calibration", exact=True)).to_have_attribute(
+        inspector = page.locator("main > section:not([hidden])")
+        expect(inspector.get_by_role("tab", name="Position", exact=True)).to_have_attribute(
             "aria-selected", "true")
 
         # Ordinary route navigation away and back leaves Show now's values and

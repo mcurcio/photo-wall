@@ -38,9 +38,12 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *   read `on` (nodeControl.js) and while the shell is signed out.
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
- *            samplePaths: string[], inSidebar?: boolean}} RouteEntry
+ *            samplePaths: string[], inSidebar?: boolean,
+ *            ownsHeading?: (route: import("./routes.js").Route) => boolean}} RouteEntry
  *   `inSidebar: false` keeps a section that is only ever one instance's page (reached by a
- *   link) out of the sidebar; its label is still its page's heading.
+ *   link) out of the sidebar; its label is still its page's heading. `ownsHeading` true for a
+ *   route whose page renders its own level-1 heading (an object page names the object), so
+ *   the section's label is not one too.
  */
 
 // The Central pill's colour: the shared health severity for each /healthz state.
@@ -143,9 +146,12 @@ function SnapshotAge({ refreshFailed }) {
 const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
   return (
     <section className={`page page--${entry.section}`} hidden={hidden}>
-      <h1 className="page__title" tabIndex={-1}>
-        {entry.label}
-      </h1>
+      {/* An object page (a Frame's) names itself in its own heading. */}
+      {!entry.ownsHeading?.(ctx.route) && (
+        <h1 className="page__title" tabIndex={-1}>
+          {entry.label}
+        </h1>
+      )}
       {ready ? (
         <div className="page__content">
           {/* A hidden page's confirmations put their dialogs away (pageVisibility.js). */}
@@ -170,7 +176,7 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
  * status and alert regions leave the accessibility tree). Wall, fleet and neutral
- * sections mount only while current, so no hidden page ever holds Calibration DOM
+ * sections mount only while current, so no hidden page ever holds a Frame's Position tab
  * (R4) and a Pi page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the first snapshot
@@ -310,7 +316,7 @@ export function Shell({ hidden = false }) {
       return;
     }
     if (headingFor.section === current) {
-      mainRef.current?.querySelector(":scope > section:not([hidden]) > h1")?.focus();
+      mainRef.current?.querySelector(":scope > section:not([hidden]) h1")?.focus();
       setHeadingFor(null);
     } else if (headingFor.from !== current) {
       setHeadingFor(null);
@@ -319,7 +325,10 @@ export function Shell({ hidden = false }) {
 
   const focusHeadingOf = (section) => setHeadingFor({ section, from: current });
 
-  const hrefFor = (section) => formatRoute(section === "wall" ? wall.lastWall : { section });
+  // The Wall link returns to the Wall as last shown, except from the Wall itself (a Frame's
+  // page), where it leads back to the plan.
+  const hrefFor = (section) =>
+    formatRoute(section === "wall" && current !== "wall" ? wall.lastWall : { section });
 
   const chooseFromDrawer = (section) => {
     choosingRef.current = true;

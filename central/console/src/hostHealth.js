@@ -701,7 +701,7 @@ export function incidentSeverity(incidents) {
 }
 
 /**
- * The Status facet's host chip (§62): the box's worst item ("pi-07 · throttled now", "pi-07 ·
+ * The Frame page Overview's host chip (§62): the box's worst item ("pi-07 · throttled now", "pi-07 ·
  * Host Management silent 3 min"), else its receipt ("pi-07 · Host Management last reported 3 s
  * ago").
  *

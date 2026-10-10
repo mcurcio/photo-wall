@@ -8,6 +8,8 @@ The operator-reported v0.13.0 Kubernetes gaps and claimable follow-up work are i
 
 The [domain-driven operator console design](operator-console-ddd.md) gives each domain aggregate one home in the console, ranks the console's domain gaps and plans its incremental passes, Player fleet first. It refines the [console UX design](operator-console-ux-design.md); pass 1 is approved.
 
+The [roadmap](roadmap.md) orders product work by the power user's journey, from installing Central to fixing things, with each step's current status. The [operator console design](operator-console-design.md) is the console's target design ([decision 0019](decisions/0019-first-principles-console.md)); the earlier [console UX design](operator-console-ux-design.md) is its historical gate record. The [console design language](design-language.md) is the one home for the console's UI rules: principles, page templates, the pattern catalogue, save models, status words, voice, and how each roadmap step becomes a page.
+
 The [Player node architecture](player-architecture.md) describes the node as built: processes, supervision, the guarantee and liveness signal of each layer, telemetry to Central, and observed gaps.
 
 The [Debian packaging module](module-debian-packaging.md) describes how the Node's software is built as Debian packages, put into images and proved ([decision 0019](decisions/0019-debian-packaging-with-debhelper.md)).
@@ -21,6 +23,7 @@ The [4 GB node memory design](node-4gb-memory-design.md) makes a 4 GB Raspberry 
 | [Requirements](requirements.md) | Canonical terminology, product behavior, and scope boundaries. | Understand Frames, Players, Scenes, Runs, and the invariants implementation must preserve. |
 | [Architecture](architecture.md) | Proposed components, module responsibilities, deployment, and platform rationale. | Locate a change and understand central/local boundaries. |
 | [Execution contract](execution-contract.md) | Proposed agreement between Runtime, Planner, and execution components. | Design preparation, commitment, timing, ownership, failure handling, and recovery. |
+| [Roadmap](roadmap.md) | Product roadmap: the user journey, each step's status, the delivery order and the moments of truth. | Choose the next product capability and what accepts it. |
 | [Implementation plan](implementation-plan.md) | Recommended work sequence, dependencies, and bounded outcomes. | Choose a demonstrable slice and the decisions it needs. |
 | [Validation](validation.md) | Acceptance scenarios, qualification methods, evidence requirements, and numerical budgets. | Determine what a test or experiment can establish. |
 | [Design decisions](design-decisions.md) | Unresolved choices, alternatives, and criteria for resolving them. | Record a consequential policy or platform choice before dependent work relies on it. |
