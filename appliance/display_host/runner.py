@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import selectors
+import signal
 import socket
 import struct
 import subprocess
+import sys
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -23,14 +27,24 @@ from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME
 from appliance.kernel.unix_credentials import receive_credential_packet
-from contracts.node_output import OUTPUT_IDS, OutputReport
+from contracts.node_output import (
+    OUTPUT_IDS,
+    OutputReport,
+    PowerAttempt,
+    decode_output_document,
+    output_document_key,
+)
 from contracts.node_protocol import OutputKey
+from nodeapi.documents import Document
 
 from .bus import DISPLAY_SLICE, BusReportSink, display_session
 from .domain import OutputState
 from .edid import parse_edid, read_edid
-from .output_power import ReportSink
+from .output_power import OutputPowerController, ReportSink
+from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
+
+log = logging.getLogger(__name__)
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel
 # feed socket. The root-only ingress (`<runtime>/ingress.sock`) keeps every operation.
@@ -153,6 +167,46 @@ class OutputReporter:
                 self._sink.put_report(report)
 
 
+class PowerObservations:
+    """`ReportSink` for the OutputReporter that hands what it saw (connection, EDID identity and
+    modes) to the power controller, so the power controller is the one writer of each Output's
+    report and the report carries both halves (roadmap 1b, D2)."""
+
+    def __init__(self, power: OutputPowerController) -> None:
+        self._power = power
+
+    def put_report(self, report: OutputReport) -> None:
+        self._power.output(report.output_id, connected=report.connected, identity=report.identity,
+                           modes=report.modes)
+
+    def emit_attempt(self, attempt: PowerAttempt) -> None:
+        raise TypeError("the OutputReporter makes no power attempt")
+
+
+def document_feed(power: OutputPowerController) -> Callable[[str, Document], None]:
+    """The desired view's callback: each Output document, decoded, to the power controller. A
+    document that does not decode, or sits under another Output's key, is logged and ignored."""
+
+    def on_document(key: str, document: Document) -> None:
+        try:
+            decoded = decode_output_document(document.value)
+            if output_document_key(decoded.output_id) != key:
+                raise ValueError("output_document_key")
+        except ValueError as error:
+            log.warning("output document under %s ignored: %s", key, error)
+            return
+        power.document(decoded.output_id, decoded)
+
+    return on_document
+
+
+def power_controller(backend: WestonBackend, sink: ReportSink) -> tuple[OutputPowerController, HdmiCecAdapter]:
+    """The three methods on this Pi's tools and compositor, and the controller over them."""
+    cec = HdmiCecAdapter(run_tool)
+    adapters = (cec, DdcCiAdapter(run_tool), SignalOffAdapter(backend))
+    return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, time), cec
+
+
 class Controller:
     def __init__(self, backend: WestonBackend, *, reports: OutputReporter | None = None):
         self.backend = backend
@@ -224,6 +278,20 @@ class Controller:
         raise ValueError("display_operation_unsupported")
 
 
+class _stopping:
+    """Stops the power controller's worker and gives back the CEC addresses on the way out."""
+
+    def __init__(self, power: OutputPowerController, cec: HdmiCecAdapter) -> None:
+        self._power, self._cec = power, cec
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *_exc: object) -> None:
+        self._power.stop()
+        self._cec.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", type=Path, default=RUNTIME)
@@ -241,6 +309,8 @@ def main() -> None:
             if not args.runtime.is_absolute():
                 raise ValueError("display_runtime_absolute")
     os.umask(0o077)
+    # systemd stops the unit with SIGTERM: exit through the finally below (CEC `--clear`).
+    signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     peer = _unit(DISPLAY_UNIT)
     # The display line's session: always, with or without the retiring Central config. It connects
     # on its own thread forever, so the compositor loop never waits on the bus.
@@ -254,7 +324,14 @@ def main() -> None:
             compositor_pid=int(peer["MainPID"]),
             verify_process=verify_process,
         )
-        controller = Controller(backend, reports=OutputReporter(BusReportSink(session)))
+        power, cec = power_controller(backend, BusReportSink(session))
+        power.start()
+        feed = document_feed(power)
+        session.desired.on_change(feed)
+        for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
+            if (present := session.desired.get(output_document_key(output_id))) is not None:
+                feed(output_document_key(output_id), present)
+        controller = Controller(backend, reports=OutputReporter(PowerObservations(power)))
         if config:
             from .service import DisplayService
 
@@ -266,6 +343,7 @@ def main() -> None:
                 runtime=args.runtime,
             )
         with (
+            _stopping(power, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):

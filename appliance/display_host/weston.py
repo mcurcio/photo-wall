@@ -9,14 +9,17 @@ Wayland peer PID/UID and /proc start time at each observed presentation.
 from __future__ import annotations
 
 import json
+import select
 import socket
 import struct
+import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Callable
 from uuid import UUID, uuid4
 
+from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
 
 from .domain import DisplayHost, Surface
@@ -112,6 +115,10 @@ class DiagnosticRelease:
 class WestonBackend:
     """Serialized controller; call ``dispatch`` only outside a domain mutation.
 
+    One lock serializes the channel: the display controller's main loop dispatches and requests
+    on it, and the power controller's worker asks for output power (``output_power``,
+    ``power_methods.OutputPowerControl``) from its own thread.
+
     The caller owns a bounded authenticated ingress and event outbox. Transport
     failure makes the output unknown; it cannot acknowledge a diagnostic. The
     shell's own local timer independently covers the app on lease/process loss.
@@ -145,6 +152,8 @@ class WestonBackend:
         self.host: DisplayHost | None = None
         self.boot_id: UUID | None = None
         self.incarnation_id: UUID | None = None
+        self._channel_lock = threading.RLock()
+        self._powered: dict[str, Power] = {}   # the compositor's own output power, per Output
 
     def _receive(self) -> dict:
         raw, _ancillary, flags, _address = self.channel.recvmsg(MAX_PACKET)
@@ -154,6 +163,13 @@ class WestonBackend:
         if type(value) is not dict or type(value.get("event")) is not str:
             raise ValueError("display_message_invalid")
         return value
+
+    def _note_power(self, value: dict) -> bool:
+        """Keep the compositor's output power from an `output_power` event; whether it was one."""
+        if value.get("event") != "output_power":
+            return False
+        self._powered[value["output_id"]] = Power(value["power"])
+        return True
 
     def _enqueue(self, value: dict) -> None:
         if len(self.pending) == self.pending.maxlen:
@@ -171,7 +187,11 @@ class WestonBackend:
         )
         return self.host
 
-    def _request(self, operation: str, key: OutputKey, **values: object) -> None:
+    def _request(self, operation: str, key: OutputKey, *, timeout: float = 2, **values: object) -> None:
+        with self._channel_lock:
+            self._request_locked(operation, key, timeout, values)
+
+    def _request_locked(self, operation: str, key: OutputKey, timeout: float, values: dict) -> None:
         request_id = str(uuid4())
         payload = {
             "op": operation,
@@ -183,15 +203,34 @@ class WestonBackend:
         wire = json.dumps(payload, default=str, separators=(",", ":")).encode()
         if len(wire) > MAX_PACKET or self.channel.send(wire) != len(wire):
             raise ConnectionError("display_request_failed")
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             value = self._receive()
             if value.get("event") == "response" and value.get("request_id") == request_id:
                 if value.get("accepted") is not True:
                     raise ValueError("display_request_rejected")
                 return
-            self._enqueue(value)
+            if not self._note_power(value):
+                self._enqueue(value)
         raise TimeoutError("display_response_timeout")
+
+    def output_power(self, output_id: str, power: Power, *, timeout: float) -> bool:
+        """Ask the shell to turn `output_id`'s signal off or on (DPMS; the Output stays); whether
+        the compositor reports it done. Called from the power controller's worker thread."""
+        try:
+            with self._channel_lock:
+                if self.host is None or output_id not in self._powered:
+                    return False
+                key = self.host.state(output_id).key
+                self._request("output_power", key, timeout=timeout, power=power.value)
+                return self._powered.get(output_id) is power
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
+
+    def output_powered(self, output_id: str) -> Power | None:
+        """The compositor's own output power for `output_id`; None while it has no such Output."""
+        with self._channel_lock:
+            return self._powered.get(output_id)
 
     def allow(self, grant: SurfaceGrant) -> UUID:
         """Called by protected lifecycle/configuration ingress, never by Player IPC."""
@@ -307,11 +346,21 @@ class WestonBackend:
         | OutputKey
         | None
     ):
-        """Consume an independently delivered native event; never synthesize one."""
+        """Consume an independently delivered native event; never synthesize one. None when
+        another thread's request already took the event the caller saw arrive."""
         if self.host is None:
             raise RuntimeError("display_not_initialized")
-        value = self.pending.popleft() if self.pending else self._receive()
+        with self._channel_lock:
+            if self.pending:
+                return self._dispatch(self.pending.popleft())
+            if not select.select([self.channel], [], [], 0)[0]:
+                return None
+            return self._dispatch(self._receive())
+
+    def _dispatch(self, value: dict):
         event = value["event"]
+        if self._note_power(value):
+            return None
         if event == "role_removed":
             surface, decision_id = _surface(value["identity"]), UUID(value["decision_id"])
             if self.withdrawals.get(surface.output.output_id) != (surface, decision_id):
@@ -322,6 +371,10 @@ class WestonBackend:
         if event == "output":
             key = _output(value["output"])
             self.host.observe_output(key, connected=value["connected"])
+            if value["connected"]:
+                self._powered[key.output_id] = Power(value.get("power", Power.ON.value))
+            else:
+                self._powered.pop(key.output_id, None)
             self.grants.pop(key.output_id, None)
             self.revisions.pop(key.output_id, None)
             self.withdrawals.pop(key.output_id, None)
