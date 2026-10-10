@@ -25,7 +25,7 @@ flowchart TD
 
 The gate is a responsibility, not another service. Local executors enforce timing after receiving authorization; a future-dated command is not permission to act immediately. Projecting January at 23:58 may acquire files but must not finish December, start January children in current state or emit future lighting cues.
 
-A pending cue is a forecast: an edit that changes its members, or drops it from the timeline, supersedes it with a new cohort before it starts. A committed or started cue is immutable; if one would grow, that cue alone is skipped (`cue_membership_changed`) and every other Frame keeps its offers.
+A cue is a forecast until it starts: an edit that changes its members or their Outputs, or drops it from the timeline, supersedes it (`superseded`) with a new cohort, withdrawing any commit already granted in its preparation window. A started cue is immutable; if one would grow, that cue alone is skipped (`cue_membership_changed`) and every other Frame keeps its offers.
 
 ## Concrete plan agreement
 
