@@ -72,7 +72,7 @@ How to read the journey tables. **P** (priority): M = broken without it, S = sho
 | D2 | Exclude | Exclude people and albums; archived, hidden and screenshots excluded by default | M | missing | Nothing | [4](#4-real-photo-sources) |
 | D3 | Photo fit | Blurred mat, colour mat, fill; portraits paired on landscape displays | M | missing | Nothing | [5a](#5a-photo-fit-and-order) |
 | D4 | Order | Shuffle with no repeats, chronological, On this day | M | missing | Newest first, fixed | [5a](#5a-photo-fit-and-order) |
-| D5 | Timing and transitions | Seconds per photo, crossfade, stagger between Frames | M | built, no controls | Seconds per photo only; fades exist without controls | [1x](#1x-expose-what-already-exists) (length), [5b](#5b-video-captions-and-transitions) (type, stagger) |
+| D5 | Timing and transitions | Seconds per photo, crossfade, stagger between Frames | M | exists | Seconds per photo and the fade's length (through black, [1x](#1x-expose-what-already-exists)); no crossfade or stagger | [5b](#5b-video-captions-and-transitions) (type, stagger) |
 | D6 | Video | Muted, length cap, share of videos | M | missing | Nothing | [5b](#5b-video-captions-and-transitions) |
 | D7 | Captions | Date, place, people | S | missing | Nothing | [5b](#5b-video-captions-and-transitions) |
 
@@ -169,6 +169,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 - **Acceptance:** CI tests `tests/browser/test_scene_flow_browser.py` and `tests/browser/test_schedule_flow_browser.py` extended (set each value, save, reload, the value shows), and a DB test `tests/test_exposed_settings_roundtrip.py` (each value is stored and appears in the plan sent to Players). No bench step.
 - **Depends on:** nothing.
 - **Risks and unknowns:** the list comes from the 2026-10-09 code audit; re-check it at the start. A setting with no operator write path needs one plain endpoint, which makes this more than console-only.
+- **Re-check at the start (2026-10-09):** five settings shipped on the Scene flow's Playback step: #41 (Fade between photos; the built fade passes through black, so 5b's crossfade is a new type), #62 and #63 as one choice, How it ends (Stops, Black, Fades out) with its length (the built outro is either opaque black or a fading photo, so the two rows are one axis; their catalogue defaults, "dissolve 3 s" and "black", disagree, and the built default, no ending, stays until the owner picks), #64 and #65. Three were not as listed: #67 child Scenes needs a nested Scene editor, so it is a 1x follow-up; #79 is not built (a Program's end always finishes gracefully, [requirements](requirements.md#progression-visibility-and-target-control); "stop now" is new behaviour); #128 is a fixed constant (`central/content_catalog/boot_policy.py` `WINDOW_SIZE = 3`), with no stored setting or Settings page, so it is missing and goes with #129 in [7](#7-peace-of-mind). Neither the Schedule flow nor its browser test changed. The Save model stays the flow's one Save (from the next start); **Save and apply now** arrives with `SaveBar` in 2b.
 - **Size:** S.
 - **Moment it proves:** none; it answers the owner's first ask.
 
@@ -336,7 +337,8 @@ Requirements and needs that are not journey steps, and where each goes:
 | Retire a Pi; reset Central | [6](#6-setup-and-hardware-life); [7](#7-peace-of-mind) |
 | Router network-boot setup, setting #130 | [6](#6-setup-and-hardware-life) |
 | Immich health over time (key rotation, version changes) | [4](#4-real-photo-sources) |
-| Central cache limit #129, Pi logs #124 | [7](#7-peace-of-mind) |
+| Central cache limit #129, releases kept on Central #128 (a fixed constant until then), Pi logs #124 | [7](#7-peace-of-mind) |
+| At a Schedule's end, stop now (#79): not built; a Program's end always finishes gracefully | Waits until a delivery picks it up |
 | U1's open fault classes (compositor, graphics, kernel, panel, power, before the display starts; [requirements](requirements.md#failure-visibility-and-recovery)) | Outside this roadmap: owned by the Node programme ([Player architecture](player-architecture.md)). Cost: a compositor or panel fault can still leave a display dark with no explanation on it, so moment 9 holds only for faults the console can see |
 | Nice-to-have catalogue rows no delivery names: #1 house name, #6 language, #60 slow pan and zoom, #61 clock and weather, #137 single sign-on | Wait until a delivery picks them up |
 
@@ -346,7 +348,7 @@ Requirements and needs that are not journey steps, and where each goes:
 |---|---|
 | Holidays and date ranges (E4, #77) | Christmas photos need a Schedule turned on and off by hand |
 | Repeated activation choices (#66) | Starting a playing Scene again is ignored (the requirements' default) |
-| The reference experiences beyond the slideshow and Good night: Talking portraits, Haunted portraits overlay, Calendar change beneath an overlay, Coordinated readiness ([requirements](requirements.md#reference-experiences)) | The wall does slideshows, Show now takeovers and Night off; theatrical, choreographed effects wait, though Central's overlays, child Scenes and protection get controls in [1x](#1x-expose-what-already-exists) |
+| The reference experiences beyond the slideshow and Good night: Talking portraits, Haunted portraits overlay, Calendar change beneath an overlay, Coordinated readiness ([requirements](requirements.md#reference-experiences)) | The wall does slideshows, Show now takeovers and Night off; theatrical, choreographed effects wait, though Central's endings and protection got controls in [1x](#1x-expose-what-already-exists) and child Scenes get theirs in its follow-up |
 | Several Installations ([requirements](requirements.md#operations-and-scope)) | One House per Central |
 | Household and guest roles | Everyone who signs in can change everything; a guest cannot be given Skip and Pause alone |
 | Notification channels beyond the basics | Alerts reach only the channels 7 builds |
@@ -361,4 +363,4 @@ What the design itself gives up is listed in [the operator console design](opera
 
 ## Settings status
 
-The [settings catalogue](operator-console-design.md#11-settings-catalogue) lists 144 settings a power user expects, each with one home. On 2026-10-09, 29 exist in the console (some in a poor form: one Photo source per Scene, one schedule window, a position editor that times out, size editable only while unbound, software brightness labelled "draft"), 8 are built in Central or on the Pi with no control in the console (the [1x](#1x-expose-what-already-exists) list), and 107 are missing. Update these counts when a delivery lands.
+The [settings catalogue](operator-console-design.md#11-settings-catalogue) lists 144 settings a power user expects, each with one home. On 2026-10-09, after [1x](#1x-expose-what-already-exists), 34 exist in the console (some in a poor form: one Photo source per Scene, one schedule window, a position editor that times out, size editable only while unbound, software brightness labelled "draft"), 1 is built in Central with no control in the console (#67 child Scenes, 1x's follow-up), and 109 are missing (1x's re-check moved #79 and #128 here). Update these counts when a delivery lands.

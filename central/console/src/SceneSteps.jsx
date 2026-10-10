@@ -1,12 +1,13 @@
 import React, { useId } from "react";
 
-import { draftId, idFromName } from "./authoring.js";
+import { draftId, idFromName, PLAYBACK_LABELS } from "./authoring.js";
 import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { candidateLabels, sourceState } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
+import { AdvancedRows, EndingRows, endingWords, onOff, secondsWords, TimingRows } from "./SceneSettings.jsx";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
@@ -213,12 +214,18 @@ function loopWords(loop) {
 }
 
 /**
- * Step 4, Playback: "Seconds per cycle" (default 30); under Advanced, "Keep playing
- * until the Program ends" (default on).
+ * Step 4, Playback: "Seconds per cycle" (default 30) and "Fade between photos"; how the
+ * Scene ends; under Advanced, "Keep playing until the Program ends" (default on), "Keep
+ * the last photo up" and "Keep these Frames together" (SceneSettings.jsx).
  *
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void}}} props
  */
 export function PlaybackStep({ value, patch, problems, advanced }) {
+  const summary = [
+    `Loop: ${loopWords(value.loop)}`,
+    `${PLAYBACK_LABELS.keepLastPhoto}: ${loopWords(value.keepLastPhoto)}`,
+    `${PLAYBACK_LABELS.keepTogether}: ${loopWords(value.keepTogether)}`,
+  ].join(" · ");
   return (
     <>
       <CycleField
@@ -226,8 +233,11 @@ export function PlaybackStep({ value, patch, problems, advanced }) {
         seconds={value.cycleSeconds}
         onSeconds={(cycleSeconds) => patch({ cycleSeconds })}
       />
-      <Advanced summary={`Loop: ${loopWords(value.loop)}`} open={advanced.open} onToggle={advanced.onToggle}>
+      <TimingRows value={value} patch={patch} problems={problems} />
+      <EndingRows value={value} patch={patch} problems={problems} />
+      <Advanced summary={summary} open={advanced.open} onToggle={advanced.onToggle}>
         <LoopField problems={problems} loop={value.loop} onLoop={(loop) => patch({ loop })} />
+        <AdvancedRows value={value} patch={patch} problems={problems} />
       </Advanced>
     </>
   );
@@ -285,6 +295,10 @@ export function ReviewStep({
       field: "loop",
       value: value.loop ? "Yes" : "No, it plays one cycle",
     },
+    { label: SCENE_ANSWER_LABELS.fade, field: "fade", value: secondsWords(value.fadeSeconds) },
+    { label: SCENE_ANSWER_LABELS.ending, field: "ending", value: endingWords(value) },
+    { label: SCENE_ANSWER_LABELS.keepLastPhoto, field: "keepLastPhoto", value: onOff(value.keepLastPhoto) },
+    { label: SCENE_ANSWER_LABELS.keepTogether, field: "keepTogether", value: onOff(value.keepTogether) },
   );
   const derived = idFromName(value.name);
   if (editingId === null) {

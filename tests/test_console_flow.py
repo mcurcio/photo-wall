@@ -195,7 +195,27 @@ out.loadingMedia = authoring.sceneProblems({ ...hand, noMedia: ["lobby"], loadin
   new Set()).map((p) => p.field);
 out.cycleProblem = authoring.sceneProblems({ ...hand, mode: "live", cycleSeconds: "0" }, new Set())
   .map((p) => p.message);
+out.fadeProblem = authoring.sceneProblems(
+  { ...hand, mode: "live", cycleSeconds: 2, fadeSeconds: 2.5 }, new Set()).map((p) => [p.field, p.message]);
 out.answerLabels = scene.SCENE_ANSWER_LABELS;
+
+// --- Delivery 1x's settings: each one saved is read back by Edit (a lossless round trip).
+const settings = { fadeSeconds: 3, ending: "fade", endingSeconds: 4.5, keepLastPhoto: false,
+                   keepTogether: true };
+const live = authoring.buildSave("live", { sceneId: "evening", sourceRef: "holiday:1",
+  targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings }).body;
+out.liveBody = live;
+const pick = ({ fadeSeconds, ending, endingSeconds, keepLastPhoto, keepTogether }) =>
+  ({ fadeSeconds, ending, endingSeconds, keepLastPhoto, keepTogether });
+out.liveBack = pick(authoring.editableDraft(live));
+const hands = authoring.buildSave("authored", { sceneId: "evening", sourceRef: "holiday:1",
+  targetIds: ["lobby"], cycleSeconds: 20, loop: true, selections: { lobby: "a1" },
+  ...settings, ending: "black" }).body.scene;
+out.authoredOutro = hands.outro_contributions;
+out.authoredBack = pick(authoring.editableDraft(hands));
+// Unequal fades (or a setting that differs per Frame) are not the console's: Edit is withheld.
+out.unequal = authoring.editableDraft({ ...live, contributions: [
+  { ...live.contributions[0], fade_in_seconds: 1 }] });
 console.log(JSON.stringify(out));
 """
 
@@ -262,16 +282,22 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["shown"] == ["frames", None, None, None]
     assert out["fieldSteps"] == [
         "kind", "photos", "frames", "media", "playback", "playback", "review", "review"]
-    assert out["advanced"] == ["id", "loop"]
+    assert out["advanced"] == ["id", "keepLastPhoto", "keepTogether", "loop"]
+    # A new Scene's 1x settings at the settings catalogue's defaults (#41 1.5 s, #64 on,
+    # #65 off); how it ends stays "none" (roadmap 1x: #62 and #63's defaults disagree).
     assert out["seedNew"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRef": "", "targets": [],
-        "selections": {}, "cycleSeconds": 30, "loop": True, "revision": None}
+        "selections": {}, "cycleSeconds": 30, "loop": True, "fadeSeconds": 1.5,
+        "ending": "none", "endingSeconds": 3, "keepLastPhoto": True, "keepTogether": False,
+        "revision": None}
     assert out["seedNewTarget"]["targets"] == ["frame_one"]
     assert out["seedNewBadTarget"]["targets"] == []
     assert out["seedEditWithTarget"] == out["seedEdit"]
     assert out["seedEdit"] == {
         "mode": "live", "name": "", "idOverride": None, "sourceRef": "holiday:1",
-        "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True, "revision": 3}
+        "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True,
+        "fadeSeconds": 0, "ending": "none", "endingSeconds": 3, "keepLastPhoto": True,
+        "keepTogether": False, "revision": 3}
     assert out["seedMissing"] is None
     assert out["changed"] == ["Keep playing until the Program ends"]
 
@@ -295,7 +321,29 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["cycleProblem"] == ["Seconds per cycle must be more than 0."]
     assert out["answerLabels"] == {
         "mode": "Kind", "source": "Photos", "targets": "Frames", "media": "Media per frame",
-        "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends"}
+        "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends",
+        "fade": "Fade between photos", "ending": "How it ends",
+        "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together"}
+    # A fade longer than the cycle is the fade's problem (the planner refuses it).
+    assert out["fadeProblem"] == [
+        ["fade", "Fade between photos must be no longer than Seconds per cycle."]]
+
+    # Delivery 1x: each setting is written to the Scene model's own field...
+    body = out["liveBody"]
+    assert body["contributions"] == [{
+        "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
+        "fade_in_seconds": 1.5, "fade_out_seconds": 1.5}]
+    assert (body["outro_seconds"], body["protect_frames"]) == (4.5, True)
+    assert body["outro_contributions"] == [{
+        "target": "frame:lobby", "role": "lobby", "kind": "media", "source_refs": ["holiday:1"],
+        "fade_out_seconds": 4.5}]
+    assert out["authoredOutro"] == [{"target": "frame:lobby", "role": "lobby", "kind": "black"}]
+    # ...and Edit reads each back.
+    settings = {"fadeSeconds": 3, "ending": "fade", "endingSeconds": 4.5,
+                "keepLastPhoto": False, "keepTogether": True}
+    assert out["liveBack"] == settings
+    assert out["authoredBack"] == {**settings, "ending": "black"}
+    assert out["unequal"] is None
 
 
 SOURCE_SCRIPT = r"""

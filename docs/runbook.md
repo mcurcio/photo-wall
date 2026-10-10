@@ -829,13 +829,22 @@ A Scene is a per-frame composition. Scenes lists every stored Scene as a card, t
 - **On.** In a Program, the Run keeps cycling until the window ends, then stops at the end of the cycle running at that moment, so it can **overrun the window by up to one cycle**. Shown without a Program, it plays until you Finish or Cancel it.
 - **Off.** The Run plays **one cycle, then ends**: a 30 s Scene in an 18:00–20:00 Program ends at 18:00:30. Its Run card reads "plays one 30 s cycle, then ends". Scenes saved by earlier console versions were always saved this way.
 
+Playback also holds the Scene settings Central already played but the console could not reach ([roadmap 1x](roadmap.md#1x-expose-what-already-exists)). Each row shows its default and offers **Reset** once changed; the flow's Save applies them like every other Scene value:
+
+| Setting | Default | What Central plays |
+|---|---|---|
+| **Fade between photos** (0–5 s) | 1.5 s for a new Scene | Each photo fades out over half of it and the next fades in over the other half, through black or what plays beneath (every body Contribution's `fade_out_seconds` and `fade_in_seconds`). It must be no longer than **Seconds per cycle**. |
+| **How it ends**: Stops, Black or Fades out, with **Ending length** (0.5–10 s) | Stops; 3 s once chosen | The Scene's outro after a Finish or its Program's end: **Black** is opaque black covering the Frames for the length; **Fades out** is one more photo per Frame fading away to reveal what plays beneath. |
+| **Keep the last photo up** (Advanced) | On | When nothing new can play on a Frame, even after the Scene ends, it keeps its last photo instead of going dark (`retain_on_expiry`). |
+| **Keep these Frames together** (Advanced) | Off | While the Scene plays, Central turns away other Scenes that need any of its Frames, and does not start it while something more important covers them (`protect_frames`). |
+
 ### Viewing and editing a Scene
 
 Each Scene card, `Scene X`, shows what feeds it ("live from `family`", or "authored: 3 chosen items"), its frames with their health, its cycle ("30 s per cycle, keeps playing until its Program ends or, when started by hand, until you Finish or Cancel it", or "plays one 30 s cycle, then ends"), the Programs that use it, and a **Running now** chip while a Run of it is live. Its actions are **Edit**, **Show now**, **Schedule it** and **Delete**. Saved revision numbers are used by Central to protect concurrent work, but are not shown on Scene or Run cards.
 
 **Delete** confirms removal from future choices. It does not stop a Run or erase completed Run history. Central refuses deletion while a Program refers to the Scene, a live Run or queued activation has captured it, or another stored Scene embeds it. The refusal names the blockers; remove or edit those references first. The console checks that the Scene has not changed since its card was loaded. If the Scene being edited has unsaved changes, the confirmation says they will be discarded; a successful deletion closes that draft.
 
-**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the flow cannot author (child Scenes, an outro, fades, and similar) reads "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…)." instead; change that Scene through the API, since a save from the flow would silently drop those features.
+**Edit** is offered only when the console can save the Scene back **without losing anything**. A Scene written through the API with features the flow cannot author (child Scenes, opacity, unequal fades, settings that differ per Frame, and similar) reads "Edit unavailable: Uses features the console can't edit yet (child Scenes, see-through photos, or different settings per Frame)." instead; change that Scene through the API, since a save from the flow would silently drop those features.
 
 To edit:
 1. Press **Edit**. The flow opens at **Review** (`#/scenes/<id>/edit/review`), filled from the saved Scene: "Editing `evening`. Its name stays the same." To use a different name, make a new Scene. Back from Review goes to Playback.

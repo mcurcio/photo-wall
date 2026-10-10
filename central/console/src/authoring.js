@@ -95,11 +95,41 @@ export function identityProblems(kind, draft, existingIds) {
 
 /**
  * The labels of a Scene's playback fields (slice 3 §4): the one wording wherever they
- * are asked (CycleInput.jsx), answered (the Scene flow's Review) or named (Reload).
+ * are asked (CycleInput.jsx, SceneSettings.jsx), answered (the Scene flow's Review) or
+ * named (Reload). The last five are delivery 1x's (settings catalogue #41, #62–#65).
  */
 export const PLAYBACK_LABELS = Object.freeze({
   cycle: "Seconds per cycle",
   loop: "Keep playing until the Program ends",
+  fade: "Fade between photos",
+  ending: "How it ends",
+  endingSeconds: "Ending length",
+  keepLastPhoto: "Keep the last photo up",
+  keepTogether: "Keep these Frames together",
+});
+
+/**
+ * How a Scene ends (settings catalogue #62, #63), as its outro: "none" (no outro), "black"
+ * (an opaque black outro covering what plays beneath) or "fade" (one more photo per Frame
+ * that fades out, revealing what plays beneath).
+ *
+ * @typedef {"none"|"black"|"fade"} Ending
+ */
+export const ENDINGS = Object.freeze(["none", "black", "fade"]);
+
+/**
+ * The defaults of delivery 1x's Scene settings (settings catalogue): a 1.5 s fade between
+ * photos (#41); no ending (#62, #63: the catalogue's "dissolve 3 s" and "black" are one
+ * choice in the built model and disagree, so the built behaviour stays until the owner
+ * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
+ * together (#65).
+ */
+export const SCENE_SETTING_DEFAULTS = Object.freeze({
+  fadeSeconds: 1.5,
+  ending: "none",
+  endingSeconds: 3,
+  keepLastPhoto: true,
+  keepTogether: false,
 });
 
 /**
@@ -127,6 +157,13 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
   }
   if (!(Number(draft.cycleSeconds) > 0)) {
     problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle} must be more than 0.` });
+  } else if (Number(draft.fadeSeconds) > Number(draft.cycleSeconds)) {
+    // A photo's fade out and the next one's fade in share its cycle (central/planner.py
+    // refuses fades longer than the cycle).
+    problems.push({
+      field: "fade",
+      message: `${PLAYBACK_LABELS.fade} must be no longer than ${PLAYBACK_LABELS.cycle}.`,
+    });
   }
   if (draft.mode === "authored") {
     for (const frameId of draft.targets) {
@@ -158,50 +195,68 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  * Contribution per target Frame carrying that Frame's chosen asset ref.
  * `revision` is 1 for a new Scene; an edit sends the stored revision + 1 (§13).
  *
+ * Delivery 1x's settings (an omitted one writes what the console always wrote):
+ * - `fadeSeconds` (#41): each photo fades out over half of it and the next fades in over
+ *   the other half (every body Contribution's `fade_out_seconds` and `fade_in_seconds`);
+ * - `ending` and `endingSeconds` (#62, #63): the outro. "black" is one opaque black
+ *   Contribution per Frame; "fade" is one more media Contribution per Frame, from the same
+ *   photos, fading out over the whole outro;
+ * - `keepLastPhoto` (#64): every body Contribution's `retain_on_expiry`;
+ * - `keepTogether` (#65): the Scene's `protect_frames`.
+ *
  * @param {"live"|"authored"} mode
  * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number,
- *          loop: boolean, selections?: Record<string,string>, revision?: number}} draft
+ *          loop: boolean, selections?: Record<string,string>, revision?: number,
+ *          fadeSeconds?: number, ending?: Ending, endingSeconds?: number,
+ *          keepLastPhoto?: boolean, keepTogether?: boolean}} draft
  * @returns {{path: string, body: object}}
  */
 export function buildSave(
   mode,
-  { sceneId, sourceRef, targetIds, cycleSeconds, loop, selections = {}, revision = 1 },
+  {
+    sceneId, sourceRef, targetIds, cycleSeconds, loop, selections = {}, revision = 1,
+    fadeSeconds = 0, ending = "none", endingSeconds = 0, keepLastPhoto = true, keepTogether = false,
+  },
 ) {
+  if (mode !== "live" && mode !== "authored") {
+    throw new Error(`unsupported scene authoring mode: ${mode}`);
+  }
+  // What each Frame shows: an authored Scene's chosen asset ref (never a live source_ref),
+  // or a live Scene's Source. `target` is the verified string "frame:<id>" (design §1b);
+  // role carries the frame id.
+  const media = (frameId) => (mode === "authored"
+    ? { asset_refs: [selections[frameId]] }
+    : { source_refs: [sourceRef] });
+  const half = Number(fadeSeconds) / 2;
+  const contributions = targetIds.map((frameId) => ({
+    target: toTarget(frameId),
+    role: frameId,
+    kind: "media",
+    ...media(frameId),
+    ...(half > 0 ? { fade_in_seconds: half, fade_out_seconds: half } : {}),
+    ...(keepLastPhoto ? { retain_on_expiry: true } : {}),
+  }));
+  const scene = { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions };
+  if (ending !== "none") {
+    const seconds = Number(endingSeconds);
+    scene.outro_seconds = seconds;
+    scene.outro_contributions = targetIds.map((frameId) => (ending === "black"
+      ? { target: toTarget(frameId), role: frameId, kind: "black" }
+      : { target: toTarget(frameId), role: frameId, kind: "media", ...media(frameId),
+          fade_out_seconds: seconds }));
+  }
+  if (keepTogether) {
+    scene.protect_frames = true;
+  }
   if (mode === "authored") {
-    // An authored Scene: one media Contribution per target Frame, each carrying
-    // the operator's chosen asset ref (never a live source_ref). The asset_ids
-    // list is the de-duplicated set of chosen refs the authored route persists.
-    const contributions = targetIds.map((frameId) => ({
-      target: toTarget(frameId),
-      role: frameId,
-      kind: "media",
-      asset_refs: [selections[frameId]],
-      retain_on_expiry: true,
-    }));
+    // The asset_ids list is the de-duplicated set of chosen refs the authored route persists.
     const assetIds = [...new Set(targetIds.map((frameId) => selections[frameId]))];
-    const scene = { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions };
     return {
       path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}/authored`,
       body: { scene, source_ref: sourceRef, asset_ids: assetIds },
     };
   }
-  if (mode !== "live") {
-    throw new Error(`unsupported scene authoring mode: ${mode}`);
-  }
-  // A live-source Scene: one media Contribution per target Frame, all driven by
-  // the chosen Source. `target` is the verified string "frame:<id>" (design
-  // §1b); role carries the frame id; retain_on_expiry keeps the last still.
-  const contributions = targetIds.map((frameId) => ({
-    target: toTarget(frameId),
-    role: frameId,
-    kind: "media",
-    source_refs: [sourceRef],
-    retain_on_expiry: true,
-  }));
-  return {
-    path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}`,
-    body: { scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions },
-  };
+  return { path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}`, body: scene };
 }
 
 // --- Editing a stored Scene (§13): only when the round trip is lossless.
@@ -236,7 +291,8 @@ export const CONTRIBUTION_DEFAULTS = {
 };
 
 export const UNAUTHORABLE_REASON =
-  "Uses features the console can't author (child Scenes, outro, fades…).";
+  "Uses features the console can't edit yet (child Scenes, see-through photos, " +
+  "or different settings per Frame).";
 
 /** A Scene with every omitted Scene and Contribution field at its model default. */
 export function normalizeScene(scene) {
@@ -266,23 +322,39 @@ function canonical(value) {
  * Contribution names assets, otherwise live from its first Source. An authored
  * Scene does not store its Source, so the operator picks it again.
  *
+ * Delivery 1x's settings are read from the first Contribution (fade, keep the last photo)
+ * and the first outro Contribution (how it ends); a Scene whose other Contributions differ
+ * does not rebuild to itself, so {@link editableDraft} withholds Edit.
+ *
  * @param {object} scene a served Scene definition
  * @returns {{mode: "live"|"authored", sourceRef: string, targetIds: string[],
- *            cycleSeconds: number, loop: boolean, selections: Record<string, string>}}
+ *            cycleSeconds: number, loop: boolean, selections: Record<string, string>,
+ *            fadeSeconds: number, ending: Ending, endingSeconds: number,
+ *            keepLastPhoto: boolean, keepTogether: boolean}}
  */
 export function decodeScene(scene) {
-  const { contributions, cycle_seconds: cycleSeconds, loop } = normalizeScene(scene);
+  const {
+    contributions, cycle_seconds: cycleSeconds, loop, outro_seconds: outroSeconds,
+    outro_contributions: outro, protect_frames: keepTogether,
+  } = normalizeScene(scene);
   const authored = contributions.length > 0 && contributions[0].asset_refs.length > 0;
   const frameIdOf = (entry) => frameOf(entry.target) ?? entry.target;
+  const first = contributions[0];
+  const ending = outroSeconds === 0 ? "none" : outro[0]?.kind === "black" ? "black" : "fade";
   return {
     mode: authored ? "authored" : "live",
-    sourceRef: authored ? "" : (contributions[0]?.source_refs[0] ?? ""),
+    sourceRef: authored ? "" : (first?.source_refs[0] ?? ""),
     targetIds: contributions.map(frameIdOf),
     cycleSeconds,
     loop,
     selections: authored
       ? Object.fromEntries(contributions.map((entry) => [frameIdOf(entry), entry.asset_refs[0]]))
       : {},
+    fadeSeconds: first ? first.fade_in_seconds + first.fade_out_seconds : 0,
+    ending,
+    endingSeconds: ending === "none" ? SCENE_SETTING_DEFAULTS.endingSeconds : outroSeconds,
+    keepLastPhoto: first ? first.retain_on_expiry : SCENE_SETTING_DEFAULTS.keepLastPhoto,
+    keepTogether,
   };
 }
 
@@ -290,8 +362,9 @@ export function decodeScene(scene) {
  * The draft to edit a stored Scene with, or null when the console cannot
  * author it losslessly (§13): the Scene must equal `buildSave(decodeScene(it))`
  * apart from `revision`, both sides filled with the model defaults. Anything
- * else — child Scenes, an outro, fades, opacity, several Sources — would be
- * dropped by a save, so Edit is withheld with {@link UNAUTHORABLE_REASON}.
+ * else — child Scenes, opacity, unequal fades, settings that differ per Frame,
+ * several Sources — would be dropped by a save, so Edit is withheld with
+ * {@link UNAUTHORABLE_REASON}.
  *
  * @param {object} scene a served Scene definition
  * @returns {ReturnType<typeof decodeScene>|null}
@@ -306,17 +379,21 @@ export function editableDraft(scene) {
 
 /**
  * A Scene draft (flow design §7 J4): its kind (`mode`), name and id, Source, target
- * frames, per-frame choices, cycle and loop, and the stored `revision` it was seeded
- * from (null for a new Scene; the flow's `baseRevision`).
+ * frames, per-frame choices, cycle and loop, delivery 1x's settings ({@link buildSave}),
+ * and the stored `revision` it was seeded from (null for a new Scene; the flow's
+ * `baseRevision`).
  *
  * @typedef {{mode: "live"|"authored", name: string, idOverride: string|null,
  *            sourceRef: string, targets: string[], selections: Record<string, string>,
- *            cycleSeconds: string|number, loop: boolean, revision: number|null}} SceneDraft
+ *            cycleSeconds: string|number, loop: boolean, fadeSeconds: number,
+ *            ending: Ending, endingSeconds: number, keepLastPhoto: boolean,
+ *            keepTogether: boolean, revision: number|null}} SceneDraft
  */
 
 /**
  * A new Scene's defaults, each with its source: live from a Source; 30 s per
- * cycle; loop on, so a Scene keeps playing until its Program ends (slice 3 Question 1).
+ * cycle; loop on, so a Scene keeps playing until its Program ends (slice 3 Question 1);
+ * delivery 1x's settings at {@link SCENE_SETTING_DEFAULTS}.
  *
  * @type {Readonly<SceneDraft>}
  */
@@ -329,6 +406,7 @@ export const NEW_SCENE_DRAFT = Object.freeze({
   selections: Object.freeze({}),
   cycleSeconds: 30,
   loop: true,
+  ...SCENE_SETTING_DEFAULTS,
   revision: null,
 });
 

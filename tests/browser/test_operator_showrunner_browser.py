@@ -1865,7 +1865,8 @@ def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, 
         expect(_scene_row(page, "plain").get_by_role("button", name="Edit Scene plain")).to_be_visible()
         evening = _scene_row(page, "evening")
         expect(evening).to_contain_text(
-            "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…).")
+            "Edit unavailable: Uses features the console can't edit yet (child Scenes, see-through "
+            "photos, or different settings per Frame).")
         expect(evening.get_by_role("button", name="Edit Scene evening")).to_have_count(0)
 
 

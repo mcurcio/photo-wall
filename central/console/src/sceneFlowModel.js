@@ -47,12 +47,19 @@ export const SCENE_FIELD_STEP = Object.freeze({
   media: "media",
   cycle: "playback",
   loop: "playback",
+  fade: "playback",
+  ending: "playback",
+  endingSeconds: "playback",
+  keepLastPhoto: "playback",
+  keepTogether: "playback",
   name: "review",
   id: "review",
 });
 
 /** The fields that sit under their step's Advanced (they have a stated default). */
-export const SCENE_ADVANCED_FIELDS = Object.freeze(new Set(["loop", "id"]));
+export const SCENE_ADVANCED_FIELDS = Object.freeze(
+  new Set(["loop", "keepLastPhoto", "keepTogether", "id"]),
+);
 
 /** The Scene flow's instances and their routes (flow/instance.js `flowKeys`). */
 export const SCENE_KEYS = flowKeys({
@@ -98,6 +105,10 @@ export const SCENE_ANSWER_LABELS = Object.freeze({
   media: MEDIA.label,
   cycle: PLAYBACK_LABELS.cycle,
   loop: PLAYBACK_LABELS.loop,
+  fade: PLAYBACK_LABELS.fade,
+  ending: PLAYBACK_LABELS.ending,
+  keepLastPhoto: PLAYBACK_LABELS.keepLastPhoto,
+  keepTogether: PLAYBACK_LABELS.keepTogether,
 });
 
 // The authored values a Reload can change, each by its answer label.
@@ -108,6 +119,11 @@ const RELOADED = [
   [SCENE_ANSWER_LABELS.media, (draft) => draft.selections],
   [SCENE_ANSWER_LABELS.cycle, (draft) => Number(draft.cycleSeconds)],
   [SCENE_ANSWER_LABELS.loop, (draft) => draft.loop],
+  [SCENE_ANSWER_LABELS.fade, (draft) => Number(draft.fadeSeconds)],
+  [SCENE_ANSWER_LABELS.ending, (draft) =>
+    (draft.ending === "none" ? "none" : `${draft.ending}:${Number(draft.endingSeconds)}`)],
+  [SCENE_ANSWER_LABELS.keepLastPhoto, (draft) => draft.keepLastPhoto],
+  [SCENE_ANSWER_LABELS.keepTogether, (draft) => draft.keepTogether],
 ];
 
 /**
