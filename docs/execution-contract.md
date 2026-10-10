@@ -25,6 +25,8 @@ flowchart TD
 
 The gate is a responsibility, not another service. Local executors enforce timing after receiving authorization; a future-dated command is not permission to act immediately. Projecting January at 23:58 may acquire files but must not finish December, start January children in current state or emit future lighting cues.
 
+A cue is a forecast until it starts: an edit that changes its members or their Outputs, or drops it from the timeline, supersedes it (`superseded`) with a new cohort, withdrawing any commit already granted in its preparation window; the new cohort keeps the late-join preparation grace past its start, so a Player that fetches it late can still commit it. A started cue is immutable; if one would grow, that cue alone is skipped (`cue_membership_changed`) and every other Frame keeps its offers.
+
 ## Concrete plan agreement
 
 A plan resolves enough information for local execution without repeating central source selection or resolving global Scene priority, while preserving the [central media boundary](requirements.md#central-media-boundary):
