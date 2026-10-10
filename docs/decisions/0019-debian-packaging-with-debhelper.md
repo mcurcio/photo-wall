@@ -1,6 +1,6 @@
 # 0019 — Photo Wall's Node software built as Debian packages with debhelper
 
-**Date:** 2026-10-09 · **Layer:** module contracts and data flow (how the Node's software is built, packaged and put into images) · **Status:** Owner-approved at the gate on 2026-10-09; not yet built. The requirements below bind. The owner's three answers are current choices and stay revisable. The design was drafted against `origin/main` at `aa694bb`; a claim marked *(inferred)* was not checked against code or a run, and the [implementer must prove](#premises-to-prove-first-in-p1) the load-bearing ones first.
+**Date:** 2026-10-09 · **Layer:** module contracts and data flow (how the Node's software is built, packaged and put into images) · **Status:** built (this PR, [57](https://github.com/mcurcio/photo-wall/pull/57)); owner-approved at the gate on 2026-10-09. How the built system works is the [Debian packaging module](../module-debian-packaging.md); what changed from this design while building it is [Built: deviations from the design](#built-this-pr-deviations-from-the-design). The requirements below bind. The owner's three answers are current choices and stay revisable. The design was drafted against `origin/main` at `aa694bb`; a claim marked *(inferred)* was not checked against code or a run, and the [implementer must prove](#premises-to-prove-first-in-p1) the load-bearing ones first.
 
 **Gate page:** <https://claude.ai/artifact/JexW8dAb1mU9D8VL85xEbc>
 
@@ -159,6 +159,42 @@ A public apt repository, package signing, dpkg on the Pi.
 | **P4, stage 1** | 2 | Per Q3: `photo-wall-netboot-init` installs an initramfs-tools hook (Debian's idiom, already used in `appliance/netboot_initramfs/hooks`) that copies `photo-wall-uplink` and stage 1's directory, so `build_boot_data.py` goes and `build_netboot_bundle.sh` only assembles. |
 
 Net: about −5,400 lines of Python and tests, +400 lines of configuration.
+
+## Built (this PR): deviations from the design
+
+The design above is kept as approved. Building it found these differences, each recorded as an erratum (`E-0019-*`, [`.claude/errata.md`](../../.claude/errata.md)). Where the owner decided, his answer is quoted in the erratum.
+
+**Layout and ownership**
+
+- `packaging/python-nats/` is `debian-packaging/python-nats/`: a root directory named `packaging` shadows PyPI `packaging` for the closure tooling (P1A-1). The pin is `debian-packaging/snapshot.list` (P1A-2), and its first line's instant is the one `SOURCE_DATE_EPOCH` (`debian-packaging/snapshot-epoch.sh`, P4-8).
+- The build container prefers the local repo over the snapshot (apt pin 1002), because trixie's own `nats-server` 2.10.27 would otherwise out-rank the pinned 2.15.0 (P1A-3). nats-server's licence ships as upstream's text in `photo-wall-node`'s doc directory (P1A-4).
+- `graphics_abi` is circular as written in this record. It hashes the Meson outputs of the display and frame client and the third-party runtime, never the context's Python (P1A-5, P1B-1, P2A-9). `base_abi` hashes `photo-wall-node`'s expanded Depends and the image format only, so a change to a base unit or launcher keeps `base_abi` and app images stay compatible (P2B-5).
+- Build-time Python that stays is larger than listed: `scripts/import_check.py`, `scripts/seal_root.py` and `scripts/node_release_writer.py` (the check, the seal and the release contract), plus `scripts/module_closure.py`'s finder.
+
+**Packages and the import check**
+
+- The check runs at `execute_after_dh_install`, not `override_dh_auto_test`: no `debian/<package>/` tree exists earlier (RECUT-5), and `nocheck` cannot skip it. Depends name **direct** imports, not closures (RECUT-4).
+- The Depends cycle through the retiring ignore lines is resolved by the owner's pick, "Exempt listed edges": an edge listed in `pyproject.toml`'s `layers` `ignore_imports` gives no Depends (OWNER-1, RECUT-12). Costs: a launcher's `PATH` exposes every module of the package directories it reaches (P2B-4); installing `photo-wall-uplink` pulls `python3-pydantic` and `python3-nats` through `photo-wall-common` (P2A-8).
+- The record's table had no home for the `appliance/*.py` modules the launchers reach: `feed.py` and `feed_socket.py` are in `photo-wall-node-kernel`, `app_launcher.py` and `process_identity.py` in `photo-wall-node-apps`, `node_boot_handoff.py` in `photo-wall-node-boot` (P1A-11, P2A-2).
+
+**Roots, seal and fixture**
+
+- The image is not the root: `appliance/apps/environment.py`'s layout is three metadata files beside `rootfs/` (P3A-2). mmdebstrap's own cleanup runs after its customize hooks, so the seal runs after mmdebstrap, from `build-root.sh`, not as a hook (P3A-1). The app root's file capabilities are handled by the seal (P3A-3). `build-root.sh` writes a fixed empty `/etc/hostname`, since two builds in containers with different hostnames differed in that file (P1A-6, P3A-9).
+- The PID1 fixture is a Dockerfile FROM the build container, not the slim target, because its head needs the compiler and `libweston-14-dev`; its stage targets are built with `build-root.sh --once` (P3A-8).
+
+**Stage 1 (P4)**
+
+- The shipped `initrd.img` is three archives, not two: the floor's layer, `mkinitramfs`' own early archive, the compressed one (P4-1). The hook copies each listed directory's import roots, so unused modules ride along (about 0.3 MB, P4-2). `dh_installinitramfs` adds an `update-initramfs` trigger (P4-3).
+
+**V1 removal (owner's pick, "Do it in this PR")**
+
+- The V1 builders, the bootstrapper, the OS agent, the Player `.deb` and payload, the V1 release files, Central's V1 routes (migrations 069 and 070) and the `photowall.node=v2` switch are deleted in this PR (OWNER-2, RECUT-6; [runbook](../runbook.md#player-provisioning-the-v1-netboot-and-promote-path-removed)). Deleted, not ported: no dual path remains.
+- Coverage lost: the V1 start probe also proved that the base's own libkmod finds `vc4` and `v3d` by device alias; nothing replaces it yet (V1B-2).
+- Not done: the GitHub origin's `manifest.json` read and the `PHOTO_WALL_RELEASE_PRERELEASES` gate have no reader left and stay for a follow-up (V1P-5, V1P-6); the Dockerfile and Compose still default to `central.app:create_app`; `README.md` still describes the V1 promote flow and its removed runbook anchors (outside the docs pass's paths).
+
+**Not run**
+
+- No Raspberry Pi boot, HDMI output or timing check ran; CI proves packages, images and systemd behaviour on a generic arm64 runner only ([CI module](../module-appliance-ci.md)).
 
 ## Implementer brief
 

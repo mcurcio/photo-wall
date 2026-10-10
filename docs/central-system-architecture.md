@@ -252,7 +252,7 @@ work runs inside the serving process, and N pods multiply the load on the origin
   way back (`media_store.py:846-853`). The serve handlers are plain `def` and run on anyio's
   40-thread pool, which the waiter caps (32 + 8) would fill. Waits must be async.
 - **Workers are not yet safe as competing consumers.** OS extraction blocks the event loop
-  and so the heartbeat (`netboot_base.py:1030`). Stalled jobs are never rescued. The mirror and
+  and so the heartbeat (the V1 `netboot_base.py`, since deleted). Stalled jobs are never rescued. The mirror and
   base-fetch jobs have a dedupe key but no `lock` (`app_release_tasks.py:70-95`), and the `.deb` temp
   name is fixed per tag (`app_release_service.py:330-334`), so two workers can collide. The
   release enqueue has no savepoint (`app_release_queue.py:83-136`; `media_queue.py:51`

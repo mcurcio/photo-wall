@@ -248,29 +248,5 @@ Central authority samples and rootfs payloads are synthetic; it does not
 exercise network enrollment, the complete Player process loop, systemd or
 physical boot. This is distinct from the separately executed draw/decode tests.
 
-Build the normal native fixture image using the recipe above, and prepare a
-verified [Player wheelhouse](module-player-package.md) for the current revision.
-From a checkout containing the committed health fixture, replace the absolute
-wheelhouse path below. The container is disposable and receives only selected
-source and the locked wheel closure; all health-test state is temporary.
+The recipe that ran this adapter installed a Player wheelhouse into the 2026-09-05 fixture image. The wheelhouse builder (`scripts/build_player.py`) is deleted ([Player package](module-player-package.md), [0019](decisions/0019-debian-packaging-with-debhelper.md)), so that recipe cannot be reproduced and is withdrawn; the executed evidence above stands as a dated record. The Player's main-loop policy against real GLib, GDK and GL, and the display against a headless Weston, now run from the built packages in CI (`display-harness`, `scripts/run_display_harness.py`; [Debian packaging module](module-debian-packaging.md)). The adapter refuses non-Linux, non-root or missing-display environments. It never executes reboot or changes host production paths.
 
-```sh
-set -eu
-native_health_wheelhouse=/absolute/player-wheelhouse
-native_health_tmp=$(mktemp -d)
-git archive HEAD appliance contracts player tests/native/health_smoke.py > "$native_health_tmp/source.tar"
-native_health_id=$(docker create --init --network none --memory 1g --cpus 2 \
-  --pids-limit 256 photo-wall-native-smoke:20260905 sleep 600)
-trap 'docker rm -f "$native_health_id" >/dev/null' EXIT
-docker start "$native_health_id" >/dev/null
-docker cp "$native_health_tmp/source.tar" "$native_health_id:/tmp/source.tar"
-docker cp "$native_health_wheelhouse" "$native_health_id:/tmp/wheelhouse"
-docker exec "$native_health_id" sh -c 'tar -xf /tmp/source.tar -C /app && /opt/native-venv/bin/pip install --no-index --find-links=/tmp/wheelhouse/wheels -r /tmp/wheelhouse/requirements.txt'
-docker exec "$native_health_id" xvfb-run -a -s '-screen 0 640x480x24' \
-  /opt/native-venv/bin/python tests/native/health_smoke.py --report /tmp/native-health-report.json
-docker cp "$native_health_id:/tmp/native-health-report.json" "$native_health_tmp/report.json"
-```
-
-The public report remains in the generated temporary directory after the
-container is removed. The test refuses non-Linux, non-root or missing-display
-environments. It never executes reboot or changes host production paths.
