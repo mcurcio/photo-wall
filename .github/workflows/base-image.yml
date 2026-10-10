@@ -385,17 +385,19 @@ jobs:
             etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf >/dev/null
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
-          # The node packages and the OS packages the layers name are installed
-          # (dpkg's own database: `install ok installed`); no watchdog override,
+          # photo-wall-node (dpkg installs it only with every Depends: the
+          # contexts, nats-server, python3-nats) and the OS packages the layers'
+          # `packages:` lists name are installed (dpkg's own database:
+          # `install ok installed`); no watchdog override,
           # time daemon or resolver writer; the image's apt sources are exactly
           # snapshot.list's pin; the agent's SSH login admits exactly the repo
           # key, by key only, with the server and its per-boot host-key
           # generator enabled; the binfmt units are masked, no build hostname is
           # baked in, the hosts database has myhostname, the default locale
           # sets LANG, and no V1 unit or bootstrapper directory is left.
-          printf '%s\n' photo-wall-node photo-wall-node-display nats-server python3-nats \
-            python3-cffi-backend libgl1-mesa-dri libpam-systemd libnss-myhostname \
-            > "$RUNNER_TEMP/base-packages.list"
+          { echo photo-wall-node
+            sed -n '/^  packages:$/,/^  [^ ]/s/^    - //p' appliance/rpi_image_gen/layer/*.yaml
+          } > "$RUNNER_TEMP/base-packages.list"
           if python3 scripts/device_root_checks.py --root "$extract" \
               --require-installed "$RUNNER_TEMP/base-packages.list" \
               --pinned-sources \

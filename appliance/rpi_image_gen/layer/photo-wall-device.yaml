@@ -12,13 +12,15 @@
 #  bundle must already be there: the required ca-certificates layer brings it
 #  with mmdebstrap's own package list (tests/test_device_root_checks.py binds
 #  this Requires list). Three OS dependencies of Debian packages the Node runs
-#  on are installed here, beside it, because no Photo Wall package may name
-#  them (decision 0019, R4): python3-cffi-backend, which trixie's
-#  python3-pywayland imports without declaring it; libgl1-mesa-dri, the GPU
-#  drivers Weston's GL renderer loads, which weston only Recommends; and
-#  libpam-systemd, the logind session photo-wall-display.service's
-#  PAMName=login opens for Weston's seat. No application code and no origin --
-#  0009 rule #1.
+#  on are this layer's `packages:`, installed from the pin with the OS, because
+#  no Photo Wall package may name them (decision 0019, R4):
+#  python3-cffi-backend, which trixie's python3-pywayland imports without
+#  declaring it; libgl1-mesa-dri, the GPU drivers Weston's GL renderer loads,
+#  which weston only Recommends; and libpam-systemd, the logind session
+#  photo-wall-display.service's PAMName=login opens for Weston's seat. The
+#  layers' `packages:` lists are the one home of the OS packages base-image.yml
+#  requires on the built image. No application code and no origin -- 0009
+#  rule #1.
 # X-Env-Layer-Version: 5.0.0
 # X-Env-Layer-Requires: systemd-min,ca-certificates
 #
@@ -34,6 +36,10 @@
 # METAEND
 ---
 mmdebstrap:
+  packages:
+    - python3-cffi-backend
+    - libgl1-mesa-dri
+    - libpam-systemd
   customize-hooks:
     - |-
       set -eu
@@ -49,14 +55,7 @@ mmdebstrap:
       chroot "$1" apt-get update \
         -o Dir::Etc::SourceList=sources.list.d/photo-wall-local.list \
         -o Dir::Etc::SourceParts=- -o APT::Get::List-Cleanup=0
-      # python3-cffi-backend: an OS dependency of Debian's python3-pywayland (trixie
-      # 0.4.18-4), which imports it without declaring it; the display's overlay client runs
-      # on pywayland (erratum E-0019-P2A-3). libgl1-mesa-dri: the Mesa DRI drivers (vc4, v3d)
-      # Weston's GL renderer loads, which weston only Recommends. libpam-systemd: the logind
-      # session of photo-wall-display.service (PAMName=login). All go into the OS here, never
-      # into a Photo Wall package (decision 0019, R4).
-      chroot "$1" apt-get install -y --no-install-recommends python3-cffi-backend \
-        libgl1-mesa-dri libpam-systemd photo-wall-node
+      chroot "$1" apt-get install -y --no-install-recommends photo-wall-node
       rm -f "$1/etc/apt/sources.list.d/photo-wall-local.list" \
         "$1/etc/apt/preferences.d/photo-wall-local" \
         "$1"/var/lib/apt/lists/_tmp_photo-wall-repo_*
