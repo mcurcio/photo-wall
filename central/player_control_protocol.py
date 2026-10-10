@@ -3,14 +3,16 @@
 import hashlib
 import json
 
-from contracts.player_control import ControlSelection
+from contracts.player_control import ControlSelection, plan_for_selection
 
 
 def project_state(delivery: dict, selection: ControlSelection) -> dict:
-    """Keep the published v0.12 envelope exactly four fields for legacy sessions."""
+    """Keep the published v0.12 envelope exactly four fields for legacy sessions, and each
+    plan layer in the shape the session's Player parses (`plan_for_selection`)."""
     state = {
         "configuration": delivery["configuration"].model_dump(mode="json"),
-        "plan": delivery["plan"].model_dump(mode="json") if delivery["plan"] else None,
+        "plan": plan_for_selection(delivery["plan"].model_dump(mode="json"), selection)
+        if delivery["plan"] else None,
         "commits": [item.model_dump(mode="json") for item in delivery["commits"]],
         "revocations": [item.model_dump(mode="json") for item in delivery["revocations"]],
     }

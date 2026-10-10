@@ -992,3 +992,52 @@ def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
     snapshot = runtime.export_state()["runs"][run_id]["scene"]
     runtime.delete_scene("historical", 1)
     assert runtime.export_state()["runs"][run_id]["scene"] == snapshot
+
+
+KEEP = {"after_end": "keep_this_photo"}
+
+
+def _kept_scene(**scene):
+    return Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+        media(fade_in_seconds=1, fade_out_seconds=2, **KEEP),), **scene)
+
+
+def _fades(view):
+    return [(intent.phase, intent.fade_in_seconds, intent.fade_out_seconds)
+            for intent in view.contributions]
+
+
+def test_a_kept_photo_plans_no_fade_out_in_its_final_cycle_only():
+    """The final cycle of a kept photo (the Scene stops at its end and nothing on the Frame
+    follows) holds full strength: a Program's end, the Scene's duration and Finish each make a
+    cycle final; earlier cycles, an ending on the Frame, and a photo not kept keep the authored
+    fade-out. Mutation probe: drop the final-cycle rule (the fade-out stays 2)."""
+    runtime = Runtime()
+    runtime.set_scene(_kept_scene())
+    runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=20))
+    assert _fades(runtime.advance(5)) == [("body", 1, 2)]
+    assert _fades(runtime.advance(15)) == [("body", 1, 0)]
+
+    timed = Runtime()
+    timed.set_scene(_kept_scene(duration_seconds=15))
+    timed.activate("kept", "timed", 0)
+    assert _fades(timed.advance(5)) == [("body", 1, 2)]
+    assert _fades(timed.advance(12)) == [("body", 1, 0)]
+
+    finished = Runtime()
+    finished.set_scene(_kept_scene())
+    run = finished.activate("kept", "finished", 0).run_id
+    assert _fades(finished.advance(3)) == [("body", 1, 2)]
+    assert _fades(finished.finish(run, 4)) == [("body", 1, 0)]
+
+    ending = Runtime()
+    ending.set_scene(_kept_scene(outro_seconds=4, outro_contributions=(
+        Contribution(target="frame:left", kind="black"),)))
+    run = ending.activate("kept", "ending", 0).run_id
+    assert _fades(ending.finish(run, 4)) == [("body", 1, 2)]
+
+    plain = Runtime()
+    plain.set_scene(Scene(scene_id="plain", cycle_seconds=10, contributions=(
+        media(fade_in_seconds=1, fade_out_seconds=2),)))
+    plain.activate("plain", "plain", 0)
+    assert _fades(plain.advance(5)) == [("body", 1, 2)]

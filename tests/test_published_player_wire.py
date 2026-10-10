@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from test_coordination import schedule
+from test_player_control_protocol import CURRENT, IDENTIFY_ONLY, LEGACY, after_end_state
 from test_registry import ADMIN, frame
 
 from central.app import create_app
@@ -189,3 +190,19 @@ def test_published_player_extra_field_negative_control(published_directory, play
         "accepted"]
     identify = package_wire(root, "rest", {**state, "identify_output": None})
     assert identify["accepted"] is (player.tag == "v0.13.0")
+
+
+@pytest.mark.parametrize("player", PLAYERS, ids=lambda value: value.tag)
+def test_published_player_reads_each_after_state_as_its_keep_flag(published_directory, player):
+    """A plan with a kept photo and an ending that keeps nothing reaches a published Player in
+    the shape it parses (`retain_on_expiry`); the current shape, `after_end`, which no
+    published Player offers to read, it refuses (contracts/player_control.py
+    LAYER_AFTER_END)."""
+    root = package_root(published_directory, player)
+    sessions = [LEGACY] + ([IDENTIFY_ONLY] if player.tag != "v0.12.0" else [])
+    for selection in sessions:
+        parsed = package_wire(root, "rest", after_end_state(selection))
+        assert parsed["accepted"] and parsed["has_plan"], parsed
+    current = {key: value for key, value in after_end_state(CURRENT).items()
+               if key != "identify_output"}
+    assert not package_wire(root, "rest", current)["accepted"]

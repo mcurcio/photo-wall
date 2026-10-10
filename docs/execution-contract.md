@@ -75,6 +75,21 @@ A covered clip paused at 12 seconds and revealed 20 seconds later may require po
 
 Use synchronized system clocks and a defined mapping into local monotonic/media time. The Player obtains an authenticated sample from `/v1/player/time`, independent of control-state delivery and bound to its current Player/session epoch. Record RTT, midpoint offset, application delay, transport/application drift, mapping age, detected step, uncertainty, and rejection counters. A rejected probe withholds clock-dependent readiness. Measure visible start skew and drift across actual panels; clock agreement or a successful synchronized start alone proves neither. Tight synchronization remains a qualification decision; do not promise frame accuracy from software timestamps.
 
+## What a Frame keeps
+
+Central plans what each Frame keeps after a layer, and the plan says it: the Player makes no content decision of its own (owner, 2026-10-10: "Can we add some metadata to indicate if the content should be held/frozen vs fade?"). Each layer carries one after-state, `Layer.after_end` ([contracts/models.py](../contracts/models.py) `AfterEnd`), for when nothing plays on its Frame, the Player's fallback during an outage included:
+
+| After-state | What the Frame keeps | Written by the console for |
+|---|---|---|
+| `keep_this_photo` | This opaque still, at full strength | **Keep the last photo up**: every photo of the Scene |
+| `keep_nothing` | Nothing: black | **How it ends**, Black or Fades out: the ending |
+| `leave_as_is` (default) | Whatever an earlier layer set | Everything else |
+
+- **When it takes effect.** At the first draw of the layer after its fade-in is over (a Fades out ending, after its return fade). A layer withdrawn, cancelled or invalidated before then changes nothing; one that took effect stays in effect when a later plan drops it. After a Black ending, an outage stays black (owner, 2026-10-10: "Stay black").
+- **A kept photo's last cycle.** Runtime plans no fade-out for a kept photo in its Run's final cycle when the Scene has no ending on that Frame (`central/runtime.py` `_holds_to_the_end`), so the photo never dips to black and snaps back to itself. A cycle is final when the Scene does not loop, or when the Run's stop (Program end, duration, scheduled finish, Finish) falls in it. The first three are known from the start; a Finish revises the current cycle's fade-out, the one change Central makes to a layer it already offered besides its arbitration (`central/planner.py` `REVISABLE`). The Player adopts it at its next commit; an outage between the Finish and that commit shows the old fade-out once.
+- **Players released before it.** A Player reads `after_end` only if it offered the `layer_after_end` capability at hello ([contracts/player_control.py](../contracts/player_control.py)). Central sends any other the yes/no `retain_on_expiry` it parses (`keep_this_photo` is yes), so it behaves as its release did; a Player whose Central did not select the capability reads that flag back the same way. Every published Player forbids unknown fields, so this projection is required ([Player control-protocol compatibility](player-protocol-compatibility-design.md); `tests/test_published_player_wire.py`).
+- **Stored data.** Migration `069_layer_after_end.sql` moved stored Scenes, Runs, offers and locks from the flag (yes is `keep_this_photo`, no is `leave_as_is`) and gave each stored Scene's ending `keep_nothing`. The previous Central build cannot read the migrated runtime state.
+
 ## Control-channel semantics
 
 Start with a typed application protocol over a persistent Player-originated WebSocket connection and separate HTTPS file retrieval from the central show system. MQTT remains an external integration boundary. Transport selection does not replace these obligations:

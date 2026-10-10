@@ -71,33 +71,10 @@ def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
 
-def _alpha(layer: Layer, now: float, *, hold_end: bool = False) -> float:
-    """The layer's strength at `now`: its opacity through its fades. `hold_end` skips the
-    fade-out (a kept still that nothing follows, `Executor._holds_end`)."""
+def _alpha(layer: Layer, now: float) -> float:
     fade_in = min(1.0, max(0.0, (now - layer.start) / layer.fade_in)) if layer.fade_in else 1
-    fade_out = (min(1.0, max(0.0, (layer.end - now) / layer.fade_out))
-                if layer.fade_out and not hold_end else 1)
+    fade_out = min(1.0, max(0.0, (layer.end - now) / layer.fade_out)) if layer.fade_out else 1
     return layer.opacity * min(fade_in, fade_out)
-
-
-def _kept(layer: Layer) -> bool:
-    """A still that asks to be kept up when nothing follows it (`retain_on_expiry`)."""
-    return bool(layer.retain_on_expiry and layer.variant and layer.variant.duration is None)
-
-
-def _replaces_kept(layer: Layer) -> bool:
-    """A layer that asks for what is beneath it once it ends: opaque black, or an opaque still
-    that is not kept and fades out (a Scene's black or fading ending, a Scene that fades its
-    photos and keeps none). Once it has played to its planned end under Central's current
-    plan, nothing brings the kept still back after it (`Executor._settle_replacement`); until
-    then the kept still stays the outage fallback. A plain opaque overlay never replaces it,
-    and neither does a video or a see-through layer (a kept Scene's videos are never kept
-    themselves)."""
-    if layer.retain_on_expiry or layer.opacity < 1:
-        return False
-    if layer.presentation == "black":
-        return True
-    return bool(layer.fade_out and layer.variant and layer.variant.duration is None)
 
 
 class Executor:
@@ -133,9 +110,6 @@ class Executor:
         self._cancelled: set[str] = set()
         self._invalidated: set[str] = set()
         self._retained: dict[str, _Retained] = {}
-        # Per output: the planned end of a shown layer that will replace the kept still once
-        # it plays to that end with Central's time held (`_settle_replacement`).
-        self._replacements: dict[str, float] = {}
         self._established_retention: set[str] = set()
         self._current: dict[str, OutputComposition] = {}
         self._current_leases: dict[str, float] = {}
@@ -205,7 +179,6 @@ class Executor:
                 self._assignments.clear()
                 self._inactive.clear()
                 self._retained.clear()
-                self._replacements.clear()
                 self._established_retention.clear()
                 self._current.clear()
                 self._current_leases.clear()
@@ -474,38 +447,24 @@ class Executor:
 
     def _local(self, assignment: _Assignment, now: float) -> LocalLayer:
         return LocalLayer(assignment.layer, assignment.path, assignment.layer.position(now),
-                          self._strength(assignment.layer, now))
+                          _alpha(assignment.layer, now))
 
-    def _settle_replacement(self, output_id: str, now: float) -> None:
-        """At the planned end of a shown replacing layer (`_replaces_kept`), drop the kept
-        still, but only if the layer held Central's plan to that end: Central's time was never
-        lost meanwhile (`_clock_gate` forgets the pending drop; a layer never outlasts the
-        plan that commits it, so its lease always reaches its end). Until then, and for good
-        when Central was lost first, the kept still stays the fallback, so an outage shows it
-        rather than black."""
-        end = self._replacements.get(output_id)
-        if end is None or now < end:
+    def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
+        """A drawn layer whose fade-in is over sets what its Frame keeps for when nothing plays
+        (`Layer.after_end`, planned by Central): this photo, at full strength, or nothing."""
+        layer = local.layer
+        if now < layer.start + layer.fade_in or layer.after_end == "leave_as_is":
             return
-        del self._replacements[output_id]
-        self._retained.pop(output_id, None)
-
-    def _strength(self, layer: Layer, now: float) -> float:
-        return _alpha(layer, now, hold_end=self._holds_end(layer))
-
-    def _holds_end(self, layer: Layer) -> bool:
-        """A kept still that nothing on its output follows keeps full strength to its end: it
-        is about to become the kept picture, so fading it out would show black and then snap
-        back to it. Something follows only when another planned layer on the output that would
-        replace the picture (opaque: a see-through overlay leaves the kept picture showing
-        beneath it) runs across the still's end; past the plan's horizon nothing is known to
-        follow."""
-        if not (layer.fade_out and _kept(layer) and self._plan):
-            return False
-        return not any(
-            other.output_id == layer.output_id and other.assignment_id != layer.assignment_id
-            and other.opacity >= 1 and other.start <= layer.end < other.end
-            for other in self._plan.layers
-        )
+        if layer.after_end == "keep_nothing":
+            self._retained.pop(binding.output_id, None)
+            return
+        identity = (f"{binding.output_id}:{binding.frame_id}:"
+                    f"{binding.generation}:{layer.assignment_id}")
+        owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
+                 f"{hashlib.sha256(identity.encode()).hexdigest()}")
+        self._pin_intents[owner] = layer.variant.sha256
+        self._retained[binding.output_id] = _Retained(
+            replace(local, alpha=layer.opacity), binding, owner)
 
     def _compositions(self, items: Iterable[_Assignment], now: float) -> tuple[OutputComposition, ...]:
         grouped: dict[str, list[LocalLayer]] = {}
@@ -535,9 +494,6 @@ class Executor:
             for assignment in self._assignments.values():
                 assignment.committed = False
                 assignment.readiness_generation += 1
-            # Central's time is lost: no replacing layer now plays to its end under the plan,
-            # so each kept still stays the fallback (`_settle_replacement`).
-            self._replacements.clear()
         return healthy
 
     @staticmethod
@@ -843,11 +799,9 @@ class Executor:
             for binding in self._config.bindings:
                 if binding.output_id not in self._config.enabled_outputs:
                     self._retained.pop(binding.output_id, None)
-                    self._replacements.pop(binding.output_id, None)
                     fallback = self._fallback(binding, now)
                     self._show_fallback(fallback)
                     continue
-                self._settle_replacement(binding.output_id, now)
                 previous = self._current.get(binding.output_id)
                 candidate = candidates.get(binding.output_id)
                 failed = False
@@ -893,17 +847,8 @@ class Executor:
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
-                                    # Bottom to top, so the topmost picture decides what is kept.
-                                    if _replaces_kept(local.layer):
-                                        self._replacements[binding.output_id] = local.layer.end
-                                    elif local.alpha >= 1 and _kept(local.layer):
-                                        self._replacements.pop(binding.output_id, None)
-                                        identity = (f"{binding.output_id}:{binding.frame_id}:"
-                                                    f"{binding.generation}:{local.layer.assignment_id}")
-                                        owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
-                                                 f"{hashlib.sha256(identity.encode()).hexdigest()}")
-                                        self._pin_intents[owner] = local.layer.variant.sha256
-                                        self._retained[binding.output_id] = _Retained(local, binding, owner)
+                                    # Bottom to top, so the topmost layer's after-state holds.
+                                    self._apply_after_end(binding, local, now)
                                 continue
                             if presented.status == "pending":
                                 # Native GL presentation acknowledges on a later main-loop turn.
@@ -925,7 +870,7 @@ class Executor:
                     continuation = OutputComposition(
                         binding, binding.effective_calibration(now), tuple(
                             LocalLayer(local.layer, local.path, local.layer.position(now),
-                                       self._strength(local.layer, now)) for local in previous.layers
+                                       _alpha(local.layer, now)) for local in previous.layers
                         )
                     )
                     acknowledgment = self._acknowledgment(

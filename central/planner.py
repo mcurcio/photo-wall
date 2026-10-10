@@ -12,7 +12,7 @@ from pydantic import Field
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
-from contracts.models import FrameProfile, Layer, Model, OutputBinding
+from contracts.models import AfterEnd, FrameProfile, Layer, Model, OutputBinding
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -100,6 +100,17 @@ def eligible(candidate: Candidate, profile: FrameProfile) -> bool:
     )
 
 
+# What Central may revise on a layer it has already offered (each offered layer is a lock:
+# its content and interval are fixed): the arbitration, and the fade-out, which a Finish
+# revises to hold a kept photo in what became its final cycle (`runtime._holds_to_the_end`).
+REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out"})
+
+
+def same_execution(first: Layer, second: Layer) -> bool:
+    """The same execution of an assignment, up to what Central may revise (`REVISABLE`)."""
+    return first.model_dump(exclude=REVISABLE) == second.model_dump(exclude=REVISABLE)
+
+
 def assignment_id(intent: Intent) -> str:
     identity = json.dumps(
         [intent.run_id, intent.target, intent.phase, intent.interval_start, intent.interval_end],
@@ -151,6 +162,14 @@ def candidate_standing(candidate: Candidate, profile: FrameProfile) -> Standing:
     if candidate.variant is None:
         return "preparing"
     return "usable" if _variant_usable(candidate, profile) else "no_compatible_variant"
+
+
+def _after_end(intent: Intent, *, still: bool) -> AfterEnd:
+    """The layer's after-state: the authored one, except that only a still is kept (a kept
+    Scene's videos change nothing)."""
+    if intent.after_end == "keep_this_photo" and not still:
+        return "leave_as_is"
+    return intent.after_end
 
 
 class _ProjectionBuilder:
@@ -292,25 +311,23 @@ class _ProjectionBuilder:
         locked = self.locks.get(identity)
         if locked is not None:
             expected_kind = "black" if intent.kind == "black" else "media"
-            arbitration = {"priority", "root_order", "admission_order"}
             if any(
                 getattr(locked, field) != value
-                for field, value in fields.items() if field not in arbitration
-            ) or locked.presentation != expected_kind:
-                self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
-                return
-            if locked.retain_on_expiry != bool(intent.retain_on_expiry and locked.variant and
-                                               locked.variant.media_type != "video/mp4"):
+                for field, value in fields.items() if field not in REVISABLE
+            ) or locked.presentation != expected_kind or locked.after_end != _after_end(
+                intent, still=locked.variant is not None and locked.variant.media_type != "video/mp4"
+            ):
                 self.diagnose("lock_stale_authority", intent=intent, assignment=identity)
                 return
             self.used_locks.add(identity)
-            self.layers[player].append(locked.model_copy(update={
-                field: fields[field] for field in arbitration
+            self.layers[player].append(Layer.model_validate({
+                **locked.model_dump(), **{field: fields[field] for field in REVISABLE},
             }))
             self.selections.append(AssignmentSelection(assignment_id=identity, locked=True))
             return
         if intent.kind == "black":
-            self.layers[player].append(Layer(**fields, presentation="black"))
+            self.layers[player].append(Layer(**fields, presentation="black",
+                                             after_end=_after_end(intent, still=False)))
             return
         pool = self._pool(intent, binding.profile)
         if not pool:
@@ -335,7 +352,7 @@ class _ProjectionBuilder:
             self.diagnose("variant_incompatible", intent=intent, assignment=identity)
             return
         self.layers[player].append(Layer(**fields, presentation="media", variant=candidate.variant,
-            retain_on_expiry=intent.retain_on_expiry and candidate.kind == "image"))
+            after_end=_after_end(intent, still=candidate.kind == "image")))
 
     def result(self, now: float, horizon_end: float) -> Projection:
         for identity, lock in self.locks.items():

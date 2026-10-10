@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
-from contracts.models import TARGET_ID_PATTERN
+from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -53,7 +53,7 @@ class Contribution(FrozenModel):
     opacity: Unit = 1
     fade_in_seconds: Seconds = 0
     fade_out_seconds: Seconds = 0
-    retain_on_expiry: bool = False
+    after_end: AfterEnd = "leave_as_is"
     ramp_from: Unit = 0
     ramp_to: Unit = 0
 
@@ -65,8 +65,10 @@ class Contribution(FrozenModel):
             raise ValueError("media contributions need source or authored asset references")
         if self.kind != "media" and (self.source_refs or self.asset_refs):
             raise ValueError("only media contributions carry media references")
-        if self.retain_on_expiry and (self.kind != "media" or self.opacity != 1):
-            raise ValueError("only opaque media contributions may retain a still")
+        if self.after_end == "keep_this_photo" and (self.kind != "media" or self.opacity != 1):
+            raise ValueError("only opaque media contributions may keep a photo")
+        if self.after_end != "leave_as_is" and self.kind == "actuator":
+            raise ValueError("an actuator contribution keeps nothing on a Frame")
         return self
 
 
@@ -166,7 +168,7 @@ class Intent(FrozenModel):
     base_opacity: Unit
     fade_in_seconds: Seconds
     fade_out_seconds: Seconds
-    retain_on_expiry: bool = False
+    after_end: AfterEnd = "leave_as_is"
     actuator_value: Unit | None = None
     phase: Literal["body", "outro"]
 
@@ -268,6 +270,20 @@ class _Run(_MutableModel):
         if self.scene.duration_seconds is not None:
             times.append(self.started_at + self.scene.duration_seconds)
         return min((t for t in times if t is not None), default=None)
+
+
+def _holds_to_the_end(run: _Run, contribution: Contribution) -> bool:
+    """A kept photo in its Run's final body cycle plans no fade-out: nothing on its Frame
+    follows it (the Scene has no ending there), so fading out would dip to black and snap back
+    to the kept photo. The cycle is final when the Scene does not loop, or when the Run's stop
+    (Program end, duration, scheduled finish or Finish) falls within it; a Finish revises the
+    current cycle, which the planner allows on an offered layer (`planner.REVISABLE`)."""
+    if run.phase != "body" or contribution.after_end != "keep_this_photo":
+        return False
+    if any(ending.target == contribution.target for ending in run.scene.outro_contributions):
+        return False
+    stop = run.stop_at
+    return not run.scene.loop or (stop is not None and stop <= run.cycle_end)
 
 
 class _Queued(_MutableModel):
@@ -950,11 +966,12 @@ class Runtime:
             definitions = run.scene.outro_contributions if run.phase == "outro" else run.scene.contributions
             position = max(0.0, now - start)
             for contribution in definitions:
+                fade_out = 0 if _holds_to_the_end(run, contribution) else contribution.fade_out_seconds
                 opacity = contribution.opacity
                 if contribution.fade_in_seconds:
                     opacity *= min(1.0, position / contribution.fade_in_seconds)
-                if contribution.fade_out_seconds:
-                    opacity *= min(1.0, max(0.0, end - now) / contribution.fade_out_seconds)
+                if fade_out:
+                    opacity *= min(1.0, max(0.0, end - now) / fade_out)
                 fraction = min(1.0, position / (end - start))
                 value = (
                     contribution.ramp_from
@@ -972,8 +989,8 @@ class Runtime:
                     interval_start=start, interval_end=end, opacity=opacity,
                     base_opacity=contribution.opacity,
                     fade_in_seconds=contribution.fade_in_seconds,
-                    fade_out_seconds=contribution.fade_out_seconds,
-                    retain_on_expiry=contribution.retain_on_expiry,
+                    fade_out_seconds=fade_out,
+                    after_end=contribution.after_end,
                     actuator_value=value, phase=run.phase,
                 ))
         winners: dict[str, Intent] = {}
