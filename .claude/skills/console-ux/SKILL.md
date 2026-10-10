@@ -72,16 +72,16 @@ One page per step. Fill every line; write "none" rather than deleting one.
 - `EntityHeader`: "Living room left", Wall and room, status (`HealthBadge`), Identify
 - `Tabs` (1a): Overview · **Position** · Picture · Hardware
 - `LivePreviewEditor`:
-  - mirror: a scaled outline of the output with the four corners (domain: `PositionCanvas`)
-  - controls: nudge pad (1 / 10 / 50 px, arrow keys); Rotation; crop per edge; "Reset to full screen"
+  - controls: `QuadEditor` (the four corners and crop edges over an outline of the output; arrow keys
+    move the selected corner), `NudgePad` (1 / 10 / 50 px steps), Rotation, "Reset to full screen"
   - `AckBadge`; **Done** · **Revert**
 
 **Settings:**
 | Setting | Control | Default | SettingRow kind | Belongs to | Acts on |
 |---|---|---|---|---|---|
-| Corner positions | PositionCanvas + nudge pad | full output | equipment | frame | pi |
+| Corner positions | QuadEditor + NudgePad | full output | equipment | frame | pi |
 | Rotation | SegmentedControl 0/90/180/270 | 0 | equipment | frame | pi |
-| Crop per edge | Slider (px) × 4 | 0 | equipment | frame | pi |
+| Crop per edge | QuadEditor edges | 0 | equipment | frame | pi |
 
 **States:** Loading: skeleton canvas · Empty: none (a Frame always has a position) ·
 Error: Central did not answer (`ProblemCard`, Retry) · Can't tell: last geometry greyed with
@@ -97,10 +97,11 @@ no session timeout while the tab is open.
 **Phone:** mirror above, big arrow buttons and a corner selector below; Done and Revert pinned.
 
 **Patterns:** reused EntityHeader, HealthBadge, SettingRow · changed EntityPage → templates/object-page ·
-new Tabs, SegmentedControl, Slider (ui); LivePreviewEditor, AckBadge, LeaveGuard (patterns);
-PositionCanvas (domain)
+new Tabs, Row, Stack, SegmentedControl (ui); LivePreviewEditor, QuadEditor, NudgePad, AckBadge,
+LeaveGuard (patterns); the Position tab's wiring (domain)
 **Stories:** LivePreviewEditor/Clean, /Requested, /Acknowledged, /NoAckProblem, /Unbound,
-/PiOffline, /Expired, /Phone; AckBadge/Requested, /Acknowledged; LeaveGuard/Default; Tabs/Default
+/PiOffline, /Expired, /Phone; QuadEditor/Default, /CornerSelected, /Cropped; NudgePad/Default;
+AckBadge/Requested, /Acknowledged; LeaveGuard/Default; Tabs/Default
 **Acceptance:** moment of truth 3 ("Dragging a corner moves the picture on the real display
 right away, and Undo works"; in this design its "Undo" is **Revert**, so the check is that
 Revert restores the last kept position) · automated: catalogue stories; a browser journey test

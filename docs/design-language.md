@@ -33,7 +33,7 @@ The values live in [`tokens.css`](../central/console/src/design/tokens.css) and 
 | **Spacing and density** | `--spacing: 4px` (Tailwind step); `--spacing-row: 8px` | One density. Touch targets at least 44 px on phone (WCAG 2.5.5, Apple HIG); table rows keep `spacing-row` on desktop. A density toggle stays deferred (0018). | none |
 | **Radius** | `button`, `input`, `card`, `pill` | Chips are `pill`; tiles and cards are `card`. | none |
 | **Motion** | none | 150 ms ease-out for state changes (sheet in, toast in, tab change); no motion carries meaning alone; `prefers-reduced-motion` turns it off. Live previews never animate (the display is the preview). | `--duration-fast` and `--ease-standard` tokens |
-| **Icons** | none | Deferred to delivery 3b (the first one that needs icons: tile actions on Home). Recommendation recorded: Material Design Icons (`@mdi/js`), the set Immich's web app uses, behind one `ui/icon` primitive with a required label or `decorative`. Cost: shadcn's copied components import lucide, so each swaps its few icons by hand. Until then actions are words. | Decide at 3b |
+| **Icons** | none | Deferred to delivery 3b-i (the first one that needs icons: tile actions on Home). Recommendation recorded: Material Design Icons (`@mdi/js`), the set Immich's web app uses, behind one `ui/icon` primitive with a required label or `decorative`. Cost: shadcn's copied components import lucide, so each swaps its few icons by hand. Until then actions are words. | Decide at 3b |
 | **Dark and light** | Dark first; light overrides the same tokens; follows the system unless `data-scheme` is set | Every member works in both; the catalogue walker screenshots and runs axe in both schemes for every story. | none |
 | **Breakpoints** | Tailwind's defaults (not cleared) | One switch: below `md` (768 px) is **phone**: bottom tabs, tables become cards, sheets come from the bottom, editors stack preview above controls. No other breakpoint changes structure. | Name the switch as a token |
 
@@ -161,8 +161,15 @@ Members load-bearing in deliveries 1a to 1c have a props sketch below; every oth
 ### Primitives for deliveries 1a–1c (`src/ui`)
 
 ```ts
-// Tabs — one tab per concern; the selected tab is in the address.
-interface TabsProps { label: string; tabs: readonly { id: string; label: string; href: string }[]; current: string; children: React.ReactNode }
+// Tabs — one tab per concern; Base UI Tabs' controlled API. The caller keeps the value (in the address);
+// only the selected panel is mounted.
+interface TabsProps { label: string; tabs: readonly { value: string; label: string }[]; value: string; onValueChange(value: string): void; children: React.ReactNode }
+
+// Row and Stack — layout primitives so patterns and domain components never write flex classes.
+// Row: controls side by side, wrapping on a narrow screen. Stack: blocks one under the other, evenly spaced.
+// With a label, either becomes a named group.
+interface RowProps { label?: string; children: React.ReactNode }
+interface StackProps { label?: string; children: React.ReactNode }
 
 // Field — owns label, help and error wiring for one control (aria-describedby).
 interface FieldProps { label: string; help?: string; error?: string; children: React.ReactElement }
@@ -189,7 +196,7 @@ interface SelectProps<V extends string> { label: string; value: V | null; option
 interface TagProps { children: string }
 ```
 
-Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overflow actions, 1a header on phone), `Skeleton` (1a, templates' loading), `Combobox` and `Input` (4), `Icon` (3b).
+Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overflow actions, 1a header on phone), `Skeleton` (1a, templates' loading), `Input` (1a, the display profile override), `Combobox` (4), `Icon` (3b-i).
 
 ### Patterns for deliveries 1a–1c (`src/patterns`)
 
@@ -270,7 +277,7 @@ interface LivePreviewEditorProps {
   dirty: boolean;
   onDone(): void;
   onRevert(): void;
-  controls: React.ReactNode;     // domain: PositionCanvas + nudge pad, or picture sliders
+  controls: React.ReactNode;     // QuadEditor + NudgePad (Position), or picture sliders
   mirror?: React.ReactNode;      // a scaled outline of the output
   unavailable?: { reason: string };   // unbound, or Pi offline: editor disabled with the reason
   expired?: { at: string };      // the session ended while the console was away
@@ -283,6 +290,31 @@ interface LivePreviewEditorProps {
 - Stories: `Clean`, `Requested`, `Acknowledged`, `NoAckProblem`, `Unbound`, `PiOffline`, `Expired`, `Phone`. A11y: Done's disabled reason is visible text; the nudge pad has arrow-key bindings and labelled buttons.
 
 Prior art: Apple HIG display arrangement; projector keystone menus.
+
+#### QuadEditor and NudgePad
+
+The Position controls, as patterns (they know geometry, not Frames). Prior art: projector keystone menus; macOS Displays arrangement.
+
+```ts
+type Point = readonly [number, number];
+type Edge = 0 | 1 | 2 | 3;
+// QuadEditor — four draggable corners and four crop edges over an outline of the output, at its aspect.
+interface QuadEditorProps {
+  label: string;
+  corners: readonly Point[];                        // four, in output coordinates
+  crop: readonly [number, number, number, number];  // per edge
+  aspect: number;
+  selected: number | null; onSelect(corner: number | null): void;
+  onCorner(corner: number, point: Point): void;
+  onCrop(edge: Edge, point: Point): void;
+  onArrow(dx: number, dy: number): void;            // arrow keys on the selected corner
+  disabled?: boolean;
+}
+// NudgePad — four labelled arrow buttons; each press is one step, the caller decides its size (1, 10 or 50 px).
+interface NudgePadProps { label: string; subject: string; onNudge(dx: number, dy: number): void; disabled?: boolean }
+```
+
+Stories: `QuadEditor/Default`, `/CornerSelected`, `/Cropped`, `/Rotated`, `/Disabled`; `NudgePad/Default`, `/Disabled`. A11y: every corner and edge is reachable by keyboard; each NudgePad button names its direction and subject ("Move up: top-left corner").
 
 #### Dialog guards
 
@@ -335,15 +367,15 @@ Stories: `Default`, `GroupChosen`, `AllFramesChosen`, `ExcludesThisFrame`.
 
 | Pattern | Purpose | Delivery |
 |---|---|---|
-| `OverrideBanner` | Something overriding the plan, with an explicit `kind`: `"power-hold"` ("Off — by Home Assistant (Away mode) · **Resume schedule**") or `"takeover"` (Show now: countdown and **Back to normal**) | 2 (power-hold), 3b (takeover) |
-| `TimelineLane` | One lane of blocks on a time axis (power on/off, content, holds, Default Scene); blocks are also a text list | 2 |
-| `SaveBar` | Explicit Save / Save and apply now, or Change now / From the next block | 2 |
-| `WallMap`, `WallTile` | Frames to scale; a tile shows the status, what the Pi is presenting and its actions; read-only on Home, editable in T6 | 3b (Home); 6 (T6) |
+| `OverrideBanner` | Something overriding the plan, with an explicit `kind`: `"power-hold"` ("Off — by Home Assistant (Away mode) · **Resume schedule**"), `"takeover"` (Show now: countdown and **Back to normal**) or `"pause"` ("Paused until 22:04 · **Carry on**") | 2a (power-hold); 3b-i (takeover, pause) |
+| `TimelineLane` | One lane of blocks on a time axis (power on/off, content, holds, Default Scene); blocks are also a text list | 2a |
+| `SaveBar` | Explicit Save / Save and apply now, or Change now / From the next block | 2b |
+| `WallMap`, `WallTile` | Frames to scale; a tile shows the status, what the Pi is presenting and its actions; read-only on Home, editable in T6 | 3b-i (status and actions); 3b-ii (what the Pi presents); 6 (T6) |
 | `IncludeExcludePicker`, `MediaGrid` | Photo source filters paired with excludes; a thumbnail grid with a live count | 4 |
 | `Checklist` | Steps from real checks: T7's body and a settings area's live checks | 3 (Integrations); 6 (T7) |
-| `StepProgress` | Long actions across the network ("Reboot requested → started → back online") | unscheduled (G3, G6 have no delivery yet) |
-| `AppShell` | Rail on desktop, bottom tabs on phone, house word in the top bar | 3b |
-| `LogView` | A Pi's log, following live | unscheduled (G8) |
+| `StepProgress` | Long actions across the network ("Reboot requested → started → back online") | 3b-i (G3); 7 (G6) |
+| `AppShell` | Rail on desktop, bottom tabs on phone, house word in the top bar | 3b-i |
+| `LogView` | A Pi's log, following live | 7 |
 
 ## 5. Interaction rules
 
@@ -483,7 +515,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | B2 Identify | Frame page › header | T3 | Button, AckBadge | Action | requested → acknowledged | no acknowledgement: ProblemCard inline, Retry |
 | B3 Name and place | Frame page › header (name) | T3 | EntityHeader (inline title) | Autosave | saved inline | duplicate name: inline error |
 | B3 Name and place | Frames › wall layout (placement) | T6 | WallTile, Tabs (walls) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
-| B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | SettingRow, SegmentedControl, AckBadge, LeaveGuard; domain PositionCanvas | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note |
+| B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl, AckBadge, LeaveGuard | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note |
 | B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | SettingRow (equipment, actsOn), Slider, Switch (grey ramp) | Live | each slider says where it acts | a display that refuses DDC/CI: rows switch to picture adjustment and say so |
 | B6 Power | Frame page › Power | T3 | SettingRow, Button (Test), AckBadge, LinkToOwner | Autosave (options); Action (Test) | "Display confirmed off" / "Display didn't answer" | no method detected: EmptyState naming the smart-plug option |
 | B7 First photos | Setup checklist › First photos | T7 | Checklist, MediaGrid | none | done when a Frame is Showing | Immich not connected → that step first |
@@ -516,6 +548,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | F5 All off/on | Schedule › Power lane (the hold) | T5 | OverrideBanner (power-hold), TimelineLane | Action (Resume schedule) | hatched hold with who and until | none |
 | F6 Phone layout | AppShell | exception (no template) | AppShell, cards, Sheet | n/a | bottom tabs Home · Show now · Schedule · More | no sideways scrolling anywhere |
 | F7 Home Assistant | Settings › Integrations | T8 | SettingRow, Checklist (live checks), Button (Test), ConfirmDangerous (Remove) | Autosave; Action (Test, Remove) | "Broker connected → Home Assistant online → 12 devices published → last command 21:04" | "Broker rejected the username/password" |
+| F8 Pause | Home › tile (default length in the Show now sheet, #86) | T1 | WallTile actions, OverrideBanner (pause) | Action (its way back: **Carry on**) | the Frame reads Resting; "Paused until 22:04" | Pi didn't acknowledge: ProblemCard inline |
 | G1 Health at a glance | Home › house word | T1 | HealthBadge, AppShell | none | the house word ([§6](#6-status-and-severity)) | Can't tell rather than a guess |
 | G2 Diagnose | Home › problems | T1 | ProblemCard, Disclosure | none | error template | Details holds the evidence |
 | G2 Diagnose | Frame page › Overview | T3 | ProblemCard, Disclosure, FactRow | none | recent problems with times | none |
@@ -527,6 +560,12 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | G6 Updates | Settings › Updates | T8 | SettingRow, StepProgress, ConfirmDangerous | Autosave (choice); Action (Apply) | "1.5.0 downloaded · Apply", then per-Pi progress | download failed: error template |
 | G7 Backup and restore | Settings › Backups | T8 | SettingRow, EntityList, ConfirmDangerous (with preview) | Autosave; Action (Restore, confirmed) | "Last backup 03:00 · 2.1 MB" | EmptyState with "Back up now" |
 | G8 Logs | Pis › Pi page › Logs | T3 | LogView, SettingRow (log level) | Autosave | following, pushed | Pi offline: last lines kept, Can't tell since |
+| G9 Notifications | Settings › Notifications | T8 | SettingRow, Button (Send a test) | Autosave; Action (test) | "Test sent 21:04" | EmptyState "Choose where to be told"; a channel that refused: error template |
+| G10 Retire and reset | Pis › Pi page (danger zone: Retire) | T3 | Section (danger), ConfirmDangerous | Action (confirmed) | "pw-3f2a retired; its Frames show nothing until you choose another Pi" | none |
+| G10 Retire and reset | Settings › Backups (danger zone: Reset Central) | T8 | Section (danger), ConfirmDangerous (type to confirm, with a backup offered first) | Action (confirmed) | the console returns to the Setup checklist | none |
+| G11 Upgrade Central | Settings › Updates (Central's version, read-only) | T8 | HealthBadge, LinkToOwner (to the backup taken before it) | none | "Central 1.6.0 · backup taken 03:00 before the upgrade" | upgrade held because the backup failed: error template |
+
+G10's Reset Central and G11's version line have no home in the [settings catalogue](operator-console-design.md#11-settings-catalogue) or the design's pages yet; the homes above are this document's proposals until the design adds them.
 
 ## 9. Enforcement
 
@@ -548,7 +587,7 @@ Strongest guarantee first. "Enforced" holds on the branch today; "Add" is propos
 | Accent only for actions (P6) | **lint:** `better-tailwindcss/no-restricted-classes` refusing `(text\|bg\|border\|ring\|outline)-accent*` except in an allow list of primitives (`ui/button`, `ui/disclosure`, the new `ui/link`, `ui/tabs`, `ui/segmented-control`). `entity-header.tsx:23,31` and `focus-filter.tsx:21,24,32` must move to those primitives first | add |
 | Plain words (P5) | **lint:** a rule over JSX text, string props and string literals in `src/domain` and `src/pages` (including `.ts` helpers that build labels) refusing the bare [forbidden words](#forbidden-words), read from one list file, which then becomes the list's home and §7 links to it; qualified words stay review | add |
 | Type sizes only from roles | **lint:** clear Tailwind's size scale in `tokens.css` and define five role tokens, so `no-unknown-classes` refuses `text-sm`. Cost: the 25 size classes in `ui` and `patterns` are renamed in one sweep (no visual change if each role keeps today's value). Alternative: keep the scale and rely on S2 (sizes already appear only in `ui` and `patterns`), review-only | add (recommended at the DS sweep) |
-| Icons only through `ui/icon` | **lint:** `no-restricted-imports` of the icon package outside `src/ui` | add at 3b |
+| Icons only through `ui/icon` | **lint:** `no-restricted-imports` of the icon package outside `src/ui` | add at 3b-i |
 | Every pattern has stories | **test:** every `src/patterns/**/*.tsx` has a `.stories.tsx` | add |
 | Phone layout holds (F6) | **test:** template stories also screenshot at a 390 px viewport. Cost: doubles those baselines and their leg time; shard if the leg passes ~4 min | add |
 | Every roadmap step has a translation row | **test:** `scripts/check_docs.py` checks each step id in the roadmap tables appears in [§8](#8-concept--ux-translation) | add |
