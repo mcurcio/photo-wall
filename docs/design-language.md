@@ -181,9 +181,15 @@ interface SheetProps { open: boolean; onOpenChange(open: boolean): void; title: 
 
 // Toast — transient, one action, role="status", never takes focus; pauses while hovered or focused.
 interface ToastProps { message: string; action?: { label: string; onAction(): void }; seconds: number }
+
+// Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…).
+interface SelectProps<V extends string> { label: string; value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
+
+// Tag — a neutral small label ("On the display", "Photo Wall picture adjustment"); never a severity colour.
+interface TagProps { children: string }
 ```
 
-Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overflow actions, 1a header on phone), `Skeleton` (1a, templates' loading), `Tag` (neutral label for `actsOn`, 1c), `Select` (2), `Combobox` and `Input` (4), `Icon` (3b).
+Later primitives: `Link` (accent text; 1a, with the accent rule), `Menu` (overflow actions, 1a header on phone), `Skeleton` (1a, templates' loading), `Combobox` and `Input` (4), `Icon` (3b).
 
 ### Patterns for deliveries 1a–1c (`src/patterns`)
 
@@ -224,10 +230,13 @@ Says what will be here and the one next step. Prior art: Polaris EmptyState. Sto
 The [error template](#the-error-template) as a type. Prior art: GOV.UK error summary; Atlassian section message.
 
 ```ts
-interface ProblemCardProps {
+type ProblemCardProps = ProblemBase & (
+  | { scope: "live"; subject: string; since: string }   // a Frame or Pi problem: "Living room left", Central's receive time
+  | { scope: "central" }                                 // template-wide: "Central did not answer"
+  | { scope: "setup"; subject?: string }                 // an unfinished setup step: no "since"
+);
+interface ProblemBase {
   verdict: Verdict;           // severity + plain words; a live Frame problem passes the domain's status verdict
-  subject?: string;           // "Living room left"; absent for template-wide problems ("Central did not answer")
-  since?: string;             // Central's receive time, formatted; absent when there is no "since" (a setup step)
   what: string;               // plain cause naming the failing part
   doing: string | null;       // "Photo Wall retried 3 times."; null when nothing is automatic
   action: { label: string; onAction(): void } | { label: string; href: string };
@@ -532,7 +541,7 @@ Strongest guarantee first. "Enforced" holds on the branch today; "Add" is propos
 | Catalogue and pages type-check | compile (`npm run typecheck`) | enforced |
 | Six words ↔ severity, their order, the house word (P6) | **compile:** exhaustive `Record<StatusWord, Severity>` and the branded status verdict in `src/domain` ([§6](#6-status-and-severity)) | add |
 | Done only after the Pi acknowledges (P3) | **compile:** `LivePreviewEditor` derives Done from `ack` and `latestRevision` | add |
-| The error template has its parts | **compile:** `ProblemCard` requires `verdict`, `what`, `doing`, `action` | add |
+| The error template has its parts | **compile:** `ProblemCard` requires `verdict`, `what`, `doing`, `action`, and for `scope: "live"` (a Frame or Pi problem) also `subject` and `since` | add |
 | Equipment settings say where they act (P2) | **compile:** `SettingRow`'s discriminated union; `actsOn` a closed union, required for `kind: "equipment"` | add |
 | Templates render every state | **compile:** templates take `LoadState<T>`; **test:** each template's stories include `Loading`, `Empty`, `Error`, `CantTell` | add |
 | Every page is a template (P7) | **lint:** a custom rule that a `src/pages` file's default export renders a `patterns/templates/*` component at its root; the two listed exceptions carry an inline disable naming §3 | add |
