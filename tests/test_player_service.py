@@ -1437,6 +1437,9 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
         try:
             await asyncio.wait_for(until(lambda: posts and pets), 5)
             GLib.blocked = True
+            # Only the control loop posts, one exchange at a time, so its first late dispatch
+            # means no readiness post is still in flight: count posts from there.
+            await asyncio.wait_for(until(lambda: late_count() >= 1), 5)
             blocked_at, petted = len(posts), len(pets)
             await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
             fail_state.append(False)        # the session ends while the loop is blocked
@@ -1457,7 +1460,7 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
                 callback()
             await asyncio.wait_for(
                 until(lambda: len(pets) > petted and len(posts) > blocked_at), 5)
-            assert all(not report["failures"] for report in posts)
+            assert all(not report["failures"] for report in posts), posts
         finally:
             service.stop()
             await asyncio.wait_for(task, 5)
