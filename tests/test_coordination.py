@@ -494,6 +494,27 @@ def test_an_edit_inside_the_prepare_window_supersedes_a_committed_cue_and_both_f
         == ["skipped", "committed"]
 
 
+def test_a_player_that_fetches_the_superseding_plan_after_the_start_still_commits_it(registry):
+    players = setup_players(registry, count=2)
+    coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(horizon_seconds=60))
+    schedule(coordinator, ["frame-0"])
+    drive(registry, coordinator, players, 1006, step=2)
+    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1010)
+    assert committed["status"] == "committed"  # frame-0 starts 1010 on this commit, offline
+    coordinator.runtime.command("set_scene", two_frame_scene())
+    for _ in range(5):  # 1007..1011: the scheduler ticks; neither Player fetches or reports
+        registry.clock.advance(1)
+        coordinator.advance()
+    for sequence, player in enumerate(players, start=20000):  # past drive()'s sequences
+        assert coordinator.readiness(player["player_id"], report(coordinator, player, sequence=sequence))
+    assert "not_ready" not in skip_codes(registry).values()
+    for player in players:
+        delivery = coordinator.delivery(player["player_id"], 1)
+        first = next(layer for layer in delivery["plan"].layers if layer.start == 1010)
+        assert first.media_origin == 1010 and not delivery["revocations"]
+        assert first.assignment_id in {a for c in delivery["commits"] for a in c.assignment_ids}
+
+
 def test_a_started_cue_that_grows_is_skipped_while_other_frames_keep_their_offers(registry):
     players = setup_players(registry, count=3)
     coordinator = Coordinator(registry.db, registry.clock)
