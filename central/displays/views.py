@@ -74,20 +74,16 @@ class FramePowerView(Model):
     answers: tuple[PowerMethod, ...]              # methods that answered the Pi's read-only check
     method_in_use: PowerMethod | None
     test: PowerTestView | None                    # the live console test, if any
-    result: PowerResult | None                    # set when status is answered
+    result: PowerResult | None                    # the Pi's, for the request Central has in force (model.power_result)
     in_force: InForceView | None                  # what the Pi says it is carrying out
     linked: bool | None                           # whether Central's hub holds the Pi's link now (presence)
     last_heard_at: Instant | None                 # while not linked: when Central's hub saw the link go (presence)
 
 
-class PowerTestRequest(Model):
-    """POST /v1/operator/frames/{frame_id}/power-tests: Test: turn off / turn on."""
-    power: Power
-
-
 class PowerTestAccepted(Model):
+    """POST /v1/operator/frames/{frame_id}/power-tests (Test: turn off; no body). Turn on is
+    DELETE on the same path: it ends the test, so it answers 204 with no body."""
     request_id: UUID
-    power: Power
     for_seconds: Annotated[int, Field(ge=1)]
 
 

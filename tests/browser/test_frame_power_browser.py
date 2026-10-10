@@ -7,7 +7,8 @@ recorded by the worker's own document source (`test_display_power_requests._proj
 Output report travels the link store's commit and its judge (`_answer`), so the tab's words come from
 Central's real status, never from the console alone.
 
-Mutation probes: show the result before the report names the change -> the waiting case fails; drop
+Mutation probes: show the result before the report names the change -> the waiting case fails; make
+Turn on post a test again -> the first case fails (a row is left); drop
 the power tab from routes.js `TABS` -> tests/test_console_routes_r4.py's pin (and the first case here)
 fails.
 """
@@ -61,25 +62,27 @@ def _power(page):
 
 
 def _tests(page) -> list:
-    """Every Test request the page sends, as its JSON body."""
+    """Every Test: turn off (POST) and Turn on (DELETE) the page sends, by method."""
     sent = []
-    page.on("request", lambda request: sent.append(request.post_data_json)
-            if request.url.endswith("/power-tests") and request.method == "POST" else None)
+    page.on("request", lambda request: sent.append(request.method)
+            if request.url.endswith("/power-tests") and request.method in ("POST", "DELETE") else None)
     return sent
 
 
-def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_replaces_it(page, registry):
+def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_ends_it(page, registry):
     frame = _seen_frame(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         sent = _tests(page)
         power = _power(open_frame(page, frame, "power"))
         assert current_hash(page).endswith(f"/frames/{frame}/power")
+        turn_on = power.get_by_role("button", name="Turn on", exact=True)
+        expect(turn_on).to_be_disabled()                # no test: nothing to end
 
         power.get_by_role("button", name="Test: turn off", exact=True).click()
         status = power.get_by_role("status")
         expect(status).to_have_text(WAITING)
-        assert sent == [{"power": "off"}]
+        assert sent == ["POST"]
 
         test_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
         carrying = _change(registry)                    # the document that carries the test
@@ -89,15 +92,17 @@ def test_test_off_waits_for_the_pi_then_reads_confirmed_off_and_turn_on_replaces
 
         _reported(registry, carrying, PowerResult.CONFIRMED, InForce(str(test_id), 299))
         expect(status).to_have_text("Display confirmed off")
-        assert sent == [{"power": "off"}]               # posted once
+        assert sent == ["POST"]                         # posted once
 
-        power.get_by_role("button", name="Turn on", exact=True).click()
+        # Owner q1, 2026-10-10: Turn on ends the test and the request underneath takes over.
+        turn_on.click()
         expect(status).to_have_text(WAITING)
-        replacing = _rows(registry, "SELECT id, power FROM power_requests")
-        assert [row["power"] for row in replacing] == ["on"]       # one row: Turn on replaced the test
-        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(str(replacing[0]["id"]), 300))
+        assert _rows(registry, "SELECT id FROM power_requests") == []
+        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce("standing", None))
         expect(status).to_have_text("Display confirmed on")
-        assert sent == [{"power": "off"}, {"power": "on"}]
+        expect(power.locator("p", has_text="Now: ")).to_have_text("Now: On")       # the request underneath
+        expect(turn_on).to_be_disabled()
+        assert sent == ["POST", "DELETE"]
 
 
 def test_an_unanswered_test_reads_display_did_not_answer(page, registry):

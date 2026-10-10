@@ -13,7 +13,6 @@ from central.displays.views import (
     FramePowerView,
     PowerTestAccepted,
 )
-from contracts.node_output import Power
 
 
 class DisplayRefused(Exception):
@@ -37,10 +36,16 @@ class DisplayQueries(Protocol):
 
 
 class DisplayCommands(Protocol):
-    def request_power_test(self, frame_id: str, power: Power) -> PowerTestAccepted:
-        """Replace the Frame's console test with one of TEST_SECONDS for `power` (Turn on ends a
-        test-off by putting a test-on on top), in one transaction that also wakes the worker's
-        Output document source. DisplayRefused("unknown_frame", 404), ("frame_unbound", 409)."""
+    def request_power_test(self, frame_id: str) -> PowerTestAccepted:
+        """Test: turn off. Replace the Frame's console test with an off of TEST_SECONDS, in one
+        transaction that also wakes the worker's Output document source.
+        DisplayRefused("unknown_frame", 404), ("frame_unbound", 409)."""
+        ...
+
+    def end_power_test(self, frame_id: str) -> None:
+        """Turn on: end the Frame's console test, so the request underneath takes over (owner q1,
+        2026-10-10; central/displays/model.py, The Output document). Nothing is put on top; with no
+        test there is nothing to end. Wakes the source when it ended one. DisplayRefused("unknown_frame", 404)."""
         ...
 
     def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:

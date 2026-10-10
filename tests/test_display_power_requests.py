@@ -4,7 +4,8 @@
 Every request goes through the operator API that the Power tab calls; every Output report travels
 the link store's commit and its judge (test_display_identity's helpers); the projection is the
 document source the worker's NodeLinks read. (1) A test off on a bound Frame answers 202 and the
-projection carries it on top of standing on. (2) Turn on replaces it: one row. (3) An unbound Frame
+projection carries it on top of standing on. (2) Turn on ends it: the request underneath takes over,
+and the tab reads the Pi's answer for that request. (3) An unbound Frame
 is refused. (4) Past `ends_at` the projection drops the test and the change rises; the source's
 `changed()` returns at that end. (5) The Power tab's status waits until a report names the change
 carrying the test, then answers with its result; a report naming an older change keeps waiting.
@@ -69,40 +70,69 @@ def _rows(registry, sql: str, params=()) -> list[dict]:
         return cursor.fetchall() if cursor.description else []
 
 
-def test_a_test_off_goes_on_top_of_standing_on_and_turn_on_replaces_it(registry):
+def test_a_test_off_goes_on_top_of_standing_on_and_turn_on_ends_it(registry):
+    """Owner q1 (2026-10-10): a test lasts "5 minutes, or less if you press Turn on. When the test
+    ends, the request underneath takes over." Turn on ends the live test; it puts nothing on top."""
     frame, _ = _bound_frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         assert _projected(registry).power == (STANDING,)
 
-        response = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH, json={"power": "off"})
+        response = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
         assert response.status_code == 202
         accepted = response.json()
-        assert (accepted["power"], accepted["for_seconds"]) == ("off", TEST_SECONDS)
+        assert accepted["for_seconds"] == TEST_SECONDS
         off = _projected(registry)
         assert off.power == (PowerRequest(accepted["request_id"], Power.OFF, RequestReason.CONSOLE_TEST,
                                           TEST_SECONDS), STANDING)
         assert off.change == 2
 
-        turned_on = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH,
-                                json={"power": "on"}).json()
-        assert turned_on["request_id"] != accepted["request_id"]
-        assert [(row["id"], row["power"]) for row in _rows(registry, "SELECT id, power FROM power_requests")] == [
-            (uuid.UUID(turned_on["request_id"]), "on")]
+        turned_on = client.delete(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
+        assert turned_on.status_code == 204
+        assert _rows(registry, "SELECT id FROM power_requests") == []
         on = _projected(registry)
-        assert on.power == (PowerRequest(turned_on["request_id"], Power.ON, RequestReason.CONSOLE_TEST,
-                                         TEST_SECONDS), STANDING)
-        assert on.change == 3
+        assert (on.power, on.change) == ((STANDING,), 3)          # the request underneath takes over
 
-        assert client.post(f"/v1/operator/frames/{frame}/power-tests", json={"power": "off"}).status_code == 401
+        # With no live test there is nothing to end: the request underneath is already in force.
+        assert client.delete(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH).status_code == 204
+        assert _projected(registry).change == 3
+
+        assert client.post(f"/v1/operator/frames/{frame}/power-tests").status_code == 401
+        assert client.delete(f"/v1/operator/frames/{frame}/power-tests").status_code == 401
+        assert client.delete("/v1/operator/frames/nowhere/power-tests", headers=AUTH).json() == {
+            "error": "unknown_frame"}
+
+
+def test_after_turn_on_the_tab_reads_the_pis_answer_for_the_request_underneath(registry):
+    """The tab's result is the Pi's for the request Central has in force: after Turn on, none until
+    the Pi's report names the request underneath on the change that dropped the test."""
+    frame, _ = _bound_frame(registry)
+    _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        def power() -> dict:
+            return client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
+
+        test_id = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH).json()["request_id"]
+        _answer(registry, _projected(registry).change, PowerResult.CONFIRMED, InForce(test_id, 299))
+        assert (power()["status"], power()["result"]) == ("answered", "confirmed")
+
+        client.delete(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
+        dropped = _projected(registry).change
+        ending = power()                                           # the Pi still names the test
+        assert (ending["status"], ending["test"], ending["result"], ending["in_force"]) == ("idle", None, None, None)
+
+        _answer(registry, dropped, PowerResult.DID_NOT_ANSWER, InForce("standing", None))
+        answered = power()
+        assert (answered["status"], answered["test"], answered["result"]) == ("idle", None, "did-not-answer")
+        assert (answered["in_force"]["reason"], answered["in_force"]["power"]) == ("standing", "on")
 
 
 def test_a_test_is_refused_for_an_unknown_or_unbound_frame(registry):
     enroll_pi(registry, SERIAL)
     frame = _frame(registry, "hallway")
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        unbound = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH, json={"power": "off"})
+        unbound = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
         assert (unbound.status_code, unbound.json()) == (409, {"error": "frame_unbound"})
-        unknown = client.post("/v1/operator/frames/nowhere/power-tests", headers=AUTH, json={"power": "off"})
+        unknown = client.post("/v1/operator/frames/nowhere/power-tests", headers=AUTH)
         assert (unknown.status_code, unknown.json()) == (404, {"error": "unknown_frame"})
         assert client.get("/v1/operator/frames/nowhere/power", headers=AUTH).status_code == 404
         idle = client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
@@ -113,7 +143,7 @@ def test_a_test_is_refused_for_an_unknown_or_unbound_frame(registry):
 def test_past_its_end_the_test_leaves_the_projection_and_the_change_rises(registry):
     frame, _ = _bound_frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH, json={"power": "off"})
+        client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH)
     assert _projected(registry).change == 1 and len(_projected(registry).power) == 2
 
     # The source's changed() returns at the earliest live end of its Node's tests, with no wake.
@@ -142,12 +172,12 @@ def test_the_power_tab_waits_for_the_report_on_the_change_carrying_the_test(regi
         _answer(registry, before, PowerResult.CONFIRMED, InForce("standing", None))
         idle = power()
         assert (idle["status"], idle["test"], idle["result"], idle["player_id"], idle["output_id"]) == (
-            "idle", None, None, player, "HDMI-A-1")
+            "idle", None, "confirmed", player, "HDMI-A-1")   # the request underneath, answered
         assert idle["in_force"] == {"request_id": "standing", "reason": "standing", "power": "on",
                                     "remaining_seconds": None}
 
-        test_id = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH,
-                              json={"power": "off"}).json()["request_id"]
+        test_id = client.post(f"/v1/operator/frames/{frame}/power-tests",
+                              headers=AUTH).json()["request_id"]
         assert power()["status"] == "waiting"                      # no document carries it yet
         carrying = _projected(registry).change
         assert carrying == before + 1
@@ -172,8 +202,8 @@ def test_the_power_tab_counts_down_on_centrals_clock_and_drops_an_ended_test(reg
     frame, _ = _bound_frame(registry)
     _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        test_id = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH,
-                              json={"power": "off"}).json()["request_id"]
+        test_id = client.post(f"/v1/operator/frames/{frame}/power-tests",
+                              headers=AUTH).json()["request_id"]
         _answer(registry, _projected(registry).change, PowerResult.CONFIRMED, InForce(test_id, 300))
         _rows(registry, "UPDATE power_requests SET ends_at = EXTRACT(EPOCH FROM clock_timestamp()) + 90")
         counted = client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
@@ -220,8 +250,10 @@ def test_each_command_wakes_the_worker_through_a_notification(registry):
             finally:
                 listening.cancel()
 
-        asyncio.run(woken_by(lambda: client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH,
-                                                 json={"power": "off"})))
+        asyncio.run(woken_by(lambda: client.post(f"/v1/operator/frames/{frame}/power-tests",
+                                                 headers=AUTH)))
+        asyncio.run(woken_by(lambda: client.delete(f"/v1/operator/frames/{frame}/power-tests",
+                                                   headers=AUTH)))
         asyncio.run(woken_by(lambda: client.put(f"/v1/operator/displays/{display_id}/power-settings",
                                                 headers=AUTH, json={"power_method": "signal-off",
                                                                     "switch_input_on_power_on": True,

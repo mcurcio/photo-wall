@@ -21,10 +21,14 @@ One home each for:
   with no EDID, is not made "display changed" by the first report.
 - **The Output document** (C1, C3). The stack is the Frame's live console test (if any), then
   standing on; method and switches come from the Display last seen on the Output (defaults when
-  none). A test lasts TEST_SECONDS (owner q1, 2026-10-10: "5 minutes, or less if Turn on is
-  pressed"); the Pi counts it on its own clock, and Central drops it from the stack at its own
-  `ends_at` (Central's clock, compared only with itself), whichever comes first.
-- **Power status** (C3): what the Power tab says about the latest test.
+  none). The console's one test is Test: turn off. It lasts TEST_SECONDS, "or less if you press
+  Turn on. When the test ends, the request underneath takes over" (owner q1, 2026-10-10): Turn on
+  ends the live test and puts nothing on top, so the stack is the request underneath again; with
+  no live test there is nothing to end. The Pi counts a test on its own clock, and Central drops
+  it from the stack at its own `ends_at` (Central's clock, compared only with itself) or at Turn
+  on, whichever comes first.
+- **Power status** (C3): what the Power tab says about the latest test, and the Pi's result for
+  the request Central has in force (`power_result`), which after Turn on is the request underneath.
 """
 from __future__ import annotations
 
@@ -44,6 +48,7 @@ from contracts.node_output import (
     Power,
     PowerMethod,
     PowerRequest,
+    PowerResult,
     RequestReason,
     encode_output_document,
 )
@@ -191,11 +196,16 @@ def project_output(output_id: str, *, test: PowerTest | None, settings: DisplayS
                    now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: `test` (when given and now < ends_at) on top
     of standing on; `settings` or DEFAULT_SETTINGS."""
-    power: tuple[PowerRequest, ...] = (standing_on(),)
-    if _live(test, now):
-        power = (PowerRequest(str(test.request_id), test.power, RequestReason.CONSOLE_TEST, test.for_seconds),
-                 *power)
-    return ProjectedOutput(output_id, power, DEFAULT_SETTINGS if settings is None else settings)
+    return ProjectedOutput(output_id, power_stack(test, now), DEFAULT_SETTINGS if settings is None else settings)
+
+
+def power_stack(test: PowerTest | None, now: float) -> tuple[PowerRequest, ...]:
+    """The Output's power requests at Central's `now`, first in force: the live test (if any), then
+    standing on, the request underneath. A test Turn on ended is no longer stored, so it is absent."""
+    if not _live(test, now):
+        return (standing_on(),)
+    return (PowerRequest(str(test.request_id), test.power, RequestReason.CONSOLE_TEST, test.for_seconds),
+            standing_on())
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,
@@ -210,6 +220,16 @@ def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocumen
             and any(request.request_id == str(test.request_id) for request in document.power)):
         return PowerStatus.ANSWERED
     return PowerStatus.WAITING
+
+
+def power_result(*, test: PowerTest | None, document: OutputDocument | None, report: OutputReport | None,
+                 now: float) -> PowerResult | None:
+    """The Pi's result for the request Central has in force (the first of `power_stack`: the live
+    test, else the request underneath, as after Turn on): set only when the report answers the
+    latest document and names that request in force; None while the Pi has not caught up."""
+    if document is None or report is None or report.in_force is None or report.for_change != document.change:
+        return None
+    return report.result if report.in_force.request_id == power_stack(test, now)[0].request_id else None
 
 
 def live_test(test: PowerTest | None, now: float) -> PowerTest | None:

@@ -5,13 +5,15 @@ slices C1-C3; a composition-root module like library_routes.py). One route per q
 |---|---|---|---|---|
 | GET | /v1/operator/frames/{frame_id}/display | | FrameDisplayView | 404 unknown_frame |
 | GET | /v1/operator/frames/{frame_id}/power | | FramePowerView | 404 unknown_frame |
-| POST | /v1/operator/frames/{frame_id}/power-tests | PowerTestRequest | 202 PowerTestAccepted | 404 unknown_frame, 409 frame_unbound |
+| POST | /v1/operator/frames/{frame_id}/power-tests | | 202 PowerTestAccepted | 404 unknown_frame, 409 frame_unbound |
+| DELETE | /v1/operator/frames/{frame_id}/power-tests | | 204 | 404 unknown_frame |
 | PUT | /v1/operator/displays/{display_id}/power-settings | DisplayPowerSettings | DisplayPowerSettings | 404 unknown_display |
 
 Every route takes the operator `admin` dependency, as every /v1/operator route does. A refusal
 answers {"error": code} with its status, the shape apiWrite.js reads. create_app mounts them through
-`mount_display_routes`: GET display (slice C1) and the Power tab's three, `_mount_power_routes`
-(slice C3).
+`mount_display_routes`: GET display (slice C1) and the Power tab's four, `_mount_power_routes`
+(slice C3). POST is Test: turn off; DELETE is Turn on, which ends the test so the request underneath
+takes over (owner q1, 2026-10-10).
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from typing import Any, Final
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from central.displays.ports import DisplayCommands, DisplayQueries, DisplayRefused
 from central.displays.views import (
@@ -27,7 +29,6 @@ from central.displays.views import (
     FrameDisplayView,
     FramePowerView,
     PowerTestAccepted,
-    PowerTestRequest,
 )
 from central.operator_auth import OPERATOR_PREFIX
 from contracts.models import Identifier
@@ -51,7 +52,7 @@ def mount_display_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, c
 
 
 def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, commands: DisplayCommands) -> None:
-    """The Power tab's three routes (slice C3)."""
+    """The Power tab's four routes (slice C3)."""
 
     @app.get(FRAMES + "{frame_id}/power", dependencies=[Depends(admin)], response_model=FramePowerView)
     def frame_power(frame_id: Identifier) -> FramePowerView:
@@ -59,8 +60,14 @@ def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, co
 
     @app.post(FRAMES + "{frame_id}/power-tests", dependencies=[Depends(admin)], status_code=202,
               response_model=PowerTestAccepted)
-    def power_test(frame_id: Identifier, request: PowerTestRequest) -> PowerTestAccepted:
-        return commands.request_power_test(frame_id, request.power)
+    def power_test(frame_id: Identifier) -> PowerTestAccepted:
+        return commands.request_power_test(frame_id)
+
+    @app.delete(FRAMES + "{frame_id}/power-tests", dependencies=[Depends(admin)], status_code=204,
+                response_class=Response)
+    def end_power_test(frame_id: Identifier) -> Response:
+        commands.end_power_test(frame_id)
+        return Response(status_code=204)
 
     @app.put(DISPLAYS + "{display_id}/power-settings", dependencies=[Depends(admin)],
              response_model=DisplayPowerSettings)

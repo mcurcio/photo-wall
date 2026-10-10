@@ -104,7 +104,7 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
             reconciled = len(reconciles)
 
             response = await asyncio.to_thread(client.post, "/v1/operator/frames/kitchen/power-tests",
-                                               headers=AUTH, json={"power": "off"})
+                                               headers=AUTH)
             assert response.status_code == 202
             test = PowerRequest(response.json()["request_id"], Power.OFF, RequestReason.CONSOLE_TEST, TEST_SECONDS)
 

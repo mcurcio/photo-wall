@@ -33,6 +33,7 @@ const meta = {
     settings: DEFAULT_SETTINGS,
     saving: null,
     sent: null,
+    turnedOn: false,
     sending: false,
     hardwareHref: "#/wall/frames/lobby/hardware",
     onTest: () => {},
@@ -40,7 +41,7 @@ const meta = {
   },
   render: (args) => (
     <Section title="Power">
-      <PowerPanel view={args.view} settings={args.settings} saving={args.saving} sent={args.sent}
+      <PowerPanel view={args.view} settings={args.settings} saving={args.saving} sent={args.sent} turnedOn={args.turnedOn}
         sending={args.sending} hardwareHref={args.hardwareHref} onTest={args.onTest} onSettings={args.onSettings} />
     </Section>
   ),
@@ -66,10 +67,10 @@ export const NotSupported: Story = {
   args: { view: { ...IDLE, status: "answered", test: TEST, result: "not-supported", answers: [],
     method_in_use: null } },
 };
-/** Turn on through signal off: the Pi restarted its picture, nothing is claimed about the display. */
+/** Turn on through signal off: the test ended, the request underneath is in force and the Pi
+ * restarted its picture; nothing is claimed about the display. */
 export const SignalBackOn: Story = {
-  args: { view: { ...IDLE, status: "answered", test: { ...TEST, power: "on" }, result: "signal-stopped",
-    method_in_use: "signal-off", in_force: { ...OFF_IN_FORCE, power: "on" } } },
+  args: { turnedOn: true, view: { ...IDLE, result: "signal-stopped", method_in_use: "signal-off" } },
 };
 /** A method chosen by hand, saved. */
 export const MethodSaved: Story = {

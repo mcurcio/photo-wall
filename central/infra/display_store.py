@@ -11,8 +11,8 @@ display" and of the Output document's body:
   `output_documents.change` rises only when the body's digest differs. Everything else is `{}`.
 - `PgDisplayQueries`: the operator API's reads (`DisplayQueries`).
 - `PgDisplayCommands`: the Power tab's writes (`DisplayCommands`, slice C3; migration 074): a
-  console test (`power_requests`, one per Frame, ending at `ends_at` on Central's clock) and a
-  Display's power settings. Each wakes the worker's document source in the same transaction by
+  console test (`power_requests`, one per Frame, ending at `ends_at` on Central's clock, or
+  deleted by Turn on) and a Display's power settings. Each wakes the worker's document source in the same transaction by
   `NOTIFY OUTPUT_DOCUMENTS_CHANNEL, '<device_id>'`, sent from app code (no trigger); the worker
   `LISTEN`s on one connection (`DisplayWakes.listen`), and the source also wakes at the earliest
   live `ends_at` of its Node, so a test leaves the document when it ends with no other write.
@@ -54,13 +54,13 @@ from central.displays.model import (
     DisplayKey,
     DisplaySettings,
     FramePosition,
-    PowerStatus,
     PowerTest,
     Readiness,
     Sighting,
     adopts,
     display_key,
     live_test,
+    power_result,
     power_status,
     project_output,
     readiness,
@@ -603,7 +603,7 @@ class PgDisplayQueries:
             method_in_use=None if report is None else report.method,
             test=None if live is None else PowerTestView(request_id=live.request_id, power=live.power,
                                                          for_seconds=live.for_seconds, ends_at=live.ends_at),
-            result=report.result if status is PowerStatus.ANSWERED and report is not None else None,
+            result=power_result(test=test, document=document, report=report, now=now),
             in_force=_in_force_view(report, document, live, now), linked=linked,
             # The link's presence row changed to unlinked when Central's hub last saw the Pi's leaf
             # go: the last time Central heard it. A report time would be the last change the Pi
@@ -639,7 +639,7 @@ class PgDisplayCommands:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def request_power_test(self, frame_id: str, power: Power) -> PowerTestAccepted:
+    def request_power_test(self, frame_id: str) -> PowerTestAccepted:
         request_id = uuid.uuid4()
         with self._db.transaction() as conn:
             frame = conn.execute("SELECT b.player_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
@@ -654,10 +654,21 @@ class PgDisplayCommands:
                 "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (frame_id, reason) DO UPDATE SET "
                 "id=EXCLUDED.id, power=EXCLUDED.power, for_seconds=EXCLUDED.for_seconds, "
                 "created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at",
-                (request_id, frame_id, Power(power).value, RequestReason.CONSOLE_TEST.value, TEST_SECONDS, now,
+                (request_id, frame_id, Power.OFF.value, RequestReason.CONSOLE_TEST.value, TEST_SECONDS, now,
                  now + TEST_SECONDS))
             _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
-        return PowerTestAccepted(request_id=request_id, power=power, for_seconds=TEST_SECONDS)
+        return PowerTestAccepted(request_id=request_id, for_seconds=TEST_SECONDS)
+
+    def end_power_test(self, frame_id: str) -> None:
+        with self._db.transaction() as conn:
+            frame = conn.execute("SELECT b.player_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+                                 "WHERE f.id=%s FOR NO KEY UPDATE OF f", (frame_id,)).fetchone()
+            if frame is None:
+                raise DisplayRefused("unknown_frame", 404)
+            ended = conn.execute("DELETE FROM power_requests WHERE frame_id=%s AND reason=%s RETURNING id",
+                                 (frame_id, RequestReason.CONSOLE_TEST.value)).fetchone()
+            if ended is not None and frame["player_id"] is not None:
+                _notify(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
 
     def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:
         with self._db.transaction() as conn:

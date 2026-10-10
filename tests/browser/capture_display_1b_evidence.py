@@ -146,8 +146,7 @@ def test_after_power(page, registry, scheme):
 
         power.get_by_role("button", name="Turn on", exact=True).click()
         expect(status).to_have_text(WAITING)
-        on_id = _rows(registry, "SELECT id FROM power_requests")[0]["id"]
-        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce(str(on_id), 300))
+        _reported(registry, _change(registry), PowerResult.CONFIRMED, InForce("standing", None))
         expect(status).to_have_text("Display confirmed on")
         _shot(page, "after-power-confirmed-on", scheme)
 

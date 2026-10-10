@@ -6,7 +6,7 @@ import { OwnerLinks } from "../patterns/link-to-owner";
 import { ProblemCard } from "../patterns/problem-card";
 import { SettingRow } from "../patterns/setting-row";
 import { usePolledRead } from "../polledRead.js";
-import { readFramePower, requestPowerTest, savePowerSettings } from "../powerApi.js";
+import { endPowerTest, readFramePower, requestPowerTest, savePowerSettings } from "../powerApi.js";
 import { formatRoute } from "../routes.js";
 import { clockTime } from "../timeWords.js";
 import { Button } from "../ui/button";
@@ -76,20 +76,32 @@ const SIGNAL_WORDS: Record<Power, string> = {
   on: "Picture back on",
 };
 
+/** One result in words for a request of `power`; null when there is nothing to claim. */
+function resultWords(power: Power, result: PowerResult): string | null {
+  if (result === "confirmed") return `Display confirmed ${power}`;
+  if (result === "not-supported") return null;
+  if (result === "signal-stopped") return SIGNAL_WORDS[power];
+  return RESULT_WORDS[result];
+}
+
 /**
  * What the tab says about the latest test, or null when it has nothing to say. `sent` is the test
  * this page sent last, until a read names it: a read that does not is older than the send, so the
  * tab waits rather than show the previous test's answer. A result shows only once Central says the
- * Pi's report answers the document change carrying the test (`status` answered).
+ * Pi's report answers the document change carrying the test (`status` answered). `turnedOn`: this
+ * page pressed Turn on, which ended the test (owner q1, 2026-10-10: the request underneath takes
+ * over); the tab waits until no test is live and Central has the Pi's result for the request now in
+ * force (`result`, central/displays/model.py `power_result`), then says it.
  */
-export function testWords(view: FramePowerView, sent: string | null): string | null {
+export function testWords(view: FramePowerView, sent: string | null, turnedOn = false): string | null {
   if (sent !== null && view.test?.request_id !== sent) return WAITING;
+  if (turnedOn) {
+    if (view.test !== null || view.result === null || view.in_force === null) return WAITING;
+    return resultWords(view.in_force.power, view.result);
+  }
   if (view.status === "waiting") return WAITING;
   if (view.status !== "answered" || view.test === null || view.result === null) return null;
-  if (view.result === "confirmed") return `Display confirmed ${view.test.power}`;
-  if (view.result === "not-supported") return null;
-  if (view.result === "signal-stopped") return SIGNAL_WORDS[view.test.power];
-  return RESULT_WORDS[view.result];
+  return resultWords(view.test.power, view.result);
 }
 
 /** What the Pi says it carries out now, in words; null when it named nothing. */
@@ -109,9 +121,12 @@ export interface PowerPanelProps {
   saving: SaveState;
   /** The test this page sent last, until a read names it. */
   sent: string | null;
+  /** This page pressed Turn on since its last Test: turn off. */
+  turnedOn?: boolean;
   /** A test is being sent: both buttons wait. */
   sending: boolean;
   hardwareHref: string;
+  /** "off": Test: turn off. "on": Turn on, which ends the test (it starts no test of its own). */
   onTest: (power: Power) => void;
   onSettings: (next: PowerSettings, label: string) => void;
 }
@@ -124,9 +139,11 @@ function rowState(saving: SaveState, label: string): { state: "idle" | "saving" 
 /**
  * The Power tab's content for one read (design-language §8 row B6; console design §5 Power):
  * the power method and its two switches, saved on change, then Test: turn off and Turn on with
- * what the Pi answered.
+ * what the Pi answered. Turn on only ends a test, so it waits while none is live or sent.
  */
-export function PowerPanel({ view, settings, saving, sent, sending, hardwareHref, onTest, onSettings }: PowerPanelProps) {
+export function PowerPanel({
+  view, settings, saving, sent, turnedOn = false, sending, hardwareHref, onTest, onSettings,
+}: PowerPanelProps) {
   if (view.status === "unbound") {
     return (
       <>
@@ -135,7 +152,7 @@ export function PowerPanel({ view, settings, saving, sent, sending, hardwareHref
       </>
     );
   }
-  const words = testWords(view, sent);
+  const words = testWords(view, sent, turnedOn);
   const now = nowWords(view);
   const change = (patch: Partial<PowerSettings>, label: string) => onSettings({ ...settings, ...patch }, label);
   const method = "Power method";
@@ -194,7 +211,7 @@ export function PowerPanel({ view, settings, saving, sent, sending, hardwareHref
         <Note>Test: turn off turns the display off for 5 min, or until you press Turn on.</Note>
         <Inline>
           <Button disabled={sending} onClick={() => onTest("off")}>Test: turn off</Button>
-          <Button disabled={sending} onClick={() => onTest("on")}>Turn on</Button>
+          <Button disabled={sending || (view.test === null && sent === null)} onClick={() => onTest("on")}>Turn on</Button>
         </Inline>
         {words !== null && <Note live>{words}</Note>}
         {view.status === "answered" && view.result === "not-supported" && sent === null && (
@@ -228,6 +245,7 @@ const sameSettings = (a: PowerSettings, b: PowerSettings) => a.power_method === 
  */
 export function FramePower({ frameId }: { frameId: string }) {
   const [sent, setSent] = useState<string | null>(null);
+  const [turnedOn, setTurnedOn] = useState(false);
   const [sending, setSending] = useState(false);
   const [edited, setEdited] = useState<PowerSettings | null>(null);
   const [saving, setSaving] = useState<SaveState>(null);
@@ -244,17 +262,18 @@ export function FramePower({ frameId }: { frameId: string }) {
     if (view === null) return;
     if (sent !== null && view.test?.request_id === sent) setSent(null);
     if (edited !== null && sameSettings(edited, settingsOf(view))) setEdited(null);
-    setWaiting(testWords(view, sent) === WAITING);
-  }, [view, sent, edited]);
+    setWaiting(testWords(view, sent, turnedOn) === WAITING);
+  }, [view, sent, turnedOn, edited]);
 
   const test = async (power: Power) => {
     if (sending) return;
     setSending(true);
     setProblem(null);
-    const result = await requestPowerTest(frameId, power) as
-      { ok: true; accepted: { request_id: string } } | { ok: false; error: string };
+    type Answer = { ok: true; accepted?: { request_id: string } } | { ok: false; error: string };
+    const result = (power === "off" ? await requestPowerTest(frameId) : await endPowerTest(frameId)) as Answer;
     if (result.ok) {
-      setSent(result.accepted.request_id);
+      setSent(result.accepted?.request_id ?? null);
+      setTurnedOn(power === "on");
       setWaiting(true);
     } else {
       setProblem(result.error);
@@ -299,6 +318,7 @@ export function FramePower({ frameId }: { frameId: string }) {
         settings={edited ?? settingsOf(read.view)}
         saving={saving}
         sent={sent}
+        turnedOn={turnedOn}
         sending={sending}
         hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
         onTest={(power) => { void test(power); }}
@@ -315,7 +335,7 @@ export function FramePower({ frameId }: { frameId: string }) {
           variant="inline"
           live
           verdict={{ severity: "todo", label: "Not sent", receipt: null }}
-          what="The test was not sent to the Pi. Try it again."
+          what="This was not sent to the Pi. Try it again."
           doing={null}
           details={<Note>{`Photo Wall's answer: ${problem}`}</Note>}
         />
