@@ -42,7 +42,7 @@ from contracts.time import ManualClock, TimeMapping
 from player.identity import load_identity
 from player.mainloop import CONTROL, DispatchRefused, LoopLate, MainLoopDispatcher
 from player.output_discovery import (
-    CONFIGURED_OUTPUT_IDS,
+    OUTPUT_IDS,
     discover_outputs,
     output_app_id,
     weston_ini,
@@ -236,8 +236,8 @@ def test_connector_discovery_rejects_mixed_or_duplicate_virtual_outputs(tmp_path
 
 
 def test_connector_routing_and_generated_weston_config_are_bounded():
-    assert CONFIGURED_OUTPUT_IDS == ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
-    for output_id in CONFIGURED_OUTPUT_IDS:
+    assert OUTPUT_IDS == ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
+    for output_id in OUTPUT_IDS:
         assert output_app_id(output_id) == "photo-wall-" + output_id
     assert output_app_id("HDMI-A-3") == "photo-wall-HDMI-A-3"
     for invalid in ("Virtual-3", "DP-1", "../../config"):
@@ -246,7 +246,7 @@ def test_connector_routing_and_generated_weston_config_are_bounded():
     config = weston_ini()
     assert config.count("[output]") == 4
     assert all(f"name={output_id}\napp-ids=photo-wall-{output_id}" in config
-               for output_id in CONFIGURED_OUTPUT_IDS)
+               for output_id in OUTPUT_IDS)
 
 
 def test_numeric_hdmi_connector_suffix_remains_supported(tmp_path):

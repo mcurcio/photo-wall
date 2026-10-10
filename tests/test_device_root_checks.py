@@ -12,6 +12,9 @@ from support.repo import REPO
 
 from scripts.device_root_checks import (
     BUILD_HOSTNAME,
+    DDC_MODULES,
+    DDC_MODULES_LOAD,
+    DISPLAY_POWER_TOOLS,
     MASKED_UNITS,
     SNAPSHOT_LIST,
     SSH_UNITS,
@@ -29,6 +32,7 @@ from scripts.device_root_checks import (
     watchdog_overrides,
 )
 from scripts.import_check import declared
+from scripts.verify_netboot_initrd import DDC_MODULES as INITRD_DDC_MODULES
 
 # An excerpt of Debian's stock /etc/systemd/system.conf: every setting commented out.
 STOCK_SYSTEM_CONF = """\
@@ -516,7 +520,9 @@ def test_the_base_enables_rpi_image_gens_ssh_layer_with_the_one_key_and_ci_check
 
 def base_os_root(root: Path) -> Path:
     """What the photo-wall-os layer, the device layer's neutral hostname and libnss-myhostname's
-    postinst leave in the base; trixie ships etc/default/locale as a link to ../locale.conf."""
+    postinst leave in the base; trixie ships etc/default/locale as a link to ../locale.conf.
+    ddcutil, v4l-utils (cec-ctl) and i2c-tools' postinst (the i2c group) add display power's
+    tools; the layer's hook writes the DDC/CI modules-load file."""
     system = root / "etc/systemd/system"
     system.mkdir(parents=True)
     for unit in MASKED_UNITS:
@@ -526,6 +532,10 @@ def base_os_root(root: Path) -> Path:
     write(root, "etc/locale.conf", "LANG=C.UTF-8\n")
     (root / "etc/default").mkdir()
     (root / "etc/default/locale").symlink_to("../locale.conf")
+    for tool in DISPLAY_POWER_TOOLS:
+        write(root, tool, "\x7fELF")
+    write(root, DDC_MODULES_LOAD, "i2c-dev\n")
+    write(root, "etc/group", "root:x:0:\nvideo:x:44:\ni2c:x:994:\n")
     return root
 
 
@@ -557,6 +567,16 @@ def _mask_elsewhere(root):
      "default locale: etc/default/locale sets no LANG"),
     (lambda root: write(root, "etc/locale.conf", "LANGUAGE=C\n"),
      "default locale: etc/default/locale sets no LANG"),
+    # Display power (1b): the two tools, the DDC/CI driver loaded at boot, the i2c group.
+    (lambda root: (root / "usr/bin/ddcutil").unlink(), "missing tool: usr/bin/ddcutil"),
+    (lambda root: (root / "usr/bin/cec-ctl").unlink(), "missing tool: usr/bin/cec-ctl"),
+    (lambda root: (root / DDC_MODULES_LOAD).unlink(),
+     f"ddc driver: {DDC_MODULES_LOAD} does not load i2c-dev"),
+    (lambda root: write(root, DDC_MODULES_LOAD, "# i2c-dev\ni2c_dev_x\n"),
+     f"ddc driver: {DDC_MODULES_LOAD} does not load i2c-dev"),
+    (lambda root: write(root, "etc/group", "root:x:0:\ni2cx:x:994:\n"),
+     "missing group: i2c (etc/group)"),
+    (lambda root: (root / "etc/group").unlink(), "missing group: i2c (etc/group)"),
 ])
 def test_an_unconfigured_base_os_is_refused(tmp_path, break_it, refused):
     root = base_os_root(tmp_path)
@@ -614,8 +634,16 @@ def test_the_base_is_built_with_its_os_configuration_and_ci_checks_it():
     assert [tuple(line.removeprefix(command).split()) for line in hook
             if line.startswith(command)] == [MASKED_UNITS]
     assert """printf 'LANG=C.UTF-8\\n' > "$1/etc/locale.conf\"""" in hook
-    # libnss-myhostname is the OS's own package, in this layer's list (decision 0019, R4).
-    assert re.search(r"^  packages:\n    - libnss-myhostname$", layer, flags=re.MULTILINE)
+    # The OS's own packages are in this layer's list (decision 0019, R4): libnss-myhostname, and
+    # display power's ddcutil and v4l-utils (cec-ctl).
+    packages = re.search(r"^  packages:\n((?:    - \S+\n)+)", layer, flags=re.MULTILINE)
+    assert packages and {"libnss-myhostname", "ddcutil", "v4l-utils"} <= {
+        line.removeprefix("    - ") for line in packages[1].splitlines()}
+    # The DDC/CI driver loads at boot: nothing matches it by alias.
+    # The same driver the netboot initrd must carry (it cannot load what stage 1 did not ship).
+    assert DDC_MODULES == INITRD_DDC_MODULES
+    modules = "".join(f"{module}\\n" for module in DDC_MODULES)
+    assert f"""printf '{modules}' > "$1/{DDC_MODULES_LOAD}\"""" in hook
     device = (IMAGE_TREE / "device/photo-wall-device-none.yaml").read_text()
     hostname = re.search(r"^# X-Env-Var-hostname: (\S+)$", device, flags=re.MULTILINE)
     assert hostname and hostname[1] == "localhost" != BUILD_HOSTNAME
@@ -623,5 +651,6 @@ def test_the_base_is_built_with_its_os_configuration_and_ci_checks_it():
     assert "--base-os; then" in workflow
     extract = workflow.partition('unsquashfs -no-xattrs -d "$extract"')[2].partition(">/dev/null")[0]
     for path in ("etc/systemd", "etc/hostname", "etc/nsswitch.conf", "etc/default/locale",
-                 "etc/locale.conf", "usr/lib/systemd/system", "usr/lib/photo-wall-bootstrapper"):
+                 "etc/locale.conf", "usr/lib/systemd/system", "usr/lib/photo-wall-bootstrapper",
+                 *DISPLAY_POWER_TOOLS, "etc/modules-load.d", "etc/group"):
         assert re.search(rf"(^|\s){re.escape(path)}(\s|$)", extract), path

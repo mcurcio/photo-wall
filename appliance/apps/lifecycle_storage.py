@@ -5,7 +5,7 @@ import json
 from dataclasses import asdict
 from uuid import UUID
 
-from appliance.apps.broker import ColdStart, EffectRecord, RunningApp
+from appliance.apps.broker import ColdStart, EffectRecord, RelaunchPacing, RunningApp
 from appliance.kernel.boot_store import BootStore
 from appliance.node.manager import ManagerRecoveryState
 from contracts.app_environment import AppEnvironmentRefV2
@@ -63,6 +63,26 @@ class FileEffectJournal:
         data = {"current": key, "records": {**self.data["records"], key: primitive(record)}}
         self.store.write("effects", data)
         self.data = data
+
+
+class FileRelaunchPacing:
+    """`RelaunchPacingStore` over the broker's boot store, key `relaunch-pacing` (1b P1b): one
+    pacing for the app unit, read by the cold-start and the online owner alike."""
+
+    def __init__(self, store: BootStore):
+        self.store = store
+
+    def get(self) -> RelaunchPacing | None:
+        """The stored pacing, or None; a malformed row is ValueError("relaunch_pacing_invalid")."""
+        row = self.store.read("relaunch-pacing")
+        if row is None:
+            return None
+        if set(row) != {"epoch", "exits", "not_before_ms"}:
+            raise ValueError("relaunch_pacing_invalid")
+        return RelaunchPacing(**row)
+
+    def put(self, pacing: RelaunchPacing) -> None:
+        self.store.write("relaunch-pacing", primitive(pacing))
 
 
 class FileManagerRecoveryStore:

@@ -183,3 +183,19 @@ def test_classify_is_total_over_every_stdlib_network_error(phase):
     unnamed = [cls for cls in classes
                if classify(cls.__new__(cls), phase=phase, host=None) is None]
     assert unnamed == []
+
+
+@pytest.mark.parametrize("phase", ["connect", "transfer"])
+def test_descriptor_and_memory_exhaustion_are_local_in_both_phases(phase):
+    """This machine ran out of a resource: nothing about the network was learned (1b P1a).
+    The Player hit EMFILE for 16.5 hours and reported it as connect_other."""
+    for code, reason in ((errno.EMFILE, "descriptors"), (errno.ENFILE, "descriptors"),
+                         (errno.ENOMEM, "memory")):
+        detail = errno.errorcode[code]
+        assert named(OSError(code, "x"), phase) == (Cause.LOCAL, reason, detail)
+        wrapper = RuntimeError("an httpx-style wrapper")
+        wrapper.__cause__ = OSError(code, "x")
+        assert named(wrapper, phase) == (Cause.LOCAL, reason, detail)
+    expected = ((Cause.CONNECT, "refused", "ECONNREFUSED") if phase == "connect"
+                else (Cause.TRANSFER, "short", "ECONNREFUSED"))
+    assert named(ConnectionRefusedError(errno.ECONNREFUSED, "refused"), phase) == expected

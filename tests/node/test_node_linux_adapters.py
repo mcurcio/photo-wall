@@ -398,3 +398,35 @@ def test_failed_exec_intent_waits_for_collection_before_fallback(stop_driver, mo
         clock = iter(range(20))
         with pytest.raises(ValueError, match="app_stop_identity_changed"):
             driver._await_unit_unloaded(previous)
+
+
+def test_a_start_records_its_boottime_and_the_unit_dumps_python_stacks(stop_driver, tmp_path,
+                                                                     monkeypatch):
+    """The broker paces relaunches from `launched().started_ms`, which `start` wrote; a crash
+    leaves the Python stack in the journal (PYTHONFAULTHANDLER=1)."""
+    from appliance.apps.broker import Launch
+    from appliance.apps.lifecycle_storage import primitive
+    linux, driver, expected, _, _, _, _ = stop_driver
+    driver.store = store(tmp_path / "broker", uuid4())
+    try:
+        driver.store.write("selected", {"environment": primitive(expected.environment)})
+        assert driver.launched() is None
+        observed = []
+        monkeypatch.setattr(driver, "current", lambda: None)
+        monkeypatch.setattr(driver, "verify", lambda environment: True)
+        monkeypatch.setattr(driver, "_await_unit_unloaded", lambda previous: None)
+        monkeypatch.setattr(driver, "display_incarnation", lambda: "weston-7")
+        monkeypatch.setattr(driver, "_observe", lambda *args: observed[0] if observed else None)
+        monkeypatch.setattr(linux, "player_device_grants", lambda sysfs: ())
+        monkeypatch.setattr(linux, "boottime_ms", lambda: 424_242)
+        commands = []
+        monkeypatch.setattr(linux.subprocess, "run", lambda command, **kwargs: (
+            commands.append(command), observed.append(expected)))
+        assert driver.start(expected.environment, expected.operation_id) == expected
+        assert driver.launched() == Launch(1, "weston-7", 424_242)
+        (command,) = commands
+        environment = next(value for value in command if value.startswith("Environment="))
+        assert "PYTHONFAULTHANDLER=1" in environment.split()
+        assert "Restart=no" in command
+    finally:
+        driver.store.close()

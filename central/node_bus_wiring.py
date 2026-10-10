@@ -20,6 +20,12 @@ from typing import Final
 
 from central.db import Database
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
+from central.infra.display_store import (
+    REPORT_STREAM,
+    DisplayDocuments,
+    DisplayWakes,
+    OutputReportJudge,
+)
 from central.infra.node_link_store import LINK_STORE_CONCURRENCY, PgLinkStores, PgWallMarks
 from central.infra.node_links import NodeLinks
 from contracts.node_link import Pipe
@@ -32,22 +38,21 @@ WALL_TABLE: Final = KeyTable({"timing": 4096})    # placeholder until E8 freezes
 
 
 class _NoDocuments:
-    """Central's desired documents and wall documents: none until E5 and E8 project them."""
-
-    async def documents(self, stream: str) -> Mapping[str, bytes]:
-        return {}
+    """Central's wall documents: none until E8 projects them."""
 
     async def wall_documents(self) -> Mapping[str, bytes]:
         return {}
 
 
 class NodeBus:
-    """The worker's side of every Node's bus: FleetHub and the fleet and show NodeLinks."""
+    """The worker's side of every Node's bus: FleetHub, the fleet and show NodeLinks, and the one
+    LISTEN connection that wakes their Output documents on another process's command."""
 
-    def __init__(self, db: Database, fleet: FleetHub, links: Sequence[NodeLinks]) -> None:
+    def __init__(self, db: Database, fleet: FleetHub, links: Sequence[NodeLinks], wakes: DisplayWakes) -> None:
         self._db = db
         self._fleet = fleet
         self._links = tuple(links)
+        self._wakes = wakes
 
     async def run(self, stop: asyncio.Event) -> None:
         """Until `stop` or the first failure; then FleetHub stops, then both supervisors, then the
@@ -65,10 +70,12 @@ class NodeBus:
         for task in (fleet, *supervisors):
             task.add_done_callback(ended)
         stopping = asyncio.create_task(stop.wait())
+        listening = asyncio.create_task(self._wakes.listen(self._db.dsn), name="node-bus document wakes")
         try:
             await asyncio.wait((stopping, fleet, *supervisors), return_when=asyncio.FIRST_COMPLETED)
         finally:
             stopping.cancel()
+            listening.cancel()
             fleet_stop.set()
             await asyncio.wait((fleet,))
             links_stop.set()
@@ -76,6 +83,7 @@ class NodeBus:
             for links in self._links:   # a supervisor that failed no longer stops what a last look started
                 with contextlib.suppress(Exception):
                     await links.track(())
+            await asyncio.wait((listening,))
             await asyncio.to_thread(self._db.close)
         if failures:
             raise failures[0]
@@ -83,14 +91,18 @@ class NodeBus:
 
 def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     """The worker's NodeBus over its own database pool, or None without HUB_URL_ENV (no hub
-    deployed). Documents and wall documents are empty until E5 and E8."""
+    deployed). Both pipes' links take their documents from `DisplayDocuments` (the fleet pipe's
+    Output documents; the show pipe's are empty), and the display line's Output reports are judged
+    as they are recorded (`OutputReportJudge`); a console command in Central's API process wakes the
+    documents through `DisplayWakes.listen`. Wall documents are empty until E8."""
     hub_url = env.get(HUB_URL_ENV)
     if not hub_url:
         return None
     db = Database(dsn, pool_size=LINK_STORE_CONCURRENCY + 2)
-    stores = PgLinkStores(db)
-    nothing = _NoDocuments()
-    links = tuple(NodeLinks(pipe, hub_url, stores, nothing) for pipe in (Pipe.FLEET, Pipe.SHOW))
+    wakes = DisplayWakes()
+    stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes)})
+    documents = DisplayDocuments(stores, wakes)
+    links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     fleet = FleetHub(db, hub_url, Path(env.get(HUB_CONFIG_ENV) or DEFAULT_HUB_CONFIG), HUB_LISTENERS,
-                     WALL_TABLE, PgWallMarks(db, nothing), links)
-    return NodeBus(db, fleet, links)
+                     WALL_TABLE, PgWallMarks(db, _NoDocuments()), links)
+    return NodeBus(db, fleet, links, wakes)

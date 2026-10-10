@@ -166,7 +166,7 @@ def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None
     links = links or SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None)
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,
                       session=session, driver=driver, links=links, probes=probes,
-                      feeds=SimpleNamespace(serve=lambda: None))
+                      feeds=SimpleNamespace(serve=lambda: None), clock=lambda: loop.now)
     loop.now = 0
     return loop, feed, session, driver, running, store
 

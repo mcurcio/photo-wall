@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import { BindingFacet } from "../BindingFacet.jsx";
+import { FrameDisplay } from "../domain/frame-display";
 import { FrameOverview } from "../domain/frame-overview";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
-import { FrameProfile } from "../domain/frame-profile";
+import { FrameProfile, type Readiness } from "../domain/frame-profile";
 import type { HostsRead } from "../domain/hosts-read";
 import { frameHealth } from "../health.js";
 import { boundOutput, isBound } from "../join.js";
@@ -38,7 +39,7 @@ interface Frame {
   output_id?: string | null;
   profile?: { width_px?: number; height_px?: number };
   calibration?: { rotation?: number };
-  calibration_valid?: boolean;
+  readiness?: Readiness;
 }
 
 const TABS = [
@@ -70,7 +71,8 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize {
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why; Position is where the
  * picture sits on the Display (corners, nudges, trims, rotation); Picture is its brightness;
- * Hardware is which Pi and HDMI output feed it (bind, unbind, Identify) and its Frame profile.
+ * Hardware is which Pi and HDMI output feed it (bind, unbind, Identify), the Display the Pi reports
+ * there (with the display-changed card) and its Frame profile.
  *
  * Position and Picture share one live adjustment (liveAdjustment.js): it runs while either tab
  * is shown, so moving between them keeps the change on the Display, and leaving them (another
@@ -145,6 +147,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           <>
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}
               onTab={(next: string) => choose(next as Tab)} />
+            <FrameDisplay key={`${frameId}:display`} frameId={frameId} />
             <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame} />
           </>
         )}

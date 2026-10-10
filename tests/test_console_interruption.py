@@ -31,9 +31,9 @@ const base = (interruptions, { silent = false, connected = true, runtime = LIVE 
       { player_id: "p-1", output_id: "HDMI-A-2", observation: { connected: true } },
     ],
     frames: [
-      { id: "lobby", player_id: "p-1", output_id: "HDMI-A-1", generation: 3, calibration_valid: true },
-      { id: "hall", player_id: "p-1", output_id: "HDMI-A-2", generation: 1, calibration_valid: true },
-      { id: "spare", player_id: null, output_id: null, generation: 0, calibration_valid: false },
+      { id: "lobby", player_id: "p-1", output_id: "HDMI-A-1", generation: 3, readiness: "ready" },
+      { id: "hall", player_id: "p-1", output_id: "HDMI-A-2", generation: 1, readiness: "ready" },
+      { id: "spare", player_id: null, output_id: null, generation: 0, readiness: "unbound" },
     ],
   },
 });

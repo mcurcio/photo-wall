@@ -19,9 +19,9 @@ POSITIVE -- every one of these must be present:
     file-level proxy for "the initrd can open TCP and TLS sockets"), the boot script
     ``scripts/photowall-netboot`` and initramfs-tools' ``scripts/functions`` (its
     configure_networking helper, which appliance.netboot_init sources -- load-bearing), the
-    ``mount`` / ``umount`` / ``modprobe`` stage 1 execs, the display modules, the CA bundle, and
-    every file stage 1 reaches (`stage1_files`) under the interpreter's own stdlib dir, where
-    ``python3 -I`` finds it;
+    ``mount`` / ``umount`` / ``modprobe`` stage 1 execs, the display and DDC/CI modules, the CA
+    bundle, and every file stage 1 reaches (`stage1_files`) under the interpreter's own stdlib
+    dir, where ``python3 -I`` finds it;
   * in the layer: the clock floor, and nothing else;
   * the CA bundle byte for byte the built base's (R5).
 
@@ -78,6 +78,13 @@ _REBOOT_TOKEN = re.compile(r"(?<![\w-])reboot(?![\w-])")
 # is scripts/initrd_mount_probe.py's job.
 DISPLAY_MODULES: tuple[str, ...] = ("vc4", "v3d")
 
+# The DDC/CI driver (i2c-dev: a /dev/i2c-N node per HDMI port's DDC bus, which ddcutil talks
+# through; spike 2026-10-10). Nothing matches it by alias, so the base loads it at boot
+# (etc/modules-load.d, written by rpi_image_gen/layer/photo-wall-os.yaml and checked by
+# scripts/device_root_checks.py, which reads this list); like the display drivers it can only
+# travel in this initrd, since the base's module tree is pruned and has no kmod binary.
+DDC_MODULES: tuple[str, ...] = ("i2c-dev",)
+
 # Present-or-fail globs for the CACHED archive, matched against normalised member paths.
 REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("python3 interpreter", "usr/bin/python3*"),
@@ -98,6 +105,7 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("the modules' depmod index", "*lib/modules/*/modules.dep"),
     *((f"display module {name}", f"*lib/modules/*/kernel/*/{name}.ko*")
       for name in DISPLAY_MODULES),
+    *((f"DDC/CI module {name}", f"*lib/modules/*/kernel/*/{name}.ko*") for name in DDC_MODULES),
     ("CA bundle", CA_BUNDLE_PATH),
 )
 

@@ -16,7 +16,17 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
+from central.displays.model import Readiness
 from central.infra.asset_roots import lock_fleet_assets_in
+from central.infra.display_store import (
+    POSITION_COLUMNS,
+    POSITION_FACTS,
+    SEEN_DISPLAY_JOIN,
+    commit_position,
+    frame_readiness,
+    frame_readiness_in,
+    resolve_output,
+)
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -527,7 +537,8 @@ class Registry:
                     raise RegistryError("binding_generation_conflict")
                 conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
                 conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)", (frame_id, player_id, output_id))
-                row = conn.execute("UPDATE frames SET generation=generation+1,calibration_valid=false,"
+                resolve_output(conn, player_id, output_id)   # the display there, under this binding
+                row = conn.execute("UPDATE frames SET generation=generation+1,"
                                    "configuration_revision=configuration_revision+1,"
                                    "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",
                                    (frame_id,)).fetchone()
@@ -553,7 +564,7 @@ class Registry:
             if frame["generation"] != expected_generation:
                 raise RegistryError("binding_generation_conflict")
             conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
-            row = conn.execute("UPDATE frames SET generation=generation+1,calibration_valid=false,"
+            row = conn.execute("UPDATE frames SET generation=generation+1,"
                                "configuration_revision=configuration_revision+1,"
                                "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",
                                (frame_id,)).fetchone()
@@ -609,7 +620,9 @@ class Registry:
         if current == profile:
             return {"profile": current.model_dump(), "generation": frame["generation"],
                     "changed": False}
-        if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+        # A bound Frame's profile is the Position's ground truth; it opens only while the Display
+        # on its Output is not the one its Position names (the display-changed card, slice C2).
+        if frame_readiness_in(conn, frame_id) not in (Readiness.UNBOUND, Readiness.DISPLAY_CHANGED):
             raise RegistryError("frame_bound")
         if not _orientation_coherent(frame["width_mm"], frame["height_mm"],
                                      profile.width_px, profile.height_px):
@@ -617,7 +630,7 @@ class Registry:
         calibration = Calibration.model_validate(frame["calibration"])
         invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
         row = conn.execute(
-            "UPDATE frames SET profile=%s,calibration=%s,calibration_valid=false,"
+            "UPDATE frames SET profile=%s,calibration=%s,"
             "preview=NULL,preview_expires=NULL,generation=generation+1,"
             "configuration_revision=configuration_revision+1 WHERE id=%s "
             "RETURNING generation",
@@ -765,8 +778,9 @@ class Registry:
                               "lease_seconds": CALIBRATION_LEASE_SECONDS}
                 else:
                     committed = calibration.model_copy(update={"revision": current.revision + 1})
-                    conn.execute("UPDATE frames SET calibration=%s,calibration_valid=true,preview=NULL,"
+                    conn.execute("UPDATE frames SET calibration=%s,preview=NULL,"
                                  "preview_expires=NULL WHERE id=%s", (Jsonb(committed.model_dump()), frame_id))
+                    commit_position(conn, frame_id)
                     result = committed.model_dump()
             else:
                 raise RegistryError("invalid_calibration_operation", 422)
@@ -803,9 +817,10 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        conn.execute("UPDATE frames SET calibration=%s,calibration_valid=true,preview=NULL,"
+        conn.execute("UPDATE frames SET calibration=%s,preview=NULL,"
                      "preview_expires=NULL,configuration_revision=configuration_revision+1 "
                      "WHERE id=%s", (Jsonb(committed.model_dump(mode="json")), frame_id))
+        commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
 
@@ -824,7 +839,8 @@ class Registry:
         if not player:
             raise RegistryError("stale_authority", 403)
         self._expire_previews(conn)
-        rows = conn.execute("SELECT f.*,b.output_id FROM bindings b JOIN frames f ON f.id=b.frame_id "
+        rows = conn.execute(f"SELECT f.*,b.output_id,{POSITION_COLUMNS} FROM bindings b "  # noqa: S608
+                            f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} "
                             "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
                             (player_id,)).fetchall()
         bindings = [OutputBinding(output_id=r["output_id"], frame_id=r["id"], generation=r["generation"],
@@ -835,7 +851,7 @@ class Registry:
                               preview_expires=r["preview_expires"])
                 for r in rows]
         return {"bindings": bindings, "execution_bindings": [binding for binding, row in
-                zip(bindings, rows, strict=True) if row["calibration_valid"]]}
+                zip(bindings, rows, strict=True) if frame_readiness(row) is Readiness.READY]}
 
     def inventory(self) -> InstallationInventory:
         with self.db.transaction() as conn:
@@ -853,10 +869,10 @@ class Registry:
                                "FROM players ORDER BY registered_at,id").fetchall()
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
-        frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"
-                              "f.generation,f.calibration,f.calibration_valid,f.preview,f.preview_expires,"
-                              "f.configuration_revision,b.player_id,b.output_id FROM frames f LEFT JOIN bindings b "
-                              "ON b.frame_id=f.id ORDER BY f.id").fetchall()
+        frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
+                              "f.calibration,f.preview,f.preview_expires,f.configuration_revision,"
+                              f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
+                              f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
         for frame in frames:
             if frame["preview_expires"] is not None and frame["preview_expires"] <= now:
                 frame["preview"] = None
@@ -866,5 +882,7 @@ class Registry:
             players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
                          for row in players),
             outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
-            frames=tuple(FrameInventory.model_validate(row) for row in frames),
+            frames=tuple(FrameInventory.model_validate(
+                {**{key: value for key, value in row.items() if key not in POSITION_FACTS},
+                 "generation": row["generation"], "readiness": frame_readiness(row)}) for row in frames),
         )

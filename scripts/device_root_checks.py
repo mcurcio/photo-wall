@@ -20,8 +20,9 @@ the snapshot it was built from.
 - Base OS configuration (`--base-os`): the binfmt units masked (the Pi kernel has no
   binfmt_misc), no build-time hostname baked in (stage 1 names the Node photo-wall-<serial> at
   boot), the hosts database resolving the machine's own name (libnss-myhostname), a default
-  locale pam_env can read (rpi_image_gen/layer/photo-wall-os.yaml), and nothing of the retired
-  V1 Pi lane (V1_UNITS, V1_DIRECTORY): every Pi boots the node path (decision 0019).
+  locale pam_env can read (rpi_image_gen/layer/photo-wall-os.yaml), nothing of the retired
+  V1 Pi lane (V1_UNITS, V1_DIRECTORY): every Pi boots the node path (decision 0019), and display
+  power's ddcutil, cec-ctl, DDC/CI driver loaded at boot and i2c group (`display_power`).
 
 Run over the base squashfs extract (all six) and the Player `.deb` staging tree (watchdog only,
 from the builder).
@@ -79,6 +80,15 @@ MASKED_UNITS: Final = ("systemd-binfmt.service", "proc-sys-fs-binfmt_misc.automo
                        "proc-sys-fs-binfmt_misc.mount")
 # What rpi-image-gen bakes into /etc/hostname when no layer sets IGconf_device_hostname.
 BUILD_HOSTNAME: Final = "rpi-image-gen"
+# Display power on the Node (spike 2026-10-10): ddcutil (DDC/CI) and v4l-utils' cec-ctl (HDMI
+# CEC), the modules-load file that loads the DDC/CI driver at boot (nothing matches it by alias),
+# and the group i2c-tools' udev rule gives the /dev/i2c-N nodes. DDC_MODULES is the initrd's
+# (scripts/verify_netboot_initrd.py): bound by tests/test_device_root_checks.py rather than
+# imported, so the base build's inputs (scripts/release_plan.py) stay this file alone.
+DISPLAY_POWER_TOOLS: Final = ("usr/bin/ddcutil", "usr/bin/cec-ctl")
+DDC_MODULES: Final = ("i2c-dev",)
+DDC_MODULES_LOAD: Final = "etc/modules-load.d/photo-wall-ddc.conf"
+I2C_GROUP: Final = "i2c"
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,8 +336,9 @@ def base_os(root: Path) -> list[str]:
     """Violations of the base's OS configuration: MASKED_UNITS each masked; etc/hostname not
     BUILD_HOSTNAME (stage 1 writes the Node's own name at boot); `myhostname` in the hosts line of
     etc/nsswitch.conf, so that name resolves with no /etc/hosts line; etc/default/locale,
-    followed through its link, setting LANG (pam_env reads it at every login); and no V1_UNITS
-    file or link under any UNIT_DIRECTORIES (a `.wants` link included) nor V1_DIRECTORY."""
+    followed through its link, setting LANG (pam_env reads it at every login); no V1_UNITS
+    file or link under any UNIT_DIRECTORIES (a `.wants` link included) nor V1_DIRECTORY; and
+    display_power's tools, driver and group."""
     found = [f"not masked: {unit}" for unit in MASKED_UNITS if not _masked(root, unit)]
     found += [f"v1 unit: {path.relative_to(root).as_posix()}"
               for directory in UNIT_DIRECTORIES if (root / directory).is_dir()
@@ -345,6 +356,23 @@ def base_os(root: Path) -> list[str]:
     if locale is None or not any(line.strip().startswith("LANG=")
                                  for line in locale.splitlines()):
         found.append("default locale: etc/default/locale sets no LANG")
+    return found + display_power(root)
+
+
+def display_power(root: Path) -> list[str]:
+    """Violations of what display power needs in the base: each DISPLAY_POWER_TOOLS file (followed
+    through its links); DDC_MODULES_LOAD naming every DDC_MODULES module (systemd-modules-load
+    reads one name per line, `#` and `;` lines are comments); and I2C_GROUP in etc/group, which
+    i2c-tools' udev rule gives the /dev/i2c-N nodes."""
+    found = [f"missing tool: {tool}" for tool in DISPLAY_POWER_TOOLS
+             if _read(root, root / tool) is None]
+    loaded = {line.strip() for line in (_read(root, root / DDC_MODULES_LOAD) or "").splitlines()
+              if line.strip() and line.strip()[0] not in "#;"}
+    found += [f"ddc driver: {DDC_MODULES_LOAD} does not load {module}"
+              for module in DDC_MODULES if module not in loaded]
+    groups = {line.partition(":")[0] for line in (_read(root, root / "etc/group") or "").splitlines()}
+    if I2C_GROUP not in groups:
+        found.append(f"missing group: {I2C_GROUP} (etc/group)")
     return found
 
 
@@ -365,7 +393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="the agent's SSH public key: the root must admit it, and only it")
     parser.add_argument("--base-os", action="store_true",
                         help="the base's OS configuration: binfmt masked, no build hostname, "
-                             "myhostname, a default locale, nothing of the V1 lane")
+                             "myhostname, a default locale, nothing of the V1 lane, display "
+                             "power's tools, driver and group")
     args = parser.parse_args(argv)
     root: Path = args.root
     violations = [f"watchdog override: {line}" for line in watchdog_overrides(root)]

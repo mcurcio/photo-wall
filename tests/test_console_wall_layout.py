@@ -63,7 +63,7 @@ const { wallUnfinished } = await import(process.argv[2]);
 const player = (id, extra = {}) => ({ id, device_id: `device-${id}`, authority_epoch: 1,
   registered_at: 10, last_seen: 900, retired_at: null, last_report_at: 995, ...extra });
 const frame = (id, extra = {}) => ({ id, surface_id: "wall", x_mm: 10, y_mm: 10,
-  width_mm: 300, height_mm: 500, player_id: null, output_id: null, calibration_valid: false,
+  width_mm: 300, height_mm: 500, player_id: null, output_id: null, readiness: "unbound",
   ...extra });
 const output = (player_id, output_id) => ({ player_id, output_id,
   observation: { connected: true } });
@@ -73,9 +73,9 @@ const snapshot = { inventory: {
   outputs: [output("heard", "HDMI-A-1"), output("silent", "HDMI-A-1"), output("raw", "HDMI-A-1")],
   frames: [
     frame("unbound"),
-    frame("dark", { player_id: "silent", output_id: "HDMI-A-1", calibration_valid: true }),
-    frame("ok", { player_id: "heard", output_id: "HDMI-A-1", calibration_valid: true }),
-    frame("raw", { player_id: "raw", output_id: "HDMI-A-1" }),
+    frame("dark", { player_id: "silent", output_id: "HDMI-A-1", readiness: "ready" }),
+    frame("ok", { player_id: "heard", output_id: "HDMI-A-1", readiness: "ready" }),
+    frame("raw", { player_id: "raw", output_id: "HDMI-A-1", readiness: "position-needed" }),
     frame("origin", { x_mm: 0, y_mm: 0 }),
   ],
 } };

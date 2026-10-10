@@ -5,7 +5,8 @@ One `PgLinkStore` per (Node, pipe) link. A drained batch is one transaction: its
 records keyed (Node, stream, epoch, sequence), then the stream's cursor, so a crash mid-drain resumes
 from the cursor and a repeat is a no-op (`ON CONFLICT DO NOTHING`). Two workers that overlap in a
 rolling deploy write the same keys; the cursor is last write wins. Central records before it judges:
-nothing here interprets a record. Times are PostgreSQL's (`DatabaseTransactionClock`), never a Node's.
+nothing here interprets a record, and a stream's `RecordJudge` (injected) reads only the records its
+commit inserted, in that commit. Times are PostgreSQL's (`DatabaseTransactionClock`), never a Node's.
 
 Every call runs its SQL in a worker thread behind one gate per process (`PgLinkStores`), so at most
 LINK_STORE_CONCURRENCY store calls hold or wait for a pooled connection: the rest wait in the event
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any, Final, Protocol, TypeVar
 
 from psycopg.types.json import Jsonb
@@ -38,11 +40,24 @@ _T = TypeVar("_T")
 _CLOCK: Final = DatabaseTransactionClock()
 
 
-class PgLinkStores:
-    """One per process: every (Node, pipe) link's store over one Database, behind one gate."""
+class RecordJudge(Protocol):
+    """Reads one stream's newly recorded items inside the commit that records them (roadmap 1b,
+    slice C1): Central records, then judges, in one transaction, so a judged fact never runs ahead
+    of its raw record and a repeat (`ON CONFLICT DO NOTHING`) is judged at most once. `PgLinkStores`
+    takes a judge per stream name (`KV_state_display` -> the Output report judge,
+    central/infra/display_store.py); a stream with no judge is only recorded."""
 
-    def __init__(self, db: Database) -> None:
+    def judge_in(self, conn: Any, device_id: str, stream: str, items: tuple[Read, ...]) -> None: ...
+        # `items` are the batch's Reads that this commit inserted (not the repeats), in sequence order
+
+
+class PgLinkStores:
+    """One per process: every (Node, pipe) link's store over one Database, behind one gate, with a
+    judge per stream name (`RecordJudge`)."""
+
+    def __init__(self, db: Database, judges: Mapping[str, RecordJudge] = MappingProxyType({})) -> None:
         self._db = db
+        self._judges = MappingProxyType(dict(judges))
         self._gate = asyncio.Semaphore(LINK_STORE_CONCURRENCY)
 
     def store(self, serial: str, pipe: Pipe) -> PgLinkStore:
@@ -51,8 +66,12 @@ class PgLinkStores:
             raise ValueError("node_link_serial")
         return PgLinkStore(self, device_id, Pipe(pipe))
 
-    async def _run(self, body: Callable[[Any], _T]) -> _T:
-        """`body(conn)` in one transaction, in a worker thread, behind the gate."""
+    def judge(self, stream: str) -> RecordJudge | None:
+        return self._judges.get(stream)
+
+    async def run(self, body: Callable[[Any], _T]) -> _T:
+        """`body(conn)` in one transaction, in a worker thread, behind the gate: every store call,
+        and every read of Central's document sources that shares this process's pool."""
         def run() -> _T:
             with self._db.transaction() as conn:
                 return body(conn)
@@ -76,11 +95,15 @@ class PgLinkStore:
             rows = conn.execute("SELECT stream, epoch, seq FROM node_link_cursors WHERE device_id=%s AND pipe=%s",
                                 (self._device_id, self._pipe.value)).fetchall()
             return {row["stream"]: Token(row["epoch"], row["seq"]) for row in rows}
-        return await self._stores._run(body)
+        return await self._stores.run(body)
 
     async def commit(self, stream: str, batch: Batch) -> None:
-        """One transaction: gap rows, then raw records, both idempotent; then the cursor, upserted
+        """One transaction: gap rows, then raw records, both idempotent; then the stream's judge, if
+        it has one, over the Reads this commit inserted (not the repeats); then the cursor, upserted
         with this pipe, or removed when the batch ends the stream (cursor None)."""
+        judge = self._stores.judge(stream)
+        reads = [item for item in batch.items if isinstance(item, Read)]   # in sequence order
+
         def body(conn) -> None:
             now = _CLOCK.now_in(conn)
             gaps = [(self._device_id, stream, item.epoch, item.after, item.count, now)
@@ -93,11 +116,20 @@ class PgLinkStore:
                     cursor.executemany(
                         "INSERT INTO node_link_gaps(device_id, stream, epoch, after_seq, lost, recorded_at) "
                         "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING", gaps)
+                inserted: list[tuple[str, int]] = []
                 if records:
                     cursor.executemany(
                         "INSERT INTO node_link_records(device_id, stream, epoch, seq, subject, message_id, headers, "
-                        "data, recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                        records)
+                        "data, recorded_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING "
+                        "RETURNING epoch, seq", records, returning=True)
+                    while True:
+                        inserted.extend((row["epoch"], row["seq"]) for row in cursor.fetchall())
+                        if not cursor.nextset():
+                            break
+            if judge is not None and inserted:
+                fresh = set(inserted)
+                judge.judge_in(conn, self._device_id, stream, tuple(
+                    read for read in reads if (read.token.epoch, read.token.seq) in fresh))
             if batch.cursor is None:
                 conn.execute("DELETE FROM node_link_cursors WHERE device_id=%s AND stream=%s",
                              (self._device_id, stream))
@@ -107,21 +139,21 @@ class PgLinkStore:
                     "ON CONFLICT (device_id, stream) DO UPDATE "
                     "SET pipe=EXCLUDED.pipe, epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
                     (self._device_id, stream, self._pipe.value, batch.cursor.epoch, batch.cursor.seq))
-        await self._stores._run(body)
+        await self._stores.run(body)
 
     async def action(self, kind: str, body: Mapping[str, object]) -> None:
         def write(conn) -> None:
             conn.execute("INSERT INTO node_link_actions(device_id, pipe, kind, body, recorded_at) "
                          "VALUES (%s, %s, %s, %s, %s)",
                          (self._device_id, self._pipe.value, kind, Jsonb(dict(body)), _CLOCK.now_in(conn)))
-        await self._stores._run(write)
+        await self._stores.run(write)
 
     async def own_tokens(self, stream: str) -> Mapping[str, tuple[str, Token]]:
         def body(conn) -> Mapping[str, tuple[str, Token]]:
             rows = conn.execute("SELECT key, digest, epoch, seq FROM node_link_documents "
                                 "WHERE device_id=%s AND stream=%s", (self._device_id, stream)).fetchall()
             return {row["key"]: (row["digest"], Token(row["epoch"], row["seq"])) for row in rows}
-        return await self._stores._run(body)
+        return await self._stores.run(body)
 
     async def wrote(self, stream: str, key: str, digest: str, token: Token) -> None:
         def body(conn) -> None:
@@ -130,7 +162,7 @@ class PgLinkStore:
                 "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (device_id, stream, key) DO UPDATE "
                 "SET digest=EXCLUDED.digest, epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
                 (self._device_id, stream, key, digest, token.epoch, token.seq))
-        await self._stores._run(body)
+        await self._stores.run(body)
 
 
 class WallDocuments(Protocol):

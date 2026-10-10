@@ -127,6 +127,13 @@ done
 # Player plays no audio and decodes in software (avdec_h264), so nothing else
 # is needed. scripts/verify_netboot_initrd.py requires vc4 and v3d in the
 # built initrd.
-for module in vc4 v3d; do
+#
+# i2c-dev is display power's DDC/CI driver: it gives each HDMI port's DDC bus
+# (vc4's i2c-13 and i2c-14) a /dev/i2c-N node for ddcutil (spike, 2026-10-10).
+# It travels here for the same reason (the base's module tree is pruned and
+# has no kmod binary), but nothing matches it by alias, so the base loads it at
+# boot from etc/modules-load.d (rpi_image_gen/layer/photo-wall-os.yaml).
+# scripts/verify_netboot_initrd.py requires it as DDC_MODULES.
+for module in vc4 v3d i2c-dev; do
     manual_add_modules "$module"
 done

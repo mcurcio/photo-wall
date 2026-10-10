@@ -32,8 +32,8 @@ const snapshot = { inventory: {
     { player_id: "p-retired", output_id: "HDMI-A-1", observation: { connected: true } },
   ],
   frames: [
-    { id: "lobby", player_id: "p-bound", output_id: "HDMI-A-1", calibration_valid: false },
-    { id: "spare", player_id: null, output_id: null, calibration_valid: false },
+    { id: "lobby", player_id: "p-bound", output_id: "HDMI-A-1", readiness: "position-needed" },
+    { id: "spare", player_id: null, output_id: null, readiness: "unbound" },
   ],
 } };
 // --- identifyOffer: one rule for the Player page and the Binding facet's picker.

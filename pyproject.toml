@@ -125,8 +125,15 @@ layers = ["central.app : central.content_wiring : central.content_routes : centr
 name = "Kernel, origins and domains have no persistence, queue or HTTP-framework dependency"
 type = "forbidden"
 source_modules = ["central.kernel", "central.origins", "central.content_catalog",
-                  "central.assets", "central.health"]
+                  "central.assets", "central.health", "central.displays"]
 forbidden_modules = ["procrastinate", "psycopg", "psycopg_pool", "fastapi", "starlette"]
+
+[[tool.importlinter.contracts]]
+# Roadmap 1b: the Display rules are pure; the bus reaches them through Central's infra edge.
+name = "Displays are pure domain"
+type = "forbidden"
+source_modules = ["central.displays"]
+forbidden_modules = ["nodeapi", "central.infra", "central.db", "central.registry", "central.app"]
 
 [[tool.importlinter.contracts]]
 # R22: only the media worker holds a library's address and key. Central's thumbnail handler gets

@@ -128,7 +128,7 @@ const snapshotOf = ({ interrupted = [], silent = [], failing = [] } = {}) => ({
     players: [player("p-c"), player("p-a"), player("p-b"), player("p-gone", null, { retired_at: 5 })]
       .map((p) => (silent.includes(p.id) ? { ...p, last_report_at: 100 } : p)),
     outputs: ["p-a", "p-b", "p-c", "p-gone"].map((id) => ({ player_id: id, output_id: "HDMI-A-1", observation: { connected: true } })),
-    frames: ["p-a", "p-b", "p-c"].map((id) => ({ id: `f-${id}`, player_id: id, output_id: "HDMI-A-1", calibration_valid: true })),
+    frames: ["p-a", "p-b", "p-c"].map((id) => ({ id: `f-${id}`, player_id: id, output_id: "HDMI-A-1", readiness: "ready" })),
   },
   outputInterruptions: interrupted.map((id) => ({ frame_id: `f-${id}`, cause_layer: "app_effect_broker", interrupted_at: 990 })),
   readinessDiagnostics: failing.map((id) => ({ player_id: id, frame_id: `f-${id}`, output_id: "HDMI-A-1",

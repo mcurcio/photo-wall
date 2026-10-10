@@ -105,7 +105,7 @@ def test_d0_unbound_player_gets_no_execution_bindings_until_operator_binds(regis
     # A Frame already exists at enroll time, so the D0 branch has something
     # it COULD (wrongly) auto-bind to -- the assertions below must catch that.
     # Cross-player: a SECOND D0 player is bound to the Frame with a real,
-    # committed (calibration_valid) execution binding. Without this second
+    # committed (ready: Position committed at its generation) execution binding. Without this second
     # player, an empty result is indistinguishable from a broken
     # `configuration_in` scope (central/registry.py `WHERE b.player_id=%s`)
     # that returns nothing for ANY player -- this bites that leak instead.

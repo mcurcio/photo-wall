@@ -320,16 +320,14 @@ def test_invalid_negotiated_stride_never_becomes_prepared():
 
 def test_capacity_waits_for_real_surface_initialization():
     import threading
-    from types import SimpleNamespace
 
-    from player.native import NativeRenderer
+    from player.native import NativeRenderer, _Surface
 
     renderer = NativeRenderer.__new__(NativeRenderer)
     renderer._owner, renderer._closed = threading.get_ident(), False
     renderer._decoders = {}
     renderer.decoder_limit, renderer.texture_budget = 4, 512*1024**2
-    surface = SimpleNamespace(output=NativeOutput("out", "app", 16, 16),
-                              size=(0, 0), programs=None, failure=None)
+    surface = _Surface(output=NativeOutput("out", "app", 16, 16), window=None, area=None)
     renderer._surfaces = {"out": surface}
     assert not renderer.capacity(()).available
     surface.programs = (1, 2)

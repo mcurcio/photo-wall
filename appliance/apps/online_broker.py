@@ -8,9 +8,15 @@ transition is an effect event queued for Central; reporting never gates progress
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from uuid import uuid4
 
-from appliance.apps.broker import RunningApp, relaunch_for_display
+from appliance.apps.broker import (
+    RelaunchPacingStore,
+    RunningApp,
+    display_took_app,
+    relaunch_absent,
+)
 from appliance.apps.probe import RECOVERY_ACKNOWLEDGED, RECOVERY_ARMED
 from appliance.apps.stop_operation import (
     StopGuaranteeUnavailable,
@@ -40,9 +46,11 @@ LOG = logging.getLogger(__name__)
 
 
 class OnlineEffectBroker:
-    def __init__(self, store, driver, session, recovery):
+    def __init__(self, store, driver, session, recovery, *, pacing: RelaunchPacingStore,
+                 now_ms: Callable[[], int]):
         self.store, self.driver, self.session = store, driver, session
         self.recovery = recovery
+        self.pacing, self.now_ms = pacing, now_ms
 
     @property
     def record(self):
@@ -237,16 +245,24 @@ class OnlineEffectBroker:
             return
         command = parse_stage_command(record["command"].encode())
         if record["phase"] in ("running", "fallback_running"):
-            # The same relaunch rule as a cold start's, for the switch's current launch: a Weston
-            # restart takes the app with it, and the new Weston gets the same root again. The
-            # switch's own record is untouched; it still completes only at the control proof.
+            if self.driver.current() is not None:
+                self._settle(record, command)
+                return
+            # The app is absent. Before control is proven its exit is the switch's own failure
+            # (E-1B-17), unless its Weston took it. Otherwise the cold start's relaunch rule
+            # holds for the switch's current launch: the same root again, paced. The switch's
+            # own record is untouched; it still completes only at the control proof.
+            if (not self._controlled(command)
+                    and not display_took_app(self.driver.launched(),
+                                             self.driver.display_incarnation())):
+                self._settle(record, command)
+                return
             launched = command.target if record["phase"] == "running" else command.fallback
             try:
-                relaunch_for_display(self.driver, launched, command.operation_id)
+                relaunch_absent(self.driver, self.pacing, launched, command.operation_id,
+                                now_ms=self.now_ms)
             except Exception:
                 self._event("effect_unknown", fault="relaunch_outcome_unknown")
-                return
-            self._settle(record, command)
             return
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
             request = stop_request_from(record["stop_request"])
