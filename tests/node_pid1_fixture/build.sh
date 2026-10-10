@@ -57,6 +57,11 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/node-pid1-fixture.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 # The two target repos: the local repo with its photo-wall-player replaced, and their indexes.
+# `success` is the built Player's own bytes at another version, so its sealed image differs from
+# the release's app root while running the real program. The source package cannot give it: a
+# version there is a hash of the installed tree (debian/content-versions), so the same bytes
+# always rebuild at the release's version. dpkg-deb's own unpack and build re-version it; nothing
+# else of the package changes. `failure` needs no real bytes, so it is an equivs stub.
 for role in success failure; do
 	mkdir "$work/$role-repo"
 	find "$repo" -maxdepth 1 -name '*.deb' ! -name 'photo-wall-player_*' -exec cp {} "$work/$role-repo/" \;

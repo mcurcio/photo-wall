@@ -21,7 +21,7 @@
 #   debian-packaging/seal-hook.sh <rootfs> <role> <NAME's .deb> <the repo's abi.json pair> <image>
 #   mksquashfs <image> <out> $SQUASHFS_OPTIONS
 #
-# twice, in two containers (whose hostnames differ), and refuses two different image digests:
+# twice, at once, in two containers (whose hostnames differ), and refuses two different image digests:
 # a release root must keep its digest when it is rebuilt. --once builds once, for a root no
 # release ships (the PID1 scenarios' stage targets, tests/node_pid1_fixture/build.sh).
 # FILE then holds the image; FILE less .squashfs plus .reference.json holds the seal's reference
@@ -119,9 +119,20 @@ build() {
 		chown "$owner" /out/root.squashfs /out/reference.json'
 }
 
-build first
+# The two builds are independent containers, so they run at once: a rebuild costs one build's
+# wall time. Both are waited for, whichever fails, before a failed one stops the script.
+build first &
+pids=$!
 if [ -z "$once" ]; then
-	build second
+	build second &
+	pids="$pids $!"
+fi
+status=0
+for pid in $pids; do
+	wait "$pid" || status=$?
+done
+[ "$status" -eq 0 ] || exit "$status"
+if [ -z "$once" ]; then
 	first=$(sha256sum "$work/first/root.squashfs" | cut -d" " -f1)
 	second=$(sha256sum "$work/second/root.squashfs" | cut -d" " -f1)
 	if [ "$first" != "$second" ]; then
