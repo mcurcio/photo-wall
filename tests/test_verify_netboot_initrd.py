@@ -17,6 +17,7 @@ import pytest
 
 from scripts.verify_netboot_initrd import (
     CA_BUNDLE_PATH,
+    DDC_MODULES,
     DEFAULT_BOOT_SCRIPT,
     DISPLAY_MODULES,
     FLOOR_PATH,
@@ -87,6 +88,8 @@ CACHED = [
     # Stage 2's display drivers, as the Pi 5 kernel package compresses its modules.
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/vc4/vc4.ko.xz",
     "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz",
+    # The DDC/CI driver ddcutil talks through (spike 2026-10-10).
+    "usr/lib/modules/6.12.0-rpi/kernel/drivers/i2c/i2c-dev.ko.xz",
     "usr/lib/modules/6.12.0-rpi/modules.dep",
 ]
 
@@ -126,6 +129,7 @@ REQUIRED_CACHED = [
     # v0.9.1's initrd carried neither, so /dev/dri never appeared in stage 2.
     ("vc4 module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/vc4/vc4.ko.xz"),
     ("v3d module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/gpu/drm/v3d/v3d.ko.xz"),
+    ("i2c-dev module", "usr/lib/modules/6.12.0-rpi/kernel/drivers/i2c/i2c-dev.ko.xz"),
     ("depmod index", "usr/lib/modules/6.12.0-rpi/modules.dep"),
     ("CA bundle", CA_BUNDLE_PATH),
 ]
@@ -138,12 +142,19 @@ def test_v0_9_1s_initrd_without_the_display_drivers_is_refused():
         "missing required display module v3d (pattern '*lib/modules/*/kernel/*/v3d.ko*')"]
 
 
-def test_the_hook_adds_exactly_the_display_modules_the_verify_requires():
-    """The hook is shell and cannot import the list: bound here, so neither changes alone."""
+def test_an_initrd_without_the_ddc_driver_is_refused():
+    """Without i2c-dev there is no /dev/i2c-N, so DDC/CI cannot turn a display off."""
+    mutated = [m for m in CACHED if not m.endswith("/i2c-dev.ko.xz")]
+    assert check(cached=mutated) == [
+        "missing required DDC/CI module i2c-dev (pattern '*lib/modules/*/kernel/*/i2c-dev.ko*')"]
+
+
+def test_the_hook_adds_exactly_the_display_and_ddc_modules_the_verify_requires():
+    """The hook is shell and cannot import the lists: bound here, so neither changes alone."""
     hook = (REPO / "appliance/netboot_initramfs/hooks/photo-wall-netboot").read_text()
     loops = re.findall(r"^for module in ([^;]+); do\n    manual_add_modules \"\$module\"$",
                        hook, flags=re.MULTILINE)
-    assert loops == ["squashfs overlay loop", " ".join(DISPLAY_MODULES)]
+    assert loops == ["squashfs overlay loop", " ".join((*DISPLAY_MODULES, *DDC_MODULES))]
     # No blacklist: with the KMS overlay, vc4's framebuffer is stage 1's console.
     assert "blacklist" not in hook
 

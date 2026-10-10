@@ -3,8 +3,8 @@
 # X-Env-Layer-Category: sys
 # X-Env-Layer-Desc: The base's OS configuration, set in the OS itself (owner,
 #  2026-10-09: OS configuration goes straight into the OS through
-#  rpi-image-gen, never through a Photo Wall package). Two settings and one
-#  package:
+#  rpi-image-gen, never through a Photo Wall package). Three settings and
+#  three packages:
 #
 #  binfmt: Debian's python3.13-minimal ships /usr/lib/binfmt.d/python3.13.conf,
 #  so systemd-binfmt.service and the binfmt_misc mount start at every boot and
@@ -25,18 +25,31 @@
 #  and no /etc/hosts line names (sudo, and anything else that looks its host
 #  up). The device layer bakes only a neutral name.
 #
-#  base-image.yml checks all three on the built image
+#  Display power (spike, 2026-10-10): ddcutil turns a display off and on over
+#  DDC/CI (it pulls i2c-tools, whose udev rule and postinst give the
+#  /dev/i2c-N nodes the i2c group), and v4l-utils carries cec-ctl for HDMI
+#  CEC. ddcutil needs the i2c-dev driver, which travels in the netboot initrd
+#  (the base's module tree is pruned and has no kmod binary) and which nothing
+#  loads by alias, so etc/modules-load.d/photo-wall-ddc.conf loads it at boot.
+#  No device-tree overlay: vc4-kms-v3d-pi5 already makes each HDMI port's DDC
+#  bus (i2c-13, i2c-14) and its CEC device.
+#
+#  base-image.yml checks all of these on the built image
 #  (scripts/device_root_checks.py).
-# X-Env-Layer-Version: 1.1.0
+# X-Env-Layer-Version: 1.2.0
 # X-Env-Layer-Requires: systemd-min
 # METAEND
 ---
 mmdebstrap:
   packages:
     - libnss-myhostname
+    - ddcutil
+    - v4l-utils
   customize-hooks:
     - |-
       set -eu
       chroot "$1" systemctl mask systemd-binfmt.service \
         proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount
       printf 'LANG=C.UTF-8\n' > "$1/etc/locale.conf"
+      mkdir -p "$1/etc/modules-load.d"
+      printf 'i2c-dev\n' > "$1/etc/modules-load.d/photo-wall-ddc.conf"
