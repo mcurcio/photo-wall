@@ -4,11 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { frameProfileProblem, updateFrameProfile } from "../framesApi.js";
 import { boundOutput, isBound } from "../join.js";
 import { FactRow, Note } from "../patterns/fact-row";
-import { Message } from "../patterns/message";
+import { ProblemCard } from "../patterns/problem-card";
 import { Button } from "../ui/button";
-import { CheckboxField, NumberField } from "../ui/field";
-import { Row } from "../ui/row";
+import { Field, NumberInput } from "../ui/field";
 import { Section } from "../ui/section";
+import { Inline } from "../ui/stack";
+import { Switch } from "../ui/switch";
 import { useMutate } from "../useMutate.js";
 
 interface Profile {
@@ -50,28 +51,29 @@ function refusal(code: string): string {
     case "binding_generation_conflict":
       return "This Frame's equipment changed while you were editing. Reload its facts before retrying.";
     case "frame_bound":
-      return "Unbind this Frame before changing its Frame profile. Your draft is preserved.";
+      return "Disconnect this Frame from its Pi before changing its Frame profile. Your draft is preserved.";
     case "frame_in_use":
-      return "Finish or cancel the active Run targeting this Frame, then retry. Your draft is preserved.";
+      return "Stop what is showing on this Frame (the Now page), then try again. Your draft is preserved.";
     case "oriented_profile":
       return "Frame profile must match the frame's orientation. Your draft is preserved.";
     case "unknown_frame":
       return "This Frame no longer exists. Reload the wall to continue.";
     default:
-      return `Could not save the Frame profile (${code}). Your draft is preserved.`;
+      return "Could not save the Frame profile. Your draft is preserved.";
   }
 }
 
 /**
  * The Frame page's Frame profile (Hardware tab): the size the operator declared for this
  * location (pixels, diagonal, video), which stays when a Display is swapped, its editor, and a
- * note when the Player app reported another resolution at its last enrollment. Saving needs an
- * unbound Frame and clears its position, which is set again on the Position tab.
+ * problem card when the Pi reported its Display at another resolution when its photo app last
+ * started (its last enrollment). Saving needs a Frame with no Pi and clears its position, which
+ * is set again on the Position tab.
  */
 export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [generation, setGeneration] = useState(0);
-  const [problem, setProblem] = useState<string | null>(null);
+  const [problem, setProblem] = useState<{ words: string; code: string | null } | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const mutate = useMutate();
@@ -107,7 +109,7 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
     if (draft === null) return;
     const invalid = frameProfileProblem(draft, frame);
     if (invalid) {
-      setProblem(invalid);
+      setProblem({ words: invalid, code: null });
       return;
     }
     setSaving(true);
@@ -127,15 +129,27 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
           ? "Frame profile saved. Set this Frame's position again before showing content."
           : "Frame profile already matches; its position was not changed.");
       } else {
-        setProblem(refusal(result.code ?? "unknown"));
+        setProblem({ words: refusal(result.code ?? "unknown"), code: result.code ?? null });
       }
     } catch (failure) {
-      setProblem(`Could not save the Frame profile: ${(failure as Error)?.message ?? "server error"}. Your draft is preserved.`);
+      setProblem({ words: "Photo Wall's server did not answer. Your draft is preserved.",
+        code: (failure as Error)?.message ?? null });
     } finally {
       setSaving(false);
     }
   };
 
+  const problemCard = problem === null ? null : (
+    <ProblemCard
+      scope="setup"
+      variant="inline"
+      live
+      verdict={{ severity: "todo", label: "Not saved", receipt: null }}
+      what={problem.words}
+      doing={null}
+      details={problem.code === null ? undefined : <Note>{`Photo Wall's answer: ${problem.code}`}</Note>}
+    />
+  );
   return (
     <Section title="Frame profile">
       <Note>Declared when the Frame was made; it stays when the Display is swapped.</Note>
@@ -143,41 +157,60 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
       <FactRow label="Pixel height" tone="set">{`${profile.height_px ?? "—"} px`}</FactRow>
       <FactRow label="Diagonal" tone="set">{`${profile.diagonal_inches ?? "—"} in`}</FactRow>
       <FactRow label="Video capable" tone="set">{profile.video ? "yes" : "no"}</FactRow>
-      {mismatch && observation ? (
-        <Message kind="status">
-          {`The Player app reported ${observation.width_px} × ${observation.height_px} at its last enrollment; this record may be stale. The Frame profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `The saved rotation ${rotation}° was considered.` : "This Frame's position is not set for this Pi yet."} Check the Display and the rotation you want, and restart the Player app if the Display changed. If the profile is wrong, unbind this Frame, edit its profile, then bind it and set its position.`}
-        </Message>
+      {mismatch && observation && draft === null ? (
+        <ProblemCard
+          scope="setup"
+          subject="Frame profile"
+          variant="inline"
+          verdict={{ severity: "todo", label: "Check the Display", receipt: null }}
+          what={`The Pi reported its Display at ${observation.width_px} × ${observation.height_px}, but this Frame's profile is ${profile.width_px} × ${profile.height_px}. ${frame.calibration_valid ? `The saved rotation ${rotation}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
+          doing={null}
+          action={{ label: "Edit Frame profile", onAction: begin }}
+          details={(
+            <>
+              <Note>The Pi reports its Display&apos;s size when its photo app starts, so a Display swapped since then may not show here yet: restart the Pi&apos;s photo app if the Display changed.</Note>
+              <Note>To change the profile: disconnect this Frame from its Pi (Disconnect, above), edit its profile, then connect it again and set its position.</Note>
+            </>
+          )}
+        />
       ) : null}
       {draft === null ? (
-        <Row>
+        <Inline>
           <Button ref={editRef} onClick={begin}>Edit Frame profile</Button>
-          {status ? <Message kind="status">{status}</Message> : null}
-        </Row>
+          {status ? <Note live>{status}</Note> : null}
+        </Inline>
       ) : (
         <form onSubmit={save} aria-label="Edit Frame profile">
           <Note>
-            Changing the Frame profile needs this Frame unbound and no Run on it. The change clears its
-            position; set it again before showing content.
+            Changing the Frame profile needs this Frame disconnected from its Pi and nothing showing
+            on it. The change clears its position; set it again before showing content.
           </Note>
-          <Row>
-            <NumberField label="Pixel width" autoFocus min={1} max={16384} step={1} value={draft.width_px}
-              onValueChange={(value) => setDraft({ ...draft, width_px: value })} />
-            <NumberField label="Pixel height" min={1} max={16384} step={1} value={draft.height_px}
-              onValueChange={(value) => setDraft({ ...draft, height_px: value })} />
-            <NumberField label="Diagonal (inches)" min={0} step="any" value={draft.diagonal_inches}
-              onValueChange={(value) => setDraft({ ...draft, diagonal_inches: value })} />
-            <CheckboxField label="Video capable" checked={draft.video}
-              onCheckedChange={(video) => setDraft({ ...draft, video })} />
-          </Row>
-          {problem ? <Message kind="alert">{problem}</Message> : null}
-          <Row>
+          <Inline>
+            <Field label="Pixel width">
+              <NumberInput autoFocus min={1} max={16384} step={1} value={draft.width_px}
+                onChange={(value) => setDraft({ ...draft, width_px: value })} />
+            </Field>
+            <Field label="Pixel height">
+              <NumberInput min={1} max={16384} step={1} value={draft.height_px}
+                onChange={(value) => setDraft({ ...draft, height_px: value })} />
+            </Field>
+            <Field label="Diagonal (inches)">
+              <NumberInput min={0} step="any" value={draft.diagonal_inches}
+                onChange={(value) => setDraft({ ...draft, diagonal_inches: value })} />
+            </Field>
+            <Field label="Video capable">
+              <Switch checked={draft.video} onChange={(video) => setDraft({ ...draft, video })} />
+            </Field>
+          </Inline>
+          {problemCard}
+          <Inline>
             <Button type="submit" variant="primary" disabled={saving}>{saving ? "Saving…" : "Save profile"}</Button>
             <Button disabled={saving} onClick={() => {
               setDraft(null);
               setProblem(null);
               requestAnimationFrame(() => editRef.current?.focus());
             }}>Cancel</Button>
-          </Row>
+          </Inline>
         </form>
       )}
     </Section>

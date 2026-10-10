@@ -43,7 +43,9 @@ const ARROWS: Record<string, [number, number]> = {
  * rectangle with a handle mid-way along each edge (under the corners, which win where they meet).
  * Drag a handle to move it; with the editor focused, the arrow keys
  * report a step for the selected corner (or the whole quad), which the caller turns into a move.
- * It holds no geometry rules: every move is the caller's to accept.
+ * It holds no geometry rules: every move is the caller's to accept. The corner handles are drawn
+ * in the accent because they are what you act on (an allowed use of the accent); the picture
+ * itself is drawn in the text colour.
  */
 export function QuadEditor({
   label, corners, crop, aspect, selected, onSelect, onCorner, onCrop, onArrow, disabled = false,
@@ -110,7 +112,7 @@ export function QuadEditor({
         <rect x={0} y={0} width={WIDTH} height={height} className="fill-surface stroke-line-input" strokeWidth={1} />
         <rect x={left} y={top} width={right - left} height={bottom - top}
           className="fill-none stroke-muted" strokeWidth={1.5} strokeDasharray="6 4" />
-        <polygon points={points} className={cn("fill-accent-tint stroke-accent", selected === null && "stroke-3")} strokeWidth={2} />
+        <polygon points={points} className={cn("fill-text/10 stroke-text", selected === null && "stroke-3")} strokeWidth={2} />
         {([[left, (top + bottom) / 2], [(left + right) / 2, top], [right, (top + bottom) / 2],
           [(left + right) / 2, bottom]] as const).map(([x, y], index) => (
           <rect key={`edge-${index}`} x={x - 6} y={y - 6} width={12} height={12}

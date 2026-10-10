@@ -743,19 +743,26 @@ LAYERS = ("pages", "domain", "patterns", "ui", "design")
 MODEL_FREE = {"patterns", "ui", "design"}
 MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
 # What a page or a domain component may import from outside the catalog: the models, and the
-# node read (a hook, no markup). Anything else that renders markup is a legacy module.
-PAGE_IMPORTS = MODELS | {"nodeRead.js"}
-# Hooks and pure modules with no markup a Frame page composes: the live adjustment (a hook),
-# the Frame profile write and refresh-after-write, and the Frame id rule.
-PAGE_IMPORTS |= {"liveAdjustment.js", "framesApi.js", "useMutate.js", "frameIds.js"}
+# node read (a hook, no markup) and the one time formatter (no markup). Anything else that
+# renders markup is a legacy module.
+PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js"}
 # Legacy modules that render markup the Hardware Pi page still composes: the confirmation
 # dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
 # Dialog primitive does not carry yet), the Reboot section and the node-control gate's notice.
 # Declared in .claude/errata.md E-CDS-FIX-1; the dialogs' migration (DS2) empties this set.
-LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js",
-                 # The Frame page's Hardware tab and Overview, until they move to the catalog:
-                 # the bind chooser, and the two read-only explanations the Now page shares.
-                 "BindingFacet.jsx", "PrecedenceExplanation.jsx", "ReadinessNotice.jsx"}
+LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
+# The Frame page's modules, each with the legacy modules it alone may import, until they move
+# to the catalog: the page composes the bind chooser and the live adjustment (a hook); the
+# Overview the two read-only explanations the Now page shares, the readiness report and the
+# Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
+# view the hook's type. No other page or domain module may import any of them.
+FRAME_PAGE_IMPORTS = {
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js"},
+    "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
+                           "frameIds.js"},
+    "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
+    "live-adjustment.tsx": {"liveAdjustment.js"},
+}
 
 
 def _layer(module, src=SRC):
@@ -847,11 +854,19 @@ def test_the_truth_kinds_token_list_is_the_fact_models():
 
 def test_pages_and_domain_components_import_only_models_and_declared_legacy_markup(layer_graph):
     # A page composes the catalog and reads models: it never imports a legacy module that
-    # renders markup (and styles it with the legacy sheet), except the declared ones.
-    imported = {imported.name for module, imports in layer_graph.items()
-                if _layer(module) in ("pages", "domain")
-                for imported in imports if _layer(imported) is None}
-    assert imported - PAGE_IMPORTS == LEGACY_MARKUP, sorted(imported - PAGE_IMPORTS)
+    # renders markup (and styles it with the legacy sheet), except the declared ones; each
+    # Frame page module imports exactly its own declared set, and no other module any of it.
+    legacy, frame = set(), {}
+    for module, imports in layer_graph.items():
+        if _layer(module) not in ("pages", "domain"):
+            continue
+        extra = {imported.name for imported in imports if _layer(imported) is None} - PAGE_IMPORTS
+        if module.name in FRAME_PAGE_IMPORTS:
+            frame[module.name] = extra
+        else:
+            legacy |= extra
+    assert legacy == LEGACY_MARKUP, sorted(legacy)
+    assert frame == FRAME_PAGE_IMPORTS, frame
 
 
 def test_reboot_and_retire_have_one_home_and_it_is_not_the_software_page(graph):

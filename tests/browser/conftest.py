@@ -38,7 +38,11 @@ CHECKS = {
     "test_drag_create_posts_frame_with_scaled_placement": ("frame_creation_binding",),
     # Calibration: the Frame page's live Position (kept while the tab is open) + conflicts.
     "test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_live": (
-        "calibration_preview_revert_commit", "preview_expiry",
+        "calibration_preview_revert_commit",
+    ),
+    # A preview expires once the console stops keeping it (the page closed).
+    "test_a_closed_page_stops_keeping_its_session_and_it_ends_within_the_idle_window": (
+        "preview_expiry",
     ),
     "test_a_stale_done_is_refused_and_keeps_the_other_save": ("stale_calibration_conflict",),
     "test_a_refresh_never_overwrites_the_draft": ("inventory_refresh_recovery",),

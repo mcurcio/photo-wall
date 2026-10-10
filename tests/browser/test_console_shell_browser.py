@@ -30,6 +30,7 @@ from console_tasks import (
     go,
     scene_continue,
     scene_form,
+    section_heading,
     start_scene,
     visible_page,
     visit,
@@ -74,7 +75,7 @@ NARROW = {"width": 390, "height": 844}
 
 
 def _heading(page, section):
-    return page.get_by_role("heading", level=1, name=LABELS[section], exact=True)
+    return section_heading(page, section)
 
 
 def _sidebar_link(page, section):
@@ -253,7 +254,7 @@ def test_back_and_forward_move_between_sections(page, registry):
         # A tile click opens the Frame's page as a new entry; a tab change replaces it.
         before = page.evaluate("history.length")
         page.get_by_role("button", name="Frame first", exact=True).click()
-        frame = page.get_by_role("heading", level=2, name="Frame first", exact=True)
+        frame = page.get_by_role("heading", level=1, name="Frame first", exact=True)
         expect(frame).to_be_visible()
         assert current_hash(page) == "#/wall/frames/first/overview"
         page.get_by_role("tab", name="Hardware", exact=True).click()
@@ -385,7 +386,6 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
             page.get_by_role("tablist", name="Frame settings", include_hidden=True),
             page.get_by_role("tab", name="Position", exact=True, include_hidden=True),
             page.get_by_role("region", name="Position", exact=True, include_hidden=True),
-            page.get_by_role("group", name="Show on the Display", include_hidden=True),
         ]
         # Positive control: every Wall sample is a Wall page, and the Position sample
         # shows the controls, so the checks below are not vacuous.

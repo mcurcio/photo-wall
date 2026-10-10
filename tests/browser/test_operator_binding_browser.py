@@ -96,7 +96,7 @@ def _bound(registry, frame_id="bound-1", count=1):
 
 def _open_unbind(page, frame_id="bound-1"):
     inspector = open_frame(page, frame_id, "hardware")
-    inspector.get_by_role("button", name="Unbind", exact=True).click()
+    inspector.get_by_role("button", name="Disconnect from this Pi", exact=True).click()
     dialog = _dialog(page)
     expect(dialog).to_be_visible()
     return inspector, dialog
@@ -207,10 +207,10 @@ def test_binding_pending_output_shows_review_and_calibrate_cta(page, registry):
         # Open the Frame's Hardware tab, choose the unbound Output and bind it.
         inspector = open_frame(page, "wall-1", "hardware")
         _option(inspector, identity["player_id"]).check()
-        inspector.get_by_role("button", name="Bind to wall-1", exact=True).click()
+        inspector.get_by_role("button", name="Connect Frame wall-1", exact=True).click()
 
         # The tab shows the amber "Review required" state and the CTA...
-        expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
+        expect(inspector.get_by_text("Connected. Set this Frame", exact=False)).to_be_visible()
         cta = inspector.get_by_role("button", name="Set its position", exact=True)
         expect(cta).to_be_visible()
 
@@ -261,7 +261,7 @@ def test_retiring_an_unbound_player_marks_it_retired_and_drops_its_output(page, 
         go(page, "wall")
         expect(inspector).to_be_visible()
         expect(inspector.get_by_role("radio")).to_have_count(0)
-        expect(inspector.get_by_text("No free Output has a Panel listed as connected",
+        expect(inspector.get_by_text("No free HDMI port has a Display connected",
                                      exact=False)).to_be_visible()
 
 
@@ -317,7 +317,7 @@ def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry
 
         # The bind carries the CAPTURED generation (0), not the live one (2) -> 409
         # binding_generation_conflict -> the distinctive reload/review wording.
-        inspector.get_by_role("button", name="Bind to stale-1", exact=True).click()
+        inspector.get_by_role("button", name="Connect Frame stale-1", exact=True).click()
         expect(
             inspector.get_by_text("This Frame changed", exact=False)
         ).to_be_visible()
@@ -327,11 +327,11 @@ def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry
         # Choosing again captures the live generation (2), and that bind succeeds.
         option = _option(inspector, identity["player_id"])
         expect(option).not_to_be_checked()
-        bind_button = inspector.get_by_role("button", name="Bind to stale-1", exact=True)
+        bind_button = inspector.get_by_role("button", name="Connect Frame stale-1", exact=True)
         expect(bind_button).to_be_disabled()
         option.check()
         bind_button.click()
-        expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
+        expect(inspector.get_by_text("Connected. Set this Frame", exact=False)).to_be_visible()
         assert registry.inventory().frames[0].player_id == identity["player_id"]
 
 
@@ -354,8 +354,8 @@ def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, regist
         second = _option(inspector, player_id, "HDMI-A-2")
         expect(second).not_to_be_checked()
         second.check()
-        inspector.get_by_role("button", name="Bind to right", exact=True).click()
-        expect(inspector.get_by_text("Review required", exact=False)).to_be_visible()
+        inspector.get_by_role("button", name="Connect Frame right", exact=True).click()
+        expect(inspector.get_by_text("Connected. Set this Frame", exact=False)).to_be_visible()
 
         frames = {frame.id: frame for frame in registry.inventory().frames}
         assert (frames["right"].player_id, frames["right"].output_id) == (player_id, "HDMI-A-2")
@@ -371,7 +371,7 @@ def test_bind_is_disabled_until_the_operator_chooses(page, registry):
         # One option, and still nothing is chosen for the operator.
         option = _option(inspector, identity["player_id"])
         expect(option).not_to_be_checked()
-        bind_button = inspector.get_by_role("button", name="Bind to choose-1", exact=True)
+        bind_button = inspector.get_by_role("button", name="Connect Frame choose-1", exact=True)
         expect(bind_button).to_be_disabled()
         option.check()
         expect(bind_button).to_be_enabled()
@@ -397,7 +397,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
         expect(inspector.get_by_role("status")).to_contain_text(
             f"{player_id[-6:]} · HDMI-A-1 · Free is no longer available")
         expect(inspector.get_by_role("radio")).to_have_count(0)
-        expect(inspector.get_by_role("button", name="Bind to mine", exact=True)).to_be_disabled()
+        expect(inspector.get_by_role("button", name="Connect Frame mine", exact=True)).to_be_disabled()
 
 
 def test_no_display_and_retired_outputs_are_never_offered(page, registry):
@@ -475,8 +475,8 @@ def test_a_bound_players_free_second_output_can_be_identified_from_both_homes(pa
 
         inspector = open_frame(page, "spare", "hardware")
         expect(inspector.get_by_role("radio")).to_have_count(1)
-        picker = inspector.get_by_role("radiogroup", name="Choose an output", exact=True)
-        picker.get_by_role("button", name="Identify Panel HDMI-A-2", exact=True).click()
+        picker = inspector.get_by_role("radiogroup", name="Choose a Pi and HDMI port", exact=True)
+        picker.get_by_role("button", name="Identify display HDMI-A-2", exact=True).click()
         expect(inspector.get_by_role("status").filter(
             has_text="Identify requested for HDMI-A-2")).to_be_visible()
         assert [url.endswith(f"/v1/operator/players/{player_id}/outputs/HDMI-A-2/identify")
@@ -527,7 +527,7 @@ def test_esc_is_blocked_while_an_unbind_is_in_flight_even_when_repeated(page, re
         inspector, dialog = _open_unbind(page)
         gate = RequestGate(page, "**/v1/operator/frames/*/binding")
         gate.holding = True
-        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        dialog.get_by_role("button", name="Disconnect", exact=True).click()
         gate.wait_held()
 
         page.keyboard.press("Escape")
@@ -540,8 +540,8 @@ def test_esc_is_blocked_while_an_unbind_is_in_flight_even_when_repeated(page, re
         gate.release()
         expect(dialog).to_have_count(0)
         # Focus successor: the Frame's output chooser, now that it is unbound.
-        expect(inspector.get_by_role("radiogroup", name="Choose an output")).to_be_focused()
-        expect(inspector.get_by_role("status")).to_have_text("Frame bound-1 unbound.")
+        expect(inspector.get_by_role("radiogroup", name="Choose a Pi and HDMI port")).to_be_focused()
+        expect(inspector.get_by_role("status")).to_have_text("Frame bound-1 is disconnected from its Pi.")
         assert registry.inventory().frames[0].player_id is None
 
 
@@ -559,11 +559,11 @@ def test_an_unbind_with_a_stale_generation_is_changed_terminal_and_never_resent(
         registry.bind("bound-1", player_id, "HDMI-A-1", expected_generation=2)
         _poll(page)
 
-        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        dialog.get_by_role("button", name="Disconnect", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Changed since you opened this. Reopen to review.")
         # Terminal: no Confirm remains, and exactly one request was ever sent.
-        expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
+        expect(dialog.get_by_role("button", name="Disconnect", exact=True)).to_have_count(0)
         page.wait_for_timeout(300)
         assert len(sent) == 1
         assert registry.inventory().frames[0].player_id == player_id
@@ -576,7 +576,7 @@ def test_an_unbind_that_already_happened_reads_already_done(page, registry):
         sign_in(page, origin)
         _inspector, dialog = _open_unbind(page)
         registry.unbind("bound-1", expected_generation=1)
-        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        dialog.get_by_role("button", name="Disconnect", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text("Already done.")
         expect(dialog.get_by_role("alert")).to_have_count(0)
 
@@ -588,10 +588,10 @@ def test_an_unbind_that_gets_no_answer_reads_outcome_unknown(page, registry):
         _inspector, dialog = _open_unbind(page)
         page.route("**/v1/operator/frames/*/binding", lambda route: route.abort()
                    if route.request.method == "DELETE" else route.continue_())
-        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        dialog.get_by_role("button", name="Disconnect", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Central did not answer. Check this after the next refresh.")
-        expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
+        expect(dialog.get_by_role("button", name="Disconnect", exact=True)).to_have_count(0)
 
 
 def test_an_unbind_answered_by_a_gateway_error_reads_outcome_unknown(page, registry):
@@ -603,11 +603,11 @@ def test_an_unbind_answered_by_a_gateway_error_reads_outcome_unknown(page, regis
         page.route("**/v1/operator/frames/*/binding", lambda route: route.fulfill(
             status=502, content_type="text/html", body="<h1>Bad Gateway</h1>")
             if route.request.method == "DELETE" else route.continue_())
-        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        dialog.get_by_role("button", name="Disconnect", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Central did not answer. Check this after the next refresh.")
         expect(dialog.get_by_role("alert")).to_have_count(0)
-        expect(dialog.get_by_role("button", name="Confirm unbind", exact=True)).to_have_count(0)
+        expect(dialog.get_by_role("button", name="Disconnect", exact=True)).to_have_count(0)
 
 
 def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
@@ -617,17 +617,17 @@ def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
         inspector, dialog = _open_unbind(page)
         page.route("**/v1/operator/snapshot", lambda route: route.fulfill(
             status=500, content_type="application/json", body='{"error": "boom"}'))
-        dialog.get_by_role("button", name="Confirm unbind", exact=True).click()
+        dialog.get_by_role("button", name="Disconnect", exact=True).click()
 
         # The write is done: the dialog closes with the status line, and the failed
         # refresh shows only as "last refresh failed" -- never as a refusal.
         expect(dialog).to_have_count(0)
-        expect(inspector.get_by_role("status")).to_have_text("Frame bound-1 unbound.")
+        expect(inspector.get_by_role("status")).to_have_text("Frame bound-1 is disconnected from its Pi.")
         expect(page.get_by_text("last refresh failed", exact=False)).to_be_visible()
         expect(page.get_by_role("alert")).to_have_count(0)
         # The stale snapshot still reads bound, so no chooser: focus falls back to the
-        # Binding heading.
-        expect(inspector.get_by_role("heading", name="Pi and HDMI output", exact=True)).to_be_focused()
+        # Disconnect button.
+        expect(inspector.get_by_role("button", name="Disconnect from this Pi", exact=True)).to_be_focused()
         assert registry.inventory().frames[0].player_id is None
 
 
@@ -861,7 +861,7 @@ def test_output_first_bind_opens_the_frame(page, registry):
         open_player(page, name)
         _frame_select(page, player_id).select_option("lobby-left")
         _card_outputs(page, name).get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
-        expect(page.get_by_role("heading", level=2, name="Frame lobby-left", exact=True)
+        expect(page.get_by_role("heading", level=1, name="Frame lobby-left", exact=True)
                ).to_be_focused()
         expect(page.get_by_role("tab", name="Hardware", exact=True)
                ).to_have_attribute("aria-selected", "true")

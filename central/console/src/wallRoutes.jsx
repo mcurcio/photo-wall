@@ -27,6 +27,8 @@ export const wallRoutes = Object.freeze(
         />
       ),
       samplePaths: SAMPLES.wall.wall,
+      // A Frame's page names the Frame in its own heading (pages/frame-page.tsx).
+      ownsHeading: (route) => route.id !== undefined,
     },
   ].map(Object.freeze),
 );

@@ -35,6 +35,7 @@ a Program" on the Schedule page, then Scene → When → Review. `schedule_progr
 `start_schedule`, `schedule_continue` and `schedule_form` are its parts.
 """
 
+import re
 from collections.abc import Mapping
 from urllib.parse import quote
 
@@ -77,7 +78,15 @@ def go(page, section):
         sidebar = page.get_by_role("dialog", name="Menu", exact=True).get_by_role(
             "navigation", name="Sections", exact=True)
     sidebar.get_by_role("link", name=LABELS[section], exact=True).click()
-    expect(page.get_by_role("heading", level=1, name=LABELS[section], exact=True)).to_be_visible()
+    expect(section_heading(page, section)).to_be_visible()
+
+
+def section_heading(page, section):
+    """The page's level-1 heading once `section` is shown: its label, except that the Wall's link
+    may return to a Frame's page, which names the Frame (wallRoutes.jsx `ownsHeading`)."""
+    if section == "wall":
+        return page.get_by_role("heading", level=1, name=re.compile(r"^(Wall|Frame .+)$"))
+    return page.get_by_role("heading", level=1, name=LABELS[section], exact=True)
 
 
 def edit_layout(page):
@@ -457,7 +466,7 @@ def open_frame(page, frame_id, tab):
         raise ValueError(f"unknown Frame page tab {tab!r}; expected one of {sorted(TABS)}")
     expect(page.get_by_role("banner")).to_be_visible()  # the shell is shown (signed in)
     visit(page, f"#/wall/frames/{quote(frame_id, safe='')}/{tab}")
-    expect(page.get_by_role("heading", level=2, name=f"Frame {frame_id}", exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", level=1, name=f"Frame {frame_id}", exact=True)).to_be_visible()
     expect(page.get_by_role("tablist", name="Frame settings", exact=True).get_by_role(
         "tab", name=TABS[tab], exact=True)).to_have_attribute("aria-selected", "true")
     return visible_page(page)

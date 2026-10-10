@@ -90,7 +90,7 @@ def test_switching_frames_discards_the_previous_frame_profile_editor(page, regis
 
         # Change the route to another Frame's page at the same tab.
         visit(page, "#/wall/frames/second-profile/hardware")
-        expect(page.get_by_role("heading", level=2, name="Frame second-profile", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Frame second-profile", exact=True)).to_be_visible()
         second = page.locator("main > section:not([hidden])")
         expect(second.get_by_role("form", name="Edit Frame profile", exact=True)).to_have_count(0)
         second_form = _editor(second)
@@ -109,7 +109,7 @@ def test_profile_orientation_validation_sends_no_write(page, registry):
         page.on("request", lambda request: requests.append(request)
                 if request.url.endswith("/v1/operator/frames/profile-frame/profile") else None)
         form.get_by_role("button", name="Save profile", exact=True).click()
-        expect(form.get_by_role("alert")).to_have_text(
+        expect(form.get_by_role("alert")).to_contain_text(
             "Frame profile must match the frame's orientation.")
         assert not requests
 
@@ -126,7 +126,7 @@ def test_bound_refusal_keeps_profile_draft_and_explains_unbind(page, registry):
         form.get_by_label("Pixel width", exact=True).fill("2560")
         form.get_by_label("Pixel height", exact=True).fill("1440")
         form.get_by_role("button", name="Save profile", exact=True).click()
-        expect(form.get_by_role("alert")).to_contain_text("Unbind this Frame")
+        expect(form.get_by_role("alert")).to_contain_text("Disconnect this Frame from its Pi")
         expect(form.get_by_label("Pixel width", exact=True)).to_have_value("2560")
         expect(form.get_by_label("Pixel height", exact=True)).to_have_value("1440")
         assert registry.inventory().frames[0].profile.width_px == 1920

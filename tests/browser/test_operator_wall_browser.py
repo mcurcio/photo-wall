@@ -168,7 +168,7 @@ def test_clicking_a_frame_opens_its_page_at_overview_with_hardware_and_position(
 
         # One click on the frame on the plan (by identity) opens its page at Overview.
         page.get_by_role("button", name=f"Frame {SHOWING}", exact=True).click()
-        expect(page.get_by_role("heading", level=2, name=f"Frame {SHOWING}", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name=f"Frame {SHOWING}", exact=True)).to_be_visible()
         inspector = visible_page(page)
 
         # The four tabs, Overview first.
@@ -179,13 +179,18 @@ def test_clicking_a_frame_opens_its_page_at_overview_with_hardware_and_position(
 
         # Hardware: the bound Player and Output, read through the frame's FrameInventory row.
         inspector.get_by_role("tab", name="Hardware", exact=True).click()
-        expect(inspector).to_contain_text(player_id)
         expect(inspector).to_contain_text("HDMI-A-1")
+        inspector.get_by_role("region", name="Pi and HDMI port", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
+        expect(inspector).to_contain_text(player_id)
 
         # Overview: the planned fact (the scene_id joined by the STRING "frame:<id>") plus
         # the precedence-ranked "why" -- the frame's contributions ranked by (priority,
         # root_order, admission_order).
         inspector.get_by_role("tab", name="Overview", exact=True).click()
+        expect(inspector).to_contain_text(f"Photo Wall is sending the Scene “{SCENE}” to this Frame.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(DIRECT_PLANNED)
         why = inspector.get_by_role("list", name="Why")
         expect(why).to_contain_text(SCENE)
@@ -214,8 +219,11 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
         connect(page, origin, "wall")
         expect(page.get_by_role("group", name="Frame spare-frame status", exact=True)).to_contain_text(planned)
         page.get_by_role("button", name="Frame spare-frame", exact=True).click()
-        expect(page.get_by_role("heading", level=2, name="Frame spare-frame", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Frame spare-frame", exact=True)).to_be_visible()
         inspector = visible_page(page)
+        expect(inspector).to_contain_text("No Pi feeds this Frame yet, so Photo Wall sends it nothing.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(planned)
         expect(inspector).not_to_contain_text("media not checked")
 
@@ -232,6 +240,9 @@ def test_the_frame_page_guides_content_authoring_from_its_frame(page, registry):
         expect(inspector.get_by_role("tab", name="Overview", exact=True)).to_have_attribute(
             "aria-selected", "true")
 
+        expect(inspector).to_contain_text("No Pi feeds this Frame yet, so Photo Wall sends it nothing.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(NOTHING_PLANNED)
         expect(inspector).to_contain_text("Frame new-frame starts selected on its Frames step")
         expect(inspector).to_contain_text("Show now or Schedule it")

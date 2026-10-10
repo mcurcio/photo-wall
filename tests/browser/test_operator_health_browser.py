@@ -81,7 +81,10 @@ def test_a_reporting_player_reads_last_heard_with_centrals_age(page, registry):
         inspector = visible_page(page)
         expect(inspector).to_contain_text("Player app last reported 2 s ago")
         inspector.get_by_role("tab", name="Hardware", exact=True).click()
-        expect(inspector.get_by_role("tabpanel")).to_contain_text("Player app last reported 2 s ago")
+        expect(inspector.get_by_role("tabpanel")).to_contain_text("The Pi: Reporting")
+        port = inspector.get_by_role("region", name="Pi and HDMI port", exact=True)
+        port.get_by_role("button", name="Details", exact=True).click()
+        expect(port).to_contain_text("Player app last reported 2 s ago")
 
         # Honesty: ok states when Central last heard the Player, never playback. The one
         # "connected" allowed is the Hardware tab's Panel record, worded as Central's record
@@ -122,7 +125,8 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
                 and "/v1/operator/node/hosts" not in request.url else None)
         connect(page, origin, "wall")
         inspector = open_frame(page, FRAME, "hardware")
-        link = inspector.get_by_role("link", name="See its layers on the Player page", exact=True)
+        expect(inspector).to_contain_text("The Pi: Not heard from lately")
+        link = inspector.get_by_role("link", name="See why on its page", exact=True)
         expect(link).to_have_attribute("href", re.compile(r"^#/players/device-"))
         page.wait_for_timeout(200)
         assert node_reads == [], "the Wall read node records"
@@ -305,7 +309,7 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         writes.holding = True
         handle = identity["player_id"][-6:]
         inspector.get_by_role("radio", name=f"{handle} · HDMI-A-1 · Free", exact=True).check()
-        inspector.get_by_role("button", name=f"Bind to {FRAME}", exact=True).click()
+        inspector.get_by_role("button", name=f"Connect Frame {FRAME}", exact=True).click()
         writes.wait_held()
 
         # A poll starts while the bind is in flight...
@@ -562,9 +566,14 @@ def test_a_phone_width_page_never_scrolls_sideways(page, registry):
         connect(page, origin, "wall")
         page.get_by_role("button", name="Frame silent-b", exact=True).click()
         expect(page.get_by_role("heading", name="Frame silent-b", exact=True)).to_be_visible()
-        _open_list(page)
+        hide = _strip(page).get_by_role("button", name="Hide list", exact=True)
         for tab in ("Overview", "Position", "Picture", "Hardware"):
+            # The open list lies over the top of the page (the tabs on a phone): shut it to
+            # choose a tab, then measure with it open.
+            if hide.count():
+                hide.click()
             page.get_by_role("tab", name=tab, exact=True).click()
+            _open_list(page)
             assert_fits_width(page, tab)
         # Every Show page too, not only the last one visited.
         for section in ("now", "scenes", "schedule", "sources"):

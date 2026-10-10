@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { isBound } from "./join.js";
-import { useDraft } from "./useDraft.js";
+import { draftKey, useDraft } from "./useDraft.js";
 import { useMutate } from "./useMutate.js";
 
 /*
@@ -11,28 +11,46 @@ import { useMutate } from "./useMutate.js";
  * Display while one of those tabs is open. Central calls the session a calibration trial
  * (central/fleet/node_calibration.py); none of that wording reaches the page.
  *
- * THE SESSION RUNS WHILE THE TAB IS OPEN. `open` true (a Position or Picture tab is shown for a
- * bound Frame whose Pi serves live adjustment) begins a session; the page then sends the draft as
- * it changes, and every TICK_MS asks Central to keep the session (`keepalive`), which also reads
- * whether the Pi has shown the latest change. Central ends a session it has not heard from within
- * its idle window, so a closed page ends it within seconds; `open` turning false or the page
- * unmounting ends it at once. A session that ends while the tab is open (it reached Central's
- * hard limit, the Pi restarted, a Done or a Revert ended it) is begun again, and the draft sent
- * to it, so the operator never sees it expire. The hard limit is reached only by beginning the
- * next one RENEW_BEFORE_S early: the remaining time is the served hard deadline minus the
- * served touch time (both Central's clock, so only their difference is used), less the time
- * since the answer arrived on this browser's own clock (never comparing the two clocks).
+ * THE DRAFT IS THE OPERATOR'S, THE SESSION ONLY SHOWS IT. A draft carries its base, the saved
+ * revision it was made from (useDraft.js), and every request that hands Central a draft sends
+ * that base: `begin` with a changed draft, `edit`, and `renew`. So a draft outlives any number
+ * of sessions (a tab revisited, a page hidden and shown again, a handover) and still cannot
+ * overwrite a save made elsewhere: Central refuses a draft whose base is no longer the saved
+ * revision. A session begun for an unchanged draft starts at the saved calibration, which the
+ * draft then adopts (with its revision), so the draft follows saves made elsewhere.
+ *
+ * THE SESSION RUNS WHILE THE TAB IS OPEN AND SHOWN. `open` true (a Position or Picture tab is
+ * shown for a bound Frame whose Pi serves live adjustment) and the browser tab visible begins a
+ * session; the page then sends the draft as it changes, and every TICK_MS asks Central to keep
+ * the session (`keepalive`), which also reads whether the Pi has shown the latest change.
+ * Central ends a session it has not heard from within its idle window, so a closed page ends it
+ * within seconds; `open` turning false, the browser tab hidden or the page unmounting ends it
+ * at once, and a session still being begun or changed when that happens is ended as its answer
+ * arrives. RENEW_BEFORE_S before Central's hard limit the page hands the session over with
+ * `renew`, which ends it and begins the next one at the draft in one step: the Display never
+ * shows the saved calibration in between and no other window can begin in a gap. The remaining
+ * time is the served hard deadline minus the served touch time (both Central's clock, so only
+ * their difference is used), less the time since the answer arrived on this browser's own
+ * clock (never comparing the two clocks). A session that ends anyway while the tab is open (the
+ * Pi restarted, a Done) is begun again with the draft.
+ *
+ * REFUSALS. Most pass: the page keeps the session and keeps trying, and the words go away once
+ * a later answer succeeds (the Pi not having shown the latest change goes once it has). A few
+ * stop it until the operator answers (STOPPING: someone saved meanwhile; the Frame lost its
+ * Pi): the session is ended and the page waits for Revert.
  *
  * DONE (`save`) is offered only once the Pi has shown the latest change (Central refuses it
- * otherwise); REVERT ends the session and returns the draft to the saved calibration.
+ * otherwise); REVERT ends the session and returns the draft to the saved calibration. Both are
+ * the operator's: `busy` is true only while one runs, never for the loop's own requests, and
+ * each waits for a loop request in flight rather than being dropped.
  */
 
 const TICK_MS = 500;
 const EDIT_DELAY_MS = 180;
 const RENEW_BEFORE_S = 15;
-const BUSY_RETRY_MS = 2000;
+const RETRY_MS = 2000;
 
-// Someone saved this Frame's calibration after the session began (Central's compare-and-set).
+// Someone saved this Frame's calibration after the draft was made (Central's compare-and-set).
 const OVERTAKEN =
   "Someone saved a different position or picture for this Frame meanwhile. Press Revert to load it, then adjust again.";
 
@@ -42,44 +60,73 @@ const REFUSALS = {
   trial_current_output_required:
     "The Pi has not reported this Display in the last few seconds. Check that the Display is on and plugged in.",
   trial_admitted_surface_required: "The Pi is still starting its picture. Wait a moment.",
-  trial_latest_not_presented: "The Pi has not shown the latest change yet. Wait a moment, then press Done again.",
+  trial_latest_not_presented: "The Pi has not presented the latest change yet. Wait a moment, then press Done again.",
   trial_sequence_conflict: "Another window changed this Frame at the same moment.",
   trial_frame_unbound: "Choose which Pi and HDMI output feed this Frame first (Hardware tab).",
   trial_baseline_revision_changed: OVERTAKEN,
   calibration_revision_conflict: OVERTAKEN,
   calibration_trial_baseline_changed: OVERTAKEN,
 };
-const NO_ANSWER = "Photo Wall's server did not answer.";
+const NO_ANSWER = "no_answer";
+const NO_ANSWER_WORDS = "Photo Wall's server did not answer.";
+// The refusals that stop the live adjustment until the operator presses Revert.
+const STOPPING = new Set([
+  "trial_baseline_revision_changed", "calibration_revision_conflict", "calibration_trial_baseline_changed",
+  "trial_frame_unbound",
+]);
+const NOT_PRESENTED = "trial_latest_not_presented";
 // Begin is refused while another session for this Frame runs (another window, or this page's
 // own a moment ago); Central ends an abandoned one within seconds, so it is tried again.
 const BUSY = "trial_already_active";
 
-const key = (value) => JSON.stringify([value.corners, value.crop, value.rotation, value.gain]);
+// The pages left with changes not kept, by Frame, and when (this browser's clock, epoch
+// seconds, only ever shown): the next visit says the Display went back to the saved values then.
+const leftUnsaved = new Map();
+
+/** The browser tab is shown (the Page Visibility API). */
+function useVisible() {
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+  useEffect(() => {
+    const update = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
+}
 
 /**
  * @typedef {{corners: number[][], crop: number[], rotation: number, gain: number}} Draft
  * @typedef {"checking"|"unsupported"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
- *           |"sending"|"shown"} Phase
+ *           |"stopped"|"sending"|"shown"} Phase
  *   `unsupported`: the Pi's software cannot show changes live; `waiting`: another session for
- *   this Frame is running; `sending`: the latest change is not shown yet; `shown`: the Pi has
- *   shown it.
+ *   this Frame is running; `stopped`: a refusal stopped it until Revert; `sending`: the latest
+ *   change is not shown yet; `shown`: the Pi has presented it.
+ * @typedef {{words: string, code: string, stops: boolean}} Problem
+ *   `code` is Central's, for a Details disclosure only.
  */
 
 /**
  * @param {{frameId: string, frame: object|undefined, open: boolean}} props
  * @returns {{draft: Draft, change: (patch: Partial<Draft>) => {valid: boolean, reason?: string},
- *            dirty: boolean, phase: Phase, error: string|null, busy: boolean,
- *            canDone: boolean, done: () => Promise<void>, revert: () => Promise<void>,
- *            retry: () => void, saved: number}}
- *   `saved` counts the Done presses Central accepted, for a page to announce.
+ *            dirty: boolean, phase: Phase, error: Problem|null, busy: boolean,
+ *            ack: {revision: number, at: number}|null, latest: number|null,
+ *            done: () => Promise<boolean>, revert: () => Promise<void>, retry: () => void,
+ *            savedAt: number|null, leftAt: number|null}}
+ *   `latest` is the number of the change last made (null with no session); `ack` the newest
+ *   one the Pi presented and when (Central's clock, seconds), so Done is offered only when
+ *   they match. `savedAt` and `leftAt` are this browser's clock (epoch seconds, shown only,
+ *   never compared with a served time): the last Done Central accepted, and when a previous
+ *   visit left this Frame with changes not kept.
  */
 export function useFrameAdjustment({ frameId, frame, open }) {
   const committed = frame?.calibration ?? null;
-  const { trying: draft, updateHandles: change, clearDraft } = useDraft(frameId, committed);
+  const { trying: draft, origin, base, dirty, updateHandles: change, clearDraft, adopt } =
+    useDraft(frameId, committed);
   const bound = isBound(frame);
   const generation = frame?.generation ?? null;
-  const base = `/v1/operator/frames/${encodeURIComponent(frameId)}/calibration-trials`;
+  const path = `/v1/operator/frames/${encodeURIComponent(frameId)}/calibration-trials`;
   const mutate = useMutate();
+  const visible = useVisible();
 
   const [capability, setCapability] = useState(/** @type {string|null} */ (null));
   const [retries, setRetries] = useState(0);
@@ -93,98 +140,135 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     return () => { current = false; };
   }, [frameId, generation, bound, retries]);
 
-  const live = open && bound && capability === "native_trial";
+  const live = open && visible && bound && capability === "native_trial";
   const [row, setRow] = useState(/** @type {object|null} */ (null));
-  const [error, setError] = useState(/** @type {string|null} */ (null));
+  const [error, setError] = useState(/** @type {Problem|null} */ (null));
   const [waiting, setWaiting] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(0);
-  // Read by the loop between renders.
-  const state = useRef({ row: null, received: 0, gate: false, error: null, waitUntil: 0, editAt: 0,
-    resync: false, draft, live, mounted: true });
-  state.current.draft = draft;
-  state.current.live = live;
-  state.current.error = error;
+  const [savedAt, setSavedAt] = useState(/** @type {number|null} */ (null));
+  const [leftAt, setLeftAt] = useState(/** @type {number|null} */ (null));
+  // Read by the loop between renders. `flight` is the request in flight (one at a time);
+  // `acting` holds the loop while an operator's Done or Revert runs.
+  const state = useRef({ row: null, received: 0, flight: null, acting: false, error: null, waitUntil: 0,
+    editAt: 0, resync: false, draft, origin, base, dirty, live, mounted: true });
+  Object.assign(state.current, { draft, origin, base, dirty, live, error });
 
   const keep = useCallback((next) => {
     state.current.row = next;
     state.current.received = performance.now();
     setRow(next);
   }, []);
+  const fail = useCallback((code) => {
+    const problem = { words: code === NO_ANSWER ? NO_ANSWER_WORDS : REFUSALS[code] ?? "Photo Wall refused the change.",
+      code, stops: STOPPING.has(code) };
+    state.current.error = problem;
+    setError(problem);
+  }, []);
+  const end = useCallback((session) => {
+    apiWrite(`${path}/${session.trial_id}`, {
+      method: "POST", body: { operation: "end", expected_sequence: session.sequence },
+    }).catch(() => {});
+  }, [path]);
 
-  /** One request; null when it failed (the error is set) or the page went away. */
+  /** The draft as Central takes it: the saved calibration it was made from, changed, and its base. */
+  const payload = () => ({ ...state.current.origin, ...state.current.draft, revision: state.current.base });
+
+  /** One request; null when it failed (the problem is set) or the page went away. */
   const send = useCallback(async (operation, calibration) => {
-    const before = state.current.row;
-    const path = operation === "begin" ? base : `${base}/${before.trial_id}`;
-    const body = operation === "begin" ? {} : {
+    const current = state.current;
+    const before = current.row;
+    const begin = operation === "begin";
+    const body = begin ? (calibration ? { calibration } : {}) : {
       operation, expected_sequence: before.sequence, ...(calibration ? { calibration } : {}),
     };
-    const request = () => apiWrite(path, { method: "POST", body });
+    const request = () => apiWrite(begin ? path : `${path}/${before.trial_id}`, { method: "POST", body });
     let result;
     try {
       result = operation === "save" ? await mutate(request) : await request();
     } catch {
-      if (state.current.mounted) setError(NO_ANSWER);
-      state.current.resync = operation !== "begin";
+      if (current.mounted && current.live) fail(NO_ANSWER);
+      current.resync = !begin;
+      if (begin) current.waitUntil = performance.now() + RETRY_MS;
       return null;
     }
-    if (!state.current.mounted) return null;
+    if (!current.mounted || !current.live) {
+      // The tab or the page was left while this was in flight: a session it began or kept is
+      // ended now, with the sequence it answered.
+      if (result.ok && result.data?.state === "active") end(result.data);
+      return null;
+    }
     if (!result.ok) {
-      if (operation === "begin" && result.error === BUSY) {
-        state.current.waitUntil = performance.now() + BUSY_RETRY_MS;
+      if (begin && result.error === BUSY) {
+        current.waitUntil = performance.now() + RETRY_MS;
         setWaiting(true);
         return null;
       }
-      setError(REFUSALS[result.error] ?? `Photo Wall refused the change (${result.error ?? result.status}).`);
+      const code = result.error ?? `http_${result.status}`;
+      fail(code);
+      if (begin) current.waitUntil = performance.now() + RETRY_MS;
+      if (STOPPING.has(code) && current.row?.state === "active") {
+        end(current.row);
+        keep(null);
+      }
       // After a refusal the session as served may have moved on: read it before editing again.
-      state.current.resync = operation !== "begin";
+      current.resync = !begin;
       return null;
     }
     setWaiting(false);
     keep(result.data);
+    const passing = current.error;
+    const shown = result.data.presented_sequence === result.data.sequence &&
+      result.data.presented_sha256 === result.data.candidate_sha256;
+    if (passing !== null && !passing.stops && (passing.code !== NOT_PRESENTED || shown)) {
+      current.error = null;
+      setError(null);
+    }
     return result.data;
-  }, [base, keep, mutate]);
+  }, [path, keep, fail, end, mutate]);
 
-  /** Runs `work` alone: the loop and the buttons never send two requests at once. */
-  const exclusive = useCallback(async (work) => {
-    if (state.current.gate) return;
-    state.current.gate = true;
-    setBusy(true);
+  /** Runs `work` as the one request in flight. */
+  const fly = useCallback(async (work) => {
+    const flight = work();
+    state.current.flight = flight;
     try {
-      await work();
+      await flight;
     } finally {
-      state.current.gate = false;
-      if (state.current.mounted) setBusy(false);
+      if (state.current.flight === flight) state.current.flight = null;
     }
   }, []);
 
   // The loop: one step decides the next request from the session as last served.
-  const step = useCallback(() => exclusive(async () => {
+  const step = useCallback(() => {
     const current = state.current;
-    if (!current.live || current.error !== null) return;
-    const session = current.row;
-    if (session === null || session.state !== "active") {
-      if (performance.now() < current.waitUntil) return;
-      await send("begin");
-      return;
-    }
-    if (current.resync) {
-      current.resync = false;
+    if (!current.live || current.flight !== null || current.acting || current.error?.stops) return;
+    fly(async () => {
+      const session = current.row;
+      if (session === null || session.state !== "active") {
+        if (performance.now() < current.waitUntil) return;
+        const changed = current.dirty;
+        const begun = await send("begin", changed ? payload() : undefined);
+        // A session begun for an unchanged draft is at the saved calibration: adopt it.
+        if (begun !== null && !changed && !state.current.dirty) adopt(begun.calibration);
+        return;
+      }
+      if (current.resync) {
+        current.resync = false;
+        await send("keepalive");
+        return;
+      }
+      const left = session.hard_expires_at - session.touched_at - (performance.now() - current.received) / 1000;
+      if (left < RENEW_BEFORE_S) {
+        await send("renew", payload());
+        return;
+      }
+      if (draftKey(current.draft) !== draftKey(session.calibration)) {
+        if (performance.now() < current.editAt) return;
+        await send("edit", payload());
+        return;
+      }
       await send("keepalive");
-      return;
-    }
-    const left = session.hard_expires_at - session.touched_at - (performance.now() - current.received) / 1000;
-    if (left < RENEW_BEFORE_S) {
-      await send("end");
-      return; // the next step begins the next session
-    }
-    if (key(current.draft) !== key(session.calibration)) {
-      if (performance.now() < current.editAt) return;
-      await send("edit", { ...session.calibration, ...current.draft, revision: session.calibration_revision });
-      return;
-    }
-    await send("keepalive");
-  }), [exclusive, send]);
+    });
+  }, [fly, send, adopt]);
 
   useEffect(() => {
     if (!live) return undefined;
@@ -194,49 +278,61 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   }, [live, step]);
 
   // A draft change is sent shortly after the operator stops changing it.
-  const draftKey = key(draft);
+  const changeKey = draftKey(draft);
   useEffect(() => {
     if (!live) return undefined;
     state.current.editAt = performance.now() + EDIT_DELAY_MS;
     const timer = setTimeout(step, EDIT_DELAY_MS + 10);
     return () => clearTimeout(timer);
-  }, [draftKey, live, step]);
+  }, [changeKey, live, step]);
 
-  // Leaving the tab, or the page, ends the session now (Central's idle window is the net).
+  // Leaving the tab, hiding the browser tab or leaving the page ends the session now
+  // (Central's idle window is the net).
   useEffect(() => {
     if (live) return undefined;
     const session = state.current.row;
-    if (session?.state === "active") {
-      apiWrite(`${base}/${session.trial_id}`, {
-        method: "POST", body: { operation: "end", expected_sequence: session.sequence },
-      }).catch(() => {});
-    }
-    state.current.row = null;
-    setRow(null);
+    if (session?.state === "active") end(session);
+    keep(null);
     setWaiting(false);
     return undefined;
-  }, [live, base]);
+  }, [live, end, keep]);
   useEffect(() => {
-    state.current.mounted = true;
+    const current = state.current;
+    current.mounted = true;
+    if (leftUnsaved.has(frameId)) {
+      setLeftAt(leftUnsaved.get(frameId));
+      leftUnsaved.delete(frameId);
+    }
     return () => {
-      state.current.mounted = false;
-      const session = state.current.row;
-      if (session?.state === "active") {
-        apiWrite(`${base}/${session.trial_id}`, {
-          method: "POST", body: { operation: "end", expected_sequence: session.sequence },
-        }).catch(() => {});
-      }
+      current.mounted = false;
+      if (current.row?.state === "active") end(current.row);
+      if (current.dirty) leftUnsaved.set(frameId, Date.now() / 1000);
     };
-  }, [base]);
+  }, [frameId, end]);
+
+  /** An operator's action: waits for the loop's request in flight, holds the loop meanwhile. */
+  const act = useCallback(async (work) => {
+    const current = state.current;
+    if (current.acting) return undefined;
+    current.acting = true;
+    setBusy(true);
+    try {
+      while (current.flight !== null) await current.flight.catch(() => {});
+      let outcome;
+      await fly(async () => { outcome = await work(); });
+      return outcome;
+    } finally {
+      current.acting = false;
+      if (current.mounted) setBusy(false);
+    }
+  }, [fly]);
 
   const active = row?.state === "active";
-  const changed = active && key(draft) !== key(row.calibration);
-  const shown = active && !changed && row.presented_sequence === row.sequence &&
-    row.presented_sha256 === row.candidate_sha256;
-  const dirty = committed !== null && key(draft) !== key({
-    corners: committed.corners ?? [[0, 0], [1, 0], [1, 1], [0, 1]], crop: committed.crop ?? [0, 0, 1, 1],
-    rotation: committed.rotation ?? 0, gain: committed.gain ?? 1,
-  });
+  const changed = active && draftKey(draft) !== draftKey(row.calibration);
+  const presented = active && row.presented_sequence != null && row.presented_sha256 === row.candidate_sha256;
+  const latest = active ? row.sequence + (changed ? 1 : 0) : null;
+  const ack = presented ? { revision: row.presented_sequence, at: row.presented_at ?? null } : null;
+  const shown = latest !== null && ack?.revision === latest;
 
   /** @type {Phase} */
   let phase;
@@ -244,30 +340,39 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   else if (capability === null) phase = "checking";
   else if (capability === "legacy_preview") phase = "unsupported";
   else if (capability !== "native_trial") phase = "unavailable";
-  else if (!open) phase = "idle";
+  else if (!open || !visible) phase = "idle";
+  else if (error?.stops) phase = "stopped";
   else if (waiting) phase = "waiting";
   else if (!active) phase = "connecting";
   else phase = shown ? "shown" : "sending";
 
-  const done = useCallback(() => exclusive(async () => {
+  const done = useCallback(() => act(async () => {
     const result = await send("save");
-    if (result?.state === "saved") setSaved((count) => count + 1);
-  }), [exclusive, send]);
-  // Revert also clears a refusal: the next session begins at the saved calibration.
-  const revert = useCallback(() => exclusive(async () => {
-    if (state.current.row?.state === "active") await send("end");
+    if (result?.state !== "saved") return false;
+    setSavedAt(Date.now() / 1000);
+    adopt(result.saved_calibration);
+    return true;
+  }), [act, send, adopt]);
+  // Revert also clears a refusal: the next session begins at the saved calibration, which the
+  // draft adopts.
+  const revert = useCallback(() => act(async () => {
+    const session = state.current.row;
+    if (session?.state === "active") end(session);
+    keep(null);
     clearDraft();
+    state.current.error = null;
     setError(null);
-  }), [clearDraft, exclusive, send]);
+    state.current.waitUntil = 0;
+  }), [act, end, keep, clearDraft]);
   const retry = useCallback(() => {
+    state.current.error = null;
     setError(null);
     state.current.waitUntil = 0;
     if (capability !== "native_trial") setRetries((count) => count + 1);
   }, [capability]);
 
   return {
-    draft, change, dirty, phase, error, busy, saved,
-    canDone: shown && dirty && !busy && error === null,
+    draft, change, dirty, phase, error, busy, ack, latest, savedAt, leftAt,
     done, revert, retry,
   };
 }

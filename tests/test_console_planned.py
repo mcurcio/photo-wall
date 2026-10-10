@@ -230,7 +230,8 @@ def test_only_time_words_formats_an_instant_for_display():
 
 # Modules whose Date.now() compares only with another Date.now() of the same browser.
 _OWN_CLOCK_ONLY = {"useSnapshot.js",  # the snapshot's arrival age: both ends are this browser's
-                   "authoring.js"}    # a request id's entropy, never compared with anything
+                   "authoring.js",    # a request id's entropy, never compared with anything
+                   "liveAdjustment.js"}  # when a Done or a leave happened, shown, never compared
 
 
 def test_the_browser_clock_is_never_compared_with_a_served_time():

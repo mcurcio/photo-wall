@@ -88,6 +88,9 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         # The Frame page's Overview gives the same plain recovery wording.
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
         inspector = page.locator("main > section:not([hidden])")
+        now = inspector.get_by_role("region", name="Now", exact=True)
+        expect(now).to_contain_text("The Pi reported a problem getting this Frame's content ready")
+        now.get_by_role("button", name="Details", exact=True).click()
         note = inspector.get_by_role("note", name=f"Player readiness for {VALID_FRAME}")
         expect(note).to_contain_text(DECODE_RECOVERY)
         expect(note).to_contain_text(UNKNOWN_RECOVERY)

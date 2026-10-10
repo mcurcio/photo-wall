@@ -285,14 +285,14 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         surface = page.get_by_role("combobox", name="Surface", exact=True)
         # Opening a1 from Surface A, then going back, shows Surface A.
         page.get_by_role("button", name="Frame a1", exact=True).click()
-        expect(page.get_by_role("heading", level=2, name="Frame a1", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Frame a1", exact=True)).to_be_visible()
         page.go_back()
         expect(surface).to_have_value("A")
         go(page, "hardware")
 
         # A typed route to b1's page: back on the plan, the plan shows b1's Surface.
         visit(page, "#/wall/frames/b1/hardware")
-        expect(page.get_by_role("heading", level=2, name="Frame b1", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Frame b1", exact=True)).to_be_visible()
         page.get_by_role("link", name="Wall", exact=True).first.click()
         expect(surface).to_have_value("B")
         expect(page.get_by_role("button", name="Frame b1", exact=True)).to_be_visible()

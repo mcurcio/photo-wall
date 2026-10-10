@@ -67,7 +67,8 @@ sold.
 > Binding, and the Frame profile). Position and Picture show each change on the Display while
 > the tab is open and offer **Done** once the Pi has shown the latest change, and **Revert**;
 > the live session no longer times out while the tab is open (`liveAdjustment.js`, Central's
-> `keepalive`). A Pi without Display Host cannot adjust live and is told so; the 30-second
+> `keepalive`, and `renew`, which hands a session over at the draft in one step; the draft
+> carries the saved revision it was made from, so a save made elsewhere is never overwritten). A Pi without Display Host cannot adjust live and is told so; the 30-second
 > preview path is no longer offered by the console. The old facet addresses are gone (no
 > aliases). How to use it: the [runbook](runbook.md#operator-console-calibration-and-conflict-states).
 > The facet text below is kept as the record of its gate, not as current design.

@@ -315,7 +315,7 @@ def test_with_node_control_off_one_banner_one_line_no_node_reads_and_the_page_wo
         page.get_by_role("combobox", name=f"Frame for {player_id[-6:]} · HDMI-A-1 · Free", exact=True
                          ).select_option("off-1")
         outputs.get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
-        expect(page.get_by_role("heading", level=2, name="Frame off-1", exact=True)).to_be_visible()
+        expect(page.get_by_role("heading", level=1, name="Frame off-1", exact=True)).to_be_visible()
         assert registry.inventory().frames[0].player_id == player_id
         player = open_player(page, name)
         player.get_by_role("button", name=f"Unbind all outputs of {player_id}", exact=True).click()

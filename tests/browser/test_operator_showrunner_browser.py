@@ -1352,6 +1352,9 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         expect(tile).not_to_contain_text("Ending (outro)")
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
         inspector = page.locator("main > section:not([hidden])")
+        expect(inspector).to_contain_text("Photo Wall is sending the Scene “evening” to this Frame.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(planned)
         expect(inspector).to_contain_text(
             f"Central's Runs on {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")

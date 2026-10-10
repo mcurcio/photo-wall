@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameOverview } from "../domain/frame-overview";
@@ -13,6 +13,7 @@ import { EntityHeader } from "../patterns/entity-header";
 import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
+import { LeaveGuard } from "../patterns/leave-guard";
 import { playerPageHref } from "../players.js";
 import { formatRoute, routeIdName, type Tab } from "../routes.js";
 import { Tabs } from "../ui/tabs";
@@ -73,13 +74,31 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize {
  *
  * Position and Picture share one live adjustment (liveAdjustment.js): it runs while either tab
  * is shown, so moving between them keeps the change on the Display, and leaving them (another
- * tab, another page) ends it. Only the shown tab's content is mounted.
+ * tab, another page) ends it. Leaving them for another tab with changes not kept asks first
+ * (LeaveGuard: Keep, Revert or Stay); leaving the page reverts them, and the page says so on
+ * the next visit. Only the shown tab's content is mounted. The Frame's name is the page's
+ * heading (the Wall route's `ownsHeading`).
  */
 export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, focusRequest, onFocusDone }: FramePageProps) {
   const frames = ((snapshot as { inventory?: { frames?: Frame[] } } | null)?.inventory?.frames ?? []);
   const frame = frames.find((candidate) => candidate.id === frameId);
-  const adjustment = useFrameAdjustment({ frameId, frame, open: tab === "position" || tab === "picture" });
+  const live = tab === "position" || tab === "picture";
+  const adjustment = useFrameAdjustment({ frameId, frame, open: live });
   const headingRef = useRef<HTMLHeadingElement | null>(null);
+  // A tab change that would leave a live adjustment with changes not kept: asked first.
+  const [leaving, setLeaving] = useState<Tab | null>(null);
+  const choose = (next: Tab) => {
+    const stays = next === "position" || next === "picture";
+    if (live && !stays && adjustment.dirty) setLeaving(next);
+    else onTab(next);
+  };
+  const leave = async (keep: boolean) => {
+    const target = leaving;
+    if (target === null) return;
+    const left = keep ? await adjustment.done() : (await adjustment.revert(), true);
+    setLeaving(null);
+    if (left) onTab(target);
+  };
 
   useEffect(() => {
     if (focusRequest === null || headingRef.current === null) return;
@@ -92,22 +111,31 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
     // A typed address may hold any text: the heading never echoes one that is no id.
     return (
       <EntityPage header={
-        <EntityHeader title={routeIdName("Frame", frameId, { start: true })} headingRef={headingRef} back={back} />
+        <EntityHeader title={routeIdName("Frame", frameId, { start: true })} level={1} headingRef={headingRef} back={back} />
       }>
         <EmptyState>{`${routeIdName("Frame", frameId, { start: true })}: This no longer exists.`}</EmptyState>
       </EntityPage>
     );
   }
+  const walls = new Set(frames.map((candidate) => candidate.surface_id));
   const health = frameHealth(snapshot, frameId) as { severity: "ok" | "todo" | "alarm"; label: string } | null;
   const softwareHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
-      <EntityHeader title={`Frame ${frameId}`} headingRef={headingRef} back={back}>
+      <EntityHeader title={`Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
         {health !== null && <HealthBadge verdict={{ severity: health.severity, label: health.label, receipt: null }} />}
-        <Note>{`On the wall plan “${frame.surface_id}”`}</Note>
+        {walls.size > 1 && <Note>{`On the “${frame.surface_id}” wall`}</Note>}
       </EntityHeader>
     }>
-      <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => onTab(next as Tab)}>
+      <LeaveGuard
+        open={leaving !== null}
+        busy={adjustment.busy}
+        keepBlocked={adjustment.phase === "shown" ? null : "Keep is offered once the Pi presents your latest change."}
+        onKeep={() => { void leave(true); }}
+        onRevert={() => { void leave(false); }}
+        onStay={() => setLeaving(null)}
+      />
+      <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
         {tab === "position" && (
           <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} softwareHref={softwareHref} />
@@ -116,7 +144,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         {tab === "hardware" && (
           <>
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}
-              onTab={(next: string) => onTab(next as Tab)} />
+              onTab={(next: string) => choose(next as Tab)} />
             <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame} />
           </>
         )}
