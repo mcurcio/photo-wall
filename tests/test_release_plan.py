@@ -15,7 +15,7 @@ import pytest
 
 from contracts.release import IMAGES
 from scripts import release_plan
-from scripts.module_closure import POLICIES, closure_for, first_party_packages
+from scripts.module_closure import first_party_packages
 from scripts.release_plan import (
     ALWAYS_JOBS,
     BUILD_JOBS,
@@ -45,6 +45,7 @@ from scripts.release_plan import (
     refuse_a_taken_tag,
 )
 from scripts.release_seal import RELEASE_BRANCH
+from scripts.verify_netboot_initrd import stage1_files
 
 REPO = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO / ".github/workflows"
@@ -564,13 +565,13 @@ def test_no_path_is_both_shipped_and_declared_unshipped():
     assert [path for path in _tracked() if claimed_by(path) and _not_shipped(path)] == []
 
 
-@pytest.mark.parametrize("policy, packages", [("initrd", ["base-bundle"])])
-def test_every_computed_closure_file_is_claimed_by_its_package(policy, packages):
-    files = [path.as_posix() for path in closure_for(POLICIES[policy]).files]
-    assert files
-    for name in packages:
-        package = next(package for package in PACKAGES if package.name == name)
-        assert [path for path in files if not package.claims(path)] == [], name
+def test_every_file_stage_1_reaches_is_claimed_by_the_node_debs_and_the_base_bundle():
+    """Stage 1 ships in photo-wall-netboot-init and the packages on its path (node-debs), and the
+    base bundle's initrd carries it."""
+    files = stage1_files(REPO)
+    assert "appliance/netboot_init.py" in files
+    for name in ("node-debs", "base-bundle"):
+        assert [path for path in files if not _package(name).claims(path)] == [], name
 
 
 def test_every_tree_file_a_debian_install_file_names_is_claimed_by_the_node_debs():
@@ -807,9 +808,11 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     assert ".venv/bin/python -m scripts.node_release_writer write" in components
     roots = _with_imports({"scripts/seal_root.py", "scripts/node_release_writer.py"})
     assert [path for path in roots if not _package("release-roots").claims(path)] == []
-    # Stage 1's uplink on the device runtime runs in the debs job (decision 0014 §11).
+    # Stage 1's uplink on the device runtime runs in the debs job (decision 0014 §11), on the
+    # tree photo-wall-netboot-init's hook copies (tests/debs/test_netboot_init.py).
     debs = _job("node-components.yml", "debs")
-    assert "scripts/uplink_device_harness.py" in debs and "photo-wall-debian-builder" in debs
+    assert "tests/debs/test_netboot_init.py" in debs
+    assert "scripts/uplink_device_harness.py" in (REPO / "tests/debs/test_netboot_init.py").read_text()
     assert _package("node-debs").claims("scripts/uplink_device_harness.py")
 
 

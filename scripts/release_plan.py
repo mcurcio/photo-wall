@@ -238,6 +238,8 @@ _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian
                      "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
                      "appliance/app_launcher.py", "appliance/process_identity.py",
                      "appliance/boot/**", "appliance/node_boot_handoff.py",
+                     "appliance/netboot_init.py", "appliance/bootstrap.py",
+                     "appliance/central_post.py", "appliance/netboot_initramfs/**",
                      "appliance/node/**", "appliance/launchers/**", "appliance/bus/**",
                      "appliance/systemd/photo-wall-*.service",
                      "appliance/systemd/photowall*.slice",
@@ -285,13 +287,13 @@ PACKAGES: Final = (
             (*_NODE_DEBS, "appliance/__init__.py", "scripts/seal_root.py",
              "scripts/node_release_writer.py", "scripts/node_release_artifacts.py",
              "scripts/package_release_artifacts.py")),
-    # The squashfs installs photo-wall-node from the local repo; the initrd carries stage 1's closure
-    # (contracts, uplink and appliance's stage-1 modules); the rest of appliance/ is the image and
-    # initramfs definition, claimed whole.
-    Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and boot data",
+    # The squashfs installs photo-wall-node from the local repo; the initrd build root installs
+    # photo-wall-netboot-init from it, whose hook copies stage 1's package directories (contracts,
+    # uplink and appliance's stage-1 modules) into the initrd; the rest of appliance/ is the image
+    # definition, claimed whole.
+    Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and clock floor",
             (*_BASE_BUILD, ".github/workflows/base-image.yml", "appliance/**", "contracts/**",
-             "uplink/**", "scripts/build_netboot_bundle.sh",
-             "scripts/build_boot_data.py", "scripts/verify_netboot_initrd.py",
+             "uplink/**", "scripts/build_netboot_bundle.sh", "scripts/verify_netboot_initrd.py",
              "scripts/node_release_artifacts.py", "nodeapi/**",
              "debian/**", "debian-packaging/**", "scripts/package_release_artifacts.py",
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
@@ -416,7 +418,7 @@ SUITES: Final = (
                  "scripts/package_release_artifacts.py",
                  "scripts/container_build.py",
                  "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",
-                 "scripts/build_boot_data.py", ".github/workflows/node-pid1.yml",
+                 ".github/workflows/node-pid1.yml",
                  ".github/actions/docker-hub-mirror/action.yml",
                  "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
                  "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),

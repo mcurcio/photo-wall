@@ -32,7 +32,8 @@ Build-Depends: debhelper-compat (= 13),
  gstreamer1.0-plugins-bad,
  gstreamer1.0-libav,
  libgl1-mesa-dri,
- libegl1
+ libegl1,
+ initramfs-tools
 Standards-Version: 4.7.2
 Rules-Requires-Root: no
 Homepage: https://github.com/mcurcio/photo-wall
@@ -45,7 +46,8 @@ Homepage: https://github.com/mcurcio/photo-wall
 #
 # appliance/display_host is built by debhelper's Meson build system (debian/rules). Its
 # Build-Depends end with the runtime Depends that no build tool needs (python3-cairo, weston,
-# python3-pydantic, then ca-certificates and photo-wall-player's libraries and render stack):
+# python3-pydantic, then ca-certificates, photo-wall-player's libraries and render stack, and
+# initramfs-tools for photo-wall-netboot-init):
 # debian/graphics-abi binds the resolved version of every third-party package the display and the
 # frame client Depend on, and the import check (scripts/import_check.py) resolves every
 # third-party import to its owner and judges every Depends entry by what it installs, so the
@@ -240,10 +242,20 @@ Description: Photo Wall Node composition
  The base's units, slices and target, system users, runtime directories, the
  bus configuration, the launchers and the base ABI identity (abi.json).
 
+# Stage 1 (decision 0019 P4): appliance.netboot_init and the two modules only it imports, under
+# its directory, with its path file (/usr/lib/photo-wall/netboot-init/path: the package directories
+# stage 1 reaches, one per line, sorted, held by the import check to import_check.launcher_path),
+# the initramfs-tools hook that copies those directories and the CA bundle into the initrd, and the
+# boot script. Stage 1 is stdlib-only, so it Depends on no Python provider; the tools the hook runs
+# (python3, kmod, zstd) are the initrd build root's OS packages (base-image.yml), never Depends
+# here (R4). The base never installs it.
 Package: photo-wall-netboot-init
 Architecture: all
-Depends: photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+Depends: initramfs-tools,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-boot (= ${pw-version:photo-wall-node-boot}),
  ${misc:Depends}
 Description: Photo Wall stage 1 in the initramfs
- An initramfs-tools hook that copies stage 1 and photo-wall-uplink into the
- netboot initramfs.
+ Stage 1 of the netboot and an initramfs-tools hook that copies it, the package
+ directories it imports from and the CA bundle into the netboot initramfs.

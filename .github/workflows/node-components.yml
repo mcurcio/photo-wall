@@ -17,9 +17,10 @@ name: V2 node components
 # (tests/debs/test_local_repo.py), by the display and frame client's installed files and ABI
 # identity (tests/debs/test_display_packages.py), by each Python context importing from its
 # runtime directories alone (tests/debs/test_context_packages.py) and by photo-wall-node's
-# launchers, units, users and base ABI (tests/debs/test_node_package.py); it also runs stage 1's uplink
-# on the device's runtime in that container (scripts/uplink_device_harness.py). It uploads the repo as
-# photo-wall-node-debs-<revision>.
+# launchers, units, users and base ABI (tests/debs/test_node_package.py), and by stage 1's package,
+# whose initramfs-tools hook's tree imports stage 1 and runs its uplink on the device's runtime in
+# that container (tests/debs/test_netboot_init.py, scripts/uplink_device_harness.py). It uploads
+# the repo as photo-wall-node-debs-<revision>.
 #
 # The `build` job is steps 3 and 4: the release roots, each a squashfs image mmdebstrap builds
 # from the snapshot pin and the repo and the seal hook seals (debian-packaging/build-root.sh, the
@@ -107,27 +108,15 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
-      # Uplink on the device's runtime (decision 0014 §11): stage 1's computed initrd closure,
-      # imported and run under the pinned trixie python3 and OpenSSL of the build container with
-      # nothing but the stdlib (`python3 -I -S`), against stdlib stand-in servers over verified
-      # TLS (scripts/uplink_device_harness.py). The runner's venv mints the test certificates.
-      - name: Run uplink on the device's runtime (stage 1's closure in the build container)
-        run: |
-          set -eu
-          work="$RUNNER_TEMP/uplink-device"
-          .venv/bin/python scripts/module_closure.py --stage "$work/closure"
-          .venv/bin/python -m scripts.uplink_device_harness mint "$work/certs"
-          docker run --rm --platform linux/arm64 --network none \
-            -v "$work:/work:ro" \
-            -v "$GITHUB_WORKSPACE/scripts/uplink_device_harness.py:/harness.py:ro" \
-            photo-wall-debian-builder sh -ec '
-              python3 --version
-              python3 -I -S /harness.py run --closure /work/closure --certs /work/certs'
-
-      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports, the composition)
+      # tests/debs/test_netboot_init.py also runs uplink on the device's runtime (decision 0014
+      # §11): stage 1's tree as photo-wall-netboot-init's initramfs hook copies it, imported and
+      # run under the pinned trixie python3 and OpenSSL of the build container with nothing but
+      # the stdlib (`python3 -I -S`), against stdlib stand-in servers over verified TLS
+      # (scripts/uplink_device_harness.py). The runner's venv mints the test certificates.
+      - name: Prove the local repo (every package, the pins, an apt install, the display's ABI, the contexts' imports, the composition, stage 1)
         env:
           PHOTO_WALL_LOCAL_REPO: ${{ runner.temp }}/node-debs
-        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py tests/debs/test_context_packages.py tests/debs/test_node_package.py
+        run: .venv/bin/python -m pytest -q tests/debs/test_local_repo.py tests/debs/test_display_packages.py tests/debs/test_context_packages.py tests/debs/test_node_package.py tests/debs/test_netboot_init.py
 
       - name: Upload the local repo
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

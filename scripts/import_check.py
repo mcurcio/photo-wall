@@ -56,6 +56,18 @@ modules too (the Player):
   frame client, a library loaded by path) and the other Depends that own no import root
   (systemd, udev, nats-server, the render stack) are not judged.
 
+Stage 1 (decision 0019 P4) is no launcher: initramfs-tools' hook copies the contents of the
+package directories photo-wall-netboot-init's path file lists (`STAGE1`,
+/usr/lib/photo-wall/netboot-init/path, one absolute directory per line) into the initrd's
+interpreter stdlib directory, and the boot script runs `python3 -I -m appliance.netboot_init`.
+The stage-1 rule judges that package besides the module rule:
+
+- The path file's lines must be exactly `launcher_path(STAGE1_ENTRY)`, and each a runtime
+  directory of the package, refused as for a launcher's PATH (`launcher-path`,
+  `undeclared-launcher-directory`); a missing path file is `launcher-path`.
+- Stage 1 is stdlib-only: a module stage 1 reaches that imports a top-level name neither
+  first-party nor stdlib is `stage-1-third-party` (netboot-init Depends on no Python provider).
+
 Build tooling: stdlib only, runs on the build root's python3.
 """
 
@@ -82,7 +94,8 @@ from scripts.module_closure import Finder, first_party_packages, search_path  # 
 Edge = tuple[str, str]  # (importer, imported), dotted module names
 RefusalKind = Literal['undeclared-sibling', 'unowned-module', 'undeclared-provider',
                       'unresolved-import', 'unused-depends', 'unjudgeable-depends',
-                      'exemption-invalid', 'launcher-path', 'undeclared-launcher-directory']
+                      'exemption-invalid', 'launcher-path', 'undeclared-launcher-directory',
+                      'stage-1-third-party']
 
 PREFIX: Final = "photo-wall-"
 PRIVATE_ROOT: Final = PurePosixPath("/usr/lib/photo-wall")
@@ -95,6 +108,10 @@ MANAGER_ROOT: Final = "photo-wall-app-manager"
 # Each launcher package -> where its launchers' __main__.py lie, as a glob under its directory.
 LAUNCHERS: Final = {COMPOSITION: "*/__main__.py", APP_ROOT: "__main__.py",
                     MANAGER_ROOT: "__main__.py"}
+# Stage 1's package, its entry and its path file, under its directory (the stage-1 rule).
+STAGE1: Final = "photo-wall-netboot-init"
+STAGE1_ENTRY: Final = "appliance.netboot_init"
+STAGE1_PATH_FILE: Final = "path"
 # The Node contexts' import root, which the app root never holds.
 NODE_CONTEXT: Final = "appliance"
 # The exemption list's one home: this contract of pyproject.toml's import-linter tables.
@@ -276,6 +293,14 @@ def launcher_path(entry: str, *, edges: frozenset[Edge],
     """The directories, sorted, of the packages owning every installed module `entry` reaches,
     itself included, over `edges` (exempt ones too): what its launcher's PATH must be. Raises
     ImportCheckError when no package installs `entry`."""
+    return tuple(sorted({directory(installed[module])
+                         for module in _reached(entry, edges=edges, installed=installed)}))
+
+
+def _reached(entry: str, *, edges: frozenset[Edge],
+             installed: Mapping[str, str]) -> frozenset[str]:
+    """Every installed module `entry` reaches over `edges`, itself included. Raises
+    ImportCheckError when no package installs `entry`."""
     if entry not in installed:
         raise ImportCheckError(f"{entry} is installed by no package")
     following: dict[str, set[str]] = {}
@@ -287,7 +312,7 @@ def launcher_path(entry: str, *, edges: frozenset[Edge],
         if module not in seen:
             seen.add(module)
             todo += [each for each in following.get(module, ()) if each in installed]
-    return tuple(sorted({directory(installed[module]) for module in seen}))
+    return frozenset(seen)
 
 
 def _launcher_files(staged: Path, package: str) -> list[tuple[str, Path]]:
@@ -351,6 +376,24 @@ def _package_of(path: str) -> str | None:
     return PREFIX + candidate.name if candidate.parent == PRIVATE_ROOT else None
 
 
+def _path_refusals(package: str, name: str, declared_path: Sequence[str],
+                   expected: Sequence[str], allowed: set[str]) -> set[Refusal]:
+    """A declared program path (a launcher's PATH, stage 1's path file) against the computed one
+    and the package's runtime directories: `launcher-path` for a directory missing, unreached or
+    out of order, `undeclared-launcher-directory` for one outside `allowed`."""
+    refusals: set[Refusal] = set()
+    for each in sorted(set(expected) - set(declared_path)):
+        refusals.add(Refusal(package, "launcher-path", f"{each} (missing from PATH)", name))
+    for each in sorted(set(declared_path) - set(expected)):
+        refusals.add(Refusal(package, "launcher-path", f"{each} (not reached)", name))
+    if set(declared_path) == set(expected) and tuple(declared_path) != tuple(expected):
+        refusals.add(Refusal(package, "launcher-path", "PATH is not sorted and unique", name))
+    for each in declared_path:
+        if each not in allowed:
+            refusals.add(Refusal(package, "undeclared-launcher-directory", each, name))
+    return refusals
+
+
 def _launcher_rule(package: str, staged: Path, depends: Mapping[str, Declared],
                    exempt: frozenset[Edge], edges: frozenset[Edge],
                    installed: Mapping[str, str]) -> set[Refusal]:
@@ -369,24 +412,45 @@ def _launcher_rule(package: str, staged: Path, depends: Mapping[str, Declared],
         except ImportCheckError as error:
             refusals.add(Refusal(package, "launcher-path", str(error), launcher))
             continue
-        for each in sorted(set(expected) - set(declared_path)):
-            refusals.add(Refusal(package, "launcher-path", f"{each} (missing from PATH)",
-                                 launcher))
-        for each in sorted(set(declared_path) - set(expected)):
-            refusals.add(Refusal(package, "launcher-path", f"{each} (not reached)", launcher))
-        if set(declared_path) == set(expected) and declared_path != expected:
-            refusals.add(Refusal(package, "launcher-path", "PATH is not sorted and unique",
-                                 launcher))
+        refusals |= _path_refusals(package, launcher, declared_path, expected, allowed)
         for each in declared_path:
-            if each not in allowed:
-                refusals.add(Refusal(package, "undeclared-launcher-directory", each, launcher))
-            elif (owner := _package_of(each)) is not None:
+            if each in allowed and (owner := _package_of(each)) is not None:
                 on_path.add(owner)
             if package == APP_ROOT and each in contexts:
                 refusals.add(Refusal(package, "launcher-path",
                                      f"{each} (a Node context in the app root)", launcher))
     for sibling in sorted((depends[package].siblings & set(installed.values())) - on_path):
         refusals.add(Refusal(package, "unused-depends", sibling, CONTROL))
+    return refusals
+
+
+def stage1_path_file(staged: Path) -> Path:
+    """Where photo-wall-netboot-init's staged tree holds its path file."""
+    return staged / STAGE1 / directory(STAGE1).relative_to("/") / STAGE1_PATH_FILE
+
+
+def _stage1_rule(staged: Path, depends: Mapping[str, Declared], exempt: frozenset[Edge],
+                 edges: frozenset[Edge], installed: Mapping[str, str],
+                 first_party: frozenset[str]) -> set[Refusal]:
+    """The stage-1 rule's refusals (see the module docstring)."""
+    path_file = stage1_path_file(staged)
+    try:
+        declared_path = tuple(line for line in path_file.read_text().splitlines() if line)
+        reached = _reached(STAGE1_ENTRY, edges=edges, installed=installed)
+    except OSError as error:
+        return {Refusal(STAGE1, "launcher-path", f"no path file: {error}", STAGE1_PATH_FILE)}
+    except ImportCheckError as error:
+        return {Refusal(STAGE1, "launcher-path", str(error), STAGE1_PATH_FILE)}
+    expected = tuple(str(each) for each in launcher_path(STAGE1_ENTRY, edges=edges,
+                                                         installed=installed))
+    allowed = {str(each) for each in runtime_directories(STAGE1, declared=depends,
+                                                         exempt=exempt, installed=installed)}
+    refusals = _path_refusals(STAGE1, STAGE1_PATH_FILE, declared_path, expected, allowed)
+    for importer, imported in edges:
+        top = imported.partition(".")[0]
+        if (importer in reached and top not in first_party
+                and top not in sys.stdlib_module_names):
+            refusals.add(Refusal(STAGE1, "stage-1-third-party", top, importer))
     return refusals
 
 
@@ -416,6 +480,8 @@ def check(*, repo: Path, staged: Path, control: Path, pyproject: Path,
     edges = source_edges(repo, installed)
     for package in sorted(set(LAUNCHERS) & set(depends)):
         refusals |= _launcher_rule(package, staged, depends, exempt, edges, installed)
+    if STAGE1 in depends:
+        refusals |= _stage1_rule(staged, depends, exempt, edges, installed, first_party)
     for edge in sorted(edges):
         importer, imported = edge
         package = installed.get(importer)

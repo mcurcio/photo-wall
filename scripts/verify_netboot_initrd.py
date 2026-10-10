@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Portable content-verify for the netboot initrd (0008 p4-boot-chain s2a; decision 0014 §5).
+"""Portable content-verify for the netboot initrd (0008 p4-boot-chain s2a; decisions 0014 §5 and
+0019 P4).
 
-The shipped `initrd.img` is two archives: the boot data (scripts/build_boot_data.py; stage 1's
-computed closure, the CA bundle and the clock floor), uncompressed, in FRONT of the cached
-compressed archive `appliance/netboot_initramfs/` builds. This checks both, against the closure
-manifest the same build wrote, so neither the module list nor the forbidden-package policy is
-restated here.
+The shipped `initrd.img` is the clock floor's one-file layer, uncompressed and written per
+revision by scripts/build_netboot_bundle.sh, in FRONT of the cached initrd mkinitramfs builds in
+the initrd build root (its own uncompressed early archive, then one compressed archive). There photo-wall-netboot-init's hook
+(appliance/netboot_initramfs/hooks/photo-wall-netboot) copies stage 1's package directories into
+the interpreter's stdlib directory and the root's CA bundle to /etc/ssl/certs. This checks both
+archives and the bundle; what stage 1 must find is computed here from the repository, never
+restated.
 
-Stdlib-only and importable (``check_listing`` is the unit-tested seam). It is deliberately NOT
-part of ``appliance/build.py``: build.py and the old signed initramfs are slated for p4-retire,
-and this verify must survive that deletion.
+Stdlib-only and importable (``check_listing`` and ``check_ca_bundle`` are the unit-tested seams).
 
 POSITIVE -- every one of these must be present:
   * in the cached archive: a python3 interpreter (``usr/bin/python3*``), the ``_ssl`` /
@@ -17,18 +18,21 @@ POSITIVE -- every one of these must be present:
     ``_socket`` is built into libpython, so the stdlib tree plus ``_ssl.so`` is the honest
     file-level proxy for "the initrd can open TCP and TLS sockets"), the boot script
     ``scripts/photowall-netboot`` and initramfs-tools' ``scripts/functions`` (its
-    configure_networking helper, which appliance.netboot_init sources -- load-bearing), and
-    the ``mount`` / ``umount`` / ``modprobe`` stage 1 execs;
-  * in the boot data: the CA bundle, the clock floor, and every closure file under the cached
-    interpreter's own stdlib dir, where ``python3 -I`` finds it.
+    configure_networking helper, which appliance.netboot_init sources -- load-bearing), the
+    ``mount`` / ``umount`` / ``modprobe`` stage 1 execs, the display modules, the CA bundle, and
+    every file stage 1 reaches (`stage1_files`) under the interpreter's own stdlib dir, where
+    ``python3 -I`` finds it;
+  * in the layer: the clock floor, and nothing else;
+  * the CA bundle byte for byte the built base's (R5).
 
 NEGATIVE -- none of these may be present:
-  * a boot-data FILE also in the cached archive (the later archive would silently win; shared
+  * a layer file also in the cached archive (the later archive would silently win; shared
     directories are fine);
-  * any package the manifest forbids (``INITRD_FORBIDDEN``), as a Python package;
   * signed material (``release.pub.pem``, ``*.sig``, ``ca.pem``, ``bootstrap.json``,
     ``boot-policy.json``) and ``appliance/updates.py``;
   * GTK / GStreamer (the app UI stack).
+
+That stage 1 imports no third-party root is scripts/import_check.py's, at the package build.
 """
 
 from __future__ import annotations
@@ -38,8 +42,7 @@ import fnmatch
 import re
 import subprocess
 import sys
-import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -47,14 +50,21 @@ REPO: Final = Path(__file__).resolve().parents[1]
 if __package__ in (None, "") and str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from scripts.build_boot_data import CA_BUNDLE_PATH, FLOOR_PATH, read_archive  # noqa: E402
-from scripts.module_closure import Manifest, read_manifest  # noqa: E402
+from scripts.module_closure import ClosureError, first_party_files  # noqa: E402
 
 # The boot script staged verbatim into the initrd (0014 rev 5, design §2.8):
 # checked by SOURCE TEXT, not by extracting it back out of a built initrd --
-# the build copies it byte-for-byte (appliance/netboot_initramfs/hooks), so
-# the repo file IS the shipped content.
+# photo-wall-netboot-init installs it byte for byte, so the repo file IS the shipped content.
 DEFAULT_BOOT_SCRIPT = REPO / "appliance" / "netboot_initramfs" / "scripts" / "photowall-netboot"
+
+# Stage 1, as the boot script runs it; `appliance` is a PEP 420 portion in the packages (no
+# package installs its __init__.py), so the repository's appliance/__init__.py is not shipped.
+STAGE1_ENTRY: Final = "appliance.netboot_init"
+NAMESPACE_INIT: Final = "appliance/__init__.py"
+# The per-revision layer's one file (R6), read by uplink.clock.read_floor.
+FLOOR_PATH: Final = "usr/lib/photo-wall/clock-floor"
+# The CA bundle stage 1's Trust loads (uplink.trust.DEBIAN_CA_BUNDLE), copied by the hook (R5).
+CA_BUNDLE_PATH: Final = "etc/ssl/certs/ca-certificates.crt"
 
 _PANIC_DEFINITION = re.compile(r"(?m)^\s*panic\s*\(\s*\)\s*\{")
 _REBOOT_TOKEN = re.compile(r"(?<![\w-])reboot(?![\w-])")
@@ -88,12 +98,7 @@ REQUIRED_GLOBS: tuple[tuple[str, str], ...] = (
     ("the modules' depmod index", "*lib/modules/*/modules.dep"),
     *((f"display module {name}", f"*lib/modules/*/kernel/*/{name}.ko*")
       for name in DISPLAY_MODULES),
-)
-
-# What the boot data must carry besides the closure.
-BOOT_DATA_FILES: tuple[tuple[str, str], ...] = (
     ("CA bundle", CA_BUNDLE_PATH),
-    ("clock floor", FLOOR_PATH),
 )
 
 # Forbidden-if-present globs.
@@ -113,19 +118,78 @@ FORBIDDEN_SUBSTRINGS: tuple[tuple[str, str], ...] = (
     ("GStreamer", "gstreamer"),
 )
 
+# The leading bytes of a compressed archive -> the host command that decompresses it to stdout.
+DECOMPRESSORS: Final = (
+    (b"\x28\xb5\x2f\xfd", ("zstd", "-dcq")),
+    (b"\x1f\x8b", ("gzip", "-dc")),
+    (b"\xfd7zXZ\x00", ("xz", "-dc")),
+)
+
 _STDLIB_SOCKET = "*lib/python3*/socket.py"
-_PYTHON_DIR = re.compile(r"python3(\.\d+)?|dist-packages|site-packages")
+NEWC_MAGIC: Final = b"070701"
+TRAILER: Final = "TRAILER!!!"
+_TYPE_MASK, _DIRECTORY_TYPE = 0o170000, 0o040000
 
 
-def _normalise(members) -> set[str]:
-    """Accept text or an iterable of member paths; return normalised paths.
+def decompressor(head: bytes) -> tuple[str, ...] | None:
+    """PURE. The command that decompresses an archive starting with `head`; None if unknown."""
+    for magic, command in DECOMPRESSORS:
+        if head.startswith(magic):
+            return command
+    return None
 
-    Strips whitespace and any leading ``./`` or ``/`` so an ``lsinitramfs``
-    listing (which may print ``./usr/...``, ``/usr/...`` or ``usr/...``)
-    compares uniformly.
-    """
-    if isinstance(members, bytes):
-        members = members.decode("utf-8", "replace")
+
+def _read_newc(data: bytes) -> tuple[list[tuple[str, int, bytes]], int]:
+    members: list[tuple[str, int, bytes]] = []
+    offset = 0
+    while True:
+        header = data[offset:offset + 110]
+        if len(header) < 110 or header[:6] != NEWC_MAGIC:
+            raise ValueError(f"no newc header at offset {offset}")
+        fields = [int(header[6 + 8 * index:14 + 8 * index], 16) for index in range(13)]
+        mode, size, name_size = fields[1], fields[6], fields[11]
+        name_end = offset + 110 + name_size
+        name = data[offset + 110:name_end - 1].decode("utf-8")
+        offset = name_end + (-name_end % 4)
+        content = data[offset:offset + size]
+        offset += size + (-size % 4)
+        if offset > len(data):
+            raise ValueError(f"member {name} runs past the end")
+        if name == TRAILER:
+            break
+        members.append((name, mode, content))
+    while offset < len(data) and data[offset] == 0:
+        offset += 1
+    return members, offset
+
+
+def read_archive(data: bytes) -> tuple[list[tuple[str, bool]], int]:
+    """The members (name, is_directory) of the newc archive at the start of `data`, and the
+    offset where what follows it begins (past the trailer and any zero padding). ValueError if
+    `data` does not start with one."""
+    members, offset = _read_newc(data)
+    return [(name, mode & _TYPE_MASK == _DIRECTORY_TYPE) for name, mode, _ in members], offset
+
+
+def archive_files(data: bytes) -> dict[str, bytes]:
+    """Each member of the newc archive at the start of `data` but its directories -> its content
+    (a symbolic link's is its target)."""
+    members, _ = _read_newc(data)
+    return {name.removeprefix("./").lstrip("/"): content for name, mode, content in members
+            if mode & _TYPE_MASK != _DIRECTORY_TYPE}
+
+
+def stage1_files(repo: Path = REPO) -> tuple[str, ...]:
+    """The repo-relative files of every first-party module stage 1 reaches, as the packages
+    install them (no namespace __init__.py). Raises ClosureError for a module that does not
+    exist."""
+    return tuple(path.as_posix() for path in first_party_files((STAGE1_ENTRY,), repo=repo)
+                 if path.as_posix() != NAMESPACE_INIT)
+
+
+def _normalise(members: Iterable[str] | str) -> set[str]:
+    """Normalised member paths: whitespace and any leading ``./`` or ``/`` stripped, so a
+    listing that prints ``./usr/...``, ``/usr/...`` or ``usr/...`` compares uniformly."""
     if isinstance(members, str):
         members = members.splitlines()
     result: set[str] = set()
@@ -139,54 +203,54 @@ def _normalise(members) -> set[str]:
     return result
 
 
-def _python_package(path: str) -> str | None:
-    """The top-level package a path installs, when it sits in a Python library directory
-    (``usr/lib/python3.13/<package>/...``, ``.../dist-packages/<package>/...``)."""
-    parts = path.split("/")
-    libraries = [index for index, part in enumerate(parts[:-1]) if _PYTHON_DIR.fullmatch(part)]
-    return parts[libraries[-1] + 1].removesuffix(".py") if libraries else None
-
-
-def check_listing(early_files: Iterable[str] | str, cached: Iterable[str] | str, *,
-                  manifest: Manifest) -> list[str]:
-    """Return the contract violations (empty = pass) for the boot data's FILE paths and the
-    cached archive's listing, under the closure `manifest` the build wrote."""
-    early, cached_paths = _normalise(early_files), _normalise(cached)
+def check_listing(layer_files: Iterable[str] | str, cached: Iterable[str] | str, *,
+                  stage1: Sequence[str]) -> list[str]:
+    """The contract violations (empty = pass) for the layer's FILE paths and the cached
+    archive's members, `stage1` being the repo-relative files stage 1 reaches."""
+    layer, cached_paths = _normalise(layer_files), _normalise(cached)
     violations: list[str] = []
 
     for label, pattern in REQUIRED_GLOBS:
         if not any(fnmatch.fnmatch(path, pattern) for path in cached_paths):
             violations.append(f"missing required {label} (pattern {pattern!r})")
 
-    for label, path in BOOT_DATA_FILES:
-        if path not in early:
-            violations.append(f"missing boot-data {label} ({path})")
+    if FLOOR_PATH not in layer:
+        violations.append(f"missing the clock floor ({FLOOR_PATH}) in the layer")
+    for path in sorted(layer - {FLOOR_PATH}):
+        violations.append(f"the layer carries more than the clock floor: {path}")
 
-    # The closure must sit in the cached interpreter's own stdlib dir, where python3 -I finds it.
+    # Stage 1 must sit in the cached interpreter's own stdlib dir, where python3 -I finds it.
     stdlib_dirs = {path.removesuffix("/socket.py") for path in cached_paths
                    if fnmatch.fnmatch(path, _STDLIB_SOCKET)}
-    for module in manifest.files:
-        if not any(f"{stdlib}/{module}" in early for stdlib in stdlib_dirs):
-            violations.append(f"missing closure module {module} (not in the boot data under "
-                              f"the initrd interpreter's stdlib dir)")
+    for module in stage1:
+        if not any(f"{stdlib}/{module}" in cached_paths for stdlib in stdlib_dirs):
+            violations.append(f"missing stage-1 module {module} (not under the initrd "
+                              "interpreter's stdlib dir)")
 
-    for path in sorted(early & cached_paths):
-        violations.append(f"boot-data file also in the cached archive (it would win): {path}")
+    for path in sorted(layer & cached_paths):
+        violations.append(f"layer file also in the cached archive (it would win): {path}")
 
-    forbidden = frozenset(manifest.forbidden)
-    for path in sorted(early | cached_paths):
+    for path in sorted(layer | cached_paths):
         for label, pattern in FORBIDDEN_GLOBS:
             if fnmatch.fnmatch(path, pattern):
                 violations.append(f"forbidden {label}: {path}")
-        package = _python_package(path)
-        if package in forbidden:
-            violations.append(f"forbidden package {package!r}: {path}")
         lowered = path.lower()
         for label, needle in FORBIDDEN_SUBSTRINGS:
             if needle in lowered:
                 violations.append(f"forbidden {label}: {path}")
 
     return violations
+
+
+def check_ca_bundle(initrd_bundle: bytes | None, base_bundle: bytes) -> list[str]:
+    """The initrd's CA bundle must be the base's, byte for byte (R5), and hold a certificate."""
+    if initrd_bundle is None:
+        return []           # check_listing names the missing bundle
+    if b"-----BEGIN CERTIFICATE-----" not in base_bundle:
+        return ["the base's CA bundle holds no certificate"]
+    if initrd_bundle != base_bundle:
+        return [f"the initrd's CA bundle ({CA_BUNDLE_PATH}) is not the base's"]
+    return []
 
 
 def check_boot_script(text: str) -> list[str]:
@@ -211,57 +275,56 @@ def check_boot_script(text: str) -> list[str]:
     return violations
 
 
-def split_initrd(initrd: Path) -> tuple[list[str], list[str]]:
-    """(the boot data's file paths, the cached archive's lsinitramfs listing). ValueError when
-    the initrd does not start with the boot data; CalledProcessError when lsinitramfs cannot
-    list what follows it (mkinitramfs compresses the cached archive; an uncompressed or
-    truncated remainder is refused)."""
+def split_initrd(initrd: Path) -> tuple[list[str], dict[str, bytes]]:
+    """(the layer's file paths, the cached initrd's files -> content, read as the kernel unpacks
+    it: its uncompressed archives in order, then the one compressed archive that ends it).
+    ValueError when the initrd does not start with the layer, or the cached initrd does not end
+    in one compressed newc archive (mkinitramfs compresses its main archive; an uncompressed or
+    truncated remainder is refused); CalledProcessError when the host's decompressor fails."""
     data = initrd.read_bytes()
-    members, end = read_archive(data)
-    with tempfile.NamedTemporaryFile(prefix="cached-initrd-") as cached:
-        cached.write(data[end:])
-        cached.flush()
-        listing = subprocess.run(["lsinitramfs", cached.name], capture_output=True, text=True,
-                                 check=True).stdout.splitlines()
-    return [name for name, is_directory in members if not is_directory], listing
+    members, offset = read_archive(data)
+    cached: dict[str, bytes] = {}
+    while data[offset:offset + len(NEWC_MAGIC)] == NEWC_MAGIC:
+        length = read_archive(data[offset:])[1]
+        cached |= archive_files(data[offset:offset + length])
+        offset += length
+    command = decompressor(data[offset:offset + 6])
+    if command is None:
+        raise ValueError(f"the cached archive at byte {offset} is not compressed by a known tool "
+                         f"(leading bytes {data[offset:offset + 6].hex()})")
+    main = subprocess.run(command, input=data[offset:], capture_output=True, check=True).stdout
+    cached |= archive_files(main)
+    return [name for name, is_directory in members if not is_directory], cached
 
 
-def main(argv=None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("initrd", nargs="?", type=Path,
-                        help="the initrd image to inspect (boot data + cached archive)")
-    parser.add_argument("--manifest", type=Path, required=True,
-                        help="the closure-manifest.json build_boot_data.py wrote")
-    parser.add_argument("--early-listing", type=Path,
-                        help="a file listing the boot data's file paths")
-    parser.add_argument("--cached-listing", type=Path,
-                        help="a file holding the cached archive's lsinitramfs listing")
+    parser.add_argument("initrd", type=Path,
+                        help="the initrd image to inspect (the floor's layer + cached archive)")
+    parser.add_argument("--ca-bundle", type=Path, required=True,
+                        help="the built base's etc/ssl/certs/ca-certificates.crt")
+    parser.add_argument("--repo", type=Path, default=REPO,
+                        help="the revision whose stage 1 the initrd must carry")
     parser.add_argument("--boot-script", type=Path, default=DEFAULT_BOOT_SCRIPT,
                         help="the photowall-netboot source to content-check "
                              "(default: the repo's own copy)")
     args = parser.parse_args(argv)
-
-    listings = (args.early_listing, args.cached_listing)
-    if args.initrd and any(listings):
-        parser.error("give either an INITRD path or the two listings, not both")
-    if not args.initrd and not all(listings):
-        parser.error("give an INITRD path or --early-listing FILE --cached-listing FILE")
-
-    if args.initrd:
-        try:
-            early, cached = split_initrd(args.initrd)
-        except ValueError as error:
-            return _report([f"initrd does not start with the boot-data archive: {error}"])
-        except subprocess.CalledProcessError as error:
-            detail = "; ".join(line.strip() for line in (error.stderr or "").splitlines()
-                               if line.strip())
-            return _report([f"the cached archive could not be listed: "
-                            f"{detail or f'exit status {error.returncode}'}"])
-    else:
-        early = args.early_listing.read_text().splitlines()
-        cached = args.cached_listing.read_text().splitlines()
-
-    violations = check_listing(early, cached, manifest=read_manifest(args.manifest))
+    try:
+        layer, cached = split_initrd(args.initrd)
+    except ValueError as error:
+        return _report([f"initrd does not start with the floor's layer and one compressed "
+                        f"archive: {error}"])
+    except subprocess.CalledProcessError as error:
+        detail = "; ".join(line.strip() for line in error.stderr.decode(errors="replace")
+                           .splitlines() if line.strip())
+        return _report([f"the cached archive could not be decompressed: "
+                        f"{detail or f'exit status {error.returncode}'}"])
+    try:
+        stage1 = stage1_files(args.repo)
+    except ClosureError as error:
+        return _report([f"stage 1 does not import from {args.repo}: {error}"])
+    violations = check_listing(layer, cached, stage1=stage1)
+    violations += check_ca_bundle(cached.get(CA_BUNDLE_PATH), args.ca_bundle.read_bytes())
     violations += check_boot_script(args.boot_script.read_text())
     return _report(violations)
 

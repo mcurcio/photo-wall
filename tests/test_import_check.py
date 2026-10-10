@@ -269,3 +269,59 @@ def test_the_app_root_holds_no_node_context(tmp_path):
             "/usr/lib/photo-wall/low (a Node context in the app root)", "player") in kinds(refusals)
     assert ("photo-wall-player", "undeclared-sibling", "appliance.low.core",
             "player.service") in kinds(refusals)
+
+
+# Stage 1 (decision 0019 P4): appliance.netboot_init reaches lib's package (not its pydantic
+# module); its package names the directories it reaches in a path file the initramfs hook copies
+# into the initrd.
+STAGE1_SOURCE = {"appliance/netboot_init.py": "import lib\n"}
+STAGE1_DEPENDS = {"photo-wall-netboot-init": (
+    "initramfs-tools, photo-wall-lib (= ${pw-version:photo-wall-lib})")}
+STAGE1_PATH = ("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/netboot-init")
+
+
+def stage1(tmp_path, *, path: tuple[str, ...] | None = STAGE1_PATH,
+           source: dict[str, str] | None = None) -> list[Refusal]:
+    repo, staged = build(tmp_path, source=STAGE1_SOURCE | (source or {}),
+                         depends=DEPENDS | STAGE1_DEPENDS)
+    into = staged / "photo-wall-netboot-init/usr/lib/photo-wall/netboot-init"
+    (into / "appliance").mkdir(parents=True)
+    (into / "appliance/netboot_init.py").write_bytes(
+        (repo / "appliance/netboot_init.py").read_bytes())
+    if path is not None:
+        import_check.stage1_path_file(staged).write_text("".join(f"{each}\n" for each in path))
+    return import_check.check(repo=repo, staged=staged, control=tmp_path / "control",
+                              pyproject=tmp_path / "pyproject.toml", owner=OWNERS.get,
+                              roots_of=(ROOTS | {"initramfs-tools": frozenset()}).get)
+
+
+def test_stage_1s_path_file_naming_its_reach_passes(tmp_path):
+    assert stage1(tmp_path) == []
+
+
+def test_a_stage_1_path_file_missing_a_reached_directory_is_refused(tmp_path):
+    """The mutation probe's shape: a reached package's directory dropped from the path file."""
+    refusals = stage1(tmp_path, path=STAGE1_PATH[1:])
+    assert kinds(refusals) == {("photo-wall-netboot-init", "launcher-path",
+                                "/usr/lib/photo-wall/lib (missing from PATH)", "path")}
+
+
+def test_a_stage_1_path_file_naming_an_unreached_or_unsorted_directory_is_refused(tmp_path):
+    unreached = stage1(tmp_path / "a", path=(*STAGE1_PATH, "/usr/lib/photo-wall/top"))
+    assert ("photo-wall-netboot-init", "launcher-path",
+            "/usr/lib/photo-wall/top (not reached)", "path") in kinds(unreached)
+    assert kinds(stage1(tmp_path / "b", path=tuple(reversed(STAGE1_PATH)))) == {
+        ("photo-wall-netboot-init", "launcher-path", "PATH is not sorted and unique", "path")}
+
+
+def test_stage_1_without_its_path_file_is_refused(tmp_path):
+    assert [(each.kind, each.importer) for each in stage1(tmp_path, path=None)] == [
+        ("launcher-path", "path")]
+
+
+def test_stage_1_reaching_a_third_party_import_is_refused(tmp_path):
+    """lib imports pydantic, which lib's package declares: stage 1 reaching it is still refused,
+    since the initrd holds no Python provider."""
+    refusals = stage1(tmp_path, source={"appliance/netboot_init.py": "import lib.wire\n"})
+    assert kinds(refusals) == {("photo-wall-netboot-init", "stage-1-third-party", "pydantic",
+                                "lib.wire")}

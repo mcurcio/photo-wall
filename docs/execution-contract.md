@@ -105,9 +105,9 @@ The Player row is intentionally absent from the durable-owner table. Player keys
 
 These are the contracts stage 1 of the netboot keeps, from [decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md). They are proven by tests and CI only. The hardware milestones that would qualify them on a Pi (M0: the loop stays alive for 24 hours; M1: a real boot through the gateway's 301) have not run yet.
 
-**Boot data.** The shipped `initrd.img` is two archives. First comes a small uncompressed `newc` archive, rebuilt on every build and never cached. It is followed by the cached compressed initrd, byte for byte (`scripts/build_boot_data.py`; [`tests/test_build_boot_data.py`](../tests/test_build_boot_data.py), [`tests/test_build_netboot_bundle.py`](../tests/test_build_netboot_bundle.py)). The first archive holds three things:
+**Boot data.** The shipped `initrd.img` is two archives. First comes a small uncompressed `newc` archive, rebuilt on every build and never cached. It is followed by the cached compressed initrd, byte for byte (`scripts/build_boot_data.py`; `tests/test_build_boot_data.py`, [`tests/test_build_netboot_bundle.py`](../tests/test_build_netboot_bundle.py)). The first archive holds three things:
 
-- stage 1's first-party import closure, placed in the initrd interpreter's stdlib directory. It is computed from `appliance.netboot_init`, never listed by hand, and must stay stdlib-only (`scripts/module_closure.py`; [`tests/test_module_closure.py`](../tests/test_module_closure.py), [`tests/test_netboot_closure.py`](../tests/test_netboot_closure.py));
+- stage 1's first-party import closure, placed in the initrd interpreter's stdlib directory. It is computed from `appliance.netboot_init`, never listed by hand, and must stay stdlib-only (`scripts/module_closure.py`; [`tests/test_module_closure.py`](../tests/test_module_closure.py), `tests/test_netboot_closure.py`);
 - `etc/ssl/certs/ca-certificates.crt`, copied byte for byte from the built base squashfs (R5);
 - `usr/lib/photo-wall/clock-floor`, the built revision's commit time.
 

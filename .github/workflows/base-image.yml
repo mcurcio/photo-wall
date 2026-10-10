@@ -164,16 +164,17 @@ jobs:
           echo "digest=$(sha256sum < "$RUNNER_TEMP/base-node-packages" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # Host tools used by the UNGATED content-verify + bundle-assembly steps
-      # (squashfs `unsquashfs`, initrd `lsinitramfs`). Installed here, out of
+      # (squashfs `unsquashfs`; cpio for the floor's layer and the mount probe;
+      # zstd to read the initrd mkinitramfs compressed). Installed here, out of
       # the two expensive build steps, so those verifications still run on a
       # CACHE HIT (when the build steps that used to install these are skipped).
       # Idempotent: the build steps below still install their own build-time
       # tooling on a miss.
-      - name: Install host tools for content verification (unsquashfs, lsinitramfs)
+      - name: Install host tools for content verification (unsquashfs, cpio, zstd)
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends squashfs-tools initramfs-tools
+          sudo apt-get install -y --no-install-recommends squashfs-tools cpio zstd
 
       # Pinned by exact commit, not just the tag, for reproducibility --
       # v2.8.0 is raspberrypi/rpi-image-gen's latest release (2026-08-13) at
@@ -447,27 +448,52 @@ jobs:
       # qemu. Diagnostics are captured to files uploaded on failure (OWNER
       # STANDING RULE: root-cause, do not guess).
       # Cache B: the scratch kernel + initrd build (~several min) is
-      # content-addressed on its TRUE input closure -- the initramfs hooks/
-      # scripts, the assembler, and this workflow. Our Python code, the CA
-      # bundle and the clock floor are NOT in the cached initrd: they are the
-      # boot data (scripts/build_boot_data.py), rebuilt on every run by the
-      # uncached assembly step and placed in front of it, so no key has to list
-      # them (decision 0014 §5). The declaration is keyed: it names the root's
-      # Debian packages, its snapshot pin and the Raspberry Pi packages. NOT
-      # keyed on player/ or the rpi-image-gen config -- neither affects the
-      # kernel/initrd. EXACT match only (no restore-keys): a stale-base
+      # content-addressed on its TRUE input closure -- photo-wall-netboot-init
+      # and every Photo Wall package on stage 1's path (their Package=Version
+      # lines: each version is a hash of what the package installs, the hook,
+      # the boot script and stage 1's code included; decision 0019 P4), the
+      # declaration (it names the root's Debian packages, its snapshot pin --
+      # so the CA bundle the hook copies -- and the Raspberry Pi packages), and
+      # this workflow. The clock floor is NOT in the cached initrd: it changes
+      # per revision, so the uncached assembly puts it in a layer in front
+      # (R6). NOT keyed on player/ or the rpi-image-gen config -- neither
+      # affects the kernel/initrd. EXACT match only (no restore-keys): a stale-base
       # prefix-fallback is the poisoning risk. Only the Raspberry Pi archive is
       # unpinned (it has no snapshot service): the kernel/firmware/eeprom are
       # pulled from it at build time and are NOT in any file the key can hash
       # -- bump BASE_CACHE_EPOCH to force them to refresh. Only the
       # fixed-layout output dir ($KOUT below) is cached, never the full
       # root-owned scratch rootfs ($SCRATCH).
+      # Stage 1's packages: photo-wall-netboot-init and the package of each
+      # directory its path file names (appliance/netboot_initramfs/path, which
+      # the package installs and the import check holds to stage 1's imports).
+      - name: Compute stage 1's package set from the local repo
+        id: stage1-packages
+        run: |
+          set -eu
+          python3 - "$RUNNER_TEMP/photo-wall-node-debs/Packages" appliance/netboot_initramfs/path \
+            > "$RUNNER_TEMP/stage1-packages" <<'PYCODE'
+          import sys
+          index = {}
+          for stanza in open(sys.argv[1]).read().split("\n\n"):
+              fields = dict(line.split(": ", 1) for line in stanza.splitlines() if ": " in line)
+              if "Package" in fields:
+                  index[fields["Package"]] = fields["Version"]
+          names = {"photo-wall-netboot-init"} | {
+              "photo-wall-" + line.rstrip("/").rsplit("/", 1)[1]
+              for line in open(sys.argv[2]).read().splitlines() if line}
+          for name in sorted(names):
+              print(f"{name}={index[name]}")
+          PYCODE
+          cat "$RUNNER_TEMP/stage1-packages"
+          echo "digest=$(sha256sum < "$RUNNER_TEMP/stage1-packages" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Cache the scratch kernel + initrd + DTBs
         id: cache-kernel
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/netboot-kernel-out
-          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'scripts/build_netboot_bundle.sh', 'scripts/verify_boot_display.py', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', '.github/workflows/base-image.yml') }}
+          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('scripts/verify_boot_display.py', 'scripts/debian_packages.py', 'debian-packaging/snapshot.list', '.github/workflows/base-image.yml') }}-${{ steps.stage1-packages.outputs.digest }}
 
       - name: Build the scratch kernel + initrd root (Debian trixie arm64)
         id: scratch-root
@@ -487,11 +513,8 @@ jobs:
           # default, and mmdebstrap copies a full `deb ...` line verbatim
           # (it adds signed-by only to a bare mirror URL). The same path
           # exists in the trixie root, so its own apt verifies the same way.
-          # initramfs-tools on the HOST provides lsinitramfs for the
-          # content-verify; squashfs-tools may already be present from the
-          # squashfs verify step above.
           sudo apt-get install -y --no-install-recommends \
-            mmdebstrap debian-archive-keyring ca-certificates gnupg curl initramfs-tools
+            mmdebstrap debian-archive-keyring ca-certificates gnupg curl
 
           sudo rm -rf "$SCRATCH"
           # Minimal Debian trixie arm64 root at the declaration's pin, carrying
@@ -552,22 +575,25 @@ jobs:
             exit 1
           fi
 
-          # Install the s2a hook + boot script + BOOT= selector. No first-party
-          # Python is staged here: the boot data carries stage 1's computed
-          # closure (decision 0014 §5).
-          sudo install -D -m 0755 \
-            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/hooks/photo-wall-netboot" \
-            "$SCRATCH/etc/initramfs-tools/hooks/photo-wall-netboot"
-          sudo install -D -m 0755 \
-            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/scripts/photowall-netboot" \
-            "$SCRATCH/etc/initramfs-tools/scripts/photowall-netboot"
+          # Stage 1: photo-wall-netboot-init from this run's local repo, by
+          # name, with the packages it pins at their exact versions (decision
+          # 0019 P4). It installs the hook and the boot script under
+          # /usr/share/initramfs-tools, so mkinitramfs below copies stage 1's
+          # package directories and this root's CA bundle into the initrd. The
+          # root prefers no archive, so apt takes the repo's packages by
+          # version; the repo's list is used for this one install.
+          sudo cp -a "$RUNNER_TEMP/photo-wall-node-debs" "$SCRATCH/var/tmp/photo-wall-node-debs"
+          echo 'deb [trusted=yes] file:/var/tmp/photo-wall-node-debs ./' \
+            | sudo tee "$SCRATCH/etc/apt/sources.list.d/photo-wall-node-debs.list"
+          if ! sudo chroot "$SCRATCH" sh -ec 'apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                photo-wall-netboot-init' > "$DIAG/apt-install-netboot-init.log" 2>&1; then
+            echo "photo-wall-netboot-init install failed; tail:" >&2
+            tail -n 80 "$DIAG/apt-install-netboot-init.log" >&2
+            exit 1
+          fi
           printf 'BOOT=photowall-netboot\n' \
             | sudo tee "$SCRATCH/etc/initramfs-tools/conf.d/photo-wall"
-          # Where the initrd's interpreter finds modules under `python3 -I`:
-          # recorded in $KOUT (below) so the uncached assembly puts the boot
-          # data's closure there, on a cache hit too.
-          python_libdir=$(sudo chroot "$SCRATCH" python3 -c \
-            'import sysconfig; print(sysconfig.get_path("stdlib"))')
 
           # Exactly one kernel is installed; derive its version for mkinitramfs.
           kver=$(sudo ls "$SCRATCH/lib/modules" | head -n1)
@@ -614,7 +640,7 @@ jobs:
             | tee "$DIAG/boot-firmware-listing.txt" || true
           initrd_bytes=$(sudo stat -c %s "$SCRATCH/boot/initrd.img")
           echo "initrd.img size: $initrd_bytes bytes" | tee "$DIAG/initrd-size.txt"
-          sudo lsinitramfs "$SCRATCH/boot/initrd.img" > "$DIAG/lsinitramfs.txt" 2>&1 || true
+          sudo chroot "$SCRATCH" lsinitramfs /boot/initrd.img > "$DIAG/lsinitramfs.txt" 2>&1 || true
           echo "lsinitramfs members: $(wc -l < "$DIAG/lsinitramfs.txt")"
 
           # Unmount the binds before find/stat over $SCRATCH so procfs does not
@@ -695,7 +721,6 @@ jobs:
           sudo cp "$rpi_eeprom_digest" "$KOUT/rpi-eeprom-digest"
           sudo chmod 0755 "$KOUT/rpi-eeprom-config" "$KOUT/rpi-eeprom-digest"
           sudo cp "$kernel_config" "$KOUT/kernel-config"
-          printf '%s\n' "$python_libdir" | sudo tee "$KOUT/python-libdir"
           if [ -n "$overlays_dir" ]; then
             sudo cp "$overlays_dir"/*.dtbo "$KOUT/overlays/" 2>/dev/null || true
           fi
@@ -719,7 +744,7 @@ jobs:
       # Consumes the FIXED-LAYOUT $KOUT (freshly built OR Cache B-restored) and
       # the squashfs (freshly built OR Cache A-restored), so it is NOT gated by
       # either cache-hit -- the initrd content-verify (verify_netboot_initrd.py,
-      # run inside the assembler via lsinitramfs installed above) therefore runs
+      # run inside the assembler) therefore runs
       # even on a cache hit, catching a corrupt/wrong restored artifact.
       - name: Assemble the netboot base bundle and content-verify the initrd
         env:
@@ -735,17 +760,16 @@ jobs:
           if ls "$KOUT"/overlays/*.dtbo >/dev/null 2>&1; then
             overlay_arg="--overlays-dir $KOUT/overlays"
           fi
-          # The assembly script puts the boot data (stage 1's computed closure,
-          # the base's CA bundle, this revision's commit time as the clock
-          # floor) in front of the cached initrd, then runs
-          # verify_netboot_initrd.py against the result via lsinitramfs
-          # (installed on the host above) -- content-verify #2.
+          # The assembly script puts the clock floor's layer (this revision's
+          # commit time) in front of the cached initrd, then runs
+          # verify_netboot_initrd.py against the result: stage 1 under the
+          # interpreter's stdlib dir, the CA bundle equal to the base's --
+          # content-verify #2.
           # shellcheck disable=SC2086
           sh "$GITHUB_WORKSPACE/scripts/build_netboot_bundle.sh" \
             --kernel "$KOUT/kernel" \
             --initrd "$KOUT/initrd.img" \
             --repo "$GITHUB_WORKSPACE" \
-            --python-libdir "$(cat "$KOUT/python-libdir")" \
             --snapshot-epoch "$DEBIAN_SNAPSHOT_EPOCH" \
             --dtb "$KOUT/dtb" \
             --eeprom-image "$KOUT/pieeprom.bin" \

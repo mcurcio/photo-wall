@@ -12,19 +12,11 @@ import pytest
 
 from scripts import module_closure
 from scripts.module_closure import (
-    INITRD_FORBIDDEN,
-    INITRD_POLICY,
-    INITRD_ROOTS,
-    POLICIES,
     ClosureError,
-    ClosurePolicy,
-    closure_for,
     compute_closure,
+    first_party_files,
     first_party_packages,
-    main,
-    read_manifest,
     search_path,
-    stage,
 )
 
 FIRST_PARTY = ("pkg_a", "pkg_b", "pkg_c", "pkg_d")
@@ -150,12 +142,14 @@ def test_the_search_path_is_the_stdlib_only(tmp_path):
         assert not any(entry.startswith(sys.prefix) for entry in path)
 
 
-def test_stage_copies_the_closure_files(tmp_path):
+def test_first_party_files_are_the_closures_files_unjudged(tmp_path):
+    """pkg_d.unused's pydantic import is not judged; a missing first-party module is."""
     closure = closure_of(tmp_path / "repo")
-    stage(closure, repo=tmp_path / "repo", into=tmp_path / "staged")
-    staged = sorted(path.relative_to(tmp_path / "staged")
-                    for path in (tmp_path / "staged").rglob("*.py"))
-    assert tuple(staged) == closure.files
+    assert first_party_files(["pkg_a.main"], repo=tmp_path / "repo") == closure.files
+    assert Path("pkg_d/unused.py") in first_party_files(["pkg_d.unused"], repo=tmp_path / "repo")
+    tree(tmp_path / "repo", {"pkg_b/helper.py": "import pkg_b.absent\n"})
+    with pytest.raises(ClosureError, match="pkg_b.absent, which does not exist"):
+        first_party_files(["pkg_a.main"], repo=tmp_path / "repo")
 
 
 def test_first_party_packages_are_the_top_level_packages(tmp_path):
@@ -163,28 +157,7 @@ def test_first_party_packages_are_the_top_level_packages(tmp_path):
     assert first_party_packages(tmp_path) == FIRST_PARTY
 
 
-def test_main_stages_writes_the_manifest_and_names_the_offender(tmp_path, capsys):
-    repo = tree(tmp_path / "repo", {**BASE, "pkg_a/bad.py": "import player\n",
-                                    "player/__init__.py": ""})
-    manifest = tmp_path / "manifest.json"
-    assert main(["--repo", str(repo), "--root", "pkg_a.main", "--stage", str(tmp_path / "out"),
-                 "--manifest", str(manifest)]) == 0
-    written = read_manifest(manifest)
-    assert written.modules[0] == "pkg_a" and written.forbidden == INITRD_FORBIDDEN
-    assert (tmp_path / "out" / "pkg_c" / "deferred.py").is_file()
-    assert main(["--repo", str(repo), "--root", "pkg_a.bad"]) == 1
-    assert "pkg_a.bad imports player" in capsys.readouterr().err
-
-
-# --- policies and the third-party table (Project 2 design §2.7) ----------------------------
-
-
-def test_the_policy_table():
-    assert tuple(POLICIES) == ("initrd",)
-    assert (INITRD_ROOTS, INITRD_FORBIDDEN) == (INITRD_POLICY.roots, INITRD_POLICY.forbidden)
-    assert INITRD_POLICY.roots == ("appliance.netboot_init",)
-    assert INITRD_POLICY.forbidden == ("player", "central", "media", "zeroconf", "ifaddr", "gi")
-    assert INITRD_POLICY.third_party == {}
+# --- the third-party table -------------------------------------------------------------------
 
 
 DECLARED = MappingProxyType({"pydantic": "python3-pydantic", "gi": "python3-gi"})
@@ -208,21 +181,6 @@ def test_a_forbidden_name_is_refused_even_when_declared(tmp_path):
     with pytest.raises(ClosureError, match="pydantic is forbidden here"):
         closure_of(tmp_path, {"pkg_b/helper.py": "import pydantic\n"}, third_party=DECLARED,
                    forbidden=("pydantic",))
-
-
-def test_closure_for_applies_the_policy(tmp_path):
-    tree(tmp_path, {**BASE, "pkg_b/helper.py": "import pydantic\n"})
-    policy = ClosurePolicy("player", ("pkg_a.main",), ("pkg_d",), DECLARED)
-    closure = closure_for(policy, repo=tmp_path)
-    assert closure.third_party == ("pydantic",) and "pkg_c.deferred" in closure.modules
-    with pytest.raises(ClosureError, match="pkg_d is forbidden"):
-        closure_for(ClosurePolicy("player", ("pkg_d.unused",), ("pkg_d",), DECLARED),
-                    repo=tmp_path)
-
-
-def test_main_prints_only_the_policy_digest(capsys):
-    assert main(["--policy", "initrd", "--digest"]) == 0
-    assert capsys.readouterr().out == closure_for(INITRD_POLICY).digest + "\n"
 
 
 def test_the_finder_records_each_direct_import_with_its_ancestors_found_or_not(tmp_path):

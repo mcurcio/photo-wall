@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Uplink on the device's runtime (decision 0014 §11): the Pi runs Debian trixie's python3
-(3.13) and OpenSSL (3.5) with nothing but the stdlib and stage 1's closure, while CI runs 3.12
+(3.13) and OpenSSL (3.5) with nothing but the stdlib and stage 1's code, while CI runs 3.12
 with a venv. This harness proves the seam there, in the pinned build container
-(photo-wall-debian-builder, node-components.yml's debs job):
+(photo-wall-debian-builder; tests/debs/test_netboot_init.py in node-components.yml's debs job),
+against the tree photo-wall-netboot-init's initramfs hook copies into the initrd:
 
-  mint DIR                        on the runner (the repo's venv): write the test CA bundle and
-                                  the leaves tests/tls_fixture.py mints (no key kept in-tree)
-  run --closure DIR --certs DIR   in the container, under `python3 -I -S`: import every staged
-                                  closure module, then run the 301 chain, a TLS-to-TLS hop, the
-                                  downgrade chain and the name-mismatch rows (verify codes 62, 64)
-                                  against stdlib servers on loopback
+  mint DIR                      on the runner (the repo's venv): write the test CA bundle and
+                                the leaves tests/tls_fixture.py mints (no key kept in-tree)
+  run --tree DIR --certs DIR    in the container, under `python3 -I -S`, DIR first on sys.path:
+                                import every first-party module stage 1 (`ENTRY`) reaches in DIR
+                                (modulefinder, function bodies included; a module it reaches
+                                that DIR lacks is a failed import), then run the 301 chain, a
+                                TLS-to-TLS hop, the downgrade chain and the name-mismatch rows
+                                (verify codes 62, 64) against stdlib servers on loopback
 
 `run` exits 1 on any failed import or row. The stand-in servers below are stdlib only, and
 tests/tls_fixture.py serves its stubs through them too, so there is one implementation.
@@ -21,8 +24,10 @@ import argparse
 import contextlib
 import http.server
 import importlib
+import modulefinder
 import ssl
 import sys
+import sysconfig
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -32,6 +37,8 @@ from urllib.parse import urlsplit
 # The certificates `mint` writes: (certfile, keyfile) per leaf, plus the CA bundle.
 CA_BUNDLE = "ca.pem"
 LEAVES = ("central", "other-name", "other-ip")
+# Stage 1, as the boot script runs it: `python3 -I -m appliance.netboot_init`.
+ENTRY = "appliance.netboot_init"
 
 
 @dataclass
@@ -143,13 +150,56 @@ def mint(directory: Path) -> None:
             (directory / f"{name}.key").write_bytes(Path(keyfile).read_bytes())
 
 
-def closure_modules(closure: Path) -> list[str]:
-    """Every module staged under `closure`, as a dotted name."""
-    names = []
-    for path in sorted(closure.rglob("*.py")):
-        parts = path.relative_to(closure).with_suffix("").parts
-        names.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
-    return names
+class _Finder(modulefinder.ModuleFinder):
+    """modulefinder over `tree` that scans first-party code only: a top-level name the tree holds
+    and the interpreter's own stdlib directory does not (the hook copies the stdlib into the same
+    directory). It also finds the tree's PEP 420 portions (`appliance`: each package directory
+    adds modules to it, none ships its __init__.py), which modulefinder cannot find itself."""
+
+    def __init__(self, tree: Path) -> None:
+        super().__init__(path=[str(tree), *sys.path])
+        stdlib = Path(sysconfig.get_path("stdlib"))
+        self.first_party = frozenset(
+            path.stem for path in tree.iterdir()
+            if (path.is_dir() or path.suffix == ".py") and path.stem.isidentifier()
+            and not (stdlib / path.name).exists())
+        self.namespaces = {name: str(tree / name) for name in self.first_party
+                           if (tree / name).is_dir()
+                           and not (tree / name / "__init__.py").exists()}
+
+    def is_first_party(self, name: str) -> bool:
+        return name.partition(".")[0] in self.first_party
+
+    def find_module(self, name, path, parent=None):
+        if parent is None and name in self.namespaces:
+            return None, self.namespaces[name], ("", "", modulefinder._PKG_DIRECTORY)
+        return super().find_module(name, path, parent)
+
+    def load_package(self, fqname, pathname):
+        if fqname in self.namespaces:
+            module = self.add_module(fqname)
+            module.__path__ = [pathname]
+            return module
+        return super().load_package(fqname, pathname)
+
+    def scan_code(self, co, m):
+        if self.is_first_party(m.__name__):
+            super().scan_code(co, m)
+
+
+def stage1_modules(tree: Path) -> tuple[list[str], list[str]]:
+    """(the first-party modules `ENTRY` reaches in `tree`, the imports of first-party code that
+    are missing: a first-party module the tree lacks, or a top-level name outside the stdlib),
+    each sorted."""
+    finder = _Finder(tree)
+    finder.import_hook(ENTRY)
+    found = sorted(name for name, module in finder.modules.items()
+                   if finder.is_first_party(name) and module.__file__)
+    missing = sorted(name for name, importers in finder.badmodules.items()
+                     if any(finder.is_first_party(importer) for importer in importers)
+                     and (finder.is_first_party(name)
+                          or name.partition(".")[0] not in sys.stdlib_module_names))
+    return found, missing
 
 
 def _rows(certs: Path) -> list[tuple[str, Callable[[], None]]]:
@@ -211,20 +261,33 @@ def _rows(certs: Path) -> list[tuple[str, Callable[[], None]]]:
             ("IP-address mismatch (64)", ip_mismatch)]
 
 
-def run(closure: Path, certs: Path) -> int:
+def run(tree: Path, certs: Path) -> int:
     print(f"python3 {sys.version.split()[0]}; {ssl.OPENSSL_VERSION}; flags isolated="
           f"{sys.flags.isolated} no_site={sys.flags.no_site}")
-    sys.path.insert(0, str(closure))
+    tree = tree.resolve()
+    sys.path.insert(0, str(tree))
+    try:
+        found, missing = stage1_modules(tree)
+    except ImportError as error:
+        print(f"FAIL import {ENTRY}: {error}")
+        return 1
     failures = 0
-    for name in closure_modules(closure):
+    for name in missing:
+        print(f"FAIL import {name}: not in {tree}")
+        failures += 1
+    for name in found:
         try:
-            importlib.import_module(name)
+            module = importlib.import_module(name)
         except Exception as error:  # every import failure is reported, then the leg fails
             print(f"FAIL import {name}: {type(error).__name__}: {error}")
             failures += 1
+            continue
+        if not Path(module.__file__ or "").resolve().is_relative_to(tree):
+            print(f"FAIL import {name}: imported from {module.__file__}")
+            failures += 1
     if failures:
         return 1
-    print(f"OK imported {len(closure_modules(closure))} closure modules")
+    print(f"OK imported {len(found)} stage-1 modules")
     for label, row in _rows(certs):
         try:
             row()
@@ -242,13 +305,14 @@ def main(argv: list[str] | None = None) -> int:
     minting = commands.add_parser("mint")
     minting.add_argument("directory", type=Path)
     running = commands.add_parser("run")
-    running.add_argument("--closure", type=Path, required=True)
+    running.add_argument("--tree", type=Path, required=True,
+                         help="the directory stage 1's modules are imported from")
     running.add_argument("--certs", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "mint":
         mint(args.directory)
         return 0
-    return run(args.closure, args.certs)
+    return run(args.tree, args.certs)
 
 
 if __name__ == "__main__":

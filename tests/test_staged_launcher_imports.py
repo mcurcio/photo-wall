@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -25,8 +25,7 @@ import pytest
 from node.launcher_closures import FORBIDDEN as NODE_LAUNCHERS
 from node.launcher_closures import closure as node_closure
 
-from scripts import module_closure
-from scripts.module_closure import Closure, ClosurePolicy, closure_for
+from scripts.module_closure import Closure
 
 REPO: Final = Path(__file__).resolve().parents[1]
 SCANNED: Final = ("tests", "scripts")
@@ -43,10 +42,6 @@ class StagedImportSite:
     line: int
     launcher: str              # <name> of the staged closure or the Node launcher
     modules: frozenset[str]    # appliance.* modules imported; `from P import n` resolves to P.n
-
-
-def launcher_policies() -> Mapping[str, ClosurePolicy]:
-    return dict(module_closure.POLICIES)
 
 
 def _launcher(statement: ast.stmt) -> str | None:
@@ -124,9 +119,7 @@ SITES: Final = tuple(site for directory in SCANNED
 
 @cache
 def _closure(launcher: str) -> Closure:
-    if launcher in NODE_LAUNCHERS:
-        return node_closure(launcher)
-    return closure_for(launcher_policies()[launcher])
+    return node_closure(launcher)
 
 
 def _site_id(site: StagedImportSite) -> str:
@@ -139,7 +132,7 @@ def test_the_sites_are_found() -> None:
 
 @pytest.mark.parametrize("site", SITES, ids=_site_id)
 def test_every_site_names_a_known_launcher(site: StagedImportSite) -> None:
-    assert site.launcher in {*launcher_policies(), *NODE_LAUNCHERS}, (
+    assert site.launcher in NODE_LAUNCHERS, (
         f"{_site_id(site)}: {site.launcher}")
 
 

@@ -2,10 +2,11 @@
 the unsigned rpi-image-gen base squashfs directly from it, and switch_root into it.
 
 This is the initramfs's `python3 -I -m appliance.netboot_init`, run by
-`appliance/netboot_initramfs/scripts/photowall-netboot`. Everything it imports is computed into
-the initramfs boot data (`scripts/module_closure.py`): this module, `appliance.bootstrap`, the
-`uplink` package and the stdlib-only `contracts` modules, never `appliance.provision` or the
-Player.
+`appliance/netboot_initramfs/scripts/photowall-netboot`. It ships as photo-wall-netboot-init,
+whose initramfs-tools hook copies the package directories its imports reach (the package's path
+file, held to them by `scripts/import_check.py`) into the initrd's stdlib directory: this module,
+`appliance.bootstrap`, `appliance.central_post`, `appliance.node_boot_handoff`, the `uplink`
+package and the stdlib-only `contracts` modules, never the Player (decision 0019 P4).
 
 Central-discovery boot model
 ----------------------------
@@ -24,7 +25,8 @@ Phases, each one console line that also pets the stage-1 watchdog (0014 rev 5, d
 every network send and read in them pets it too, each one bounded call (`_PacedTransport`):
 
 0. setup (in `main()`): arm the watchdog first, then read the cmdline, load the CA bundle
-   (`Trust`) and the clock floor from the boot data. A missing bundle or floor is a broken
+   (`Trust`, copied by the hook) and the clock floor (the per-revision layer in front of the
+   initrd). A missing bundle or floor is a broken
    build and stops even an http boot.
 1. cmdline: `resolve_central`. Stage 1 has no discovery, so an absent root is a failure.
 2. serial.
@@ -147,7 +149,7 @@ BASE_FETCH_SECONDS = 300
 # contract's absolute `deadline`, so it holds for any Transport; a send that runs out is a named
 # CONNECT failure and the FAILED line.
 STAGE1_SEND_SECONDS: Final = LOOKUP_TIMEOUT + 2 * STATUS_TIMEOUT
-# This initrd's CA bundle (the boot data's copy of the base's), compared after mounting with
+# This initrd's CA bundle (the hook's copy, the base's bytes), compared after mounting with
 # the mounted base's own at the same path (R5, Q3 = A).
 INITRD_CA_BUNDLE = DEBIAN_CA_BUNDLE
 # Stage 1's resolver: initramfs-tools' configure_networking renders it from the DHCP lease
