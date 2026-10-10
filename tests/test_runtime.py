@@ -1086,3 +1086,24 @@ def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
     assert advance("leave_as_is").contributions
     with pytest.raises(RuntimeBudgetExceeded):
         advance("keep_this_photo")
+
+
+def test_an_ending_keeps_nothing_only_when_nothing_plays_beneath_it():
+    """Owner, 2026-10-10: "When the top show ends, it gets out of the way and the show
+    underneath takes over." An ending's `keep_nothing` becomes `leave_as_is` when another Run
+    plays on its Frame at its end. Mutation probe: keep the authored after-state."""
+    def ending(beneath):
+        runtime = Runtime()
+        runtime.set_scene(Scene(scene_id="top", cycle_seconds=10, outro_seconds=4,
+                                contributions=(media(),), outro_contributions=(
+                                    Contribution(target="frame:left", kind="black",
+                                                 after_end="keep_nothing"),)))
+        if beneath:
+            runtime.set_scene(Scene(scene_id="under", cycle_seconds=10, loop=True,
+                                    contributions=(media(),)))
+            runtime.activate("under", "under", 0)
+        runtime.activate("top", "top", 0)
+        return [i.after_end for i in runtime.advance(11).contributions if i.phase == "outro"]
+
+    assert ending(beneath=False) == ["keep_nothing"]
+    assert ending(beneath=True) == ["leave_as_is"]

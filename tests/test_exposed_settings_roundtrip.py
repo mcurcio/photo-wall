@@ -529,3 +529,40 @@ def test_a_kept_photo_followed_by_a_see_through_program_keeps_its_fade(registry,
         frame.sync()
         assert _shown(frame.advance(19.5)) == (False, [("photo", 0.33)])
         assert _shown(frame.advance(1)) == (False, [("photo", 0.5)])  # no kept photo beneath
+
+
+def _kept_scene_beneath(client, frame):
+    """A kept Scene playing on the Frame, drawn (and its photo kept) before a Scene starts on
+    top of it."""
+    _save_and_start(client, _scene("beneath", keep_last=True))
+    frame.sync()
+    assert _shown(frame.advance(2)) == (False, [("photo", 1.0)])
+
+
+def test_after_a_black_ending_the_scene_beneath_takes_over(registry, tmp_path):
+    """Owner, 2026-10-10: "When the top show ends, it gets out of the way and the show
+    underneath takes over." The top Scene's ending plans no after-state of its own when a Scene
+    plays beneath at its end."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _kept_scene_beneath(client, frame)
+        _play_one_cycle(client, frame, _scene("top", ending=("black", 4), keep_last=False))
+        assert [layer.after_end for layer in _layers(coordinator, player)
+                if layer.presentation == "black"] == ["leave_as_is"]
+        assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # the ending
+        assert _shown(frame.advance(5)) == (False, [("photo", 1.0)])  # the Scene beneath
+
+
+def test_an_outage_during_an_ending_over_a_scene_beneath_shows_its_kept_photo(registry, tmp_path):
+    """Central is lost while the top Scene's (long) ending shows; when the ending is over, the
+    Scene beneath's own layers have run out too, and the Frame shows its kept photo, not
+    black. Mutation probe: let the ending keep nothing whatever plays beneath (black at the
+    end)."""
+    player, app, coordinator = _rig(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _kept_scene_beneath(client, frame)
+        _play_one_cycle(client, frame, _scene("top", ending=("black", 40), keep_last=False))
+        assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # 23 s: the ending
+        assert _shown(frame.lose_central(45)) == KEPT  # 68 s: past the ending and its cover

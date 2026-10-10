@@ -968,8 +968,9 @@ class Runtime:
                          and intent.interval_start <= at < intent.interval_end)
 
     def _view(self, now: float, *, budget: _TransitionBudget | None) -> RuntimeView:
-        """The view at `now`; with a budget, kept photos' final cycles are held
-        (`_may_hold_to_the_end`), spending it on what follows them."""
+        """The view at `now`. With a budget, spent on what follows (`_followed_at`): a kept
+        photo's final cycle is held (`_may_hold_to_the_end`), and an ending that keeps nothing
+        changes nothing instead when another Run plays on its Frame at its end."""
         intents: list[Intent] = []
         runs = sorted(self._state.runs.values(), key=lambda r: r.order)
         followed: dict[str, frozenset[str]] = {}
@@ -987,6 +988,14 @@ class Runtime:
                         followed[run.run_id] = self._followed_at(run, end, budget)
                     if contribution.target not in followed[run.run_id]:
                         fade_out = 0
+                after_end = contribution.after_end
+                if after_end == "keep_nothing" and run.phase == "outro" and budget is not None:
+                    # An ending gets out of the way of the show underneath: it keeps nothing
+                    # only when no other Run plays on its Frame at its end.
+                    if run.run_id not in followed:
+                        followed[run.run_id] = self._followed_at(run, end, budget)
+                    if contribution.target in followed[run.run_id]:
+                        after_end = "leave_as_is"
                 opacity = contribution.opacity
                 if contribution.fade_in_seconds:
                     opacity *= min(1.0, position / contribution.fade_in_seconds)
@@ -1010,7 +1019,7 @@ class Runtime:
                     base_opacity=contribution.opacity,
                     fade_in_seconds=contribution.fade_in_seconds,
                     fade_out_seconds=fade_out,
-                    after_end=contribution.after_end,
+                    after_end=after_end,
                     actuator_value=value, phase=run.phase,
                 ))
         winners: dict[str, Intent] = {}
