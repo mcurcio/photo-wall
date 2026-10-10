@@ -332,3 +332,157 @@ def test_explicit_binding_cohort_change_offers_fresh_revision_for_current_state(
     assert current["plan"].layers[0].media_origin == 1000
     coordinator.readiness(player["player_id"], report(coordinator, player))
     assert len(coordinator.delivery(player["player_id"], 1)["commits"][0].assignment_ids) == 2
+
+
+# Pending cues are forecasts: an operator edit that rewrites the forecast supersedes them.
+
+def ending_scene(scene_id="ending"):
+    return Scene(scene_id=scene_id, loop=True, cycle_seconds=60, outro_seconds=10,
+        contributions=(Contribution(target="frame:frame-0", kind="black"),),
+        outro_contributions=(Contribution(target="frame:frame-0", kind="black", opacity=.5),))
+
+
+def cohorts(registry):
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT id,cue_key,starts_at,members,status FROM coordination_groups "
+                            "ORDER BY starts_at,cohort_sequence").fetchall()
+
+
+def skip_codes(registry):
+    with registry.db.transaction() as conn:
+        return {row["detail"]["group_id"]: row["detail"]["code"] for row in conn.execute(
+            "SELECT detail FROM execution_events WHERE kind='group_skipped'").fetchall()}
+
+
+def assert_outro_plays_after_finish(registry, coordinator, player):
+    coordinator.advance()  # the edit's own tick: the grown 1060 cue no longer aborts coordination
+    outro = next(layer for layer in coordinator.delivery(player["player_id"], 1)["plan"].layers
+                 if layer.start == 1060)
+    assert (outro.end, outro.opacity) == (1070, .5)
+    codes = skip_codes(registry)
+    old, new = [g for g in cohorts(registry) if g["starts_at"] == 1060]
+    assert codes[old["id"]] == "superseded" and new["status"] == "pending"
+    assert list(new["members"]) == [outro.assignment_id]
+    registry.clock.advance(1056 - registry.clock.utc())
+    coordinator.advance()
+    coordinator.readiness(player["player_id"], report(coordinator, player))
+    committed = {a for c in coordinator.delivery(player["player_id"], 1)["commits"] for a in c.assignment_ids}
+    assert outro.assignment_id in committed
+    assert coordinator.runtime.read().project(1060).runs[0].phase == "outro"
+
+
+def test_operator_finish_with_outro_supersedes_the_grouped_next_cycle(registry):
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", ending_scene())
+    run_id = coordinator.runtime.command("activate", "ending", "go", 1000).run_id
+    coordinator.advance()
+    registry.clock.advance(20)
+    coordinator.runtime.command_current("finish", run_id)
+    assert_outro_plays_after_finish(registry, coordinator, player)
+
+
+def test_removing_a_running_program_with_outro_supersedes_the_grouped_next_cycle(registry):
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", ending_scene())
+    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="ending",
+                                                        starts_at=1000, ends_at=5000))
+    coordinator.advance()
+    registry.clock.advance(20)
+    coordinator.runtime.command_current("remove_program", "p")
+    assert_outro_plays_after_finish(registry, coordinator, player)
+
+
+def test_scene_edit_for_an_upcoming_program_supersedes_each_affected_cue_once(registry):
+    players = setup_players(registry, count=2)
+    coordinator = Coordinator(registry.db, registry.clock)
+    one = Scene(scene_id="s", loop=True, cycle_seconds=60,
+                contributions=(Contribution(target="frame:frame-0", kind="black"),))
+    coordinator.runtime.command("set_scene", one)
+    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="s",
+                                                        starts_at=1100, ends_at=1500))
+    coordinator.advance()
+    before = cohorts(registry)
+    assert before and all(len(g["members"]) == 1 for g in before)
+    coordinator.runtime.command("set_scene", one.model_copy(update={"revision": 2, "contributions": (
+        *one.contributions, Contribution(target="frame:frame-1", kind="black"))}))
+    coordinator.advance()
+    after, codes = cohorts(registry), skip_codes(registry)
+    for old in before:
+        cue = [g for g in after if g["cue_key"] == old["cue_key"]]
+        assert cue[0]["id"] == old["id"] and len(cue) == 2
+        assert cue[0]["status"] == "skipped" and codes[old["id"]] == "superseded"
+        assert cue[1]["status"] == "pending" and len(cue[1]["members"]) == 2
+    assert {layer.start for layer in coordinator.delivery(players[1]["player_id"], 1)["plan"].layers} \
+        == {g["starts_at"] for g in before}
+    coordinator.advance()
+    assert cohorts(registry) == after  # a steady forecast reuses the new cohorts
+    coordinator.runtime.command("set_scene", one.model_copy(update={"revision": 3}))
+    coordinator.advance()  # back to the first membership: a third cohort, not the first one
+    for old in before:
+        cue = [g for g in cohorts(registry) if g["cue_key"] == old["cue_key"]]
+        assert [g["status"] for g in cue] == ["skipped", "skipped", "pending"]
+        assert cue[2]["members"].keys() == old["members"].keys()
+
+
+def test_a_started_pending_cue_never_narrows_into_success(registry):
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(scene_id="nested", loop=True, cycle_seconds=60,
+        contributions=(Contribution(target="frame:frame-0", kind="black"),),
+        children=(Child(scene=Scene(scene_id="blink", cycle_seconds=1,
+            contributions=(Contribution(target="frame:missing", kind="black"),))),)))
+    coordinator.runtime.command("activate", "nested", "nested-start", 1000)
+    coordinator.advance()
+    registry.clock.advance(2)
+    coordinator.advance()
+    coordinator.readiness(player["player_id"], report(coordinator, player))
+    assert not coordinator.delivery(player["player_id"], 1)["commits"]
+    assert [g["status"] for g in cohorts(registry) if g["starts_at"] == 1000] == ["pending"]
+
+
+def test_a_committed_cue_that_grows_is_skipped_while_other_frames_keep_their_offers(registry):
+    players = setup_players(registry, count=3)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"])
+    registry.clock.advance(6)
+    coordinator.advance()
+    coordinator.readiness(players[0]["player_id"], report(coordinator, players[0]))
+    assert coordinator.delivery(players[0]["player_id"], 1)["commits"]
+    committed = next(g for g in cohorts(registry) if g["starts_at"] == 1010)
+    assert committed["status"] == "committed"
+    coordinator.runtime.command("set_scene", Scene(scene_id="scheduled", revision=2, loop=True,
+        cycle_seconds=60, contributions=tuple(Contribution(target=f"frame:frame-{i}", kind="black")
+                                              for i in (0, 1))))
+    coordinator.runtime.command("set_scene", Scene(scene_id="other", loop=True, cycle_seconds=60,
+        contributions=(Contribution(target="frame:frame-2", kind="black"),)))
+    coordinator.runtime.command("activate", "other", "other-now", registry.clock.utc())
+    coordinator.advance()
+    assert skip_codes(registry)[committed["id"]] == "cue_membership_changed"
+    assert coordinator.delivery(players[0]["player_id"], 1)["commits"] == ()
+    assert coordinator.delivery(players[0]["player_id"], 1)["revocations"]
+    assert coordinator.delivery(players[2]["player_id"], 1)["plan"].layers
+    coordinator.advance()  # the skipped cue stays skipped: no event and revocation per tick
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM execution_events WHERE kind='group_skipped' "
+                            "AND detail->>'group_id'=%s", (committed["id"],)).fetchone()["n"] == 1
+
+
+def test_orphaned_pending_cues_are_superseded_not_skipped_as_not_ready(registry):
+    setup_players(registry, count=1)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", ending_scene())
+    coordinator.runtime.command("set_program", Program(program_id="p", scene_id="ending",
+                                                        starts_at=1100, ends_at=1500))
+    coordinator.advance()
+    forecast = cohorts(registry)
+    assert forecast and all(g["status"] == "pending" for g in forecast)
+    coordinator.runtime.command_current("remove_program", "p")
+    coordinator.advance()
+    codes = skip_codes(registry)
+    assert all(codes[g["id"]] == "superseded" for g in forecast)
+    assert all(g["status"] == "skipped" for g in cohorts(registry))
+    registry.clock.advance(150)
+    coordinator.advance()
+    assert "not_ready" not in skip_codes(registry).values()
