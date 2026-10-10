@@ -71,6 +71,18 @@ export function clockTime(epochSeconds) {
   return `${hourMinute(date)} ${zoneLabel(date)}`;
 }
 
+/**
+ * A time of day with its seconds and no zone, "21:04:07": when the Pi acknowledged a live
+ * change (Central's time of it), or when this browser saved or left one.
+ *
+ * @param {number} epochSeconds
+ * @returns {string}
+ */
+export function timeOfDay(epochSeconds) {
+  const date = toDate(epochSeconds);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 /** "Tue 2 Mar". */
 export function dayLabel(epochSeconds) {
   return toDate(epochSeconds).toLocaleDateString(undefined, {

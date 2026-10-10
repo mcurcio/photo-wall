@@ -25,7 +25,7 @@ import { useMutate } from "./useMutate.js";
 const NO_FRAMES = "No unbound frames. Draw one on the plan first.";
 
 
-/** A link to a Frame's home on the Wall (it opens the facet showing its cause). */
+/** A link to a Frame's page on the Wall (it opens the tab showing its cause). */
 function FrameLink({ frameId, wall }) {
   return (
     <a

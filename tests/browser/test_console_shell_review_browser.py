@@ -283,21 +283,19 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         surface = page.get_by_role("combobox", name="Surface", exact=True)
-        # Plain selection on Surface A remembers A.
+        # Opening a1 from Surface A, then going back, shows Surface A.
         page.get_by_role("button", name="Frame a1", exact=True).click()
+        expect(page.get_by_role("heading", level=1, name="Frame a1", exact=True)).to_be_visible()
+        page.go_back()
         expect(surface).to_have_value("A")
         go(page, "hardware")
 
-        visit(page, "#/wall/frames/b1/binding")
-        expect(page.get_by_role("region", name="Frame b1 inspector", exact=True)).to_be_visible()
+        # A typed route to b1's page: back on the plan, the plan shows b1's Surface.
+        visit(page, "#/wall/frames/b1/hardware")
+        expect(page.get_by_role("heading", level=1, name="Frame b1", exact=True)).to_be_visible()
+        page.get_by_role("link", name="Wall", exact=True).first.click()
         expect(surface).to_have_value("B")
         expect(page.get_by_role("button", name="Frame b1", exact=True)).to_be_visible()
-        # Back to a1's route: its Surface again.
-        page.go_back()
-        expect(_heading(page, "hardware")).to_be_visible()
-        page.go_back()
-        expect(page.get_by_role("region", name="Frame a1 inspector", exact=True)).to_be_visible()
-        expect(surface).to_have_value("A")
 
 
 # --- Focus after "Show all" and a drawer link opened elsewhere (item 5).

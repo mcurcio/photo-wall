@@ -199,7 +199,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
                 break
             time.sleep(0.01)
         if browser:
-            print(f"BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/wall/frames/native-frame/commissioning", flush=True)
+            print(f"BROWSER_URL http://127.0.0.1:{listener.getsockname()[1]}/console/#/wall/frames/native-frame/position", flush=True)
         root = Path(__file__).resolve().parents[1]
         result = subprocess.run(
             [
