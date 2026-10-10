@@ -450,9 +450,9 @@ class Executor:
                           _alpha(assignment.layer, now))
 
     def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
-        """A drawn layer sets what its Frame keeps for when nothing plays (`Layer.after_end`,
-        planned by Central): nothing, from its first draw; or this photo, at full strength,
-        from the first draw after its fade-in."""
+        """A drawn layer, covered or not, sets what its Frame keeps for when nothing plays
+        (`Layer.after_end`, planned by Central): nothing, from its first draw; or this photo,
+        at full strength, from the first draw after its fade-in."""
         layer = local.layer
         if layer.after_end == "keep_nothing":
             self._retained.pop(binding.output_id, None)
@@ -848,7 +848,10 @@ class Executor:
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
-                                    # Bottom to top, so the topmost layer's after-state holds.
+                                # Every drawn layer, covered ones included (a Scene beneath keeps
+                                # its photo while a Scene on top shows), bottom to top, so the
+                                # topmost layer's after-state holds.
+                                for local in drawn.layers:
                                     self._apply_after_end(binding, local, now)
                                 continue
                             if presented.status == "pending":
