@@ -165,10 +165,10 @@ Members load-bearing in deliveries 1a to 1c have a props sketch below; every oth
 // only the selected panel is mounted.
 interface TabsProps { label: string; tabs: readonly { value: string; label: string }[]; value: string; onValueChange(value: string): void; children: React.ReactNode }
 
-// Row and Stack — layout primitives so patterns and domain components never write flex classes.
-// Row: controls side by side, wrapping on a narrow screen. Stack: blocks one under the other, evenly spaced.
+// Inline and Stack — layout primitives so patterns and domain components never write flex classes.
+// Inline: controls side by side, wrapping on a narrow screen. Stack: blocks one under the other, evenly spaced.
 // With a label, either becomes a named group.
-interface RowProps { label?: string; children: React.ReactNode }
+interface InlineProps { label?: string; children: React.ReactNode }
 interface StackProps { label?: string; children: React.ReactNode }
 
 // Field — owns label, help and error wiring for one control (aria-describedby).

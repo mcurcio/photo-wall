@@ -97,7 +97,7 @@ no session timeout while the tab is open.
 **Phone:** mirror above, big arrow buttons and a corner selector below; Done and Revert pinned.
 
 **Patterns:** reused EntityHeader, HealthBadge, SettingRow · changed EntityPage → templates/object-page ·
-new Tabs, Row, Stack, SegmentedControl (ui); LivePreviewEditor, QuadEditor, NudgePad, AckBadge,
+new Tabs, Inline, Stack, SegmentedControl (ui); LivePreviewEditor, QuadEditor, NudgePad, AckBadge,
 LeaveGuard (patterns); the Position tab's wiring (domain)
 **Stories:** LivePreviewEditor/Clean, /Requested, /Acknowledged, /NoAckProblem, /Unbound,
 /PiOffline, /Expired, /Phone; QuadEditor/Default, /CornerSelected, /Cropped; NudgePad/Default;
