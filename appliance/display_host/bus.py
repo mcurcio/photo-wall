@@ -26,11 +26,16 @@ from contracts.node_output import (
     OUTPUT_DOCUMENT_BYTES,
     OUTPUT_IDS,
     OUTPUT_REPORT_BYTES,
+    SCHEMA_MAJOR,
+    OutputReport,
+    PowerAttempt,
+    encode_output_report,
+    encode_power_attempt,
     output_document_key,
     output_report_key,
 )
 from nodeapi.buffers import KeyTable, Slice, desired_bucket, event_buffer, state_bucket
-from nodeapi.node import NodeSession
+from nodeapi.node import NodeSession, Release
 
 DISPLAY_COMPONENT: Final = "display"
 DISPLAY_VERSION: Final = "1.0.0"                   # the display component's release version (birth)
@@ -56,5 +61,21 @@ def display_session(release_digest: str, *, url: str = NODE_BUS_URL) -> NodeSess
     DISPLAY_SLICE, writes birth (Release(DISPLAY_VERSION, digest=release_digest,
     schema_majors={"display": SCHEMA_MAJOR})) at every attach, registers no method, and exposes the
     desired bucket as `session.desired`. Its start() returns at once and it connects forever, so
-    the controller never waits on the bus. Slice D1 implements it."""
-    raise NotImplementedError
+    the controller never waits on the bus."""
+    return NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,
+                       Release(DISPLAY_VERSION, release_digest, {DISPLAY_COMPONENT: SCHEMA_MAJOR}), url=url)
+
+
+class BusReportSink:
+    """`output_power.ReportSink` on the display session: an Output's report is its state key, a
+    power attempt one `display.record.power` event. Both only queue on the session, so neither
+    blocks the Weston dispatch loop."""
+
+    def __init__(self, session: NodeSession) -> None:
+        self._session = session
+
+    def put_report(self, report: OutputReport) -> None:
+        self._session.state.put(output_report_key(report.output_id), encode_output_report(report))
+
+    def emit_attempt(self, attempt: PowerAttempt) -> None:
+        self._session.events.emit(POWER_RECORD, encode_power_attempt(attempt), schema_major=SCHEMA_MAJOR)

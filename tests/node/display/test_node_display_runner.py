@@ -18,8 +18,9 @@ from support.repo import REPO
 
 from appliance import feed_socket
 from appliance.display_host import runner
+from appliance.display_host.bus import DISPLAY_SLICE
 from appliance.display_host.domain import OutputState
-from appliance.display_host.runner import Controller
+from appliance.display_host.runner import Controller, OutputReporter
 from appliance.display_host.weston import MAX_PACKET, CompositorPresentation
 from contracts.node_display import Surface
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
@@ -128,6 +129,45 @@ def test_every_events_read_carries_each_output_and_its_admission():
                  controller.feed_events({"after": 0, "incarnation": None})):
         assert page["events"] == [] and page["outputs"] == expected
     assert json.loads(json.dumps(expected)) == expected  # JSON-native: no UUID objects
+
+
+class Reports:
+    """A ReportSink that keeps what was put."""
+
+    def __init__(self) -> None:
+        self.puts: list = []
+
+    def put_report(self, report) -> None:
+        self.puts.append(report)
+
+    def emit_attempt(self, attempt) -> None:
+        raise AssertionError("D1 emits no power attempt")
+
+
+def test_the_controller_reports_outputs_at_start_and_after_each_hotplug():
+    backend = FakeBackend()
+    host = backend.host
+    backend.states = (OutputState(key(host, "HDMI-A-1"), connected=False),)
+    sink = Reports()
+    controller = Controller(backend, reports=OutputReporter(sink, read=lambda output_id: None))
+    assert [(r.output_id, r.connected) for r in sink.puts] == [("HDMI-A-1", False)]
+    plugged = OutputKey(host.boot_id, host.incarnation_id, "HDMI-A-1", 3, 3)
+    backend.states = (OutputState(plugged),)
+    backend.queue.append(plugged)                      # Weston's hotplug event
+    controller.observe()
+    assert [(r.output_id, r.connected) for r in sink.puts] == [("HDMI-A-1", False), ("HDMI-A-1", True)]
+
+
+def test_main_starts_the_display_session_without_the_central_config(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(runner, "_unit", lambda unit: {"MainPID": "1"})
+    monkeypatch.setattr(runner, "display_session",
+                        lambda digest: SimpleNamespace(start=lambda: started.append(digest)))
+    monkeypatch.setattr(sys, "argv", ["display-controller", "--runtime", str(tmp_path)])
+    monkeypatch.setattr(os, "umask", lambda mask: 0)
+    with pytest.raises(OSError):                       # no compositor control socket here
+        runner.main()
+    assert started == [DISPLAY_SLICE.digest]
 
 
 def test_the_feed_socket_answers_events_and_nothing_else():
