@@ -39,6 +39,10 @@ a seal that published writes nothing and passes:
                 have applied it), read GitHub back -- waiting briefly for it to catch up -- and
                 carry on toward the published state.
 
+`--dry-run` runs steps 2 and 3's packaged-set check alone (no claim, registry, GitHub, stage,
+promote or publish): base-image.yml runs it on every PR, so a change that breaks what a release
+is built from fails before merge, not at the seal.
+
 A seal that fails between steps 5 and 6 leaves `<repository>:T` naming an unreleased build. The
 next seal of T takes it over (the newest commit wins); if the next push plans another version,
 the tag stays, naming a build no release records (decision 0011 states the cost).
@@ -639,7 +643,6 @@ class Build:
     server: str = "https://github.com"
     player_payload: Path | None = None
     node_components: Path | None = None
-    node_bundle: Path | None = None
 
 
 def seal(github: GitHub, registry: Registry, build: Build) -> dict:
@@ -653,17 +656,7 @@ def seal(github: GitHub, registry: Registry, build: Build) -> dict:
         check_sealed(github, registry, claimed.sealed, build.tag, build.revision)
         print(f"seal: {build.tag} is published at this revision and intact: nothing written")
         return claimed.sealed
-    try:
-        payload = ({"player_payload": build.player_payload}
-                   if build.player_payload is not None else {})
-        if build.node_components is not None or build.node_bundle is not None:
-            payload.update(node_components=build.node_components, node_bundle=build.node_bundle,
-                           release_tag=build.tag)
-        package(build.base_bundle, build.player_deb, build.bootstrapper_deb, build.destination,
-                revision=build.revision, images=build.images,
-                source_date_epoch=build.source_date_epoch, **payload)
-    except PackagingError as error:
-        raise SealError(f"packaging failed: {error}") from None
+    _package(build)
     packaged = verified(build.destination, build.revision, registry)
     print(f"verify: {len(packaged.assets)} assets and {len(packaged.images)} images, as declared")
     promotable(registry, github, packaged.images, build.tag, build.revision)
@@ -677,6 +670,30 @@ def seal(github: GitHub, registry: Registry, build: Build) -> dict:
     check_published(github, release, build.tag, build.revision, packaged)
     print(f"publish: {build.tag} at {build.revision}: {release.get('html_url')}")
     return release
+
+
+def _package(build: Build) -> None:
+    """Step 2: package `build` into its destination."""
+    try:
+        payload = ({"player_payload": build.player_payload}
+                   if build.player_payload is not None else {})
+        if build.node_components is not None:
+            payload.update(node_components=build.node_components, release_tag=build.tag)
+        package(build.base_bundle, build.player_deb, build.bootstrapper_deb, build.destination,
+                revision=build.revision, images=build.images,
+                source_date_epoch=build.source_date_epoch, **payload)
+    except PackagingError as error:
+        raise SealError(f"packaging failed: {error}") from None
+
+
+def dry_run(build: Build) -> Packaged:
+    """Package `build` and check the packaged set is exactly the declared release; nothing
+    else (no claim, registry, GitHub, stage, promote or publish)."""
+    _package(build)
+    try:
+        return verify(build.destination, revision=build.revision)
+    except PackagingError as error:
+        raise SealError(f"the packaged release is not the declared one: {error}") from None
 
 
 # --- adapters ----------------------------------------------------------------------------------
@@ -937,10 +954,11 @@ def main(argv: Sequence[str] | None = None, *, github: GitHub | None = None,
     parser.add_argument("--player-deb", type=Path, required=True)
     parser.add_argument("--player-payload", type=Path)
     parser.add_argument("--node-components", type=Path)
-    parser.add_argument("--node-bundle", type=Path)
     parser.add_argument("--bootstrapper-deb", type=Path, required=True)
     parser.add_argument("--image", action="append", default=[], help="NAME=REPOSITORY@DIGEST")
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="package and verify only; claim, stage and publish nothing")
     parser.add_argument("--source-date-epoch", type=int,
                         help="the tarball's member time; default: the revision's commit time")
     args = parser.parse_args(argv)
@@ -956,7 +974,12 @@ def main(argv: Sequence[str] | None = None, *, github: GitHub | None = None,
                       args.destination, epoch, environ.get("GITHUB_REPOSITORY", ""),
                       environ.get("GITHUB_SERVER_URL") or "https://github.com",
                       _one_payload(args.player_payload) if args.player_payload else None,
-                      args.node_components, args.node_bundle)
+                      args.node_components)
+        if args.dry_run:
+            packaged = dry_run(build)
+            print(f"dry run: {len(packaged.assets)} assets and {len(packaged.images)} images, "
+                  "as declared")
+            return 0
         release = seal(github or GitHubApi.from_env(environ), registry or Buildx(), build)
     except (SealError, PlanError) as error:
         for line in str(error).splitlines():

@@ -293,8 +293,12 @@ done
 # base still mounts its store and reports memcg_present 0. This template is the
 # token's one source: the release seal refuses a cmdline without it, or with
 # it twice (scripts/package_release_artifacts.py _check_cmdline).
+#
+# photowall.node=v2 (contracts/release.py CMDLINE_NODE_TOKEN): every Pi takes
+# the node path. Like cgroup_enable=memory, this template is the token's one
+# source and the seal refuses a cmdline without it, or with it twice.
 cat > "$boot_dir/cmdline.txt" <<'EOF'
-console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 cgroup_enable=memory photowall.central=@@PHOTOWALL_CENTRAL@@
+console=tty1 ip=dhcp boot=photowall-netboot panic=10 watchdog.stop_on_reboot=0 hung_task_panic=1 cgroup_enable=memory photowall.node=v2 photowall.central=@@PHOTOWALL_CENTRAL@@
 EOF
 
 # Corruption-only SHA256SUMS over every staged artifact (incl. the squashfs).

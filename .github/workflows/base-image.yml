@@ -873,7 +873,7 @@ jobs:
             --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
             --python python3
 
-      - name: Verify installed node ABI and produce the explicit V2 cohort bundle
+      - name: Verify installed node ABI
         run: |
           set -eu
           .venv/bin/python - "$RUNNER_TEMP" <<'PYCODE'
@@ -887,9 +887,6 @@ jobs:
           if installed != components["abi"]:
               raise SystemExit("installed node ABI does not match exact component roots")
           PYCODE
-          .venv/bin/python -m scripts.node_release_artifacts \
-            --source-bundle "$RUNNER_TEMP/photo-wall-base-bundle" \
-            --output "$RUNNER_TEMP/photo-wall-node-bundle"
 
       - name: Verify the assembled bundle (content, no hardware)
         env:
@@ -989,7 +986,8 @@ jobs:
           # exactly ONE kernel command line (no comment lines: the firmware
           # passes the file verbatim), carrying the static tokens + the central
           # ROOT placeholder, and NONE of the retired base_url/base_sha256
-          # params. The operator substitutes @@PHOTOWALL_CENTRAL@@ and nothing
+          # params. The node token (contracts/release.py CMDLINE_NODE_TOKEN)
+          # appears exactly once: every Pi takes the node path. The operator substitutes @@PHOTOWALL_CENTRAL@@ and nothing
           # else. This catches a template regression in build_netboot_bundle.sh.
           cmd=$(cat "$BUNDLE/boot/cmdline.txt")
           cmd_lines=$(wc -l < "$BUNDLE/boot/cmdline.txt")
@@ -998,10 +996,14 @@ jobs:
           printf '%s' "$cmd" | grep -q 'photowall.central=@@PHOTOWALL_CENTRAL@@' \
             || violation "cmdline.txt missing photowall.central=@@PHOTOWALL_CENTRAL@@"
           for tok in 'console=tty1' 'ip=dhcp' 'boot=photowall-netboot' 'panic=10' \
-                     'watchdog.stop_on_reboot=0' 'hung_task_panic=1' 'cgroup_enable=memory'; do
+                     'watchdog.stop_on_reboot=0' 'hung_task_panic=1' 'cgroup_enable=memory' \
+                     'photowall.node=v2'; do
             printf '%s' "$cmd" | grep -q -- "$tok" \
               || violation "cmdline.txt missing static token $tok"
           done
+          node_tokens=$(printf '%s\n' $cmd | grep -cx -- 'photowall.node=v2' || true)
+          [ "$node_tokens" -eq 1 ] \
+            || violation "cmdline.txt carries photowall.node=v2 $node_tokens times, not once"
           if grep -Eq 'base_url|base_sha256' "$BUNDLE/boot/cmdline.txt"; then
             violation "cmdline.txt still references retired base_url/base_sha256"
           fi
@@ -1013,6 +1015,28 @@ jobs:
           fi
           echo "PASS: bundle content contract satisfied"
           find "$BUNDLE" -type f -printf '%10s %p\n'
+
+      # PR-time seal check: package and verify the release from this run's one bundle with the
+      # seal's own code (scripts/release_seal.py --dry-run), so a change that breaks what a release
+      # is built from fails on the pull request, not at the seal after merge. No claim, registry,
+      # GitHub write or promote; the images are placeholders, never resolved.
+      - name: Package and verify the release (PR-time seal check)
+        env:
+          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
+          PLAYER_PAYLOAD: ${{ steps.player-payload.outputs.payload_path }}
+          BOOTSTRAPPER_DEB: ${{ steps.bootstrapper-deb.outputs.deb_path }}
+        run: |
+          set -eu
+          zeros=0000000000000000000000000000000000000000000000000000000000000000
+          python3 -m scripts.release_seal --dry-run --tag v0.0.0 --revision "$REVISION" --since "" \
+            --base-bundle "$RUNNER_TEMP/photo-wall-base-bundle" \
+            --node-components "$RUNNER_TEMP/photo-wall-node-components" \
+            --player-deb "$PLAYER_DEB" \
+            --player-payload "$PLAYER_PAYLOAD" \
+            --bootstrapper-deb "$BOOTSTRAPPER_DEB" \
+            --image "central=ghcr.io/dry-run/central@sha256:$zeros" \
+            --image "media-worker=ghcr.io/dry-run/media-worker@sha256:$zeros" \
+            --destination "$RUNNER_TEMP/seal-dry-run"
 
       # Stage 1's REAL mount path, out of the shipped initrd.img, on this
       # runner's kernel: unpack it, chroot in, and run mount_root (loop attach,
@@ -1152,15 +1176,6 @@ jobs:
         with:
           name: photo-wall-base-bundle-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-base-bundle/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload the explicit V2 cohort bundle
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: photo-wall-node-bundle-${{ env.REVISION }}
-          path: ${{ runner.temp }}/photo-wall-node-bundle/
           if-no-files-found: error
           retention-days: 7
 

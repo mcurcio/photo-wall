@@ -79,6 +79,7 @@ from contracts.release import (
     CHECKSUMS,
     CMDLINE,
     CMDLINE_MEMORY_CONTROLLER,
+    CMDLINE_NODE_TOKEN,
     CMDLINE_PLACEHOLDER,
     FILES,
     IMAGES,
@@ -225,7 +226,6 @@ def package(
     source_date_epoch: int,
     player_payload: Path | None = None,
     node_components: Path | None = None,
-    node_bundle: Path | None = None,
     release_tag: str | None = None,
 ) -> dict:
     """Assemble the flat operator artifact set into a new `destination` directory."""
@@ -329,12 +329,12 @@ def package(
             (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
         )
 
-    if node_components is not None or node_bundle is not None:
-        if node_components is None or node_bundle is None or release_tag is None:
+    if node_components is not None:
+        if release_tag is None:
             raise PackagingError("node_release_inputs_incomplete")
         from scripts.node_release_artifacts import append as append_node
         try:
-            append_node(node_components, node_bundle, destination, revision=revision,
+            append_node(node_components, base_bundle, destination, revision=revision,
                         tag=release_tag, epoch=source_date_epoch)
         except (ValueError, OSError) as error:
             raise PackagingError(str(error)) from error
@@ -541,15 +541,16 @@ def _check_base_tarball(path: Path, *, require_abi: bool = False
 
 def _check_cmdline(data: bytes | None, name: str) -> None:
     """`data` is the cmdline template contracts/release.py declares: one line (a trailing newline
-    allowed), not a comment, holding CMDLINE_PLACEHOLDER and the word CMDLINE_MEMORY_CONTROLLER
-    exactly once each."""
+    allowed), not a comment, holding CMDLINE_PLACEHOLDER and the words CMDLINE_MEMORY_CONTROLLER
+    and CMDLINE_NODE_TOKEN exactly once each."""
     try:
         line = (data or b"").decode("utf-8").removesuffix("\n")
     except UnicodeError:
         line = ""
     if (len(data or b"") > MAX_CMDLINE_BYTES or "\n" in line or "\r" in line
             or line.lstrip().startswith("#") or line.count(CMDLINE_PLACEHOLDER) != 1
-            or line.split().count(CMDLINE_MEMORY_CONTROLLER) != 1):
+            or line.split().count(CMDLINE_MEMORY_CONTROLLER) != 1
+            or line.split().count(CMDLINE_NODE_TOKEN) != 1):
         raise PackagingError(f"boot_tarball_cmdline_invalid:{name}")
 
 
@@ -577,8 +578,8 @@ def verify(directory: Path, *, revision: str) -> Packaged:
     """`directory` holds exactly the declared release for `revision`: a manifest of the declared
     schema naming every declared file and image and nothing else, each file present with the
     recorded sha256 and size, the base and boot tarballs in the declared layouts with one boot/
-    tree between them, a checksum list that matches every other file, and no other file.
-    Raises PackagingError naming the first difference."""
+    tree between them (and the node `boot` asset's, when present), a checksum list that matches
+    every other file, and no other file. Raises PackagingError naming the first difference."""
     directory = directory.absolute()
     legacy_record = _actual(directory, MANIFEST)
     if legacy_record["size"] > MAX_MANIFEST_BYTES:
@@ -657,8 +658,10 @@ def verify(directory: Path, *, revision: str) -> Packaged:
         differing = sorted(set(base_boot).symmetric_difference(boot_boot) | {
             name for name in set(base_boot) & set(boot_boot) if base_boot[name] != boot_boot[name]})
         raise PackagingError(f"boot_tarball_mismatch:{boot_member(BASE_BOOT)}{differing[0]}")
-
     if node is not None:
+        node_boot = next(item for item in node.artifacts if item.role == "boot")
+        if _check_boot_tarball(directory / node_boot.filename) != boot_boot:
+            raise PackagingError("node_boot_tree_mismatch")
         assets.append(Asset(NODE_RELEASE_MANIFEST, directory / NODE_RELEASE_MANIFEST,
                             **_actual(directory, NODE_RELEASE_MANIFEST)))
         assets.extend(Asset(item.filename, directory / item.filename, item.sha256, item.size_bytes)

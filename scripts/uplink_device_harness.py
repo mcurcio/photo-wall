@@ -10,8 +10,15 @@ the declared pin, `scripts/test_netboot_e2e.py device-root`):
                                   closure module, then run the 301 chain, a TLS-to-TLS hop, the
                                   downgrade chain and the name-mismatch rows (verify codes 62, 64)
                                   against stdlib servers on loopback
+  node-boot --closure DIR         in the container, under `python3 -I -S`: stage 1's node branch
+    --cmdline-central URL           (`appliance.netboot_init.netboot`) from a command line naming
+    --serial HEX8 --boot-id UUID    URL and `photowall.node=v2`, over the real transport, locate
+    --rootmnt DIR                   and verified base fetch; it fakes only what no container has
+                                    (the mount, RAM, the clock gate, the watchdog, the serial
+                                    and the kernel boot id), writing the handoff under DIR
 
-`run` exits 1 on any failed import or row. The stand-in servers below are stdlib only, and
+`run` exits 1 on any failed import or row. `node-boot` prints one JSON line
+`{"outcome", "error", "sha256"}` and exits 0 on a handed-off boot, 3 on a named refusal. The stand-in servers below are stdlib only, and
 tests/tls_fixture.py serves its stubs through them too, so there is one implementation.
 """
 
@@ -19,11 +26,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import http.server
 import importlib
+import json
 import ssl
 import sys
+import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -236,6 +247,103 @@ def run(closure: Path, certs: Path) -> int:
     return 1 if failures else 0
 
 
+NODE_HANDED_OFF, NODE_REFUSED = 0, 3
+
+
+class _NodeLog:
+    """Stage 1's console, on stderr."""
+
+    debug = False
+
+    def info(self, message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+    def detail(self, message: str) -> None:
+        print(message, file=sys.stderr, flush=True)
+
+
+class _NodeKeeper:
+    """The watchdog keeper: no watchdog here, every pet is a no-op."""
+
+    summary = "harness (no watchdog)"
+
+    def pet(self) -> None:
+        pass
+
+    def paced(self, blocks):
+        yield from blocks
+
+    def hand_over(self) -> None:
+        pass
+
+
+class _NodeOps:
+    """No mount or RAM disk in a container: `ram()` is a temp dir and `mount_root` records the
+    sha256 of the verified image it was handed."""
+
+    def __init__(self, run_root: Path) -> None:
+        self.run_root = run_root
+        self.mounted: str | None = None
+
+    def configure_networking(self) -> None:
+        pass
+
+    def network_info(self) -> dict:
+        return {"ip": "127.0.0.1"}
+
+    def ram(self) -> Path:
+        path = self.run_root / "ram"
+        path.mkdir(exist_ok=True)
+        return path
+
+    def mount_root(self, image: Path, rootmnt: Path) -> None:
+        digest = hashlib.sha256()
+        with image.open("rb") as stream:
+            while block := stream.read(1 << 20):
+                digest.update(block)
+        self.mounted = digest.hexdigest()
+
+    def hand_over_modules(self, rootmnt: Path, *, pet, release=None) -> str:
+        return "modules=none (harness)"
+
+
+def node_boot(closure: Path | None, *, central: str, serial: str, boot_id: str, rootmnt: Path,
+              ca_bundle: Path | None = None) -> tuple[int, dict]:
+    """One stage 1 node boot from `central` (the command line's root); (exit code, the printed
+    JSON). `closure` goes first on sys.path (the device run); `ca_bundle` replaces the device's
+    trust store (an in-process run with no Debian bundle)."""
+    if closure is not None:
+        sys.path.insert(0, str(closure))
+    from appliance.bootstrap import BootstrapError
+    from appliance.netboot_init import NetbootError, netboot
+    from contracts.clock_record import ClockRecord, ClockState
+    from uplink.causes import UplinkError
+    from uplink.transport import HttpTransport
+    from uplink.trust import Trust
+
+    class Settled:
+        def settle(self) -> ClockRecord:
+            return ClockRecord(state=ClockState.SYNCED, floor=1, raised_to_floor=False,
+                               tier=None, source=None, offset=None, stepped=False, tried=(),
+                               writer="netboot", written_at=time.time())
+
+    rootmnt.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="node-boot-") as run_root:
+        ops = _NodeOps(Path(run_root))
+        trust = Trust.public() if ca_bundle is None else Trust.public(ca_bundle)
+        try:
+            netboot({"photowall.central": central, "photowall.node": "v2"}, rootmnt, ops=ops,
+                    transport=HttpTransport(trust=trust), clock_gate=Settled(),
+                    keeper=_NodeKeeper(), trust_provenance="harness", serial_reader=lambda: serial,
+                    log=_NodeLog(), offer_mode=True, boot_id_reader=lambda: boot_id)
+        except (NetbootError, BootstrapError) as error:
+            return NODE_REFUSED, {"outcome": "refused", "error": str(error), "sha256": None}
+        except UplinkError as error:
+            code = error.central_error or f"{error.cause.value}:{error.reason}"
+            return NODE_REFUSED, {"outcome": "refused", "error": code, "sha256": None}
+    return NODE_HANDED_OFF, {"outcome": "handed_off", "error": None, "sha256": ops.mounted}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -244,10 +352,21 @@ def main(argv: list[str] | None = None) -> int:
     running = commands.add_parser("run")
     running.add_argument("--closure", type=Path, required=True)
     running.add_argument("--certs", type=Path, required=True)
+    booting = commands.add_parser("node-boot")
+    booting.add_argument("--closure", type=Path, required=True)
+    booting.add_argument("--cmdline-central", required=True)
+    booting.add_argument("--serial", required=True)
+    booting.add_argument("--boot-id", required=True)
+    booting.add_argument("--rootmnt", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "mint":
         mint(args.directory)
         return 0
+    if args.command == "node-boot":
+        status, result = node_boot(args.closure, central=args.cmdline_central, serial=args.serial,
+                                   boot_id=args.boot_id, rootmnt=args.rootmnt)
+        print(json.dumps(result, sort_keys=True))
+        return status
     return run(args.closure, args.certs)
 
 

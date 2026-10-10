@@ -299,6 +299,21 @@ jobs:
           tags: photo-wall-ci-central
       - run: docker compose up -d --no-build --wait
       - run: curl --fail http://127.0.0.1:8000/healthz
+      # The shipped image, on its own command, runs node control: a first boot request on a
+      # fresh Central is refused for the unselected boot policy, never node_control_disabled.
+      - name: Node control answers on the image's own command
+        run: |
+          set -eu
+          boot_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          nonce=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+          status=$(curl --silent --output "$RUNNER_TEMP/boot-offer.json" --write-out '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            --data "{\"schema\":2,\"kind\":\"node_boot_request\",\"serial\":\"1a2b3c4d\",\"kernel_boot_id\":\"$boot_id\",\"boot_nonce\":\"$nonce\"}" \
+            http://127.0.0.1:8000/v2/node/boot-offers)
+          cat "$RUNNER_TEMP/boot-offer.json"; echo
+          [ "$status" = 503 ]
+          python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["error"] == "node_boot_policy_unconfigured"' \
+            "$RUNNER_TEMP/boot-offer.json"
         # GET / must serve the console shell (HTTP 200), not 500. Because
         # central/console/dist/ is .dockerignore'd, the compose central image
         # gets its bundle SOLELY from the Dockerfile's console-builder stage --

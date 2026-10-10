@@ -803,8 +803,12 @@ def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, pac
 def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
+    # base-image.yml also runs the PR-time seal check: the seal and the plan it imports are named
+    # in the base-image suite's own paths, not claimed by a package, for the reason below.
+    base_suite = next(suite for suite in SUITES if suite.job == "base-image")
     assert [path for path in base if not (_package("base-bundle").claims(path)
-                                         or _package("player-payload").claims(path))] == []
+                                         or _package("player-payload").claims(path)
+                                         or path in base_suite.paths)] == []
     # The seal and the plan it imports decide whether and how a release is written; they shape
     # no artefact byte. The packager does, and ships as release-assets.
     seal = {path for path in _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
