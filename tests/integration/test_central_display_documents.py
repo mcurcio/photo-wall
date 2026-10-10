@@ -7,7 +7,9 @@ the shipped `DISPLAY_SLICE`. Central runs the worker's own composition of the fl
 with standing on. (2) The session's Output report is recorded and judged into `output_displays`
 (the Display recognised on the bound Frame). (3) A report from an Output Central had no row for
 gives that Output a document within 3 s, carried by the judge's wake (`changed()`), not by a
-reconcile.
+reconcile: the link first settles (its reconcile after draining the session's `birth`), and no
+reconcile runs between the report and the document (E-1B-C3-3). Mutation probe: drop the judge's
+wake (the document waits for a reconcile, or the 3 s pass).
 """
 from __future__ import annotations
 
@@ -44,6 +46,7 @@ from contracts.node_output import (
     output_report_key,
 )
 from contracts.time import ManualClock
+from nodeapi.hub import NodeLink
 from nodeapi.node import NodeSession, Release
 
 SERIAL = "serial-display-documents"
@@ -56,7 +59,15 @@ def _report(output_id: str) -> bytes:
     return encode_output_report(OutputReport(output_id, True, IDENTITY, MODES, (), None, None, None, None))
 
 
-def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, tmp_path):
+def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, tmp_path, monkeypatch):
+    reconciles: list[float] = []
+    reconcile = NodeLink.reconcile
+
+    async def counted(self):
+        epochs = await reconcile(self)
+        reconciles.append(asyncio.get_running_loop().time())
+        return epochs
+    monkeypatch.setattr(NodeLink, "reconcile", counted)
     registry = Registry(database, ManualClock(1000))
     player = enroll_pi(registry, SERIAL)
     with database.transaction() as conn:   # one enrolled Output only: HDMI-A-2 has no `outputs` row
@@ -114,9 +125,16 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
                             "AND subject LIKE '%%.output-HDMI-A-1'", (device_id_for_serial(SERIAL), REPORT_STREAM))
             assert [bytes(row["data"]) for row in recorded] == [_report("HDMI-A-1")]
 
-            # (3) A report from an Output with no row: its document follows the judge's wake.
+            # (3) A report from an Output with no row: its document follows the judge's wake, once
+            # the link settled (its reconcile after draining the session's birth), so no reconcile
+            # can carry it.
+            async def settled():
+                return len(reconciles) >= 2
+            await until(settled, SECONDS, "the link's reconcile after the session's birth")
+            reconciled = len(reconciles)
             display.state.put(output_report_key("HDMI-A-2"), _report("HDMI-A-2"))
             await until(lambda: held("HDMI-A-2"), 3, "output-HDMI-A-2 on the Node after its report")
+            assert len(reconciles) == reconciled   # the judge's wake carried it, not a reconcile
             assert not running.done()
         finally:
             stop.set()

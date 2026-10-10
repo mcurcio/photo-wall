@@ -29,7 +29,7 @@
 #  DDC/CI (it pulls i2c-tools, whose udev rule and postinst give the
 #  /dev/i2c-N nodes the i2c group), and v4l-utils carries cec-ctl for HDMI
 #  CEC. ddcutil needs the i2c-dev driver, which travels in the netboot initrd
-#  (the base's module tree is pruned and has no kmod binary) and which nothing
+#  (stage 1 hands the initrd's module tree over; the base has none of its own and no kmod binary) and which nothing
 #  loads by alias, so etc/modules-load.d/photo-wall-ddc.conf loads it at boot.
 #  No device-tree overlay: vc4-kms-v3d-pi5 already makes each HDMI port's DDC
 #  bus (i2c-13, i2c-14) and its CEC device.

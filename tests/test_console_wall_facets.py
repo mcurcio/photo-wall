@@ -61,7 +61,10 @@ const unplugged = health.frameHealth({ inventory: { ...snapshot.inventory,
 } }, "lobby");
 const pick = ({ state, severity, cause, label, tileLabel, tab }) =>
   ({ state, severity, cause, label, tileLabel, tab });
-out.health = [pick(calibrate), pick(unplugged)];
+const swapped = health.frameHealth({ inventory: { ...snapshot.inventory,
+  frames: snapshot.inventory.frames.map((frame) => ({ ...frame, readiness: "display-changed" })),
+} }, "lobby");
+out.health = [pick(calibrate), pick(unplugged), pick(swapped)];
 out.panelWording = factText(players.panelAtEnrollment({ connected: false }, null, null));
 console.log(JSON.stringify(out));
 """
@@ -107,6 +110,10 @@ def test_frame_health_says_calibration_and_keeps_the_panel_alarm_worded_as_a_rec
         {"state": "no-panel-at-enrollment", "severity": "alarm", "cause": "panel",
          "label": "No Panel listed as connected at the Player app's last enrollment (may be stale)",
          "tileLabel": "No Panel listed at the last enrollment", "tab": "hardware"},
+        # Another display on the Frame's port: the Hardware tab's card resolves it (confirm the
+        # Frame profile, then Position), so it is worded as such and opens Hardware (1b K1).
+        {"state": "display-changed", "severity": "todo", "cause": "display",
+         "label": "Display changed", "tileLabel": "Display changed", "tab": "hardware"},
     ]
     assert out["health"][1]["label"] == out["panelWording"]
 

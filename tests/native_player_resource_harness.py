@@ -16,6 +16,9 @@ NativeRenderer on software GL. Its JPEG fixture is made here with GStreamer.
    until the window is mapped again, not forever.
 4. a_failed_surface_presents_again_under_a_new_grant: a failure under grant G1 ends when the
    display host hands the Output a new grant G2.
+5. each_teardown_mechanism_holds_alone: case 1 stays green while either mechanism alone holds,
+   so each is checked by itself: connected callbacks hold their decoder weakly, and release
+   disconnects every handler the decoder made.
 """
 import gc
 import hashlib
@@ -26,6 +29,7 @@ import subprocess
 import sys
 import time
 import uuid
+import weakref
 
 sys.path[:0] = ["/repo", "/smoke"]
 RUNTIME = pathlib.Path("/tmp/pw-resource")
@@ -259,6 +263,39 @@ def a_failed_surface_presents_again_under_a_new_grant(native: NativeRenderer,
     print("PASS a_failed_surface_presents_again_under_a_new_grant", flush=True)
 
 
+def each_teardown_mechanism_holds_alone(native: NativeRenderer, variant: Variant) -> None:
+    """Case 1 holds only while both mechanisms fail together (either one alone breaks the
+    pipeline -> sink -> callback -> decoder -> pipeline cycle), so each is held here by itself:
+    (a) a decoder whose callbacks are still connected is not kept alive by them (they hold it
+    weakly); (b) release disconnects every handler the decoder made, on the element itself."""
+    run = uuid.uuid4().hex[:8]
+    local = slide(f"weak-{run}", variant).layers[0]
+    assert until(lambda: native.prepare(local).status, "prepared") == "prepared"
+    decoder = native._decoders.pop(local.layer.assignment_id)
+    owner = weakref.ref(decoder)
+    pipeline, bus, handlers, probes = decoder.pipeline, decoder.bus, list(decoder.handlers), list(decoder.probes)
+    del decoder
+    gc.collect()
+    held = owner() is not None
+    for instance, handler in handlers:      # this case's own teardown of the detached decoder
+        instance.disconnect(handler)
+    for pad, probe in probes:
+        pad.remove_probe(probe)
+    bus.remove_signal_watch()
+    pipeline.set_state(Gst.State.NULL)
+    assert not held, "a connected callback holds its decoder strongly"
+    print("PASS connected_callbacks_hold_their_decoder_weakly", flush=True)
+
+    local = slide(f"disconnect-{run}", variant).layers[0]
+    assert until(lambda: native.prepare(local).status, "prepared") == "prepared"
+    handlers = list(native._decoders[local.layer.assignment_id].handlers)
+    assert len(handlers) >= 3, handlers     # new-preroll, new-sample, the bus's message
+    native.release(local.layer.assignment_id)
+    connected = [handler for instance, handler in handlers if instance.handler_is_connected(handler)]
+    assert not connected, ("handlers_left_connected", connected)
+    print("PASS release_disconnects_every_handler", flush=True)
+
+
 def main() -> None:
     variant = jpeg_fixture()
     with WESTON_LOG.open("w") as log:
@@ -273,7 +310,7 @@ def main() -> None:
                     break
                 time.sleep(0.05)
             failed = []
-            for case in (decoder_churn_releases_every_descriptor,
+            for case in (decoder_churn_releases_every_descriptor, each_teardown_mechanism_holds_alone,
                          a_failed_surface_presents_again_after_a_remap,
                          a_failed_surface_presents_again_under_a_new_grant):
                 native = renderer()     # each case on its own surface: one red stays one red

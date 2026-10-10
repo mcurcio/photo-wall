@@ -51,7 +51,7 @@ class InForceView(Model):
     request_id: str
     reason: RequestReason
     power: Power
-    remaining_seconds: int | None                 # the Pi's own count
+    remaining_seconds: int | None                 # Central's count for its live console test, else the Pi's
 
 
 class PowerTestView(Model):
@@ -77,7 +77,7 @@ class FramePowerView(Model):
     result: PowerResult | None                    # set when status is answered
     in_force: InForceView | None                  # what the Pi says it is carrying out
     linked: bool | None                           # whether Central's hub holds the Pi's link now (presence)
-    last_heard_at: Instant | None                 # when Central last recorded anything from this Output's display
+    last_heard_at: Instant | None                 # while not linked: when Central's hub saw the link go (presence)
 
 
 class PowerTestRequest(Model):

@@ -47,8 +47,7 @@ from contracts.strict_json import loads_object
 SCHEMA_MAJOR: Final = 1                         # the display line's schema major (birth, envelope)
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
-# software end-to-end tier runs (player/output_discovery.py CONFIGURED_OUTPUT_IDS names the same
-# four; slice P1 points it here).
+# software end-to-end tier runs (player/output_discovery.py's `weston_ini` iterates these).
 OUTPUT_IDS: Final[tuple[str, ...]] = ("HDMI-A-1", "HDMI-A-2", "Virtual-1", "Virtual-2")
 
 OUTPUT_DOCUMENT_BYTES: Final = 4096             # an Output document's largest encoding

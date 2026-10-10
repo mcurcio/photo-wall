@@ -160,9 +160,47 @@ def test_the_power_tab_waits_for_the_report_on_the_change_carrying_the_test(regi
         answered = power()
         assert (answered["status"], answered["result"]) == ("answered", "did-not-answer")
         assert (answered["answers"], answered["method_in_use"]) == (["ddc-ci"], "ddc-ci")
-        assert answered["in_force"] == {"request_id": test_id, "reason": "console-test", "power": "off",
-                                        "remaining_seconds": 299}
-        assert answered["display_id"] is not None and answered["last_heard_at"] is not None
+        assert answered["in_force"]["request_id"] == test_id
+        assert (answered["in_force"]["reason"], answered["in_force"]["power"]) == ("console-test", "off")
+        assert answered["display_id"] is not None
+
+
+def test_the_power_tab_counts_down_on_centrals_clock_and_drops_an_ended_test(registry):
+    """The Pi reports only on a change, so its count stands still: the tab's count of the live test
+    is Central's (ends_at against Central's clock). Past ends_at the tab shows no test, even while the
+    last document still carries it (model.live_test, the one rule the projection also reads)."""
+    frame, _ = _bound_frame(registry)
+    _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        test_id = client.post(f"/v1/operator/frames/{frame}/power-tests", headers=AUTH,
+                              json={"power": "off"}).json()["request_id"]
+        _answer(registry, _projected(registry).change, PowerResult.CONFIRMED, InForce(test_id, 300))
+        _rows(registry, "UPDATE power_requests SET ends_at = EXTRACT(EPOCH FROM clock_timestamp()) + 90")
+        counted = client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
+        assert counted["status"] == "answered" and counted["test"]["request_id"] == test_id
+        assert counted["in_force"]["remaining_seconds"] in (89, 90)      # not the Pi's 300
+
+        _rows(registry, "UPDATE power_requests SET ends_at = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
+        ended = client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
+        assert (ended["status"], ended["test"], ended["result"]) == ("idle", None, None)
+
+
+def test_last_heard_is_when_centrals_hub_saw_the_pis_link_go(registry):
+    """Not the last report's time: the Pi puts a report only when it changes, hours apart on a quiet
+    display. While linked (or never seen by the hub) there is no last-heard time to show."""
+    frame, _ = _bound_frame(registry)
+    _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
+    device = device_id_for_serial(SERIAL)
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        def power() -> dict:
+            return client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
+
+        assert (power()["linked"], power()["last_heard_at"]) == (None, None)
+        _rows(registry, "INSERT INTO node_bus_presence(device_id, linked, changed_at) VALUES (%s, true, 5)", (device,))
+        assert (power()["linked"], power()["last_heard_at"]) == (True, None)
+        _rows(registry, "UPDATE node_bus_presence SET linked=false, changed_at=1791000123.5 WHERE device_id=%s",
+              (device,))
+        assert (power()["linked"], power()["last_heard_at"]) == (False, 1791000123.5)
 
 
 def test_each_command_wakes_the_worker_through_a_notification(registry):

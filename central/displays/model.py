@@ -2,8 +2,10 @@
 
 One home each for:
 - **Same display** (C1; design rule 1; owner q2, 2026-10-10). A serial counts only when it is
-  present and no other Output reports the same maker, product and serial at the same time (then
-  it is recorded as shared for that maker and product, for good). A display with a usable serial
+  present and no other Output reports the same maker, product and serial at the same time (an
+  Output of this Node, or of a Node Central's hub holds now; then it is recorded as shared for
+  that maker and product, for good, and every Output holding its serial-keyed Display is keyed
+  again without it, the bound Frame's Position following: not a display change). A display with a usable serial
   is keyed (maker, product, serial) across the wall: its settings follow it anywhere. A display
   with none is keyed (maker, product, Frame) of the Frame bound to the Output it is seen on: it
   stays the same Display through a Pi swap or a port change, and on another Frame it starts over.
@@ -27,6 +29,7 @@ One home each for:
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
@@ -207,6 +210,17 @@ def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocumen
             and any(request.request_id == str(test.request_id) for request in document.power)):
         return PowerStatus.ANSWERED
     return PowerStatus.WAITING
+
+
+def live_test(test: PowerTest | None, now: float) -> PowerTest | None:
+    """`test` while it is still on the stack at Central's `now`; None once it ended (or none)."""
+    return test if _live(test, now) else None
+
+
+def remaining_seconds(test: PowerTest, now: float) -> int:
+    """Whole seconds until `test` ends at Central's `now` (rounded up, never below 0): the Power
+    tab's count, on Central's clock only."""
+    return max(0, math.ceil(test.ends_at - now))
 
 
 def _live(test: PowerTest | None, now: float) -> TypeGuard[PowerTest]:

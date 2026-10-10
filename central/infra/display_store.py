@@ -60,9 +60,11 @@ from central.displays.model import (
     Sighting,
     adopts,
     display_key,
+    live_test,
     power_status,
     project_output,
     readiness,
+    remaining_seconds,
     serial_usable,
 )
 from central.displays.ports import DisplayRefused
@@ -175,22 +177,28 @@ def _modes_json(modes: tuple[DisplayMode, ...]) -> Jsonb:
 
 def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdentity,
                modes: tuple[DisplayMode, ...], *, before: DisplayIdentity | None, recorded: UUID | None,
-               now: float) -> UUID | None:
+               now: float, present: bool = True) -> UUID | None:
     """The Display `identity` is on this Output, by the model's rules: a serial another connected
-    Output reports at the same time is recorded shared (for good); pending (no key) keeps what was
-    recorded for the same identity and is None for a new one."""
+    Output reports at the same time is recorded shared (for good), and every Output already holding
+    that serial's Display is keyed again (`_rekey_shared`); pending (no key) keeps what was recorded
+    for the same identity and is None for a new one. "At the same time" counts only Outputs this
+    Node reports and those of a Node Central's hub holds now (presence): a dead or switched-off Pi
+    never says it was unplugged, so its last rows are not a sighting. `present` False (the identity
+    last recorded on a disconnected Output) is no sighting at all: it marks nothing shared."""
     sighting = Sighting(player_id, output_id, identity)
     others: tuple[Sighting, ...] = ()
-    if identity.serial is not None:
+    if identity.serial is not None and present:
         rows = conn.execute(
             "SELECT o.player_id, o.output_id, o.identity FROM output_displays o JOIN players p ON p.id=o.player_id "
-            "WHERE p.retired_at IS NULL AND o.connected AND o.identity->>'maker'=%s "
-            "AND (o.identity->>'product')::int=%s AND o.identity->>'serial'=%s",
-            (identity.maker, identity.product, identity.serial)).fetchall()
+            "LEFT JOIN node_bus_presence n ON n.device_id=p.device_id "
+            "WHERE p.retired_at IS NULL AND o.connected AND (o.player_id=%s OR n.linked) "
+            "AND o.identity->>'maker'=%s AND (o.identity->>'product')::int=%s AND o.identity->>'serial'=%s",
+            (player_id, identity.maker, identity.product, identity.serial)).fetchall()
         others = tuple(Sighting(row["player_id"], row["output_id"], _identity(row["identity"])) for row in rows)
         if not serial_usable(sighting, others, ()):   # reported elsewhere at once: never usable again
             conn.execute("INSERT INTO shared_serials(maker, product, serial, found_at) VALUES (%s, %s, %s, %s) "
                          "ON CONFLICT DO NOTHING", (identity.maker, identity.product, identity.serial, now))
+            _rekey_shared(conn, identity, now)
     shared = {(row["maker"], row["product"], row["serial"]) for row in conn.execute(
         "SELECT maker, product, serial FROM shared_serials WHERE maker=%s AND product=%s",
         (identity.maker, identity.product)).fetchall()}
@@ -201,6 +209,28 @@ def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdent
     if key is None:
         return recorded if identity == before else None
     return _display_for(conn, key, identity, modes, now)
+
+
+def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float) -> None:
+    """`identity`'s serial was just found shared: every Output that holds the Display keyed by it is
+    recognised again without the serial (tied to its bound Frame, or pending when unbound), and the
+    bound Frame's Position commit that named the serial's Display names the new one. The same
+    monitor on the same port is not a display change, whichever port reported first."""
+    rows = conn.execute(
+        "SELECT o.player_id, o.output_id, o.identity, o.display_id, o.report, b.frame_id FROM output_displays o "
+        "JOIN displays d ON d.id=o.display_id LEFT JOIN bindings b ON b.player_id=o.player_id "
+        "AND b.output_id=o.output_id WHERE d.maker=%s AND d.product=%s AND d.serial=%s FOR UPDATE OF o",
+        (identity.maker, identity.product, identity.serial)).fetchall()
+    for row in rows:
+        held = _identity(row["identity"]) or identity
+        key = display_key(held, serial_counts=False, bound_frame_id=row["frame_id"])
+        modes = tuple(DisplayMode(**mode) for mode in (row["report"] or {}).get("modes", ()))
+        display_id = None if key is None else _display_for(conn, key, held, modes, now)
+        conn.execute("UPDATE output_displays SET display_id=%s WHERE player_id=%s AND output_id=%s",
+                     (display_id, row["player_id"], row["output_id"]))
+        if display_id is not None:
+            conn.execute("UPDATE frames SET position_display_id=%s WHERE id=%s AND position_display_id=%s",
+                         (display_id, row["frame_id"], row["display_id"]))
 
 
 def _display_for(conn: Any, key: DisplayKey, identity: DisplayIdentity, modes: tuple[DisplayMode, ...],
@@ -243,18 +273,20 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
 
 
 def resolve_output(conn: Any, player_id: str, output_id: str) -> None:
-    """After a bind of this Output, in the binding's transaction: the identity recorded on it, when a
-    display is connected there, is recognised again under the new binding (a pending identity
-    resolves; a display tied to another Frame starts over on this one). Times are PostgreSQL's, as
-    the judge's."""
-    row = conn.execute("SELECT identity, display_id, report FROM output_displays WHERE player_id=%s "
-                       "AND output_id=%s AND connected FOR UPDATE", (player_id, output_id)).fetchone()
+    """After a bind of this Output, in the binding's transaction: the identity recorded on it is
+    recognised again under the new binding (a pending identity resolves; a display tied to another
+    Frame starts over on this one), whether or not it is connected now: a display switched off at
+    the bind is the same display when it comes back, so the Position commit made meanwhile names the
+    Display it will be seen as. A disconnected Output's identity is no sighting (it marks no serial
+    shared). Times are PostgreSQL's, as the judge's."""
+    row = conn.execute("SELECT identity, display_id, report, connected FROM output_displays WHERE player_id=%s "
+                       "AND output_id=%s FOR UPDATE", (player_id, output_id)).fetchone()
     identity = None if row is None else _identity(row["identity"])
     if identity is None:
         return
     modes = tuple(DisplayMode(**mode) for mode in row["report"].get("modes", ()))
     display_id = _recognise(conn, player_id, output_id, identity, modes, before=identity,
-                            recorded=row["display_id"], now=_CLOCK.now_in(conn))
+                            recorded=row["display_id"], now=_CLOCK.now_in(conn), present=row["connected"])
     conn.execute("UPDATE output_displays SET display_id=%s WHERE player_id=%s AND output_id=%s",
                  (display_id, player_id, output_id))
 
@@ -552,10 +584,11 @@ class PgDisplayQueries:
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             now = _CLOCK.now_in(conn)
-            linked = None if frame["device_id"] is None else (
-                bus_links_in(conn, (frame["device_id"],))[frame["device_id"]]["linked"])
+            presence = None if frame["device_id"] is None else (
+                bus_links_in(conn, (frame["device_id"],))[frame["device_id"]])
         test = _power_test(frame)
-        live = test if test is not None and now < test.ends_at else None
+        live = live_test(test, now)
+        linked = None if presence is None else presence["linked"]
         document = None if frame["document"] is None else decode_output_document(_json_bytes(frame["document"]))
         report = None if frame["report"] is None else decode_output_report(_json_bytes(frame["report"]))
         status = power_status(bound=frame["player_id"] is not None, test=test, document=document,
@@ -571,7 +604,11 @@ class PgDisplayQueries:
             test=None if live is None else PowerTestView(request_id=live.request_id, power=live.power,
                                                          for_seconds=live.for_seconds, ends_at=live.ends_at),
             result=report.result if status is PowerStatus.ANSWERED and report is not None else None,
-            in_force=_in_force_view(report, document), linked=linked, last_heard_at=frame["reported_at"])
+            in_force=_in_force_view(report, document, live, now), linked=linked,
+            # The link's presence row changed to unlinked when Central's hub last saw the Pi's leaf
+            # go: the last time Central heard it. A report time would be the last change the Pi
+            # put, hours old on a quiet display.
+            last_heard_at=presence["changed_at"] if linked is False else None)
 
 
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
@@ -579,15 +616,19 @@ def _json_bytes(value: Mapping[str, Any]) -> bytes:
     return json.dumps(value, ensure_ascii=False).encode()
 
 
-def _in_force_view(report: OutputReport | None, document: OutputDocument | None) -> InForceView | None:
+def _in_force_view(report: OutputReport | None, document: OutputDocument | None, live: PowerTest | None,
+                   now: float) -> InForceView | None:
     """The request the Pi says it carries out, named from the latest document's stack (None when the
-    Pi names none, or a request that document no longer holds)."""
+    Pi names none, or a request that document no longer holds). Its count is Central's for its live
+    console test (the Pi reports only on a change, so its own count would stand still), else the Pi's."""
     if report is None or report.in_force is None or document is None:
         return None
     for request in document.power:
         if request.request_id == report.in_force.request_id:
+            remaining = (remaining_seconds(live, now) if live is not None and str(live.request_id) == request.request_id
+                         else report.in_force.remaining_seconds)
             return InForceView(request_id=request.request_id, reason=request.reason, power=request.power,
-                               remaining_seconds=report.in_force.remaining_seconds)
+                               remaining_seconds=remaining)
     return None
 
 

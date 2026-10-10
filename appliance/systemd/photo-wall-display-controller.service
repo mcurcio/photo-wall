@@ -17,11 +17,11 @@ StartLimitBurst=10
 User=pw-display
 Group=pw-display
 # pw-node-feeds lets the controller chown its display feed socket (0660); video opens the CEC
-# devices (/dev/cecN, group video) for the power methods (1b D2). Never a sysusers membership,
-# which Weston's login session (and so the overlay client) would inherit. The DDC/CI devices
-# (/dev/i2c-N, group i2c) wait for the i2c group to exist on every root that runs this unit
-# (E-1B-D2-1): a missing group fails the unit at start.
-SupplementaryGroups=pw-node-feeds video
+# devices (/dev/cecN, group video) and i2c the DDC/CI devices (/dev/i2c-N, group i2c) for the
+# power methods (1b D2). Never a sysusers membership, which Weston's login session (and so the
+# overlay client) would inherit. The base's sysusers.d declares i2c (E-1B-D2-1), so every root
+# that installs this unit has the group: a missing one would fail the unit at start.
+SupplementaryGroups=pw-node-feeds video i2c
 LoadCredential=node-config:/run/photo-wall-node/display.json
 ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/display-controller --config=%d/node-config
 Restart=always

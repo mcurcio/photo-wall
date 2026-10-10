@@ -290,6 +290,35 @@ def test_a_failed_relaunch_is_paced_and_retried_once_the_unit_is_collected():
     assert driver.calls.count("start_simulated_process") == 3
 
 
+def test_a_start_that_fails_before_recording_a_launch_is_paced_too():
+    """A start can raise before it writes the new launch (a root image that fails to mount, a
+    selection mismatch): that failure is one more short exit, never a retry on every turn."""
+    class EarlyFailingDriver(RecordingAppDriver):
+        fail = False
+
+        def start(self, environment, operation_id):
+            if not self.fail:
+                return super().start(environment, operation_id)
+            self.calls.append("start_simulated_process")
+            raise OSError("root image did not mount")   # before any launch record
+    clock = Clock()
+    driver = EarlyFailingDriver(clock=clock)
+    broker = cold_broker(driver, clock)
+    driver.fail = True
+    run_for(driver, clock, 2_000)
+    attempts = []
+    for _ in range(100):   # 10 s of turns 100 ms apart
+        before = driver.calls.count("start_simulated_process")
+        broker.reconcile()
+        if driver.calls.count("start_simulated_process") > before:
+            attempts.append(clock.ms)
+        clock.ms += 100
+    assert attempts == [3_000, 8_000]   # 1 s after the exit, then 5 s after the failed start
+    driver.fail = False
+    wait_for_start(broker, driver, clock)
+    assert clock.ms == 8_000 + 30_000   # the second failure waits 30 s
+
+
 def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor():
     class LostDriver(RecordingAppDriver):
         def start(self, environment, operation_id):

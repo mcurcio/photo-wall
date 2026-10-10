@@ -92,7 +92,10 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
     ?.observation ?? null;
   const rotation = frame.calibration?.rotation ?? 0;
   const quarterTurn = frame.readiness === "ready" && (rotation === 90 || rotation === 270);
-  const mismatch = isBound(frame) && observation?.connected === true && usable(profile) && usable(observation) &&
+  // A changed display has its own card on this tab (frame-display.tsx), which confirms the profile
+  // from the new display's own modes: a second card from the enrollment record would contradict it.
+  const mismatch = frame.readiness !== "display-changed" && isBound(frame) && observation?.connected === true
+    && usable(profile) && usable(observation) &&
     (profile.width_px !== (quarterTurn ? observation.height_px : observation.width_px) ||
       profile.height_px !== (quarterTurn ? observation.width_px : observation.height_px));
 

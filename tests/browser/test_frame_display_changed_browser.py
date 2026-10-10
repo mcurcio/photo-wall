@@ -80,6 +80,9 @@ def test_a_changed_display_is_cleared_by_confirming_the_profile_then_checking_po
         expect(card.get_by_role("group", name="Step 1: Frame profile", exact=True)).to_contain_text("1920 × 1080")
         expect(card.get_by_role("group", name="Step 2: Position", exact=True)).to_be_visible()
         expect(card).not_to_contain_text(re.compile(r"Panel|Actuator|Display Host|calibration", re.IGNORECASE))
+        # One card: the Frame profile's enrollment-size check would contradict it (the enrollment
+        # said 1920 x 1080, the profile 1280 x 720), so it waits while the display is changed.
+        expect(frame.get_by_role("group", name="Check the Display", exact=True)).to_have_count(0)
 
         with page.expect_request(lambda request: request.url.endswith(f"/v1/operator/frames/{frame_id}/profile")
                                  and request.method == "PUT") as captured:

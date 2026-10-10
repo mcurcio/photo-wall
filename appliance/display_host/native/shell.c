@@ -976,6 +976,11 @@ static int lease_tick(void *data) {
         }
         if (o->trial_json[0] && boot_ms() >= o->trial_until) trial_end(o);
         if (o->revision_identity && now_ms() >= o->revision_until) revision_clear(o, true);
+        /* A forced-off output (signal off, `output_power`) presents nothing, so no presentation
+         * can renew the lease: it holds while the output is off and runs again from power on.
+         * The app's process is still checked. */
+        if (o->identity && o->weston && o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF)
+            o->lease_until = now_ms() + LEASE_MS;
         if (o->identity && (now_ms() >= o->lease_until || process_start(o->pid) != o->start_ticks))
             invalidate(o, "surface_lease_or_process_lost");
     }

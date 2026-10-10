@@ -170,8 +170,21 @@ def pace_relaunch(prior: RelaunchPacing | None, launch: Launch, *, display_chang
         exits = 1
     else:
         exits = (prior.exits if prior else 0) + 1
+    return _paced(launch.epoch, exits, now_ms)
+
+
+def pace_failed_start(paced: RelaunchPacing, launch: Launch, *, now_ms: int) -> RelaunchPacing:
+    """PURE. A relaunch whose start raised at `now_ms` counts as one more short exit, judged for
+    `launch` (the driver's launch after the failure: a new epoch when the start recorded one, the
+    same as `paced.epoch` when it raised before that), so the next try waits its backoff and that
+    launch's exit is not counted again."""
+    return _paced(launch.epoch, paced.exits + 1, now_ms)
+
+
+def _paced(epoch: int, exits: int, now_ms: int) -> RelaunchPacing:
+    """`exits` (>= 1) consecutive short exits, the last judged at `now_ms`."""
     wait = RELAUNCH_BACKOFF_MS[min(exits, len(RELAUNCH_BACKOFF_MS)) - 1]
-    return RelaunchPacing(launch.epoch, exits, now_ms + wait)
+    return RelaunchPacing(epoch, exits, now_ms + wait)
 
 
 def relaunch_absent(driver: AppProcessDriver, pacing: RelaunchPacingStore,
@@ -187,8 +200,9 @@ def relaunch_absent(driver: AppProcessDriver, pacing: RelaunchPacingStore,
     through `pacing` when it differs from `pacing.get()`); the old unit not yet collected, or
     `now_ms()` before `not_before_ms` -> None (the owner's next turn asks again); else `intent`
     runs, then `driver.start(environment, operation_id)`, whose identity must match
-    (ValueError("started_environment_mismatch")). A failed start raises; the owner records it,
-    and its next turn paces that launch's exit like any other.
+    (ValueError("started_environment_mismatch")). A failed start is paced as one more short exit
+    (`pace_failed_start`, stored before the error is raised again), whether or not it recorded a
+    launch first; the owner records the failure and asks again on a later turn.
     """
     display = driver.display_incarnation()
     if display is None:
@@ -205,7 +219,11 @@ def relaunch_absent(driver: AppProcessDriver, pacing: RelaunchPacingStore,
     if not driver.unit_collected() or now < paced.not_before_ms:
         return None
     intent()
-    running = driver.start(environment, operation_id)
+    try:
+        running = driver.start(environment, operation_id)
+    except Exception:
+        pacing.put(pace_failed_start(paced, driver.launched() or launch, now_ms=now))
+        raise
     if running.environment != environment or running.operation_id != operation_id:
         raise ValueError("started_environment_mismatch")
     return running

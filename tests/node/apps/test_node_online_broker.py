@@ -327,6 +327,38 @@ def test_a_fallback_follows_a_new_display_incarnation_and_a_failed_relaunch_is_r
     assert parse_app_effect_event(broker.record["pending"][-1].encode()).fault == "relaunch_outcome_unknown"
 
 
+def test_a_failed_switch_relaunch_is_retried_on_the_pacing_until_the_app_runs(setup):
+    """E-1B-18 on the switch path: after control, one failed restart is not the Frame's end. The
+    start is asked again on the cold start's pacing (a start that raised before recording a
+    launch counts as one more short exit), and the switch's phase comes back."""
+    broker, driver, command, _ = setup
+    broker.execute()
+    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
+                                             "progress": {"kind": "stopped"}})
+    driver.running, driver.display = None, "weston-2"
+    attempts = []
+
+    def failing(reference, operation_id):
+        attempts.append(broker.clock["ms"])
+        raise OSError("spawn failed")
+    driver.start = failing
+    for _ in range(50):   # 5 s of turns 100 ms apart, every start failing
+        broker.reconcile()
+        broker.clock["ms"] += 100
+    assert broker.record["phase"] == "effect_unknown"
+    assert attempts == [1000, 2000]   # at once (a new Weston), then after one short exit's 1 s
+    del driver.start
+    for _ in range(100):
+        broker.reconcile()
+        if driver.running is not None:
+            break
+        broker.clock["ms"] += 100
+    assert driver.starts == [command.target, command.target]
+    assert broker.clock["ms"] == 2000 + 5_000   # the second failure waited 5 s
+    assert broker.record["phase"] == "running" and "relaunch_of" not in broker.record
+    assert phases(broker)[-3:] == ["effect_unknown", "effect_unknown", "running"]
+
+
 def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):
     broker, driver, _, _ = setup
     driver.unknown_stop = True

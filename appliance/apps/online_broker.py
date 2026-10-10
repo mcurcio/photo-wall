@@ -239,11 +239,34 @@ class OnlineEffectBroker:
         else:
             self._event("effect_unknown", fault="fallback_exited_before_control")
 
+    def _relaunch(self, command: StageCommandV2, phase: str):
+        """The paced relaunch of the launch `phase` (running or fallback_running) names; a failed
+        start is reported and kept as `relaunch_of` for the next turn's retry."""
+        launched = command.target if phase == "running" else command.fallback
+        try:
+            return relaunch_absent(self.driver, self.pacing, launched, command.operation_id,
+                                   now_ms=self.now_ms)
+        except Exception:
+            self._event("effect_unknown", fault="relaunch_outcome_unknown")
+            self._save({**self.record, "relaunch_of": phase})
+            return None
+
     def reconcile(self) -> None:
         record = self.record
         if record is None or record["phase"] == "preparing":
             return
         command = parse_stage_command(record["command"].encode())
+        # A relaunch whose start failed (E-1B-18 on the switch path) is asked again on the cold
+        # start's pacing, never left for good: the phase it relaunched is kept beside the fault.
+        retry = record.get("relaunch_of") if record["phase"] == "effect_unknown" else None
+        if retry is not None:
+            running = self.driver.current()
+            if running is None:
+                running = self._relaunch(command, retry)
+            if running is not None:
+                self._event(retry, running=running)
+                self._save({key: value for key, value in self.record.items() if key != "relaunch_of"})
+            return
         if record["phase"] in ("running", "fallback_running"):
             if self.driver.current() is not None:
                 self._settle(record, command)
@@ -257,12 +280,7 @@ class OnlineEffectBroker:
                                              self.driver.display_incarnation())):
                 self._settle(record, command)
                 return
-            launched = command.target if record["phase"] == "running" else command.fallback
-            try:
-                relaunch_absent(self.driver, self.pacing, launched, command.operation_id,
-                                now_ms=self.now_ms)
-            except Exception:
-                self._event("effect_unknown", fault="relaunch_outcome_unknown")
+            self._relaunch(command, record["phase"])
             return
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
             request = stop_request_from(record["stop_request"])

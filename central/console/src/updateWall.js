@@ -81,7 +81,7 @@ const ENDED = new Set(["interrupted_by_reboot", "ended_by_later_boot"]);
 // A bound Output is live when its Frame's health is past every liveness and Output cause;
 // calibration is kept across a reboot, so a Frame that needed it before still does. Liveness
 // is not readiness: a current readiness failure is read separately (`readinessFailures`).
-const LIVE = new Set(["ok", "needs-calibration"]);
+const LIVE = new Set(["ok", "display-changed", "needs-calibration"]);
 // Rows that hold no reboot and need none: the rollout moves past them.
 const SETTLED = new Set(["rejoined", "skipped", "not_in_rollout"]);
 

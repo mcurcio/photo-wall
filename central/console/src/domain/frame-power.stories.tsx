@@ -66,6 +66,11 @@ export const NotSupported: Story = {
   args: { view: { ...IDLE, status: "answered", test: TEST, result: "not-supported", answers: [],
     method_in_use: null } },
 };
+/** Turn on through signal off: the Pi restarted its picture, nothing is claimed about the display. */
+export const SignalBackOn: Story = {
+  args: { view: { ...IDLE, status: "answered", test: { ...TEST, power: "on" }, result: "signal-stopped",
+    method_in_use: "signal-off", in_force: { ...OFF_IN_FORCE, power: "on" } } },
+};
 /** A method chosen by hand, saved. */
 export const MethodSaved: Story = {
   args: { settings: { ...DEFAULT_SETTINGS, power_method: "signal-off" },

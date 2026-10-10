@@ -33,9 +33,9 @@ export { isBound };
 /**
  * @typedef {"ok"|"todo"|"alarm"} Severity
  * @typedef {"unbound"|"awaiting-report"|"player-silent"|"output-interrupted"|
- *           "no-panel-at-enrollment"|"needs-calibration"|"ok"} FrameState
+ *           "no-panel-at-enrollment"|"display-changed"|"needs-calibration"|"ok"} FrameState
  * @typedef {import("./routes.js").Tab} Tab
- * @typedef {"liveness"|"binding"|"output"|"panel"|"calibration"} Cause
+ * @typedef {"liveness"|"binding"|"output"|"panel"|"display"|"calibration"} Cause
  * @typedef {{state: FrameState, severity: Severity, cause: Cause|null,
  *            label: string, tileLabel: string, settling: boolean,
  *            tab: Tab|null}} FrameHealth
@@ -45,8 +45,9 @@ export { isBound };
  * `cause` groups states by what must change: "liveness" (awaiting-report and
  * player-silent — the Player's reports are not reaching Central), "binding"
  * (unbound), "output" (output-interrupted — a node layer reported the bound Output
- * lost while its Run continues), "panel" (no-panel-at-enrollment), "calibration"
- * (needs-calibration); null when ok. `label` is the full fact with its age;
+ * lost while its Run continues), "panel" (no-panel-at-enrollment), "display"
+ * (display-changed: another display is on the Frame's port, resolved on the Hardware tab),
+ * "calibration" (needs-calibration); null when ok. `label` is the full fact with its age;
  * `tileLabel` is the same fact without the age, short enough for a plan tile.
  * `settling` marks an awaiting-report frame enrolled within the grace (two
  * report intervals): it is still never ok, but the attention strip does not
@@ -221,6 +222,9 @@ export function frameHealth(snapshot, frameId) {
       "hardware",
     );
   }
+  if (frame.readiness === "display-changed") {
+    return healthOf("display-changed", "todo", "display", DISPLAY_CHANGED, DISPLAY_CHANGED, "hardware");
+  }
   if (frame.readiness !== "ready") {
     return healthOf(
       "needs-calibration",
@@ -233,6 +237,13 @@ export function frameHealth(snapshot, frameId) {
   }
   return healthOf("ok", "ok", null, liveness.label, "Heard recently", null);
 }
+
+/**
+ * A Frame whose port shows another display than its Position was set against (readiness
+ * `display-changed`): a to-do the Hardware tab's card resolves (confirm the Frame profile, then
+ * Position), so it opens Hardware, not Position.
+ */
+export const DISPLAY_CHANGED = "Display changed";
 
 /**
  * The Panel record at the Player app's last enrollment when no Panel is listed as connected

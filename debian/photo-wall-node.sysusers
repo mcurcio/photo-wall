@@ -5,3 +5,4 @@ u pw-health 10006 "Photo Wall health judge" /nonexistent
 g pw-node-feeds 10007
 m pw-health pw-node-feeds
 u pw-bus 10008 "Photo Wall Node bus" /nonexistent
+g i2c -

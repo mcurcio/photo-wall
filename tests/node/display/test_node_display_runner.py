@@ -342,9 +342,14 @@ def test_the_controller_unit_reaches_the_cec_and_i2c_devices_and_nothing_else():
     assert "PrivateDevices=yes" not in lines
     assert {"DevicePolicy=closed", "DeviceAllow=char-cec rw", "DeviceAllow=char-i2c rw"} <= set(lines)
     (groups,) = [line for line in lines if line.startswith("SupplementaryGroups=")]
-    # video: /dev/cecN. i2c (/dev/i2c-N) joins once every root that runs the unit has the group
-    # (E-1B-D2-1); a group the root lacks fails the unit at start.
-    assert {"pw-node-feeds", "video"} <= set(groups.split("=", 1)[1].split())
+    # video: /dev/cecN (root:video 0660); i2c: /dev/i2c-N (root:i2c 0660, E-1B-D2-1). Without the
+    # group DeviceAllow=char-i2c opens nothing and DDC/CI never answers.
+    assert {"pw-node-feeds", "video", "i2c"} <= set(groups.split("=", 1)[1].split())
+    # A group the root lacks fails the unit at start (216/GROUP): the base declares every one the
+    # unit names beyond the distribution's own (video).
+    users = (REPO / "debian/photo-wall-node.sysusers").read_text().splitlines()
+    declared = {line.split()[1] for line in users if line.startswith(("g ", "u "))}
+    assert set(groups.split("=", 1)[1].split()) - {"video"} <= declared
 
 
 def test_power_reports_carry_what_the_output_reporter_saw():

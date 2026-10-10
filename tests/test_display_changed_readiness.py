@@ -15,9 +15,19 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from test_display_identity import ADMIN, AUTH, SERIAL_DISPLAY, _bind, _frame, _report, enroll_pi
+from test_display_identity import (
+    ADMIN,
+    AUTH,
+    NO_SERIAL,
+    SERIAL_DISPLAY,
+    _bind,
+    _frame,
+    _report,
+    enroll_pi,
+)
 
 from central.app import create_app
+from central.content_catalog.catalog import device_id_for_serial
 from central.displays.model import Readiness
 from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration
@@ -155,3 +165,95 @@ def test_a_frame_ready_before_073_is_ready_after_with_no_report(registry):
     assert _readiness(registry, ready) is Readiness.READY
     assert _readiness(registry, unfinished) is Readiness.POSITION_NEEDED
     assert _executing(registry, pi) == [ready]
+
+
+def _display_of(registry, player_id: str, output_id: str):
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT o.display_id, d.serial, d.frame_id FROM output_displays o LEFT JOIN displays d "
+                            "ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id=%s",
+                            (player_id, output_id)).fetchone()
+
+
+def _shared(registry) -> list:
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT serial FROM shared_serials").fetchall()
+
+
+def _presence(registry, serial: str, linked: bool) -> None:
+    """Central's hub holds (or lost) the Pi's link: its presence row, as the worker's look writes it."""
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO node_bus_presence(device_id, linked, changed_at) VALUES (%s, %s, 1) "
+                     "ON CONFLICT (device_id) DO UPDATE SET linked=EXCLUDED.linked",
+                     (device_id_for_serial(serial), linked))
+
+
+def _unbind(registry, frame_id: str) -> None:
+    registry.unbind(frame_id, expected_generation=_frame_row(registry, frame_id).generation)
+
+
+@pytest.mark.parametrize("commit_first", [False, True], ids=["both-seen-then-commit", "commit-then-second"])
+def test_two_monitors_sharing_one_serial_stay_ready_whichever_port_reported_first(registry, commit_first):
+    """Owner q2: two identical monitors, one constant serial. The port judged first got the
+    serial's Display; once the second shows the serial is shared, the first is keyed again at once,
+    its Frame's Position following, so a later blip is not a display change. Mutation probes: no
+    re-key when the serial becomes shared (the first port keeps the serial's Display); a re-key
+    that leaves the Position commit alone (commit-then-second reads display-changed)."""
+    pi = enroll_pi(registry, "pi-a")
+    left, right = _frame(registry, "left"), _frame(registry, "right")
+    _bind(registry, left, pi, "HDMI-A-1")
+    _bind(registry, right, pi, "HDMI-A-2")
+    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
+    if commit_first:
+        _commit_by_calibrate(registry, left, pi)
+    _report(registry, "pi-a", "HDMI-A-2", SERIAL_DISPLAY)
+    seen = _display_of(registry, pi, "HDMI-A-1")
+    assert (seen["serial"], seen["frame_id"]) == (None, left)
+    if commit_first:   # the commit made against the serial's Display follows the re-key
+        assert _readiness(registry, left) is Readiness.READY
+    for frame in (left, right):
+        _commit_by_calibrate(registry, frame, pi)
+    assert (_readiness(registry, left), _readiness(registry, right)) == (Readiness.READY, Readiness.READY)
+
+    _report(registry, "pi-a", "HDMI-A-1", None, connected=False)   # Test off: the monitor blips
+    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
+    assert (_readiness(registry, left), _readiness(registry, right)) == (Readiness.READY, Readiness.READY)
+    assert sorted(_executing(registry, pi)) == [left, right]
+
+
+def test_a_dead_pis_last_report_does_not_make_a_moved_displays_serial_shared(registry):
+    """A Pi that died or was switched off never reports the unplug: its rows still say connected. A
+    swap moves the display to Pi B, which must recognise the same Display (owner q2, R2). Mutation
+    probe: count every non-retired Pi's connected rows (the serial is marked shared for good)."""
+    pi_a, pi_b = enroll_pi(registry, "pi-a"), enroll_pi(registry, "pi-b")
+    frame = _frame(registry, "lobby")
+    _bind(registry, frame, pi_a, "HDMI-A-1")
+    _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
+    first = _display_of(registry, pi_a, "HDMI-A-1")["display_id"]
+    _presence(registry, "pi-a", False)                                # Pi A died: its link is gone
+
+    _bind(registry, _frame(registry, "spare"), pi_b, "HDMI-A-1")
+    _report(registry, "pi-b", "HDMI-A-1", SERIAL_DISPLAY)
+    assert _display_of(registry, pi_b, "HDMI-A-1")["display_id"] == first and _shared(registry) == []
+
+    # Positive control: while Pi A's link is held, the same serial on both is shared.
+    _presence(registry, "pi-a", True)
+    _report(registry, "pi-b", "HDMI-A-1", SERIAL_DISPLAY)
+    assert _shared(registry) == [{"serial": SERIAL_DISPLAY.serial}]
+
+
+def test_a_frame_bound_while_its_display_is_off_is_ready_when_it_comes_back(registry):
+    """A bind re-recognises the identity recorded on the port even while its display is off, so the
+    Position commit names the Display the same monitor is seen as when it returns. Mutation probe:
+    re-recognise only a connected port (the Frame reads display-changed when the display returns)."""
+    pi = enroll_pi(registry, "pi-a")
+    first, second = _frame(registry, "lobby"), _frame(registry, "hall")
+    _bind(registry, first, pi, "HDMI-A-1")
+    _report(registry, "pi-a", "HDMI-A-1", NO_SERIAL)
+    _report(registry, "pi-a", "HDMI-A-1", None, connected=False)   # switched off
+    _unbind(registry, first)
+    _bind(registry, second, pi, "HDMI-A-1")
+    assert _display_of(registry, pi, "HDMI-A-1")["frame_id"] == second
+    _commit_by_calibrate(registry, second, pi)
+
+    _report(registry, "pi-a", "HDMI-A-1", NO_SERIAL)                # switched on again
+    assert _readiness(registry, second) is Readiness.READY and _executing(registry, pi) == [second]

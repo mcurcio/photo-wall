@@ -56,7 +56,7 @@ const WAITING = "Waiting for the Pi";
 const METHOD_WORDS: Record<PowerMethod, string> = {
   "hdmi-cec": "HDMI-CEC",
   "ddc-ci": "DDC/CI",
-  "signal-off": "HDMI signal off (the panel sleeps)",
+  "signal-off": "HDMI signal off (the display may sleep)",
 };
 const METHOD_OPTIONS = [
   { value: BEST, label: "Best detected" },
@@ -66,10 +66,14 @@ export const DEFAULT_SETTINGS: PowerSettings = {
   power_method: null, switch_input_on_power_on: true, never_off_on_other_input: true,
 };
 
-const RESULT_WORDS: Record<Exclude<PowerResult, "confirmed" | "not-supported">, string> = {
-  "signal-stopped": "Picture stopped; the display may sleep",
+const RESULT_WORDS: Record<Exclude<PowerResult, "confirmed" | "not-supported" | "signal-stopped">, string> = {
   "did-not-answer": "Display didn't answer",
   "another-input": "Left on: the display is showing another input",
+};
+/** Signal off stops or restarts the Pi's own picture: nothing is claimed about the display. */
+const SIGNAL_WORDS: Record<Power, string> = {
+  off: "Picture stopped; the display may sleep",
+  on: "Picture back on",
 };
 
 /**
@@ -84,6 +88,7 @@ export function testWords(view: FramePowerView, sent: string | null): string | n
   if (view.status !== "answered" || view.test === null || view.result === null) return null;
   if (view.result === "confirmed") return `Display confirmed ${view.test.power}`;
   if (view.result === "not-supported") return null;
+  if (view.result === "signal-stopped") return SIGNAL_WORDS[view.test.power];
   return RESULT_WORDS[view.result];
 }
 
@@ -169,7 +174,7 @@ export function PowerPanel({ view, settings, saving, sent, sending, hardwareHref
           />
           <SettingRow
             kind="equipment" belongsTo="display" actsOn="display-hardware" label={other}
-            help="Someone may be watching something else on it."
+            help="Someone may be watching something else on it. When the display can't say which input it shows, the off goes ahead."
             defaultLabel="Default: On"
             onReset={settings.never_off_on_other_input ? undefined : () => change({ never_off_on_other_input: true }, other)}
             state={otherState.state} error={otherState.error}
@@ -177,6 +182,11 @@ export function PowerPanel({ view, settings, saving, sent, sending, hardwareHref
               onChange={(next) => change({ never_off_on_other_input: next }, other)} />}
           />
         </>
+      )}
+      {view.answers.length > 0 && (
+        <FactRow label="Answered the Pi's check" tone="reported">
+          {view.answers.map((answer) => METHOD_WORDS[answer]).join(", ")}
+        </FactRow>
       )}
       {view.method_in_use !== null && <FactRow label="In use" tone="reported">{METHOD_WORDS[view.method_in_use]}</FactRow>}
       {now !== null && <FactRow label="Now" tone="reported">{now}</FactRow>}
