@@ -1,0 +1,2 @@
+contracts/*.py usr/lib/photo-wall/common/contracts
+nodeapi/*.py usr/lib/photo-wall/common/nodeapi

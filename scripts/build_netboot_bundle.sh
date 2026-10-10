@@ -3,19 +3,21 @@
 #
 # Given a built rpi-image-gen base squashfs plus the kernel/initrd/DTBs from a
 # scratch Debian-trixie-arm64 root (linux-image-rpi-2712 + raspi-firmware +
-# initramfs-tools), this stages the FROZEN bundle layout, puts the boot data in
-# front of the cached initrd (scripts/build_boot_data.py: stage 1's computed
-# closure, the base's CA bundle and the clock floor; decision 0014 §5), writes
-# config.txt and a cmdline.txt template, computes a corruption-only SHA256SUMS
-# over every artifact, and content-verifies the initrd via
-# scripts/verify_netboot_initrd.py against the closure manifest.
+# initramfs-tools, and photo-wall-netboot-init, whose hook put stage 1 and the
+# CA bundle into that initrd; decision 0019 P4), this only assembles: it stages
+# the FROZEN bundle layout, puts the clock floor's one-file layer in front of the
+# cached initrd (R6: the floor changes per revision, so it never enters the
+# cache), writes config.txt and a cmdline.txt template, computes a
+# corruption-only SHA256SUMS over every artifact, and content-verifies the
+# initrd via scripts/verify_netboot_initrd.py against the base's CA bundle and
+# this revision's stage 1.
 #
 #   photo-wall-base-bundle/
 #     boot/
 #       config.txt              (firmware directives; kernel + initramfs + dtb)
 #       cmdline.txt             (TEMPLATE -- operator sets Central's root ONCE)
 #       kernel_2712.img         (rpi-2712 kernel the Pi 5 SPI-EEPROM bootloader fetches)
-#       initrd.img              (boot data, then the cached mkinitramfs output)
+#       initrd.img              (the floor's layer, then the cached mkinitramfs output)
 #       bcm2712-rpi-5-b.dtb     (Pi 5 device tree)
 #       overlays/*.dtbo         (optional device-tree overlays)
 #       pieeprom.upd            (bootloader self-update: BOOT_ORDER=0xf21, BOOT_WATCHDOG_TIMEOUT=120)
@@ -26,28 +28,27 @@
 # This is deliberately a portable shell script, NOT part of appliance/build.py:
 # build.py and the old signed pipeline are slated for p4-retire, and this
 # assembly must survive that deletion (owner: portable packages). It shells out
-# only to coreutils, git, unsquashfs and the repo's own stdlib build scripts;
-# no image-build tool glue leaks into it.
+# only to coreutils, git, cpio, unsquashfs and the repo's own stdlib build
+# scripts; no image-build tool glue leaks into it.
 set -eu
 
 usage() {
     cat >&2 <<'EOF'
 usage: build_netboot_bundle.sh --kernel FILE --initrd FILE --dtb FILE \
            --squashfs FILE --eeprom-image FILE --output DIR --verify SCRIPT \
-           --repo DIR --python-libdir DIR [options]
+           --repo DIR [options]
 
 required:
   --kernel FILE       rpi-2712 kernel image (staged as boot/kernel_2712.img)
-  --initrd FILE       cached mkinitramfs output (boot/initrd.img is the boot
-                      data followed by these bytes unchanged)
+  --initrd FILE       cached mkinitramfs output (boot/initrd.img is the floor's
+                      layer followed by these bytes unchanged)
   --dtb FILE          Pi 5 device tree       (staged as boot/bcm2712-rpi-5-b.dtb)
   --squashfs FILE     rpi-image-gen base squashfs (staged as photo-wall-base.squashfs)
   --eeprom-image FILE packaged rpi-eeprom bootloader image (source for pieeprom.upd/.sig)
   --output DIR        bundle output directory (created; must be empty/absent)
   --verify SCRIPT     path to verify_netboot_initrd.py (run against boot/initrd.img)
-  --repo DIR          the checked-out revision: stage 1's closure and the clock
-                      floor (its HEAD commit time) come from here
-  --python-libdir DIR the initrd interpreter's stdlib dir (e.g. /usr/lib/python3.13)
+  --repo DIR          the checked-out revision: the clock floor (its HEAD commit
+                      time) and the stage 1 the verify requires come from here
 
 optional:
   --overlays-dir DIR  directory of *.dtbo overlays (staged under boot/overlays/)
@@ -57,9 +58,7 @@ optional:
                       local dev with the real rpi-eeprom package installed; CI passes the
                       pinned scratch-root's own copy, never the runner's, which has none)
   --rpi-eeprom-digest FILE  the packaged rpi-eeprom-digest to run (default: PATH lookup)
-  --build-boot-data SCRIPT  path to scripts/build_boot_data.py (default: alongside this script)
-  --snapshot-epoch N  the Debian snapshot pin; build_boot_data.py warns past 90 days
-  --base-abi-file FILE  ABI extracted from this squashfs by the build; binds schema-2 releases
+  --snapshot-epoch N  the Debian snapshot pin; warns when it is over 90 days old
   --skip-verify       skip the lsinitramfs content-verify (local dev only;
                       lsinitramfs is unavailable off an initramfs-tools host)
 EOF
@@ -79,10 +78,7 @@ EEPROM_UPDATE=""
 RPI_EEPROM_CONFIG=""
 RPI_EEPROM_DIGEST=""
 REPO=""
-PYTHON_LIBDIR=""
-BUILD_BOOT_DATA=""
 SNAPSHOT_EPOCH=""
-BASE_ABI_FILE=""
 SKIP_VERIFY=0
 
 while [ "$#" -gt 0 ]; do
@@ -100,10 +96,7 @@ while [ "$#" -gt 0 ]; do
         --rpi-eeprom-config) RPI_EEPROM_CONFIG="$2"; shift 2 ;;
         --rpi-eeprom-digest) RPI_EEPROM_DIGEST="$2"; shift 2 ;;
         --repo) REPO="$2"; shift 2 ;;
-        --python-libdir) PYTHON_LIBDIR="$2"; shift 2 ;;
-        --build-boot-data) BUILD_BOOT_DATA="$2"; shift 2 ;;
         --snapshot-epoch) SNAPSHOT_EPOCH="$2"; shift 2 ;;
-        --base-abi-file) BASE_ABI_FILE="$2"; shift 2 ;;
         --skip-verify) SKIP_VERIFY=1; shift ;;
         -h|--help) usage ;;
         *) echo "build_netboot_bundle: unknown argument: $1" >&2; usage ;;
@@ -113,13 +106,10 @@ done
 if [ -z "$EEPROM_UPDATE" ]; then
     EEPROM_UPDATE="$(dirname -- "$0")/eeprom_update.py"
 fi
-if [ -z "$BUILD_BOOT_DATA" ]; then
-    BUILD_BOOT_DATA="$(dirname -- "$0")/build_boot_data.py"
-fi
 
 for pair in "kernel:$KERNEL" "initrd:$INITRD" "dtb:$DTB" "squashfs:$SQUASHFS" \
             "eeprom-image:$EEPROM_IMAGE" "output:$OUTPUT" "verify:$VERIFY" \
-            "repo:$REPO" "python-libdir:$PYTHON_LIBDIR"; do
+            "repo:$REPO"; do
     name=${pair%%:*}
     value=${pair#*:}
     if [ -z "$value" ]; then
@@ -151,10 +141,6 @@ if [ -n "$RPI_EEPROM_CONFIG" ] && [ ! -f "$RPI_EEPROM_CONFIG" ]; then
 fi
 if [ -n "$RPI_EEPROM_DIGEST" ] && [ ! -f "$RPI_EEPROM_DIGEST" ]; then
     echo "build_netboot_bundle: --rpi-eeprom-digest file not found: $RPI_EEPROM_DIGEST" >&2
-    exit 1
-fi
-if [ ! -f "$BUILD_BOOT_DATA" ]; then
-    echo "build_netboot_bundle: --build-boot-data script not found: $BUILD_BOOT_DATA" >&2
     exit 1
 fi
 
@@ -197,18 +183,30 @@ echo "build_netboot_bundle: staged $overlay_count device-tree overlay(s)"
 # bundle root, NOT under the TFTP-served boot/ directory (transport split).
 cp -- "$SQUASHFS" "$OUTPUT/photo-wall-base.squashfs"
 
-# boot/initrd.img: the boot data in front of the cached initrd (decision 0014
-# §5). The CA bundle is the BUILT BASE's, byte for byte (R5: the same list);
-# the floor is this revision's commit time, never SOURCE_DATE_EPOCH (a
-# hand-bumped snapshot pin). build_boot_data.py computes and stages stage 1's
-# closure, refuses a future floor or a bundle with no certificate, and writes
-# the manifest the verifier below reads.
-unsquashfs -cat "$SQUASHFS" etc/ssl/certs/ca-certificates.crt > "$work/ca-certificates.crt"
+# boot/initrd.img: the clock floor's layer in front of the cached initrd
+# (Debian's early-microcode layout, which the kernel and lsinitramfs read). The
+# floor is this revision's commit time (R6), never SOURCE_DATE_EPOCH (a
+# hand-bumped snapshot pin); a floor past now + 5 min would reject every genuine
+# NTP answer. The layer is one uncompressed newc archive with an entry for every
+# parent directory, each before its children (the kernel's unpacker creates no
+# missing parent), owned by root.
+now=$(date +%s)
 floor=$(git -C "$REPO" log -1 --format=%ct)
-"$PYTHON" "$BUILD_BOOT_DATA" --repo "$REPO" --cached-initrd "$INITRD" \
-    --python-libdir "$PYTHON_LIBDIR" --ca-bundle "$work/ca-certificates.crt" \
-    --floor "$floor" --out "$boot_dir/initrd.img" --manifest "$work/closure-manifest.json" \
-    ${SNAPSHOT_EPOCH:+--snapshot-epoch "$SNAPSHOT_EPOCH"}
+if [ "$floor" -le 0 ] || [ "$floor" -gt $((now + 300)) ]; then
+    echo "build_netboot_bundle: floor $floor is not in (0, now + 300s]" >&2
+    exit 1
+fi
+if [ -n "$SNAPSHOT_EPOCH" ] && [ $(((now - SNAPSHOT_EPOCH) / 86400)) -gt 90 ]; then
+    echo "::warning::the Debian snapshot pin is over 90 days old: the initrd's CA list is" \
+         "that old; bump the pin"
+fi
+layer="$work/layer"
+mkdir -p "$layer/usr/lib/photo-wall"
+printf '%s\n' "$floor" > "$layer/usr/lib/photo-wall/clock-floor"
+( cd "$layer" && printf '%s\n' usr usr/lib usr/lib/photo-wall usr/lib/photo-wall/clock-floor \
+    | cpio --quiet -o -H newc -R 0:0 ) > "$work/floor.cpio"
+cat "$work/floor.cpio" "$INITRD" > "$boot_dir/initrd.img"
+echo "build_netboot_bundle: initrd.img is the floor $floor, then the cached initrd"
 
 # config.txt: Pi 5 uses the SPI-EEPROM bootloader and needs NO start*.elf /
 # fixup*.dat (those are Pi 4 and earlier). config.txt is MANDATORY on Pi 5 --
@@ -299,17 +297,6 @@ EOF
 
 # Corruption-only SHA256SUMS over every staged artifact (incl. the squashfs).
 # Paths are relative to the bundle root so the file is position-independent.
-if [ -n "$BASE_ABI_FILE" ]; then
-    [ -f "$BASE_ABI_FILE" ] || { echo "base ABI file missing" >&2; exit 1; }
-    ( cd "$REPO" && "$PYTHON" -c '
-import hashlib, pathlib, sys
-from contracts.release import base_abi_sidecar
-abi_file, squashfs, output = map(pathlib.Path, sys.argv[1:])
-abi = abi_file.read_text(encoding="ascii").strip()
-digest = hashlib.file_digest(squashfs.open("rb"), "sha256").hexdigest()
-output.write_bytes(base_abi_sidecar(abi, digest))
-' "$BASE_ABI_FILE" "$OUTPUT/photo-wall-base.squashfs" "$OUTPUT/base-abi.json" )
-fi
 (
     cd "$OUTPUT"
     find . -type f ! -name SHA256SUMS -print0 \
@@ -322,8 +309,12 @@ echo "build_netboot_bundle: wrote SHA256SUMS ($(wc -l < "$OUTPUT/SHA256SUMS") en
 if [ "$SKIP_VERIFY" -eq 1 ]; then
     echo "build_netboot_bundle: --skip-verify set; NOT running verify_netboot_initrd"
 else
+    # The verify compares the initrd's CA bundle with the BUILT BASE's, byte for
+    # byte (R5: one list, from one pin).
+    unsquashfs -cat "$SQUASHFS" etc/ssl/certs/ca-certificates.crt > "$work/ca-certificates.crt"
     echo "build_netboot_bundle: verifying $boot_dir/initrd.img"
-    "$PYTHON" "$VERIFY" "$boot_dir/initrd.img" --manifest "$work/closure-manifest.json"
+    "$PYTHON" "$VERIFY" "$boot_dir/initrd.img" --ca-bundle "$work/ca-certificates.crt" \
+        --repo "$REPO"
 fi
 
 echo "build_netboot_bundle: bundle assembled at $OUTPUT"

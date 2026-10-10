@@ -3,9 +3,9 @@ Deferrals "Presence for the console"; 0017 Open item "Presence", leaf state only
 
 S2's bed with one enrolled Node: `FleetHub` writes the hub's configuration, a real nats-server hub
 starts from it, and the Node is a real bus on the shipped configuration whose leaf dials the hub.
-Central's read is `FleetService.status()` with an injected read clock, and its `bus_link` is rendered
-by the console's own `busLinkFact` (facts.js, under Node); the Hardware pages' source, the fleet
-host read, serves the same value (erratum E-CDS-FIX-10). 1: the leaf links: linked, the look recent,
+Central's read is the fleet host read (the Hardware pages' one source, erratum E-CDS-FIX-10) with an
+injected read clock, and its `bus_link` is rendered by the console's own `busLinkFact` (facts.js,
+under Node). 1: the leaf links: linked, the look recent,
 the fact derived "linked". 2: the Node bus crashes: not linked with a later changed_at; it restarts:
 linked again. 3: FleetHub stops: a read 31 s after its last look renders unknown.
 """
@@ -26,7 +26,6 @@ from central.fleet.node_bus_accounts import HubListeners
 from central.fleet.node_bus_hub import HUB_LOOK_SECONDS, PRESENCE_STALE_SECONDS, FleetHub
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
-from central.fleet.service import FleetService
 from central.infra.node_link_store import PgWallMarks
 from nodeapi.buffers import KeyTable
 
@@ -91,7 +90,6 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
     fleet = FleetHub(database, hub.client_url, config_path, listeners, WALL_TABLE,
                      PgWallMarks(database, _WallDocuments()), [])
     clock = _ReadClock()
-    service = FleetService(database, clock)
     hosts = NodeObservations(NodeSessions(database, clock, NodeControlConfig("presence-test")))
 
     def hardware_read() -> dict:
@@ -101,9 +99,8 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
         return {"read_at": document["read_at"], "bus_link": device["bus_link"]}
 
     async def read() -> tuple[float, dict]:
-        status = await asyncio.to_thread(service.status)
-        [device] = [device for device in status["devices"] if device["device_id"] == DEVICE]
-        return status["read_at"], device["bus_link"]
+        page = await asyncio.to_thread(hardware_read)
+        return page["read_at"], page["bus_link"]
 
     def link_is(linked: bool, after: float | None = None):
         async def check():

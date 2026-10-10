@@ -101,7 +101,7 @@ class Fleet:
         if request.method == "GET" and tail == "":
             return self._json(route, {"device_id": device, "device_generation": 3, "read_at": 1_759_363_300,
                                       "sessions": self._sessions(box), "reboot_commands": box["commands"],
-                                      "boot_claims": [], "deprecated_boot": None, "display_outputs": []})
+                                      "boot_claims": [], "display_outputs": []})
         if request.method == "GET" and tail == "app-attempts":
             return self._json(route, {"device_id": device, "generation": 3, "read_at": 1_759_363_300,
                                       "operations": box["operations"], "qualification": {

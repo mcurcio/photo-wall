@@ -26,7 +26,7 @@ SHA_C = "c" * 64
 SHA_T1 = "1" * 64
 SHA_T2 = "2" * 64
 SHA_S1 = "5" * 64
-KEY = AssetKey(AssetKind.PLAYER_DEB, SHA_A)
+KEY = AssetKey(AssetKind.SEALED_ENVIRONMENT, SHA_A)
 MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
 
 
@@ -97,7 +97,7 @@ def test_retire_of_the_last_reference_keeps_the_row_and_its_facts(repo):
     assert repo.get(KEY) is None  # no reference: not an asset
     assert repo.count("assets") == 1 and repo.count("asset_references") == 0
     repo.retire(KEY, "v1.1.0")  # absent reference -> no-op
-    repo.retire(AssetKey(AssetKind.PLAYER_DEB, SHA_B), "v1.1.0")  # absent asset -> no-op
+    repo.retire(AssetKey(AssetKind.SEALED_ENVIRONMENT, SHA_B), "v1.1.0")  # absent asset -> no-op
     # A new reference revives the key with the facts it always had (never cleared).
     assert repo.reference(KEY, ref("v1.2.0")) is True
     assert repo.get(KEY).produced == facts
@@ -232,14 +232,7 @@ def test_021_backfill_seeds_references_and_produced_facts(pre_021):
         assert repo.get(AssetKey(AssetKind.OS_IMAGE, "v1.1.0")).produced is None
         assert repo.get(AssetKey(AssetKind.OS_IMAGE, "v2.0.0")) is None  # no reference, no facts
 
-        shared = repo.get(AssetKey(AssetKind.PLAYER_DEB, SHA_A))
-        assert [r.owner for r in shared.references] == ["v1.1.0", "v1.0.0"]
-        assert shared.references[1] == AssetReference(
-            "v1.0.0", OriginLocator("https://gh.test/v1.0.0/a.deb", SHA_A, 10),
-            expected_size=10, expected_sha256=SHA_A)
-        assert shared.produced == AssetReady(size=10, sha256=SHA_A)
-        assert repo.get(AssetKey(AssetKind.PLAYER_DEB, SHA_B)).produced is None
-        assert repo.get(AssetKey(AssetKind.PLAYER_DEB, SHA_C)) is None
+        # The `.deb` half (two player-deb assets, three references) has no kind to read today.
         assert repo.count("assets") == 4
         assert repo.count("asset_references") == 5
     finally:

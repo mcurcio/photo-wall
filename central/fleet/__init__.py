@@ -1,1 +1,1 @@
-"""Central-owned fleet policy, boot offers, and observational status."""
+"""Central-owned fleet control: node boot offers, sessions and commands, and observational status."""

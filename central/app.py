@@ -8,7 +8,6 @@ import logging
 import mimetypes
 import os
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -20,7 +19,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
 from central import cache_layout
-from central.content_catalog.catalog import CatalogError
 from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
@@ -31,7 +29,6 @@ from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.rollout_gate import ServingImageVerifier
-from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.mdns_advertise import MdnsCentralAdvertiser
@@ -45,7 +42,6 @@ from central.media_ports import (
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.netboot_base import record_base_health
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
@@ -63,7 +59,6 @@ from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
-    BaseHealth,
     Calibration,
     Identifier,
     Model,
@@ -78,8 +73,6 @@ from media.models import SourcePreviewQuery, SourceSpec
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
-# CatalogError kinds -> HTTP status; the body is always {"error": code}.
-CATALOG_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
 
 class Challenge(Model):
@@ -132,10 +125,6 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
     scene: Scene
 
 
-class DevicePin(Model):
-    # The tag to pin a device to (0012 bead 7). Bounded here; the catalog checks
-    # the tag's shape (422) and that the release and the device exist (404).
-    tag: str = Field(min_length=1, max_length=128)
 
 
 def create_app(
@@ -393,10 +382,6 @@ def create_app(
             "scene_ids": exc.scene_ids,
         }, status_code=409)
 
-    @app.exception_handler(CatalogError)
-    async def catalog_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=CATALOG_ERROR_STATUS[exc.kind])
-
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         # Do not reflect request bodies, private keys, token strings, or upstream fields.
@@ -555,29 +540,6 @@ def create_app(
             raise RegistryError("stale_authority", 403)
         return {"accepted": coordinator.readiness(identity["id"], request)}
 
-    @app.post("/v1/player/base-health")
-    def base_health(request: BaseHealth, identity: dict = Depends(player)):
-        # Authenticated by the enrolled-device token (the `player` dependency),
-        # but -- unlike readiness -- requires NO live plan offer (0012 r7), so an
-        # enrolled-but-unbound, base-booted device can move the latest-verified
-        # frontier. Join player_id -> players.device_id -> devices, then advance
-        # known-good only for a genuinely healthy, monotonic report whose
-        # running_tag equals the tag Central recorded as last-served (E1: the
-        # write is a single conditional UPDATE under FOR UPDATE, so a concurrent
-        # recovery serve that moved the served tag invalidates a stale write).
-        if request.authority_epoch != identity["authority_epoch"]:
-            raise RegistryError("stale_authority", 403)
-        with db.transaction() as conn:
-            row = conn.execute(
-                "SELECT device_id FROM players WHERE id=%s", (identity["id"],)
-            ).fetchone()
-            accepted = (
-                record_base_health(conn, row["device_id"], request, clock=clock)
-                if row is not None
-                else False
-            )
-        return {"accepted": accepted}
-
     @app.post("/v1/player/observations")
     def observation(request: Observation, identity: dict = Depends(player)):
         if request.authority_epoch != identity["authority_epoch"]:
@@ -657,49 +619,12 @@ def create_app(
             raise RegistryError("content_unavailable", 503)
         return content
 
-    @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
-    async def list_releases():
-        # Discovered releases, semver DESC, each flagged deployable/promoted/has_os_image, and
-        # promoted_by ("auto" | "operator", null unless promoted).
-        return [asdict(view) for view in await _content().catalog.releases_view()]
-
-    @app.post("/v1/operator/app/releases/{tag}/promote", dependencies=[Depends(admin)])
-    async def promote_release(tag: str):
-        # Records the promoted tag and publishes its `.deb` fetch in one transaction
-        # (unknown tag -> 404, no `.deb` -> 409). The manifest never waits on the
-        # bytes: the package route reads them through the cache.
-        await _content().catalog.promote(tag)
-        return {"status": "promoted"}
-
     @app.post("/v1/operator/app/releases/refresh", dependencies=[Depends(admin)])
     async def refresh_releases():
         # Publishes SyncReleases now (merged with a pending tick) so a newly-cut
         # release appears without waiting for the next cadence.
         await _content().catalog.refresh()
         return JSONResponse({"status": "polling"}, status_code=202)
-
-    @app.put("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
-    async def pin_device(device_id: Identifier, request: DevicePin):
-        # Operator pin (0012 bead 7): sets `devices.attached_tag`, which the catalog
-        # resolves as the only candidate (a pinned device never gets a substitute),
-        # and publishes the tag's OS-image and `.deb` fetches in the same
-        # transaction, so a recovery pin comes up on the device's NEXT netboot.
-        # Unknown release or device -> 404 with no write.
-        await _content().catalog.pin(device_id, request.tag)
-        return {"status": "pinned"}
-
-    @app.delete("/v1/operator/devices/{device_id}/pin", dependencies=[Depends(admin)])
-    async def unpin_device(device_id: Identifier):
-        # Clear the pin: the device falls back to the unpinned precedence.
-        await _content().catalog.unpin(device_id)
-        return {"status": "cleared"}
-
-    @app.get("/v1/operator/netboot", dependencies=[Depends(admin)])
-    async def netboot_status():
-        # Read-only operator view: the live frontier and every active device's
-        # netboot state (pin, known-good, last served, boot outcome, fence).
-        view = await _content().catalog.netboot_view()
-        return {"frontier": view.frontier, "devices": [asdict(row) for row in view.devices]}
 
     @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
     def create_frame(frame: FrameCreate):
@@ -892,7 +817,6 @@ def create_app(
     mount_library_routes(app, admin=admin, media=media_application, content=content)
     if content is not None:
         mount_content_routes(app, content)
-    mount_fleet_routes(app, db=db, clock=clock, admin=admin, content=content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       serving_verifier=node_serving_verifier, content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)

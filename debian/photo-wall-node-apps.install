@@ -1,0 +1,2 @@
+appliance/apps/*.py usr/lib/photo-wall/node-apps/appliance/apps
+appliance/process_identity.py usr/lib/photo-wall/node-apps/appliance

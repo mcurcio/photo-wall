@@ -14,10 +14,8 @@ from pathlib import Path
 import pytest
 
 from contracts.release import IMAGES
-from scripts import build_node_base_deb as node_base_deb
-from scripts import build_node_manager_deb as node_manager_deb
 from scripts import release_plan
-from scripts.module_closure import POLICIES, closure_for, first_party_packages
+from scripts.module_closure import first_party_packages
 from scripts.release_plan import (
     ALWAYS_JOBS,
     BUILD_JOBS,
@@ -47,6 +45,7 @@ from scripts.release_plan import (
     refuse_a_taken_tag,
 )
 from scripts.release_seal import RELEASE_BRANCH
+from scripts.verify_netboot_initrd import stage1_files
 
 REPO = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO / ".github/workflows"
@@ -125,7 +124,7 @@ def test_a_package_change_with_fix_releases_a_patch(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.8.1", "PATCH", "commitizen")
     assert plan.since == "v0.8.0"
-    assert {"player-deb", "bootstrapper-deb", "base-bundle", "central-image"} <= set(plan.packages)
+    assert {"node-debs", "release-roots", "central-image"} <= set(plan.packages)
     assert set(RELEASE_JOBS) <= set(ReleaseRun(plan).jobs)
 
 
@@ -135,25 +134,17 @@ def test_feat_releases_a_minor(scratch):
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
     assert plan.packages == ("central-image", "media-worker-image")
-    # The composition root mounts the packaged OS-agent's v2 route and the node routes, so it
-    # runs the netboot tracer and the node scenarios; a pull request still needs no base-image
-    # rebuild.
-    assert plan.suites == ("checks", "e2e", "netboot-e2e", "node-pid1")
-    assert PullRequestRun(plan).jobs == ("checks", "e2e", "netboot-e2e", "node-pid1")
+    # The composition root mounts the node routes, so it runs the node scenarios; a pull request
+    # still needs no base-image rebuild.
+    assert plan.suites == ("checks", "e2e", "node-pid1")
+    assert PullRequestRun(plan).jobs == ("checks", "e2e", "node-pid1")
     assert "base-image" in ReleaseRun(plan).jobs
 
 
 @needs_uvx
-@pytest.mark.parametrize("path", ("central/db.py", "Dockerfile", "uv.lock"))
-def test_packaged_os_agent_gate_runs_for_central_database_and_image_inputs(scratch, path):
-    scratch.commit("fix(central): preserve check-in startup", {path: "changed\n"})
-    assert "netboot-e2e" in scratch.plan().suites
-
-
-@needs_uvx
-def test_resident_agent_probe_change_runs_the_built_base_gate(scratch):
-    scratch.commit("fix(base): keep OS reports through package failure",
-                   {"scripts/os_agent_service_probe.py": "PROBE = 1\n"})
+def test_a_base_check_change_runs_the_built_base_gate(scratch):
+    scratch.commit("fix(base): refuse a stray unit",
+                   {"scripts/device_root_checks.py": "CHECK = 1\n"})
     plan = scratch.plan()
     assert "base-bundle" in plan.packages
     assert "base-image" in plan.suites
@@ -224,9 +215,9 @@ def test_the_real_history_releases_0_9_0(scratch):
     scratch.commit("feat(netboot): every boot stage reaches the configured Central (0014, #28)")
     plan = scratch.plan()
     assert (plan.tag, plan.increment, plan.source) == ("v0.9.0", "MINOR", "commitizen")
-    assert {"base-bundle", "bootstrapper-deb", "player-deb"} <= set(plan.packages)
+    assert {"base-bundle", "node-debs"} <= set(plan.packages)
     assert "release-assets" not in plan.packages          # pipeline.yml is not a release input
-    assert {"base-image", "netboot-e2e"} <= set(plan.suites)
+    assert "base-image" in plan.suites
 
 
 @needs_uvx
@@ -267,18 +258,18 @@ def test_pr_mode_plans_the_merge_ref_and_reports_what_merging_releases(scratch, 
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     values = scratch.main("pr", "--base", base, "--head", head, output=output)
     # The report: what merging releases.
-    assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, player-deb, "
-            "player-environment, player-payload, bootstrapper-deb, base-bundle, increment: MINOR (commitizen), from commits: 2 "
+    assert ("merging releases v0.9.0 (packages: central-image, media-worker-image, node-debs, "
+            "release-roots, increment: MINOR (commitizen), from commits: 2 "
             "since v0.8.0)") in summary.read_text()
     assert "::notice title=Release plan::merging releases v0.9.0" in capsys.readouterr().out
     # The action: this run tests the merge ref and releases nothing.
     assert values["revision"] == scratch.git("rev-parse", "HEAD")
     assert (values["should_release"], values["tag"], values["version"], values["since"]) == (
         "false", "", "", "")
-    # The Player is the sealed environment the node scenarios boot.
-    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "netboot-e2e",
-                                          "node-pid1"]
-    assert "Jobs: base-image, checks, e2e, netboot-e2e, node-pid1\n" in summary.read_text()
+    # The Player is a binary package of the one source package the base build installs from,
+    # and the app root the node scenarios boot.
+    assert json.loads(values["jobs"]) == ["base-image", "checks", "e2e", "node-pid1"]
+    assert "Jobs: base-image, checks, e2e, node-pid1\n" in summary.read_text()
 
 
 @needs_uvx
@@ -465,7 +456,6 @@ def test_how_a_release_is_written_is_unshipped_and_what_it_contains_is_release_a
         assert claimed_by(path) == () and any(matches(pattern, path) for pattern in NOT_SHIPPED)
     assert _package("release-assets").paths == ("scripts/package_release_artifacts.py",
                                                 "contracts/release.py",
-                                                "contracts/player_payload.py",
                                                 "contracts/node_release.py",
                                                 "scripts/node_release_artifacts.py")
     assert "release-assets" in claimed_by("contracts/release.py")
@@ -482,7 +472,7 @@ def _needs(jobs, **results):
 
 def test_the_gate_passes_when_every_listed_job_succeeded_and_the_rest_skipped():
     assert gate(_needs(["checks", "e2e"], checks="success", e2e="success", tested="success",
-                       **{"base-image": "skipped", "netboot-e2e": "skipped",
+                       **{"base-image": "skipped", "node-pid1": "skipped",
                           "seal": "skipped"})) == []
 
 
@@ -575,28 +565,33 @@ def test_no_path_is_both_shipped_and_declared_unshipped():
     assert [path for path in _tracked() if claimed_by(path) and _not_shipped(path)] == []
 
 
-@pytest.mark.parametrize("policy, packages", [("initrd", ["base-bundle"]),
-                                              ("bootstrapper", ["bootstrapper-deb",
-                                                                "base-bundle"]),
-                                              ("player", ["player-deb"])])
-def test_every_computed_closure_file_is_claimed_by_its_package(policy, packages):
-    files = [path.as_posix() for path in closure_for(POLICIES[policy]).files]
-    assert files
-    for name in packages:
-        package = next(package for package in PACKAGES if package.name == name)
-        assert [path for path in files if not package.claims(path)] == [], name
+def test_every_file_stage_1_reaches_is_claimed_by_the_node_debs_and_the_base_bundle():
+    """Stage 1 ships in photo-wall-netboot-init and the packages on its path (node-debs), and the
+    base bundle's initrd carries it."""
+    files = stage1_files(REPO)
+    assert "appliance/netboot_init.py" in files
+    for name in ("node-debs", "base-bundle"):
+        assert [path for path in files if not _package(name).claims(path)] == [], name
 
 
-@pytest.mark.parametrize("policies, package", [((node_manager_deb.POLICY,), "node-manager-deb"),
-                                               (tuple(node_base_deb.POLICIES.values()),
-                                                "node-base-deb")])
-def test_every_node_deb_closure_file_is_claimed_by_its_package(policies, package):
-    """The node .debs stage their import closures (uplink included), so each closure file is an
-    input of the package: a change to it releases that .deb."""
-    claimer = next(each for each in PACKAGES if each.name == package)
-    files = [path.as_posix() for policy in policies for path in closure_for(policy).files]
+def test_every_tree_file_a_debian_install_file_names_is_claimed_by_the_node_debs():
+    """dh_install falls back to the source tree for a path debian/tmp lacks: each such file
+    ships in a binary package of the one source package, so a change to it releases node-debs."""
+    tracked = _tracked()
+    sources = [line.split()[0] for install in sorted((REPO / "debian").glob("*.install"))
+               for line in install.read_text().splitlines() if line.strip()]
+    files = [path for source in sources for path in tracked
+             if matches(source, path) or matches(f"{source}/**", path)]
     assert files
-    assert [path for path in files if not claimer.claims(path)] == []
+    assert [path for path in files if not _package("node-debs").claims(path)] == []
+
+
+def test_every_first_party_file_the_import_check_imports_is_claimed_by_the_node_debs():
+    """debian/rules runs scripts/import_check.py inside the build: it and what it imports decide
+    whether the packages build."""
+    files = _with_imports({"scripts/import_check.py"})
+    assert {"scripts/import_check.py", "scripts/module_closure.py"} <= files
+    assert [path for path in files if not _package("node-debs").claims(path)] == []
 
 
 def _covered(source: str, tracked: list[str]) -> list[str]:
@@ -793,18 +788,10 @@ def _job(workflow: str, job: str) -> str:
                     flags=re.MULTILINE)[0]
 
 
-@pytest.mark.parametrize("builder, package", [("scripts/build_player_deb.py", "player-deb"),
-                                              ("scripts/build_bootstrapper_deb.py",
-                                               "bootstrapper-deb")])
-def test_each_deb_builder_and_what_it_imports_is_claimed_by_its_deb(builder, package):
-    assert [path for path in _with_imports({builder}) if not _package(package).claims(path)] == []
-
-
 def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     base = _with_imports(_scripts_named((WORKFLOWS / "base-image.yml").read_text()))
     assert "scripts/build_netboot_bundle.sh" in base and "scripts/eeprom_update.py" in base
-    assert [path for path in base if not (_package("base-bundle").claims(path)
-                                         or _package("player-payload").claims(path))] == []
+    assert [path for path in base if not _package("base-bundle").claims(path)] == []
     # The seal and the plan it imports decide whether and how a release is written; they shape
     # no artefact byte. The packager does, and ships as release-assets.
     seal = {path for path in _with_imports(_scripts_named(_job("pipeline.yml", "seal")))
@@ -814,11 +801,19 @@ def test_every_script_a_release_build_runs_is_claimed_by_what_it_builds():
     assert _package("release-assets").claims("scripts/package_release_artifacts.py")
     service = _with_imports(_scripts_named((WORKFLOWS / "service-base.yml").read_text()))
     assert service and all(_package("media-worker-image").claims(path) for path in service)
-    # The node components base-image.yml bakes and the seal ships are node-components.yml's.
+    # The node components base-image.yml bakes and the seal ships are node-components.yml's:
+    # the release roots (built, sealed and keyed there) and the writer, release-roots' inputs.
     components = _job("node-components.yml", "build")
-    assert ".venv/bin/python -m scripts.build_node_components" in components
-    assert [path for path in _with_imports({"scripts/build_node_components.py"})
-            if not _package("base-bundle").claims(path)] == []
+    assert "debian-packaging/build-root.sh" in components
+    assert ".venv/bin/python -m scripts.node_release_writer write" in components
+    roots = _with_imports({"scripts/seal_root.py", "scripts/node_release_writer.py"})
+    assert [path for path in roots if not _package("release-roots").claims(path)] == []
+    # Stage 1's uplink on the device runtime runs in the debs job (decision 0014 §11), on the
+    # tree photo-wall-netboot-init's hook copies (tests/debs/test_netboot_init.py).
+    debs = _job("node-components.yml", "debs")
+    assert "tests/debs/test_netboot_init.py" in debs
+    assert "scripts/uplink_device_harness.py" in (REPO / "tests/debs/test_netboot_init.py").read_text()
+    assert _package("node-debs").claims("scripts/uplink_device_harness.py")
 
 
 def _harness(suite: Suite) -> list[str]:
@@ -839,17 +834,15 @@ def test_a_suite_is_due_for_every_file_its_harness_imports(suite):
             if suite.job not in due_suites(release_plan.changed_packages([path]), [path])] == []
 
 
-def test_base_cache_and_content_check_include_base_owned_player_contract():
+def test_the_base_cache_and_content_check_carry_no_v1_lane():
     workflow = (WORKFLOWS / "base-image.yml").read_text()
     key = next(line for line in workflow.splitlines() if "key: squashfs-" in line)
-    for path in ("appliance/systemd/photo-wall-os-agent.service",
-                 "appliance/systemd/player.service",
-                 "appliance/systemd/weston.service",
-                 "appliance/systemd/weston.ini", "player/output_discovery.py"):
+    for path in ("appliance/rpi_image_gen/**", "debian-packaging/snapshot.list",
+                 "scripts/device_root_checks.py"):
         assert path in key
-    for path in ("$bootstrapper_dir/os-agent.py", "$bootstrapper_dir/player-launch.py",
-                 "$bootstrapper_dir/base-abi.txt", "$bootstrapper_dir/weston.ini"):
-        assert path in workflow
+    for word in ("bootstrapper", "player.service", "weston", "os-agent", "payload"):
+        assert word not in key, word
+    assert "--base-os; then" in workflow
     assert "forbid_substring 'squashfs-root/usr/lib/photo-wall-player/'" in workflow
 
 
@@ -1052,8 +1045,11 @@ def test_the_pipeline_is_the_one_workflow_that_triggers_on_pull_requests_and_mai
             triggers = workflow.read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
             assert "pull_request" not in triggers and "push:" not in triggers, workflow.name
             assert "paths:" not in triggers, workflow.name
-    for name in ("checks.yml", "software-e2e.yml"):
-        assert "\non:\n  workflow_call:\n\n" in (WORKFLOWS / name).read_text(), name
+    # Called only: checks.yml takes nothing, software-e2e.yml the plan's revision (the node
+    # component set its Player runs from).
+    assert "\non:\n  workflow_call:\n\n" in (WORKFLOWS / "checks.yml").read_text()
+    e2e = (WORKFLOWS / "software-e2e.yml").read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
+    assert re.fullmatch(r"  workflow_call:\n    inputs:\n      revision:\n(        .*\n?)+", e2e), e2e
 
 
 def test_nothing_releases_by_hand():

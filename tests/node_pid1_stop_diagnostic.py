@@ -1,5 +1,6 @@
 """Opt-in fixture wrapper: preserve original stop result; log bounded failed samples."""
 
+import ast
 import collections
 import json
 import os
@@ -7,9 +8,11 @@ import sys
 import threading
 from pathlib import Path
 
-sys.path.insert(0, "/usr/lib/photo-wall-app-broker")
-from appliance.apps import process_linux
-from appliance.apps.broker_runner import main
+sys.path[:0] = next(ast.literal_eval(node.value) for node in ast.parse(Path(
+    "/usr/lib/photo-wall/node/app-broker/__main__.py").read_text()).body
+    if isinstance(node, ast.AnnAssign) and node.target.id == "PATH")  # its launcher's PATH
+from appliance.apps import process_linux  # noqa: E402
+from appliance.apps.broker_runner import main  # noqa: E402
 
 local = threading.local()
 original_show = process_linux.systemctl_show

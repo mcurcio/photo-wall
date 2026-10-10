@@ -1,15 +1,14 @@
 name: rpi-image-gen base OS build
 
 # 0009 Phase 4 (see docs/decisions/0009-minimal-base-and-app-package.md,
-# "base-OS" + "Bootstrapper" sections): builds the minimal netboot base OS
-# squashfs with raspberrypi/rpi-image-gen, plus the Player and bootstrapper
-# `.deb`s and the assembled netboot base bundle. The old custom-image /
-# signed-disk pipeline (appliance.yml) was retired in p4-retire s5; this is now
-# the sole base-OS + package build.
+# "base-OS" section): builds the minimal netboot base OS squashfs with
+# raspberrypi/rpi-image-gen and the assembled netboot base bundle. The old
+# custom-image / signed-disk pipeline (appliance.yml) was retired in p4-retire
+# s5; this is now the sole base-OS build.
 #
 # pipeline.yml calls it (its `base-image` job) for the plan's exact revision:
 # on a pull request or push when scripts/release_plan.py finds the base bundle
-# or a .deb changed -- the one package manifest that decides what builds, what
+# or a node package changed -- the one package manifest that decides what builds, what
 # is tested and what releases -- and on every release, whose assets it builds.
 # Every artifact is named by that revision so the publish job consumes it by
 # name. Nothing here is signed (home LAN, no threat model), so this call takes
@@ -17,7 +16,8 @@ name: rpi-image-gen base OS build
 #
 # The V2 node components are built once per run by node-components.yml (the
 # pipeline's `node-components` job; this workflow's own `components` job when
-# dispatched) and downloaded here: the squashfs bakes their two .debs.
+# dispatched) and downloaded here: the squashfs installs photo-wall-node from
+# the same run's local repo, and its installed ABI must be the components'.
 # A pull request uploads no release artifact (only the seal, on main, reads
 # them); its failure diagnostics are still kept.
 on:
@@ -42,8 +42,8 @@ defaults:
 # Human-bumpable cache epoch. The two expensive base-OS stages (the
 # rpi-image-gen squashfs and the scratch kernel+initrd) are content-addressed
 # and cached below, keyed by a hash of each stage's TRUE input closure. Every
-# Debian package either stage installs comes from the declaration's snapshot
-# pin (scripts/debian_packages.py, in both keys); only the Raspberry Pi archive
+# Debian package either stage installs comes from the snapshot pin
+# (debian-packaging/snapshot.list, in both keys); only the Raspberry Pi archive
 # is unpinned (it has no snapshot service), so the scratch kernel stage's
 # linux-image-rpi-2712 + raspi-firmware + rpi-eeprom are the one input no key
 # can hash. Bump this integer to force BOTH caches to miss and fully rebuild
@@ -81,106 +81,38 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
 
-      # The Debian declaration (scripts/debian_packages.py) is the one place a
-      # package list or mirror is written; the runner's system python3 runs it
-      # (stdlib only). Its snapshot pin, as DEBIAN_SNAPSHOT_EPOCH, is the fixed
-      # instant the .deb mtimes and the CA-age reference are pinned to, given
-      # to each step as SOURCE_DATE_EPOCH. The initrd's CA list is the base's,
-      # so it is as old as this pin: the bundle assembly warns (never fails)
-      # once it is over 90 days old (decision 0014, Q3 = A). DEVICE_PACKAGES is
-      # the device set (the base OS's own, the bootstrapper's and the Player's
-      # packages, scripts/debian_packages.py DEVICE_CONSUMERS): the
-      # rpi-image-gen layer installs it and the base check requires it.
-      # DEBIAN_SOURCES is the pin's apt sources, one signed-by line each: the
+      # The snapshot pin (debian-packaging/snapshot.list, decision 0019 rule 1).
+      # Its instant, as DEBIAN_SNAPSHOT_EPOCH (debian-packaging/snapshot-epoch.sh),
+      # is the fixed instant the CA-age reference is pinned to, given to each
+      # step as SOURCE_DATE_EPOCH. The initrd's CA list is the base's, so it is
+      # as old as this pin: the bundle assembly warns (never fails) once it is
+      # over 90 days old (decision 0014, Q3 = A). DEBIAN_SOURCES is the pin's apt
+      # sources, its lines without the comments, one signed-by line each: the
       # base is built from them and keeps them (layer/photo-wall-debian.yaml),
       # so the base's mirror is the pin by construction, not by an environment
       # variable rpi-image-gen would clear.
-      - name: Read the Debian pin, the device set and the sources from the declaration
+      - name: Read the Debian pin and its sources from snapshot.list
         run: |
           set -eu
-          epoch=$(python3 scripts/debian_packages.py epoch)
+          epoch=$(sh debian-packaging/snapshot-epoch.sh)
           echo "DEBIAN_SNAPSHOT_EPOCH=$epoch" >> "$GITHUB_ENV"
-          device_packages="$RUNNER_TEMP/device.list"
-          python3 scripts/debian_packages.py packages base-os bootstrapper player > "$device_packages"
-          echo "DEVICE_PACKAGES=$device_packages" >> "$GITHUB_ENV"
           debian_sources="$RUNNER_TEMP/photo-wall-debian.list"
-          python3 scripts/debian_packages.py sources > "$debian_sources"
+          grep -v '^#' debian-packaging/snapshot.list > "$debian_sources"
           echo "DEBIAN_SOURCES=$debian_sources" >> "$GITHUB_ENV"
-          echo "DEBIAN_SNAPSHOT_EPOCH=$epoch; device set:"
-          cat "$device_packages"
-          echo "base apt sources:"
+          echo "DEBIAN_SNAPSHOT_EPOCH=$epoch; base apt sources:"
           cat "$debian_sources"
 
-      # ALL our own code ships to the base build as a portable `.deb`, never
-      # a raw-file overlay this tool owns (see
-      # scripts/build_bootstrapper_deb.py's module docstring). Pure Python,
-      # no arm64 chroot needed, so this runs directly on the runner before
-      # rpi-image-gen is even cloned.
       # Install uv via pipx (isolated env) rather than actions/setup-python
       # (`python: 'false'`): setup-python prepends its own python3 to PATH for
       # the whole job, which would shadow the system python3 that rpi-image-gen's
       # install_deps.sh provisions `yaml` (and its other deps) into, breaking
       # `bin/ig`. pipx keeps the system python3 intact for the rpi-image-gen build
-      # below; the .deb build uses uv's own .venv explicitly.
+      # below; the checks use uv's own .venv explicitly.
       - uses: ./.github/actions/python-uv
         with:
           python: 'false'
       - name: Sync the locked environment
         run: uv sync --frozen
-
-      - name: Build the photo-wall-bootstrapper .deb
-        id: bootstrapper-deb
-        env:
-          # Make the .deb bytes reproducible: dpkg-deb (>= 1.18.11, well below
-          # trixie's) clamps its members' mtimes to SOURCE_DATE_EPOCH instead of
-          # embedding build-time mtimes. Same fixed instant the squashfs build
-          # below pins, so the two agree. run_dpkg_deb inherits this env (its
-          # subprocess.run sets no env=), so no build-script change is needed.
-          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
-        run: |
-          set -eu
-          install -d -m 0755 "$RUNNER_TEMP/photo-wall-bootstrapper-deb"
-          # The builder may print progress before the final .deb path; capture
-          # all of it, then take only the last line (the path) for the output —
-          # a multiline value would corrupt $GITHUB_OUTPUT.
-          build_out=$(.venv/bin/python -m scripts.build_bootstrapper_deb \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --output-dir "$RUNNER_TEMP/photo-wall-bootstrapper-deb")
-          printf '%s\n' "$build_out"
-          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
-          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
-
-      # The Player .deb ships no venv and declares its runtime deps as Depends
-      # (the declaration's player list), so it builds on any host with
-      # dpkg-deb (pure staging, like the bootstrapper .deb) -- no OS-base
-      # chroot. The base carries those Depends (the device set): the base
-      # check below requires every one of them installed in the built image.
-      - name: Build the photo-wall-player .deb
-        id: player-deb
-        env:
-          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
-        run: |
-          set -eu
-          install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-deb"
-          build_out=$(.venv/bin/python -m scripts.build_player_deb \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --output-dir "$RUNNER_TEMP/photo-wall-player-deb")
-          printf '%s\n' "$build_out"
-          deb_path=$(printf '%s\n' "$build_out" | tail -n1)
-          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
-
-      - name: Build the data-only Player payload
-        id: player-payload
-        env:
-          SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
-        run: |
-          set -eu
-          install -d -m 0755 "$RUNNER_TEMP/photo-wall-player-payload"
-          payload_path=$(.venv/bin/python -m scripts.build_player_payload \
-            --repository "$GITHUB_WORKSPACE" --revision "$REVISION" \
-            --source-date-epoch "$SOURCE_DATE_EPOCH" \
-            --output-dir "$RUNNER_TEMP/photo-wall-player-payload")
-          echo "payload_path=$payload_path" >> "$GITHUB_OUTPUT"
 
       # The exact set node-components.yml built for this revision, the one the seal ships.
       - name: Download the immutable V2 node components
@@ -189,45 +121,60 @@ jobs:
           name: photo-wall-node-components-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-node-components
 
-      # Cache A's node input: the two node .debs the squashfs bakes, named by what builds them
-      # rather than by bytes a build might not repeat. node-base.deb is pure staging under the
-      # pin's SOURCE_DATE_EPOCH, so its bytes are its inputs; node-display.deb is compiled, so
-      # it is named by the inputs its builder records (inputs_sha256 in build-provenance.json).
-      # A stale hit cannot pass silently: the node ABI check below requires the cached
-      # squashfs's installed ABI to equal these components'.
-      - name: Compute the node component input digest
-        id: node-components
-        run: |
-          set -eu
-          components="$RUNNER_TEMP/photo-wall-node-components"
-          base=$(sha256sum < "$components/node-base.deb" | cut -d' ' -f1)
-          display=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["native"]["inputs_sha256"])' \
-            "$components/build-provenance.json")
-          digest=$(printf 'node-base.deb %s\nnode-display inputs %s\n' "$base" "$display" \
-            | sha256sum | cut -d' ' -f1)
-          echo "inputs_digest=$digest" >> "$GITHUB_OUTPUT"
+      # The local repo the base installs photo-wall-node from, by name, with every context it pins
+      # at its exact version and nats-server at its pin (layer/photo-wall-device.yaml).
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ env.REVISION }}
+          path: ${{ runner.temp }}/photo-wall-node-debs
 
-      # The bootstrapper's computed closure digest (scripts/module_closure.py,
-      # the code the .deb ships): Cache A's code input, instead of a hand-kept
-      # file list that could fall behind the closure.
-      - name: Compute the bootstrapper closure digest
-        id: bootstrapper-closure
+      # Cache A's node input: the Package=Version lines of every package the local repo gives
+      # photo-wall-node, itself included, following each Depends name the repo's index holds
+      # (the contexts, python3-nats, nats-server). Each Photo Wall version is a hash of what the
+      # package installs (debian/content-versions), nats-server's is its pin, and python3-nats
+      # is built from debian-packaging/python-nats/ (in the key below), so the lines name the
+      # bytes the squashfs installs; the OS packages the layers name come from the pin and the
+      # recipe, also in the key. A stale hit cannot pass silently: the node ABI check below
+      # requires the cached squashfs's installed ABI to equal these components'.
+      - name: Compute the base's package set from the local repo
+        id: node-packages
         run: |
           set -eu
-          digest=$(python3 scripts/module_closure.py --policy bootstrapper --digest)
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          python3 - "$RUNNER_TEMP/photo-wall-node-debs/Packages" > "$RUNNER_TEMP/base-node-packages" <<'PYCODE'
+          import re, sys
+          index = {}
+          for stanza in open(sys.argv[1]).read().split("\n\n"):
+              fields = dict(line.split(": ", 1) for line in stanza.splitlines() if ": " in line)
+              if "Package" in fields:
+                  index[fields["Package"]] = fields
+          seen, todo = set(), ["photo-wall-node"]
+          while todo:
+              name = todo.pop()
+              if name in seen or name not in index:
+                  continue
+              seen.add(name)
+              todo += re.findall(r"(?:^|[,|])\s*([a-z0-9][a-z0-9+.-]*)", index[name].get("Depends", ""))
+          if "photo-wall-node" not in seen:
+              raise SystemExit("the local repo holds no photo-wall-node")
+          for name in sorted(seen):
+              print(f"{name}={index[name]['Version']}")
+          PYCODE
+          cat "$RUNNER_TEMP/base-node-packages"
+          echo "digest=$(sha256sum < "$RUNNER_TEMP/base-node-packages" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # Host tools used by the UNGATED content-verify + bundle-assembly steps
-      # (squashfs `unsquashfs`, initrd `lsinitramfs`). Installed here, out of
+      # (squashfs `unsquashfs`; cpio for the floor's layer and the mount probe;
+      # zstd to read the initrd mkinitramfs compressed). Installed here, out of
       # the two expensive build steps, so those verifications still run on a
       # CACHE HIT (when the build steps that used to install these are skipped).
       # Idempotent: the build steps below still install their own build-time
       # tooling on a miss.
-      - name: Install host tools for content verification (unsquashfs, lsinitramfs)
+      - name: Install host tools for content verification (unsquashfs, cpio, zstd)
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends squashfs-tools initramfs-tools
+          sudo apt-get install -y --no-install-recommends squashfs-tools cpio zstd
 
       # Pinned by exact commit, not just the tag, for reproducibility --
       # v2.8.0 is raspberrypi/rpi-image-gen's latest release (2026-08-13) at
@@ -254,7 +201,7 @@ jobs:
           sudo ./install_deps.sh
 
       # The base's Debian package set comes from DEBIAN_SOURCES (the
-      # declaration's pin, rendered above) through our own
+      # pin's sources, copied above) through our own
       # layer/photo-wall-debian.yaml, so it is reproducible rather than
       # "whatever the snapshot service has right now". SOURCE_DATE_EPOCH does
       # NOT choose that mirror: rpi-image-gen runs its layer pipeline under
@@ -263,17 +210,15 @@ jobs:
       # built image keeps the pinned sources; the content check below asserts
       # they are exactly the pin.
       # Cache A: the rpi-image-gen squashfs build (~20 min) is content-addressed
-      # on its TRUE input closure -- the rpi-image-gen tree, the declaration
-      # (the pin and the device set the base installs), the bootstrapper .deb
-      # (BAKED into the squashfs: its computed closure's digest, its unit and
-      # its builders, which also generate its __main__.py and Depends), the
-      # node component input digest (above), the pyproject version, and this
-      # workflow. Deliberately EXACT match only (no
-      # restore-keys): a prefix-fallback could restore a stale base built from
-      # different inputs -- exactly the poisoning risk. The Player's code is NOT
-      # in this closure because it is NOT baked into the base (it ships as the
-      # Player .deb, served by reference), so a Player-code-only change HITS
-      # this cache; its Debian packages are, through the declaration.
+      # on its TRUE input closure -- the rpi-image-gen tree (its layers name the
+      # base's OS packages), the pin, the base's package set from the local repo
+      # (above: every Photo Wall package it installs at its content version), the
+      # checker, and this workflow.
+      # Deliberately EXACT match only (no restore-keys): a prefix-fallback could
+      # restore a stale base built from different inputs -- exactly the
+      # poisoning risk. The Player's code is NOT in this closure because it is
+      # NOT baked into the base (it ships in the app root), so a Player-code-only
+      # change HITS this cache.
       - name: Cache the rpi-image-gen base squashfs
         id: cache-squashfs
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -281,24 +226,21 @@ jobs:
           path: |
             ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base
             ${{ runner.temp }}/photo-wall-base-work/deploy-*
-          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'scripts/debian_packages.py', 'appliance/systemd/photo-wall-provision.service', 'appliance/systemd/photo-wall-os-agent.service', 'appliance/systemd/player.service', 'appliance/systemd/weston.service', 'appliance/systemd/weston.ini', 'player/output_discovery.py', 'scripts/build_bootstrapper_deb.py', 'scripts/build_player_deb.py', 'scripts/build_player.py', 'scripts/module_closure.py', 'scripts/device_root_checks.py', 'pyproject.toml', '.github/workflows/base-image.yml') }}-${{ steps.bootstrapper-closure.outputs.digest }}-${{ steps.node-components.outputs.inputs_digest }}
+          key: squashfs-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/rpi_image_gen/**', 'debian-packaging/snapshot.list', 'debian-packaging/snapshot-epoch.sh', 'debian-packaging/python-nats/**', 'scripts/device_root_checks.py', '.github/workflows/base-image.yml') }}-${{ steps.node-packages.outputs.digest }}
 
       - name: Build the minimal base OS rootfs and squashfs image
         if: steps.cache-squashfs.outputs.cache-hit != 'true'
         env:
           SOURCE_DATE_EPOCH: ${{ env.DEBIAN_SNAPSHOT_EPOCH }}
           WORKROOT: ${{ runner.temp }}/photo-wall-base-work
-          BOOTSTRAPPER_DEB: ${{ steps.bootstrapper-deb.outputs.deb_path }}
         run: |
           set -x
           cd "$RUNNER_TEMP/rpi-image-gen"
           ./rpi-image-gen build \
             -S "$GITHUB_WORKSPACE/appliance/rpi_image_gen" \
             -c photo-wall-base.yaml \
-            -- "IGconf_sys_workroot=$WORKROOT" "IGconf_app_bootstrapper_deb=$BOOTSTRAPPER_DEB" \
-               "IGconf_app_node_base_deb=$RUNNER_TEMP/photo-wall-node-components/node-base.deb" \
-               "IGconf_app_node_display_deb=$RUNNER_TEMP/photo-wall-node-components/node-display.deb" \
-               "IGconf_app_device_packages=$DEVICE_PACKAGES" \
+            -- "IGconf_sys_workroot=$WORKROOT" \
+               "IGconf_app_local_repo=$RUNNER_TEMP/photo-wall-node-debs" \
                "IGconf_app_debian_sources=$DEBIAN_SOURCES"
 
       # rpi-image-gen's genimage/deploy output can be root-owned and not
@@ -326,11 +268,11 @@ jobs:
       # application and no origin". Reads the rootfs tree straight out of the
       # built squashfs via `unsquashfs -ll` (permissions/type + path) rather
       # than trusting the build's own exit code, then extracts only what
-      # scripts/device_root_checks.py reads (systemd config, apt sources, the
-      # dpkg database): no watchdog override, no time daemon, no resolver
-      # writer, every device package and every Player Depends installed
-      # (provisioning installs the Player with dpkg alone), and apt sources
-      # that are exactly the declaration's pin (none foreign, none missing).
+      # scripts/device_root_checks.py reads (systemd config and units, apt
+      # sources, the dpkg database): no watchdog override, no time daemon, no
+      # resolver writer, the node packages installed, nothing of the V1 lane,
+      # and apt sources that are exactly snapshot.list's pin (none foreign,
+      # none missing).
       #
       # Squashfs location: rpi-image-gen's image-base layer places genimage's
       # output directly at $IGconf_image_outputdir =
@@ -347,7 +289,6 @@ jobs:
       - name: Verify the built base image is what 0009 requires (content, not just build success)
         env:
           WORKROOT: ${{ runner.temp }}/photo-wall-base-work
-          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
         run: |
           set -eu
           set -x
@@ -410,58 +351,19 @@ jobs:
           }
 
           echo "== MUST BE PRESENT =="
-          # The bootstrapper's computed closure (scripts/module_closure.py,
-          # never player.service), shipped privately by the
-          # photo-wall-bootstrapper `.deb` as a directory application: the
-          # generated entry point, the manifest, and every file the manifest
-          # lists.
-          bootstrapper_dir=usr/lib/photo-wall-bootstrapper
-          require_path - "$bootstrapper_dir/__main__.py" 'the bootstrapper entry point'
-          require_path - "$bootstrapper_dir/closure.json" 'the bootstrapper closure manifest'
-          require_path - "$bootstrapper_dir/os-agent.py" 'the base-owned OS agent launcher'
-          require_path - "$bootstrapper_dir/player-launch.py" 'the base-owned Player launcher'
-          require_path - "$bootstrapper_dir/base-abi.txt" 'the base ABI declaration'
-          require_path - "$bootstrapper_dir/weston.ini" 'the base-owned Weston configuration'
-          for unit in photo-wall-os-agent photo-wall-player photo-wall-weston; do
-            if grep -Eq -- "^- squashfs-root/(usr/)?lib/systemd/system/$unit.service$" "$typed"; then
-              echo "OK: found base-owned $unit.service vendor unit"
-            else
-              violation "missing base-owned $unit.service vendor unit"
-            fi
-          done
-          # The unit ships at the vendor path (/lib/systemd/system, not
-          # /etc/systemd/system -- this is a packaged unit now, not a raw
-          # overlay file), AND is actually enabled (a `.wants` symlink the
-          # `.deb` bakes as data, pointing back at the vendor path), not
-          # just installed inert.
+          # The node's units ship at the vendor path; photo-wall-node.target is
+          # enabled by a link photo-wall-node ships as data.
           # On merged-/usr Debian, /lib is a symlink to /usr/lib, so the
           # packaged unit is listed under usr/lib/systemd/system; accept either.
-          if grep -Eq -- '^- squashfs-root/(usr/)?lib/systemd/system/photo-wall-provision.service$' "$typed"; then
-            echo "OK: found the photo-wall-provision.service unit ((usr/)lib/systemd/system)"
+          if grep -Eq -- '^- squashfs-root/(usr/)?lib/systemd/system/photo-wall-node.target$' "$typed"; then
+            echo "OK: found photo-wall-node.target ((usr/)lib/systemd/system)"
           else
-            violation "missing required the photo-wall-provision.service unit at (usr/)lib/systemd/system/photo-wall-provision.service"
+            violation "missing photo-wall-node.target at (usr/)lib/systemd/system"
           fi
-          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-provision.service 'photo-wall-provision.service enablement symlink'
-          if grep -Fxq -- 'l squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-provision.service' "$typed"; then
-            target=$(grep -F -- 'squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-provision.service ->' "$listing" | awk '{print $NF}')
-            if [ "$target" = "/lib/systemd/system/photo-wall-provision.service" ] || [ "$target" = "/usr/lib/systemd/system/photo-wall-provision.service" ]; then
-              echo "OK: enablement symlink points at the vendor unit path"
-            else
-              violation "enablement symlink points at unexpected target: $target"
-            fi
-          fi
-          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service 'photo-wall-os-agent.service enablement symlink'
-          if grep -Fxq -- 'l squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service' "$typed"; then
-            agent_target=$(grep -F -- 'squashfs-root/etc/systemd/system/multi-user.target.wants/photo-wall-os-agent.service ->' "$listing" | awk '{print $NF}')
-            if [ "$agent_target" = "/lib/systemd/system/photo-wall-os-agent.service" ] || [ "$agent_target" = "/usr/lib/systemd/system/photo-wall-os-agent.service" ]; then
-              echo "OK: OS-agent enablement symlink points at the vendor unit path"
-            else
-              violation "OS-agent enablement symlink points at unexpected target: $agent_target"
-            fi
-          fi
+          require_path l etc/systemd/system/multi-user.target.wants/photo-wall-node.target 'photo-wall-node.target enablement symlink'
           # /usr/bin/python3 is a symlink to python3.13 on Debian trixie (a
           # regular file on some distros), so accept either type here. The
-          # unit runs it as `python3 -I -B /usr/lib/photo-wall-bootstrapper`.
+          # node's units run it as `python3 -I -B /usr/lib/photo-wall/node/<launcher>`.
           if grep -Eq -- '^[-l] squashfs-root/usr/bin/python3$' "$typed"; then
             echo "OK: found the python3 interpreter (usr/bin/python3, file or symlink)"
           else
@@ -469,49 +371,35 @@ jobs:
           fi
 
           # Only what scripts/device_root_checks.py reads: the systemd manager
-          # config, the apt sources, the dpkg database, sshd's config, the
-          # logins' authorized keys, the hostname, the hosts database and the
-          # default locale; plus the closure manifest. An extract path the image lacks is skipped, not an error;
-          # xattrs are not needed and an unprivileged extract cannot set them.
+          # config and units, the apt sources, the dpkg database, sshd's config,
+          # the logins' authorized keys, the hostname, the hosts database, the
+          # default locale and where the V1 bootstrapper lived. An extract path
+          # the image lacks is skipped, not an error; xattrs are not needed and
+          # an unprivileged extract cannot set them.
           extract="$RUNNER_TEMP/photo-wall-base-extract"
           rm -rf "$extract"
           unsquashfs -no-xattrs -d "$extract" "$squashfs" \
             etc/systemd usr/lib/systemd/system.conf.d lib/systemd/system.conf.d \
+            usr/lib/systemd/system usr/lib/photo-wall-bootstrapper \
             etc/apt etc/passwd etc/ssh home root/.ssh var/lib/dpkg/status \
-            etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf \
-            "$bootstrapper_dir/closure.json" \
-            "$bootstrapper_dir/base-abi.txt" >/dev/null
-          manifest="$extract/$bootstrapper_dir/closure.json"
-          if [ -f "$manifest" ]; then
-            closure_files=$(python3 -c 'import sys; from pathlib import Path; from scripts.module_closure import read_manifest; print("\n".join(read_manifest(Path(sys.argv[1])).files))' "$manifest")
-            for file in $closure_files; do
-              require_path - "$bootstrapper_dir/$file" "closure file $file"
-            done
-          fi
-          if ! grep -q '^wall:' "$extract/etc/passwd"; then
-            violation "missing wall user in base OS"
-          fi
-          expected_abi=$(.venv/bin/python -c 'from pathlib import Path; from contracts.player_payload import base_abi; from scripts.debian_packages import PIN, packages; from scripts.build_bootstrapper_deb import launcher_contract_digest; print(base_abi(PIN.snapshot, packages("player"), launcher_contract_digest(Path.cwd())))')
-          if [ "$(cat "$extract/$bootstrapper_dir/base-abi.txt")" != "$expected_abi" ]; then
-            violation "base ABI file does not match installed runtime declaration"
-          fi
+            etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf >/dev/null
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
-          # Every device package (the rendered device set), every Depends of
-          # the Player .deb built above, and the bootstrapper itself are
-          # installed (dpkg's own database: `install ok installed`); no
-          # watchdog override, time daemon or resolver writer; the image's
-          # apt sources are exactly the declaration's pin; the agent's SSH
-          # login admits exactly the repo key, by key only, with the server
-          # and its per-boot host-key generator enabled; the binfmt units are
-          # masked, no build hostname is baked in, the hosts database has
-          # myhostname and the default locale sets LANG.
-          dpkg-deb -f "$PLAYER_DEB" Depends > "$RUNNER_TEMP/player-depends.list"
-          printf '%s\n' photo-wall-bootstrapper > "$RUNNER_TEMP/bootstrapper-package.list"
+          # photo-wall-node (dpkg installs it only with every Depends: the
+          # contexts, nats-server, python3-nats) and the OS packages the layers'
+          # `packages:` lists name are installed (dpkg's own database:
+          # `install ok installed`); no watchdog override,
+          # time daemon or resolver writer; the image's apt sources are exactly
+          # snapshot.list's pin; the agent's SSH login admits exactly the repo
+          # key, by key only, with the server and its per-boot host-key
+          # generator enabled; the binfmt units are masked, no build hostname is
+          # baked in, the hosts database has myhostname, the default locale
+          # sets LANG, and no V1 unit or bootstrapper directory is left.
+          { echo photo-wall-node
+            sed -n '/^  packages:$/,/^  [^ ]/s/^    - //p' appliance/rpi_image_gen/layer/*.yaml
+          } > "$RUNNER_TEMP/base-packages.list"
           if python3 scripts/device_root_checks.py --root "$extract" \
-              --require-installed "$DEVICE_PACKAGES" \
-              --require-installed "$RUNNER_TEMP/player-depends.list" \
-              --require-installed "$RUNNER_TEMP/bootstrapper-package.list" \
+              --require-installed "$RUNNER_TEMP/base-packages.list" \
               --pinned-sources \
               --agent-key appliance/rpi_image_gen/photo_wall_agent.pub \
               --base-os; then
@@ -521,7 +409,7 @@ jobs:
           fi
 
           echo "== MUST BE ABSENT (no application outside the private dirs, no origin) =="
-          # Each .deb ships its closure privately; nothing first-party lands
+          # Each package ships its code privately; nothing first-party lands
           # in the shared dist-packages tree (two packages would own a file).
           for package in appliance player uplink contracts; do
             if grep -Eq -- "^. squashfs-root/usr/lib/python3/dist-packages/$package(/|\$)" "$typed"; then
@@ -539,19 +427,19 @@ jobs:
           fi
           # No Player venv baked into the base.
           forbid_substring 'squashfs-root/opt/photo-wall/venv' 'the Player venv (/opt/photo-wall/venv)'
-          forbid_substring 'squashfs-root/usr/lib/photo-wall-player/' 'application code before payload activation'
+          forbid_substring 'squashfs-root/usr/lib/photo-wall-player/' 'the Player (it runs from the app root)'
           # No deployment config or app trust anchor baked into the base --
-          # the bootstrapper resolves these at boot, not build time.
+          # stage 1 hands the node its configuration at boot, not build time.
           forbid_substring 'squashfs-root/etc/photo-wall/public.json' 'a baked /etc/photo-wall/public.json'
           forbid_substring 'squashfs-root/etc/photo-wall/bootstrap.json' 'a baked /etc/photo-wall/bootstrap.json'
           forbid_substring 'squashfs-root/etc/photo-wall/ca.pem' 'a baked /etc/photo-wall/ca.pem'
           forbid_substring 'release.pub.pem' 'a baked release.pub.pem app trust anchor'
 
           if [ "$fail" -ne 0 ]; then
-            echo "FAIL: built base image does not match 0009's minimal-base-plus-bootstrapper contract; see VIOLATION lines above" >&2
+            echo "FAIL: built base image does not match 0009's minimal-base contract; see VIOLATION lines above" >&2
             exit 1
           fi
-          echo "PASS: built base image content matches 0009's minimal-base-plus-bootstrapper contract"
+          echo "PASS: built base image content matches 0009's minimal-base contract"
 
       # --- p4-boot-chain s2b: netboot base bundle (kernel + initrd + DTBs +
       # the base squashfs) -------------------------------------------------
@@ -562,27 +450,52 @@ jobs:
       # qemu. Diagnostics are captured to files uploaded on failure (OWNER
       # STANDING RULE: root-cause, do not guess).
       # Cache B: the scratch kernel + initrd build (~several min) is
-      # content-addressed on its TRUE input closure -- the initramfs hooks/
-      # scripts, the assembler, and this workflow. Our Python code, the CA
-      # bundle and the clock floor are NOT in the cached initrd: they are the
-      # boot data (scripts/build_boot_data.py), rebuilt on every run by the
-      # uncached assembly step and placed in front of it, so no key has to list
-      # them (decision 0014 §5). The declaration is keyed: it names the root's
-      # Debian packages, its snapshot pin and the Raspberry Pi packages. NOT
-      # keyed on player/ or the rpi-image-gen config -- neither affects the
-      # kernel/initrd. EXACT match only (no restore-keys): a stale-base
+      # content-addressed on its TRUE input closure -- photo-wall-netboot-init
+      # and every Photo Wall package on stage 1's path (their Package=Version
+      # lines: each version is a hash of what the package installs, the hook,
+      # the boot script and stage 1's code included; decision 0019 P4), the
+      # snapshot pin (debian-packaging/snapshot.list -- so the CA bundle the
+      # hook copies), and this workflow (it names the root's Debian packages
+      # and the Raspberry Pi packages). The clock floor is NOT in the cached initrd: it changes
+      # per revision, so the uncached assembly puts it in a layer in front
+      # (R6). NOT keyed on player/ or the rpi-image-gen config -- neither
+      # affects the kernel/initrd. EXACT match only (no restore-keys): a stale-base
       # prefix-fallback is the poisoning risk. Only the Raspberry Pi archive is
       # unpinned (it has no snapshot service): the kernel/firmware/eeprom are
       # pulled from it at build time and are NOT in any file the key can hash
       # -- bump BASE_CACHE_EPOCH to force them to refresh. Only the
       # fixed-layout output dir ($KOUT below) is cached, never the full
       # root-owned scratch rootfs ($SCRATCH).
+      # Stage 1's packages: photo-wall-netboot-init and the package of each
+      # directory its path file names (appliance/netboot_initramfs/path, which
+      # the package installs and the import check holds to stage 1's imports).
+      - name: Compute stage 1's package set from the local repo
+        id: stage1-packages
+        run: |
+          set -eu
+          python3 - "$RUNNER_TEMP/photo-wall-node-debs/Packages" appliance/netboot_initramfs/path \
+            > "$RUNNER_TEMP/stage1-packages" <<'PYCODE'
+          import sys
+          index = {}
+          for stanza in open(sys.argv[1]).read().split("\n\n"):
+              fields = dict(line.split(": ", 1) for line in stanza.splitlines() if ": " in line)
+              if "Package" in fields:
+                  index[fields["Package"]] = fields["Version"]
+          names = {"photo-wall-netboot-init"} | {
+              "photo-wall-" + line.rstrip("/").rsplit("/", 1)[1]
+              for line in open(sys.argv[2]).read().splitlines() if line}
+          for name in sorted(names):
+              print(f"{name}={index[name]}")
+          PYCODE
+          cat "$RUNNER_TEMP/stage1-packages"
+          echo "digest=$(sha256sum < "$RUNNER_TEMP/stage1-packages" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Cache the scratch kernel + initrd + DTBs
         id: cache-kernel
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/netboot-kernel-out
-          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('appliance/netboot_initramfs/**', 'scripts/build_netboot_bundle.sh', 'scripts/verify_boot_display.py', 'scripts/debian_packages.py', '.github/workflows/base-image.yml') }}
+          key: kernel-initrd-${{ env.BASE_CACHE_EPOCH }}-${{ hashFiles('scripts/verify_boot_display.py', 'debian-packaging/snapshot.list', '.github/workflows/base-image.yml') }}-${{ steps.stage1-packages.outputs.digest }}
 
       - name: Build the scratch kernel + initrd root (Debian trixie arm64)
         id: scratch-root
@@ -597,26 +510,30 @@ jobs:
           mkdir -p "$DIAG"
           sudo apt-get update
           # mmdebstrap builds the scratch root. debian-archive-keyring provides
-          # the keyring each pinned line names (signed-by=, from the
-          # declaration): this Ubuntu host's apt trusts no Debian key by
+          # the keyring each pinned line names (signed-by=, in snapshot.list): this Ubuntu host's apt trusts no Debian key by
           # default, and mmdebstrap copies a full `deb ...` line verbatim
           # (it adds signed-by only to a bare mirror URL). The same path
           # exists in the trixie root, so its own apt verifies the same way.
-          # initramfs-tools on the HOST provides lsinitramfs for the
-          # content-verify; squashfs-tools may already be present from the
-          # squashfs verify step above.
           sudo apt-get install -y --no-install-recommends \
-            mmdebstrap debian-archive-keyring ca-certificates gnupg curl initramfs-tools
+            mmdebstrap debian-archive-keyring ca-certificates gnupg curl
 
           sudo rm -rf "$SCRATCH"
-          # Minimal Debian trixie arm64 root at the declaration's pin, carrying
-          # the initrd toolchain + interpreter the netboot init needs
-          # (packages("initrd-build"); mmdebstrap_argv is the one way a root
-          # outside rpi-image-gen is built, with only the snapshot sources).
-          # The rpi-2712 kernel itself comes from the Raspberry Pi archive,
-          # added below.
-          if ! sudo python3 scripts/debian_packages.py mmdebstrap --arch arm64 \
-              --target "$SCRATCH" initrd-build \
+          # Minimal Debian trixie arm64 root at the pin, with only its two
+          # sources (snapshot.list's lines; a snapshot's Release file is past
+          # its Valid-Until by design). Its OS packages: the CA bundle (apt
+          # inside the root fetches the pin over https, so mmdebstrap's own
+          # --include brings it first, with the host's apt), the initrd
+          # toolchain (initramfs-tools, kmod for depmod, zstd for compression,
+          # gnupg for apt's keys), the interpreter stage 1 runs on, and
+          # device-tree-compiler (fdtoverlay and fdtget at the pin for
+          # scripts/verify_boot_display.py: Ubuntu 24.04's 1.7.0 cannot apply
+          # vc4-kms-v3d-pi5 to the Pi 5 DTB). The rpi-2712 kernel itself comes
+          # from the Raspberry Pi archive, added below.
+          mapfile -t pin_sources < <(grep -v '^#' debian-packaging/snapshot.list)
+          if ! sudo mmdebstrap --arch=arm64 --variant=minbase \
+              --aptopt='Acquire::Check-Valid-Until "false"' \
+              --include=ca-certificates,device-tree-compiler,gnupg,initramfs-tools,kmod,python3,zstd \
+              trixie "$SCRATCH" "${pin_sources[@]}" \
               > "$DIAG/mmdebstrap.log" 2>&1; then
             echo "mmdebstrap failed; tail:" >&2
             tail -n 80 "$DIAG/mmdebstrap.log" >&2
@@ -636,7 +553,7 @@ jobs:
           # 0009's no-threat-model / corruption-only ruling. If RPi later re-signs
           # its key with SHA256, restore `[signed-by=.../raspberrypi.gpg]` (fetch
           # + dearmor the key) in place of `[trusted=yes]`.
-          python3 scripts/debian_packages.py sources --archive raspberrypi \
+          echo 'deb [trusted=yes] http://archive.raspberrypi.com/debian trixie main' \
             | sudo tee "$SCRATCH/etc/apt/sources.list.d/raspberrypi.list"
           sudo cp /etc/resolv.conf "$SCRATCH/etc/resolv.conf"
 
@@ -654,35 +571,34 @@ jobs:
           # rpi-eeprom (alongside the kernel + firmware) packages the bootloader
           # images build_eeprom_update.py rebuilds into the TFTP self-update
           # pair (0014 rev 5, design §2.8) -- pieeprom.upd/.sig, staged below.
-          # The list is the declaration's (one package name per line, split
-          # on purpose).
-          kernel_packages=$(python3 scripts/debian_packages.py packages \
-            --archive raspberrypi initrd-build)
-          # shellcheck disable=SC2086
           if ! sudo chroot "$SCRATCH" env DEBIAN_FRONTEND=noninteractive \
-              apt-get install -y --no-install-recommends $kernel_packages \
+              apt-get install -y --no-install-recommends \
+                linux-image-rpi-2712 raspi-firmware rpi-eeprom \
               > "$DIAG/apt-install-kernel.log" 2>&1; then
             echo "kernel/raspi-firmware/rpi-eeprom install failed; tail:" >&2
             tail -n 80 "$DIAG/apt-install-kernel.log" >&2
             exit 1
           fi
 
-          # Install the s2a hook + boot script + BOOT= selector. No first-party
-          # Python is staged here: the boot data carries stage 1's computed
-          # closure (decision 0014 §5).
-          sudo install -D -m 0755 \
-            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/hooks/photo-wall-netboot" \
-            "$SCRATCH/etc/initramfs-tools/hooks/photo-wall-netboot"
-          sudo install -D -m 0755 \
-            "$GITHUB_WORKSPACE/appliance/netboot_initramfs/scripts/photowall-netboot" \
-            "$SCRATCH/etc/initramfs-tools/scripts/photowall-netboot"
+          # Stage 1: photo-wall-netboot-init from this run's local repo, by
+          # name, with the packages it pins at their exact versions (decision
+          # 0019 P4). It installs the hook and the boot script under
+          # /usr/share/initramfs-tools, so mkinitramfs below copies stage 1's
+          # package directories and this root's CA bundle into the initrd. The
+          # root prefers no archive, so apt takes the repo's packages by
+          # version; the repo's list is used for this one install.
+          sudo cp -a "$RUNNER_TEMP/photo-wall-node-debs" "$SCRATCH/var/tmp/photo-wall-node-debs"
+          echo 'deb [trusted=yes] file:/var/tmp/photo-wall-node-debs ./' \
+            | sudo tee "$SCRATCH/etc/apt/sources.list.d/photo-wall-node-debs.list"
+          if ! sudo chroot "$SCRATCH" sh -ec 'apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                photo-wall-netboot-init' > "$DIAG/apt-install-netboot-init.log" 2>&1; then
+            echo "photo-wall-netboot-init install failed; tail:" >&2
+            tail -n 80 "$DIAG/apt-install-netboot-init.log" >&2
+            exit 1
+          fi
           printf 'BOOT=photowall-netboot\n' \
             | sudo tee "$SCRATCH/etc/initramfs-tools/conf.d/photo-wall"
-          # Where the initrd's interpreter finds modules under `python3 -I`:
-          # recorded in $KOUT (below) so the uncached assembly puts the boot
-          # data's closure there, on a cache hit too.
-          python_libdir=$(sudo chroot "$SCRATCH" python3 -c \
-            'import sysconfig; print(sysconfig.get_path("stdlib"))')
 
           # Exactly one kernel is installed; derive its version for mkinitramfs.
           kver=$(sudo ls "$SCRATCH/lib/modules" | head -n1)
@@ -729,7 +645,7 @@ jobs:
             | tee "$DIAG/boot-firmware-listing.txt" || true
           initrd_bytes=$(sudo stat -c %s "$SCRATCH/boot/initrd.img")
           echo "initrd.img size: $initrd_bytes bytes" | tee "$DIAG/initrd-size.txt"
-          sudo lsinitramfs "$SCRATCH/boot/initrd.img" > "$DIAG/lsinitramfs.txt" 2>&1 || true
+          sudo chroot "$SCRATCH" lsinitramfs /boot/initrd.img > "$DIAG/lsinitramfs.txt" 2>&1 || true
           echo "lsinitramfs members: $(wc -l < "$DIAG/lsinitramfs.txt")"
 
           # Unmount the binds before find/stat over $SCRATCH so procfs does not
@@ -810,7 +726,6 @@ jobs:
           sudo cp "$rpi_eeprom_digest" "$KOUT/rpi-eeprom-digest"
           sudo chmod 0755 "$KOUT/rpi-eeprom-config" "$KOUT/rpi-eeprom-digest"
           sudo cp "$kernel_config" "$KOUT/kernel-config"
-          printf '%s\n' "$python_libdir" | sudo tee "$KOUT/python-libdir"
           if [ -n "$overlays_dir" ]; then
             sudo cp "$overlays_dir"/*.dtbo "$KOUT/overlays/" 2>/dev/null || true
           fi
@@ -834,7 +749,7 @@ jobs:
       # Consumes the FIXED-LAYOUT $KOUT (freshly built OR Cache B-restored) and
       # the squashfs (freshly built OR Cache A-restored), so it is NOT gated by
       # either cache-hit -- the initrd content-verify (verify_netboot_initrd.py,
-      # run inside the assembler via lsinitramfs installed above) therefore runs
+      # run inside the assembler) therefore runs
       # even on a cache hit, catching a corrupt/wrong restored artifact.
       - name: Assemble the netboot base bundle and content-verify the initrd
         env:
@@ -850,17 +765,16 @@ jobs:
           if ls "$KOUT"/overlays/*.dtbo >/dev/null 2>&1; then
             overlay_arg="--overlays-dir $KOUT/overlays"
           fi
-          # The assembly script puts the boot data (stage 1's computed closure,
-          # the base's CA bundle, this revision's commit time as the clock
-          # floor) in front of the cached initrd, then runs
-          # verify_netboot_initrd.py against the result via lsinitramfs
-          # (installed on the host above) -- content-verify #2.
+          # The assembly script puts the clock floor's layer (this revision's
+          # commit time) in front of the cached initrd, then runs
+          # verify_netboot_initrd.py against the result: stage 1 under the
+          # interpreter's stdlib dir, the CA bundle equal to the base's --
+          # content-verify #2.
           # shellcheck disable=SC2086
           sh "$GITHUB_WORKSPACE/scripts/build_netboot_bundle.sh" \
             --kernel "$KOUT/kernel" \
             --initrd "$KOUT/initrd.img" \
             --repo "$GITHUB_WORKSPACE" \
-            --python-libdir "$(cat "$KOUT/python-libdir")" \
             --snapshot-epoch "$DEBIAN_SNAPSHOT_EPOCH" \
             --dtb "$KOUT/dtb" \
             --eeprom-image "$KOUT/pieeprom.bin" \
@@ -868,12 +782,11 @@ jobs:
             --rpi-eeprom-digest "$KOUT/rpi-eeprom-digest" \
             $overlay_arg \
             --squashfs "$squashfs" \
-            --base-abi-file "$RUNNER_TEMP/photo-wall-base-extract/usr/lib/photo-wall-bootstrapper/base-abi.txt" \
             --output "$BUNDLE" \
             --verify "$GITHUB_WORKSPACE/scripts/verify_netboot_initrd.py" \
             --python python3
 
-      - name: Verify installed node ABI and produce the explicit V2 cohort bundle
+      - name: Verify the installed node ABI is the components'
         run: |
           set -eu
           .venv/bin/python - "$RUNNER_TEMP" <<'PYCODE'
@@ -882,14 +795,11 @@ jobs:
           components = json.loads((work / "photo-wall-node-components/components.json").read_text())
           squashfs = work / "photo-wall-base-bundle/photo-wall-base.squashfs"
           installed = {}
-          for name in ("usr/lib/photo-wall-node-base/abi.json", "usr/lib/photo-wall-display/abi.json"):
+          for name in ("usr/lib/photo-wall/node/abi.json", "usr/lib/photo-wall/node-display/abi.json"):
               installed.update(json.loads(subprocess.check_output(["unsquashfs", "-cat", str(squashfs), name])))
           if installed != components["abi"]:
               raise SystemExit("installed node ABI does not match exact component roots")
           PYCODE
-          .venv/bin/python -m scripts.node_release_artifacts \
-            --source-bundle "$RUNNER_TEMP/photo-wall-base-bundle" \
-            --output "$RUNNER_TEMP/photo-wall-node-bundle"
 
       - name: Verify the assembled bundle (content, no hardware)
         env:
@@ -906,14 +816,12 @@ jobs:
           for f in boot/config.txt boot/cmdline.txt boot/kernel_2712.img \
                    boot/initrd.img boot/bcm2712-rpi-5-b.dtb \
                    boot/pieeprom.upd boot/pieeprom.sig \
-                   photo-wall-base.squashfs base-abi.json SHA256SUMS; do
+                   photo-wall-base.squashfs SHA256SUMS; do
             [ -f "$BUNDLE/$f" ] || violation "missing bundle artifact $f"
           done
 
           # squashfs under the release size ceiling, read from the constant
-          # stage 1 enforces (contracts/release.py, stdlib only). The base
-          # carries the Player's whole platform, so this is the number to
-          # watch.
+          # stage 1 enforces (contracts/release.py, stdlib only).
           max=$(python3 -c 'from contracts.release import MAX_ROOTFS_BYTES; print(MAX_ROOTFS_BYTES)')
           sq_bytes=$(stat -c %s "$BUNDLE/photo-wall-base.squashfs")
           echo "squashfs size: $sq_bytes bytes (MAX_ROOTFS_BYTES $max)"
@@ -928,19 +836,6 @@ jobs:
             || violation "SHA256SUMS lists $listed files, bundle has $expected"
           ( cd "$BUNDLE" && sha256sum -c --quiet SHA256SUMS ) \
             || violation "SHA256SUMS re-verification failed"
-          python3 - "$BUNDLE" <<'PY'
-          import hashlib
-          import pathlib
-          import sys
-          from contracts.release import parse_base_abi_sidecar
-          bundle = pathlib.Path(sys.argv[1])
-          abi, digest = parse_base_abi_sidecar((bundle / "base-abi.json").read_bytes())
-          with (bundle / "photo-wall-base.squashfs").open("rb") as stream:
-              actual = hashlib.file_digest(stream, "sha256").hexdigest()
-          if digest != actual:
-              raise SystemExit("base ABI sidecar does not bind assembled squashfs")
-          PY
-
           # No signed / trust material anywhere in the bundle (this path is
           # unsigned by construction -- 0008 boot-chain). pieeprom.sig is the
           # bootloader's own rpi-eeprom-digest over pieeprom.upd (0014 rev 5,
@@ -1031,96 +926,6 @@ jobs:
           sudo .venv/bin/python scripts/initrd_mount_probe.py "$BUNDLE/boot/initrd.img" \
             --work "$RUNNER_TEMP/initrd-mount-probe"
 
-      # The base must START the Player, not only carry its Depends. v0.9.1's base had no udev,
-      # so no render group, and player.service failed at spawn (216/GROUP) on every Pi while
-      # every content check passed. Three probes boot the built squashfs under real systemd (a
-      # --privileged container, systemd as PID 1, the units that would act on this runner's
-      # devices and kernel masked), each in its own container, image and work directory (every
-      # name carries a random suffix), so they run at once; the step waits for all three,
-      # prints each one's output, and fails if any failed. Not gated by a cache hit, so a
-      # Player-only change still has to start on the cached base. After the bundle, so they read
-      # the initrd the release ships.
-      #
-      #   player-deb       requires udev and the render, video and input groups, installs the
-      #                    Player .deb built above with dpkg alone, and starts the unit as
-      #                    provisioning does: it passes only when the unit is active/running.
-      #                    It then hands the built initrd's modules over as stage 1 does and
-      #                    requires the base's own libkmod to find vc4 and v3d by their devices'
-      #                    aliases and read every file they need (scripts/player_start_probe.py).
-      #   player-payload   the data-only Player payload through the shipped base-owned launcher
-      #                    and exact archive (the .deb probe installs an overriding unit, so this
-      #                    one has its own container).
-      #   os-agent         the netboot tracer checks the exact packaged check-in wire against
-      #                    Central, but invokes two one-shot reports. This boots the final
-      #                    squashfs to multi-user.target with the provisioner masked and requires
-      #                    the OS-agent to start without an explicit start; a separate container
-      #                    then keeps the same installed agent process alive while the
-      #                    provisioner rejects a corrupt package. The HTTP peer is a local
-      #                    recorder on an ephemeral port.
-      - name: Start the Player, the Player payload and the OS-agent on the built base under systemd
-        env:
-          SQUASHFS: ${{ runner.temp }}/photo-wall-base-work/image-photo-wall-base/photo-wall-base.squashfs
-          INITRD: ${{ runner.temp }}/photo-wall-base-bundle/boot/initrd.img
-          PLAYER_DEB: ${{ steps.player-deb.outputs.deb_path }}
-          PLAYER_PAYLOAD: ${{ steps.player-payload.outputs.payload_path }}
-        run: |
-          set -eu
-          logs="$RUNNER_TEMP/base-probes"
-          mkdir -p "$logs"
-          declare -A probes
-          # A probe in the background, its output to its own log: `probe NAME COMMAND...`.
-          probe() {
-            local name=$1
-            shift
-            "$@" > "$logs/$name.log" 2>&1 &
-            probes[$name]=$!
-          }
-          probe player-deb sudo .venv/bin/python scripts/player_start_probe.py \
-            --squashfs "$SQUASHFS" --deb "$PLAYER_DEB" --initrd "$INITRD" \
-            --work "$RUNNER_TEMP/player-start-probe"
-          probe player-payload sudo .venv/bin/python scripts/player_start_probe.py \
-            --squashfs "$SQUASHFS" --payload "$PLAYER_PAYLOAD" \
-            --work "$RUNNER_TEMP/player-payload-start-probe"
-          probe os-agent sudo .venv/bin/python scripts/os_agent_service_probe.py \
-            --squashfs "$SQUASHFS" --deb "$PLAYER_DEB" \
-            --work "$RUNNER_TEMP/os-agent-service-probe"
-          failed=()
-          for name in player-deb player-payload os-agent; do
-            status=0
-            wait "${probes[$name]}" || status=$?
-            echo "::group::$name probe (exit $status)"
-            cat "$logs/$name.log"
-            echo "::endgroup::"
-            if [ "$status" -ne 0 ]; then failed+=("$name"); fi
-          done
-          if [ "${#failed[@]}" -ne 0 ]; then
-            echo "::error::base systemd probes failed: ${failed[*]}"
-            exit 1
-          fi
-
-      - name: Make OS-agent probe diagnostics readable to the runner
-        if: always()
-        run: |
-          if [ -d "$RUNNER_TEMP/os-agent-service-probe" ]; then
-            sudo chmod -R a+rX "$RUNNER_TEMP/os-agent-service-probe"
-          fi
-
-      # Diagnostics: kept on any failure, and on every run that is not a pull request.
-      - name: Upload OS-agent service probe diagnostics
-        if: failure() || github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: photo-wall-os-agent-service-${{ env.REVISION }}
-          path: |
-            ${{ runner.temp }}/os-agent-service-probe/evidence.json
-            ${{ runner.temp }}/os-agent-service-probe/requests.json
-            ${{ runner.temp }}/os-agent-service-probe/journal.log
-            ${{ runner.temp }}/os-agent-service-probe/autostart/evidence.json
-            ${{ runner.temp }}/os-agent-service-probe/autostart/requests.json
-            ${{ runner.temp }}/os-agent-service-probe/autostart/journal.log
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Show what was produced
         if: always()
         env:
@@ -1152,45 +957,6 @@ jobs:
         with:
           name: photo-wall-base-bundle-${{ env.REVISION }}
           path: ${{ runner.temp }}/photo-wall-base-bundle/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload the explicit V2 cohort bundle
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: photo-wall-node-bundle-${{ env.REVISION }}
-          path: ${{ runner.temp }}/photo-wall-node-bundle/
-          if-no-files-found: error
-          retention-days: 7
-
-      # The two .debs built above, each as its own revision-named artifact so
-      # pipeline.yml can publish them as standalone release assets alongside the
-      # base bundle.
-      - name: Upload the Player .deb
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: photo-wall-player-deb-${{ env.REVISION }}
-          path: ${{ steps.player-deb.outputs.deb_path }}
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload the data-only Player payload
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: photo-wall-player-payload-${{ env.REVISION }}
-          path: ${{ steps.player-payload.outputs.payload_path }}
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload the bootstrapper .deb
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: photo-wall-bootstrapper-deb-${{ env.REVISION }}
-          path: ${{ steps.bootstrapper-deb.outputs.deb_path }}
           if-no-files-found: error
           retention-days: 7
 

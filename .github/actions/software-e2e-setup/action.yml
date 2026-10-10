@@ -21,6 +21,11 @@ outputs:
   central-image:
     description: The central image ID when `central` is 'true', else empty
     value: ${{ steps.central.outputs.imageid }}
+  builder:
+    description: >-
+      The buildx builder the build cache runs on, for builds outside the service-image action
+      (scripts/demo_wall.py's roots container, through debian-packaging/build-container.sh)
+    value: ${{ steps.buildx.outputs.name }}
 
 runs:
   using: composite
@@ -50,6 +55,7 @@ runs:
           > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
 
     - name: Set up the container build cache
+      id: buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
       with:
         buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}

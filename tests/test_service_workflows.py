@@ -109,9 +109,6 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
     for job in ('db', 'browser'):
         assert 'compose.test-database.yml up -d --wait' in selections[job]
     assert 'PHOTO_WALL_RELEASE_TOKEN' in selections['db']
-    for job in ('unit', 'db'):  # both tiers hold tests of the published Player wire
-        assert 'published_player_wire.py prepare' in selections[job]
-        assert 'PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR' in selections[job]
     assert '--env PHOTO_WALL_TEST_REQUIRE_DATABASE --env CI' in selections['browser']
 
 
@@ -164,6 +161,24 @@ def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
             assert repeated not in body, (job, repeated)
 
 
+def test_the_wall_scenario_runs_the_player_from_this_runs_app_image():
+    """The Players run from the app root node-components.yml built for the plan's revision
+    (decision 0019), never from a wheelhouse built beside it."""
+    workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    scenario = _job(workflow, 'two-players-three-outputs')
+    assert 'name: photo-wall-node-components-${{ inputs.revision }}' in scenario
+    assert '--app-image "$RUNNER_TEMP/node-components/app.squashfs"' in scenario
+    assert 'REVISION: ${{ inputs.revision }}' in scenario and '--revision "$REVISION"' in scenario
+    # The roots container that unpacks the image comes from node-components' build cache.
+    assert 'PHOTO_WALL_NODE_BUILDER: ${{ steps.setup.outputs.builder }}' in scenario
+    assert 'PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}' in scenario
+    for retired in ('build_player', 'wheelhouse'):
+        assert retired not in workflow, retired
+    job = _job((WORKFLOWS / 'pipeline.yml').read_text(), 'e2e')
+    assert 'needs: [plan, node-components]' in job
+    assert 'revision: ${{ needs.plan.outputs.revision }}' in job
+
+
 def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     """One matrix leg per scenario of tests/test_node_pid1.py, each required, never skipped,
     on native arm64, every leg booting the one component set and fixture node-components.yml
@@ -180,10 +195,13 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert f"\n  {REQUIRE_VARIABLE}: '1'\n" in workflow
     assert "\n  PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'\n" in workflow
     assert 'compose.test-database.yml up -d --wait' in scenario
-    builds = _job((WORKFLOWS / 'node-components.yml').read_text(), 'build')
-    assert 'runs-on: ubuntu-24.04-arm\n' in builds
-    for builder in ('build_node_components', 'build_node_pid1_fixture'):
-        assert f'.venv/bin/python -m scripts.{builder}' in builds, builder
+    components = (WORKFLOWS / 'node-components.yml').read_text()
+    builds, fixture = _job(components, 'build'), _job(components, 'pid1-fixture')
+    assert 'runs-on: ubuntu-24.04-arm\n' in builds and 'runs-on: ubuntu-24.04-arm\n' in fixture
+    for builder, job in (('debian-packaging/build-root.sh', builds),
+                         ('.venv/bin/python -m scripts.node_release_writer write', builds),
+                         ('tests/node_pid1_fixture/build.sh', fixture)):
+        assert builder in job, builder
         assert builder not in scenario, builder
     components = 'name: photo-wall-node-components-${{ env.REVISION }}'
     assert components in scenario and components in (WORKFLOWS / 'base-image.yml').read_text()
@@ -200,21 +218,6 @@ def test_the_node_pid1_job_requires_every_real_systemd_scenario_in_parallel():
     assert 'uses: ./.github/workflows/node-components.yml' in build
     assert 'revision: ${{ needs.plan.outputs.revision }}' in build
     assert "pid1-fixture: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1') }}" in build
-
-
-def test_the_base_probes_run_at_once_and_every_failure_fails_the_step():
-    """The three systemd probes of the built base run concurrently, each in its own work
-    directory (their containers and images carry random names), and the step waits for every
-    one, shows every log and fails when any failed."""
-    workflow = (WORKFLOWS / 'base-image.yml').read_text()
-    step = workflow.split('      - name: Start the Player, the Player payload and the OS-agent')[1]
-    step = step.split('\n      - name: ')[0]
-    works = re.findall(r'--work "\$RUNNER_TEMP/([\w-]+)"', step)
-    assert len(works) == len(set(works)) == 3
-    assert step.count('    probe ') == 3 and '"$@" > "$logs/$name.log" 2>&1 &' in step
-    assert 'for name in player-deb player-payload os-agent; do' in step
-    assert 'wait "${probes[$name]}" || status=$?' in step
-    assert 'if [ "${#failed[@]}" -ne 0 ]; then' in step and 'exit 1' in step
 
 
 def test_a_pull_request_uploads_no_release_artifact_but_keeps_failure_diagnostics():
@@ -326,7 +329,7 @@ def test_every_buildx_builder_carries_the_mirror():
                 builders += 1
                 assert BUILDKIT_MIRROR in step, path
                 assert BUILDKIT_IMAGE in step, path
-    assert builders >= 6  # not vacuous: the six builders today
+    assert builders >= 5  # not vacuous: the five builders today (one is node-builder)
     for action in ACTIONS.glob('*/action.yml'):
         if 'docker/setup-buildx-action@' in action.read_text():
             assert action.parent.name in routed, action

@@ -1,8 +1,8 @@
-"""069 moves stored Scenes, Runs, offered plans and locks from `retain_on_expiry` to `after_end`.
+"""071 moves stored Scenes, Runs, offered plans and locks from `retain_on_expiry` to `after_end`.
 
 The rows are written as the previous build stored them (the yes/no flag, the console's endings
 changing nothing), into temporary tables of the real shape, and the migration's SQL runs on them;
-and the runbook's reverse SQL followed by 069 again, with an ending in flight.
+and the runbook's reverse SQL followed by 071 again, with an ending in flight.
 """
 
 import json
@@ -24,7 +24,7 @@ from test_player_control_protocol import after_end_plan
 from central.runtime import Contribution, Program, Runtime, Scene
 from contracts.models import Layer, Plan
 
-MIGRATION = Path(__file__).parents[1] / "central/migrations/069_layer_after_end.sql"
+MIGRATION = Path(__file__).parents[1] / "central/migrations/071_layer_after_end.sql"
 
 
 def _previous_build(value):
@@ -95,16 +95,16 @@ RUNBOOK = Path(__file__).parents[1] / "docs/runbook.md"
 
 
 def _rollback_sql() -> str:
-    """The runbook's reverse of 069, exactly as an operator would copy it."""
+    """The runbook's reverse of 071, exactly as an operator would copy it."""
     text = RUNBOOK.read_text()
     section = text[text.index("**Rolling Central back past the after-state"):]
     start = section.index("```sql\n") + len("```sql\n")
     return section[start:section.index("\n```", start)]
 
 
-def test_an_ending_in_flight_across_rollback_and_069_still_keeps_nothing(registry, tmp_path):
+def test_an_ending_in_flight_across_rollback_and_071_still_keeps_nothing(registry, tmp_path):
     """The black ending is offered and committed when Central is rolled back with the runbook's
-    SQL (the previous build's shape) and then forward again: 069 gives the stored ending
+    SQL (the previous build's shape) and then forward again: 071 gives the stored ending
     `keep_nothing` but its offered layer `leave_as_is`, and the planner revises it rather than
     dropping it as stale. Mutation probe: make the after-state not revisable (the ending is
     dropped and the kept photo comes back)."""
@@ -120,7 +120,7 @@ def test_an_ending_in_flight_across_rollback_and_069_still_keeps_nothing(registr
                                                        ("plan_offers", "manifest"),
                                                        ("assignment_locks", "layer"))])
         assert "retain_on_expiry" in stored and "after_end" not in stored
-        registry.db.migrate()  # rolling forward: 069 runs again
+        registry.db.migrate()  # rolling forward: 071 runs again
         assert _shown(frame.advance(2)) == (False, [("black", 1.0)])  # 21 s: the ending
         assert [layer.after_end for layer in _layers(coordinator, player)
                 if layer.presentation == "black"] == ["keep_nothing"]

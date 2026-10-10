@@ -103,7 +103,7 @@ def eligible(candidate: Candidate, profile: FrameProfile) -> bool:
 # What Central may revise on a layer it has already offered (each offered layer is a lock:
 # its content and interval are fixed): the arbitration; the fade-out, which a Finish or a
 # follower revises (`runtime._may_hold_to_the_end`); and the after-state, which is not content
-# (a Run's after-states are fixed by its Scene; migration 069 left in-flight endings'
+# (a Run's after-states are fixed by its Scene; migration 071 left in-flight endings'
 # offered layers at "leave_as_is" while their Scene says "keep_nothing").
 REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end"})
 

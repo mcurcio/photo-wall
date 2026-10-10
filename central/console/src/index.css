@@ -2033,8 +2033,8 @@ label {
   border-left: 2px solid var(--color-line);
 }
 
-/* Node control off (Part E §25): the one banner above every page; and a Player's
-   deprecated-path boot line. Both name a misconfiguration, so they read as warnings. */
+/* Node control off (Part E §25): the one banner above every page. It names a
+   misconfiguration, so it reads as a warning. */
 .node-banner {
   margin: 0 0 16px;
   padding: 12px 16px;
@@ -2043,10 +2043,6 @@ label {
   border-radius: 6px;
 }
 .node-banner p { margin: 0; }
-.player__warning {
-  padding-left: 12px;
-  border-left: 4px solid var(--color-notice);
-}
 
 /* The Player page (console DDD §9): one section per aggregate part, each with its own
    read time; facts carry their truth kind (FactLine.jsx). */

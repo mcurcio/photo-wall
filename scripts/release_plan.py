@@ -217,26 +217,33 @@ def image_inputs(target: str, text: str | None = None) -> tuple[str, ...]:
 
 # The locked Python project every build syncs. pyproject.toml counts only through DIGESTED below.
 _PROJECT: Final = ("pyproject.toml", "uv.lock")
-# How base-image.yml builds both .debs, and node-components.yml the node set: each builder
-# `git archive`s its computed closure and the Debian declaration at the revision, stamps the
-# pyproject version, and runs in the pinned uv environment. build_bootstrapper_deb imports
-# build_player_deb and build_player.
-_DEB_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
-                     ".github/workflows/base-image.yml", ".github/workflows/node-components.yml",
-                     "scripts/build_player.py",
-                     "scripts/build_player_deb.py", "scripts/module_closure.py",
-                     "scripts/debian_packages.py", "scripts/device_root_checks.py")
-_PLAYER_DEB: Final = (*_DEB_BUILD, "player/**", "contracts/**", "uplink/**",
-                      "appliance/systemd/player.service", "appliance/systemd/weston.service",
-                      "appliance/systemd/weston.ini")
-_BOOTSTRAPPER_DEB: Final = (*_DEB_BUILD, "scripts/build_bootstrapper_deb.py",
-                            "appliance/*.py", "contracts/**", "uplink/**", "player/**",
-                            "appliance/systemd/photo-wall-provision.service",
-                            "appliance/systemd/photo-wall-os-agent.service",
-                            "appliance/systemd/player.service",
-                            "appliance/systemd/weston.service",
-                            "appliance/systemd/weston.ini")
-_PLAYER_PAYLOAD: Final = (*_BOOTSTRAPPER_DEB, "scripts/build_player_payload.py")
+# The base build's tooling: the pinned uv environment and the snapshot pin it reads.
+_BASE_BUILD: Final = (*_PROJECT, ".github/actions/python-uv/action.yml",
+                      ".github/workflows/node-components.yml", "scripts/module_closure.py",
+                      "debian-packaging/snapshot.list", "debian-packaging/snapshot-epoch.sh",
+                      "scripts/device_root_checks.py")
+# The one source package (decision 0019): node-components.yml's `debs` job builds every binary
+# package of debian/control in the pinned build container and the local repo beside upstream's
+# nats-server .deb and python3-nats (debian-packaging/build-repo.sh). The build runs the import
+# check (scripts/import_check.py and what it imports) and installs the import roots the
+# debian/*.install files name; tests/test_release_plan.py holds both claimed.
+_NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian/**",
+                     "debian-packaging/**", "scripts/import_check.py",
+                     "scripts/module_closure.py",
+                     # stage 1's uplink on the device runtime, run in the build container
+                     "scripts/uplink_device_harness.py",
+                     "contracts/**", "nodeapi/**", "uplink/**", "player/**", "appliance/kernel/**",
+                     "appliance/feed.py", "appliance/feed_socket.py",
+                     "appliance/central_session/**", "appliance/host/**",
+                     "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
+                     "appliance/process_identity.py",
+                     "appliance/boot/**", "appliance/node_boot_handoff.py",
+                     "appliance/netboot_init.py", "appliance/bootstrap.py",
+                     "appliance/central_post.py", "appliance/netboot_initramfs/**",
+                     "appliance/node/**", "appliance/launchers/**", "appliance/bus/**",
+                     "appliance/systemd/photo-wall-*.service",
+                     "appliance/systemd/photowall*.slice",
+                     "appliance/systemd/photo-wall-node.target")
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,55 +268,42 @@ PACKAGES: Final = (
            "FROM the media OS base service-base.yml prepares", "media-worker",
            "scripts/service_base.py", "scripts/registry_pull.py", "scripts/docker_diagnostics.py",
            ".github/workflows/service-base.yml"),
-    Package("player-deb", "the Player .deb", _PLAYER_DEB),
-    Package("node-manager-deb", "the exact versioned AppManager .deb",
-            (*_DEB_BUILD, "scripts/build_node_manager_deb.py", "appliance/__init__.py",
-             "appliance/node/__init__.py", "appliance/node/manager.py", "appliance/node/manager_runner.py",
-             "appliance/node/manager_desired.py", "appliance/node/manager_observation.py",
-             "appliance/node/preparer.py",
-             "appliance/kernel/**", "appliance/apps/__init__.py", "appliance/apps/environment.py",
-             "appliance/central_session/**",
-             "contracts/**", "uplink/**")),
-    Package("node-display-deb", "the isolated native Weston display .deb",
-            (*_DEB_BUILD, "scripts/build_node_display_deb.py", "scripts/node_build_inputs.py", "appliance/display_host/**")),
-    Package("player-environment", "the sealed Debian V2 Player environment",
-            (*_PLAYER_DEB, "scripts/build_app_environment.py", "scripts/node_build_inputs.py", "appliance/apps/environment.py",
-             "scripts/build_environment_image.py", "scripts/sealed_archive.py")),
-    Package("node-base-deb", "the isolated V2 node base .deb",
-            (*_DEB_BUILD, "scripts/build_node_base_deb.py", "appliance/node/**", "appliance/kernel/**",
-             "appliance/host/**", "appliance/apps/**", "appliance/boot/**", "appliance/display_host/**", "contracts/**",
-             "uplink/**", "appliance/__init__.py", "appliance/central_session/**", "appliance/feed.py",
-             "appliance/feed_socket.py",
-             "appliance/health/**", "appliance/node_boot_handoff.py", "appliance/process_identity.py", "appliance/app_launcher.py", "appliance/systemd/photo-wall-*.service",
-             "appliance/systemd/photowall*.slice", "appliance/systemd/photo-wall-node.target",
-             # The Node bus: its configuration and its pinned server (E3c).
-             "appliance/bus/**", "scripts/nats_server.py", "scripts/pinned_fetch.py",
-             # HostCore's nodeapi session and its vendored nats-py wheel (E3c S4).
-             "nodeapi/**", "scripts/vendored_packages.py")),
-    Package("player-payload", "the data-only Player application archive", _PLAYER_PAYLOAD),
-    Package("bootstrapper-deb", "the bootstrapper .deb", _BOOTSTRAPPER_DEB),
-    # The squashfs bakes the bootstrapper .deb, so the bundle reads everything that .deb does;
-    # the rest of appliance/ is the image and initramfs definition, claimed whole.
-    Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and boot data",
-            (*_BOOTSTRAPPER_DEB, "appliance/**", "scripts/build_netboot_bundle.sh",
-             "scripts/build_boot_data.py", "scripts/verify_netboot_initrd.py",
-             "scripts/build_node_components.py", "scripts/node_component_inputs.py",
-             "scripts/node_release_artifacts.py",
-             "scripts/build_app_environment.py", "scripts/build_environment_image.py",
-             "scripts/sealed_archive.py", "scripts/build_node_base_deb.py", "scripts/nats_server.py", "scripts/pinned_fetch.py",
-             "scripts/vendored_packages.py", "nodeapi/**",
-             "scripts/build_node_display_deb.py", "scripts/build_node_manager_deb.py",
-             "scripts/node_build_inputs.py", "scripts/package_release_artifacts.py",
+    # photo-wall-node, the composition (launchers, units, bus configuration), ships byte for byte
+    # as the node release's node-base.deb; photo-wall-player and photo-wall-app-manager as its
+    # app.deb and manager-primary.deb.
+    Package("node-debs", "the Node's Debian packages from the one source package, and their "
+            "local repo", _NODE_DEBS),
+    # photo-wall-node-display from the one source package, built by debhelper's Meson build
+    # system (decision 0019 P1), shipped byte for byte as node-display.deb.
+    Package("node-display-deb", "the native Weston display .deb from the local repo",
+            (*_PROJECT, "debian/**", "debian-packaging/**", "appliance/display_host/**",
+             ".github/workflows/node-components.yml")),
+    # The release roots (decision 0019, steps 3 and 4): mmdebstrap builds the app and manager
+    # roots from the pin and the local repo (debian-packaging/build-root.sh), the seal
+    # (debian-packaging/seal-hook.sh, scripts/seal_root.py) seals them and the release writer
+    # (scripts/node_release_writer.py) writes the component set's components.json.
+    Package("release-roots", "the app and manager release roots (squashfs images) and the "
+            "component set's components.json",
+            (*_NODE_DEBS, "appliance/__init__.py", "scripts/seal_root.py",
+             "scripts/node_release_writer.py", "scripts/node_release_artifacts.py",
+             "scripts/package_release_artifacts.py")),
+    # The squashfs installs photo-wall-node from the local repo; the initrd build root installs
+    # photo-wall-netboot-init from it, whose hook copies stage 1's package directories (contracts,
+    # uplink and appliance's stage-1 modules) into the initrd; the rest of appliance/ is the image
+    # definition, claimed whole.
+    Package("base-bundle", "the netboot base bundle: squashfs, kernel, initrd and clock floor",
+            (*_BASE_BUILD, ".github/workflows/base-image.yml", "appliance/**", "contracts/**",
+             "uplink/**", "scripts/build_netboot_bundle.sh", "scripts/verify_netboot_initrd.py",
+             "scripts/node_release_artifacts.py", "nodeapi/**",
+             "debian/**", "debian-packaging/**", "scripts/package_release_artifacts.py",
              "scripts/initrd_mount_probe.py", "scripts/kernel_config_check.py",
-             "scripts/eeprom_update.py", "scripts/player_start_probe.py",
-             "scripts/os_agent_service_probe.py",
-             "scripts/verify_boot_display.py")),
-    # The published files beyond the .debs: the base bundle tarball, manifest.json and
-    # SHA256SUMS, whose names, layout and contents this packager writes to the declaration.
-    Package("release-assets", "the GitHub Release's operator asset set (base tarball, "
-            "manifest.json, SHA256SUMS)", ("scripts/package_release_artifacts.py",
-                                           "contracts/release.py", "contracts/player_payload.py", "contracts/node_release.py",
-                                           "scripts/node_release_artifacts.py")),
+             "scripts/eeprom_update.py", "scripts/verify_boot_display.py")),
+    # The published files: the base and boot tarballs, manifest.json, SHA256SUMS and the node
+    # release, whose names, layout and contents this packager writes to the declaration.
+    Package("release-assets", "the GitHub Release's asset set (base and boot tarballs, "
+            "manifest.json, SHA256SUMS, the node release)",
+            ("scripts/package_release_artifacts.py", "contracts/release.py",
+             "contracts/node_release.py", "scripts/node_release_artifacts.py")),
 )
 
 # Every tracked path no package claims must match one of these, so a new top-level directory or
@@ -317,12 +311,13 @@ PACKAGES: Final = (
 NOT_SHIPPED: Final = (
     "*.md", "docs/**", "tests/**", ".claude/**", ".codegraph/**", ".gitignore", "compose.yaml",
     ".github/workflows/checks.yml", ".github/workflows/software-e2e.yml",
-    ".github/workflows/netboot-e2e.yml",
     ".github/workflows/pipeline.yml",           # owner ruling: see the manifest's head
     # The service images' shared build and BuildKit cache wiring, which pipeline.yml runs: under
     # the same owner ruling, how an image is built is not a release input. The cache scope policy
     # also serves the node component builds, where a hit reuses a recorded layer: no byte changes.
     ".github/actions/service-image/action.yml", ".github/actions/buildkit-cache/action.yml",
+    # The node builds' builder and cache wiring over that policy (the same ruling).
+    ".github/actions/node-builder/action.yml",
     # The test jobs' console build; the images build their own bundle (the Dockerfile).
     ".github/actions/console-bundle/action.yml",
     # The software e2e jobs' shared setup; it builds test images only.
@@ -331,19 +326,18 @@ NOT_SHIPPED: Final = (
     # byte changes; the suites whose jobs use it list it, so a change to it runs them.
     ".github/actions/docker-hub-mirror/action.yml",
     # Development, documentation and test-harness tooling; no build reads these.
-    "scripts/boot_time_fixture.py", "scripts/check_docs.py", "scripts/check_player_unit.py",
+    "scripts/boot_time_fixture.py", "scripts/check_docs.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
     "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
     "scripts/node_rollout_image_check.py", "scripts/node_rollout_ci_evidence.py",
     "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
-    "scripts/provenance_models.py", "scripts/published_player_wire.py",
-    "scripts/packaged_os_agent_probe.py",
+    "scripts/provenance_models.py",
     "scripts/release_plan.py", "scripts/release_seal.py",
     "scripts/runtime_provenance.py",
-    "scripts/test_local.py", "scripts/test_netboot_e2e.py", "scripts/uplink_device_harness.py",
-    "scripts/build_node_pid1_fixture.py",  # the node-pid1 scenarios' fixture; never shipped
+    "scripts/test_local.py",
     "scripts/run_display_harness.py",  # node-pid1's display-harness job runner; never shipped
+    "scripts/nats_server.py",  # the bus tests' pinned nats-server binary; never shipped
     ".github/workflows/node-pid1.yml",
     "scripts/catalog_baselines.py",  # the console-catalog leg's baseline tool; never shipped
 )
@@ -404,34 +398,14 @@ class Suite:
 SUITES: Final = (
     Suite("checks", always=True),
     Suite("e2e", always=True),
-    Suite("base-image", packages=("base-bundle", "bootstrapper-deb", "player-deb",
-                                  "player-payload")),
-    # The tracer serves the Player .deb from a real Central: its content-serving layers, and the
-    # rest of what its harness imports (tests/test_release_plan.py computes that closure).
-    Suite("netboot-e2e", packages=("bootstrapper-deb", "player-deb"),
-          paths=("scripts/test_netboot_e2e.py", "scripts/packaged_os_agent_probe.py",
-                 "scripts/uplink_device_harness.py", "scripts/demo_wall.py",
-                 "scripts/container_build.py", "scripts/docker_diagnostics.py",
-                 "scripts/harness_bundle.py", "scripts/harness_failure.py",
-                 "scripts/immich_actions.py", "scripts/immich_fixture.py",
-                 "scripts/provenance_models.py", "scripts/registry_pull.py",
-                 "scripts/runtime_provenance.py",
-                 "tests/tls_fixture.py", ".github/workflows/netboot-e2e.yml",
-                 ".github/actions/docker-hub-mirror/action.yml",
-                 "central/__init__.py", "central/app.py", "central/db.py", "central/fleet/**",
-                 "central/catalog.py", "central/execution_outcomes.py", "central/media_ports.py",
-                 "central/planner.py", "central/runtime.py", "media/__init__.py",
-                 "media/models.py",
-                 "central/migrations/041_fleet_app_observations.sql",
-                 "central/content_routes.py", "central/content_catalog/**",
-                 "central/assets/**", "central/infra/**", "Dockerfile", "uv.lock")),
+    Suite("base-image", packages=("base-bundle", "node-debs")),
     # The node lifecycle under real systemd (node-pid1.yml): the node packages it boots, the
     # Central it runs against (its fixture imports central.app, so all of Central's Python), and
     # its own builder, harness, the test modules the harness borrows from, and workflow; and the
     # display harness job's runner and fixture (the job builds appliance/display_host itself).
-    Suite("node-pid1", packages=("node-base-deb", "node-manager-deb", "node-display-deb",
-                                 "player-environment"),
-          paths=("tests/test_node_pid1.py", "tests/node_pid1_*", "tests/node/apps/test_environment_image.py",
+    Suite("node-pid1", packages=("node-display-deb", "release-roots", "node-debs"),
+          paths=("tests/test_node_pid1.py", "tests/node_pid1_*", "tests/node_pid1_fixture/**",
+                 "tests/node/apps/test_environment_image.py", "tests/debs/test_roots.py",
                  "tests/native_display_smoke.py", "tests/native_display_probe.c",
                  "tests/native_player_mainloop_harness.py", "tests/native_display_media.py",
                  "tests/display_harness_health_client.py", "tests/display_harness_judge_feeder.py",
@@ -441,14 +415,14 @@ SUITES: Final = (
                  "tests/test_node_boot.py", "tests/test_registry.py",
                  # the join's hub harness and its pinned nats-server
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
-                 "scripts/nats_server.py",
-                 "scripts/build_node_pid1_fixture.py", "scripts/build_node_components.py",
-                 "scripts/node_component_inputs.py", "scripts/node_release_artifacts.py",
+                 "scripts/nats_server.py", "debian-packaging/nats-server.env",
+                 "scripts/node_release_artifacts.py",
                  "scripts/package_release_artifacts.py",
-                 "scripts/container_build.py", "scripts/player_start_probe.py",
+                 "scripts/container_build.py",
                  "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",
-                 "scripts/build_boot_data.py", ".github/workflows/node-pid1.yml",
+                 ".github/workflows/node-pid1.yml",
                  ".github/actions/docker-hub-mirror/action.yml",
+                 ".github/actions/node-builder/action.yml",
                  "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
                  "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),
 )
@@ -458,7 +432,7 @@ SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
 # through its consumers (each listed one must succeed, and cannot without it) and by its rule
 # that no job fails. tests/test_release_plan.py holds pipeline.yml's wiring to this.
 BUILD_JOBS: Final[Mapping[str, tuple[str, ...]]] = {
-    "node-components": ("base-image", "node-pid1")}
+    "node-components": ("e2e", "base-image", "node-pid1")}
 # A release runs these; base-image doubles as the release build (its artifacts are what the
 # seal packages), so a release always runs it.
 RELEASE_JOBS: Final = ("base-image", *PUBLISH_JOBS)

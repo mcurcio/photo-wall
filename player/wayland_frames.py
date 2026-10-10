@@ -15,7 +15,7 @@ from uuid import UUID
 from contracts.node_frame import frame_witness_tag
 from player.rendering import LocalLayer, OutputComposition
 
-CLIENT_LIBRARY = "/usr/lib/photo-wall-client/libphoto-wall-frame-client.so"
+CLIENT_LIBRARY = "/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so"
 
 
 @dataclass(frozen=True)

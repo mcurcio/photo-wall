@@ -114,6 +114,10 @@ Known defects against these rules, fixed in PR #28:
 - **Private package directories (Q1).** Each `.deb` ships its computed closure under
   `/usr/lib/<package>/`, run as `python3 -I -B <dir>`. Nothing goes to dist-packages, so the two
   packages share no file.
+- **Superseded in part by [0019](0019-debian-packaging-with-debhelper.md#relation-to-earlier-records)**
+  (2026-10-09): the packages these three bullets describe become debhelper packages. Depends live
+  in `debian/control` and the pin in `snapshot.list`; private directories and computed imports
+  stay, as a check.
 - **A Player the base cannot satisfy (Q2).** dpkg refuses it, and the unit's start limit reboots
   the Pi. The build checks one revision's base against its Player's Depends. Operator rule: stage
   the base first.

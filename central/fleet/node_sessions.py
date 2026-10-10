@@ -89,7 +89,8 @@ def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
 
 
 def command_eligibility_in(conn, offer_id: UUID) -> tuple[bool, str]:
-    """Weak legacy observation adoption never carries operator commands."""
+    """Only a node boot offer's admission carries operator commands; an admission recorded by
+    the retired legacy adoption stays history and carries none."""
     basis = conn.execute("SELECT basis FROM node_offer_contexts WHERE offer_id=%s", (offer_id,)).fetchone()
     if basis is None or basis["basis"] != "node_v2":
         return False, "legacy_observation_adoption"
@@ -120,20 +121,12 @@ class NodeSessions:
         """Bind the claim to its offer identity; offer age never refuses enrollment."""
         node = conn.execute("SELECT offer_payload,device_generation FROM node_boot_offers WHERE offer_id=%s",
                             (claim.offer_id,)).fetchone()
-        if node:
-            if node["offer_payload"] is None or node["device_generation"] != generation:
-                raise NodeControlError("node_offer_mismatch", 403)
-            offer = parse_node_boot_offer(bytes(node["offer_payload"]))
-            if (offer.device_id, offer.serial, offer.kernel_boot_id, offer.installation_audience) != (
-                    device_id, claim.serial, claim.kernel_boot_id, self.config.installation_audience):
-                raise NodeControlError("node_offer_mismatch", 403)
-            return
-        legacy = conn.execute("SELECT * FROM fleet_boot_offers WHERE offer_id=%s", (claim.offer_id,)).fetchone()
-        if (legacy is None or legacy["device_id"] != device_id or legacy["serial"] != claim.serial
-                or legacy["kernel_boot_id"] != claim.kernel_boot_id):
+        if node is None or node["offer_payload"] is None or node["device_generation"] != generation:
             raise NodeControlError("node_offer_mismatch", 403)
-        conn.execute("INSERT INTO node_offer_contexts(offer_id,basis,legacy_offer_id) "
-                     "VALUES(%s,'legacy_adoption',%s) ON CONFLICT DO NOTHING", (claim.offer_id, claim.offer_id))
+        offer = parse_node_boot_offer(bytes(node["offer_payload"]))
+        if (offer.device_id, offer.serial, offer.kernel_boot_id, offer.installation_audience) != (
+                device_id, claim.serial, claim.kernel_boot_id, self.config.installation_audience):
+            raise NodeControlError("node_offer_mismatch", 403)
 
     def _admit_boot_in(self, conn, claim: NodeSessionClaim, device_id: str, generation: int,
                        now: float):

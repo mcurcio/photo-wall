@@ -74,7 +74,7 @@ class RootImportWorker:
         args = ["/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + unit, "--service-type=exec"]
         for value in properties:
             args.extend(("--property", value))
-        args.extend(("--", "/usr/bin/python3", "-I", "-B", "/usr/lib/photo-wall-root-import"))
+        args.extend(("--", "/usr/bin/python3", "-I", "-B", "/usr/lib/photo-wall/node/root-import"))
         subprocess.run(args, check=True, timeout=10, stdin=subprocess.DEVNULL)
         rows = systemctl_show(unit)
         if rows["ActiveState"] == "active" and rows["MainPID"] != "0":

@@ -328,8 +328,8 @@ def test_only_a_player_that_offers_it_is_sent_the_after_state():
     """A plan layer's `after_end` reaches only a session that selected `layer_after_end`; any
     other gets the yes/no flag its release parses (unknown fields forbidden), kept photo or
     not. This Player reads either shape as the after-state. Mutation probe: send `after_end`
-    to every session (the published Players refuse the state,
-    tests/test_published_player_wire.py)."""
+    to every session (a released Player, whose models forbid unknown fields, would refuse the
+    state)."""
     assert select_control(ControlHello(authority_epoch=1, schemas=(1, 2), capabilities=(
         LAYER_AFTER_END, "identify_output"))) == CURRENT
     assert select_control(ControlHello(authority_epoch=1, schemas=(1, 2),

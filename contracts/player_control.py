@@ -46,7 +46,7 @@ class ControlDelivery(Model):
 
 # A plan Layer carries `after_end` (contracts.models.AfterEnd) only to a Player that offered
 # this; every Player released before it parses the yes/no `retain_on_expiry` instead, with
-# unknown fields forbidden (tests/test_published_player_wire.py).
+# unknown fields forbidden (contracts.models.Model, extra="forbid").
 LAYER_AFTER_END = "layer_after_end"
 CAPABILITIES = ("identify_output", LAYER_AFTER_END)
 

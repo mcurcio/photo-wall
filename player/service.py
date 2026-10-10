@@ -122,12 +122,6 @@ class PlayerConfig(Model):
     # validator, uplink.origin.Origin.parse_root. So when the cmdline names Central, no
     # saved value of any type or length can stop the Player (U3).
     central_origin: Any = Field(default=None, repr=False)
-    # The base tag this boot's diskless base was served, handed forward by the
-    # appliance bootstrapper on the opt-in per-device path (0012 bead 6). When
-    # set, the enrolled player reports it healthy on /v1/player/base-health so
-    # the latest-verified frontier advances. Absent on the flashed/D0 baseline
-    # and on the 0010 global `.deb` path -- no base-health is posted there.
-    base_running_tag: str | None = Field(default=None, max_length=256)
     # A PEM bundle used instead of the Debian bundle for every Central request this
     # process makes (locate, httpx, websocket): main() builds the one Trust from it.
     ca_file: str | None = Field(default=None, max_length=4096)
@@ -429,12 +423,6 @@ class PlayerService:
         self._task = None
         self.last_fault: str | None = None
         self.last_fault_detail: str | None = None
-        # The authority epoch whose base-health has been reported (0012 bead 6);
-        # None until a check-in lands, then one report per epoch (a re-enroll
-        # bumps the epoch and re-reports; central is monotonic per epoch).
-        self._base_health_epoch: int | None = None
-        self._base_health_sequence_epoch: int | None = None
-        self._base_health_sequence = 0
         self._hello_epoch: int | None = None
         self._control_selection: ControlSelection | None = None
         self._highest_control_sequence = 0
@@ -720,48 +708,6 @@ class PlayerService:
             raise ServiceError("control_selection_invalid")
         self._control_selection = selected
         self._hello_epoch = epoch
-
-    async def _report_base_health(self):
-        """One-shot base-image health check-in after enroll (0012 bead 6).
-
-        The diskless base is served per-device by tag; the appliance
-        bootstrapper hands the tag it booted forward as
-        `PlayerConfig.base_running_tag` (public.json). Once enrolled, the player
-        reports that tag healthy on `POST /v1/player/base-health` -- an
-        enrolled-token endpoint that requires NO live plan offer, so even an
-        unbound device advances the latest-verified frontier. Central validates
-        `running_tag == devices.last_served_tag` (the tag it recorded serving
-        this device this boot), so the reported tag is the served tag, never a
-        guess. Best-effort and idempotent per authority epoch: a failed or
-        repeated check-in never disturbs the coordination loop -- it retries on
-        the next enroll. A player with no handed-forward tag (flashed/D0 or the
-        0010 global path) reports nothing.
-        """
-        tag = self.config.base_running_tag
-        if not tag or self.registration is None:
-            return
-        if self._base_health_epoch == self.registration.authority_epoch:
-            return
-        epoch = self.registration.authority_epoch
-        if self._base_health_sequence_epoch != epoch:
-            self._base_health_sequence_epoch = epoch
-            self._base_health_sequence = 0
-        self._base_health_sequence += 1
-        try:
-            response = await self.request("POST", "/v1/player/base-health", body={
-                "authority_epoch": epoch,
-                "sequence": self._base_health_sequence,
-                "running_tag": tag,
-                "healthy": True,
-            })
-            if response.get("accepted") is not True:
-                raise ServiceError("base_health_rejected")
-            self._base_health_epoch = epoch
-        except (ServiceError, Unauthorized, StaleFeedback, httpx.HTTPError,
-                UplinkError, asyncio.TimeoutError) as error:
-            LOG.info("player base-health check-in deferred: %s",
-                     error if isinstance(error, (ServiceError, UplinkError))
-                     else type(error).__name__)
 
     def _apply_state(self, state: State):
         self._main()
@@ -1340,7 +1286,6 @@ class PlayerService:
                         await self.locate_central()
                     if self.registration is None:
                         await self.enroll()
-                        await self._report_base_health()
                     if proof_task is None:
                         proof_task = asyncio.create_task(self._local_app_proof_loop())
                     await self.hello_protocol()

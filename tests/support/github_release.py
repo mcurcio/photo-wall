@@ -99,10 +99,12 @@ class FakeRelease:
         return deb_name(self.tag)
 
 
-def make_release(tag: str, *, squashfs_bytes: int = 4 * 1024 * 1024) -> FakeRelease:
-    """Random (incompressible) squashfs bytes, so the tarball is big enough to throttle or hold."""
+def make_release(tag: str, *, squashfs_bytes: int = 4 * 1024 * 1024,
+                 deb_bytes: int = 64 * 1024) -> FakeRelease:
+    """Random (incompressible) squashfs and `.deb` bytes, so either is big enough to throttle or
+    hold."""
     tarball, tarball_sha, squashfs_sha = real_tarball(os.urandom(squashfs_bytes))
-    return FakeRelease(tag, tarball, tarball_sha, squashfs_sha, os.urandom(64 * 1024))
+    return FakeRelease(tag, tarball, tarball_sha, squashfs_sha, os.urandom(deb_bytes))
 
 
 def recut(release: FakeRelease, *, squashfs_bytes: int = 4 * 1024 * 1024) -> FakeRelease:
@@ -120,9 +122,9 @@ class FakeGitHubOrigin:
     """The GitHub Releases API for `repo` plus every release asset, served over real HTTP on
     127.0.0.1 so separate processes reach it (`PHOTO_WALL_RELEASE_API_BASE=api_base`).
 
-    Counts every asset GET per (tag, "manifest"|"tarball"|"deb"). A tarball can be throttled
-    (`chunk_delay` per 64 KiB) or held at half its body until `hold` is set, and answered with
-    `tarball_status` instead. Use as a context manager; closing releases any held download.
+    Counts every asset GET per (tag, "manifest"|"tarball"|"deb"). A tarball or a `.deb` can be
+    throttled (`chunk_delay` per 64 KiB) or held at half its body until `hold` is set, and a
+    tarball answered with `tarball_status` instead. Use as a context manager; closing releases any held download.
     """
 
     repo: str
@@ -182,7 +184,7 @@ class FakeGitHubOrigin:
                         tarball=release.tarball, tarball_sha=release.tarball_sha,
                         deb=release.deb, deb_filename=release.deb_filename))
                 elif what == "deb":
-                    self._send(200, release.deb)
+                    self._stream(release.deb)
                 elif release.tarball_status != 200:
                     self._send(release.tarball_status)
                 else:

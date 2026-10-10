@@ -917,9 +917,8 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
             service._set_central_link_state("retrying")
             assert service.renderer.central_link_state == "retrying"
             assert service.renderer.unbound_outputs == ("hdmi1",)
-            service.config = service.config.model_copy(update={"base_running_tag": "a" * 64})
-            await service._report_base_health()
-            assert any(request.url.path == "/v1/player/base-health" for request in server.requests)
+            assert not any(request.url.path == "/v1/player/base-health"
+                           for request in server.requests)  # the Player posts no base-health
             assert service.renderer.central_link_state == "retrying"
             await service.poll_state()
             assert service.central_link_state == service.renderer.central_link_state == "reachable"
@@ -2257,103 +2256,3 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         thread.join(timeout=5)
         listener.close()
         assert not thread.is_alive()
-
-
-# --- 0012 bead 6: base-health check-in after enroll --------------------------
-
-BASE_TAG = "v9.9.9"
-
-
-def _base_health_rig(tmp_path, config, *, responses=()):
-    """A PlayerService wired to a Server that captures base-health POST bodies.
-
-    Mirrors `rig`'s construction but keeps the base-health path observable and
-    lets the caller vary `config` (e.g. whether a served tag was handed forward).
-    """
-    directory = tmp_path / "cache"
-    directory.mkdir(mode=0o700, exist_ok=True)
-    clock = ManualClock(100)
-    server = Server(clock)
-    posts = []
-    answers = iter(responses)
-    inner = server.__call__
-
-    def capture(request):
-        if request.url.path == "/v1/player/base-health":
-            posts.append(json.loads(request.content))
-            if responses:
-                return httpx.Response(200, json={"accepted": next(answers)})
-        return inner(request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(capture), trust_env=False)
-    service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
-        find_central=finding("http://central"), trust=TRUST, clock=clock,
-        client=client, time_client=client,
-        websocket_connect=False, health_path=None, boot_context=boot_context())
-    return service, posts
-
-
-def test_base_health_posted_once_per_epoch_after_enroll(tmp_path):
-    # The enrolled player reports the handed-forward served tag healthy so the
-    # latest-verified frontier can advance; the report is idempotent per epoch.
-    config = PlayerConfig(central_origin="http://central", allow_http=True,
-                          cache_dir=str(tmp_path / "cache"), cache_bytes=1024**2,
-                          base_running_tag=BASE_TAG)
-
-    async def check():
-        service, posts = _base_health_rig(tmp_path, config)
-        try:
-            await service.locate_central()
-            await service.enroll()
-            await service._report_base_health()
-            await service._report_base_health()  # no re-post within the same epoch
-            epoch = service.registration.authority_epoch
-            assert posts == [{"authority_epoch": epoch, "sequence": 1,
-                              "running_tag": BASE_TAG, "healthy": True}]
-            assert service._base_health_epoch == epoch
-        finally:
-            await close(service)
-
-    asyncio.run(check())
-
-
-def test_rejected_base_health_retries_with_new_sequence(tmp_path):
-    config = PlayerConfig(central_origin="http://central", allow_http=True,
-                          cache_dir=str(tmp_path / "cache"), cache_bytes=1024**2,
-                          base_running_tag=BASE_TAG)
-
-    async def check():
-        service, posts = _base_health_rig(tmp_path, config, responses=(False, True))
-        try:
-            await service.locate_central()
-            await service.enroll()
-            await service._report_base_health()
-            assert service._base_health_epoch is None
-            await service._report_base_health()
-            assert service._base_health_epoch == service.registration.authority_epoch
-            await service._report_base_health()
-            assert [post["sequence"] for post in posts] == [1, 2]
-        finally:
-            await close(service)
-
-    asyncio.run(check())
-
-
-def test_no_base_health_when_no_tag_handed_forward(tmp_path):
-    # Flashed/D0 or the 0010 global `.deb` path: no served tag was handed
-    # forward, so the player posts no base-health (regression guard on d).
-    config = PlayerConfig(central_origin="http://central", allow_http=True,
-                          cache_dir=str(tmp_path / "cache"), cache_bytes=1024**2)
-
-    async def check():
-        service, posts = _base_health_rig(tmp_path, config)
-        try:
-            await service.locate_central()
-            await service.enroll()
-            await service._report_base_health()
-            assert posts == []
-            assert service._base_health_epoch is None
-        finally:
-            await close(service)
-
-    asyncio.run(check())

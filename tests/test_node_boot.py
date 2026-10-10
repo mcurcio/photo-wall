@@ -46,11 +46,8 @@ def publish_deployment(db, deployment, clock) -> bool:
 
 def cold_setup(registry, *, app=True):
     _seed(registry)
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE app_releases SET base_tarball_url=%s,base_tarball_size=256 WHERE tag=%s",
-                     ("https://example.invalid/base.tar", BASE_TAG))
     sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
-    manager = environment("2", "photo-wall-node-manager")
+    manager = environment("2", "photo-wall-app-manager")
     selected = environment() if app else None
     refs = [manager] + ([selected] if selected else [])
     deployment = NodeDeployment(uuid4(), NodeBaseRefV2(BASE_TAG, BASE_TARBALL_SHA, BASE_SHA, 1024,
@@ -101,14 +98,14 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
 
 def test_manager_pins_and_environment_identity_are_immutable(registry):
     service, _, deployment = cold_setup(registry)
-    changed = environment("3", "photo-wall-node-manager")
+    changed = environment("3", "photo-wall-app-manager")
     sources = {**deployment.environment_sources, changed.environment_sha256: "https://example.invalid/new"}
     del sources[deployment.manager_primary.environment_sha256]
     with pytest.raises(NodeReleaseRefused, match="manager_pins_immutable"):
         publish_deployment(registry.db, replace(deployment, deployment_id=uuid4(),
                            manager_primary=changed, environment_sources=sources), registry.clock)
-    with pytest.raises(ValueError, match="role_invalid"):
-        replace(deployment, manager_primary=environment()).offer(offer_id=uuid4(), audience="a",
+    with pytest.raises(ValueError, match="role_invalid"):  # a fallback must be another root
+        replace(deployment, manager_fallback=deployment.manager_primary).offer(offer_id=uuid4(), audience="a",
             request=NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64), device_id=DEVICE_ID,
             generation=1, revision=1, now=1)
 
@@ -188,9 +185,9 @@ def test_sealed_environment_worker_and_exact_reader_hold_inode_lease(registry, t
 
 def _desired(registry):
     from central.content_catalog.catalog import ReleaseCatalog
-    from central.infra.catalog_records import PgDeviceRecords, PgReleaseRecords
+    from central.infra.catalog_records import PgReleaseRecords
     from central.infra.transactions import PgTransactions
-    catalog = ReleaseCatalog(releases=PgReleaseRecords(), devices=PgDeviceRecords(), stored=None,
+    catalog = ReleaseCatalog(releases=PgReleaseRecords(),
                              transactions=PgTransactions(registry.db), publisher=None,
                              clock=registry.clock)
     with PgTransactions(registry.db).begin() as tx:

@@ -1,8 +1,9 @@
 """`scripts/build_netboot_bundle.sh` end to end with stand-ins for the host tools (unsquashfs,
 rpi-eeprom-config, rpi-eeprom-digest) on PATH and THIS repository as --repo: boot/initrd.img is
-the boot data -- stage 1's real computed closure, the base's CA bundle, this revision's commit
-time as the floor -- followed by the cached initrd unchanged. No hardware, no lsinitramfs (the
-content-verify itself is tests/test_verify_netboot_initrd.py)."""
+the clock floor's one-file layer -- this revision's commit time, written by the host's cpio --
+followed by the cached initrd unchanged (stage 1 and the CA bundle are in the cached initrd,
+decision 0019 P4). No hardware (the content-verify itself is
+tests/test_verify_netboot_initrd.py)."""
 
 import os
 import shutil
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 from test_eeprom_update import _RPI_EEPROM_CONFIG_STUB, _RPI_EEPROM_DIGEST_STUB
 
-from scripts.build_boot_data import CA_BUNDLE_PATH, FLOOR_PATH, read_archive
+from scripts.verify_netboot_initrd import FLOOR_PATH, archive_files, read_archive
 
 REPO = Path(__file__).resolve().parents[1]
 BUNDLE = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
@@ -36,7 +37,7 @@ def _tool(bin_dir: Path, name: str, text: str) -> None:
 
 @pytest.mark.skipif(shutil.which("git") is None or not (REPO / ".git").exists(),
                     reason="needs this repository's git history for the floor")
-def test_the_bundle_initrd_is_the_boot_data_then_the_cached_initrd(tmp_path):
+def test_the_bundle_initrd_is_the_floors_layer_then_the_cached_initrd(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _tool(bin_dir, "unsquashfs", _UNSQUASHFS_STUB)
@@ -56,7 +57,7 @@ def test_the_bundle_initrd_is_the_boot_data_then_the_cached_initrd(tmp_path):
          "--dtb", str(inputs["dtb"]), "--squashfs", str(inputs["base.squashfs"]),
          "--eeprom-image", str(inputs["pieeprom.bin"]), "--output", str(output),
          "--verify", str(REPO / "scripts/verify_netboot_initrd.py"), "--repo", str(REPO),
-         "--python-libdir", "/usr/lib/python3.13", "--python", sys.executable, "--skip-verify"],
+         "--python", sys.executable, "--skip-verify"],
         env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
         capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -64,14 +65,11 @@ def test_the_bundle_initrd_is_the_boot_data_then_the_cached_initrd(tmp_path):
     initrd = (output / "boot" / "initrd.img").read_bytes()
     members, end = read_archive(initrd)
     assert initrd[end:] == CACHED
-    files = {name for name, is_directory in members if not is_directory}
-    assert {CA_BUNDLE_PATH, FLOOR_PATH,
-            "usr/lib/python3.13/appliance/netboot_init.py",
-            "usr/lib/python3.13/uplink/locate.py"} <= files
-    assert not any(name.startswith(("usr/lib/python3.13/player",
-                                    "usr/lib/python3.13/appliance/provision")) for name in files)
+    # Every parent before its child, so the kernel's unpacker can create the file.
+    assert [name for name, _ in members] == ["usr", "usr/lib", "usr/lib/photo-wall", FLOOR_PATH]
     commit_time = subprocess.run(["git", "-C", str(REPO), "log", "-1", "--format=%ct"],
                                  capture_output=True, text=True, check=True).stdout.strip()
+    assert archive_files(initrd) == {FLOOR_PATH: f"{commit_time}\n".encode()}
     assert f"floor {commit_time}" in result.stdout
     listing = (output / "SHA256SUMS").read_text()
-    assert "./boot/initrd.img" in listing and "closure-manifest" not in listing
+    assert "./boot/initrd.img" in listing

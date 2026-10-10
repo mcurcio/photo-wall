@@ -324,18 +324,10 @@ class RolloutEffectGate:
                     raise RolloutGateError("rollout_revision_conflict")
                 if row["state"] != "closed":
                     raise RolloutGateError("rollout_gate_already_open")
-                # A stopped/ambiguous legacy or schema-one attempt must be
-                # reconciled before a new effect generation can start. A
-                # queued intent without a command has no equipment effect.
-                barrier = conn.execute(
-                    "SELECT EXISTS(SELECT 1 FROM fleet_app_attempts "
-                    "WHERE root_released_at IS NULL AND "
-                    "(command_id IS NOT NULL OR drain_id IS NOT NULL OR "
-                    "phase IN ('prepared','stop_committed','installing','starting',"
-                    "'expired_unknown','recovery_required'))) AS attempt, "
-                    "EXISTS(SELECT 1 FROM active_equipment_drains) AS drain"
-                ).fetchone()
-                if barrier["attempt"] or barrier["drain"]:
+                # An unresolved equipment drain must be reconciled before a new effect
+                # generation can start.
+                if conn.execute("SELECT EXISTS(SELECT 1 FROM active_equipment_drains) AS drain"
+                                ).fetchone()["drain"]:
                     raise RolloutGateError("rollout_barrier_unresolved")
                 now = _time_in(conn)
                 encoded, scope_digest = _validated_certificate(certificate, now=now)

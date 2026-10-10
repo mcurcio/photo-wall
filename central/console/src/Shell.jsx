@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
-import { useBootFacts } from "./bootFacts.js";
+import { bootFactsFrom } from "./bootFacts.js";
 import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
@@ -203,9 +203,6 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
 export function Shell({ hidden = false }) {
   const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
-  // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
-  // the fleet pages and the output chooser.
-  const bootFacts = useBootFacts(snapshot);
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
   // Node control (Part E §25): ONE node status read, the effect gate's one source.
@@ -218,6 +215,9 @@ export function Shell({ hidden = false }) {
   const hostsSkipped = hidden || nodeControl.state !== "on";
   const fleetHosts = useFleetHosts({ skip: hostsSkipped });
   const hosts = hostsSkipped ? null : fleetHosts;
+  // Boot facts (slice 2 §5): each box's serial from the host read, shared by the fleet pages
+  // and the output chooser.
+  const bootFacts = useMemo(() => bootFactsFrom(hosts), [hosts]);
   const wall = useWallMemory(route, snapshot, navigate);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.

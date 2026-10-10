@@ -32,7 +32,6 @@ DSN = "postgresql://unused.invalid/none"
 ENV = {
     "PHOTO_WALL_RELEASE_REPO": "example/photo-wall",
     "PHOTO_WALL_RELEASE_TOKEN": "token-value",
-    "PHOTO_WALL_RELEASE_PRERELEASES": "true",
 }
 MIGRATION_022 = (Path(__file__).parents[1] / "central" / "migrations"
                  / "022_retire_release_queue.sql")

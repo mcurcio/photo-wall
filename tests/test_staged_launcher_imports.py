@@ -1,50 +1,52 @@
-"""Code that runs against a staged launcher imports only what that launcher stages.
+"""Code that runs against a launcher imports only what that launcher's program reaches.
 
-A PID1 scenario, a probe or a generated launcher puts `/usr/lib/photo-wall-<name>` first on
-`sys.path` and then imports `appliance` modules from it. The staged tree holds exactly the
-launcher's computed closure, so an import outside it fails only on a booted node. This guard
-finds every such site in tests/ and scripts/ (a module-level insert covers the file's own
-imports; an inline program in a string constant covers that program's imports) and requires
-each imported `appliance` module to be in its launcher's closure.
+A PID1 scenario, a probe or a generated launcher puts a launcher's path first on `sys.path` and
+then imports `appliance` modules from it: a staged closure's `/usr/lib/photo-wall-<name>`
+(the manager and Player builders), or the PATH a Node launcher
+`/usr/lib/photo-wall/node/<name>/__main__.py` declares (photo-wall-node, decision 0019), read
+from that file. An import outside the launcher's computed closure fails only on a booted node, or
+reaches a module its program never runs. This guard finds every such site in tests/ and scripts/
+(a module-level statement covers the file's own imports; an inline program in a string constant
+covers that program's imports) and requires each imported `appliance` module to be in its
+launcher's closure.
 """
 
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator, Mapping
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Final
 
 import pytest
+from node.launcher_closures import FORBIDDEN as NODE_LAUNCHERS
+from node.launcher_closures import closure as node_closure
 
-from scripts import build_node_base_deb, build_node_manager_deb, module_closure
-from scripts.module_closure import Closure, ClosurePolicy, closure_for
+from scripts.module_closure import Closure
 
 REPO: Final = Path(__file__).resolve().parents[1]
 SCANNED: Final = ("tests", "scripts")
 STAGED_PREFIX: Final = "/usr/lib/photo-wall-"
-# A floor, so a scanner gone blind fails: 7 since E2c deleted the three unrun container probes
-# (scripts/node_service_probe.py and its two fixtures, errata E-E2C-DR-10).
-MIN_SITES: Final = 7
+NODE_LAUNCHER: Final = re.compile(r"/usr/lib/photo-wall/node/([a-z-]+)/__main__\.py")
+# A floor, so a scanner gone blind fails: 3 since the V1 lane's scripts/player_start_probe.py
+# went (decision 0019 P3), the three node-pid1 sites that read a Node launcher's PATH.
+MIN_SITES: Final = 3
 
 
 @dataclass(frozen=True, slots=True)
 class StagedImportSite:
     path: str                  # repo-relative
     line: int
-    launcher: str              # <name> of sys.path.insert(0, "/usr/lib/photo-wall-<name>")
+    launcher: str              # <name> of the staged closure or the Node launcher
     modules: frozenset[str]    # appliance.* modules imported; `from P import n` resolves to P.n
 
 
-def launcher_policies() -> Mapping[str, ClosurePolicy]:
-    return (build_node_base_deb.POLICIES | {"node-manager": build_node_manager_deb.POLICY}
-            | dict(module_closure.POLICIES))
-
-
 def _launcher(statement: ast.stmt) -> str | None:
-    """`name` when `statement` is `sys.path.insert(0, "/usr/lib/photo-wall-<name>")`."""
+    """`name` when `statement` is `sys.path.insert(0, "/usr/lib/photo-wall-<name>")`, or a
+    `sys.path[:0] = ...` that reads "/usr/lib/photo-wall/node/<name>/__main__.py"'s PATH."""
     match statement:
         case ast.Expr(value=ast.Call(
                 func=ast.Attribute(value=ast.Attribute(value=ast.Name(id="sys"), attr="path"),
@@ -52,6 +54,12 @@ def _launcher(statement: ast.stmt) -> str | None:
                 args=[_, ast.Constant(value=str() as target)])) if target.startswith(
                     STAGED_PREFIX):
             return target.removeprefix(STAGED_PREFIX)
+        case ast.Assign(targets=[ast.Subscript(
+                value=ast.Attribute(value=ast.Name(id="sys"), attr="path"))], value=value):
+            for node in ast.walk(value):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and (
+                        found := NODE_LAUNCHER.fullmatch(node.value)):
+                    return found.group(1)
     return None
 
 
@@ -93,7 +101,7 @@ def staged_import_sites(path: Path) -> Iterator[StagedImportSite]:
             continue
         text = (node.value.decode(errors="replace") if isinstance(node.value, bytes)
                 else node.value)
-        if "sys.path.insert" not in text:
+        if "sys.path" not in text:
             continue
         try:
             program = ast.parse(text)
@@ -111,7 +119,7 @@ SITES: Final = tuple(site for directory in SCANNED
 
 @cache
 def _closure(launcher: str) -> Closure:
-    return closure_for(launcher_policies()[launcher])
+    return node_closure(launcher)
 
 
 def _site_id(site: StagedImportSite) -> str:
@@ -124,7 +132,8 @@ def test_the_sites_are_found() -> None:
 
 @pytest.mark.parametrize("site", SITES, ids=_site_id)
 def test_every_site_names_a_known_launcher(site: StagedImportSite) -> None:
-    assert site.launcher in launcher_policies(), f"{_site_id(site)}: {site.launcher}"
+    assert site.launcher in NODE_LAUNCHERS, (
+        f"{_site_id(site)}: {site.launcher}")
 
 
 @pytest.mark.parametrize("site", SITES, ids=_site_id)

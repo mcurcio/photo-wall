@@ -19,10 +19,9 @@ from fakes.transactions import FakeTransactions
 
 from central.assets import handlers
 from central.assets.handlers import (
-    MAX_PACKAGE_BYTES,
     MAX_TARBALL_BYTES,
     FetchOsImageHandler,
-    FetchPackageHandler,
+    FetchSealedEnvironmentHandler,
     PrefetchHandler,
 )
 from central.assets.layout import TEMP_PREFIX, CacheLayout
@@ -37,8 +36,9 @@ from central.kernel.handling import (
     TerminalFailure,
     handler_job_type,
 )
-from central.kernel.job_types import FetchOsImage, FetchPackage, Prefetch
+from central.kernel.job_types import FetchOsImage, FetchSealedEnvironment, Prefetch
 from central.kernel.ports import ReleaseListing
+from contracts.node_boot import MAX_ENVIRONMENT_BYTES
 from contracts.time import ManualClock
 
 SQUASHFS = b"squashfs image bytes " * 64
@@ -180,9 +180,9 @@ def test_os_image_handler_download_failure_leaves_no_temp(world_at):
     assert world.temps() == []
 
 
-# -- FetchPackageHandler --------------------------------------------------------------------------
+# -- FetchSealedEnvironmentHandler ----------------------------------------------------------------
 
-DEB_KEY = AssetKey(AssetKind.PLAYER_DEB, sha(DEB))
+DEB_KEY = AssetKey(AssetKind.SEALED_ENVIRONMENT, sha(DEB))
 
 
 def deb_locator(url: str, data: bytes = DEB) -> OriginLocator:
@@ -198,8 +198,8 @@ def package_world(world_at, blobs, owners=("v1.0.0", "v1.1.0")) -> World:
 
 
 def run_package(world: World):
-    handler = FetchPackageHandler(production=world.production, origin=world.origin)
-    return asyncio.run(handler.handle(FetchPackage(sha256=sha(DEB))))
+    handler = FetchSealedEnvironmentHandler(production=world.production, origin=world.origin)
+    return asyncio.run(handler.handle(FetchSealedEnvironment(sha256=sha(DEB))))
 
 
 def test_package_handler_two_tags_share_one_file_and_one_producer(world_at):
@@ -229,8 +229,8 @@ def fallthrough(world_at, kind: str, blobs: dict[str, object]):
                                 size=len(data))
         world.reference(key, owner, locator, expected=facts(DEB) if kind == "deb" else None)
     if kind == "deb":
-        handler = FetchPackageHandler(production=world.production, origin=world.origin)
-        return world, lambda: asyncio.run(handler.handle(FetchPackage(sha256=sha(DEB)))), DEB
+        handler = FetchSealedEnvironmentHandler(production=world.production, origin=world.origin)
+        return world, lambda: asyncio.run(handler.handle(FetchSealedEnvironment(sha256=sha(DEB)))), DEB
     os_handler = FetchOsImageHandler(production=world.production, origin=world.origin,
                                      store=world.store)
     return world, lambda: asyncio.run(os_handler.handle(OS_JOB)), SQUASHFS
@@ -273,7 +273,7 @@ def test_package_handler_caps_an_unsized_locator(world_at):
     world.reference(DEB_KEY, "v1.0.0",
                     OriginLocator("https://example.test/x.deb", sha256=sha(DEB), size=None))
     run_package(world)
-    assert world.origin.max_bytes == [MAX_PACKAGE_BYTES]
+    assert world.origin.max_bytes == [MAX_ENVIRONMENT_BYTES]
 
 
 def test_handlers_declare_their_job_types():
@@ -283,9 +283,9 @@ def test_handlers_declare_their_job_types():
     origin = SpyOrigin({})
     assert handler_job_type(FetchOsImageHandler(production=production, origin=origin,
                                                 store=store)) is FetchOsImage
-    assert handler_job_type(FetchPackageHandler(production=production, origin=origin)) \
-        is FetchPackage
-    prefetch = PrefetchHandler(catalog=StaticContentCatalog({}),
+    assert handler_job_type(FetchSealedEnvironmentHandler(production=production, origin=origin)) \
+        is FetchSealedEnvironment
+    prefetch = PrefetchHandler(catalog=StaticContentCatalog(),
                                readiness=DiskStoredAssets(records=PgAssetRecords(ManualClock(0.0)),
                                                           store=store),
                                transactions=FakeTransactions(),
@@ -300,7 +300,7 @@ def test_prefetch_publishes_only_recorded_assets_missing_from_disk(world_at):
     world = world_at()
     present = FetchOsImage(tarball_sha256=sha(b"tarball v1.0.0"))
     absent_file = FetchOsImage(tarball_sha256=sha(b"tarball v1.1.0"))
-    never_produced = FetchPackage(sha256=sha(DEB))
+    never_produced = FetchSealedEnvironment(sha256=sha(DEB))
     unrecorded = FetchOsImage(tarball_sha256=sha(b"tarball v9.9.9"))
     for job, owner in ((present, "v1.0.0"), (absent_file, "v1.1.0")):
         key = AssetKey(AssetKind.OS_IMAGE, job.tarball_sha256)
@@ -317,7 +317,7 @@ def test_prefetch_publishes_only_recorded_assets_missing_from_disk(world_at):
 
     publisher = RecordingPublisher(ManualClock(1000.0))
     catalog = StaticContentCatalog(
-        {}, desired=frozenset({present, absent_file, never_produced, unrecorded}))
+        desired=frozenset({present, absent_file, never_produced, unrecorded}))
     handler = PrefetchHandler(catalog=catalog,
                               readiness=DiskStoredAssets(records=world.records, store=world.store),
                               transactions=world.transactions, publisher=publisher)

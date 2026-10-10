@@ -244,25 +244,3 @@ def test_unauthorized_proof_peer_rejected_before_process_or_network(monkeypatch)
         service.handle(SimpleNamespace())
 
 
-def test_public_config_mountpoint_is_empty_and_manifested(tmp_path):
-    import io
-    import tarfile
-
-    from appliance.apps.environment import inventory
-    from scripts.build_app_environment import materialize
-
-    archive = tmp_path / "root.tar"
-    with tarfile.open(archive, "w") as stream:
-        member = tarfile.TarInfo("etc/photo-wall/public.json")
-        member.mode = 0o444
-        member.size = 0
-        stream.addfile(member, io.BytesIO(b""))
-    root = tmp_path / "root"
-    materialize(archive, root)
-    entry = inventory(root)["etc/photo-wall/public.json"]
-    assert entry["size"] == 0 and entry["mode"] == 0o444
-    with tarfile.open(archive, "w") as stream:
-        member.size = 2
-        stream.addfile(member, io.BytesIO(b"{}"))
-    with pytest.raises(ValueError, match="configuration_not_placeholder"):
-        materialize(archive, tmp_path / "nonempty")

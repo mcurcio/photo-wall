@@ -88,13 +88,19 @@ class NodeBootOfferV2:
         validate_node_environment_roles(self.base, self.app_environment, self.manager_primary, self.manager_fallback)
 
 
+# Each release root's package (decision 0019, debian/control), which its reference's deb_name
+# names: the manager root's AppManager launcher and the app root's Player. Judged where a root
+# is built (scripts/seal_root.py, scripts/node_release_writer.py) and launched
+# (appliance/node/manager_launcher.py, appliance/apps/process_linux.py), never when a stored
+# document is parsed: Central re-reads releases, deployments and offers an earlier build wrote,
+# whose roots named the packages of their day (E-0019-FIX-16).
+MANAGER_PACKAGE = "photo-wall-app-manager"
+APP_PACKAGE = "photo-wall-player"
+
+
 def validate_node_environment_roles(base, app_environment, manager_primary, manager_fallback):
     """Shared cold-offer/release role and ABI compatibility rules."""
-    if (manager_primary.deb_name != "photo-wall-node-manager"
-            or (manager_fallback is not None and (
-                manager_fallback.deb_name != "photo-wall-node-manager"
-                or manager_fallback.environment_sha256 == manager_primary.environment_sha256))
-            or (app_environment is not None and app_environment.deb_name != "photo-wall-player")):
+    if manager_fallback is not None and manager_fallback.environment_sha256 == manager_primary.environment_sha256:
         raise ValueError("node_boot_role_invalid")
     for environment in (app_environment, manager_primary, manager_fallback):
         if environment is None:

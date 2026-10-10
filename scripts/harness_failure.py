@@ -57,8 +57,8 @@ _CODES = (
     "original_integrity_mismatch", "outage_fallback_missing", "outage_lease_overrun",
     "outage_report_stale", "output_not_drawn", "output_state_missing",
     "pagination_not_exercised", "player_boundary", "player_environment_leak",
-    "player_network_leak", "player_requirements_mismatch", "player_revision_mismatch",
-    "player_volume_leak", "player_wheel_mismatch", "players_not_registered",
+    "player_image_mismatch", "player_network_leak", "player_revision_mismatch",
+    "player_volume_leak", "players_not_registered",
     "permission_not_reported", "permission_recovery_timeout", "player_rejoin_timeout",
     "portrait_not_secured", "readiness_commit_proof", "refresh_pending",
     "registry_pull_failed", "registry_pull_unavailable",
@@ -73,7 +73,7 @@ _CODES = (
     "upstream_already_initialized", "upstream_host_port_exposed", "upstream_outage_not_reported",
     "upstream_owner_mismatch", "upstream_recovery_timeout", "upstream_scope",
     "upstream_startup_timeout", "upstream_version_mismatch",
-    "video_not_prepared", "wheel_path",
+    "video_not_prepared",
 )
 
 FailureCode = StrEnum("FailureCode", {value.upper(): value for value in _CODES})

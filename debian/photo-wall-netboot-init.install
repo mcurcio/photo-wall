@@ -1,0 +1,6 @@
+appliance/netboot_init.py usr/lib/photo-wall/netboot-init/appliance
+appliance/bootstrap.py usr/lib/photo-wall/netboot-init/appliance
+appliance/central_post.py usr/lib/photo-wall/netboot-init/appliance
+appliance/netboot_initramfs/path usr/lib/photo-wall/netboot-init
+appliance/netboot_initramfs/hooks/photo-wall-netboot usr/share/initramfs-tools/hooks
+appliance/netboot_initramfs/scripts/photowall-netboot usr/share/initramfs-tools/scripts

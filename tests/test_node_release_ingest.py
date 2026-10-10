@@ -55,14 +55,15 @@ class NodeUpload:
 
 
 def node_upload(tag: str, *, revision: str = "a" * 40, salt: str = "", app: bool = True,
-                size: int = 0) -> NodeUpload:
-    """A valid node release for `tag`; `salt` re-cuts every artifact (new digests)."""
+                size: int = 0, manager_package: str = "photo-wall-app-manager") -> NodeUpload:
+    """A valid node release for `tag`; `salt` re-cuts every artifact (new digests);
+    `manager_package` is the manager root's deb_name."""
     roles = _ROLES if app else _ROLES[:-2]
     bodies = {role: f"{tag}{salt}:{role}".encode() + b"x" * size for role in roles}
     artifacts = tuple(NodeReleaseAssetV2(role, f"{role}.bin", sha256(data).hexdigest(), len(data))
                       for role, data in bodies.items())
     refs = {asset.role: asset for asset in artifacts}
-    manager = replace(environment("2", "photo-wall-node-manager"),
+    manager = replace(environment("2", manager_package),
                       environment_sha256=refs["manager-primary"].sha256,
                       size_bytes=refs["manager-primary"].size_bytes,
                       deb_sha256=refs["manager-primary-deb"].sha256)
@@ -110,9 +111,8 @@ class Upstream:
         data = self.files.get(path)
         return httpx.Response(404) if data is None else httpx.Response(200, content=data)
 
-    def origin(self, *, include_prereleases: bool = False) -> GitHubReleaseOrigin:
-        return GitHubReleaseOrigin(REPO, transport=httpx.MockTransport(self.handle),
-                                   include_prereleases=include_prereleases)
+    def origin(self) -> GitHubReleaseOrigin:
+        return GitHubReleaseOrigin(REPO, transport=httpx.MockTransport(self.handle))
 
 
 def listed(upstream: Upstream, **options):
@@ -170,17 +170,14 @@ def test_a_transport_failure_still_aborts_the_whole_listing():
         listed(upstream)
 
 
-@pytest.mark.parametrize("include_prereleases", [False, True])
-def test_a_node_prerelease_is_listed_whatever_the_legacy_flag(include_prereleases):
+def test_a_node_prerelease_is_listed():
     upstream = Upstream()
     upstream.put(node_upload("v2.1.0-rc.1"), prerelease=True)
-    release = listed(upstream, include_prereleases=include_prereleases)["v2.1.0-rc.1"]
+    release = listed(upstream)["v2.1.0-rc.1"]
     assert release.is_prerelease and release.node_publication is not None
-    # With the legacy flag off its legacy facts were not read: no V1 row is ever written.
-    assert release.legacy is include_prereleases
 
 
-def test_a_prerelease_without_a_node_manifest_stays_unlisted_when_the_flag_is_off():
+def test_a_prerelease_without_a_node_manifest_stays_unlisted():
     upstream = Upstream()
     upstream.entries["v2.1.0-rc.1"] = {"tag_name": "v2.1.0-rc.1", "draft": False,
                                        "prerelease": True, "assets": []}

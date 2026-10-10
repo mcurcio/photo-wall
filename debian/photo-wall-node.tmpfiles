@@ -1,0 +1,6 @@
+d /run/photo-wall-node 0700 root root -
+d /run/photo-wall-app-proof 0755 root root -
+d /run/photo-wall-boot-stage 0755 root root -
+d /run/photo-wall-app-feed 0750 root pw-node-feeds -
+d /run/photo-wall-display-feed 0750 pw-display pw-node-feeds -
+d /run/photo-wall-display-wayland 0750 pw-display pw-display -

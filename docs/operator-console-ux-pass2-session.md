@@ -130,7 +130,7 @@ Five operator POSTs take no body (`app.py:548,556,633,668,725`; retire and run o
 
 - **Rejected: an Origin/Host comparison.** Proxies rewrite `Host` (nginx sends the upstream name by default), and trusting `X-Forwarded-Host` needs per-deployment proxy trust. The bound Origin needs neither: it compares the browser's view with the browser's view.
 - **`Sec-Fetch-Site` is a bonus layer.** Browsers send it only to secure origins, so over http it is absent.
-- **Scripts are unaffected.** A request with a Bearer credential needs no marker and no Origin, so `curl` (runbook release and pin examples), `scripts/demo_wall.py:785` and `scripts/test_netboot_e2e.py:341` keep working.
+- **Scripts are unaffected.** A request with a Bearer credential needs no marker and no Origin, so `curl` (runbook release and pin examples), and `scripts/demo_wall.py:785` keep working (the netboot end-to-end script it also named was deleted by [0019](decisions/0019-debian-packaging-with-debhelper.md)).
 
 ## 7. Console changes
 

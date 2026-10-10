@@ -1,31 +1,11 @@
-"""Base-owned PID1 and kernel process identity sampling for the Player unit.
+"""A process's kernel birth tick, the local fence the base's units compare a MainPID against.
 
-The sample is a local concurrency fence. It does not prove app control, trusted
-device identity, or visible output.
+It does not prove app control, trusted device identity, or visible output.
 """
 
 from __future__ import annotations
 
-import re
-import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
-
-from appliance.app_launcher import UNIT
-
-_INVOCATION = re.compile(r"[0-9a-f]{32}")
-
-
-@dataclass(frozen=True, slots=True)
-class ProcessSample:
-    pid: int
-    start_ticks: int
-    invocation_id: str
-
-
-class ProcessSampler(Protocol):
-    def sample(self) -> ProcessSample | None: ...
 
 
 def read_proc_start_ticks(proc_root: Path, pid: int) -> int | None:
@@ -49,32 +29,3 @@ def read_proc_start_ticks(proc_root: Path, pid: int) -> int | None:
     ticks = int(fields[19])
     return ticks if 0 < ticks < 2**63 else None
 
-
-class SystemdProcessSampler:
-    """Sample PID1's invocation and the current MainPID's kernel birth tick."""
-
-    def __init__(self, proc_root: Path = Path("/proc")) -> None:
-        self.proc_root = proc_root
-
-    def sample(self) -> ProcessSample | None:
-        try:
-            result = subprocess.run(
-                ["systemctl", "show", "--property=MainPID,InvocationID,ActiveState", UNIT],
-                capture_output=True, text=True, check=False, timeout=3)
-            if result.returncode != 0:
-                return None
-            rows = [line.split("=", 1) for line in result.stdout.splitlines()]
-            if len(rows) != 3 or any(len(row) != 2 for row in rows):
-                return None
-            values = dict(rows)
-            pid_text, invocation = values.get("MainPID"), values.get("InvocationID")
-            if (set(values) != {"MainPID", "InvocationID", "ActiveState"}
-                    or values["ActiveState"] != "active" or pid_text is None
-                    or not pid_text.isdecimal() or int(pid_text) <= 0
-                    or invocation is None or _INVOCATION.fullmatch(invocation) is None):
-                return None
-            pid = int(pid_text)
-            ticks = read_proc_start_ticks(self.proc_root, pid)
-            return ProcessSample(pid, ticks, invocation) if ticks is not None else None
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return None

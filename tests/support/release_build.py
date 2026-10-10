@@ -1,18 +1,23 @@
-"""One release build's outputs, synthetic: what base-image.yml and the pipeline's `images` job hand
-the packager (scripts/package_release_artifacts.py) and the seal (scripts/release_seal.py).
+"""One release build's outputs, synthetic: what base-image.yml, node-components.yml and the
+pipeline's `images` job hand the packager (scripts/package_release_artifacts.py) and the seal
+(scripts/release_seal.py).
 
-The bundle is shaped like `scripts/build_netboot_bundle.sh`'s, the `.deb`s are named as the
-builders name them, and each service image is a `<repository>@<digest>` reference.
+The bundle is shaped like `scripts/build_netboot_bundle.sh`'s, the component set like
+`scripts/node_release_writer.py`'s (stamped for REVISION), and each service image is a
+`<repository>@<digest>` reference.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from contracts.release import CMDLINE, base_abi_sidecar
+from contracts.app_environment import AppEnvironmentRefV2
+from contracts.release import CMDLINE
+from scripts.node_release_artifacts import COMPONENTS_SCHEMA, write_stamp
 
 BUNDLE_BUILDER = Path(__file__).resolve().parents[2] / "scripts" / "build_netboot_bundle.sh"
 
@@ -27,6 +32,8 @@ def cmdline_template(script: str | None = None) -> str:
 
 
 REVISION = "a" * 40
+TAG = "v2.0.0"
+COMPONENT_INPUTS = "c" * 64          # the component set's recorded input digest
 EPOCH = 1_790_000_000               # a fixed source date for the base tarball's members
 REPOSITORY = "ghcr.io/owner/repo"
 
@@ -67,32 +74,37 @@ def base_bundle(root: Path) -> Path:
     return bundle
 
 
-def with_base_abi(bundle: Path, abi: str) -> Path:
-    """Attach the schema-2 fact for the synthetic squashfs bytes."""
-    squashfs = bundle / "photo-wall-base.squashfs"
-    digest = hashlib.sha256(squashfs.read_bytes()).hexdigest()
-    write(bundle / "base-abi.json", base_abi_sidecar(abi, digest))
-    return bundle
-
-
-def player_deb(root: Path) -> Path:
-    path = root / "photo-wall-player_0.1.0+gdeadbeef_arm64.deb"
-    write(path, b"fake-player-deb-bytes" * 100)
-    return path
-
-
-def bootstrapper_deb(root: Path) -> Path:
-    path = root / "photo-wall-bootstrapper_0.1.0+gdeadbeef_arm64.deb"
-    write(path, b"fake-bootstrapper-deb-bytes" * 100)
-    return path
+def node_components(root: Path, revision: str = REVISION) -> Path:
+    """A component set stamped for `revision`: the app and the primary manager roots with their
+    .debs, the node base and display .debs, components.json and build-provenance.json."""
+    components = root / "components"
+    components.mkdir(parents=True)
+    abi = {"base_abi": "node-v2-test", "graphics_abi": "weston14-test", "plugin_abi": "frame-v2"}
+    refs = {}
+    for role, name in (("manager-primary", "photo-wall-app-manager"), ("app", "photo-wall-player")):
+        deb = (role + "-deb").encode()
+        archive = (role + "-root").encode()
+        (components / (role + ".deb")).write_bytes(deb)
+        (components / (role + ".squashfs")).write_bytes(archive)
+        refs[role] = asdict(AppEnvironmentRefV2(
+            hashlib.sha256(archive).hexdigest(), len(archive), hashlib.sha256(deb).hexdigest(),
+            name, "2.0", "arm64", "a" * 64, "b" * 64, "/usr/bin/entry", **abi))
+    for role in ("node-base", "node-display"):
+        (components / (role + ".deb")).write_bytes(role.encode())
+    (components / "components.json").write_text(json.dumps({
+        "schema": COMPONENTS_SCHEMA, "abi": abi, "app_environment": refs["app"],
+        "manager_primary": refs["manager-primary"], "manager_fallback": None}))
+    (components / "build-provenance.json").write_text(json.dumps(
+        {"schema": COMPONENTS_SCHEMA, "abi": abi, "inputs_sha256": COMPONENT_INPUTS}))
+    write_stamp(components, revision=revision, inputs_sha256=COMPONENT_INPUTS)
+    return components
 
 
 @dataclass(frozen=True)
 class Inputs:
     base_bundle: Path
-    player_deb: Path
-    bootstrapper_deb: Path
+    node_components: Path
 
 
 def inputs(root: Path) -> Inputs:
-    return Inputs(base_bundle(root), player_deb(root), bootstrapper_deb(root))
+    return Inputs(base_bundle(root), node_components(root))

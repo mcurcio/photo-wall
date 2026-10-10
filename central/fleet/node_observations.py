@@ -31,20 +31,6 @@ from contracts.node_observation import (
 from contracts.node_preparation import encode_manager_preparation, parse_manager_preparation
 from contracts.node_protocol import RebootFact, parse_node_message
 
-# The deprecated-path boot evidence (G5): the newer of the device's latest V1 boot offer and
-# its last netboot-base serve, served only when newer than every node boot offer Central holds
-# for it. All three are Central's own clock readings, compared here inside Central, so the
-# console needs no V1 route or field and never compares clocks. It reads two V1 tables and
-# writes nothing; it goes with them when the V1 lane is removed.
-_DEPRECATED_BOOT_SQL = (
-    "SELECT v.path, v.recorded_at FROM ("
-    "SELECT 'offer' AS path, max(created_at) AS recorded_at FROM fleet_boot_offers WHERE device_id=%(d)s "
-    "UNION ALL SELECT 'base_without_offer', last_served_at FROM devices WHERE device_id=%(d)s) v "
-    "WHERE v.recorded_at IS NOT NULL AND v.recorded_at > coalesce("
-    "(SELECT max(created_at) FROM node_boot_offers WHERE device_id=%(d)s), '-infinity'::float8) "
-    "ORDER BY v.recorded_at DESC, v.path DESC LIMIT 1")
-
-
 # A producer's newest host sample, by sequence through the primary key (never ORDER BY
 # received_at over the table): coalescing (its payload's boot clock) and G12 both read it.
 _NEWEST_HOST_SQL = ("SELECT payload,received_at FROM node_host_observations WHERE producer_id={p} "
@@ -70,7 +56,7 @@ def _preparation_key(sample) -> tuple:
 # today's observation and preparation quota rows; the current admission's node boot offer (its base tag) and
 # its host_core producer's facts row. Every sample read is producer-scoped on the primary key.
 _FLEET_HOSTS_SQL = (
-    "SELECT d.device_id,ch.payload,ch.received_at,ph.received_at AS previous_received_at,"
+    "SELECT d.device_id,d.serial,ch.payload,ch.received_at,ph.received_at AS previous_received_at,"
     "cm.payload AS preparation_payload,cm.received_at AS preparation_received_at,"
     "q.used AS intake_used,pq.used AS preparation_intake_used,cb.admission_id AS current_admission,co.offer_payload,"
     "cf.payload AS facts_payload,cf.first_received_at AS facts_first_received_at FROM devices d "
@@ -97,13 +83,6 @@ _FLEET_HOSTS_SQL = (
     "LEFT JOIN node_intake_quotas pq ON pq.device_id=d.device_id AND pq.day=%(day)s "
     "AND pq.kind='preparation' "
     "WHERE d.retired_at IS NULL AND l.revoked_at IS NULL ORDER BY d.device_id")
-
-
-def deprecated_boot_in(conn, device_id: str) -> dict | None:
-    """`{path: "offer" | "base_without_offer", recorded_at}` when this box's newest boot
-    record on Central is a deprecated-path one, else None."""
-    row = conn.execute(_DEPRECATED_BOOT_SQL, {"d": device_id}).fetchone()
-    return None if row is None else {"path": row["path"], "recorded_at": row["recorded_at"]}
 
 
 class NodeObservations:
@@ -223,8 +202,8 @@ class NodeObservations:
         return False
 
     def fleet_hosts(self) -> dict:
-        """G12: every active box's current-boot host and App Manager samples, read under one
-        snapshot.
+        """G12: every active box's serial (its claim at boot) and current-boot host and App
+        Manager samples, read under one snapshot.
 
         No fleet or device lock is taken, so a held lock never blocks this read. A superseded
         boot's sample is never served as `host`; its receipt alone is served, and only when
@@ -252,7 +231,7 @@ class NodeObservations:
             boot = None
             if row["current_admission"] is not None:
                 # As node_lifecycle's qualification reads it: an admission adopted from a
-                # legacy offer has no node offer payload, so no base tag.
+                # legacy offer (history from the retired V1 path) has no node offer payload.
                 payload = row["offer_payload"]
                 boot = {"base_tag": None if payload is None
                         else parse_node_boot_offer(bytes(payload)).base.tag}
@@ -264,7 +243,7 @@ class NodeObservations:
                 # `facts.boot` is the node's boot stage report (None when absent or invalid).
                 facts = {"first_received_at": row["facts_first_received_at"],
                          **stored_fact_values(bytes(row["facts_payload"]))}
-            devices.append({"device_id": row["device_id"], "host": host,
+            devices.append({"device_id": row["device_id"], "serial": row["serial"], "host": host,
                             "previous_boot_received_at": row["previous_received_at"] if host is None else None,
                             "intake_full": (row["intake_used"] or 0) >= OBSERVATION_DAILY_CAP,
                             "preparation_intake_full":
@@ -343,7 +322,7 @@ class NodeObservations:
             boot_claims = [{"kernel_boot_id": str(item["kernel_boot_id"]), "offer_id": str(item["offer_id"]),
                 "first_received_at": item["created_at"], "offer_refusal": item["refusal"],
                 "physical_identity": "unverified"} for item in claims]
-            return {"boot_claims": boot_claims, "deprecated_boot": deprecated_boot_in(conn, device_id),
+            return {"boot_claims": boot_claims,
                     "device_id": device_id, "device_generation": generation, "read_at": now,
                     "sessions": sessions, "reboot_commands": audit, "physical_output": "unknown",
                     "display_outputs": display_outputs_in(conn, device_id, generation),

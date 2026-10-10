@@ -1,8 +1,8 @@
-"""The fleet asset lock: serializes offer and reservation publication with device retirement.
+"""The fleet asset lock: serializes node boot offer publication with device retirement.
 
 Moved from `central/fleet/locks.py` so infra's deployment writer (`central/infra/node_releases.py`)
-can take it without importing fleet. Its holders: boot offers and their artifact reads, fleet
-reservations and retirement (`central/fleet/`, `central/registry.py`) and the deployment writer.
+can take it without importing fleet. Its holders: node boot offers and sessions, retirement
+(`central/fleet/`, `central/registry.py`) and the deployment writer.
 The cache cleaner does NOT take it, and no other writer of a desired-set input needs to: the
 cleaner re-checks the desired set immediately before each unlink (`central/assets/maintenance.py`),
 and a file removed in the remaining window is restored by read-through.

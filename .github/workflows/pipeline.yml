@@ -7,15 +7,15 @@ name: Pipeline
 #                   of commitizen. Its `jobs` output lists the conditional jobs this run needs;
 #                   every `if:` below reads it, and the gate holds the run to it.
 #   checks, e2e     checks.yml and software-e2e.yml, on every pull request and push.
-#   base-image      base-image.yml, when the base bundle or a .deb changed -- and on every
-#                   release, whose assets it builds (no second base build).
-#   netboot-e2e     netboot-e2e.yml, when a .deb or the tracer's own paths changed.
+#   base-image      base-image.yml, when the base bundle or a node package changed -- and on
+#                   every release, whose assets it builds (no second base build).
 #   node-pid1       node-pid1.yml, the Player node lifecycle under real systemd, when a node
 #                   package, Central's fleet owners or the scenarios' own paths changed.
 #   node-components node-components.yml: the V2 node components (and the PID1 fixture when
-#                   node-pid1 runs), built ONCE for base-image and node-pid1 when the plan lists
-#                   either. A build, not a test: scripts/release_plan.py's BUILD_JOBS names its
-#                   consumers, and the gate fails a run where it failed.
+#                   node-pid1 runs), built ONCE for e2e (the Player runs from its app image),
+#                   base-image and node-pid1 when the plan lists one, so on every run. A build,
+#                   not a test: scripts/release_plan.py's BUILD_JOBS names its consumers, and the
+#                   gate fails a run where it failed.
 #   tested          the barrier every release job needs: each test job the plan listed passed.
 #   service-base, images, seal
 #                   the release, in that order: a push to main that changed a shipped package.
@@ -133,18 +133,21 @@ jobs:
     uses: ./.github/workflows/checks.yml
 
   e2e:
-    needs: plan
+    needs: [plan, node-components]
     if: contains(fromJSON(needs.plan.outputs.jobs), 'e2e')
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/software-e2e.yml
+    with:
+      revision: ${{ needs.plan.outputs.revision }}
 
   # The V2 node components for the plan's exact revision, once, for every job that needs them.
   node-components:
     needs: plan
     if: >-
-      contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
+      contains(fromJSON(needs.plan.outputs.jobs), 'e2e')
+      || contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
       || contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1')
     permissions:
       contents: read
@@ -153,9 +156,9 @@ jobs:
       revision: ${{ needs.plan.outputs.revision }}
       pid1-fixture: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'node-pid1') }}
 
-  # The base OS, the netboot bundle and both .debs, built for the plan's exact revision (a pull
-  # request's merge commit or main's commit). Every artifact is
-  # named by that revision, so the seal packages the bytes built here.
+  # The base OS and the netboot bundle, built for the plan's exact revision (a pull request's
+  # merge commit or main's commit). Every artifact is named by that revision, so the seal
+  # packages the bytes built here.
   base-image:
     needs: [plan, node-components]
     if: contains(fromJSON(needs.plan.outputs.jobs), 'base-image')
@@ -164,14 +167,6 @@ jobs:
     uses: ./.github/workflows/base-image.yml
     with:
       revision: ${{ needs.plan.outputs.revision }}
-
-  netboot-e2e:
-    needs: plan
-    if: contains(fromJSON(needs.plan.outputs.jobs), 'netboot-e2e')
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/netboot-e2e.yml
 
   node-pid1:
     needs: [plan, node-components]
@@ -186,7 +181,7 @@ jobs:
   # skipped job is itself skipped (and `!failure()` passes a cancelled one), so the rule "every
   # test the plan listed succeeded" is judged here, by the same code as the gate.
   tested:
-    needs: [plan, checks, e2e, base-image, netboot-e2e, node-pid1]
+    needs: [plan, checks, e2e, base-image, node-pid1]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -350,35 +345,11 @@ jobs:
           name: photo-wall-base-bundle-${{ needs.plan.outputs.revision }}
           path: ${{ runner.temp }}/photo-wall-release/bundle
 
-      - name: Download the Player .deb
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: photo-wall-player-deb-${{ needs.plan.outputs.revision }}
-          path: ${{ runner.temp }}/photo-wall-release/player-deb
-
-      - name: Download the data-only Player payload
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: photo-wall-player-payload-${{ needs.plan.outputs.revision }}
-          path: ${{ runner.temp }}/photo-wall-release/player-payload
-
-      - name: Download the bootstrapper .deb
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: photo-wall-bootstrapper-deb-${{ needs.plan.outputs.revision }}
-          path: ${{ runner.temp }}/photo-wall-release/bootstrapper-deb
-
       - name: Download V2 node components
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: photo-wall-node-components-${{ needs.plan.outputs.revision }}
           path: ${{ runner.temp }}/photo-wall-release/node-components
-
-      - name: Download explicit V2 cohort bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: photo-wall-node-bundle-${{ needs.plan.outputs.revision }}
-          path: ${{ runner.temp }}/photo-wall-release/node-bundle
 
       # Plan and image values reach the script through env, never interpolated into the shell.
       - name: Seal the release
@@ -394,10 +365,6 @@ jobs:
           python3 -m scripts.release_seal --tag "$TAG" --revision "$REVISION" --since "$SINCE" \
             --base-bundle "$release_root/bundle" \
             --node-components "$release_root/node-components" \
-            --node-bundle "$release_root/node-bundle" \
-            --player-deb "$release_root/player-deb" \
-            --player-payload "$release_root/player-payload" \
-            --bootstrapper-deb "$release_root/bootstrapper-deb" \
             --image "central=$CENTRAL" --image "media-worker=$MEDIA_WORKER" \
             --destination "$release_root/artifacts"
 
@@ -405,7 +372,7 @@ jobs:
   # job the plan listed did not succeed, or when any job failed or was cancelled.
   gate:
     name: gate
-    needs: [plan, checks, e2e, node-components, base-image, netboot-e2e, node-pid1, tested, service-base, images, seal]
+    needs: [plan, checks, e2e, node-components, base-image, node-pid1, tested, service-base, images, seal]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

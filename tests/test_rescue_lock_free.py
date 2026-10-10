@@ -24,7 +24,12 @@ from central.infra.job_queue import (
 )
 from central.infra.queue_ops import QueueAdmin, RescueStalledJobsHandler
 from central.infra.transactions import PgTransactions, pg_connection
-from central.kernel.job_types import CATALOG, FetchOsImage, FetchPackage, RescueStalledJobs
+from central.kernel.job_types import (
+    CATALOG,
+    FetchOsImage,
+    FetchSealedEnvironment,
+    RescueStalledJobs,
+)
 
 FETCH, UPKEEP = "photo-wall-fetch", "photo-wall-upkeep"
 
@@ -134,9 +139,9 @@ def test_p1_retrying_a_doing_row_in_place_violates_the_queueing_lock_so_rescue_r
 def test_an_asset_fetch_keeps_one_runner(registry):
     queue = Queue(registry)
     worker = queue.worker()
-    package = FetchPackage(sha256="ab" * 32)
+    package = FetchSealedEnvironment(sha256="ab" * 32)
     queue.publish(package)
     assert queue.fetch(FETCH, worker) is not None  # now `doing`
     queue.publish(package)  # its pending copy
-    assert queue.pending(task_name(FetchPackage)) == [job_kwargs(package, attempt=0)]
+    assert queue.pending(task_name(FetchSealedEnvironment)) == [job_kwargs(package, attempt=0)]
     assert queue.fetch(FETCH, worker) is None  # the running copy's lock holds it back

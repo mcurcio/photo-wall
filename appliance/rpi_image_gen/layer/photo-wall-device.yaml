@@ -1,82 +1,62 @@
 # METABEGIN
 # X-Env-Layer-Name: photo-wall-device
 # X-Env-Layer-Category: app
-# X-Env-Layer-Desc: Installs the Photo Wall device set and the bootstrapper
-#  `.deb` into the base. The device set is every Debian package the base OS
-#  itself, the bootstrapper and the Player need, rendered by
-#  .github/workflows/base-image.yml from the Debian declaration
-#  (`python3 scripts/debian_packages.py packages base-os bootstrapper player`) into
-#  the file `IGconf_app_device_packages` names: the declaration is the one
-#  place a package is named, so this layer names none. The `.deb`
-#  (`scripts/build_bootstrapper_deb.py`, "ALL our custom code ships as a
-#  portable .deb" -- the image-build tool owns none of it) is built before
-#  rpi-image-gen runs and named by `IGconf_app_bootstrapper_deb`. One
-#  customize-hook copies it into the chroot and installs both with apt-get
-#  against this build's snapshot sources (the pin the base itself is built
-#  from, layer/photo-wall-debian.yaml), without Recommends. That apt runs
-#  INSIDE the chroot and fetches over https, so the CA bundle must already be
-#  there: the declaration's "bootstrap" stage
-#  (`packages(*DEVICE_CONSUMERS, stage="bootstrap")`) is installed first by
-#  mmdebstrap's own package list with the host's apt, through the required
-#  rpi-image-gen layer of the same name (its `ca-certificates` layer is
-#  `mmdebstrap: packages: [ca-certificates]`). tests/test_debian_packages.py
-#  binds this Requires list to that stage, so neither can change alone. The
-#  `.deb` enables photo-wall-provision.service by a symlink it bakes as data,
-#  so no enable-units hook is needed. On the Pi nothing resolves packages:
-#  provisioning installs the Player `.deb` with dpkg alone, so its Depends
-#  must already be here (base-image.yml checks the built image with
-#  scripts/device_root_checks.py). No application code and no origin -- 0009
+# X-Env-Layer-Desc: Installs the Node's software into the base: photo-wall-node,
+#  by name, from the local repo (`IGconf_app_local_repo`,
+#  debian-packaging/build-repo.sh's output), with every Photo Wall context it
+#  pins at its exact version and upstream's nats-server at its pin. The repo
+#  is built before rpi-image-gen runs (.github/workflows/node-components.yml);
+#  this tree owns none of its code, only the install step. apt runs INSIDE the
+#  chroot against this build's snapshot sources (the pin the base itself is
+#  built from, layer/photo-wall-debian.yaml) and fetches over https, so the CA
+#  bundle must already be there: the required ca-certificates layer brings it
+#  with mmdebstrap's own package list (tests/test_device_root_checks.py binds
+#  this Requires list). Three OS dependencies of Debian packages the Node runs
+#  on are this layer's `packages:`, installed from the pin with the OS, because
+#  no Photo Wall package may name them (decision 0019, R4):
+#  python3-cffi-backend, which trixie's python3-pywayland imports without
+#  declaring it; libgl1-mesa-dri, the GPU drivers Weston's GL renderer loads,
+#  which weston only Recommends; and libpam-systemd, the logind session
+#  photo-wall-display.service's PAMName=login opens for Weston's seat. The
+#  layers' `packages:` lists are the one home of the OS packages base-image.yml
+#  requires on the built image. No application code and no origin -- 0009
 #  rule #1.
-# X-Env-Layer-Version: 3.1.0
+# X-Env-Layer-Version: 5.0.0
 # X-Env-Layer-Requires: systemd-min,ca-certificates
 #
 # X-Env-VarPrefix: app
 #
-# X-Env-Var-bootstrapper_deb:
-# X-Env-Var-bootstrapper_deb-Desc: Absolute host path to the prebuilt
-#  photo-wall-bootstrapper_<version>_all.deb (scripts/build_bootstrapper_deb.py),
-#  built by .github/workflows/base-image.yml before this build runs.
-# X-Env-Var-bootstrapper_deb-Required: y
-# X-Env-Var-bootstrapper_deb-Valid: file
-# X-Env-Var-bootstrapper_deb-Set: y
-#
-# X-Env-Var-node_base_deb:
-# X-Env-Var-node_base_deb-Desc: Optional photo-wall-node-base .deb for the photowall.node=v2 cohort.
-# X-Env-Var-node_base_deb-Required: n
-# X-Env-Var-node_base_deb-Valid: file
-# X-Env-Var-node_base_deb-Set: y
-#
-# X-Env-Var-node_display_deb:
-# X-Env-Var-node_display_deb-Desc: Optional pinned native display .deb for the V2 cohort.
-# X-Env-Var-node_display_deb-Required: n
-# X-Env-Var-node_display_deb-Valid: file
-# X-Env-Var-node_display_deb-Set: y
-#
-# X-Env-Var-device_packages:
-# X-Env-Var-device_packages-Desc: Absolute host path to the device set, one
-#  Debian package name per line, rendered by .github/workflows/base-image.yml
-#  from scripts/debian_packages.py before this build runs.
-# X-Env-Var-device_packages-Required: y
-# X-Env-Var-device_packages-Valid: file
-# X-Env-Var-device_packages-Set: y
+# X-Env-Var-local_repo:
+# X-Env-Var-local_repo-Desc: Absolute host path to the local repo
+#  (debian-packaging/build-repo.sh's output, a flat apt repository with its
+#  Packages index) photo-wall-node is installed from by name.
+# X-Env-Var-local_repo-Required: y
+# X-Env-Var-local_repo-Valid: dir
+# X-Env-Var-local_repo-Set: y
 # METAEND
 ---
 mmdebstrap:
+  packages:
+    - python3-cffi-backend
+    - libgl1-mesa-dri
+    - libpam-systemd
   customize-hooks:
     - |-
       set -eu
-      install -m 0644 "$IGconf_app_bootstrapper_deb" "$1/tmp/photo-wall-bootstrapper.deb"
-      # Unquoted on purpose: the device set is one package name per line.
-      chroot "$1" apt-get install -y --no-install-recommends \
-        $(cat "$IGconf_app_device_packages") /tmp/photo-wall-bootstrapper.deb
-      rm -f "$1/tmp/photo-wall-bootstrapper.deb"
-      if [ -n "${IGconf_app_node_base_deb:-}" ]; then
-        install -m 0644 "$IGconf_app_node_base_deb" "$1/tmp/photo-wall-node-base.deb"
-        chroot "$1" apt-get install -y --no-install-recommends /tmp/photo-wall-node-base.deb
-        rm -f "$1/tmp/photo-wall-node-base.deb"
-      fi
-      if [ -n "${IGconf_app_node_display_deb:-}" ]; then
-        install -m 0644 "$IGconf_app_node_display_deb" "$1/tmp/photo-wall-node-display.deb"
-        chroot "$1" apt-get install -y --no-install-recommends /tmp/photo-wall-node-display.deb
-        rm -f "$1/tmp/photo-wall-node-display.deb"
-      fi
+      # The local repo, read as the display harness reads it (scripts/run_display_harness.py):
+      # a trusted file: source preferred at 1002 (the pin's nats-server is older than the
+      # repo's, erratum E-0019-P1A-3). Only its own list is fetched, the pin's lists are kept,
+      # and every trace is removed after, so the base's sources stay the pin.
+      cp -R "$IGconf_app_local_repo" "$1/tmp/photo-wall-repo"
+      echo 'deb [trusted=yes] file:/tmp/photo-wall-repo ./' \
+        > "$1/etc/apt/sources.list.d/photo-wall-local.list"
+      printf 'Package: *\nPin: origin ""\nPin-Priority: 1002\n' \
+        > "$1/etc/apt/preferences.d/photo-wall-local"
+      chroot "$1" apt-get update \
+        -o Dir::Etc::SourceList=sources.list.d/photo-wall-local.list \
+        -o Dir::Etc::SourceParts=- -o APT::Get::List-Cleanup=0
+      chroot "$1" apt-get install -y --no-install-recommends photo-wall-node
+      rm -f "$1/etc/apt/sources.list.d/photo-wall-local.list" \
+        "$1/etc/apt/preferences.d/photo-wall-local" \
+        "$1"/var/lib/apt/lists/_tmp_photo-wall-repo_*
+      rm -rf "$1/tmp/photo-wall-repo"

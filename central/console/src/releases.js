@@ -354,8 +354,7 @@ export function selectionRequest(read, deploymentId) {
 
 /** Select's scope (§26, R17): fleet-wide, and wider than any list the console could show. */
 export const SELECT_SCOPE = "Every Player that boots by node path from now on is offered this deployment, including "
-  + "Players Central has not seen. Central cannot list which Players will boot. A Pi whose kernel command line "
-  + "lacks photowall.node=v2 is misconfigured and is not offered it.";
+  + "Players Central has not seen. Central cannot list which Players will boot.";
 /** Central's offer when the selected deployment has no app (R17). */
 export const SELECT_NO_APP = "This deployment has no app: every boot from now on is offered no app.";
 

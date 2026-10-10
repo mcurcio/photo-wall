@@ -323,7 +323,7 @@ def test_source_health_remains_observable_when_entire_projection_is_locked():
 
 def test_a_locked_layer_takes_a_revised_fade_out_and_nothing_else():
     """Central may revise only the fade-out and the after-state of a layer it already offered
-    (Finish makes the current cycle the last and holds a kept photo there; migration 069 left
+    (Finish makes the current cycle the last and holds a kept photo there; migration 071 left
     in-flight endings at "leave_as_is"); any other change to it stays a stale lock. Mutation
     probes: refuse the revised fade-out (the layer is dropped as stale); accept any change (the
     revised fade-in is planned)."""

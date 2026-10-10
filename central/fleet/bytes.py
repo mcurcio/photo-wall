@@ -1,10 +1,9 @@
-"""Exact offer bytes over the existing read-through cache; no HTTP routes live here.
+"""Exact node offer bytes over the existing read-through cache; no HTTP routes live here.
 
 An open descriptor leases the inode through response streaming even if a cache cleanup unlinks
-its path. The cache cleaner (`central/assets/maintenance.py`) keeps every desired file (the V1
-offer roots in `fleet_offer_artifact_roots`, the selected and previous node deployment and the
-window) and spares any file served within the last hour; a V2 offer's file removed after that
-is restored by read-through on its next open.
+its path. The cache cleaner (`central/assets/maintenance.py`) keeps every desired file (the
+selected and previous node deployment and the window) and spares any file served within the
+last hour; an offer's file removed after that is restored by read-through on its next open.
 
 No request hashes bytes. The worker verified the digest when it filled the cache, the node
 verifies size and SHA-256 after its download, and the cache key fixes the content; so a serve
@@ -18,14 +17,8 @@ import os
 
 from central.assets.reader import AssetReader, Opened, Unavailable
 from central.fleet.models import FleetError, OfferAsset
-from central.kernel.job_types import (
-    FetchOsImage,
-    FetchPackage,
-    FetchPlayerPayload,
-    FetchSealedEnvironment,
-)
+from central.kernel.job_types import FetchOsImage, FetchSealedEnvironment
 from central.kernel.ports import Candidates
-from contracts.player_payload import FORMAT as PAYLOAD_FORMAT
 
 
 class OfferByteReader:
@@ -39,11 +32,6 @@ class OfferByteReader:
             job = FetchOsImage(tarball_sha256=asset.content_key)
         elif asset.format == "sealed-environment-v2":
             job = FetchSealedEnvironment(sha256=asset.content_key)
-        elif asset.format == PAYLOAD_FORMAT:
-            job = FetchPlayerPayload(sha256=asset.content_key)
-        elif asset.format is None:
-            # Historical schema-1 offers remain frozen until their expiry.
-            job = FetchPackage(sha256=asset.content_key)
         else:
             raise FleetError("offer_artifact_format_invalid", 503)
         opened = await self.reader.read(Candidates((job,), pinned=True))
@@ -56,8 +44,3 @@ class OfferByteReader:
             os.close(opened.fd)
             raise FleetError("offer_artifact_mismatch", 503)
         return opened
-
-    async def preflight(self, assets: tuple[OfferAsset, ...]) -> None:
-        for asset in assets:
-            opened = await self.open_exact(asset)
-            os.close(opened.fd)

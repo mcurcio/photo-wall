@@ -6,7 +6,6 @@ import socket
 import stat
 import sys
 import time
-from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -321,29 +320,28 @@ def test_a_turn_owes_nothing_when_the_slot_holds_no_relink(tmp_path, monkeypatch
 # -- packaging -----------------------------------------------------------------------------
 
 
-def test_broker_closure_has_no_host_module_and_the_base_declares_the_feed(tmp_path):
-    from scripts.build_node_base_deb import POLICIES, stage_tree
-    from scripts.module_closure import closure_for
+def test_broker_closure_has_no_host_module_and_the_base_declares_the_feed():
+    from node.launcher_closures import closure
 
-    modules = closure_for(POLICIES["app-broker"], repo=REPO).modules
+    # Refused (ClosureError) when the broker reaches a host module.
+    modules = closure("app-broker").modules
     assert {"appliance.apps.probe", "appliance.apps.probe_channel", "appliance.feed"} <= set(modules)
-    assert not [module for module in modules if module.startswith("appliance.host.host")]
-    stage_tree(REPO, tmp_path / "package")  # the app-broker deny list refuses a host module itself
-    root = tmp_path / "package"
-    users = (root / "usr/lib/sysusers.d/photo-wall-node.conf").read_text().splitlines()
+    users = (REPO / "debian/photo-wall-node.sysusers").read_text().splitlines()
     assert 'u pw-health 10006 "Photo Wall health judge" /nonexistent' in users
     assert "g pw-node-feeds 10007" in users and "m pw-health pw-node-feeds" in users
-    tmpfiles = (root / "usr/lib/tmpfiles.d/photo-wall-node.conf").read_text().splitlines()
+    tmpfiles = (REPO / "debian/photo-wall-node.tmpfiles").read_text().splitlines()
     assert "d /run/photo-wall-app-feed 0750 root pw-node-feeds -" in tmpfiles
-    unit = (root / "lib/systemd/system/photo-wall-app-broker.service").read_text()
+    unit = (REPO / "appliance/systemd/photo-wall-app-broker.service").read_text()
     assert any(line.startswith("ReadWritePaths=") and "/run/photo-wall-app-feed" in line.split()
                for line in unit.splitlines())
 
 
 def test_a_host_module_in_the_broker_closure_is_refused() -> None:
-    from scripts.build_node_base_deb import POLICIES
-    from scripts.module_closure import ClosureError, closure_for
+    from node.launcher_closures import FORBIDDEN
 
-    policy = POLICIES["app-broker"]
+    from scripts.module_closure import ClosureError, compute_closure, first_party_packages
+
     with pytest.raises(ClosureError, match="appliance.host is forbidden here"):
-        closure_for(replace(policy, roots=(*policy.roots, "appliance.host.host_linux")), repo=REPO)
+        compute_closure(("appliance.apps.broker_runner", "appliance.host.host_linux"), repo=REPO,
+                        first_party=first_party_packages(REPO), forbidden=FORBIDDEN["app-broker"],
+                        third_party=None)

@@ -8,7 +8,15 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
-from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, _seed
+from test_fleet_attempts import (
+    BASE_SHA,
+    BASE_TARBALL_SHA,
+    BOOT_ID,
+    DEVICE_ID,
+    OFFER_ID,
+    SERIAL,
+    _seed,
+)
 from test_node_central import setup
 from test_registry import enroll
 
@@ -65,24 +73,59 @@ def seed_historical_committed_stop(registry, player, request):
                      (player["player_id"], request.boot_id, Jsonb(snapshot)))
 
 
+SESSION_ID = uuid4()
+
+
+def seed_historical_release(registry) -> None:
+    """The base release row the V1 offers named, as Central recorded it before 070 dropped
+    `app_releases`: SQL against the historical schema."""
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
+                     "discovered_at,updated_at,base_tarball_sha256) "
+                     "VALUES('v1.0.0',1,0,0,FALSE,900,900,%s)", (BASE_TARBALL_SHA,))
+
+
+def seed_historical_v1_offer(registry, *, session: bool = True) -> None:
+    """A V1 boot offer for BOOT_ID (and an OS command session naming it), as Central recorded
+    them before 069 dropped the offers: SQL against the historical schema."""
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO fleet_boot_offers(offer_id,installation_audience,device_id,"
+                     "serial,kernel_boot_id,boot_nonce,base_policy_source,base_policy_revision,"
+                     "app_policy_source,app_policy_revision,base_tag,base_content_key,"
+                     "base_sha256,base_size,app_status,compatibility_basis,offer_schema,"
+                     "created_at,expires_at) "
+                     "VALUES(%s,'test-installation-1',%s,%s,%s,%s,'operator_baseline',1,"
+                     "'explicit',1,'v1.0.0',%s,%s,1024,'unconfigured','none',2,900,2000)",
+                     (OFFER_ID, DEVICE_ID, SERIAL, BOOT_ID, "1" * 32, BASE_TARBALL_SHA, BASE_SHA))
+        if session:
+            conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
+                         "device_generation,kernel_boot_id,offer_id,installation_audience,"
+                         "trust_mode,agent_key_sha256,verifier_ref,issued_at,expires_at) "
+                         "VALUES(%s,%s,1,%s,%s,'test-installation-1','t1',%s,'test-gateway',"
+                         "900,1100)", (SESSION_ID, DEVICE_ID, BOOT_ID, OFFER_ID, "f" * 64))
+
+
 def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
-    # A committed drain row written before the node migrations still fences its Player.
+    # A committed drain row written before the node migrations still fences its Player; the V1
+    # offer goes (069) and so does the OS command session that named it (070).
     with history(49) as (registry, _through):
         _seed(registry)
+        seed_historical_release(registry)
+        seed_historical_v1_offer(registry)
         player, _, request = enroll(registry, device_id=DEVICE_ID)
         seed_historical_committed_stop(registry, player, request)
         before = ledger(registry.db)
         with registry.db.transaction() as conn:
             drain = conn.execute("SELECT * FROM equipment_drains").fetchone()
-            session = conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone()
-            offer = conn.execute("SELECT * FROM fleet_boot_offers").fetchone()
+            assert conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone()
         registry.db.migrate()
         registry.db.migrate()
         assert ledger(registry.db)[:len(before)] == before
         with registry.db.transaction() as conn:
             assert conn.execute("SELECT * FROM equipment_drains").fetchone() == drain
-            assert conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone() == session
-            assert conn.execute("SELECT * FROM fleet_boot_offers").fetchone() == offer
+            for table in ("fleet_boot_offers", "fleet_os_command_sessions"):
+                assert conn.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()[
+                    "name"] is None
             assert fenced_players_in(conn) == frozenset({player["player_id"]})
             with pytest.raises(RegistryError, match="equipment_draining"):
                 require_unfenced_player_in(conn, player["player_id"])
@@ -93,6 +136,8 @@ def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
 def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
     with history(53) as (registry, through):
         _seed(registry)
+        seed_historical_release(registry)
+        seed_historical_v1_offer(registry, session=False)
         admission = uuid4()
         with registry.db.transaction() as conn:
             conn.execute("INSERT INTO node_boot_admissions(admission_id,device_id,device_generation,"
@@ -113,7 +158,10 @@ def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
                     conn.execute("UPDATE node_boot_admissions SET offer_id=%s", (uuid4(),))
         registry.db.migrate()
         with registry.db.transaction() as conn:
+            # 069: the adopted context stays as history without the V1 offer it named.
             assert conn.execute("SELECT * FROM node_boot_admissions").fetchone() == original
+            assert conn.execute("SELECT * FROM node_offer_contexts").fetchone() == {
+                "offer_id": OFFER_ID, "basis": "legacy_adoption", "node_offer_id": None}
             assert conn.execute("SELECT count(*) AS n FROM node_sessions").fetchone()["n"] == 0
 
 

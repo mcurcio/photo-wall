@@ -6,6 +6,7 @@ transaction, so the units' own Requires= decide what runs after the refusal; the
 which needs no storage, then starts as in every scenario.
 """
 
+import ast
 import json
 import shutil
 import subprocess
@@ -13,10 +14,12 @@ import sys
 import urllib.request
 from pathlib import Path
 
-sys.path.insert(0, "/usr/lib/photo-wall-node-bootstrap")
-from appliance.kernel.clock import boot_id, boottime_ms
-from appliance.node_boot_handoff import write_node_handoff
-from contracts.node_boot import parse_node_boot_offer
+sys.path[:0] = next(ast.literal_eval(node.value) for node in ast.parse(Path(
+    "/usr/lib/photo-wall/node/node-bootstrap/__main__.py").read_text()).body
+    if isinstance(node, ast.AnnAssign) and node.target.id == "PATH")  # its launcher's PATH
+from appliance.kernel.clock import boot_id, boottime_ms  # noqa: E402
+from appliance.node_boot_handoff import write_node_handoff  # noqa: E402
+from contracts.node_boot import parse_node_boot_offer  # noqa: E402
 
 config = json.loads(Path("/var/lib/node-fixture-config.json").read_text())
 request = urllib.request.Request(
@@ -32,27 +35,10 @@ write_node_handoff(
     central=ready["central"],
     offer=parse_node_boot_offer(json.dumps(ready["offer"]).encode()),
 )
-# Container has no real boot command line. Only the node cohort condition is removed;
-# every production service command, sandbox and capability remains otherwise exact.
-units = [
-    "photo-wall-node.target",
-    "photo-wall-node-storage.service",
-    "photo-wall-node-handoff.service",
-    "photo-wall-node-prepare.service",
-    "photo-wall-display.service",
-    "photo-wall-display-controller.service",
-    "photo-wall-host-core.service",
-    "photo-wall-app-broker.service",
-    "photo-wall-health.service",
-    "photo-wall-manager-supervisor.service",
-    "photo-wall-bus.service",
-]
-for unit in units:
-    d = Path("/etc/systemd/system") / (unit + ".d")
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "fixture-cohort.conf").write_text("[Unit]\nConditionKernelCommandLine=\n")
 shutil.copy2("/var/tmp/fixture-head.so", "/usr/lib/photo-wall-fixture-head.so")
+# Each drop-in directory is made where it is written: nothing else in the image makes them.
 d = Path("/etc/systemd/system/photo-wall-display.service.d")
+d.mkdir(parents=True, exist_ok=True)
 # The installed unit's own command with only the hardware swapped: headless instead of DRM, and
 # the fixture head loaded before the production modules, so READY=1 (systemd-notify.so, Type=)
 # and every other argument stay the package's.
@@ -89,6 +75,7 @@ d.mkdir(parents=True, exist_ok=True)
 )
 if config.get("stop_diagnostics"):
     diagnostic = Path("/etc/systemd/system/photo-wall-app-broker.service.d/fixture-diagnostic.conf")
+    diagnostic.parent.mkdir(parents=True, exist_ok=True)
     diagnostic.write_text(
         "[Service]\nExecStart=\nExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall-stop-diagnostic.py\n"
     )
@@ -101,6 +88,7 @@ if scenario == "refused":
         "MemTotal:        2097152 kB\nMemFree:         1048576 kB\nMemAvailable:    1572864 kB\n"
     )
     d = Path("/etc/systemd/system/photo-wall-node-storage.service.d")
+    d.mkdir(parents=True, exist_ok=True)
     (d / "fixture-memory-class.conf").write_text(
         "[Service]\nBindReadOnlyPaths=/var/lib/node-fixture-meminfo:/proc/meminfo\n"
     )
