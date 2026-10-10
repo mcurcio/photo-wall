@@ -992,3 +992,97 @@ def test_deleting_definition_does_not_rewrite_ended_run_snapshot():
     snapshot = runtime.export_state()["runs"][run_id]["scene"]
     runtime.delete_scene("historical", 1)
     assert runtime.export_state()["runs"][run_id]["scene"] == snapshot
+
+
+KEEP = {"after_end": "keep_this_photo"}
+
+
+def _kept_scene(**scene):
+    return Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+        media(fade_in_seconds=1, fade_out_seconds=2, **KEEP),), **scene)
+
+
+def _fades(view):
+    return [(intent.phase, intent.fade_in_seconds, intent.fade_out_seconds)
+            for intent in view.contributions]
+
+
+def test_a_kept_photo_plans_no_fade_out_in_its_final_cycle_only():
+    """The final cycle of a kept photo (the Scene stops at its end and nothing on the Frame
+    follows) holds full strength: a Program's end, the Scene's duration and Finish each make a
+    cycle final; earlier cycles, an ending on the Frame, and a photo not kept keep the authored
+    fade-out. Mutation probe: drop the final-cycle rule (the fade-out stays 2)."""
+    runtime = Runtime()
+    runtime.set_scene(_kept_scene())
+    runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=20))
+    assert _fades(runtime.advance(5)) == [("body", 1, 2)]
+    assert _fades(runtime.advance(15)) == [("body", 1, 0)]
+
+    timed = Runtime()
+    timed.set_scene(_kept_scene(duration_seconds=15))
+    timed.activate("kept", "timed", 0)
+    assert _fades(timed.advance(5)) == [("body", 1, 2)]
+    assert _fades(timed.advance(12)) == [("body", 1, 0)]
+
+    finished = Runtime()
+    finished.set_scene(_kept_scene())
+    run = finished.activate("kept", "finished", 0).run_id
+    assert _fades(finished.advance(3)) == [("body", 1, 2)]
+    assert _fades(finished.finish(run, 4)) == [("body", 1, 0)]
+
+    ending = Runtime()
+    ending.set_scene(_kept_scene(outro_seconds=4, outro_contributions=(
+        Contribution(target="frame:left", kind="black"),)))
+    run = ending.activate("kept", "ending", 0).run_id
+    assert _fades(ending.finish(run, 4)) == [("body", 1, 2)]
+
+    plain = Runtime()
+    plain.set_scene(Scene(scene_id="plain", cycle_seconds=10, contributions=(
+        media(fade_in_seconds=1, fade_out_seconds=2),)))
+    plain.activate("plain", "plain", 0)
+    assert _fades(plain.advance(5)) == [("body", 1, 2)]
+
+
+def test_a_kept_photo_followed_on_its_frame_keeps_its_fade_out():
+    """The final-cycle hold is only for a photo nothing follows: a Program starting at its end,
+    or a Run playing beneath it, keeps the authored fade-out; a follower that appears later
+    revises the hold away. Mutation probe: ignore what follows (the fade-out is 0)."""
+    def kept(runtime):
+        return [(i.fade_in_seconds, i.fade_out_seconds) for i in runtime.advance(
+            runtime._state.now).contributions if i.scene_id == "kept"]
+
+    following = Runtime()
+    following.set_scene(_kept_scene())
+    following.set_scene(Scene(scene_id="next", cycle_seconds=10, contributions=(media(),)))
+    following.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
+    following.advance(5)
+    assert kept(following) == [(1, 0)]
+    following.set_program(Program(program_id="night", scene_id="next", starts_at=10, ends_at=20))
+    assert kept(following) == [(1, 2)]
+
+    beneath = Runtime()
+    beneath.set_scene(_kept_scene())
+    beneath.set_scene(Scene(scene_id="under", cycle_seconds=10, loop=True, contributions=(media(),)))
+    beneath.activate("under", "under", 0)
+    beneath.set_program(Program(program_id="evening", scene_id="kept", starts_at=0, ends_at=10))
+    beneath.advance(5)
+    assert kept(beneath) == [(1, 2)]
+
+
+def test_looking_at_what_follows_a_kept_photo_spends_the_callers_budget():
+    """The projection that decides a final-cycle hold is bounded by the caller's `max_events`:
+    the same advance that fits the budget without a kept photo exceeds it with one. Mutation
+    probe: give the projection its own budget (the kept advance succeeds)."""
+    def advance(after_end):
+        runtime = Runtime()
+        runtime.set_scene(Scene(scene_id="kept", cycle_seconds=10, loop=True, contributions=(
+            media(fade_in_seconds=1, fade_out_seconds=2, after_end=after_end),)))
+        runtime.set_program(Program(program_id="evening", scene_id="kept", starts_at=0,
+                                    ends_at=10))
+        return runtime.advance(5, max_events=2)
+
+    from central.runtime import RuntimeBudgetExceeded
+
+    assert advance("leave_as_is").contributions
+    with pytest.raises(RuntimeBudgetExceeded):
+        advance("keep_this_photo")

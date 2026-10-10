@@ -449,6 +449,24 @@ class Executor:
         return LocalLayer(assignment.layer, assignment.path, assignment.layer.position(now),
                           _alpha(assignment.layer, now))
 
+    def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
+        """A drawn layer sets what its Frame keeps for when nothing plays (`Layer.after_end`,
+        planned by Central): nothing, from its first draw; or this photo, at full strength,
+        from the first draw after its fade-in."""
+        layer = local.layer
+        if layer.after_end == "keep_nothing":
+            self._retained.pop(binding.output_id, None)
+            return
+        if layer.after_end == "leave_as_is" or now < layer.start + layer.fade_in:
+            return
+        identity = (f"{binding.output_id}:{binding.frame_id}:"
+                    f"{binding.generation}:{layer.assignment_id}")
+        owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
+                 f"{hashlib.sha256(identity.encode()).hexdigest()}")
+        self._pin_intents[owner] = layer.variant.sha256
+        self._retained[binding.output_id] = _Retained(
+            replace(local, alpha=layer.opacity), binding, owner)
+
     def _compositions(self, items: Iterable[_Assignment], now: float) -> tuple[OutputComposition, ...]:
         grouped: dict[str, list[LocalLayer]] = {}
         for assignment in items:
@@ -830,15 +848,8 @@ class Executor:
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
-                                    if (local.alpha >= 1 and local.layer.retain_on_expiry
-                                            and local.layer.variant
-                                            and local.layer.variant.duration is None):
-                                        identity = (f"{binding.output_id}:{binding.frame_id}:"
-                                                    f"{binding.generation}:{local.layer.assignment_id}")
-                                        owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
-                                                 f"{hashlib.sha256(identity.encode()).hexdigest()}")
-                                        self._pin_intents[owner] = local.layer.variant.sha256
-                                        self._retained[binding.output_id] = _Retained(local, binding, owner)
+                                    # Bottom to top, so the topmost layer's after-state holds.
+                                    self._apply_after_end(binding, local, now)
                                 continue
                             if presented.status == "pending":
                                 # Native GL presentation acknowledges on a later main-loop turn.

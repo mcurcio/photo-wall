@@ -1781,7 +1781,7 @@ def _console_scene(scene_id, frame=VALID_FRAME, **fields):
     """A live Scene in exactly the shape the console saves: only the fields it sends
     are set, so every other field is stored at its model default."""
     return Scene(scene_id=scene_id, **{"loop": True, **fields}, contributions=(Contribution(
-        target=f"frame:{frame}", role=frame, source_refs=(SOURCE,), retain_on_expiry=True),))
+        target=f"frame:{frame}", role=frame, source_refs=(SOURCE,), after_end="keep_this_photo"),))
 
 
 def _scene_row(page, scene_id):
@@ -1869,7 +1869,8 @@ def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, 
         expect(_scene_row(page, "plain").get_by_role("button", name="Edit Scene plain")).to_be_visible()
         evening = _scene_row(page, "evening")
         expect(evening).to_contain_text(
-            "Edit unavailable: Uses features the console can't author (child Scenes, outro, fades…).")
+            "Edit unavailable: Uses features the console can't edit yet (child Scenes, see-through "
+            "photos, different settings per Frame, or values outside its ranges).")
         expect(evening.get_by_role("button", name="Edit Scene evening")).to_have_count(0)
 
 
@@ -1905,7 +1906,7 @@ def _put_authored(page, origin, scene_id, choices):
     """Store an authored Scene through the public route, as the console saves one."""
     scene = {"scene_id": scene_id, "revision": 1, "cycle_seconds": 30, "loop": True,
              "contributions": [{"target": f"frame:{frame}", "role": frame, "kind": "media",
-                                "asset_refs": [asset], "retain_on_expiry": True}
+                                "asset_refs": [asset], "after_end": "keep_this_photo"}
                                for frame, asset in choices.items()]}
     response = page.request.put(
         origin + f"/v1/operator/scenes/{scene_id}/authored",
@@ -2185,7 +2186,7 @@ def _stop(chain):
 
 def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page, registry):
     """§14 step 2: nothing is intended any more because the one-cycle Run ended; the
-    frame keeps its last still if it was a photo (retain_on_expiry). Mutation probes:
+    frame keeps its last still if it was a photo (`after_end`). Mutation probes:
     drop the retained-still words; render the chain inside the ranked list."""
     _seed(registry)
     queue = _seed_source(registry)

@@ -40,8 +40,9 @@ epoch. Comparing the normalized full snapshot detects removal and changes to
 either Output; taking a maximum of Frame revisions would miss independent edits.
 All bindings permit calibration; only `enabled_outputs` permit execution. A cold
 Player still needs a freshly rotated epoch even when the stored configuration is
-unchanged. `Layer.retain_on_expiry` is an explicit central decision limited to opaque
-stills. It is false by default, including temporary overlays.
+unchanged. What a Frame keeps after a layer (`Layer.after_end`) is an explicit central
+decision ([execution contract](execution-contract.md#what-a-frame-keeps)); it changes nothing by
+default, including temporary overlays.
 
 Short output-identification requests are operational registry state, separate
 from Frame and Scene content. Central stores at most one request per Player,

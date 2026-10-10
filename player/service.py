@@ -44,11 +44,13 @@ from contracts.models import (
     Revocation,
 )
 from contracts.player_control import (
+    CAPABILITIES,
     ControlAck,
     ControlAckResponse,
     ControlAppliedReceipt,
     ControlHello,
     ControlSelection,
+    plan_from_selection,
 )
 from contracts.time import Clock, SystemClock, TimeMapping
 from player.cache import Cache
@@ -689,8 +691,7 @@ class PlayerService:
         epoch = self.registration.authority_epoch
         if self._hello_epoch == epoch:
             return
-        offer = ControlHello(authority_epoch=epoch, schemas=(1, 2),
-                             capabilities=("identify_output",))
+        offer = ControlHello(authority_epoch=epoch, schemas=(1, 2), capabilities=CAPABILITIES)
         try:
             response = await self.request("POST", "/v1/player/hello",
                                           body=offer.model_dump(mode="json"))
@@ -1044,9 +1045,17 @@ class PlayerService:
                 verified_at = self.clock.monotonic()
             await asyncio.sleep(.1)
 
+    def _state(self, body: dict) -> State:
+        """Central's state, its plan read in the shape the selected session carries."""
+        selection = self._control_selection
+        if isinstance(body.get("plan"), dict) and isinstance(body["plan"].get("layers"), list):
+            body = {**body, "plan": plan_from_selection(
+                body["plan"], selection or ControlSelection(authority_epoch=1, schema=1))}
+        return State.model_validate(body)
+
     async def poll_state(self):
         body, _ = await self._request_with_receipt("GET", "/v1/player/state")
-        state = State.model_validate(body)
+        state = self._state(body)
         result = await self.dispatch(lambda: self._apply_state(state))
         await self._ack_control(state, result)
 
@@ -1154,7 +1163,7 @@ class PlayerService:
                 body = _json(message)
                 if body.pop("type", None) != "state":
                     raise ServiceError("message_type")
-                state = State.model_validate(body)
+                state = self._state(body)
                 try:
                     result = await self.dispatch(lambda: self._apply_state(state))
                 except MainLoopLate:

@@ -44,17 +44,55 @@ class ControlDelivery(Model):
     delivery_sequence: int = Field(ge=1, le=2**63 - 1)
 
 
+# A plan Layer carries `after_end` (contracts.models.AfterEnd) only to a Player that offered
+# this; every Player released before it parses the yes/no `retain_on_expiry` instead, with
+# unknown fields forbidden (contracts.models.Model, extra="forbid").
+LAYER_AFTER_END = "layer_after_end"
+CAPABILITIES = ("identify_output", LAYER_AFTER_END)
+
+
 def select_control(offer: ControlHello) -> ControlSelection | None:
     """Select only a mutually known envelope, ignoring bounded future offers."""
     common = set(offer.schemas) & {1, 2}
     if not common:
         return None
     schema = max(common)
-    capabilities = ("identify_output",) if (
-        schema == 2 and "identify_output" in offer.capabilities
-    ) else ()
+    capabilities = tuple(
+        capability for capability in CAPABILITIES if capability in offer.capabilities
+    ) if schema == 2 else ()
     return ControlSelection(authority_epoch=offer.authority_epoch, schema=schema,
                             capabilities=capabilities)
+
+
+def plan_for_selection(plan: dict, selection: ControlSelection) -> dict:
+    """A wire plan as the selected session reads it. Without `layer_after_end`, each layer's
+    after-state becomes the flag that Player knows: keep this photo, or not; it never drops a
+    kept photo (its own release's behaviour)."""
+    if LAYER_AFTER_END in selection.capabilities:
+        return plan
+    layers = []
+    for layer in plan["layers"]:
+        legacy = {key: value for key, value in layer.items() if key != "after_end"}
+        legacy["retain_on_expiry"] = layer.get("after_end") == "keep_this_photo"
+        layers.append(legacy)
+    return {**plan, "layers": layers}
+
+
+def plan_from_selection(plan: dict, selection: ControlSelection) -> dict:
+    """The reverse, on the Player: a plan from a Central that did not select `layer_after_end`
+    (one older than this Player) carries the flag; read it as the after-state it meant."""
+    if LAYER_AFTER_END in selection.capabilities:
+        return plan
+    layers = []
+    for layer in plan["layers"]:
+        if not isinstance(layer, dict) or "after_end" in layer:
+            layers.append(layer)  # unparseable, or already explicit: read as sent
+            continue
+        current = {key: value for key, value in layer.items() if key != "retain_on_expiry"}
+        current["after_end"] = ("keep_this_photo" if layer.get("retain_on_expiry")
+                                else "leave_as_is")
+        layers.append(current)
+    return {**plan, "layers": layers}
 
 
 class ControlAck(Model):
