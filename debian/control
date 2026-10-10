@@ -1,0 +1,261 @@
+Source: photo-wall
+Section: misc
+Priority: optional
+Maintainer: Photo Wall <noreply@example.invalid>
+Build-Depends: debhelper-compat (= 13),
+ dh-sequence-installsysusers,
+ meson,
+ ninja-build,
+ pkgconf,
+ libweston-14-dev,
+ libwayland-dev,
+ libjansson-dev,
+ wayland-protocols,
+ python3,
+ python3-pywayland,
+ python3-cffi-backend,
+ python3-cairo,
+ weston,
+ python3-pydantic,
+ ca-certificates,
+ python3-cryptography,
+ python3-gi,
+ python3-httpx,
+ python3-opengl,
+ python3-websockets,
+ python3-zeroconf,
+ python3-gst-1.0,
+ gir1.2-gtk-3.0,
+ gir1.2-gst-plugins-base-1.0,
+ gstreamer1.0-plugins-base,
+ gstreamer1.0-plugins-good,
+ gstreamer1.0-plugins-bad,
+ gstreamer1.0-libav,
+ libgl1-mesa-dri,
+ libegl1,
+ initramfs-tools
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/mcurcio/photo-wall
+
+# Every binary package of decision 0019's package table. Each owns one directory,
+# /usr/lib/photo-wall/<name>/ (<name> is the package name without `photo-wall-`), and gets its
+# own content-derived version, 0+<12 hex> (debian/content-versions). A sibling is named at its
+# exact version as `<sibling> (= ${pw-version:<sibling>})`. Third-party Depends are added by the
+# slice that fills the package, and only the computed import check may change them after.
+#
+# appliance/display_host is built by debhelper's Meson build system (debian/rules). Its
+# Build-Depends end with the runtime Depends that no build tool needs (python3-cairo, weston,
+# python3-pydantic, then ca-certificates, photo-wall-player's libraries and render stack, and
+# initramfs-tools for photo-wall-netboot-init):
+# debian/graphics-abi binds the resolved version of every third-party package the display and the
+# frame client Depend on, and the import check (scripts/import_check.py) resolves every
+# third-party import to its owner and judges every Depends entry by what it installs, so the
+# build root holds each of them.
+# python3-cffi-backend is an OS dependency of trixie's python3-pywayland (0.4.18-4), which
+# imports it without declaring it: the build root needs it to generate the overlay's bindings,
+# and the base gets it from rpi-image-gen (appliance/rpi_image_gen/layer/photo-wall-device.yaml),
+# never from a Photo Wall package (R4).
+
+Package: photo-wall-common
+Architecture: all
+Depends: python3,
+ python3-nats,
+ python3-pydantic,
+ ${misc:Depends}
+Description: Photo Wall wire contracts and Node API
+ The contracts and nodeapi import roots every Node program shares.
+
+# ca-certificates is the Debian bundle uplink's Trust.public() reads (R5).
+Package: photo-wall-uplink
+Architecture: all
+Depends: python3,
+ ca-certificates,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ ${misc:Depends}
+Description: Photo Wall uplink: locating and trusting Central
+ The stdlib-only uplink import root, shared by stage 1 and the Node's programs.
+
+Package: photo-wall-node-kernel
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ ${misc:Depends}
+Description: Photo Wall Node kernel
+ The Node's primitives (appliance.kernel): clock, boot store, credentials,
+ capacity and the memory line table, boot-stage records, image mounts.
+
+Package: photo-wall-node-central-session
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ ${misc:Depends}
+Description: Photo Wall Node's Central session (retiring)
+ The appliance.central_session context.
+
+Package: photo-wall-node-host
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ ${misc:Depends}
+Description: Photo Wall HostCore
+ The appliance.host context: host metrics and facts, operator reboot, local
+ recovery deadlines.
+
+# The display's overlay client is Python on pywayland and pycairo.
+Package: photo-wall-node-display
+Architecture: any
+Depends: weston,
+ python3,
+ python3-pywayland,
+ python3-cairo,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: Photo Wall display host
+ The appliance.display_host context, the Weston shell, the diagnostic client
+ and the display's ABI identity (abi.json).
+
+Package: photo-wall-node-health
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-node-display (= ${pw-version:photo-wall-node-display}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ ${misc:Depends}
+Description: Photo Wall health judge
+ The appliance.health context: Node facts to one verdict and the overlay
+ instruction.
+
+Package: photo-wall-node-apps
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ ${misc:Depends}
+Description: Photo Wall app lifecycle
+ The appliance.apps context: effect broker, progress probe, app process, stop,
+ root import and release images.
+
+Package: photo-wall-node-boot
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
+ ${misc:Depends}
+Description: Photo Wall Node boot stages
+ The appliance.boot context: storage, handoff and prepare.
+
+Package: photo-wall-node-manager
+Architecture: all
+Depends: python3,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ photo-wall-node-host (= ${pw-version:photo-wall-node-host}),
+ photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
+ ${misc:Depends}
+Description: Photo Wall AppManager context (retiring)
+ The appliance.node context.
+
+Package: photo-wall-frame-client
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Photo Wall frame client library
+ The native Wayland frame client the Player loads in the app root.
+
+# The app root's one package (debian-packaging/build-root.sh): the Player and its launcher, run
+# as `python3 -I -B /usr/lib/photo-wall/player`. Its Python libraries are what its modules import
+# (the import check); the render stack is loaded through gi and GStreamer, never imported by name.
+# The frame client is the library the
+# Player loads by path (player/wayland_frames.py). Players are Immich-unaware: nothing here
+# reaches Central's or the media worker's code.
+Package: photo-wall-player
+Architecture: all
+Depends: python3,
+ python3-cryptography,
+ python3-gi,
+ python3-httpx,
+ python3-opengl,
+ python3-pydantic,
+ python3-websockets,
+ python3-zeroconf,
+ python3-gst-1.0,
+ gir1.2-gtk-3.0,
+ gir1.2-gst-plugins-base-1.0,
+ gstreamer1.0-plugins-base,
+ gstreamer1.0-plugins-good,
+ gstreamer1.0-plugins-bad,
+ gstreamer1.0-libav,
+ libgl1-mesa-dri,
+ libegl1,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-frame-client (= ${pw-version:photo-wall-frame-client}),
+ ${misc:Depends}
+Description: Photo Wall Player
+ The Player and its launcher: the app root's program.
+
+# The manager root's one package: AppManager's launcher, run as
+# `python3 -I -B /usr/lib/photo-wall/app-manager`; its PATH is the directories its entry reaches.
+Package: photo-wall-app-manager
+Architecture: all
+Depends: python3,
+ photo-wall-node-manager (= ${pw-version:photo-wall-node-manager}),
+ ${misc:Depends}
+Description: Photo Wall AppManager launcher
+ The manager root's program.
+
+# The composition the base installs: the seven launchers (appliance/launchers/<launcher>/, each
+# naming its PATH, which the import check holds to its entry's imports), the base's units, slices
+# and target (enabled by debian/photo-wall-node.links), its system users and runtime directories,
+# the bus configuration and the base ABI (debian/base-abi). nats-server is upstream's .deb, in the
+# local repo at the pin; its licence ships in this package's doc directory.
+Package: photo-wall-node
+Architecture: all
+Depends: photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
+ photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
+ photo-wall-node-host (= ${pw-version:photo-wall-node-host}),
+ photo-wall-node-display (= ${pw-version:photo-wall-node-display}),
+ photo-wall-node-health (= ${pw-version:photo-wall-node-health}),
+ photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
+ photo-wall-node-boot (= ${pw-version:photo-wall-node-boot}),
+ photo-wall-node-manager (= ${pw-version:photo-wall-node-manager}),
+ nats-server (= ${nats:Version}),
+ systemd,
+ udev,
+ ${misc:Depends}
+Description: Photo Wall Node composition
+ The base's units, slices and target, system users, runtime directories, the
+ bus configuration, the launchers and the base ABI identity (abi.json).
+
+# Stage 1 (decision 0019 P4): appliance.netboot_init and the two modules only it imports, under
+# its directory, with its path file (/usr/lib/photo-wall/netboot-init/path: the package directories
+# stage 1 reaches, one per line, sorted, held by the import check to import_check.launcher_path),
+# the initramfs-tools hook that copies those directories and the CA bundle into the initrd, and the
+# boot script. Stage 1 is stdlib-only, so it Depends on no Python provider; the tools the hook runs
+# (python3, kmod, zstd) are the initrd build root's OS packages (base-image.yml), never Depends
+# here (R4). The base never installs it.
+Package: photo-wall-netboot-init
+Architecture: all
+Depends: initramfs-tools,
+ photo-wall-common (= ${pw-version:photo-wall-common}),
+ photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
+ photo-wall-node-boot (= ${pw-version:photo-wall-node-boot}),
+ ${misc:Depends}
+Description: Photo Wall stage 1 in the initramfs
+ Stage 1 of the netboot and an initramfs-tools hook that copies it, the package
+ directories it imports from and the CA bundle into the netboot initramfs.

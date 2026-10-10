@@ -673,7 +673,6 @@ class Registry:
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
         with self._equipment_write() as conn:
             from central.equipment_drain import require_unfenced_player_in
-            from central.fleet.fallback import retire_device_fallback_references
 
             require_unfenced_player_in(conn, player_id)
             identity = conn.execute("SELECT device_id FROM players WHERE id=%s",
@@ -681,9 +680,8 @@ class Registry:
             if identity is None:
                 raise RegistryError("unknown_player", 404)
             device_id = identity["device_id"]
-            # Fleet offer, fallback reservation and eviction take this lock
-            # before the device row. Use the same order for retirement so a
-            # fallback cannot be pinned between revocation and GC release.
+            # Node boot offers and the deployment writer take this lock before
+            # the device row. Use the same order for retirement.
             lock_fleet_assets_in(conn)
             now = self.clock.utc()
             # Ticketless legacy Players may predate any PXE `devices` row.
@@ -704,11 +702,6 @@ class Registry:
             conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
                          "revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL",
                          (now, device_id))
-            conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=%s "
-                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
-            conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s "
-                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
-            retire_device_fallback_references(conn, device_id)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (now, player_id))
             self._audit(conn, "player_retired", player_id)

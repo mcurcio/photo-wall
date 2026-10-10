@@ -38,19 +38,24 @@ from scripts.harness_failure import (  # noqa: E402
     FailureEnvelope,
     FailureRole,
 )
+from scripts.registry_pull import RegistryPullError, pull_images  # noqa: E402
 
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 MAX_STREAM_BYTES = 16 * 1024 * 1024
 TERMINATE_GRACE = 5.0
 
-# A disposable fixture's image pull and container start are the two docker
-# operations exposed to real registry/daemon flakiness. Bounding the retry
-# count keeps a truly permanent failure (bad image ref, unfixable config)
-# from hanging CI, while still absorbing the transient hiccup that clears on
-# a human re-run. This layer cannot reliably tell the two apart -- both
-# surface as the same closed `docker_command_failed`/`docker_command_timeout`
-# code -- so retrying a bounded few times regardless is treated as safe for a
-# fixture that is torn down and rebuilt from scratch on every attempt anyway.
+COMPOSE_FILE = ROOT / "tests/integration/compose.immich.yml"
+# The upstream services whose images come from a registry (the rest build locally).
+UPSTREAM_SERVICES = ("immich", "database", "redis")
+
+# Container start is exposed to daemon flakiness (registry pulls retry in
+# scripts.registry_pull). Bounding the retry count keeps a truly permanent
+# failure (unfixable config) from hanging CI, while still absorbing the
+# transient hiccup that clears on a human re-run. This layer cannot reliably
+# tell the two apart -- both surface as the same closed
+# `docker_command_failed`/`docker_command_timeout` code -- so retrying a
+# bounded few times regardless is treated as safe for a fixture that is torn
+# down and rebuilt from scratch on every attempt anyway.
 STARTUP_RETRY_ATTEMPTS = 4
 STARTUP_RETRY_BACKOFF_SECONDS = (2.0, 5.0, 10.0)
 _TRANSIENT_DOCKER_CODES = ("docker_command_failed", "docker_command_timeout")
@@ -127,6 +132,30 @@ def call_with_retry(action, *, attempts: int, backoff_seconds: tuple[float, ...]
 
 def _retryable_startup_error(error: BaseException) -> bool:
     return isinstance(error, HarnessError) and str(error) in _TRANSIENT_DOCKER_CODES
+
+
+def fixture_images(*services: str) -> list[str]:
+    """The digest-pinned image reference each named service declares in the compose file."""
+    compose = COMPOSE_FILE.read_text()
+    refs = []
+    for service in services:
+        match = re.search(rf"^  {re.escape(service)}:\n(?:    .*\n)*?    image: (\S+)$",
+                          compose, re.MULTILINE)
+        require(match is not None and re.search(r"@sha256:[a-f0-9]{64}$", match[1]) is not None,
+                "fixture_document_invalid")
+        refs.append(match[1])
+    return refs
+
+
+def pull_fixture_images(*services: str, **retry) -> None:
+    """Make the services' registry images present (see scripts.registry_pull), keeping the
+    printed failure a HarnessError code and the sanitized stderr on its `diagnostic`."""
+    try:
+        pull_images(fixture_images(*services), **retry)
+    except RegistryPullError as error:
+        failure = HarnessError(error.code)
+        failure.diagnostic = error.diagnostic
+        raise failure from None
 
 
 def read_json(path: Path) -> dict:
@@ -230,7 +259,7 @@ def fixture_provenance_paths() -> tuple[tuple[str, ...], tuple[str, ...]]:
         "contracts/time.py", "pyproject.toml", "uv.lock", *runtime,
     )
     host = (
-        "scripts/docker_diagnostics.py", "scripts/immich_fixture.py",
+        "scripts/docker_diagnostics.py", "scripts/immich_fixture.py", "scripts/registry_pull.py",
         "tests/integration/compose.immich.yml",
         *(item.source for item in IMMICH_RUNTIME_BUNDLE.files),
     )
@@ -249,7 +278,7 @@ class FixtureHost:
         require(marker.get("state") == str(self.state), "fixture_path_mismatch")
         self.base = ["docker", "compose", "--project-name", self.project, "--env-file",
                      str(self.state / ".env"), "--file",
-                     str(ROOT / "tests/integration/compose.immich.yml")]
+                     str(COMPOSE_FILE)]
 
     @classmethod
     def create(cls, state: Path) -> FixtureHost:
@@ -423,15 +452,10 @@ class FixtureHost:
         # Buildx builder (as in GHA) cannot resolve that daemon-local FROM tag.
         self.compose(*daemon_compose_build("central-probe"), timeout=600, capture=False)
 
-    def pull(self, *services: str, timeout: int = 300, sleep=time.sleep) -> None:
-        """Pull upstream registry images before startup, isolating a slow or
-        hiccupping registry from the container-start step below and retrying
-        it independently (see module docstring on STARTUP_RETRY_ATTEMPTS)."""
-        call_with_retry(
-            lambda: self.compose("pull", *services, timeout=timeout, capture=False),
-            attempts=STARTUP_RETRY_ATTEMPTS, backoff_seconds=STARTUP_RETRY_BACKOFF_SECONDS,
-            cleanup=self.cleanup, retryable=_retryable_startup_error, sleep=sleep,
-        )
+    def pull(self, *services: str, **retry) -> None:
+        """Make the upstream registry images present before startup, so a slow or
+        throttled registry is never mistaken for a container-start failure."""
+        pull_fixture_images(*services, **retry)
 
     def start(self, *, wait_timeout: int = 240, timeout: int = 600, sleep=time.sleep) -> None:
         """Start the fixture's containers and wait for health, retrying a
@@ -538,7 +562,7 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
         host.build(base_image=base_image)
         evidence["stage"] = "startup"
         write_json(host.state / "evidence.json", evidence)
-        host.pull("immich", "database", "redis")
+        host.pull(*UPSTREAM_SERVICES)
         host.start(wait_timeout=240, timeout=600)
         inventory, upstream_ip = host.topology()
         evidence["inventory"] = inventory
@@ -594,6 +618,8 @@ def run_fixture(state: Path, keep: bool, *, page_size: int = 3,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    # `prefetch` pulls the upstream images ahead of a later `run` (CI overlaps it with builds).
+    commands.add_parser("prefetch")
     for name in ("run", "cleanup"):
         command = commands.add_parser(name)
         command.add_argument("--state-dir", type=Path, required=True)
@@ -606,6 +632,9 @@ def main() -> None:
     if args.command == "run":
         result = run_fixture(args.state_dir, args.keep, page_size=args.page_size,
                              base_image=args.base_image, setup_only=args.setup_only)
+    elif args.command == "prefetch":
+        pull_fixture_images(*UPSTREAM_SERVICES)
+        result = {"prefetched": list(UPSTREAM_SERVICES)}
     else:
         FixtureHost(args.state_dir).cleanup()
         result = {"cleaned": True}

@@ -23,7 +23,7 @@ The shell and its Cairo diagnostic client run from the base, independently of ap
 files or imports. The sealed Player receives only the public Wayland socket.
 
 The diagnostic client is launched by the shell at the fixed base path
-`/usr/lib/photo-wall-display/diagnostic-client`. A private socketpair is passed as
+`/usr/lib/photo-wall/node-display/diagnostic-client`. A private socketpair is passed as
 `WAYLAND_SOCKET`; the compositor retains that exact `wl_client` as the capability
 to bind the diagnostic protocol. A public client with the same app ID, UID, or
 claimed PID cannot obtain that role. Client failure restores a compositor-owned
@@ -80,6 +80,60 @@ process loss and lease expiry invalidate affected authority. Mode/connection
 generations and the compositor incarnation fence connector reuse. A new controller
 connection explicitly invalidates old grants rather than inventing recovered
 presentation evidence. Compositor loss remains Output unknown until recovery.
+
+## Units and Weston incarnations
+
+The display stack is two base units in `photowallbase.slice`. Their ordering is
+systemd's, not a poll or a retry in either process:
+
+- `photo-wall-display.service` runs Weston with `Type=notify`, `NotifyAccess=main`
+  and Weston's own `systemd-notify.so` module (`--modules=`). Weston loads it after
+  it has created its Wayland socket and the shell has bound `control.sock`, so
+  READY=1 means both sockets accept connections. The `/usr/bin/env` wrapper restates
+  `XDG_RUNTIME_DIR`, which `PAMName=login`'s pam_systemd would otherwise replace,
+  and execs Weston, so the main PID is Weston's. `WatchdogSec=10s`: the module pings
+  from Weston's event loop at half that interval, so a hung compositor is aborted
+  (SIGABRT) and restarted like a crashed one.
+- `photo-wall-display-controller.service` has `BindsTo=` and `After=` the display
+  unit, and the display unit `Wants=` it. Each Weston incarnation therefore gets
+  one controller, started after its READY=1 and stopped when it ends; the next
+  incarnation brings a new one. The controller never starts, or builds its sandbox,
+  while Weston's `RuntimeDirectory` (`/run/photo-wall-display`) is absent, so no
+  `RuntimeDirectoryPreserve=` is needed. The directory leaves with the incarnation
+  that made it, and no reader can open a dead incarnation's sockets.
+- The public Wayland socket is not in that directory. Weston binds it at
+  `/run/photo-wall-display-wayland/wayland-0` (`--socket=` takes the absolute path),
+  in a directory the base's tmpfiles.d creates as `pw-display:pw-display 0750`. It
+  outlives every incarnation, so an app in group `pw-display` binds the directory,
+  never a socket file a restart replaces, and never sees `control.sock` or
+  `ingress.sock`. Weston's umask under `PAMName=login` is 0002, so the socket is
+  group-writable. [`appliance/kernel/display_paths.py`](../appliance/kernel/display_paths.py)
+  is the one home of these paths; a unit test pins them to the packaged units and
+  tmpfiles.d.
+
+Any other consumer of `/run/photo-wall-display` must follow the same rule: start
+after the display unit is ready, and end with the Weston incarnation it connected
+to. The app broker's `After=` orders it on READY=1. The Player's transient unit
+binds `WAYLAND_DIRECTORY` read-only at the same path, sets `WAYLAND_DISPLAY` to
+`WAYLAND_SOCKET`, and carries `BindsTo=` and `After=` the display unit
+([`app_unit_properties`](../appliance/apps/process_linux.py)): its start waits for
+READY=1 and it stops with that Weston. Each launch records the display's
+`InvocationID`. One rule, `relaunch_for_display`
+([`broker.py`](../appliance/apps/broker.py)), serves whichever launch is current:
+the boot's (`AppEffectBroker.reconcile`) or an online switch's
+(`OnlineEffectBroker.reconcile`, for its target or fallback). When the Player is
+absent while a newer incarnation runs, the same environment starts again under the
+same operation, once for that incarnation. Until PID1 has unloaded the old unit
+nothing starts, and the next turn asks again. A switch still completes only at the
+control proof. The node-pid1 success scenario crashes Weston under a linked Player
+and requires a new Player to link.
+
+The node-pid1 scenarios start the controller alone, so Weston comes up only
+through the units' own dependencies. Every scenario then checks that `control.sock`
+existed before the controller's main process started, that the controller never
+restarted, and that its journal holds no `FileNotFoundError` or `226/NAMESPACE`.
+The `refused` scenario also sends Weston SIGSEGV, then SIGSTOP (its watchdog aborts
+it), and requires a new Weston and a new clean controller each time.
 
 ## Base controller ingress
 
@@ -140,6 +194,26 @@ Primary implementation references: [Weston 14 shell APIs](https://gitlab.freedes
 [Wayland server protocol logger](https://gitlab.freedesktop.org/wayland/wayland/-/blob/1.23.1/src/wayland-server-core.h),
 and [presentation feedback protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/stable/presentation-time/presentation-time.xml).
 
+## The health layer's buffers
+
+The overlay client (`overlay/client.py`) keeps its health surface mapped over the whole
+Output at all times. With the tint off, and for the first map before any instruction, the
+surface shows a fully transparent solid buffer from `wp_single_pixel_buffer_manager_v1`
+(rgba 0), scaled to the Output by `wp_viewporter`. With the tint on it shows one
+whole-Output ARGB8888 `wl_shm` buffer. Every health commit sets the viewport destination to
+the Output size, so the solid buffer covers the Output and the ARGB buffer maps 1:1. The
+solid buffer holds no pixels and is not counted against the client's buffer and memory caps.
+A compositor that does not offer both globals ends the client, so the shell's fallback tint
+shows; there is no second drawing path.
+
+Why not a small `wl_shm` buffer: Weston 14's DRM backend treats a small ARGB8888 shm buffer
+as a cursor-plane candidate and builds that plane's mask as `1 << plane_idx` in 32 bits. The
+Pi 5's vc4 exposes 56 KMS planes and the HDMI-A-1 cursor plane has index 50, so the mask
+wraps to an overlay plane and `drm_output_find_plane_for_view` aborts Weston on
+`assert(fb)`. Weston returns before the plane search for a solid buffer. Weston 15 removes
+that assertion (upstream commit d3ead778) but still builds 32-bit plane masks, so a plane
+index of 32 or more still aliases another plane. A real pointer cursor can still reach the
+same path on Weston 14. CI cannot see this: its headless Weston has no DRM planes.
 
 ## Frame-scoped replacement and explicit withdrawal
 

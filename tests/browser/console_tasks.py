@@ -1,8 +1,8 @@
 """Task-level browser helpers: what an operator does, named by the section it happens in.
 
 Bead 0 of the console passes C+D (docs/operator-console-ux-pass2-flow.md §9). The tests
-state *what* they do (go to Scenes, author a Scene, schedule it, show it now, open a frame's
-facet); these helpers own *how* today's layout does it. When the layout moves (bead 1b: the
+state *what* they do (go to Scenes, author a Scene, schedule it, show it now, open a Frame's page at a
+tab); these helpers own *how* today's layout does it. When the layout moves (bead 1b: the
 sidebar and hash routes; beads 2-5: step flows), the helpers change and the call sites do
 not. Labels and accessible names never change when a control moves (§3 rule 3), so the
 helpers use the same names the tests always have.
@@ -11,9 +11,11 @@ Tests that are *about* a form (its validation, focus, descriptions or chooser co
 their direct locators; these helpers are for tests that only need the task done.
 
 As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #/schedule,
-#/sources, #/wall, #/players, #/attention), reached from the sidebar (a drawer under
-850 px). As of the console DDD pass 1 (B1) the boxes live on Players: a list with one row
-per box, and one Player page per box (#/players/<device-id>), opened with `open_player`.
+#/sources, #/wall, #/hardware, #/attention), reached from the sidebar (a drawer under
+850 px). As of Console by Domain (E1 U1) the boxes live on Hardware: a list with one row per
+Pi in groups, and one Hardware page per Pi (#/hardware/<device-id>), opened with `open_pi`;
+the Pi's Software and screens page (#/players/<device-id>) is reached from its Pi header,
+opened with `open_player`.
 Signing in always lands on #/wall (console DDD §48), so a test that needs another page goes
 to it. As of console DDD W1 the Wall's daily face is read-only: drawing, moving and deleting
 Frames happen in Edit layout (#/wall/layout), opened with `edit_layout`.
@@ -33,8 +35,9 @@ a Program" on the Schedule page, then Scene → When → Review. `schedule_progr
 `start_schedule`, `schedule_continue` and `schedule_form` are its parts.
 """
 
+import re
 from collections.abc import Mapping
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from operator_harness import pause_page_clock, sign_in
 from playwright.sync_api import expect
@@ -43,25 +46,27 @@ from playwright.sync_api import expect
 # (each page's <h1> reads the same).
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
-FLEET_SECTIONS = frozenset({"players", "releases"})
+FLEET_SECTIONS = frozenset({"hardware", "releases"})
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
-    "wall": "Wall", "players": "Players", "releases": "Releases", "attention": "Needs attention",
+    "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
+    # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
+    "players": "Software and screens",
 }
 
-# The Inspector's facet keys (Inspector.jsx FACETS) and their tab labels.
-FACETS = {"status": "Status", "binding": "Binding", "calibration": "Calibration"}
+# The Frame page's tab keys (routes.js TABS) and their labels.
+TABS = {"overview": "Overview", "position": "Position", "picture": "Picture", "hardware": "Hardware"}
 
 
 def go(page, section):
-    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "players",
+    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "hardware",
     "releases" or "attention". Name the section the test is about (a Run test goes to "now", a
     Program test to "schedule").
 
     Clicks the section's sidebar link by its accessible name; on a narrow screen, where
     the sidebar is a drawer, opens the drawer with "Menu" first. Waits for the page's
-    heading. The Wall link returns to the Wall as it was last shown (its frame and facet).
+    heading. The Wall link returns to the Wall as it was last shown (a Frame's page and tab).
     """
     if section not in SECTIONS:
         raise ValueError(f"unknown console section {section!r}; expected one of {sorted(SECTIONS)}")
@@ -73,7 +78,15 @@ def go(page, section):
         sidebar = page.get_by_role("dialog", name="Menu", exact=True).get_by_role(
             "navigation", name="Sections", exact=True)
     sidebar.get_by_role("link", name=LABELS[section], exact=True).click()
-    expect(page.get_by_role("heading", level=1, name=LABELS[section], exact=True)).to_be_visible()
+    expect(section_heading(page, section)).to_be_visible()
+
+
+def section_heading(page, section):
+    """The page's level-1 heading once `section` is shown: its label, except that the Wall's link
+    may return to a Frame's page, which names the Frame (wallRoutes.jsx `ownsHeading`)."""
+    if section == "wall":
+        return page.get_by_role("heading", level=1, name=re.compile(r"^(Wall|Frame .+)$"))
+    return page.get_by_role("heading", level=1, name=LABELS[section], exact=True)
 
 
 def edit_layout(page):
@@ -107,7 +120,7 @@ def visible_page(page):
 
 
 def player_name(registry, player_id, serial=None):
-    """A Player's name on the Players pages (players.js `playerName`): "Player …<last six of
+    """A Pi's name on the fleet pages (players.js `playerName`): "Player …<last six of
     its serial>" when its box netbooted with `serial`, else "Player <device id>"."""
     if serial:
         return f"Player …{serial[-6:]}"
@@ -115,12 +128,27 @@ def player_name(registry, player_id, serial=None):
     return f"Player {device_id}"
 
 
-def open_player(page, name):
-    """Go to Players and follow the list's link to the Player page named `name`
+def hardware_list(page):
+    """The Hardware list on screen: the region "Pis", its groups' tables inside."""
+    return page.get_by_role("region", name="Pis", exact=True)
+
+
+def open_pi(page, name):
+    """Go to Hardware and follow the list's link to the Hardware page of the Pi named `name`
     (`player_name`); waits for the page's heading and returns the page on screen."""
-    go(page, "players")
-    page.get_by_role("table", name="Players", exact=True).get_by_role(
-        "link", name=name, exact=True).click()
+    go(page, "hardware")
+    hardware_list(page).get_by_role("link", name=name, exact=True).click()
+    expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
+    expect(page.get_by_role("heading", level=1, name="Hardware", exact=True)).to_be_visible()
+    return visible_page(page)
+
+
+def open_player(page, name):
+    """Open the Software and screens page of the Pi named `name`: its Hardware page
+    (`open_pi`), then the Pi header's link; waits for the page and returns it."""
+    open_pi(page, name)
+    page.get_by_role("link", name="Software and screens", exact=True).click()
+    expect(page.get_by_role("heading", level=1, name="Software and screens", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
     return visible_page(page)
 
@@ -343,7 +371,8 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
     default, 0).
 
     With `submit`, sends it ("Schedule Program", or "Add separate windows" for more than
-    one window) and returns the first Program PUT response; without it, returns the flow's
+    one window), waits (on success) for that Program's card and returns the first Program
+    PUT response; without it, returns the flow's
     form on Review, filled and unsent.
     """
     form = start_schedule(page)
@@ -367,6 +396,14 @@ def schedule_program(page, program, scene_id, start, end, priority=None, *, wind
         lambda r: "/v1/operator/programs/" in r.url and r.request.method == "PUT"
     ) as info:
         form.get_by_role("button", name=action, exact=True).click()
+    if info.value.ok:
+        # Listed before anything can use it (the refresh after the save landed): the
+        # answer arrives before the console's refresh read does. The card is visible only
+        # for a window not yet ended: a past Program renders inside the closed "Past (N)"
+        # disclosure (ProgramsRegion.jsx), so this wait suits future windows only.
+        program_id = unquote(info.value.url.rsplit("/", 1)[-1])
+        expect(page.get_by_role("region", name="Programs", exact=True).get_by_label(
+            f"Program {program_id}", exact=True)).to_be_visible()
     return info.value
 
 
@@ -407,7 +444,8 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
     the Scene's frames, or 0). `repeat` is the label of the "if it is already running"
     choice; its default ("Leave it running") is left as it is. Central answers
     synchronously with an Admission ({status, reason}); the console mints the activation
-    id, so the operator never types one. Without `submit`, returns the form on Review.
+    id, so the operator never types one. With `submit`, returns once the console says the
+    outcome; without it, returns the form on Review.
     """
     form = start_show_now(page, scene_id)
     form.get_by_role("button", name="Continue", exact=True).click()
@@ -424,23 +462,25 @@ def show_now(page, scene_id, priority=None, repeat="Leave it running", *, submit
         lambda r: r.url.endswith("/v1/operator/activations") and r.request.method == "POST"
     ) as info:
         form.get_by_role("button", name="Activate now", exact=True).click()
+    # The outcome is said only after the console's refresh read has landed (useMutate),
+    # so whatever the test does next sees the state after the activation.
+    expect(page.get_by_role("region", name="Runs", exact=True).get_by_label(
+        "Activation outcome", exact=True)).to_be_visible()
     return info.value
 
 
-def open_frame(page, frame_id, facet):
-    """Open frame `frame_id` on the Wall at `facet` ("status", "binding" or
-    "calibration", the Inspector.jsx keys); returns its Inspector.
+def open_frame(page, frame_id, tab):
+    """Open frame `frame_id`'s page at `tab` ("overview", "position", "picture" or
+    "hardware", the Frame page's keys); returns the page on screen.
 
-    Follows the frame's route, `#/wall/frames/<id>/<facet>`, as a typed URL would: the
-    frame is selected on the plan and its Inspector opens at that facet, without moving
-    focus.
+    Follows the frame's route, `#/wall/frames/<id>/<tab>`, as a typed URL would, and waits for
+    the Frame's heading and the tab.
     """
-    if facet not in FACETS:
-        raise ValueError(f"unknown Inspector facet {facet!r}; expected one of {sorted(FACETS)}")
+    if tab not in TABS:
+        raise ValueError(f"unknown Frame page tab {tab!r}; expected one of {sorted(TABS)}")
     expect(page.get_by_role("banner")).to_be_visible()  # the shell is shown (signed in)
-    visit(page, f"#/wall/frames/{quote(frame_id, safe='')}/{facet}")
-    inspector = page.get_by_role("region", name=f"Frame {frame_id} inspector", exact=True)
-    expect(inspector).to_be_visible()
-    expect(inspector.get_by_role("tab", name=FACETS[facet], exact=True)).to_have_attribute(
-        "aria-selected", "true")
-    return inspector
+    visit(page, f"#/wall/frames/{quote(frame_id, safe='')}/{tab}")
+    expect(page.get_by_role("heading", level=1, name=f"Frame {frame_id}", exact=True)).to_be_visible()
+    expect(page.get_by_role("tablist", name="Frame settings", exact=True).get_by_role(
+        "tab", name=TABS[tab], exact=True)).to_have_attribute("aria-selected", "true")
+    return visible_page(page)

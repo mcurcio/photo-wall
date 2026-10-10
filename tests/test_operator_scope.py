@@ -31,7 +31,7 @@ def test_every_admin_route_of_the_real_app_is_under_the_cookie_path():
     routes = _admin_routes(app)
     # Non-vacuous: console callers of node and calibration routes are found.
     assert {"/v1/operator/node/status", "/v1/operator/frames/{frame_id}/calibration-capability",
-            "/v1/operator/fleet"} <= routes
+            "/v1/operator/app/releases/refresh"} <= routes
     assert COOKIE_PATH == OPERATOR_PREFIX
     assert sorted(path for path in routes if not path.startswith(OPERATOR_PREFIX)) == []
 

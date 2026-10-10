@@ -18,7 +18,6 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
-import procrastinate
 import psycopg
 import pytest
 from fakes.publisher import PublishedCall, RecordingPublisher
@@ -26,7 +25,7 @@ from procrastinate.periodic import PeriodicDeferrer
 from runtime_fakes import apply_procrastinate_schema
 
 from central.infra.asset_records import PgAssetRecords
-from central.infra.job_queue import build_app, decode
+from central.infra.job_queue import async_connector, build_app, decode
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
@@ -182,7 +181,7 @@ class ProcrastinateHarness:
         return handle
 
     async def insert_periodic_tick(self, job_type) -> None:
-        app = build_app(procrastinate.PsycopgConnector(conninfo=self.dsn), (job_type,), None)
+        app = build_app(async_connector(self.dsn), (job_type,), None)
         async with app.open_async():
             (tick,) = app.periodic_registry.periodic_tasks.values()
             await PeriodicDeferrer(registry=app.periodic_registry).defer_jobs([(tick, 1000)])

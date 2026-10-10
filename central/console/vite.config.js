@@ -1,4 +1,7 @@
 import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
+
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 
 // The built bundle is served same-origin at /console by central/app.py under a
@@ -12,8 +15,13 @@ import react from "@vitejs/plugin-react";
 //     `<script type="module" src="/console/assets/index-<hash>.js">`.
 //   - assetsInlineLimit 0: Vite otherwise inlines small assets (the font, icons)
 //     as `data:` URLs, which `default-src 'self'` refuses; every asset is a file.
+// Tailwind compiles at build time to a static stylesheet (no runtime style injection). The
+// "@/" alias is the catalog layers' (components.json, tsconfig.json `paths`).
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
+  },
   base: "/console/",
   build: {
     modulePreload: { polyfill: false },

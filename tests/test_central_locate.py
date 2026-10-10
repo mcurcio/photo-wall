@@ -5,6 +5,8 @@ import http.client
 
 import pytest
 from fastapi.testclient import TestClient
+from test_central_health import FakeCoordinator, FakeDatabase, app_with
+from tls_fixture import central_stub, serve_stub
 
 from contracts.central_identity import (
     LOCATE_PATH,
@@ -15,8 +17,6 @@ from contracts.central_identity import (
 )
 from contracts.strict_json import loads_object
 from contracts.time import ManualClock
-from tests.test_central_health import FakeCoordinator, FakeDatabase, app_with
-from tests.tls_fixture import central_stub, serve_stub
 
 
 @pytest.fixture

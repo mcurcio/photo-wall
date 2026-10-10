@@ -23,7 +23,7 @@ from player.native import NativeOutput, NativeRenderer
 for module in (player.native, player.wayland_frames, contracts.node_frame):
     source = Path(module.__file__)
     print("FROZEN_IMPORT", source, hashlib.sha256(source.read_bytes()).hexdigest(), flush=True)
-print("FROZEN_CLIENT", hashlib.sha256(Path("/usr/lib/photo-wall-client/libphoto-wall-frame-client.so").read_bytes()).hexdigest(), flush=True)
+print("FROZEN_CLIENT", hashlib.sha256(Path("/usr/lib/photo-wall/frame-client/libphoto-wall-frame-client.so").read_bytes()).hexdigest(), flush=True)
 
 renderer = NativeRenderer((NativeOutput("headless", "photo-wall-headless", 640, 480),))
 renderer.set_unbound_outputs((), "fixture-player")

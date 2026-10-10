@@ -13,6 +13,10 @@ facts carry no time the judge compares. Rules for `app_unresponsive` (the one M1
 - a feed gap (`forget`) withdraws a pending condition and restarts a running clear hold, but
   keeps a raised one: the wall is not untinted on evidence the judge did not see.
 
+`software_renderer` (degraded, never display-affecting) follows the run's `app_renderer` fact:
+a software rasterizer (llvmpipe, softpipe, swrast) raises it at once for that run; a GPU
+renderer reported by any later run clears it. A feed gap keeps it, like any raised condition.
+
 Every other feed kind (channel, link and relink facts, `kill_withheld`) is recorded or ignored,
 never a fault; `app_link_accepted` is kept for its `player_id`. A code outside the catalogue is
 refused (`ValueError`). Construction refuses timing under which the card could miss the kill:
@@ -46,6 +50,9 @@ from appliance.feed import FeedEvent
 from contracts.node_faults import Fault
 
 APP_UNRESPONSIVE = "app_unresponsive"
+SOFTWARE_RENDERER = "software_renderer"
+# Mesa's CPU rasterizers, as GL_RENDERER names them (zink over lavapipe reports "llvmpipe" too).
+_SOFTWARE_RENDERERS = ("llvmpipe", "softpipe", "software rasterizer", "swrast")
 RING_CAPACITY = 256
 _RUN_KEYS = {"invocation_id": str, "pid": int, "start_ticks": int, "app_epoch": int}
 _UNANSWERED = ("probe_unanswered", "probe_kill_due")
@@ -98,6 +105,7 @@ class Transition:
     run: dict
     state: Literal["pending", "raised", "cleared", "withdrawn"]
     reason: str  # unanswered | window_elapsed | app_killed | run_changed | answered | hold_elapsed | feed_gap
+    # | software_renderer | gpu_renderer
     at_ms: int
 
 
@@ -118,6 +126,12 @@ def _run(value: object) -> dict | None:
         if type(value[key]) is not kind:
             return None
     return dict(value)
+
+
+def software_renderer(renderer: str) -> bool:
+    """True iff `renderer` (a GL_RENDERER string) names a CPU rasterizer, not a GPU."""
+    lowered = renderer.lower()
+    return any(name in lowered for name in _SOFTWARE_RENDERERS)
 
 
 def _positive(*values: object) -> bool:
@@ -193,6 +207,8 @@ class HealthJudge:
                 self._killed(APP_UNRESPONSIVE, run, now)
             elif event.kind == "app_link_accepted" and isinstance(value.get("player_id"), str):
                 self.player = (run, value["player_id"])
+            elif event.kind == "app_renderer" and isinstance(value.get("renderer"), str):
+                self._renderer(run, value["renderer"], now)
         self._advance(now)
 
     def observe_outputs(self, snapshot: object, now_ms: int) -> None:
@@ -347,6 +363,18 @@ class HealthJudge:
             condition.raised = True
             self._record(code, run, "raised", "app_killed", now)
 
+    def _renderer(self, run: dict, renderer: str, now: int) -> None:
+        condition = self._open.get(SOFTWARE_RENDERER)
+        if not software_renderer(renderer):
+            if condition is not None:
+                self._close(SOFTWARE_RENDERER, condition, "cleared", "gpu_renderer", now)
+        elif condition is None:
+            self._begin(SOFTWARE_RENDERER, _Open(run, now, raised=True), "raised",
+                        "software_renderer", now)
+        elif condition.run != run:  # still software, now as a new run
+            condition.run = run
+            self._record(SOFTWARE_RENDERER, run, "raised", "run_changed", now)
+
     def _advance(self, now: int) -> None:
         for code, condition in list(self._open.items()):
             fault = self._fault(code)
@@ -376,5 +404,6 @@ class HealthJudge:
         self._ring.append(entry)
 
 
-__all__ = ["APP_UNRESPONSIVE", "MAX_OUTPUTS", "RING_CAPACITY", "Condition", "DisplayOutput",
-           "HealthJudge", "OutputVerdict", "Presented", "Transition", "Verdict", "display_outputs"]
+__all__ = ["APP_UNRESPONSIVE", "MAX_OUTPUTS", "RING_CAPACITY", "SOFTWARE_RENDERER", "Condition",
+           "DisplayOutput", "HealthJudge", "OutputVerdict", "Presented", "Transition", "Verdict",
+           "display_outputs", "software_renderer"]

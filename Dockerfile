@@ -71,9 +71,9 @@ RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
 # workspace pre-build. This is the fix for the published central image 500ing on
 # `GET /`: previously dist/ only reached the image when a caller happened to have
 # pre-built it into the build context (checks.yml did; the publish path did not).
-# Digest-pinned to match the python base's rigor (node:20-bookworm-slim,
-# multi-arch index digest resolved 2026-09).
-FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS console-builder
+# Digest-pinned to match the python base's rigor (node:22-bookworm-slim, the console's
+# .nvmrc major; multi-arch index digest resolved 2026-10-09).
+FROM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS console-builder
 WORKDIR /console
 COPY central/console/package.json central/console/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
@@ -89,6 +89,7 @@ COPY --link contracts /app/contracts
 COPY --link media /app/media
 COPY --link player /app/player
 COPY --link central /app/central
+COPY --link nodeapi /app/nodeapi
 COPY --link --from=console-builder /console/dist /app/central/console/dist
 
 # GHA passes an immutable retained native image; Compose can use the local target.
@@ -119,6 +120,10 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
     "$PHOTO_WALL_CACHE_ROOT/apps" \
     "$PHOTO_WALL_CACHE_ROOT/os-images" \
     "$PHOTO_WALL_CACHE_ROOT/previews"
+# The hub's configuration directory (PHOTO_WALL_HUB_CONFIG): the worker writes hub.json there and
+# the hub reads it. Owned by the runtime identity so a fresh Docker volume mounted here is populated
+# writable for `wall`; nothing in it outlives a hub start (E3b design §12).
+RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0755 /var/lib/photo-wall/hub
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 ENV PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
@@ -154,4 +159,8 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 EXPOSE 8000
-CMD ["uvicorn", "central.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "1048576"]
+# --ws-max-size bounds one WebSocket frame. A Node's leaf rides Central's origin
+# (/photo-wall/bus/leafnode), and nats-server writes everything it has pending for a connection as
+# one frame, so it is at least node-bus.conf's max_pending plus one message
+# (tests/test_node_bus_config.py; E-E3D-CC1-2).
+CMD ["uvicorn", "central.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "16777216"]

@@ -7,8 +7,8 @@ import { formatRoute, isPlainClick } from "./routes.js";
 
 /**
  * The Needs attention page (#/attention): the attention strip's list at full width,
- * uncapped. Each frame's entry links to `#/wall/frames/<id>/<facet>`, the facet that
- * shows its cause (health.js `facetFor`); following it asks the Wall's Inspector to
+ * uncapped. Each frame's entry links to `#/wall/frames/<id>/<tab>`, the Frame page tab that
+ * shows its cause (health.js `tabFor`); following it asks the Frame page to
  * take focus once, as the strip's own navigation does. A G1 list module (console DDD §49):
  * its closure reaches no page and no write (tests/test_console_routes_r4.py).
  *

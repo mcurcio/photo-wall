@@ -37,6 +37,9 @@ function seed(committed) {
   };
 }
 
+/** A draft's identity for comparison: its four parts, never its revision. */
+export const draftKey = (value) => JSON.stringify([value.corners, value.crop, value.rotation, value.gain]);
+
 /**
  * Plane B edit-draft hook (shared primitive #2).
  *
@@ -44,10 +47,16 @@ function seed(committed) {
  * React state seeded from that Frame's committed calibration. This is the second
  * of the two planes (design §4a/§6b): a snapshot refresh replaces Plane A
  * (`useSnapshot`) wholesale and CANNOT reach this state cell, so an in-progress
- * edit survives every refresh. The draft is re-seeded ONLY when the Frame
- * identity (`frameId`) changes — never when `committed` changes underneath an
- * open draft (that is a "committed changed underneath you" case a later bead
- * surfaces, not a silent clobber).
+ * edit survives every refresh. The draft is re-seeded when the Frame identity
+ * (`frameId`) changes, by `clearDraft` (Revert) and by `adopt` — never when
+ * `committed` changes underneath an open draft.
+ *
+ * THE DRAFT'S BASE. A draft is made from one saved calibration, its `origin`; `base` is
+ * that calibration's `revision`. It is set whenever the draft is seeded, cleared or adopted
+ * (a Done hands the saved calibration to `adopt`), and only then, so it is the draft's own,
+ * whatever session shows the draft: the live adjustment sends it with every draft, and
+ * Central refuses a draft whose base is no longer the saved revision (someone saved
+ * meanwhile) instead of re-basing it. `dirty` is whether the draft differs from its origin.
  *
  * `updateHandles(patch)` merges a partial `{corners?, crop?, rotation?, gain?}`
  * into the draft, first validating any geometry it touches with the SAME convex
@@ -57,26 +66,28 @@ function seed(committed) {
  *
  * @param {string} frameId identity of the Frame being edited
  * @param {object|null|undefined} committed the Frame's committed calibration (Plane A)
- * @returns {{trying: Trying, updateHandles: (patch: Partial<Trying>) => {valid: boolean, reason?: string}, clearDraft: () => void}}
+ * @returns {{trying: Trying, origin: object|null, base: number|null, dirty: boolean,
+ *            updateHandles: (patch: Partial<Trying>) => {valid: boolean, reason?: string},
+ *            clearDraft: () => void, adopt: (calibration: object) => void}}
  */
 export function useDraft(frameId, committed) {
-  const [trying, setTrying] = useState(() => seed(committed));
-  // Track the frame the current draft was seeded for. Re-seeding is keyed on
-  // this identity ALONE — a refresh mutates `committed` but not `frameId`, so
-  // the two-plane rule ("refresh merges nothing into Plane B") is structural,
-  // not a convention someone must remember to honor.
+  const [draft, setDraft] = useState(() => ({ trying: seed(committed), origin: committed ?? null }));
+  // Track the frame the current draft was seeded for. Re-seeding on a refresh is keyed on
+  // this identity ALONE — a refresh mutates `committed` but not `frameId`, so the two-plane
+  // rule ("refresh merges nothing into Plane B") is structural, not a convention someone
+  // must remember to honor.
   const [seededFor, setSeededFor] = useState(frameId);
 
   if (seededFor !== frameId) {
     setSeededFor(frameId);
-    setTrying(seed(committed));
+    setDraft({ trying: seed(committed), origin: committed ?? null });
   }
 
   // Latest values read synchronously by the mutators without re-binding them on
   // every draft edit: `tryingRef` for merge-against-current, `committedRef` so
   // clearDraft resets to the freshest committed baseline.
-  const tryingRef = useRef(trying);
-  tryingRef.current = trying;
+  const tryingRef = useRef(draft.trying);
+  tryingRef.current = draft.trying;
   const committedRef = useRef(committed);
   committedRef.current = committed;
 
@@ -88,13 +99,25 @@ export function useDraft(frameId, committed) {
     if ("crop" in patch && !cropValid(candidate.crop)) {
       return { valid: false, reason: CROP_REASON };
     }
-    setTrying(candidate);
+    tryingRef.current = candidate;
+    setDraft((current) => ({ ...current, trying: candidate }));
     return { valid: true };
   }, []);
 
-  const clearDraft = useCallback(() => {
-    setTrying(seed(committedRef.current));
+  const adopt = useCallback((calibration) => {
+    tryingRef.current = seed(calibration);
+    setDraft({ trying: tryingRef.current, origin: calibration ?? null });
   }, []);
+  const clearDraft = useCallback(() => adopt(committedRef.current), [adopt]);
 
-  return { trying, updateHandles, clearDraft };
+  const { trying, origin } = draft;
+  return {
+    trying,
+    origin,
+    base: origin?.revision ?? null,
+    dirty: draftKey(trying) !== draftKey(seed(origin)),
+    updateHandles,
+    clearDraft,
+    adopt,
+  };
 }

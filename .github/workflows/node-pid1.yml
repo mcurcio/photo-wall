@@ -14,19 +14,28 @@ name: Player node real-PID1 lifecycle scenarios
 #   refused   a board below the smallest memory class (a 2 GiB meminfo bound into the storage
 #             unit alone): storage refuses, prepare, broker and manager supervisor never run,
 #             and Central receives the refusal with its numbers in the host facts boot report
+#   join      the Node API whole (E3b design §16.2): Central with a real hub (the pinned
+#             nats-server) and the worker's bus side on its database; the new serial's leaf links
+#             through Central's origin, a kill -9 of the bus and a reboot each end an epoch that
+#             Central records with its gap rows, and after a hub restart WALL is current on the
+#             Node within 60 s (erratum E-E3B-FR1) and its leaf relinked
 #
-# Each leg boots the components node-components.yml built ONCE for the run (the builder
-# base-image.yml's squashfs bakes, scripts/build_node_components.py) and the PID1 fixture it
-# derived from them (scripts/build_node_pid1_fixture.py): it downloads both and loads the fixture
+# Each leg boots the components node-components.yml built ONCE for the run (the release roots and
+# the release writer's set, scripts/node_release_writer.py) and the PID1 fixture it derived from
+# them (tests/node_pid1_fixture/build.sh): it downloads both and loads the fixture
 # image. PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 turns a missing fixture into a failure, never a skip.
 # Native arm64 (ubuntu-24.04-arm): the node components and the fixture image are arm64, and the
 # container is --privileged with systemd as PID 1, as base-image.yml's start probes run.
 # Hardware stays synthetic (sysfs Virtual-1, headless Weston): no DRM, HDMI or PXE claim.
 #
-# The `display-harness` job needs no components: scripts/run_display_harness.py builds the
-# current appliance/display_host in a pinned arm64 container and runs tests/native_display_smoke.py
-# against a real headless Weston (slate, private-role refusal, handoff, trial overlay events),
-# reading output pixels back through Weston's weston_capture_v1.
+# The `display-harness` job needs no components, only the run's local repo (node-components.yml's
+# `debs` job, the photo-wall-node-debs-<revision> artifact): scripts/run_display_harness.py
+# installs the built photo-wall-node-display and photo-wall-frame-client from it into an arm64
+# image FROM the pinned Debian build container and runs tests/native_display_smoke.py against a
+# real headless Weston (slate, private-role refusal, handoff, trial overlay events), reading
+# output pixels back through Weston's weston_capture_v1; then
+# tests/native_player_mainloop_harness.py holds the Player's main-loop policy to real GLib, GDK
+# and GL (control dispatch on a saturated loop; a static photo is not redrawn every tick).
 #
 # Called by pipeline.yml (its `node-pid1` job, after its `node-components` job) when
 # scripts/release_plan.py finds a node package or one of this suite's own paths changed.
@@ -61,33 +70,12 @@ jobs:
       pid1-fixture: true
 
   display-harness:
-    runs-on: ubuntu-24.04-arm
-    # The harness image's cold build about 5 min, the run under 1 min.
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.revision || github.sha }}
-          persist-credentials: false
-
-      - uses: ./.github/actions/python-uv
-
-      - name: Install the locked environment
-        run: uv sync --frozen
-
-      - name: Run the native display harness
-        run: .venv/bin/python scripts/run_display_harness.py
-
-  scenario:
     needs: components
     if: ${{ !cancelled() && needs.components.result != 'failure' }}
     runs-on: ubuntu-24.04-arm
-    # Setup and the fixture download about 2 min, one scenario 2-5 min.
+    # The build container from its BuildKit cache and the harness image's install about 2 min,
+    # the run under 1 min.
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        scenario: [success, failure, outage, reboot, refused]
     env:
       REVISION: ${{ inputs.revision || github.sha }}
     steps:
@@ -101,8 +89,59 @@ jobs:
       - name: Install the locked environment
         run: uv sync --frozen
 
+      - name: Download the local repo
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-debs-${{ env.REVISION }}
+          path: ${{ runner.temp }}/node-debs
+
+      # The harness image is FROM the build container, which debian-packaging/build-container.sh
+      # loads from the `debs` job's BuildKit cache (read only).
+      - name: Set up the node package builder
+        id: builder
+        uses: ./.github/actions/node-builder
+
+      - name: Run the native display harness
+        env:
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.builder.outputs.cache-from }}
+        run: .venv/bin/python scripts/run_display_harness.py --debs "$RUNNER_TEMP/node-debs"
+
+  scenario:
+    needs: components
+    if: ${{ !cancelled() && needs.components.result != 'failure' }}
+    runs-on: ubuntu-24.04-arm
+    # Setup and the fixture download about 2 min, one scenario 2-5 min.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [success, failure, outage, reboot, refused, join]
+    env:
+      REVISION: ${{ inputs.revision || github.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+
+      - uses: ./.github/actions/python-uv
+
+      - name: Install the locked environment
+        run: uv sync --frozen
+
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+
+      # The join's hub; the test fails, never skips, without it under PHOTO_WALL_TEST_REQUIRE_NODE_PID1.
+      - name: Fetch the pinned nats-server
+        if: matrix.scenario == 'join'
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
 
       # The fixture names its components by the absolute path they were built at, so both land
       # at the builder's paths.

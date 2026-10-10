@@ -6,6 +6,7 @@ import threading
 from uuid import UUID
 
 import pytest
+from test_player_local_app_proof import _packet_pair
 
 from contracts.node_app_link import (
     NodeAppLinkChallengeV2,
@@ -17,7 +18,6 @@ from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 from contracts.player_control import ControlAppliedReceipt
 from player.identity import load_identity
 from player.node_app_link import NodeAppLinkClient
-from tests.test_player_local_app_proof import _packet_pair
 
 BOOT_ID = "12345678-1234-1234-1234-123456789abc"
 DEVICE_ID = "device-" + "b" * 64

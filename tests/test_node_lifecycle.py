@@ -44,7 +44,7 @@ from contracts.player_control import ControlAck, ControlHello
 
 class Rig:
     def __init__(self, registry, *, qualified=True, unbound=True, gate_seconds=60):
-        coordinator, player, key, sessions, claims, grants, surfaces, _, proof = rig(registry, node_v2=True)
+        coordinator, player, key, sessions, claims, grants, surfaces, _, proof = rig(registry)
         self.display = NodeDisplay(sessions, runtime=coordinator)
         self.display_claim, self.display_grant, self.surfaces = claims['display_host'], grants['display_host'], surfaces
         self.refresh_display(1000)

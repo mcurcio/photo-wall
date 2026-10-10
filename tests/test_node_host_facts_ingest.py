@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from test_fleet_attempts import BASE_TAG, DEVICE_ID
-from test_node_central import setup as legacy_setup
+from test_node_central import setup as node_setup
 from test_node_fleet_hosts import Host, _device, _rig
 from test_registry import ADMIN
 
@@ -198,13 +198,13 @@ def test_g12_serves_only_the_current_boots_facts_and_its_base_tag(registry):
                                "kernel_release": None, "address": None, "boot": None}
 
 
-def test_g12_boot_is_null_without_an_admission_and_base_tag_null_without_a_node_offer(registry):
-    sessions, _claim, _grant = legacy_setup(registry)  # an admission adopted from a legacy offer
+def test_g12_boot_is_null_without_an_admission_and_the_node_offers_base_tag_with_one(registry):
+    sessions, _claim, _grant = node_setup(registry)  # an admission of a node boot offer
     spare = "device-" + "e" * 64
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)", (spare,))
     read = NodeObservations(sessions).fleet_hosts()
-    assert _device(read, DEVICE_ID)["boot"] == {"base_tag": None}
+    assert _device(read, DEVICE_ID)["boot"] == {"base_tag": BASE_TAG}
     assert _device(read, DEVICE_ID)["facts"] is None
     assert _device(read, spare)["boot"] is None and _device(read, spare)["facts"] is None
 

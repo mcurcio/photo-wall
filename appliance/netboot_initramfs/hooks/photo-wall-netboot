@@ -1,18 +1,27 @@
 #!/bin/sh
-# Installed as /etc/initramfs-tools/hooks/photo-wall-netboot in the scratch
-# builder root. Stages the interpreter, its stdlib and the userland the slim,
-# UNSIGNED netboot init (appliance.netboot_init) needs into the initrd.
+# photo-wall-netboot-init's initramfs-tools hook, installed as
+# /usr/share/initramfs-tools/hooks/photo-wall-netboot (decision 0019 P4). Stages
+# into the initrd the interpreter, its stdlib and the userland the slim,
+# UNSIGNED netboot init (appliance.netboot_init) needs, then stage 1 itself:
 #
-# It copies NO first-party code and NO CA bundle or clock floor: those are the
-# boot data (scripts/build_boot_data.py; decision 0014 §5), an uncompressed
-# archive rebuilt on every build and placed in front of this cached initrd, so
-# no cache key has to cover them and they never go stale in the cache. The
-# boot data puts stage 1's computed closure in this interpreter's stdlib dir.
+#   * the contents of each package directory the package's path file lists
+#     (/usr/lib/photo-wall/netboot-init/path: the directories stage 1's imports
+#     reach, held by scripts/import_check.py to its computed launcher path),
+#     copied into the interpreter's stdlib dir, where
+#     `python3 -I -m appliance.netboot_init` finds them. Whole directories, so
+#     photo-wall-common's nodeapi rides along, never imported;
+#   * this root's /etc/ssl/certs/ca-certificates.crt, the CA bundle stage 1's
+#     Trust loads (R5). The root and the base install ca-certificates from the
+#     same snapshot pin, so the bytes are the base's; the bundle check
+#     (scripts/verify_netboot_initrd.py) compares them.
+#
+# The clock floor is NOT here: it changes with every revision, so it is a
+# one-file layer scripts/build_netboot_bundle.sh puts in front of this cached
+# initrd (R6).
 #
 # Self-contained on purpose (0008 p4-boot-chain s2a): no signed material (no
 # ca.pem/bootstrap.json/boot-policy.json/release.pub.pem), no openssl/chronyd/
-# blkid, so the old signed initramfs dir (appliance/initramfs/) can be deleted
-# whole at p4-retire without touching this one.
+# blkid.
 set -eu
 case "${1:-}" in prereqs) exit 0 ;; esac
 . /usr/share/initramfs-tools/hook-functions
@@ -37,6 +46,26 @@ for extension in "${libdir}"/lib-dynload/*.so; do
     copy_exec "$extension" "$extension"
 done
 cp -a "${libdir}/." "${DESTDIR}${libdir}/"
+
+# Stage 1: each listed package directory's import roots (its directories and
+# modules; the path file itself is no import root), merged into the stdlib dir.
+# A missing path file or directory fails the build.
+stage1_path=/usr/lib/photo-wall/netboot-init/path
+while IFS= read -r directory; do
+    if [ ! -d "$directory" ]; then
+        echo "photo-wall-netboot: $stage1_path names $directory, which is not installed" >&2
+        exit 1
+    fi
+    for entry in "$directory"/*; do
+        if [ -d "$entry" ] || [ "${entry%.py}" != "$entry" ]; then
+            cp -a "$entry" "${DESTDIR}${libdir}/"
+        fi
+    done
+done < "$stage1_path"
+
+# The CA bundle stage 1 verifies Central against (R5).
+mkdir -p "${DESTDIR}/etc/ssl/certs"
+cp /etc/ssl/certs/ca-certificates.crt "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
 
 # Only what LinuxOps.mount_root / ram / loop_device / command shell out to:
 #   mount/umount  -- NOT staged here: initramfs-tools stages klibc-utils'

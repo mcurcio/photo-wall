@@ -499,7 +499,7 @@ def test_a_failure_with_no_earlier_answer_reads_unknown_never_nothing_matches(pa
         status = _panel(page).get_by_role("status")
         expect(status).to_have_text(
             "Unknown: Photo Wall can't reach your photo library right now; retrying", timeout=ANSWER_WAIT)
-        expect(status.locator(".fact--unknown")).to_have_count(1)
+        expect(status.locator("[data-truth=unknown]")).to_have_count(1)
         expect(status).not_to_contain_text(NOTHING_MATCHES)
 
 
@@ -648,7 +648,7 @@ def test_tracer_a_tagged_photo_draft_previews_through_central_and_reads_as_the_l
             count=1, image_count=1, video_count=0, shown=(member.served(),)), members=(member,)))
         expect(form.get_by_role("status").filter(has_text="Your photo library reported")).to_contain_text(
             "Your photo library reported 1 photo · first received 4 s ago", timeout=ANSWER_WAIT)
-        expect(_panel(page).locator(".fact--reported")).to_have_count(1)
+        expect(_panel(page).locator("[data-truth=reported]")).to_have_count(1)
 
 
 def test_several_reported_connections_ask_for_one_on_its_own_step(page, registry):

@@ -22,7 +22,7 @@ from itertools import count
 
 import pytest
 from console_tasks import connect, visit
-from operator_harness import operator_server, reload_after, report_readiness
+from operator_harness import operator_server, reload_after, report_readiness, run_page_clock
 from playwright.sync_api import expect
 from test_node_boot import cold_setup
 from test_registry import enroll
@@ -101,7 +101,7 @@ class Fleet:
         if request.method == "GET" and tail == "":
             return self._json(route, {"device_id": device, "device_generation": 3, "read_at": 1_759_363_300,
                                       "sessions": self._sessions(box), "reboot_commands": box["commands"],
-                                      "boot_claims": [], "deprecated_boot": None, "display_outputs": []})
+                                      "boot_claims": [], "display_outputs": []})
         if request.method == "GET" and tail == "app-attempts":
             return self._json(route, {"device_id": device, "generation": 3, "read_at": 1_759_363_300,
                                       "operations": box["operations"], "qualification": {
@@ -581,7 +581,7 @@ def test_the_first_reboot_waits_for_centrals_download_then_rolls(page, registry,
         _settle(page, times=4)
         assert fleet.reboots == []
         fleet.readiness = {"readiness": "ready", "readiness_reason": None, "missing_bytes": 0}
-        page.clock.run_for(30_000)  # the next release read
+        run_page_clock(page, 30_000)  # the next release read
         _settle(page, times=2)
         assert len(fleet.reboots) == 1
 
@@ -625,7 +625,7 @@ def test_a_refused_put_starts_no_rolling(page, registry, monkeypatch):
         with registry.db.transaction() as conn:
             [deployment] = [row["deployment_id"] for row in conn.execute("SELECT deployment_id FROM node_deployments")]
         NodeBootService(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))).select(deployment, 0)
-        page.clock.run_for(30_000)  # the next release read
+        run_page_clock(page, 30_000)  # the next release read
         keep = _section(page, "Put on the wall")
         expect(keep.get_by_role("status")).to_have_text("Paused · 0 of 3 Players on the selection", timeout=10_000)
         _settle(page, times=4)

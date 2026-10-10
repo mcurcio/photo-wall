@@ -158,3 +158,32 @@ def test_node_probe_channel_messages_are_bounded_and_closed():
         parse_node_probe_open(b'{"schema":2,"kind":"probe_open","player_id":"p"}')
     with pytest.raises(ValueError, match="probe_channel_message"):
         parse_node_probe_answer(encode_node_probe(nonce))
+
+
+def test_the_probe_channel_carries_the_players_gl_renderer():
+    import json
+
+    from contracts.node_app_link import (
+        MAX_RENDERER,
+        NodeProbeV2,
+        NodeRendererV2,
+        encode_node_probe,
+        encode_node_probe_answer,
+        encode_node_renderer,
+        parse_node_probe_channel_message,
+        parse_node_probe_reply,
+    )
+    nonce = "0123456789abcdef" * 4
+    name = "llvmpipe (LLVM 19.1.7, 128 bits)"
+    assert json.loads(encode_node_renderer(name)) == {"schema": 2, "kind": "renderer", "renderer": name}
+    assert parse_node_probe_reply(encode_node_renderer(name)) == NodeRendererV2(name)
+    assert parse_node_probe_reply(encode_node_probe_answer(nonce)) == NodeProbeV2(nonce)
+    for bad in ("", "x" * (MAX_RENDERER + 1), "V3D\n7.1", 7, None):
+        with pytest.raises(ValueError, match="probe_channel_message"):
+            encode_node_renderer(bad)
+    for raw in (encode_node_probe(nonce), b'{"schema":2,"kind":"renderer"}',
+                b'{"schema":2,"kind":"renderer","renderer":"V3D","extra":1}', b"not json"):
+        with pytest.raises(ValueError, match="probe_channel_message"):
+            parse_node_probe_reply(raw)
+    with pytest.raises(ValueError, match="probe_channel_message"):
+        parse_node_probe_channel_message(encode_node_renderer(name))  # Player → broker only

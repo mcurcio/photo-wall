@@ -2,9 +2,9 @@
 provenance beside a certificate failure, nothing beside any other cause."""
 
 import pytest
+import tls_fixture as tls
 
 from contracts.clock_record import ClockRecord, ClockState
-from tests import tls_fixture as tls
 from uplink.causes import Cause, UplinkError
 from uplink.diagnosis import MAX_FAILURE_TEXT, failure_text, trust_provenance
 from uplink.trust import Trust

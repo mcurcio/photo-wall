@@ -5,10 +5,10 @@ import hashlib
 import ssl
 
 import pytest
+import tls_fixture as tls
+from test_central_health import FakeCoordinator, FakeDatabase, app_with
 
 from contracts.time import ManualClock
-from tests import tls_fixture as tls
-from tests.test_central_health import FakeCoordinator, FakeDatabase, app_with
 from uplink.causes import Cause, UplinkError
 from uplink.locate import locate
 from uplink.origin import Origin

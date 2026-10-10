@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -26,7 +25,6 @@ from scripts.harness_failure import (  # noqa: E402
 )
 
 PLAYER_REVISION = "dda8e98c5c54dc8ca9c007599f8a919eadbd5248"
-PYTHON_IMAGE = "python:3.12.11-slim-trixie@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f"
 POSTGRES_IMAGE = "postgres:16.9-bookworm@sha256:253815cf7579ffa05e1673d92e78d37273e61be0e4414e9a1449337d7925be94"
 MAX_EVIDENCE = 10 * 1024**2
 CORE_IMAGES = {
@@ -45,9 +43,13 @@ SCENE_CYCLE_SECONDS = 8
 # The deletion step needs a secured assignment that starts at least this far ahead.
 SECURED_LEAD_SECONDS = 3
 
-# This is the ONLY benchmark application code copied into the Player image.
-# It imports source-neutral Player/contracts/uplink and stdlib; no host harness follows.
+# This is the ONLY benchmark application code copied into the Player image, which is the app
+# root (photo-wall-player, decision 0019) as built: the runner puts the PATH the Player's own
+# launcher declares first on sys.path, read from the root's launcher (never a copy of it), and
+# runs on the root's python3. It imports source-neutral Player/contracts/uplink and stdlib; no
+# host harness follows.
 PLAYER_RUNNER = r'''
+import ast
 import collections
 import hashlib
 import importlib.util
@@ -62,6 +64,12 @@ import time
 import uuid
 from concurrent.futures import Future
 from pathlib import Path
+
+launcher = {node.target.id: ast.literal_eval(node.value)
+            for node in ast.parse(Path('/usr/lib/photo-wall/player/__main__.py').read_text()).body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)}
+assert launcher['ENTRY'] == 'player.service', launcher
+sys.path[:0] = launcher['PATH']
 
 import player.service
 from contracts.enrollment import OutputReport
@@ -365,7 +373,29 @@ def _git_output(*args: str) -> str:
     return result.stdout.strip()
 
 
-def validate_selected_revision(revision: str, wheelhouse: Path, central_image=None,
+def app_image_stamp(app_image: Path) -> dict:
+    """The revision stamp of the node component set holding `app_image` (its revision.json)."""
+    from scripts.node_release_artifacts import STAMP
+
+    return read_json(Path(app_image).parent / STAMP)
+
+
+def app_image_ref(app_image: Path) -> dict:
+    """`app_image`'s ref in its component set's components.json (app_environment), refused
+    unless the image is that ref's bytes: its sha256 and size."""
+    ref = read_json(Path(app_image).parent / "components.json").get("app_environment")
+    require(isinstance(ref, dict), "player_image_mismatch")
+    digest, size = hashlib.sha256(), 0
+    with Path(app_image).open("rb") as stream:
+        while block := stream.read(1024**2):
+            digest.update(block)
+            size += len(block)
+    require(digest.hexdigest() == ref.get("environment_sha256") and size == ref.get("size_bytes"),
+            "player_image_mismatch")
+    return ref
+
+
+def validate_selected_revision(revision: str, app_image: Path, central_image=None,
                                worker_image=None) -> dict:
     """Validate revision-bound inputs before creating any demo state."""
     require(isinstance(revision, str) and REVISION_PATTERN.fullmatch(revision) is not None,
@@ -380,8 +410,7 @@ def validate_selected_revision(revision: str, wheelhouse: Path, central_image=No
         _git_output("status", "--short", "--untracked-files=all", "--", *CORE_SOURCE_PATHS),
     )))
     require(not dirty, "core_dirty")
-    inventory = read_json(Path(wheelhouse) / "inventory.json")
-    require(inventory.get("revision") == revision, "player_revision_mismatch")
+    require(app_image_stamp(app_image).get("revision") == revision, "player_revision_mismatch")
     return images
 
 
@@ -441,13 +470,13 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
             entrypoint=["python", "/harness/demo_wall.py", "init"], network_mode="none", mem_limit="128m", cpus=.5,
             volumes=[f"{name}:/{name}" for name in ("media", "private", "setup", "control")]),
         "player-one": dict(common, image=project + "-player:local", user="10001:10001",
-            command=["python", "/opt/player/runner.py", "1" if scenario == "baseline" else "2"],
+            command=["python3", "/opt/player/runner.py", "1" if scenario == "baseline" else "2"],
             environment={"PHOTO_WALL_DEMO_DEVICE_ID": "device-" + hashlib.sha256(b"demo-player-one").hexdigest()},
             tmpfs=["/tmp", "/state:uid=10001,gid=10001,mode=0700"], networks=["wall"],
             mem_limit="192m", cpus=1, stop_grace_period="40s"),
     }
     if scenario != "baseline":
-        services["player-two"] = dict(services["player-one"], command=["python", "/opt/player/runner.py", "1"],
+        services["player-two"] = dict(services["player-one"], command=["python3", "/opt/player/runner.py", "1"],
             environment={"PHOTO_WALL_DEMO_DEVICE_ID": "device-" + hashlib.sha256(b"demo-player-two").hexdigest()},
             tmpfs=["/tmp", "/state:uid=10001,gid=10001,mode=0700"])
     for service_name, service in services.items():
@@ -489,7 +518,7 @@ class DemoHost:
                      "-f", str(self.state / "compose.json")]
 
     @classmethod
-    def create(cls, state: Path, fixture_state: Path, wheelhouse: Path, scenario: str,
+    def create(cls, state: Path, fixture_state: Path, app_image: Path, scenario: str,
                central_image=None, worker_image=None, revision=PLAYER_REVISION):
         import secrets
 
@@ -501,15 +530,8 @@ class DemoHost:
                     "revision_requires_core_images")
         from scripts.immich_fixture import FixtureHost
         fixture = FixtureHost(fixture_state)
-        inventory = read_json(wheelhouse / "inventory.json")
-        require(inventory.get("revision") == revision, "player_revision_mismatch")
-        require(hashlib.sha256((wheelhouse / "requirements.txt").read_bytes()).hexdigest() ==
-                inventory["requirements_sha256"], "player_requirements_mismatch")
-        for wheel in inventory["wheels"]:
-            require(Path(wheel["filename"]).name == wheel["filename"], "wheel_path")
-            data = (wheelhouse / "wheels" / wheel["filename"]).read_bytes()
-            require(len(data) == wheel["size"] and hashlib.sha256(data).hexdigest() == wheel["sha256"],
-                    "player_wheel_mismatch")
+        require(app_image_stamp(app_image).get("revision") == revision, "player_revision_mismatch")
+        app_ref = app_image_ref(app_image)
         require(scenario in SCENARIOS, "invalid_scenario")
         state = state.resolve()
         require(not any(c in str(state) for c in "\n\r$#'\""), "unsupported_state_path")
@@ -517,8 +539,8 @@ class DemoHost:
         project = "pw-wall-demo-" + secrets.token_hex(6)
         capture = 631_152_000 + int(project[-8:], 16) % (10*365*86400)
         write_json(state / "demo.json", dict(schema=1, project=project, state=str(state),
-            immich_state=str(fixture_state.resolve()), wheelhouse=str(wheelhouse.resolve()),
-            scenario=scenario, capture_start=capture, revision=revision, core_images=core_images))
+            immich_state=str(fixture_state.resolve()), app_image=str(Path(app_image).resolve()),
+            app_image_ref=app_ref, scenario=scenario, capture_start=capture, revision=revision, core_images=core_images))
         with (state / ".env").open("w") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(f"DEMO_DB_PASSWORD={secrets.token_hex(24)}\nDEMO_ADMIN_TOKEN={secrets.token_hex(32)}\n"
@@ -566,16 +588,26 @@ class DemoHost:
                 f"{self.project}-core-{role}:local"
             ))
             self.command(daemon_image_build(f"{self.project}-{role}:local", helper), 120, False)
+        # The Player runs from the app root itself: the image's rootfs/, unpacked in the roots
+        # container (debian-packaging/build-container.sh, which has unsquashfs) and imported.
+        roots = self.command([str(ROOT / "debian-packaging/build-container.sh"),
+                              "--revision", self.revision, "--target", "roots"], 900).strip()
+        archive = context / "player-root.tar"
+        self.command(["docker", "run", "--rm", "--network", "none",
+            "-v", f"{self.marker['app_image']}:/image/app.squashfs:ro", "-v", f"{context}:/out",
+            roots, "sh", "-ec",
+            "unsquashfs -q -n -no-xattrs -d /tmp/image /image/app.squashfs rootfs >/dev/null\n"
+            "tar --numeric-owner -C /tmp/image/rootfs -cf /out/player-root.tar .\n"
+            f"chown {os.getuid()}:{os.getgid()} /out/player-root.tar\n"], 300, False)
+        self.command(["docker", "import", str(archive), self.project + "-player-root:local"], 300)
+        archive.unlink()
         player = context / "player"
         player.mkdir()
-        wheelhouse = Path(self.marker["wheelhouse"])
-        shutil.copytree(wheelhouse / "wheels", player / "wheelhouse/wheels")
-        shutil.copyfile(wheelhouse / "requirements.txt", player / "wheelhouse/requirements.txt")
         (player / "runner.py").write_text(PLAYER_RUNNER)
-        (player / "Dockerfile").write_text(f"FROM {PYTHON_IMAGE}\n"
-            "COPY wheelhouse /wheelhouse\n"
-            "RUN python -m pip install --no-index --find-links /wheelhouse/wheels --require-hashes -r /wheelhouse/requirements.txt "
-            "&& useradd --system --uid 10001 wall && install -d -o wall -g wall -m0700 /state\n"
+        # A numeric user: the root's apt variant need not carry useradd. The sealed root's
+        # directories all have the format's one mode (0755), and a tmpfs over /tmp takes it.
+        (player / "Dockerfile").write_text(f"FROM {self.project}-player-root:local\n"
+            "RUN install -d -o 10001 -g 10001 -m 0700 /state && chmod 1777 /tmp\n"
             "COPY runner.py /opt/player/runner.py\nWORKDIR /opt/player\nUSER 10001:10001\nENV PYTHONUNBUFFERED=1\n")
         self.command(daemon_image_build(self.project + "-player:local", player), 180, False)
 
@@ -584,12 +616,12 @@ class DemoHost:
         return ["player-one"] + (["player-two"] if self.marker["scenario"] != "baseline" else [])
 
     def player_report(self, player: str):
-        return json.loads(self.compose("exec", "-T", player, "python", "-c",
+        return json.loads(self.compose("exec", "-T", player, "python3", "-c",
             "from pathlib import Path; print(Path('/state/report.json').read_text())"))
 
     def probe(self):
         _, address = self.fixture.topology()
-        return {player: json.loads(self.compose("exec", "-T", player, "python", "-c",
+        return {player: json.loads(self.compose("exec", "-T", player, "python3", "-c",
                     DENIAL_PROBE, "immich", address, "2283")) for player in self.players}
 
     def inventory(self):
@@ -623,7 +655,7 @@ for path in sorted(pathlib.Path('/tmp/cache').glob('*.blob')):
     assert digest == path.stem
     result.append(dict(sha256=digest,size=path.stat().st_size))
 print(json.dumps(result))"""
-        return {name: json.loads(self.compose("exec", "-T", name, "python", "-c", code))
+        return {name: json.loads(self.compose("exec", "-T", name, "python3", "-c", code))
                 for name in self.players}
 
     def source_audit(self):
@@ -650,8 +682,7 @@ print(json.dumps(result))"""
         # of existing runtime-provenance.json files.
         audit = dict(role_audits["worker"])
         audit["role_audits"] = role_audits
-        audit["player_inventory_sha256"] = hashlib.sha256(
-            (Path(self.marker["wheelhouse"]) / "inventory.json").read_bytes()).hexdigest()
+        audit["player_image"] = self.marker["app_image_ref"]
         write_json(self.state / "runtime-provenance.json", audit)
         return audit
 
@@ -1243,10 +1274,10 @@ def fault_sequence(host, evidence, save, segments):
     save()
 
 
-def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, keep: bool,
+def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, keep: bool,
              central_image=None, worker_image=None, revision=PLAYER_REVISION):
-    core_images = validate_selected_revision(revision, wheelhouse, central_image, worker_image)
-    host = DemoHost.create(state, fixture_state, wheelhouse, scenario,
+    core_images = validate_selected_revision(revision, app_image, central_image, worker_image)
+    host = DemoHost.create(state, fixture_state, app_image, scenario,
                            central_image=core_images["central"], worker_image=core_images["worker"],
                            revision=revision)
     evidence = dict(schema=1, started_utc=datetime.now(timezone.utc).isoformat(), status="running",
@@ -1257,7 +1288,7 @@ def run_demo(state: Path, fixture_state: Path, wheelhouse: Path, scenario: str, 
     try:
         setup_operation(evidence, save, "setup_build", "host", "build_images", host.build)
         evidence["provenance"] = dict(harness_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            player_inventory=read_json(wheelhouse / "inventory.json"),
+            player_image=host.marker["app_image_ref"],
             core_images=host.core_images, core_revision=revision,
             workspace_revision=host.command(["git", "rev-parse", "HEAD"]).strip(),
             core_dirty=host.command(["git", "diff", "--name-only", revision, "--", *CORE_SOURCE_PATHS]).splitlines())
@@ -1379,7 +1410,8 @@ def main():
     parser.add_argument("action", nargs="?")
     parser.add_argument("--state-dir", type=Path)
     parser.add_argument("--immich-state", type=Path)
-    parser.add_argument("--wheelhouse", type=Path)
+    parser.add_argument("--app-image", type=Path,
+                        help="app.squashfs of a node component set (node-components.yml)")
     parser.add_argument("--scenario", choices=tuple(SCENARIOS), default="baseline")
     parser.add_argument("--revision", default=PLAYER_REVISION)
     parser.add_argument("--central-image")
@@ -1399,13 +1431,13 @@ def main():
         result = dict(schema=1, scenarios=list(SCENARIOS), revision=args.revision,
             player_revision=args.revision, requires_core_images=args.revision != PLAYER_REVISION,
             topology="isolated wall and backend, worker-only retained upstream access", host_ports=False,
-            actuation="simulated", required_inputs=["new state-dir", "retained immich-state", "exact wheelhouse"])
+            actuation="simulated", required_inputs=["new state-dir", "retained immich-state", "exact app image"])
     else:
         require(args.state_dir is not None and args.state_dir.is_absolute(), "absolute_state_required")
         if args.command == "run":
             core_image_mapping(args.central_image, args.worker_image)
-            require(args.immich_state is not None and args.wheelhouse is not None, "missing_fixture_inputs")
-            result = run_demo(args.state_dir, args.immich_state, args.wheelhouse, args.scenario, args.keep,
+            require(args.immich_state is not None and args.app_image is not None, "missing_fixture_inputs")
+            result = run_demo(args.state_dir, args.immich_state, args.app_image, args.scenario, args.keep,
                               args.central_image, args.worker_image, args.revision)
         elif args.command == "status":
             host = DemoHost(args.state_dir)

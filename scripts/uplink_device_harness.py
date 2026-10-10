@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 """Uplink on the device's runtime (decision 0014 §11): the Pi runs Debian trixie's python3
-(3.13) and OpenSSL (3.5) with nothing but the stdlib and stage 1's closure, while CI runs 3.12
-with a venv. This harness proves the seam there, in the CI device root (the device set at
-the declared pin, `scripts/test_netboot_e2e.py device-root`):
+(3.13) and OpenSSL (3.5) with nothing but the stdlib and stage 1's code, while CI runs 3.12
+with a venv. This harness proves the seam there, in the pinned build container
+(photo-wall-debian-builder; tests/debs/test_netboot_init.py in node-components.yml's debs job),
+against the tree photo-wall-netboot-init's initramfs hook copies into the initrd:
 
-  mint DIR                        on the runner (the repo's venv): write the test CA bundle and
-                                  the leaves tests/tls_fixture.py mints (no key kept in-tree)
-  run --closure DIR --certs DIR   in the container, under `python3 -I -S`: import every staged
-                                  closure module, then run the 301 chain, a TLS-to-TLS hop, the
-                                  downgrade chain and the name-mismatch rows (verify codes 62, 64)
-                                  against stdlib servers on loopback
-  node-boot --closure DIR         in the container, under `python3 -I -S`: stage 1's node branch
-    --cmdline-central URL           (`appliance.netboot_init.netboot`) from a command line naming
-    --serial HEX8 --boot-id UUID    URL and `photowall.node=v2`, over the real transport, locate
-    --rootmnt DIR                   and verified base fetch; it fakes only what no container has
-                                    (the mount, RAM, the clock gate, the watchdog, the serial
-                                    and the kernel boot id), writing the handoff under DIR
+  mint DIR                      on the runner (the repo's venv): write the test CA bundle and
+                                the leaves tests/tls_fixture.py mints (no key kept in-tree)
+  run --tree DIR --certs DIR    in the container, under `python3 -I -S`, DIR first on sys.path:
+                                import every first-party module stage 1 (`ENTRY`) reaches in DIR
+                                (scripts/module_closure.py's Finder, function bodies included;
+                                a module it reaches that DIR lacks is a failed import), then run
+                                the 301 chain, a
+                                TLS-to-TLS hop, the downgrade chain and the name-mismatch rows
+                                (verify codes 62, 64) against stdlib servers on loopback
 
-`run` exits 1 on any failed import or row. `node-boot` prints one JSON line
-`{"outcome", "error", "sha256"}` and exits 0 on a handed-off boot, 3 on a named refusal. The stand-in servers below are stdlib only, and
+`run` exits 1 on any failed import or row. The stand-in servers below are stdlib only, and
 tests/tls_fixture.py serves its stubs through them too, so there is one implementation.
 """
 
@@ -26,23 +23,34 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import http.server
 import importlib
-import json
 import ssl
 import sys
-import tempfile
+import sysconfig
 import threading
-import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+# The one stdlib-only Finder (scripts/module_closure.py), from this file's own repository root.
+# The root leaves sys.path again at once: `run` imports stage 1 from the tree under test only, and
+# the repository's own `appliance` would join that PEP 420 package.
+_ROOT = str(Path(__file__).resolve().parents[1])
+_ADDED = _ROOT not in sys.path
+if _ADDED:
+    sys.path.insert(0, _ROOT)
+from scripts.module_closure import Finder  # noqa: E402
+
+if _ADDED:
+    sys.path.remove(_ROOT)
+
 # The certificates `mint` writes: (certfile, keyfile) per leaf, plus the CA bundle.
 CA_BUNDLE = "ca.pem"
 LEAVES = ("central", "other-name", "other-ip")
+# Stage 1, as the boot script runs it: `python3 -I -m appliance.netboot_init`.
+ENTRY = "appliance.netboot_init"
 
 
 @dataclass
@@ -154,13 +162,31 @@ def mint(directory: Path) -> None:
             (directory / f"{name}.key").write_bytes(Path(keyfile).read_bytes())
 
 
-def closure_modules(closure: Path) -> list[str]:
-    """Every module staged under `closure`, as a dotted name."""
-    names = []
-    for path in sorted(closure.rglob("*.py")):
-        parts = path.relative_to(closure).with_suffix("").parts
-        names.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
-    return names
+def stage1_modules(tree: Path) -> tuple[list[str], list[str]]:
+    """(the first-party modules `ENTRY` reaches in `tree`, the imports of first-party code that
+    are missing: a first-party module the tree lacks, or a top-level name outside the stdlib),
+    each sorted. First-party is a top-level name the tree holds and the interpreter's own stdlib
+    directory does not (the hook copies the stdlib into the same directory); a directory of it
+    without an __init__.py is a PEP 420 portion (`appliance`)."""
+    stdlib = Path(sysconfig.get_path("stdlib"))
+    names = frozenset(path.stem for path in tree.iterdir()
+                      if (path.is_dir() or path.suffix == ".py") and path.stem.isidentifier()
+                      and not (stdlib / path.name).exists())
+    namespaces = {name: str(tree / name) for name in names
+                  if (tree / name).is_dir() and not (tree / name / "__init__.py").exists()}
+    finder = Finder([str(tree), *sys.path], names, namespaces)
+    finder.import_hook(ENTRY)
+
+    def first_party(name: str) -> bool:
+        return name.partition(".")[0] in finder.first_party
+
+    found = sorted(name for name, module in finder.modules.items()
+                   if first_party(name) and module.__file__)
+    missing = sorted(name for name, importers in finder.badmodules.items()
+                     if any(first_party(importer) for importer in importers)
+                     and (first_party(name)
+                          or name.partition(".")[0] not in sys.stdlib_module_names))
+    return found, missing
 
 
 def _rows(certs: Path) -> list[tuple[str, Callable[[], None]]]:
@@ -222,20 +248,33 @@ def _rows(certs: Path) -> list[tuple[str, Callable[[], None]]]:
             ("IP-address mismatch (64)", ip_mismatch)]
 
 
-def run(closure: Path, certs: Path) -> int:
+def run(tree: Path, certs: Path) -> int:
     print(f"python3 {sys.version.split()[0]}; {ssl.OPENSSL_VERSION}; flags isolated="
           f"{sys.flags.isolated} no_site={sys.flags.no_site}")
-    sys.path.insert(0, str(closure))
+    tree = tree.resolve()
+    sys.path.insert(0, str(tree))
+    try:
+        found, missing = stage1_modules(tree)
+    except ImportError as error:
+        print(f"FAIL import {ENTRY}: {error}")
+        return 1
     failures = 0
-    for name in closure_modules(closure):
+    for name in missing:
+        print(f"FAIL import {name}: not in {tree}")
+        failures += 1
+    for name in found:
         try:
-            importlib.import_module(name)
+            module = importlib.import_module(name)
         except Exception as error:  # every import failure is reported, then the leg fails
             print(f"FAIL import {name}: {type(error).__name__}: {error}")
             failures += 1
+            continue
+        if not Path(module.__file__ or "").resolve().is_relative_to(tree):
+            print(f"FAIL import {name}: imported from {module.__file__}")
+            failures += 1
     if failures:
         return 1
-    print(f"OK imported {len(closure_modules(closure))} closure modules")
+    print(f"OK imported {len(found)} stage-1 modules")
     for label, row in _rows(certs):
         try:
             row()
@@ -247,127 +286,20 @@ def run(closure: Path, certs: Path) -> int:
     return 1 if failures else 0
 
 
-NODE_HANDED_OFF, NODE_REFUSED = 0, 3
-
-
-class _NodeLog:
-    """Stage 1's console, on stderr."""
-
-    debug = False
-
-    def info(self, message: str) -> None:
-        print(message, file=sys.stderr, flush=True)
-
-    def detail(self, message: str) -> None:
-        print(message, file=sys.stderr, flush=True)
-
-
-class _NodeKeeper:
-    """The watchdog keeper: no watchdog here, every pet is a no-op."""
-
-    summary = "harness (no watchdog)"
-
-    def pet(self) -> None:
-        pass
-
-    def paced(self, blocks):
-        yield from blocks
-
-    def hand_over(self) -> None:
-        pass
-
-
-class _NodeOps:
-    """No mount or RAM disk in a container: `ram()` is a temp dir and `mount_root` records the
-    sha256 of the verified image it was handed."""
-
-    def __init__(self, run_root: Path) -> None:
-        self.run_root = run_root
-        self.mounted: str | None = None
-
-    def configure_networking(self) -> None:
-        pass
-
-    def network_info(self) -> dict:
-        return {"ip": "127.0.0.1"}
-
-    def ram(self) -> Path:
-        path = self.run_root / "ram"
-        path.mkdir(exist_ok=True)
-        return path
-
-    def mount_root(self, image: Path, rootmnt: Path) -> None:
-        digest = hashlib.sha256()
-        with image.open("rb") as stream:
-            while block := stream.read(1 << 20):
-                digest.update(block)
-        self.mounted = digest.hexdigest()
-
-    def hand_over_modules(self, rootmnt: Path, *, pet, release=None) -> str:
-        return "modules=none (harness)"
-
-
-def node_boot(closure: Path | None, *, central: str, serial: str, boot_id: str, rootmnt: Path,
-              ca_bundle: Path | None = None) -> tuple[int, dict]:
-    """One stage 1 node boot from `central` (the command line's root); (exit code, the printed
-    JSON). `closure` goes first on sys.path (the device run); `ca_bundle` replaces the device's
-    trust store (an in-process run with no Debian bundle)."""
-    if closure is not None:
-        sys.path.insert(0, str(closure))
-    from appliance.bootstrap import BootstrapError
-    from appliance.netboot_init import NetbootError, netboot
-    from contracts.clock_record import ClockRecord, ClockState
-    from uplink.causes import UplinkError
-    from uplink.transport import HttpTransport
-    from uplink.trust import Trust
-
-    class Settled:
-        def settle(self) -> ClockRecord:
-            return ClockRecord(state=ClockState.SYNCED, floor=1, raised_to_floor=False,
-                               tier=None, source=None, offset=None, stepped=False, tried=(),
-                               writer="netboot", written_at=time.time())
-
-    rootmnt.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="node-boot-") as run_root:
-        ops = _NodeOps(Path(run_root))
-        trust = Trust.public() if ca_bundle is None else Trust.public(ca_bundle)
-        try:
-            netboot({"photowall.central": central, "photowall.node": "v2"}, rootmnt, ops=ops,
-                    transport=HttpTransport(trust=trust), clock_gate=Settled(),
-                    keeper=_NodeKeeper(), trust_provenance="harness", serial_reader=lambda: serial,
-                    log=_NodeLog(), offer_mode=True, boot_id_reader=lambda: boot_id)
-        except (NetbootError, BootstrapError) as error:
-            return NODE_REFUSED, {"outcome": "refused", "error": str(error), "sha256": None}
-        except UplinkError as error:
-            code = error.central_error or f"{error.cause.value}:{error.reason}"
-            return NODE_REFUSED, {"outcome": "refused", "error": code, "sha256": None}
-    return NODE_HANDED_OFF, {"outcome": "handed_off", "error": None, "sha256": ops.mounted}
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     minting = commands.add_parser("mint")
     minting.add_argument("directory", type=Path)
     running = commands.add_parser("run")
-    running.add_argument("--closure", type=Path, required=True)
+    running.add_argument("--tree", type=Path, required=True,
+                         help="the directory stage 1's modules are imported from")
     running.add_argument("--certs", type=Path, required=True)
-    booting = commands.add_parser("node-boot")
-    booting.add_argument("--closure", type=Path, required=True)
-    booting.add_argument("--cmdline-central", required=True)
-    booting.add_argument("--serial", required=True)
-    booting.add_argument("--boot-id", required=True)
-    booting.add_argument("--rootmnt", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "mint":
         mint(args.directory)
         return 0
-    if args.command == "node-boot":
-        status, result = node_boot(args.closure, central=args.cmdline_central, serial=args.serial,
-                                   boot_id=args.boot_id, rootmnt=args.rootmnt)
-        print(json.dumps(result, sort_keys=True))
-        return status
-    return run(args.closure, args.certs)
+    return run(args.tree, args.certs)
 
 
 if __name__ == "__main__":

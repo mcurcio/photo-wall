@@ -1,0 +1,7 @@
+u pw-manager 10003 "Photo Wall manager" /nonexistent
+u pw-player 10004 "Photo Wall Player" /nonexistent
+u pw-display 10005 "Photo Wall display" /nonexistent
+u pw-health 10006 "Photo Wall health judge" /nonexistent
+g pw-node-feeds 10007
+m pw-health pw-node-feeds
+u pw-bus 10008 "Photo Wall Node bus" /nonexistent

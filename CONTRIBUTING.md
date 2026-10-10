@@ -36,11 +36,11 @@ For agent-led development, the top-level agent must act as the orchestrator. It 
 2. **Inspect each child.** Assess scope, complexity, dependencies, and unresolved decisions. Delegate bounded leaf implementation when its contract is clear. If it needs further architecture, delegate child design and decomposition, then repeat this assessment recursively. Stop at a meaningful module boundary with an implementable contract and clear acceptance checks; there is no fixed recursion depth.
 3. **Give a complete handoff.** Include project context and document links, the objective, owned files, interfaces, constraints, acceptance criteria and checks, and the limits of the delegated scope. Assign disjoint write ownership to parallel siblings and coordinate changes to shared contracts. Do not have siblings edit the same files or independently implement the same behavior.
 4. **Implement and verify each leaf.** Connect its required path with a simulator or real adapter. Keep future projection free of current effects and return execution outcomes to lifecycle ownership. Return the outputs and changed files, decisions made, check results, remaining limits, and any contract issue requiring coordination.
-5. **Integrate and review from children to parents.** Check each return against its contract, inspect the changes, run the relevant integration checks, and resolve incompatible assumptions before combining dependent work. Repeat upward until the full scenario works. The top-level orchestrator owns the final review and reports what was verified, failures or untested conditions, and the evidence supporting completion.
+5. **Integrate from children to parents.** Check each return against its contract and resolve incompatible assumptions before combining dependent work. Repeat upward until the full scenario works. Verification and the adversarial review run once, at the end, over everything, not at each level; a fix round is checked narrowly, by the finding's test and its mutation. The top-level orchestrator owns that review and reports what was verified, failures or untested conditions, and the evidence supporting completion.
 
 Update the owning documents as contracts and implementation evolve. Add verified setup/run/check commands and record results without presenting proposed or unqualified capabilities as complete. Delegation changes who performs the work; it does not remove the orchestrator's responsibility for correctness.
 
-### Subagent model selection
+### Codex subagent model selection
 
 The requested project preference is **`gpt-5.3-codex-spark`** for suitable lightweight subagent work. Prefer it for clear, bounded implementation, focused tests, mechanical changes and documentation; keep ambiguous design and integrated correctness review on a model suited to those tasks. [Official subagent configuration](https://learn.chatgpt.com/docs/agent-configuration/subagents).
 
@@ -68,6 +68,14 @@ Preserve two runtime boundaries in every implementation:
 
 - [Player provisioning](docs/requirements.md#player-provisioning) is plug-and-play PXE: a Player must appear in the central system without local setup.
 - [The central media boundary](docs/requirements.md#central-media-boundary) keeps Players unaware of Immich. Players obtain media exclusively through the central Photo Wall service; Immich-specific integration belongs centrally.
+
+## Packaging the Node's software
+
+The Node's software is built as Debian packages by one debhelper source package ([Debian packaging module](docs/module-debian-packaging.md), [decision 0019](docs/decisions/0019-debian-packaging-with-debhelper.md)). Three rules bind every change to it:
+
+- **No hand-rolled packaging code.** No Python or shell stages package files, writes control files or calls `dpkg-deb`; add files to `debian/*.install` and Depends to `debian/control`. Build-time Python only checks imports, seals a root or writes the release contract.
+- **OS features go in rpi-image-gen layers** (`appliance/rpi_image_gen/`), never in a Photo Wall package's Depends (SSH is the example).
+- **Prove packages through the built artifact:** `tests/debs` runs against a real `debian-packaging/build-repo.sh` output, and the PID1 scenarios boot the built images.
 
 ## Choose the right evidence
 

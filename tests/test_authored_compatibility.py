@@ -2,12 +2,12 @@
 
 import pytest
 from psycopg.types.json import Jsonb
+from test_authored_media import RECIPE, asset, setup_source
 
 from central.coordination import Coordinator
 from central.registry import FrameCreate, RegistryError
 from central.runtime import Child, Contribution, Scene
 from contracts.models import FrameProfile, Variant
-from tests.test_authored_media import RECIPE, asset, setup_source
 
 
 def add_frame(registry, frame_id: str, *, portrait: bool = True):
@@ -153,8 +153,9 @@ def test_authored_scene_accepts_an_eligible_alternative_for_each_frame(registry)
 
 
 def test_frame_filtered_api_and_atomic_save_share_original_eligibility(registry):
+    from test_authored_media import ADMIN, client_for
+
     from media.models import OriginalAsset
-    from tests.test_authored_media import ADMIN, client_for
 
     landscape = asset(1, width=2000, height=1000)
     portrait = asset(2, width=1000, height=2000)

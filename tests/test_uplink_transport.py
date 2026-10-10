@@ -10,8 +10,8 @@ import time
 from collections.abc import Iterator
 
 import pytest
+import tls_fixture as tls
 
-from tests import tls_fixture as tls
 from uplink import transport as transport_module
 from uplink.causes import Cause, UplinkError
 from uplink.lookup import LookupTimeout, lookup

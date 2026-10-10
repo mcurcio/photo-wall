@@ -18,10 +18,9 @@
 #  appliance/initramfs + appliance/provisioning concern, and this build
 #  emits a bare rootfs squashfs, not a bootable Pi image.
 #
-#  Dropping rpi-device-base also drops its udev, which the Player needs (the
-#  render and input groups, the device nodes' groups): the Debian
-#  declaration (scripts/debian_packages.py) names udev as a Player Depends,
-#  so the base gets it with the rest of the device set.
+#  Dropping rpi-device-base also drops its udev, which the display needs (the
+#  render and input groups, the device nodes' groups): photo-wall-node
+#  Depends on udev, so the base gets it with the Node's software.
 #
 #  rpi-image-gen ships no hardware-agnostic/"none" device layer of its own.
 #  Its own documented pattern for this exact situation is a small custom
@@ -42,10 +41,15 @@
 #  handling) -- confirmed by grepping the whole pinned rpi-image-gen tree
 #  that no IGconf_device_* variable is read anywhere in image-base.yaml, our
 #  own ../image/photo-wall-squashfs.yaml, ../image/rootfs.cfg.in, or
-#  ../image/pre-image.sh, so device-base's vars and device-user-admin's
-#  login-user machinery would be pure, unwanted weight on this headless
-#  rootfs. No packages, no hooks: metadata-only, same pattern as this repo's
-#  own ../image/photo-wall-squashfs.yaml.
+#  ../image/pre-image.sh, so device-base's vars are unwanted weight on this
+#  headless rootfs. Two are read elsewhere and are declared below instead:
+#  sector_size (image/post-image.sh) and hostname (the rpi-image-gen script
+#  itself, which that grep missed). device-user-admin itself does come in, not through
+#  device-base but as the requirement of rpi-image-gen's openssh-server layer:
+#  it makes the agent's SSH login user (../config/photo-wall-base.yaml,
+#  `device: user1`; docs/runbook.md, "Reaching a Node over SSH"). This layer
+#  still adds nothing: no packages, no hooks, metadata-only, same pattern as
+#  this repo's own ../image/photo-wall-squashfs.yaml.
 #
 #  image/post-image.sh (pinned rpi-image-gen commit
 #  262d4df5a9f9d4133370465399a7958a7c22cdc7) unconditionally truncates every
@@ -59,7 +63,7 @@
 #  Valid: int:512-512, under `X-Env-VarPrefix: device`), which this layer
 #  deliberately does not require (see above). Declare it directly below, same
 #  schema, same default, so post-image.sh's truncate has a value without
-#  pulling in device-base's device-user-admin login-user machinery.
+#  pulling in device-base.
 #
 #  post-image.sh's other consumer of IGconf_device_* -- the Image Description
 #  Provisioning (IDP) block at lines 22-43, gated on
@@ -93,4 +97,19 @@
 # X-Env-Var-sector_size-Required: n
 # X-Env-Var-sector_size-Valid: int:512-512
 # X-Env-Var-sector_size-Set: y
+#
+# X-Env-Var-hostname: localhost
+# X-Env-Var-hostname-Desc: The name baked into the image's /etc/hostname.
+#  rpi-image-gen passes `--hostname "${IGconf_device_hostname:-rpi-image-gen}"`
+#  to bdebstrap for every build (rpi-image-gen:313 at the pinned commit), and
+#  bdebstrap writes it to /etc/hostname, so without this every Node booted
+#  named "rpi-image-gen". Neutral on purpose: stage 1 replaces it with the
+#  Node's own photo-wall-<serial> at every boot (appliance/netboot_init.py
+#  hand_over_hostname), and libnss-myhostname (layer/photo-wall-os.yaml)
+#  resolves whichever name is set. base-image.yml
+#  refuses an image baking rpi-image-gen's default
+#  (scripts/device_root_checks.py).
+# X-Env-Var-hostname-Required: n
+# X-Env-Var-hostname-Valid: string
+# X-Env-Var-hostname-Set: y
 # METAEND

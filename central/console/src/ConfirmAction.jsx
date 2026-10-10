@@ -2,7 +2,7 @@ import React, { useEffect, useId, useRef, useState } from "react";
 
 import { ALREADY_MESSAGE, retirePlayer, unbind, unbindSequence } from "./equipmentApi.js";
 import { deleteFrame } from "./framesApi.js";
-import { isBound, outputLabel, outputStates, playerHandle } from "./health.js";
+import { isBound, outputLabel, outputStates, playerHandle, portName } from "./health.js";
 import { liveRunsFor } from "./join.js";
 import { usePageHidden } from "./pageVisibility.js";
 import { CHANGED_MESSAGE, UNKNOWN_MESSAGE } from "./sendOutcome.js";
@@ -458,27 +458,27 @@ export function unbindRequest(snapshot, bootFacts, frameId) {
     (candidate) => candidate.id !== frameId && candidate.player_id === playerId,
   );
   const runs = liveRunsFor(snapshot?.runtime, frameId);
-  const output = `${playerHandle(snapshot, bootFacts, playerId)} · ${outputId}`;
+  const output = `${playerHandle(snapshot, bootFacts, playerId)} · ${portName(outputId)}`;
   return {
     key: `unbind:${frameId}`,
-    title: `Unbind frame ${frameId}?`,
-    confirmLabel: "Confirm unbind",
+    title: `Disconnect Frame ${frameId} from its Pi?`,
+    confirmLabel: "Disconnect",
     body: (
       <>
-        <p>{`Frame ${frameId} stops being served by ${output}.`}</p>
-        <p>Its calibration is kept but marked invalid, so it must be calibrated again.</p>
-        <RunList runs={runs} lead="Its live Runs lose this frame:" />
+        <p>{`Frame ${frameId} stops being fed by Pi ${output}.`}</p>
+        <p>Its position is kept, but it must be set again once the Frame is connected.</p>
+        <RunList runs={runs} lead="These Scenes stop showing on it:" />
         {siblings.length > 0 && (
           <p>
-            {`The Player's other output is re-planned too: ${siblings
-              .map((sibling) => `frame ${sibling.id}`)
+            {`The Pi's other Frames get their content again too: ${siblings
+              .map((sibling) => `Frame ${sibling.id}`)
               .join(", ")}.`}
           </p>
         )}
-        <p>Nothing is lost for good: you can bind it again.</p>
+        <p>Nothing is lost for good: you can connect it again.</p>
       </>
     ),
-    run: async () => fromEquipment(await unbind(frameId, generation), `Frame ${frameId} unbound.`),
+    run: async () => fromEquipment(await unbind(frameId, generation), `Frame ${frameId} is disconnected from its Pi.`),
   };
 }
 

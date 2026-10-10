@@ -10,7 +10,7 @@ The browser half is tests/browser/test_schedule_flow_browser.py.
 import json
 import subprocess
 
-from tests.test_console_flow import SRC, _require_node
+from test_console_flow import SRC, _require_node
 
 SCRIPT = r"""
 const model = await import(process.argv[1]);

@@ -3,6 +3,6 @@ Description=Bounded Player application resources
 [Slice]
 CPUWeight=100
 IOWeight=100
-MemoryMax=2G
+MemoryMax=992M
 MemorySwapMax=0
 TasksMax=128

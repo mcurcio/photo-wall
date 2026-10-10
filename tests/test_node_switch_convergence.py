@@ -11,16 +11,16 @@ import os
 from types import SimpleNamespace
 from uuid import uuid4
 
+from node.apps.test_node_online_broker import Driver
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_lifecycle import Rig
-from test_node_online_broker import Driver
 
+import appliance.apps.online_broker as online_broker
 import appliance.central_session.session as node_session
-import appliance.node.online_broker as online_broker
-from appliance.boot_store import BootStore
+from appliance.apps.broker import RunningApp
+from appliance.apps.online_runner import OnlineRunner
 from appliance.central_session.session import NodeSession
-from appliance.node.broker import RunningApp
-from appliance.node.online_runner import OnlineRunner
+from appliance.kernel.boot_store import BootStore
 from central.fleet.node_sessions import NodeControlError
 from contracts.node_commands import encode_session_grant, parse_session_claim
 from contracts.node_lifecycle import parse_app_effect_event
@@ -76,8 +76,8 @@ def test_late_first_post_and_outage_after_accept_converge_and_report(registry, t
     driver = Driver(RunningApp(command.old_environment, command.old_process, command.old_app_epoch, uuid4()))
     prepared = tmp_path / "prepared.json"
     runner = OnlineRunner(store, driver, session, SimpleNamespace(arm=lambda o: o.receipt, advance=lambda *a: None),
+                          worker=SimpleNamespace(advance=lambda command: None, ready=lambda command: True),
                           prepared=prepared)
-    runner.worker = SimpleNamespace(advance=lambda command: None, ready=lambda command: True)
 
     runner.tick()  # Central reachable: the stage is accepted while preparation is still running.
     assert runner.broker.record["phase"] == "preparing" and driver.stop_calls == 0

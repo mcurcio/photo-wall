@@ -5,8 +5,8 @@ v0.9.1 passed every test and failed on the first Pi: `mount -o loop` meant nothi
 klibc mount(8) initramfs-tools puts in the initrd, and no check ever ran stage 1's mounts with
 the initrd's own userland. This does, with no fakes:
 
-  1. unpack the shipped `initrd.img` the way the kernel does -- the boot data (stage 1's code,
-     uncompressed) first, then the cached compressed archive over it -- into a directory;
+  1. unpack the shipped `initrd.img` the way the kernel does -- the clock floor's layer
+     (uncompressed) first, then the cached compressed archive over it -- into a directory;
   2. build a tiny squashfs holding one marker file inside that tree, shaped like the base where
      it matters here (merged /usr: `lib -> usr/lib`, and no kernel modules);
   3. chroot into the tree (devtmpfs, proc and sysfs mounted, as initramfs-tools' init does) and
@@ -50,8 +50,7 @@ if __package__ in (None, "") and str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from appliance.netboot_init import INITRD_MODULES as STAGE1_MODULES  # noqa: E402
-from scripts.build_boot_data import read_archive  # noqa: E402
-from scripts.verify_netboot_initrd import DISPLAY_MODULES  # noqa: E402
+from scripts.verify_netboot_initrd import DISPLAY_MODULES, decompressor, read_archive  # noqa: E402
 
 # initramfs-tools' init: `export PATH=/sbin:/usr/sbin:/bin:/usr/bin`.
 INITRAMFS_PATH: Final = "/sbin:/usr/sbin:/bin:/usr/bin"
@@ -66,14 +65,7 @@ INITRD_MODULES: Final = STAGE1_MODULES.relative_to("/")
 MOUNTINFO: Final = Path("/proc/self/mountinfo")
 SYS_BLOCK: Final = Path("/sys/block")
 
-# The leading bytes of the cached archive -> the host command that decompresses it to stdout.
-DECOMPRESSORS: Final = (
-    (b"\x28\xb5\x2f\xfd", ("zstd", "-dcq")),
-    (b"\x1f\x8b", ("gzip", "-dc")),
-    (b"\xfd7zXZ\x00", ("xz", "-dc")),
-)
-
-# Run by the INITRD's python3 inside the chroot: only stage 1's closure is importable there.
+# Run by the INITRD's python3 inside the chroot: only stage 1's tree is importable there.
 # argv: image, rootmnt, marker (relative to rootmnt), the initrd's kernel release, then the
 # modules to resolve on the new root. One `resolve` line per module (resolution_violations).
 PROBE_PROGRAM: Final = """\
@@ -104,18 +96,10 @@ for module in sys.argv[5:]:
 Run = Callable[..., subprocess.CompletedProcess]
 
 
-def decompressor(head: bytes) -> tuple[str, ...] | None:
-    """PURE. The command that decompresses an archive starting with `head`; None if unknown."""
-    for magic, command in DECOMPRESSORS:
-        if head.startswith(magic):
-            return command
-    return None
-
-
 def unpack(initrd: Path, root: Path, *, run: Run = subprocess.run) -> list[str]:
     """Extract `initrd` into `root` as the kernel does: each concatenated archive in order,
-    each over the last -- the uncompressed ones (the boot data first; mkinitramfs may add its
-    own early archive) and then the one compressed archive that ends the file. The violations
+    each over the last -- the uncompressed ones (the floor's layer first; mkinitramfs may add
+    its own early archive) and then the one compressed archive that ends the file. The violations
     (empty = unpacked)."""
     data = initrd.read_bytes()
     cpio = ("cpio", "-idmu", "--quiet", "--no-absolute-filenames")
@@ -125,7 +109,7 @@ def unpack(initrd: Path, root: Path, *, run: Run = subprocess.run) -> list[str]:
             _, length = read_archive(data[offset:])
         except ValueError as error:
             if offset == 0:
-                return [f"initrd does not start with the boot-data archive: {error}"]
+                return [f"initrd does not start with the floor's layer: {error}"]
             break
         run(cpio, input=data[offset:offset + length], cwd=root, check=True, capture_output=True)
         offset += length
@@ -280,7 +264,8 @@ def probe(initrd: Path, work: Path, *, run: Run = subprocess.run,
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("initrd", type=Path, help="the shipped initrd.img (boot data + cached)")
+    parser.add_argument("initrd", type=Path,
+                        help="the shipped initrd.img (the floor's layer + cached)")
     parser.add_argument("--work", type=Path,
                         help="an empty or absent directory to work in (default: a temp dir)")
     args = parser.parse_args(argv)

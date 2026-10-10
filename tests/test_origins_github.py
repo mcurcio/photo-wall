@@ -8,7 +8,6 @@ that serves the paginated releases API on `api.github.com` and each release asse
 
 import asyncio
 import hashlib
-import json
 import os
 import stat
 from datetime import timedelta
@@ -18,29 +17,23 @@ import pytest
 
 from central.kernel.assets import OriginLocator
 from central.kernel.handling import OriginRejected, OriginUnavailable
-from central.kernel.ports import ReleaseOrigin, UpstreamVersion
-from central.origins.github import MAX_DOWNLOAD_BYTES, GitHubReleaseOrigin
+from central.kernel.ports import NODE_RELEASE_INVALID, ReleaseOrigin, UpstreamVersion
+from central.origins.github import MAX_DOWNLOAD_BYTES, NODE_MANIFEST_MISSING, GitHubReleaseOrigin
+from contracts.node_release import NODE_RELEASE_MANIFEST
 
 REPO = "mcurcio/photo-wall"
 ETAG = 'W/"releases-v1"'
 BODY = b"pretend photo-wall-player_0.1.0+gabc_arm64.deb bytes; no real package.\n"
 SHA = hashlib.sha256(BODY).hexdigest()
 DEB_NAME = "photo-wall-player_0.1.0+gabc_arm64.deb"
-BASE_NAME = "photo-wall-base_0.1.0_arm64.tar"
-BASE_SHA = "b" * 64
-BASE_SIZE = 4096
 DOWNLOAD = f"https://github.com/{REPO}/releases/download/v1.2.3/{DEB_NAME}"
+# A node manifest body the contract refuses: the release is listed with `node_release_invalid`.
+# Valid node manifests are tests/test_node_release_ingest.py's.
+REFUSED = b"{}"
 
 
-def manifest_bytes(filename, sha256, size, *, schema=1, base=None):
-    manifest = {
-        "schema": schema,
-        "revision": "a" * 40,
-        "player_deb": {"filename": filename, "sha256": sha256, "size": size, "version": "0.1.0+ga"},
-    }
-    if base is not None:
-        manifest["base_image"] = base
-    return json.dumps(manifest).encode()
+def manifest_url(tag="v1.2.3"):
+    return f"https://github.com/{REPO}/releases/download/{tag}/{NODE_RELEASE_MANIFEST}"
 
 
 def release(tag, *, prerelease=False, draft=False, assets=None):
@@ -79,21 +72,15 @@ class Server:
                                redirect=redirect, error=error)
         return url
 
-    def deployable(self, tag="v1.2.3", *, prerelease=False, deb_body=BODY, schema=1, base=None,
-                   attach_base=True):
-        deb_url = f"https://github.com/{REPO}/releases/download/{tag}/{DEB_NAME}"
-        manifest_url = f"https://github.com/{REPO}/releases/download/{tag}/manifest.json"
-        base_url = f"https://github.com/{REPO}/releases/download/{tag}/{BASE_NAME}"
-        sha = hashlib.sha256(deb_body).hexdigest()
-        self.blob(manifest_url, chunks=[manifest_bytes(DEB_NAME, sha, len(deb_body),
-                                                       schema=schema, base=base)])
-        self.blob(deb_url, chunks=[deb_body])
-        assets = [asset("manifest.json", manifest_url), asset(DEB_NAME, deb_url)]
-        if attach_base:
-            assets.append(asset(BASE_NAME, base_url))
-        row = release(tag, prerelease=prerelease, assets=assets)
+    def deployable(self, tag="v1.2.3", *, prerelease=False, body=REFUSED, **version):
+        """A release attaching a node manifest `body` (None: listed but 404 upstream); `version`
+        may add the manifest asset's GitHub `id` and `updated_at`."""
+        if body is not None:
+            self.blob(manifest_url(tag), chunks=[body])
+        row = release(tag, prerelease=prerelease,
+                      assets=[asset(NODE_RELEASE_MANIFEST, manifest_url(tag), **version)])
         self.releases.append(row)
-        return row, sha, deb_url
+        return row
 
     def handle(self, request):
         self.requests.append(request)
@@ -163,81 +150,25 @@ def test_implements_the_kernel_port():
 # -- D1 listing ----------------------------------------------------------------
 
 
-def test_normal_release_becomes_a_published_release_with_package():
+def test_a_release_is_listed_by_its_node_manifest():
     server = Server()
-    _, sha, deb_url = server.deployable("v1.2.3")
+    server.deployable("v1.2.3")
     result = discover(server)
     record = only(result.releases)
-    assert (record.tag, record.package_problem, record.is_prerelease) == ("v1.2.3", None, False)
-    assert record.package == OriginLocator(url=deb_url, sha256=sha, size=len(BODY))
-    assert record.os_image is None  # the manifest carries no base_image
+    assert (record.tag, record.is_prerelease) == ("v1.2.3", False)
+    assert (record.node_publication, record.node_problem) == (None, NODE_RELEASE_INVALID)
     assert result.etag == ETAG and result.unchanged is False
 
 
-def test_schema_two_prefers_payload_and_checks_legacy_projection():
+def test_a_release_without_a_node_manifest_is_not_listed_and_its_v1_files_are_not_read():
     server = Server()
-    base_record = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
-    row, _, _ = server.deployable("v1.2.3", base=base_record)
-    legacy_url = next(asset["browser_download_url"] for asset in row["assets"]
-                      if asset["name"] == "manifest.json")
-    legacy = json.loads(server.blobs[legacy_url]["chunks"][0])
-    payload_name = f"photo-wall-player-payload-{'a' * 40}.tar.gz"
-    payload_url = f"https://github.com/{REPO}/releases/download/v1.2.3/{payload_name}"
-    v2_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.v2.json"
-    payload_record = {"filename": payload_name, "sha256": "c" * 64, "size": 100,
-                      "format": "pw-player-data-v1", "base_abi": "sha256:" + "d" * 64}
-    v2 = {**legacy, "schema": 2, "player_payload": payload_record,
-          "base_image": {**base_record, "base_abi": "sha256:" + "d" * 64,
-                         "base_abi_squashfs_sha256": "e" * 64}}
-    server.blob(v2_url, chunks=[json.dumps(v2).encode()])
-    row["assets"].extend((asset("manifest.v2.json", v2_url),
-                          asset(payload_name, payload_url)))
-    observed = only(discover(server).releases)
-    assert observed.payload is not None
-    assert observed.payload.locator == OriginLocator(payload_url, "c" * 64, 100)
-    assert observed.payload.base_abi == payload_record["base_abi"]
-    assert observed.base_abi == "sha256:" + "d" * 64
-    assert observed.base_abi_squashfs_sha256 == "e" * 64
-
-    # A v2 manifest which disagrees with the legacy view is never promoted into catalog facts.
-    v2["player_deb"]["sha256"] = "e" * 64
-    server.blob(v2_url, chunks=[json.dumps(v2).encode()])
-    invalid = only(discover(server).releases)
-    assert invalid.package is None and invalid.upstream_version is None
-    assert invalid.package_problem == "manifest_invalid"
-
-
-def test_base_image_becomes_the_os_image_locator():
-    server = Server()
-    base = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
-    server.deployable("v1.2.3", base=base)
-    record = only(discover(server).releases)
-    assert record.os_image == OriginLocator(
-        url=f"https://github.com/{REPO}/releases/download/v1.2.3/{BASE_NAME}",
-        sha256=BASE_SHA, size=BASE_SIZE)
-
-
-def test_base_image_not_attached_or_malformed_is_no_os_image():
-    server = Server()
-    server.deployable("v1.2.3", base={"filename": BASE_NAME, "sha256": BASE_SHA,
-                                      "size": BASE_SIZE}, attach_base=False)
-    server.deployable("v1.2.4", base={"filename": BASE_NAME, "sha256": "nope", "size": BASE_SIZE})
-    releases = discover(server).releases
-    assert [r.os_image for r in releases] == [None, None]
-    assert all(r.package is not None for r in releases)
-
-
-def test_os_image_survives_an_invalid_player_deb():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    base_url = f"https://github.com/{REPO}/releases/download/v1.2.3/{BASE_NAME}"
-    base = {"filename": BASE_NAME, "sha256": BASE_SHA, "size": BASE_SIZE}
-    server.blob(manifest_url, chunks=[manifest_bytes("not-a-deb.txt", SHA, 1, base=base)])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url),
-                                                     asset(BASE_NAME, base_url)]))
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "manifest_invalid"
-    assert record.os_image is not None and record.os_image.url == base_url
+    v1 = [f"https://github.com/{REPO}/releases/download/v1.2.3/{name}"
+          for name in ("manifest.json", "manifest.v2.json", DEB_NAME)]
+    for url in v1:
+        server.blob(url, chunks=[b"{}"])
+    server.releases.append(release("v1.2.3", assets=[asset(url.rsplit("/", 1)[1], url) for url in v1]))
+    assert discover(server).releases == ()
+    assert [r.url.host for r in server.requests] == ["api.github.com"]
 
 
 def test_draft_release_is_excluded():
@@ -247,119 +178,47 @@ def test_draft_release_is_excluded():
     assert {r.tag for r in discover(server).releases} == {"v1.2.3"}
 
 
-def test_prerelease_excluded_by_default_and_included_when_configured():
+def test_a_prerelease_is_listed_and_labelled():
     server = Server()
     server.deployable("v1.2.3")
     server.deployable("v1.3.0-rc.1", prerelease=True)
-    assert {r.tag for r in discover(server).releases} == {"v1.2.3"}
-    included = discover(server, include_prereleases=True)
-    record = next(r for r in included.releases if r.tag == "v1.3.0-rc.1")
-    assert record.is_prerelease is True and record.package is not None
+    assert {(r.tag, r.is_prerelease) for r in discover(server).releases} == {
+        ("v1.2.3", False), ("v1.3.0-rc.1", True)}
 
 
 def test_non_semver_tag_is_skipped_with_no_record():
     server = Server()
     server.deployable("v1.2.3")
-    server.releases.append(release("release-2024"))
-    server.releases.append(release("v1.2"))  # missing patch component
-    server.releases.append(release("v1.2.3+build"))  # build metadata is rejected
+    for tag in ("release-2024", "v1.2", "v1.2.3+build"):  # no patch; build metadata is rejected
+        server.deployable(tag)
     assert {r.tag for r in discover(server).releases} == {"v1.2.3"}
 
 
-def test_schema_mismatch_has_no_package_and_does_not_crash():
+def test_a_node_manifest_listed_but_absent_upstream_is_that_release_problem():
     server = Server()
-    server.deployable("v1.2.3", schema=3)
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "schema_mismatch"
+    server.deployable("v1.2.3", body=None)
+    assert only(discover(server).releases).node_problem == NODE_MANIFEST_MISSING
 
 
-def test_missing_manifest_asset_has_no_package():
-    server = Server()
-    server.blob(DOWNLOAD, chunks=[BODY])
-    server.releases.append(release("v1.2.3", assets=[asset(DEB_NAME, DOWNLOAD)]))
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "no_manifest"
+# -- the upstream version: the node manifest asset's (updated_at, id) ----------
 
 
-def test_manifest_not_json_is_manifest_invalid():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, chunks=[b"{not json"])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    record = only(discover(server).releases)
-    assert record.package_problem == "manifest_invalid"
-
-
-def test_oversize_manifest_is_manifest_invalid_not_an_abort():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, chunks=[b" " * (64 * 1024 + 1)])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    assert only(discover(server).releases).package_problem == "manifest_invalid"
-
-
-def test_manifest_names_deb_absent_from_assets_is_asset_missing():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, chunks=[manifest_bytes(DEB_NAME, SHA, len(BODY))])
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "asset_missing"
-
-
-def test_manifest_asset_listed_but_absent_upstream_has_no_package():
-    server = Server()
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.releases.append(release("v1.2.3", assets=[asset("manifest.json", manifest_url)]))
-    record = only(discover(server).releases)
-    assert record.package is None and record.package_problem == "no_manifest"
-
-
-# -- the upstream version: the manifest asset's (updated_at, id), only when its body was read --
-
-
-MANIFEST_URL = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
 UPLOADED = {"id": 7, "updated_at": "2026-09-01T00:00:00Z"}
 
 
-def _versioned(server, *, manifest=None, attach_deb=False, **version):
-    """v1.2.3 whose manifest asset carries `version`; `manifest` is its body (None: 404), and
-    `attach_deb` attaches the `.deb` a valid manifest names."""
-    if manifest is not None:
-        server.blob(MANIFEST_URL, chunks=[manifest])
-    assets = [asset("manifest.json", MANIFEST_URL, **version)]
-    if attach_deb:
-        assets.append(asset(DEB_NAME, DOWNLOAD))
-    server.releases.append(release("v1.2.3", assets=assets))
+def _versioned(**version):
+    server = Server()
+    server.deployable("v1.2.3", **version)
     return only(discover(server).releases)
 
 
-VALID = manifest_bytes(DEB_NAME, SHA, len(BODY))
-
-
-def test_a_valid_complete_manifest_carries_its_assets_updated_at_and_id():
-    record = _versioned(Server(), manifest=VALID, attach_deb=True, **UPLOADED)
-    assert record.package_problem is None
-    assert record.upstream_version == UpstreamVersion(1788220800.0, 7)
+def test_the_node_manifest_carries_its_assets_updated_at_and_id():
+    assert _versioned(**UPLOADED).node_version == UpstreamVersion(1788220800.0, 7)
 
 
 def test_an_offset_updated_at_is_read_as_the_same_instant():
-    record = _versioned(Server(), manifest=VALID, attach_deb=True, id=7,
-                        updated_at="2026-09-01T02:00:00+02:00")
-    assert record.upstream_version == UpstreamVersion(1788220800.0, 7)
-
-
-@pytest.mark.parametrize("manifest,problem", [
-    (b"{not json", "manifest_invalid"),
-    (b"[1]", "manifest_invalid"),  # not an object
-    (manifest_bytes(DEB_NAME, SHA, len(BODY), schema=3), "schema_mismatch"),
-    (manifest_bytes("not-a-deb.txt", SHA, 1), "manifest_invalid"),  # a malformed player_deb
-    (VALID, "asset_missing"),  # valid, but its .deb is not attached: an incomplete upload
-])
-def test_a_read_but_invalid_or_incomplete_manifest_is_no_version(manifest, problem):
-    # Owner decisions (errata 2026-09-24, bead 3): invalid or incomplete is treated as unread.
-    record = _versioned(Server(), manifest=manifest, **UPLOADED)
-    assert record.package_problem == problem and record.upstream_version is None
+    record = _versioned(id=7, updated_at="2026-09-01T02:00:00+02:00")
+    assert record.node_version == UpstreamVersion(1788220800.0, 7)
 
 
 @pytest.mark.parametrize("version", [
@@ -374,18 +233,7 @@ def test_a_read_but_invalid_or_incomplete_manifest_is_no_version(manifest, probl
     {"id": 7, "updated_at": 1788220800},
 ])
 def test_an_invalid_id_or_updated_at_is_no_version(version):
-    record = _versioned(Server(), manifest=VALID, attach_deb=True, **version)
-    assert record.package_problem is None and record.upstream_version is None
-
-
-def test_a_manifest_not_read_is_no_version():
-    # Listed, but 404 upstream (mid re-draft): no body, so no version, whatever the asset says.
-    assert _versioned(Server(), **UPLOADED).upstream_version is None
-    # Not attached at all.
-    server = Server()
-    server.blob(DOWNLOAD, chunks=[BODY])
-    server.releases.append(release("v1.2.3", assets=[asset(DEB_NAME, DOWNLOAD, **UPLOADED)]))
-    assert only(discover(server).releases).upstream_version is None
+    assert _versioned(**version).node_version is None
 
 
 def test_etag_304_short_circuits_the_whole_listing():
@@ -394,13 +242,13 @@ def test_etag_304_short_circuits_the_whole_listing():
     server.match_etag = ETAG
     result = discover(server, etag=ETAG)
     assert result.unchanged is True and result.releases == () and result.etag == ETAG
-    assert len(server.requests) == 1  # no manifest or asset was re-fetched
+    assert len(server.requests) == 1  # no manifest was re-fetched
 
 
 def test_pagination_follows_full_pages_and_stops_at_a_short_one():
     server = Server()
     for index in range(150):
-        server.releases.append(release(f"v0.0.{index}"))  # no manifest: no asset fetches
+        server.deployable(f"v0.0.{index}")
     result = discover(server)
     assert len(result.releases) == 150
     pages = [r for r in server.requests if r.url.host == "api.github.com"]
@@ -460,8 +308,7 @@ def test_rate_limited_without_retry_after_has_none():
 def test_rate_limited_manifest_aborts_the_listing():
     server = Server()
     server.deployable("v1.2.3")
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, status=429, chunks=[], headers={"Retry-After": "5"})
+    server.blob(manifest_url(), status=429, chunks=[], headers={"Retry-After": "5"})
     error = raises(OriginUnavailable, "rate_limited", discover, server)
     assert error.retry_after == timedelta(seconds=5)
 
@@ -480,16 +327,14 @@ def test_transient_manifest_5xx_aborts_the_listing_never_partial():
     server = Server()
     server.deployable("v1.2.3")
     server.deployable("v1.2.4")
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.4/manifest.json"
-    server.blob(manifest_url, status=500, chunks=[])
+    server.blob(manifest_url("v1.2.4"), status=500, chunks=[])
     raises(OriginUnavailable, "manifest_unavailable", discover, server)
 
 
 def test_unreachable_manifest_aborts_the_listing():
     server = Server()
     server.deployable("v1.2.3")
-    manifest_url = f"https://github.com/{REPO}/releases/download/v1.2.3/manifest.json"
-    server.blob(manifest_url, error=httpx.ConnectError("reset"))
+    server.blob(manifest_url(), error=httpx.ConnectError("reset"))
     raises(OriginUnavailable, "manifest_unavailable", discover, server)
 
 
@@ -723,14 +568,7 @@ def test_invalid_repo_slug_is_refused():
 
 def test_from_env_defaults():
     built = GitHubReleaseOrigin.from_env({})
-    assert built.repo == "mcurcio/photo-wall" and built.include_prereleases is False
-
-
-@pytest.mark.parametrize("value, expected", [("1", True), ("TRUE", True), ("yes", True),
-                                             ("on", True), ("0", False), ("", False)])
-def test_from_env_prerelease_flag(value, expected):
-    built = GitHubReleaseOrigin.from_env({"PHOTO_WALL_RELEASE_PRERELEASES": value})
-    assert built.include_prereleases is expected
+    assert built.repo == "mcurcio/photo-wall"
 
 
 def test_from_env_repo_and_token_reach_the_wire():

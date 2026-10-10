@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
+import player.native as native_module
 from contracts.models import Calibration
 from player.geometry import (
     compose_pixel,
@@ -19,6 +21,7 @@ from player.geometry import (
     transform,
 )
 from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
+from player.rendering import REDRAW_RENEWAL, PrepareResult
 
 
 def test_local_diagnostic_distinguishes_startup_from_enrolled_unbound_output():
@@ -332,3 +335,125 @@ def test_capacity_waits_for_real_surface_initialization():
     surface.programs = (1, 2)
     assert renderer.capacity(()).available
     assert not renderer.capacity(()).qualified
+
+
+def test_the_frame_renewer_paints_only_surfaces_not_renewed_within_a_renewal():
+    """G8 E-G8-4: present() renews a shown draw every REDRAW_RENEWAL, so the display-host
+    renewer paints only surfaces with no acknowledgment or one at least that old."""
+    class Area:
+        def __init__(self):
+            self.renders = 0
+
+        def queue_render(self):
+            self.renders += 1
+
+    now = time.monotonic()
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._closed = False
+    renderer._surfaces = {
+        name: SimpleNamespace(area=Area(), acknowledged=None if completed is None
+                              else SimpleNamespace(completed_at=completed))
+        for name, completed in (("none", None), ("fresh", now + 60),
+                                ("old", now - REDRAW_RENEWAL - .1))}
+    assert renderer._renew_display_frames() is True
+    assert {name: surface.area.renders for name, surface in renderer._surfaces.items()} == {
+        "none": 1, "fresh": 0, "old": 1}
+
+
+def test_a_crossfade_step_or_a_trial_edit_is_a_change_to_redraw():
+    """G8 render on change, E-G8-3: alpha and the calibration trial change pixels without
+    changing the composition's fingerprint, so each is part of what a surface shows."""
+    class Frames:
+        def __init__(self, candidate):
+            self.candidate = candidate
+
+        def trial(self, composition, grant):
+            if self.candidate == "unreadable":
+                raise ValueError("unreadable")
+            return None if self.candidate is None else SimpleNamespace(candidate=self.candidate)
+
+    def trial(sequence):
+        return SimpleNamespace(trial_id="t", generation=1, sequence=sequence,
+                               candidate_sha256="0" * 64)
+
+    def shown(alpha=1.0, frames=None):
+        local = SimpleNamespace(layer="picture", path=None, alpha=alpha)
+        composition = SimpleNamespace(binding="hdmi1", calibration=Calibration(),
+                                      fallback=False, layers=(local,))
+        return native_module._shown(composition, (), (), frames, object())
+
+    assert shown() == shown()
+    assert shown(.5) != shown(1.0)
+    assert shown(frames=Frames(None)) == shown()
+    assert shown(frames=Frames(trial(1))) != shown()
+    assert shown(frames=Frames(trial(1))) == shown(frames=Frames(trial(1)))
+    assert shown(frames=Frames(trial(2))) != shown(frames=Frames(trial(1)))
+    unreadable = Frames("unreadable")
+    assert shown(frames=unreadable) != shown(frames=unreadable)
+
+
+def _presenting_renderer(decoders=None):
+    """A NativeRenderer reduced to present(): one surface, every layer prepared, and _render
+    played by the test (acknowledge or drop the pending draw)."""
+    class Area:
+        renders = 0
+
+        def queue_render(self):
+            self.renders += 1
+
+    renderer = NativeRenderer.__new__(NativeRenderer)
+    renderer._owner, renderer._closed, renderer._serial = threading.get_ident(), False, 0
+    renderer._decoders = decoders or {}
+    renderer._surfaces = {"hdmi1": native_module._Surface(output=None, window=None, area=Area())}
+    renderer.capacity = lambda compositions: SimpleNamespace(available=True)
+    renderer.prepare = lambda local: PrepareResult("prepared")
+    return renderer, renderer._surfaces["hdmi1"]
+
+
+def _composition(*layers):
+    return SimpleNamespace(binding=SimpleNamespace(output_id="hdmi1"), calibration=Calibration(),
+                           fallback=False, layers=layers)
+
+
+def _acknowledge(surface):
+    """What _render does with a pending draw it paints."""
+    surface.acknowledged, surface.pending = surface.pending, None
+    surface.acknowledged.completed_at = time.monotonic()
+
+
+def test_a_draw_render_dropped_is_drawn_again_on_the_next_present():
+    """Render on change keeps one record of what is owed: the newest draw (pending, else
+    acknowledged). When _render drops a pending draw (its grant lapsed, its decoder sought, its
+    candidate failed), the next present() queues it again at once, not after REDRAW_RENEWAL."""
+    renderer, surface = _presenting_renderer()
+    photo = _composition(SimpleNamespace(layer=SimpleNamespace(assignment_id="a", variant=None),
+                                         path=None, alpha=1.0))
+    other = _composition(SimpleNamespace(layer=SimpleNamespace(assignment_id="b", variant=None),
+                                         path=None, alpha=1.0))
+    assert renderer.present(photo).status == "pending" and surface.area.renders == 1
+    _acknowledge(surface)
+    assert renderer.present(photo).status == "presented" and surface.area.renders == 1
+    assert renderer.present(other).status == "pending" and surface.area.renders == 2
+    surface.pending = None                  # _render dropped it
+    assert renderer.present(other).status == "pending" and surface.area.renders == 3
+    assert surface.pending is not None
+    _acknowledge(surface)
+    assert renderer.present(other).status == "presented" and surface.area.renders == 3
+
+
+def test_a_playing_video_is_redrawn_on_each_new_sample_only():
+    """Video: a new decoded sample is a change to draw (its serial is in the redraw key); with
+    no new sample nothing is redrawn before REDRAW_RENEWAL."""
+    layer = SimpleNamespace(assignment_id="v", output_id="hdmi1",
+                            variant=SimpleNamespace(duration=10.0, media_type="video/mp4"))
+    decoder = SimpleNamespace(incarnation=0, generation=0, sample_serial=1, playing=True,
+                              local=SimpleNamespace(layer=layer))
+    renderer, surface = _presenting_renderer({"v": decoder})
+    video = _composition(SimpleNamespace(layer=layer, path=None, alpha=1.0))
+    assert renderer.present(video).status == "pending" and surface.area.renders == 1
+    _acknowledge(surface)
+    assert renderer.present(video).status == "presented" and surface.area.renders == 1
+    decoder.sample_serial += 1
+    assert renderer.present(video).status == "presented" and surface.area.renders == 2
+    _acknowledge(surface)
+    assert renderer.present(video).status == "presented" and surface.area.renders == 2

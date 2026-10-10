@@ -9,7 +9,7 @@ inputs:
   name:
     description: >-
       The build role's scope stem: a Dockerfile target, or `node-{role}`, whose `{role}` the node
-      builders replace with each build's role (scripts/node_build_inputs.py)
+      builders replace with each build's role (debian-packaging/build-container.sh)
     required: true
   architecture:
     description: amd64 or arm64; part of the scope

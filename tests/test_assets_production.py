@@ -19,7 +19,7 @@ from central.kernel.assets import (
     OriginLocator,
 )
 from central.kernel.handling import TerminalFailure, TransientFailure
-from central.kernel.job_types import FetchOsImage, FetchPackage
+from central.kernel.job_types import FetchOsImage, FetchSealedEnvironment
 from central.kernel.publishing import ASSET_NOT_RECORDED
 from contracts.time import ManualClock
 
@@ -31,9 +31,9 @@ facts = facts_of
 DEB_SHA = facts(GOOD).sha256
 TARBALL = sha("base tarball v1")
 OS_JOB = FetchOsImage(tarball_sha256=TARBALL)
-DEB_JOB = FetchPackage(sha256=DEB_SHA)
+DEB_JOB = FetchSealedEnvironment(sha256=DEB_SHA)
 OS_KEY = AssetKey(AssetKind.OS_IMAGE, TARBALL)
-DEB_KEY = AssetKey(AssetKind.PLAYER_DEB, DEB_SHA)
+DEB_KEY = AssetKey(AssetKind.SEALED_ENVIRONMENT, DEB_SHA)
 URL = "https://example.test/a"
 
 
@@ -197,7 +197,7 @@ def test_production_differing_from_a_reference_expectation_is_a_digest_mismatch(
         world.produce(DEB_JOB, Writer(OTHER))
     assert raised.value.reason == "digest_mismatch"
     assert world.final(DEB_KEY) is None
-    assert world.temps(AssetKind.PLAYER_DEB) == []
+    assert world.temps(AssetKind.SEALED_ENVIRONMENT) == []
 
 
 def test_every_reference_expectation_must_hold(world):

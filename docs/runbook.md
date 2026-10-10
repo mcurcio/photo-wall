@@ -17,10 +17,10 @@ curl --fail http://127.0.0.1:8000/healthz
 
 Open `http://127.0.0.1:8000`. Read the operator token from the private `.env` file and enter it once to sign in; the browser stays signed in for 30 days ([signing in and Log out](#operator-console-signing-in-and-log-out)). The script creates `.env` with mode 0600 and never overwrites it. No credentials are committed. The development listener and database port bind only to loopback. Appliance deployment requires the separately configured HTTPS/PXE trust boundary; this local listener is not that deployment.
 
-The operator interface lists Players and Outputs, creates persistent Frames, binds equipment, retires a Player, and calibrates each Frame (Live calibration, then save). It creates and edits Sources and Scenes, schedules Programs, starts/finishes/cancels Runs, and shows source/worker health. Program timestamps use the browser's displayed local time zone. Configure the private upstream connection on the worker before creating a Source; after the worker checks in, the Source flow offers its configured connection name. The disposable browser walkthrough below covers these controls; final-revision delivery evidence remains separate. With the scheduler enabled, `/healthz` is green only when the database is reachable and a scheduler tick completed successfully within the last 10 monotonic seconds; `starting`, `coordination_unavailable`, `stale`, and `stopped` states return 503 with fixed sanitized status fields. Explicit test mode can disable the scheduler and retain database-only health semantics. A green `/healthz` reports service liveness, not observed presentation.
+The operator interface lists Players and Outputs, creates persistent Frames, binds equipment, retires a Player, and sets each Frame's position and brightness on its page (live on the Display, then Done). It creates and edits Sources and Scenes, schedules Programs, starts/finishes/cancels Runs, and shows source/worker health. Program timestamps use the browser's displayed local time zone. Configure the private upstream connection on the worker before creating a Source; after the worker checks in, the Source flow offers its configured connection name. The disposable browser walkthrough below covers these controls; final-revision delivery evidence remains separate. With the scheduler enabled, `/healthz` is green only when the database is reachable and a scheduler tick completed successfully within the last 10 monotonic seconds; `starting`, `coordination_unavailable`, `stale`, and `stopped` states return 503 with fixed sanitized status fields. Explicit test mode can disable the scheduler and retain database-only health semantics. A green `/healthz` reports service liveness, not observed presentation.
 
 When a calibrated Frame shows a current readiness failure, follow the
-Frame-specific guidance in its Frame Inspector: reduce concurrent video/effect work
+Frame-specific guidance on its Frame page: reduce concurrent video/effect work
 or use lighter media for `capacity`; check time synchronization for `clock`;
 check supported media or choose another item for `decode`; inspect Player
 storage/network and Central delivery for `download`; inspect the Player cache
@@ -148,41 +148,16 @@ The baseline Player path (0008) is flash-and-go: no boot ticket, no pre-registra
 
 Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [PXE service module](module-pxe-service.md). Certificate-based identity and pinned/explicit transport trust are further opt-in enhancements described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md); they are designed but not yet implemented, so do not rely on them today. Physical Pi boot of either the flash image or the netboot tree is not yet hardware-qualified.
 
-## Player provisioning: netboot and promote the app (0009, in progress)
+## Player provisioning: the V1 netboot and promote path (removed)
 
-> **Deprecated lane.** This section describes the V1 boot path (the netboot base without a node offer and the promoted `.deb`). The supported configuration is [Node control](#node-control): Pis boot by node path and Central ingests releases and you select them in the console. The V1 lane is kept until the [V1 follow-up](player-fleet-implementation-map.md) removes it; the console shows none of it.
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) is the adopted target for the netboot tier: a minimal base OS image that carries no application, plus the Player shipped as a downloadable `.deb` that central serves. Nothing is signed — the owner ruled a home LAN has no threat model, so the sha256 published alongside the `.deb` is a corruption check, not an authenticity proof. Once the boot-chain wiring below lands, the operator flow is:
-
-1. **Stage the boot files in your TFTP tree.** From a published release's boot tarball, `photo-wall-boot-<revision>.tar.gz`, stage `photo-wall-boot/boot/` (kernel, DTBs, initramfs) beneath the boot-server root, as [staging the netboot bundle](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014) describes — see [PXE service setup](module-pxe-service.md). It is the same tree as the base tarball's `photo-wall-base/boot/`, without the base squashfs, which Central serves over HTTP ([decision 0012](decisions/0012-netboot-base-auto-mirror.md)). The base carries no Player code and no deployment config; it exists to run the bootstrapper (`appliance/provision.py`) that fetches everything else. The kernel command line must name Central with `photowall.central=http://photo-wall.localdomain/` or your deployment's Central root (see step 2 of [decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md)).
-2. **Boot the Pi and watch the pending queue.** The bootstrapper reads `photowall.central` from the kernel command line, locates Central (following the gateway's redirects for `GET /v1/locate` only), downloads the manifest and `.deb` from the located Central, checks the sha256, installs it with `dpkg --install` alone (no apt, nothing downloaded from Debian), writes `/etc/photo-wall/public.json` and starts the Player, which locates Central the same way and enrolls by serial — it appears **unbound** in the same operator inventory (`/v1/operator/inventory`) as the flash path.
-3. **Check which app is promoted.** Central serves the `.deb` of the one promoted release, taken
-   from the GitHub release list ([below](#player-provisioning-promote-a-release-from-github-0010)).
-   The release sync promotes the newest deployable release by itself (`promoted_by: "auto"`)
-   until a Player is bound and a `.deb` has been downloaded; after that it holds the promotion.
-   To choose a release, promote it yourself:
-
-   ```sh
-   curl -X POST -H 'Authorization: Bearer <admin-token>' \
-     http://<central>/v1/operator/app/releases/<tag>/promote
-   ```
-
-   The release sync never moves an operator promotion. Every Player fetches the newly promoted
-   `.deb` on its next reboot; already-running Players are unaffected until then.
-4. **Bind** the pending Player to a Frame and calibrate, exactly as in the flash-and-go flow above.
-5. **Update the app later** by promoting a newer release tag, as in step 3 — no re-imaging, no
-   re-signing, no boot-tree edit. There is no auto-rollback: if a promoted `.deb` crashes on boot,
-   the dark screen is the signal, and recovery is re-promoting the previous tag.
-
-**Where this actually stands.** Central's app manifest and package routes (`central/content_routes.py`, over the release
-catalog in `central/content_catalog/catalog.py`), the minimal base image build (`scripts/build_ci_base_image.py`), the `.deb` build (`scripts/build_player_deb.py`), and the bootstrapper (`appliance/provision.py`) are each implemented and pass their own tests in isolation. **The PXE boot chain that would load the minimal base and hand off to the bootstrapper — with no boot ticket and no signature — is not yet wired**: today's initramfs still runs the old signed boot-ticket protocol described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md#the-netboot-tier-d1-and-its-config-decoupling), so a netboot deployment today still boots that signed, combined image, not this one. Do not follow the steps above against a real fleet yet; they describe the design 0009 targets, and this section will be reconciled with the [appliance builder](module-appliance-builder.md) module once the wiring lands.
+[Decision 0009](decisions/0009-minimal-base-and-app-package.md) shipped the Player as a `.deb` that a base-owned bootstrapper downloaded and installed with `dpkg --install`. That path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): the bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes, the `.deb` promotion and the Player `.deb`, bootstrapper `.deb` and Player payload release files no longer exist. A Node boots by [stage 1](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014), mounts its base, and its release roots (the Player app root and the AppManager root) arrive as squashfs images through [Node control](#node-control). A Pi enrolls by serial and appears **unbound** in the operator inventory (`/v1/operator/inventory`); bind it to a Frame and calibrate it as in the flash-and-go flow above.
 
 ## Player provisioning: stage the netboot bundle and read its console (0014)
 
 [Decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md) changes how the netboot's first stage reaches Central and how it stays alive. None of this is hardware-qualified yet. Its first Pi observations (the M0 and M1 milestones) are still to be recorded.
 
 1. **Stage the kernel, `initrd.img` and DTBs together, from one release.** Download a published GitHub Release's boot tarball, `photo-wall-boot-<revision>.tar.gz` (automation reads its name from the release's `manifest.json`, `boot_image.filename`), check it against the release's `SHA256SUMS`, and take `photo-wall-boot/boot/` from it whole: `kernel_2712.img`, `initrd.img`, `bcm2712-rpi-5-b.dtb`, `overlays/`, `config.txt`, the `cmdline.txt` template, `pieeprom.upd` and `pieeprom.sig`. It is byte for byte the `photo-wall-base/boot/` of the same release's base tarball, `photo-wall-base-<revision>.tar.gz`, which still carries it, without that tarball's base squashfs: the release's seal refuses to publish the two with different trees. Never stage from a CI (Actions) artifact: one exists for every build, including unreleased pull requests, and expires after seven days, while a published release is complete by construction and is what Central mirrors the base squashfs from. `initrd.img` carries that build's stage-1 code, its CA list (copied from that build's base) and its clock floor, all in front of the cached initrd ([`tests/test_build_netboot_bundle.py`](../tests/test_build_netboot_bundle.py)). The kernel package is not pinned, so an initrd from one build must not be paired with a kernel from another. The CA list is as old as that build's Debian snapshot pin and stays that old until you stage again. Stage again when the gateway's certificate chain changes.
-2. **Set the cmdline.** `cmdline.txt` is one line. Replace its one `@@PHOTOWALL_CENTRAL@@` placeholder (in `photowall.central=@@PHOTOWALL_CENTRAL@@`) with Central's root and change nothing else: the firmware passes the file to the kernel verbatim, so never add a line or a comment ([`contracts/release.py`](../contracts/release.py) declares the template; the release seal refuses any other shape). The root may be http: stage 1 follows the gateway's redirects to https across hosts (up to ten), refuses any https→http step, and verifies TLS ([`tests/test_uplink_tls.py`](../tests/test_uplink_tls.py)). On failure the console prints the named cause and the redirect hops, never a value to set, because the located origin can come from an unauthenticated first hop ([decision 0014, U7](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)). Stage 1 no longer prints a `set photowall.central=…` note; on an http root it logs only `note: configured root is http: the first hop is unauthenticated`. Keep `watchdog.stop_on_reboot=0 hung_task_panic=1` beside `panic=10`. **Keep `cgroup_enable=memory`; never remove it.** Every release's `cmdline.txt` from the 4 GB tracer release on carries it, so do not add it again; a boot tree staged from an earlier release does not, and must be restaged. The Pi 5's device tree puts `cgroup_disable=memory` in the command line the firmware builds, before `cmdline.txt` ([raspberrypi/linux#6980](https://github.com/raspberrypi/linux/issues/6980)); the kernel's later `cgroup_enable=memory` wins ([raspberrypi/linux commit ab520ab14d64](https://github.com/raspberrypi/linux/commit/ab520ab14d64)). Without it every memory limit on the node is ignored. The base still mounts its store and the Player runs, because the boot tree is staged separately from Central's boot selection and Select is fleet-wide ([Releases](#releases-stage-app-and-update-the-wall)): refusing would darken every Player on an older tree. Host Management reports the absence, and the console's Memory limits item warns "memory controller absent: memory limits not enforced". The release seal refuses a `cmdline.txt` that lacks it or repeats it ([`scripts/package_release_artifacts.py`](../scripts/package_release_artifacts.py), [`tests/test_package_release_artifacts.py`](../tests/test_package_release_artifacts.py)); a node release's `cmdline.txt` is that line plus `photowall.node=v2`, and its seal also refuses a tree that lacks either token or repeats one ([`scripts/node_release_artifacts.py`](../scripts/node_release_artifacts.py), [`tests/test_node_release_artifacts.py`](../tests/test_node_release_artifacts.py)). If either liveness parameter is missing, stage 1 boots on and names it (`note: kernel liveness missing: …`; [`tests/test_netboot_liveness.py`](../tests/test_netboot_liveness.py)).
+2. **Set the cmdline.** `cmdline.txt` is one line. Replace its one `@@PHOTOWALL_CENTRAL@@` placeholder (in `photowall.central=@@PHOTOWALL_CENTRAL@@`) with Central's root and change nothing else: the firmware passes the file to the kernel verbatim, so never add a line or a comment ([`contracts/release.py`](../contracts/release.py) declares the template; the release seal refuses any other shape). The root may be http: stage 1 follows the gateway's redirects to https across hosts (up to ten), refuses any https→http step, and verifies TLS ([`tests/test_uplink_tls.py`](../tests/test_uplink_tls.py)). On failure the console prints the named cause and the redirect hops, never a value to set, because the located origin can come from an unauthenticated first hop ([decision 0014, U7](decisions/0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules)). Stage 1 no longer prints a `set photowall.central=…` note; on an http root it logs only `note: configured root is http: the first hop is unauthenticated`. Keep `watchdog.stop_on_reboot=0 hung_task_panic=1` beside `panic=10`. **Keep `cgroup_enable=memory`; never remove it.** Every release's `cmdline.txt` from the 4 GB tracer release on carries it, so do not add it again; a boot tree staged from an earlier release does not, and must be restaged. The Pi 5's device tree puts `cgroup_disable=memory` in the command line the firmware builds, before `cmdline.txt` ([raspberrypi/linux#6980](https://github.com/raspberrypi/linux/issues/6980)); the kernel's later `cgroup_enable=memory` wins ([raspberrypi/linux commit ab520ab14d64](https://github.com/raspberrypi/linux/commit/ab520ab14d64)). Without it every memory limit on the node is ignored. The base still mounts its store and the Player runs, because the boot tree is staged separately from Central's boot selection and Select is fleet-wide ([Releases](#releases-stage-app-and-update-the-wall)): refusing would darken every Player on an older tree. Host Management reports the absence, and the console's Memory limits item warns "memory controller absent: memory limits not enforced". The release seal refuses a `cmdline.txt` that lacks it or repeats it ([`scripts/package_release_artifacts.py`](../scripts/package_release_artifacts.py), [`tests/test_package_release_artifacts.py`](../tests/test_package_release_artifacts.py)); a node release carries that one boot tree, and the node release's seal refuses a release whose `cmdline.txt` differs from it ([`scripts/node_release_artifacts.py`](../scripts/node_release_artifacts.py), [`tests/test_node_release_artifacts.py`](../tests/test_node_release_artifacts.py)). If either liveness parameter is missing, stage 1 boots on and names it (`note: kernel liveness missing: …`; [`tests/test_netboot_liveness.py`](../tests/test_netboot_liveness.py)).
 3. **The EEPROM step is the two `pieeprom` files.** On its next boot, the Pi's bootloader updates itself from the TFTP directory to `BOOT_ORDER=0xf21` (SD, then network, then start again) and `BOOT_WATCHDOG_TIMEOUT=120`, and resets once. No SD card is needed ([`tests/test_eeprom_update.py`](../tests/test_eeprom_update.py)). To keep a Pi's bootloader as it is, leave the two files out. The Pi must already boot from the network: its factory boot order has no network entry.
 4. **Read a failed boot on the console.** Every stage-1 failure prints one line, `photo-wall[netboot] FAILED phase=<n> cause=<cause> reason=<reason> host=<host> detail=<detail>` ([`tests/test_netboot_init.py`](../tests/test_netboot_init.py)). Some lines to know:
    - `cause=tls reason=untrusted … bundle=sha256:… anchors=… floor=…`: the initrd's CA list does not trust the served chain. Stage a newer bundle.
@@ -196,189 +171,39 @@ catalog in `central/content_catalog/catalog.py`), the minimal base image build (
    After the line, the boot script restarts the Pi. It uses a sysrq emergency restart, not `reboot`; the hardware watchdog armed at stage 1's start is the backstop. `photowall.debug=1` holds the console for 60 s first.
 5. **If a Pi is found stalled, look at its HDMI screen before resetting it.** The bootloader's diagnostics page with `order` other than `0xf21` means the EEPROM self-update did not apply. Kernel text with no `photo-wall[netboot]` line and no panic is a hang that nothing in the product resets. `sysrq: Resetting` as the last line means the emergency restart hung and the watchdog did not fire. Record what the screen shows in the evidence. The owner of each boot segment is listed in the [execution contract](execution-contract.md#netboot-stage-1-boot-data-the-clock-record-and-liveness).
 
-6. **Reading provisioning and Player failures.**
-   - Read the provisioning unit's logs: `journalctl -u photo-wall-provision`. Provisioning logs one line per failed attempt with format `cause=<cause> reason=<reason> host=<host> detail=<detail>`. For `cause=time` or `cause=tls reason=untrusted` it appends the stage-1 clock record: `clock=<state> floor=<date> tried=...`.
-   - Read the Player's logs: `journalctl -u photo-wall-player`. The Player logs `player fault: <cause>_<reason>` on enrollment or connection failure, e.g. `tls_untrusted`, `redirect_unexpected`, `connect_refused`, `dns_failed`, `central_error`, followed by the same `host`, `detail` and `clock` fields as provisioning.
-   - A Player unit that does not start logs `cause=unit reason=<systemd result> detail=photo-wall-player.service/status=<n>/<NAME>`, and provisioning exits into the restart limit. A named status such as `216/GROUP`, `217/USER` or `203/EXEC` means systemd could not set up the Player's process, so the booted base cannot run it. v0.9.1's base had no udev, so it had no `render` group and failed with `216/GROUP`. Stage a base whose CI passed the Player start check ([`scripts/player_start_probe.py`](../scripts/player_start_probe.py)). A bare `status=1` means the Player itself exited; read `journalctl -u photo-wall-player`. `reason=timeout detail=…/state=activating/<substate>` means the Player was still starting when provisioning stopped waiting (90 s). It never sent READY; `start-pre` means it was still waiting for the compositor's socket.
-   - `cause=time` is not retried in place: the provisioning unit exits, and after 10 exits in 10 minutes the systemd service reboots the Pi. On reboot, stage 1 re-steps the clock.
-   - A dpkg dependency failure during provisioning looks like `photo-wall-player depends on python3-foo; however: Package python3-foo is not installed`. It means the promoted Player requires a Debian package the booted base lacks. Fix it by staging a base built from a declaration that includes it, or by promoting an older Player. The Pi reboot-loops until fixed. **Operator rule:** stage the base first, then promote a Player that adds a Debian package.
-   - Bumping the Debian snapshot pin (developers): edit `PIN.snapshot` in `scripts/debian_packages.py` (format `YYYYMMDDTHHMMSSZ`). Every artifact keyed on the declaration rebuilds at the new snapshot: the base, the initrd build root, and the CI device root. Re-stage the whole TFTP bundle from that new build.
+6. **Reading Node failures after stage 1.** The V1 provisioner and its `photo-wall-provision.service` are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)); a Node's programs are the units of `photo-wall-node.target`, read over [SSH](#reaching-a-node-over-ssh) (`journalctl -b -u <unit>`) or on the Player page's host facts and boot report. A unit that systemd could not start logs a status such as `216/GROUP`, `217/USER` or `203/EXEC`: the booted base cannot run it; stage a base whose `base-image` CI leg and [PID1 scenarios](evidence/player-node-handoff-support/node-lifecycle-qualification.md) passed. `cause=time` is a stage 1 fault: it reboots and re-steps the clock on the next boot.
+   - Bumping the Debian snapshot pin (developers): see [Changing it](module-debian-packaging.md#changing-it). Every artifact keyed on the pin rebuilds: the base, the initrd build root, the release roots and the CI device root. Re-stage the whole TFTP bundle from that new build.
 
-**Console success on phase 7.** After a successful mount, stage 1 prints `phase 7/7 mount + handoff: modules=<release> files=<n> bytes=<b>`. That line means the initrd's kernel modules were copied onto the base, which carries none of its own. The display drivers (`vc4`, `v3d`) already loaded in stage 1, because `config.txt`'s `dtoverlay=vc4-kms-v3d-pi5` turns the display on. A bundle without that line has no `/dev/dri`. It then prints `phase 7/7 mount + handoff: success dns=<a,b> search=<x>` (where `dns=none` if stage 1 had no resolver discovered). Stage 1 copies its resolver state to the new root's `/etc/resolv.conf`, and the base carries none. Stage 1 then writes `/run/systemd/system.conf.d/90-photo-wall-watchdog.conf` (`RuntimeWatchdogSec=30s`, `RebootWatchdogSec=300s`), so systemd in the base keeps petting the watchdog stage 1 armed. The provisioning unit reboots the Pi after 10 exits in 10 minutes, and the Pi then netboots again. The clock step stage 1 took is recorded in `/run/photo-wall-clock.json`.
+**Console success on phase 7.** After a successful mount, stage 1 prints `phase 7/7 mount + handoff: modules=<release> files=<n> bytes=<b>`. That line means the initrd's kernel modules were copied onto the base, which carries none of its own. The display drivers (`vc4`, `v3d`) already loaded in stage 1, because `config.txt`'s `dtoverlay=vc4-kms-v3d-pi5` turns the display on. A bundle without that line has no `/dev/dri`. It then prints `phase 7/7 mount + handoff: success dns=<a,b> search=<x>` (where `dns=none` if stage 1 had no resolver discovered). Stage 1 copies its resolver state to the new root's `/etc/resolv.conf`, and the base carries none. Stage 1 then writes `/run/systemd/system.conf.d/90-photo-wall-watchdog.conf` (`RuntimeWatchdogSec=30s`, `RebootWatchdogSec=300s`), so systemd in the base keeps petting the watchdog stage 1 armed. The clock step stage 1 took is recorded in `/run/photo-wall-clock.json`.
 
-## Player provisioning: promote a release from GitHub (0010)
+## Release sourcing from GitHub (0010)
 
-> **Deprecated lane, shared configuration.** Promoting a `.deb` is the V1 boot path; the supported configuration is [Node control](#node-control), where Central ingests releases and you select them in the console. The worker's GitHub polling and its `PHOTO_WALL_RELEASE_*` settings below are shared: the same sync records node publications into the node release catalog that Fleet › Releases shows. The V1 promotion is kept until the [V1 follow-up](player-fleet-implementation-map.md) removes it.
+[Decision 0010](decisions/0010-github-release-sourcing.md): Central **watches the project's GitHub Releases** and records every semver release as a candidate. The worker's sync records each valid release as a node publication in the node release catalog that Fleet › Releases shows, and downloads the bytes the fleet needs (the base squashfs and the node components) into the cache root. Nothing is signed; the sha256 is a corruption check only. The V1 `.deb` promotion (`GET /v1/operator/app/releases`, `POST …/{tag}/promote`, `GET /v1/app/manifest`, the Player `.deb` and the bootstrapper) was removed with the V1 path ([0019](decisions/0019-debian-packaging-with-debhelper.md)); put a release on the wall from the console ([Releases](#releases-stage-app-and-update-the-wall)).
 
-[Decision 0010](decisions/0010-github-release-sourcing.md) removed 0009's manual sha256 dance: central **watches the project's GitHub Releases**, records every semver release as a candidate, and downloads the `.deb`s the fleet needs (the promoted release's among them) into the shared `.deb` store Players fetch from. As of [decision 0013](decisions/0013-unified-cache-root.md) that store is the derived `apps/` subdir of the single cache root (`PHOTO_WALL_CACHE_ROOT`), not a separate `PHOTO_WALL_APP_ROOT`. Discovery is automatic. So is promotion on a fresh install: the release sync promotes the newest
-deployable release until a Player is bound and a `.deb` has been downloaded, then holds it; an
-operator promotion overrides it and is never moved by the sync. Nothing is signed; the sha256 is a corruption check only. See [the operator release-sourcing flow](module-player-package.md#operator-release-sourcing-0010) for the model.
-
-**Configuration.** Release sourcing is **always-on** (0013 retired the opt-in gate): the worker polls GitHub and mirrors bytes into `<cache-root>/apps/` unconditionally; central serves them RO. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)); there is no separate `.deb`-store env to wire.
+**Configuration.** Release sourcing is always-on ([decision 0013](decisions/0013-unified-cache-root.md)): the worker polls GitHub and mirrors bytes into the cache root unconditionally; Central serves them read-only. Both mount the one cache root (see the [Central cache subsystem](module-central-cache.md)).
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `PHOTO_WALL_CACHE_ROOT` | central (RO) + worker (RW) | `/var/cache/photo-wall` | The one cache root; the `.deb` store is its derived `apps/` subdir. Optional (baked default) |
+| `PHOTO_WALL_CACHE_ROOT` | central (RO) + worker (RW) | `/var/cache/photo-wall` | The one cache root. Optional (baked default) |
 | `PHOTO_WALL_RELEASE_REPO` | worker | `mcurcio/photo-wall` | `owner/name` of the GitHub repo whose releases are polled |
 | `PHOTO_WALL_RELEASE_TOKEN` | worker | (unset) | Optional GitHub token; unauthenticated polling is rate-limited to ~60 requests/hour |
-| `PHOTO_WALL_RELEASE_PRERELEASES` | worker | off | Truthy to also track GitHub prereleases (drafts are always skipped) |
 | `PHOTO_WALL_RELEASE_POLL_SECONDS` | worker | `900` | Poll cadence in seconds |
 | `PHOTO_WALL_RELEASE_API_BASE` | worker | `https://api.github.com` | Base URL of the releases API; unset or empty means the default, an invalid URL fails at boot. Tests point it at a fake origin |
 
-**List, promote, refresh (all admin-authenticated).** These reach central's operator API; substitute your central origin and admin token:
+**Poll now (admin-authenticated).** Poll GitHub instead of waiting for the next cadence (coalesced; 202 `{"status": "polling"}`):
 
 ```sh
-# List tracked releases, newest first: tag / is_prerelease / deployable / promoted /
-# promoted_by ("auto" | "operator", null unless promoted) / has_os_image.
-curl --fail -H 'Authorization: Bearer <admin-token>' \
-  http://<central>/v1/operator/app/releases
-
-# Promote a version: 200 {"status": "promoted"}, and central starts downloading its .deb;
-# 404 unknown tag; 409 no .deb (undeployable); 422 not a version tag.
-curl -X POST -H 'Authorization: Bearer <admin-token>' \
-  http://<central>/v1/operator/app/releases/<tag>/promote
-
-# Poll GitHub now instead of waiting for the next cadence (coalesced; 202 {"status": "polling"}).
 curl -X POST -H 'Authorization: Bearer <admin-token>' \
   http://<central>/v1/operator/app/releases/refresh
 ```
 
-All three routes are always available: release sourcing is unconditional as of [decision 0013](decisions/0013-unified-cache-root.md), so the former **503 `release_sourcing_unconfigured`** branch (gated on the old `PHOTO_WALL_APP_ROOT`) has been removed.
+## Base-image auto-mirror (0012, removed)
 
-**Promoted vs. served.** A promote records your tag at once (`promoted_by: "operator"`) and, in
-the same transaction, queues the download of its `.deb`. `GET /v1/app/manifest` names the promoted
-`.deb` once its bytes are on disk; until then it names the last-good one (the latest earlier
-promotion whose `.deb` was on disk when it was replaced) if that is on disk, so Players are never
-broken. With neither on disk it names the promoted one, and the package route downloads it on
-request. A failed download is retried: a Player's next request asks again, and the five-minute
-`Prefetch` tick re-queues it after a transient failure; no re-promote is needed. Watch `promoted`
-and `promoted_by` in the list.
-
-**Offline / air-gapped.** There is no manual stage path: the hand-staging routes
-(`POST /v1/operator/app`, `PUT /v1/operator/app/current`) no longer exist, and central downloads
-every `.deb` from the download link of the GitHub release that lists it. A `.deb` already on disk
-keeps serving while the uplink is down.
-
-## Base-image auto-mirror (0012)
-
-> **Deprecated lane.** This section describes the V1 boot path (the netboot base without a node offer and the promoted `.deb`). The supported configuration is [Node control](#node-control): Pis boot by node path and Central ingests releases and you select them in the console. The V1 lane is kept until the [V1 follow-up](player-fleet-implementation-map.md) removes it; the console shows none of it.
-
-[Decision 0012](decisions/0012-netboot-base-auto-mirror.md) extends the same discover-and-mirror model to the **base squashfs**, so you no longer hand-stage it into a served directory. The fleet is heterogeneous: central serves **several base images at once**, one per version some Pi needs, resolved **per device**. There is **no fleet default and no promote-the-base action** — rollout is emergent (see *pin a canary* below).
-
-**Storage (the root of the old outage).** As of [decision 0013](decisions/0013-unified-cache-root.md) base bytes live at the derived **`<cache-root>/os-images/base-<tarball sha256>.squashfs`** (named by the sha256 of the release's base tarball, so a re-cut is a new file) under the single cache root (`PHOTO_WALL_CACHE_ROOT`, default `/var/cache/photo-wall`), **mounted RW on the worker and RO on central** — one cache PVC, no separate per-domain volume. The worker is the single writer, **asserts its cache is writable at boot** and fails loud (an ERROR log) if not, and self-heals a missing file at the serve seam (a read that finds no file publishes its fetch) — so a wiped or unmounted volume can no longer produce a silent, permanent `503`. On **NFS**, `flock` and `O_EXCL`/atomic-rename reliability across the mount is a documented precondition. Base serving is **always-on**; there is no "off" state. See the [Central cache subsystem](module-central-cache.md).
-
-| Variable | Where | Default | Meaning |
-|---|---|---|---|
-| `PHOTO_WALL_CACHE_ROOT` | worker (RW) + central (RO) | `/var/cache/photo-wall` | The one cache root; `base-<tarball sha256>.squashfs` files live in its derived `os-images/` subdir. Optional (baked default); base serving is always-on |
-| `PHOTO_WALL_PER_DEVICE_DEB` | Pi provisioner (`photo-wall-provision.service`) | (unset) | Opt-in: the Pi fetches the `.deb` of the exact tag its base was served this boot (`GET /v1/netboot/manifest`, serial-keyed) and posts base-health. Unset ⇒ unchanged 0010 global `.deb`, no base-health |
-
-This setting must be present in the Pi's base-image provisioner environment
-before it starts. Setting it only on the Kubernetes Central Deployment does not
-change an already booted Pi or cause that Pi to report base-health.
-
-**Discovery.** Automatic, on the same poll as the `.deb`: the worker reads each release's `manifest.json` `base_image` + `revision` and records the base facts on the catalog row. Discovery moves **no bytes** and changes **no device's target**. The heavy squashfs is downloaded only when a device actually needs a version.
-
-**A `503` is transient and self-heals — it is never a dead end.** The design does **not** promise "never `503`"; it promises a `503` is **bounded and self-heals**. A base a device needs but that is not yet cached returns a `503`, the worker fetches it in the background, and the diskless Pi retries on its next boot (fails-closed-and-reboots). A boot re-hydrate refills any file that went missing. The one accepted exception: a **fresh cluster's very first image** is `latest-discovered` and therefore **unverified** — a bad first image bricks initial bring-up until you pin a known-good version.
-
-**Per-device selection.** A Pi sends its serial; central resolves **one** tag by precedence: the device's **pin**, else **latest-verified** (the highest semver any device row not marked retired has reported base-healthy — a live query, never a stored pointer), else — empty cluster only — **latest-discovered**. Both the base and (with `PHOTO_WALL_PER_DEVICE_DEB`) the `.deb` come from that one tag. **Retiring a Player does not retire its device row**: nothing in Central marks a netboot device retired today, so a retired Pi's last healthy tag still counts toward latest-verified and its serial still netboots. Whether retire should also retire the device row is an open owner question ([slice 2, Question 4](operator-console-ux-pass2-onboarding.md#12-costs-deferrals-and-questions)).
-
-**Pin a canary / recover a device (admin-authenticated).** Rollout is emergent: pin one device to a candidate version; when it boots and posts base-health, `latest-verified` climbs and unpinned devices follow on their next boot — no separate promote step. The same route rolls a broken device back by pinning it to a known-good tag.
-
-```sh
-# Pin device <device-id> to <tag> (a canary, or a manual rollback). Proactively
-# fetches that tag's base (and .deb) so the device comes up on its next netboot.
-curl -X PUT -H 'Authorization: Bearer <admin-token>' -H 'Content-Type: application/json' \
-  -d '{"tag":"<tag>"}' http://<central>/v1/operator/devices/<device-id>/pin
-
-# Clear the pin: the device falls back to latest-verified.
-curl -X DELETE -H 'Authorization: Bearer <admin-token>' \
-  http://<central>/v1/operator/devices/<device-id>/pin
-```
-
-**Server-side rollback (the Pi is diskless).** The Pi persists nothing and cannot choose a tag, so rollback lives on central. When a device is served a target (a 200) but never posts it base-healthy and re-netboots, central marks that boot failed, fences the tag, and serves the device its own **known-good** on the next boot — **sticking** there (never re-serving the failing tag) until a newer tag appears or you pin it, so it cannot oscillate. A device with **no** prior known-good that cannot boot its served image boot-loops until you pin it (accepted).
-
-**Garbage collection.** `MaintainCache` runs hourly as an eager keep-set sweep, hourly, with no byte budget: it removes every release file under `os-images/` and `apps/` whose key is not desired (the window of the 3 newest stable node releases, the selected and the previous deployment, and the V1 roots: pins, known-goods, served tags, policy tags and fleet reservations), re-checking the desired set immediately before each unlink (mark and sweep, no lock; a root committed in the remaining instant costs one read-through re-download), sparing a file whose mtime is within `SERVE_GRACE` (1 h) of the run's marker file on the cache filesystem, or whose `last_served_at` is within 1 h of the database's clock, and a temp file not idle past `TEMP_GRACE` (1 h), at most 50 unlinks per run; `previews/` and `media/` are never touched ([`central/assets/maintenance.py`](../central/assets/maintenance.py)). So a re-cut's old
-`base-<tarball sha256>.squashfs` (about 1 GiB) is removed once nothing desires it. Asset rows,
-references and produced facts are never removed, so a key that becomes wanted again re-fetches. A wiped cache refills on demand: a read that
-finds no file publishes its fetch, and the five-minute `Prefetch` publishes the fetch of every
-desired asset missing from disk. A device row marked retired names no tag, so it keeps nothing desired; no operator action marks one today, and retiring a Player leaves its device row active (above).
-
-**Observability (`GET /v1/operator/netboot`, admin-authenticated).** A read-only view to answer "why did this device get this image / why won't it advance / why were bytes evicted": the **BASE_ROOT boot-assertion outcome** (so a failed base volume is visible, not only logged), the live **frontier** (`latest-verified`), each **device's** pin / known-good / last-served tag + boot outcome / sticky failed tag, and each **`base_cache`** row's state + eviction reason. (An operator UI over these fields is deferred; the backend fields ship here.)
-
-```sh
-curl --fail -H 'Authorization: Bearer <admin-token>' http://<central>/v1/operator/netboot
-```
-
-**Two assumptions worth stating (0012 errata E9).** (1) Base-health's server-side `running_tag == last_served_tag` check binds to the **live** `devices.last_served_tag`, relying on no concurrent re-serve of the same device interleaving between the per-device manifest fetch and the base-health post — which holds on the diskless target, since a genuine reboot restarts the whole squashfs fetch. (2) The appliance's origin-handoff writer preserves existing keys and does not explicitly clear the served tag on a global-path boot; this is harmless on the RAM-overlay netboot target (rebuilt fresh each boot), but a persistent-disk reuse of that path would need to clear it.
+[Decision 0012](decisions/0012-netboot-base-auto-mirror.md) served several base images per device, selected by a per-device pin or the latest base-healthy version, with server-side rollback. That whole path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): `/v1/netboot/base`, `/v1/netboot/manifest`, `GET /v1/operator/netboot`, the device pin routes, base-health and `PHOTO_WALL_PER_DEVICE_DEB` no longer exist, and migrations 069 and 070 drop their tables. A Node's base now comes from the release it is offered through its node boot offer, and the operator selects the release in the console ([Node control](#node-control)). The worker still mirrors each needed release's base squashfs into the cache root's `os-images/` subdirectory and the hourly `MaintainCache` sweep keeps the desired ones ([Central cache subsystem](module-central-cache.md)).
 
 ## Upgrading to content-keyed OS images (migration 028)
 
-Migration 028 re-keys every OS image from its release tag to the sha256 of its base tarball
-([idempotent jobs](central-idempotent-jobs.md) §8). It carries **no produced facts**: the owner
-decided that each desired OS image downloads once more after the upgrade, rather than trusting a
-file whose tag may have been re-cut since it was fetched. The cost, stated plainly:
-
-- A Pi that reboots before its image lands fails its fetch (`503`) and reboots again.
-- If GitHub is unreachable, or a wanted tarball was deleted upstream, Pis loop on `503` and reboot
-  until a download succeeds.
-- A device pinned to a deleted release stays stuck until you re-pin it.
-
-1. **Preflight, before upgrading.** Confirm the worker reaches the release origin
-   (`PHOTO_WALL_RELEASE_API_BASE`, default `https://api.github.com`). Then, for every desired
-   tag, check that its tarball URL answers. The desired tags are every active device's pin and
-   known-good, every tag served in the last 30 days, and, while no device has a known-good, the
-   newest release with an OS image (`GET /v1/operator/app/releases`, `has_os_image`). This lists
-   the device-named ones with their URLs:
-
-   ```sh
-   docker compose exec -T database psql -U photo_wall photo_wall -At -F ' ' -c "
-     SELECT DISTINCT r.tag, r.base_tarball_url FROM app_releases r JOIN devices d
-       ON d.retired_at IS NULL AND r.tag IN (d.attached_tag, d.known_good_tag,
-          CASE WHEN d.last_served_at >= EXTRACT(EPOCH FROM now()) - 30 * 86400
-               THEN d.last_served_tag END)
-     WHERE r.base_tarball_url IS NOT NULL ORDER BY r.tag"
-   # For each URL, fetch one byte: 206 or 200 means it answers; 404 means deleted upstream.
-   curl -sL -r 0-0 -o /dev/null -w '%{http_code}\n' '<base_tarball_url>'
-   ```
-
-   A tag whose tarball is gone will not boot after the upgrade. Re-pin its devices first.
-2. **Upgrade Central and the workers together** (Compose replaces both). 028 runs at start-up.
-3. **Delete the old `os-images/base-<tag>.squashfs` files.** Nothing reads them any more, and
-   they double the OS-image disk until removed. A new-style name is 64 hex digits; a tag name
-   starts with `v`:
-
-   ```sh
-   docker compose exec -T worker sh -c 'rm -f /var/cache/photo-wall/os-images/base-v*.squashfs'
-   ```
-
-   (Use your `PHOTO_WALL_CACHE_ROOT` if it is not the default.)
-4. **Watch the first downloads.** Each desired OS image downloads once, on the next `Prefetch`
-   (every five minutes) or on the first Pi that asks for it.
-
-**Rollback.** Migrations are forward-only. From 028's header, in this order:
-
-```text
-  a. End the new-shape deliveries, which the old code cannot decode:
-       UPDATE procrastinate_jobs SET status = 'cancelled'
-       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'todo';
-       UPDATE procrastinate_jobs SET status = 'failed'
-       WHERE task_name = 'photo_wall.os_image.fetch' AND status = 'doing';
-  b. Drop the CHECK, which the old code's tag-keyed references violate:
-       ALTER TABLE asset_references DROP CONSTRAINT asset_references_locator_names_the_key;
-  c. Revert the code.
-  d. UPDATE app_release_poll SET etag = NULL;
-     so the next sync lists every release again and re-references each OS image under its
-     tag: one download per desired OS image.
-```
-
-**Roll forward after a rollback:** repeat (a) for the old-shape deliveries, then
-
-```sql
-DELETE FROM schema_migrations WHERE name = '028_os_image_content_key.sql';
-```
-
-and deploy the new code: 028 runs again and re-keys every OS image from `app_releases`. It is
-safe to run twice.
+Migration 028 re-keyed every OS image from its release tag to the sha256 of its base tarball ([idempotent jobs](central-idempotent-jobs.md) §8) and carried no produced facts, so each desired OS image downloaded once more after that upgrade. Its upgrade and rollback procedure (a preflight over `app_releases` and the device pins, a rollback of `asset_references` and the release poll's ETag) is **withdrawn**: migration 070 drops `app_releases`, the device pins and the V1 fleet tables ([0019](decisions/0019-debian-packaging-with-debhelper.md)), so the queries cannot run, and a rollback past 070 is not supported (forward-only: restore a database backup instead). A deployment older than migration 028 must first upgrade on a release that predates 0019. The key naming survives: OS images are `os-images/base-<tarball sha256>.squashfs` in the cache root, and a wanted tarball that was deleted upstream is a transient `503` until a download succeeds ([Release sourcing](#release-sourcing-from-github-0010)).
 
 **Rolling Central back past stored protection refusals.** Runtime state (`runtime_state.snapshot`)
 records the Run that refused a protected activation or Program as `blocking_run_id` on that
@@ -421,7 +246,7 @@ The design, its protocol and its failure table are owned by [pass A](operator-co
 
 **Changing the admin token.** Change `PHOTO_WALL_ADMIN_TOKEN` in `.env` (or the deployment secret) and restart every Central process.
 - Every browser is signed out within 5 s and must sign in with the new token. This is the only "log out everywhere".
-- Every script still using the old token gets 401 until it is given the new one: the `curl` examples in this runbook, `scripts/demo_wall.py` (`DEMO_ADMIN_TOKEN`) and the netboot end-to-end harness (`scripts/test_netboot_e2e.py`).
+- Every script still using the old token gets 401 until it is given the new one: the `curl` examples in this runbook and `scripts/demo_wall.py` (`DEMO_ADMIN_TOKEN`).
 - Players are not affected; they authenticate with their own enrollment credentials.
 
 **Scripts keep using the bearer header.** `curl`, the demo and the test harnesses send `Authorization: Bearer <admin-token>` and need no cookie, marker header or `Origin`. A Bearer header decides alone: a wrong one gets 401 even if the request also carries a valid cookie.
@@ -448,22 +273,23 @@ The console is one page: a header (Central's health, the snapshot age with **Ref
 
 | Section | Addresses | For |
 |---|---|---|
-| **Wall** | `#/wall`; Edit layout: `#/wall/layout`; a frame: `#/wall/frames/<id>/<facet>`, facet `status` (the default), `binding` or `calibration` (the old `nowshowing` and `commissioning` addresses open `status` and `calibration`; `#/wall/frames/<id>` opens `status`) | The read-only plan, the select-only Unplaced tray, the To finish list, the first-run guidance and the Frame Inspector; [Edit layout](#operator-console-placing-moving-and-deleting-frames-and-the-unplaced-tray) holds every layout write. |
+| **Wall** | `#/wall`; Edit layout: `#/wall/layout`; a Frame's page: `#/wall/frames/<id>/<tab>`, tab `overview` (the default; `#/wall/frames/<id>` opens it), `position`, `picture` or `hardware` | The read-only plan, the Unplaced tray, the To finish list and the first-run guidance; one click on a Frame opens [its page](#operator-console-calibration-and-conflict-states); [Edit layout](#operator-console-placing-moving-and-deleting-frames-and-the-unplaced-tray) holds every layout write. |
 | **Now** | `#/now`; Show now: `#/now/show/scene`, `#/now/show/review` | Central's live Runs, [Show now](#now-show-a-scene-now), Run cards, and why a frame shows what it does. |
 | **Scenes** | `#/scenes`; `#/scenes/new/<step>` (optionally `?target=<frame-id>` when started from a Frame); `#/scenes/<id>/edit/<step>` | [Making and editing Scenes](#scenes-make-a-scene-step-by-step). Steps: `kind`, `photos`, `frames`, `media` (hand-picked only), `playback`, `review`. |
 | **Schedule** | `#/schedule`; `#/schedule/new/<step>` | [Programs](#schedule-a-program-step-by-step). Steps: `scene`, `when`, `review`. |
 | **Sources** | `#/sources`; `#/sources/new/<step>`; `#/sources/<name>/edit/<step>` | [Sources](#sources-add-and-manage-a-source). Steps: `library` (skipped with one known connection), `tags`, `narrow`, `name`, `review`. |
-| **Players** | `#/players`; one Player: `#/players/<device-id>` | The [Players list and Player pages](#the-players-list-and-the-player-page). The old `#/equipment` address opens `#/players`. |
+| **Hardware** | `#/hardware`; one Pi in focus: `#/hardware?pi=<device-id>`; one Pi: `#/hardware/<device-id>` | The [Hardware list and Hardware pages](#the-hardware-list-and-the-hardware-pages). |
+| *Software and screens* (no sidebar entry) | one Pi: `#/players/<device-id>` | The [Software and screens page](#the-software-and-screens-page), reached from a Pi's Hardware page. There is no list at `#/players`, and the old `#/equipment` and `#/players` addresses open the Wall. |
 | **Releases** | `#/releases`; Update the wall: `#/releases/update/<tag>…` | [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall). |
 | **Needs attention** | `#/attention` | Every Frame and Player incident, each linked to where it shows. |
 
-**Show and Wall are organization, not permission.** There is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)); the sections change what you are looking at, never what you may do. Calibration controls ([the Calibration facet](#operator-console-calibration-and-conflict-states)) are reachable only from the Wall. The four Show sections and Needs attention show frame health as status only (R4). This is checked by a test that walks what the Show and Needs attention pages import, and a browser test that visits each of their sample addresses (`tests/test_console_routes_r4.py`, `tests/browser/test_console_shell_browser.py`).
+**Show and Wall are organization, not permission.** There is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)); the sections change what you are looking at, never what you may do. Display controls ([a Frame's Position and Picture tabs](#operator-console-calibration-and-conflict-states)) are reachable only from the Wall. The four Show sections and Needs attention show frame health as status only (R4). This is checked by a test that walks what the Show and Needs attention pages import, and a browser test that visits each of their sample addresses (`tests/test_console_routes_r4.py`, `tests/browser/test_console_shell_browser.py`).
 
 **Where an address leads.**
 - An address the console does not know goes to the Wall (`#/wall`), always; with no Frames its first-run guidance is there.
 - Pages read "Loading…" until the first snapshot. An address naming a frame or Scene that no longer exists then says so ("Frame lobby-left: This no longer exists.", "Scene evening: This Scene no longer exists.").
 - An address naming a step that does not exist, or does not apply (`media` for a live Scene), opens the step the draft last showed, or its first step. An address may skip ahead; the steps it skipped are not ticked in the stepper.
-- On the Wall, choosing a frame or a facet updates the address in place, and a frame reached by an address (typed, Back, or a link from the strip, a Player page or Needs attention) shows its Surface. A Frame opens on **Status** unless the visit comes from Needs attention or a Player page, which open the facet that shows the cause (Binding for Player, Output and Panel problems, Calibration for calibration). The Wall link in the sidebar always opens the daily face, never Edit layout.
+- On the Wall, one click on a Frame opens its page as a new history entry (Back returns to the plan); choosing a tab updates the address in place, and going back to the plan from a Frame shows its Surface. A Frame opens on **Overview** unless the visit comes from the attention strip, Needs attention or a Player page, which open the tab that shows the cause (Hardware for Player, Output and Panel problems, Position for calibration). The Wall link in the sidebar opens the Wall as last shown from another section, the plan from a Frame page, and never Edit layout.
 
 **Drafts.** Each flow (a Scene, a Program, a Source, Show now) holds one unsaved draft. It survives moving between steps, going to another section (the Wall included), a refresh, and a session that ends (above). A section holding one is marked "Draft" in the sidebar and offers **Resume draft (Draft)** and **Discard draft** in place of its New button. Only saving (or Activate now with a known outcome), Discard, Log out or reloading the page ends a draft. **A reload loses every draft**: drafts live only in this tab's memory (flow design Question 5, built on its default).
 
@@ -475,7 +301,7 @@ The console is one page: a header (Central's health, the snapshot age with **Ref
 
 ## Operator console: refresh, the snapshot-age clock, and the guidance banner
 
-The console has **no push channel** — the player WebSocket is player-only — so every region reads from **one timestamped snapshot**: a single atomic read of `/v1/operator/inventory`, `/v1/operator/runtime` and `/v1/operator/media` (the design calls this **Plane A**; see [§9](operator-console-ux-design.md#9-storage-lifecycle--refresh) and [§4a](operator-console-ux-design.md#4a-the-two-plane-state-model) of the console design). The wall plan, the Players list, the Frame Inspector, and each Frame's `planned` fact all render from that same snapshot (a Player page adds its own node and V1 reads, each with its own read time), so a Frame's binding row and its `planned` fact always share one age. Between refreshes the console can be stale, and it never hides this.
+The console has **no push channel** — the player WebSocket is player-only — so every region reads from **one timestamped snapshot**: a single atomic read of `/v1/operator/inventory`, `/v1/operator/runtime` and `/v1/operator/media` (the design calls this **Plane A**; see [§9](operator-console-ux-design.md#9-storage-lifecycle--refresh) and [§4a](operator-console-ux-design.md#4a-the-two-plane-state-model) of the console design). The wall plan, the Players list, the Frame page, and each Frame's `planned` fact all render from that same snapshot (a Player page adds its own node and V1 reads, each with its own read time), so a Frame's binding row and its `planned` fact always share one age. Between refreshes the console can be stale, and it never hides this.
 
 **The snapshot-age clock.** The global bar always reads **"updated N s ago"** next to a **Refresh** control. The age is the honest time since the last successful snapshot, not a freshness guarantee — it tells you exactly how stale what you are looking at may be. Pressing **Refresh** re-fetches them together as one new snapshot and resets the clock. Because a stale read can never silently drive a wrong write, mutations still carry their concurrency tokens (`expected_generation`, `expected_revision`, an idempotent `activation_id`), so an action taken against a stale snapshot resolves to an explicit "the world moved" conflict rather than a silent wrong success.
 
@@ -487,13 +313,13 @@ The console has **no push channel** — the player WebSocket is player-only — 
 
 **To finish.** Once Frames exist, the Wall lists its own unfinished items above the plan, one row per item in Frame order, each with one link: "lobby-left · not on the plan" [Edit layout], "lobby-left · needs a Player" [Binding], "lobby-right · needs calibration" [Calibration]. Calibration is asked only of a bound Frame. The list is worked out from the snapshot each time, with no stored flag, and is absent when nothing is left; a new Frame or a rebind brings an item back by itself. These items are never attention rows. The Players page lists its own: boxes **Not driving a Frame** ([below](#the-players-list-and-the-player-page)).
 
-**Put content on a Frame.** Select the Frame on the Wall. Once it is bound and its calibration is valid, **Choose content for this Frame** on the Calibration facet opens a new Scene with that Frame selected on the Frames step. The **Status** facet (the default) also offers **Make a Scene** with the same initial selection. Review the target checkboxes: add or remove Frames explicitly, then choose a live Source or hand-picked media. Save the Scene, then **Show now** for immediate activation or **Schedule it** as a Program. These authoring links do not activate content by themselves. The facet also links to existing Scenes. A Frame owns its location and calibration; the Scene owns the content and target choice, and a Run or Program activates it. The first-run banner names this path after binding and calibrating.
+**Put content on a Frame.** Open the Frame's page from the Wall. Its **Overview** tab (the default) offers **Make a Scene**, which opens a new Scene with that Frame selected on the Frames step. Review the target checkboxes: add or remove Frames explicitly, then choose a live Source or hand-picked media. Save the Scene, then **Show now** for immediate activation or **Schedule it** as a Program. These authoring links do not activate content by themselves. The tab also links to existing Scenes. A Frame owns its location and calibration; the Scene owns the content and target choice, and a Run or Program activates it. The first-run banner names this path after binding and calibrating.
 
 If a new Scene draft is already open, following either Frame link keeps that draft. It does not add a target behind your back; the Scene explains this and offers **Choose Frames** so you can select the Frame yourself. A dirty edit of another Scene retains the flow's **Resume or Discard** choice.
 
 ## Operator console: wall health and the attention strip
 
-Every Frame tile, the Frame Inspector header, the Unplaced tray, the frame badges on Now and the frame lists of the Scene flow and Run cards show one **health** label for each Frame, so the same Frame never reads differently in two places; each [Player page](#the-players-list-and-the-player-page) shows the Player app's last-reported age from the same source, beside the host layers'. The plan tile shows a short form; the full label, with its age, is in the Inspector header and in the tile's accessible name. The states, their order and their wording are owned by the [pass 2 design, §4](operator-console-ux-pass2.md#4-per-frame-health-one-closed-set-one-classifier).
+Every Frame tile, the Frame page header, the Unplaced tray, the frame badges on Now and the frame lists of the Scene flow and Run cards show one **health** label for each Frame, so the same Frame never reads differently in two places; each [Player page](#the-players-list-and-the-player-page) shows the Player app's last-reported age from the same source, beside the host layers'. The plan tile shows a short form; the full label, with its age, is in the Frame page header and in the tile's accessible name. The states, their order and their wording are owned by the [pass 2 design, §4](operator-console-ux-pass2.md#4-per-frame-health-one-closed-set-one-classifier).
 
 **What the labels are based on.** A label reports **Central's record of the last readiness report it accepted from the Player**, aged on Central's clock at the moment of the snapshot. It is **not** a live video readback, and nothing on the console says "LIVE", "online" or "connected". A Frame that reads healthy may still be dark (a failed panel, a failed decode); the console cannot confirm lit pixels. The `planned` fact ("On top: …") is **Central's Runtime projection** (the top Run on the Frame), never confirmed playback. A healthy Player reports about twice a second.
 
@@ -502,22 +328,22 @@ Every Frame tile, the Frame Inspector header, the Unplaced tray, the frame badge
 | **Player app last reported N s ago** | Central accepted a report from the bound Player's app within the silence threshold, and nothing else is wrong. This is the healthy state. | Nothing. |
 | **Player app silent · last reported N min ago** (alarm; the tile says "Player app silent") | The Player app has not had a report accepted for longer than the silence threshold; the box itself may still be up (its other layers are on the Player page). The Pi may be off, off the network, crashed, or talking to Central but having its reports refused. | Check power and network at the Frame. If the Central pill is not ok, fix Central first (below). If it stays silent after the Pi is back, restart the Player. |
 | **Enrolled N s ago, no report yet** | The Player enrolled (its process started) but Central has not yet accepted a report from it. A to-do for up to the threshold after enrolling, then an **alarm**. A Player that restarts in a loop keeps resetting this age and may stay a to-do. | Wait a few seconds after a boot. If it turns into an alarm, or you see the enrolled age keep resetting, check the Player's logs for a crash loop. |
-| **Output interrupted (Central's inference: Display Host reported the app surface invalidated or withdrawn · recorded N s ago) · the Run continues** (alarm) | Central holds an unresolved Output-loss record for this Frame's current Binding, from what the named node layer reported: Display Host an invalidated or withdrawn app surface on this Output, or the App Effect Broker "reported the app process exited" (which Central applies to every Output linked to that process). "· the Run continues" appears only when a live Run targets the Frame. Only this Output's contribution is interrupted; the Run, other Frames and Actuators continue. The tile reads "Output interrupted · the Run continues", or "Output interrupted" with no live Run. A Frame with no such record shows nothing, which is not proof the Output is fine: Central records only the losses it could link. | Open the Frame's Binding facet and its Player page; check the Panel, cable and the named layer. |
+| **Output interrupted (Central's inference: Display Host reported the app surface invalidated or withdrawn · recorded N s ago) · the Run continues** (alarm) | Central holds an unresolved Output-loss record for this Frame's current Binding, from what the named node layer reported: Display Host an invalidated or withdrawn app surface on this Output, or the App Effect Broker "reported the app process exited" (which Central applies to every Output linked to that process). "· the Run continues" appears only when a live Run targets the Frame. Only this Output's contribution is interrupted; the Run, other Frames and Actuators continue. The tile reads "Output interrupted · the Run continues", or "Output interrupted" with no live Run. A Frame with no such record shows nothing, which is not proof the Output is fine: Central records only the losses it could link. | Open the Frame's Hardware tab and its Player page; check the Panel, cable and the named layer. |
 | **No Panel listed as connected at the Player app's last enrollment (may be stale)** (alarm) | When the Player app last enrolled, it did not list a connected Panel on the bound Output. This is Central's enrollment record, not a live reading. The tile reads "No Panel listed at the last enrollment". | Check the Panel's power and cable, then restart the Player so the Player app enrolls again. |
-| **Needs calibration** (to-do) | The Frame's calibration is not valid, so nothing is shown on it. This is normal for a new or newly bound Frame. | Open the Frame's [Calibration facet](#operator-console-calibration-and-conflict-states) and save a calibration. |
-| **Needs a Player** (to-do) | No Player output is bound to the Frame. | Open its [Binding facet](#operator-console-onboarding-binding-and-auto-recovery) and choose a free output. |
+| **Needs calibration** (to-do) | The Frame's calibration is not valid, so nothing is shown on it. This is normal for a new or newly bound Frame. | Open the Frame's [Position tab](#operator-console-calibration-and-conflict-states) and press Done. |
+| **Needs a Player** (to-do) | No Player output is bound to the Frame. | Open its [Hardware tab](#operator-console-onboarding-binding-and-auto-recovery) and choose a free output. |
 
 **The silence threshold is about 31.5 s.** Central serves it with the inventory; its single source is `contracts/liveness.py`, shared with the Player's own retry timing. It is long enough that one failed Player cycle against a responsive Central does not raise a false alarm, so a powered-off Pi reads "Player app silent" within about 31.5 s plus one 5 s poll. A Central that is answering slowly (near its 15 s request timeout) can make a live Player briefly read silent. The derivation and its costs are in [pass 2 §2](operator-console-ux-pass2.md#2-the-liveness-signal).
 
 **Panel hot-plug is not detected on the Wall.** Frame health uses the Panel record from the Player app's last enrollment. Unplugging or plugging in a Panel afterwards changes nothing on the Wall until the Player app enrolls again (a restart); the Player page's Display Host row shows Display Host's current per-Output connector state where the node lane runs. This is a known gap, deferred ([pass 2 §12](operator-console-ux-pass2.md#12-costs-deferrals-and-questions)).
 
-**The attention strip.** A one-line strip under the status bar counts incidents only, for example "2 Frames · 1 Player need attention", or "No Frame or Player needs attention", with "· K awaiting a first report" when K Frames are bound to a Player app that has not reported yet and is still within the silence threshold. A Frame counts when its health is an alarm; a Player counts when it is Bound and has a [host incident](#host-health-on-the-players-pages). A Player incident alone makes the strip an alarm. Unbound and needs-calibration Frames are not counted: they are the Wall's **To finish** items. While the fleet host read has failed or not yet loaded, the summary ends " · host health not read", so missing host rows never read as health. **Show list** opens a list (Frame rows, then Player rows, up to 8 entries and "and M more"). On the Wall, Players and Needs attention pages a Frame entry is a button: it opens the Wall on the Frame's Surface, selects the Frame, and opens the Inspector on the facet where the cause is shown (Binding for Player, Output and Panel problems). A Player entry reads, for example, "pi-07 (Frame lobby-left) — Host Management silent · last reported 2 min ago" with a [Frame lobby-left] button and a link to the Player page. On the Show sections (Now, Scenes, Schedule, Sources) every entry is text only, so reading them never abandons show work. **Show all** opens **Needs attention** (`#/attention`), the same list at full width with no cap, where each entry links to the Frame's facet (`#/wall/frames/<id>/<facet>`) and Player rows to the Player page.
+**The attention strip.** A one-line strip under the status bar counts incidents only, for example "2 Frames · 1 Player need attention", or "No Frame or Player needs attention", with "· K awaiting a first report" when K Frames are bound to a Player app that has not reported yet and is still within the silence threshold. A Frame counts when its health is an alarm; a Player counts when it is Bound and has a [host incident](#host-health-on-the-players-pages). A Player incident alone makes the strip an alarm. Unbound and needs-calibration Frames are not counted: they are the Wall's **To finish** items. While the fleet host read has failed or not yet loaded, the summary ends " · host health not read", so missing host rows never read as health. **Show list** opens a list (Frame rows, then Player rows, up to 8 entries and "and M more"). On the Wall, Players and Needs attention pages a Frame entry is a button: it opens the Frame's page on the tab where the cause is shown (Hardware for Player, Output and Panel problems). A Player entry reads, for example, "pi-07 (Frame lobby-left) — Host Management silent · last reported 2 min ago" with a [Frame lobby-left] button and a link to the Player page. On the Show sections (Now, Scenes, Schedule, Sources) every entry is text only, so reading them never abandons show work. **Show all** opens **Needs attention** (`#/attention`), the same list at full width with no cap, where each entry links to the Frame's page at that tab (`#/wall/frames/<id>/<tab>`) and Player rows to the Player page.
 
 **When Central's scheduler is not ok.** If the Central pill reads something like "Central: scheduler stale", the strip replaces the silent-Player entries with one line, for example "5 frames silent — Central's scheduler is stale; Players may be unable to report until it recovers." Fix Central (its logs and `/healthz`) before visiting the Pis. Entries with another cause, such as no Panel listed, stay listed.
 
 ## Operator console: placing, moving, and deleting Frames (and the Unplaced tray)
 
-In the console (served at `/` since the cutover, aliased at `/console`) the wall plan is on the **Wall** section (`#/wall`). The daily Wall is read-only: selecting a tile opens the Frame's Status, and the Unplaced tray is a select-only list. Every write in this section happens in **Edit layout** (`#/wall/layout`), opened by the **Edit layout** button (or **Add first frame**, or a To finish "not on the plan" link). Its header reads "Editing layout" with **Done**, which returns to the daily face, on the selected Frame's Status when one is selected; the Frame Inspector is not shown there. Each Surface is a flat millimetre plan and its Frames are drawn as rectangles from their `x_mm/y_mm/width_mm/height_mm`. Dragging or entering measurements uses the operator routes documented above ([reposition and remove Frames](#operator-api-reposition-and-remove-frames)) or the existing `POST /v1/operator/frames`. Selecting a Surface *filters* the plan to that Surface's Frames; a Surface is a bare text label, not something you act on. This mirrors the "reading & building the wall" walkthrough (J3) in the [console design](operator-console-ux-design.md).
+In the console (served at `/` since the cutover, aliased at `/console`) the wall plan is on the **Wall** section (`#/wall`). The daily Wall is read-only: one click on a tile (or an Unplaced tray entry) opens the Frame's page. Every write in this section happens in **Edit layout** (`#/wall/layout`), opened by the **Edit layout** button (or **Add first frame**, or a To finish "not on the plan" link). Its header reads "Editing layout" with **Done**, which returns to the daily face. Each Surface is a flat millimetre plan and its Frames are drawn as rectangles from their `x_mm/y_mm/width_mm/height_mm`. Dragging or entering measurements uses the operator routes documented above ([reposition and remove Frames](#operator-api-reposition-and-remove-frames)) or the existing `POST /v1/operator/frames`. Selecting a Surface *filters* the plan to that Surface's Frames; a Surface is a bare text label, not something you act on. This mirrors the "reading & building the wall" walkthrough (J3) in the [console design](operator-console-ux-design.md).
 
 **Place a new Frame.** In Edit layout, on a new installation with no Frames, the Surface selector starts at **wall**. Drag a rectangle on the plan or press **Add frame with measurements** to use the keyboard and enter its position and physical size in millimetres. Both paths open the same form for the Frame's **id** and **Frame profile** — pixel width/height and diagonal (plus whether it is video-capable). The console sends one `POST /v1/operator/frames` carrying the chosen `surface_id`, `x_mm`, `y_mm`, `width_mm`, `height_mm` and profile. Position `(0, 0)` is reserved for old Unplaced frames; choose another position. Central runs the same orientation-coherence guard as every Frame creation: if the aperture orientation would disagree with the profile (a portrait matte declared against a landscape panel, or vice versa) the create is refused and nothing is added. The profile values are **Frame facts** — operator-declared and persisting across a later panel swap — not a live Panel reading.
 
@@ -529,7 +355,7 @@ In the console (served at `/` since the cutover, aliased at `/console`) the wall
 
 The reference guard does not ban explicit future Scene targets for a Frame id that is currently absent. That permits recovery: an operator can retain or author future content for an id and recreate the persistent Frame later. Until the Frame exists and is bound and calibrated, Central has no Output to receive that content.
 
-**The Unplaced tray.** Frames created by the old UI all sit at `wall`/(0,0) with no distinct position; rather than pile them at the origin as permanent clutter, the console collects such geometry-less Frames in an **Unplaced tray** beside the plan, as a list. On the daily Wall, selecting a tray entry opens its Inspector, so a bound Frame that is not placed is still one click away. In Edit layout you can drag a Frame from the tray onto the plan or select it and use **Edit placement** to give it a measured position. Either sends the same `PATCH` as a move, and the Frame then leaves the tray and joins the plan. You can also delete it under the same delete checks above.
+**The Unplaced tray.** Frames created by the old UI all sit at `wall`/(0,0) with no distinct position; rather than pile them at the origin as permanent clutter, the console collects such geometry-less Frames in an **Unplaced tray** beside the plan, as a list. On the daily Wall, a tray entry opens the Frame's page, so a bound Frame that is not placed is still one click away. In Edit layout you can drag a Frame from the tray onto the plan or select it and use **Edit placement** to give it a measured position. Either sends the same `PATCH` as a move, and the Frame then leaves the tray and joins the plan. You can also delete it under the same delete checks above.
 
 A freshly placed or moved Frame **settles to its final position on the next snapshot refresh**: the plan re-fits per Surface (it scales each Surface's millimetre space to the viewport), so a rectangle drawn or dragged optimistically can shift slightly once the authoritative snapshot returns, while its stored millimetre geometry is exactly what you entered.
 
@@ -537,33 +363,39 @@ A freshly placed or moved Frame **settles to its final position on the next snap
 
 New hardware appears in the console before it does any work. Following [decision 0006](decisions/0006-central-authority-and-stateless-players.md), Central is the source of truth and a Player is a replaceable box behind a Frame. The design of this flow, and its costs, are owned by [pass 2, slice 2](operator-console-ux-pass2-onboarding.md).
 
-### The Players list and the Player page
+### The Hardware list and the Hardware pages
 
-The **Players** section (`#/players`) has one row per physical box, keyed by its fleet device identity (derived from the serial it claims at netboot), so the same Pi never appears twice. The design is owned by the [domain-driven console design, pass 1](operator-console-ddd.md#9-screens-and-read-models). The list reads the same `/v1/operator/inventory` snapshot as the plan plus the netboot read below, so a new Pi appears the moment it netboots or enrolls. It makes no per-box node read; its host columns come from the console's one [fleet host read](#host-health-on-the-players-pages). The list is **one table**: Bound Players first, worst first by host tier (alarm, notice, unknown, ok), then by name; then spares (Unbound, Not enrolled) by name, with plain values and their receipt age but none of Central's threshold judgements (no band, no "hot", no "silent"), so a spare is never alarmed; then retired boxes, whose host columns read "Not read: Player retired". There is no counts line (the attention strip counts incidents). At phone width the table scrolls sideways. Each row names the Player ("Player …a1b2c3", the last six characters of its claimed serial), links to its Player page, and shows:
+The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**), keyed by its fleet device identity (derived from the serial it claims at netboot), so the same Pi never appears twice. The design is owned by [Console by Domain](decisions/0018-console-by-domain-and-design-system.md) and the earlier [domain-driven console design](operator-console-ddd.md#9-screens-and-read-models). The list reads the same `/v1/operator/inventory` snapshot as the plan plus the netboot read below, so a new Pi appears the moment it netboots or enrolls. It makes no per-box node read; its host columns, and its **Link** column (whether Central's hub holds the Pi's Node API link, from the fleet host read's `bus_link`), come from the console's one [fleet host read](#host-health-on-the-players-pages). The list has three groups, each its own table: **Driving a Frame** (Bound Pis, worst first by host tier: alarm, notice, unknown, ok, then by name), **Not driving a Frame** (boxes seen at boot but never enrolled first, then Unbound Pis, newest registration first; plain values and their receipt age but none of Central's threshold judgements, so a spare is never alarmed) and **Retired** (host columns read "Not read: Player retired"). There is no counts line (the attention strip counts incidents). At phone width a table scrolls sideways. Each row names the Pi ("Player …a1b2c3", the last six characters of its claimed serial), links to its Hardware page, and offers **Focus on** that Pi: `#/hardware?pi=<device-id>` narrows every group to it, a chip clears it, and leaving the list ends it (the focus lives only in the address).
 
-- **Standing and Frames**: **Not enrolled** (seen at boot, never enrolled), **Unbound** (enrolled, no Output bound: a new Pi, or one whose Frames were all unbound), **Bound** (at least one Output bound) or **Retired** (permanently out of service), then a link to each Frame its Outputs are bound to.
-- **Host columns**: Host Management (when it last reported), Temperature, Throttling, CPU, Storage (free space in `/run`, plus App Manager's last storage refusal), Network (link and link state, link speed, address, and when the host facts were first received) and Software (kernel; the base Host Management reported; Central's offer, the base in the boot offer this boot claimed; and "Base differs: …" when those two tags differ). Each cell keeps its label ("Temperature: 81 °C · hot …"). The host columns are hidden while node control is not on.
+- **Standing and Frames**: **Not enrolled** (seen at boot, never enrolled), **Unbound** (enrolled, no Output bound), **Bound** (at least one Output bound) or **Retired** (permanently out of service), then a link to the Binding of each Frame its Outputs are bound to, and, for a Bound Pi, one health badge.
+- **Host columns**: Link (the Node API link and Host Management's last report), Temperature and throttling, CPU and `/run` storage (plus App Manager's last storage refusal), and Network (link and link state, link speed, address, and when the host facts were first received). Each cell keeps its label ("Temperature: 81 °C · hot …"). The host columns are hidden while node control is not on.
 
-**Not driving a Frame** sits below the table: Unbound Players and boxes seen at boot but never enrolled, each with its Host Management line. They are listed, never counted, and never block anything. Boxes seen at boot come first (Central serves no first-boot time for them), then Unbound Players, newest registration first.
+**A Pi's Hardware page** (`#/hardware/<device-id>`) is the one home for the box itself. Each section shows its own read time and fails on its own ("This section could not be shown"):
 
-**The Player page** (`#/players/<device-id>`) is the one home for that box. Each section shows its own read time and fails on its own ("This section could not be shown") without taking down the rest:
+- **Header**: name, standing, the serial **labelled as a claim**, **Enrollment**, links to the bound Frames' Bindings, the full device and Player ids under **Identifiers**, and a link to the Pi's Software and screens page.
+- **Reboot** (with its history): **Reboot Player** targets Host Management's one current session; when it cannot, the button is disabled and says why (for example, Central's effect gate is closed). The dialog names the bound Frames and their live Runs: the Run stays active and no other Frame or Actuator gets a command. Each request then reads one state: Requested · delivery unknown, Outcome unknown, Received, Accepted or Rejected by Host Management, or Host Management reported the reboot started · completion unknown. If the answer is lost, **Retry the same request** resends the identical request. A **new** request cannot be sent while another reboot request for the same session is outstanding (unexpired on Central's clock and not rejected; Accepted and started requests count). The console checks Central's served `outstanding` at the moment of sending, and Central refuses a new command id with 409 `node_reboot_outstanding`, which reads "Another reboot request for this Player is outstanding; close this dialog and review it."
+- **Health**: the box's [host health](#host-health-on-the-players-pages) in groups (Thermal, Power and throttling, Compute, Storage, Network, Software), the host facts' one receipt line, and an **Every reported metric** disclosure with the raw sample, its fault code and "Host samples do not show visible pixels." Health is hidden while node control is not on and for a retired box.
+- **Link and sessions**: whether Central's hub holds the Node API link, and Host Management's session: when it last reported, and which session and boot.
+- **Danger zone**: **Retire player** (Unbound only). A Bound Pi shows links to its Frames' Bindings instead: unbind it there first.
 
-- **Header**: name, standing, the serial **labelled as a claim** (the console cannot confirm which physical box sent it), **Enrollment** ("Player app enrolled N s ago (authority epoch N)", Central's enrollment record), links to bound Frames, the full device and Player ids under **Identifiers**, and **Reboot** (below). Reboot has its own error boundary, so a fault in it cannot take down the header.
-- **Health** (first): the box's [host health](#host-health-on-the-players-pages) in groups (Thermal, Power and throttling, Compute, Storage, Network, Software), the host facts' one receipt line, and an **Every reported metric** disclosure with the raw sample, its fault code and "Host samples do not show visible pixels." Health is hidden while node control is not on and for a retired box.
+### The Software and screens page
+
+**A Pi's Software and screens page** (`#/players/<device-id>`, reached from its Hardware page) holds what runs on the box and the screens it drives. Each section shows its own read time and fails on its own ("This section could not be shown") without taking down the rest:
+
+- **Header**: name, standing, the serial **labelled as a claim** (the console cannot confirm which physical box sent it), **Enrollment** ("Player app enrolled N s ago (authority epoch N)", Central's enrollment record), links to bound Frames, the full device and Player ids under **Identifiers**, and a link to the Pi's Hardware page.
 - **Layers**: one row per node layer, each naming its source. Host Management and App Manager show when they **last reported**. App Effect Broker shows its app-process fact and when Central **first received** it; its last report reads "Unknown: App Effect Broker sends evidence only on change, and Central stores no receipt of its polls". Display Host shows when it **last reported** (its newest display exchange on this boot) and, for each Output, three facts it reported: the Panel connector (connected or not), the admitted surface ("the app's surface for Frame … (binding generation g)" or "Display Host reported no app surface admitted"), and the compositor receipt for that surface with its age on Display Host's own clock. A compositor receipt is not proof of Panel pixels, and the console judges no staleness. When Display Host has reported no Output on this boot, the row says so. The Player app shows its last-reported readiness. "Panel pixels: Unknown: no layer observes them" closes the list. A silent Player app with a reporting host shows both ages, so a crashed app reads differently from a dead box.
 - **Outputs**: each Output's state ("Bound to Frame …", "Free", "No Panel listed at the last enrollment", or "Retired with its Player"; "No outputs reported" when there are none), **Bind to a frame…**, **Identify Panel**, and the Panel record at the Player app's last enrollment, labelled "may be stale". A bound Output also shows its [Output interruption](#operator-console-wall-health-and-the-attention-strip) when Central records one.
-- **Boot**: the current node session's boot as a claim (or "No current node session"), then the latest node boot offer ("not proof the Player booted"). A later boot never says what caused it. If Central's newest boot record for this box is not a node boot, one warning line says so: "Booted by the deprecated path: Central's newest boot record for this box is a deprecated boot offer (or a base image served without an offer) · recorded N ago; its kernel command line lacks `photowall.node=v2`; Select and Stage do not reach it." Fix that Pi's command line ([Node control](#node-control)).
-- **Reboot** (in the header): **Reboot Player** targets Host Management's one current session; when it cannot, the button is disabled and says why (for example, Central's effect gate is closed). The dialog names the bound Frames and their live Runs: the Run stays active and no other Frame or Actuator gets a command. Each request then reads one state: Requested · delivery unknown, Outcome unknown, Received, Accepted or Rejected by Host Management, or Host Management reported the reboot started · completion unknown. If the answer is lost, **Retry the same request** resends the identical request. A **new** request cannot be sent while another reboot request for the same session is outstanding (unexpired on Central's clock and not rejected; Accepted and started requests count). The console checks Central's served `outstanding` at the moment of sending, and Central refuses a new command id with 409 `node_reboot_outstanding`, which reads "Another reboot request for this Player is outstanding; close this dialog and review it."
+- **Boot**: the current node session's boot as a claim (or "No current node session"), then the latest node boot offer ("not proof the Player booted"). A later boot never says what caused it.
 - **App**: the node app operations, each with its named state (for example "Rejected by App Effect Broker", or "Ended by a later boot" for a stage that ran before the Player rebooted). **Stage app** switches this Player's app for this boot only (see [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall)). **Qualified fallback** shows the app environment the Player app linked, lets you qualify it, and lists the stored acceptances.
-- **Danger zone**: **Retire player** (Unbound only) and **Unbind all outputs** (Bound only).
+- **Danger zone**: **Unbind all outputs** (Bound only). Retire is on the Pi's Hardware page.
 
-A Player page reads that box's node state every 5 s while it is open and visible. If Central was started without node control, a banner sits above every page ("Node management is off on this Central …"), the Player page shows one line, "Node records are not shown: node management is off (see the banner).", in place of its node sections, and its header, Outputs, Bind, Identify, Retire and Unbind still work. That is a misconfiguration: start Central as [Node control](#node-control) describes. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
+A Pi's pages read that box's node state every 5 s while it is open and visible. If Central was started without node control, a banner sits above every page ("Node management is off on this Central …"), the Player page shows one line, "Node records are not shown: node management is off (see the banner).", in place of its node sections, and its header, Outputs, Bind, Identify and Unbind still work. That is a misconfiguration: start Central as [Node control](#node-control) describes. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
 
-The serial comes from a separate, optional read of `GET /v1/operator/netboot`, refreshed at most every 30 s or when the set of Players changes. If that read fails, the Players list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
+The serial comes from a separate, optional read of `GET /v1/operator/netboot`, refreshed at most every 30 s or when the set of Players changes. If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
 
 ### Host health on the Players pages
 
-The Players table, the Player page's **Health** section, the Status facet's host chip and the Player rows on Needs attention all come from one read, `GET /v1/operator/node/hosts`, which the console sends every 15 s while the tab is visible and node control reads on. It serves each active box's values from its **current boot only**, aged on Central's clock, plus Central's thresholds as numbers; the console bands values against those numbers and composes every basis from them. The design and every wording are owned by [console DDD §62](operator-console-ddd.md#62-wording-and-truth-kinds); the route and its storage are mapped in the [fleet implementation map](player-fleet-implementation-map.md#fleet-host-health-batch-4-2026-10-02).
+The Players table, the Player page's **Health** section, the Frame page Overview's host chip and the Player rows on Needs attention all come from one read, `GET /v1/operator/node/hosts`, which the console sends every 15 s while the tab is visible and node control reads on. It serves each active box's values from its **current boot only**, aged on Central's clock, plus Central's thresholds as numbers; the console bands values against those numbers and composes every basis from them. The design and every wording are owned by [console DDD §62](operator-console-ddd.md#62-wording-and-truth-kinds); the route and its storage are mapped in the [fleet implementation map](player-fleet-implementation-map.md#fleet-host-health-batch-4-2026-10-02).
 
 Host Management posts one observation every 15 s, and Central stores at most one per box per 15 s. **Host silence is called after 60 s** (four intervals) with no stored report. A host value is a report, not a live reading: "Host Management last reported 4 s ago · 62 °C".
 
@@ -582,7 +414,7 @@ Host Management posts one observation every 15 s, and Central stores at most one
 | **memory controller absent: memory limits not enforced** (Storage, Memory limits) | The kernel's memory controller is off, so no memory limit on the box is enforced; the Player still runs (the base mounts its store regardless). The Pi 5's device tree turns it off; the boot command line must turn it back on with `cgroup_enable=memory` ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)). Usually the staged boot tree predates the release that added the token. Owner: the boot tree you staged and its `cmdline.txt`. A warning (notice band), never an incident | Stage `boot/` from a current release (releases from the 4 GB tracer on carry the token; trees staged earlier do not) and check nothing in your staging, such as iac `cmdline_extra`, removes it or adds `cgroup_disable=memory` after it. Reboot the Player |
 | **boot preparation refused at prepare: needs 2.1 GB, room 1.8 GB** (Software) | The deployment this boot was offered does not fit the node store, or the memory left above the 512 MiB emergency headroom. Owner: the prepare step (cold admission) | Select a smaller deployment, or use a board of a larger memory class. A reboot takes the boot selection current then |
 | **boot preparation failed at handoff / storage / prepare (fault)** (Software) | That step stopped with a fault token: `os:<ERRNO>` for an operating-system error, a named code such as `node_measured_base_abi_mismatch`, or `unexpected:<type>`. Without a parenthesis no fault was recorded. Owner: that step's unit, `photo-wall-node-<step>.service`. Alarm, one incident; its failed unit is not repeated under Base units | Note the fault from the Player page; reboot once. A fault that survives a fresh boot is a defect: report it with the fault and the release |
-| **boot preparation running: prepare** (Software) | The step is still running on this boot; prepare fetches and expands the offered roots, so it runs longest. A step killed or timed out is not shown as running: its unit fails and the item reads "failed at … (unit failed, no exit record)" | Wait. If it never moves on, the step is hung; reboot the Player |
+| **boot preparation running: prepare** (Software) | The step is still running on this boot; prepare fetches the offered root images and mounts them, so it runs longest. A step killed or timed out is not shown as running: its unit fails and the item reads "failed at … (unit failed, no exit record)" | Wait. If it never moves on, the step is hung; reboot the Player |
 | **boot preparation failed at handoff / storage / prepare (unit failed, no exit record)** (Software) | The step's unit (`photo-wall-node-<step>.service`) failed but the step wrote no exit record: it was killed before its exit write (an out-of-memory victim, or its start timeout's SIGTERM), or the record write itself failed. Alarm, one incident; the unit is not repeated under Base units | Check Out of memory on the Player page (a base or preparation kill points at memory); reboot once. A repeat on a fresh boot is a defect: report it with the step, the release and the board's memory size |
 | **Unknown: failed units not read** (Software, Base units) | Host Management has not read PID1's failed-unit list on this run (`systemctl` was slow or missing). Once read, a later failed read keeps the last reading, so this never hides a failure it already saw, and never reads as "no base unit failed". No band | Nothing; if it persists, check `systemctl` on the box |
 | **base unit failed on this boot: photo-wall-app-broker.service** (Software), or **base units failed on this boot: a · b and N more** | A base service failed. A crash-looping base service stops after 10 starts in 10 minutes and stays failed: the box never reboots itself for it. Owner: the named unit. A boot preparation unit is left out here only when Boot preparation reports its step stopped; otherwise it is listed like any base unit. Alarm, one incident per Player | Reboot the Player from its page. A unit that fails again on a fresh boot is a defect: report it with the unit name and the release |
@@ -615,7 +447,7 @@ A rebooted Player is offered the boot selection current at its next boot; the re
 
 ### Identify an Output and bind it
 
-You can power on more than one Pi before binding. On a Player's page, each Output that was connected at the last enrollment and is not bound has an **Identify Panel** action, including a Bound Player's free second Output; the Binding facet's Output picker offers the same action on each candidate. Use it to match a Player page to the physical screen: Central queues a request for that exact Output, and the Player briefly shows a high-contrast **IDENTIFY THIS OUTPUT • `<output id>`** banner on it. The banner lasts at most 15 seconds. A new request for the same Player replaces its previous request.
+You can power on more than one Pi before binding. On a Player's page, each Output that was connected at the last enrollment and is not bound has an **Identify Panel** action, including a Bound Player's free second Output; the Frame page's Hardware tab offers the same action in its Output picker on each candidate. Use it to match a Player page to the physical screen: Central queues a request for that exact Output, and the Player briefly shows a high-contrast **IDENTIFY THIS OUTPUT • `<output id>`** banner on it. The banner lasts at most 15 seconds. A new request for the same Player replaces its previous request.
 
 The console reports that the request was accepted by Central; it cannot confirm that a banner reached the panel. Check the physical screen yourself, then bind that Output to its persistent Frame. Identification requests expire, and Central stops delivering one if its Output becomes bound, disconnected, or the Player's authority changes. The action is disabled, with its reason, on an Output not listed as connected at the last enrollment ("Connect a Panel and restart the Player app") and on a bound Output ("Central identifies only unbound Outputs"). When Central holds no negotiated Identify capability for the Player app's current enrollment (the app has not completed its control hello, or did not offer Identify), the request answers "Central has not negotiated Identify with this Player app's current enrollment".
 
@@ -625,10 +457,10 @@ The console reports that the request was accepted by Central; it cannot confirm 
 
 You can bind from either end. Both write the same Frame binding, carry the Frame's `generation` token, and are refused rather than applied when something changed:
 
-- **From a Frame.** Select the Frame, open its **Binding** facet, and choose a Player's Output from "Choose an output". Nothing is pre-selected, even when there is one option. Then press "Bind to <frame>". If a refresh removes the Output you chose, the choice is cleared and announced. If the bind is refused ("That output was just bound elsewhere", "That Player is no longer available", or "This Frame changed — reload and review its binding."), your choice is cleared; choose again from the current list.
-- **From a free Output.** On the Player page, a Free Output offers a "Bind to a frame…" list: pick an unbound Frame and press Bind. On success the console opens that Frame's Binding facet.
+- **From a Frame.** Open the Frame's page, open its **Hardware** tab, and choose a Player's Output from "Choose an output". Nothing is pre-selected, even when there is one option. Then press "Bind to <frame>". If a refresh removes the Output you chose, the choice is cleared and announced. If the bind is refused ("That output was just bound elsewhere", "That Player is no longer available", or "This Frame changed — reload and review its binding."), your choice is cleared; choose again from the current list.
+- **From a free Output.** On the Player page, a Free Output offers a "Bind to a frame…" list: pick an unbound Frame and press Bind. On success the console opens that Frame's page at its Hardware tab.
 
-**After a bind, calibrate the Frame again.** A successful bind or unbind bumps the Frame's `generation`, clears any live calibration lease, and **invalidates calibration**, so the Binding facet shows **"Review required"** with a **"Calibrate this Frame"** button that opens the [Calibration facet](#operator-console-calibration-and-conflict-states). The Binding facet also shows the bound Player and Output and the Panel record at the Player app's last enrollment. This is a forced re-validation, not data loss: bind and unbind set `calibration_valid=false` but never write the `calibration` column, so the committed calibration persists and is available to re-confirm. Only a fresh save overwrites it. Retire changes no binding and no calibration. If the Frame changed underneath you (a concurrent bind or unbind bumped its `generation`), the write is refused with **409 `binding_generation_conflict`** and nothing is applied.
+**After a bind, calibrate the Frame again.** A successful bind or unbind bumps the Frame's `generation`, clears any live calibration lease, and **invalidates calibration**, so the Hardware tab shows **"Review required"** with a **"Set its position"** button that opens the [Position tab](#operator-console-calibration-and-conflict-states). The Hardware tab also shows the bound Player and Output and the Panel record at the Player app's last enrollment. This is a forced re-validation, not data loss: bind and unbind set `calibration_valid=false` but never write the `calibration` column, so the committed calibration persists and is available to re-confirm. Only a fresh save overwrites it. Retire changes no binding and no calibration. If the Frame changed underneath you (a concurrent bind or unbind bumped its `generation`), the write is refused with **409 `binding_generation_conflict`** and nothing is applied.
 
 ### Confirmation dialogs
 
@@ -655,7 +487,7 @@ While a write is in flight, Esc and Cancel do nothing. Then the dialog shows one
 
 **To replace a Pi, unbind it; do not retire it.** Unbind the old Pi's Frames (or use **Unbind all outputs**), then bind the new Pi's Output to each Frame. The old Pi returns to Unbound and can be bound again later. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) changes no Player record.
 
-**To revoke a compromised bound Pi, unbind it, then retire it immediately.** Unbind alone leaves its session token valid and its serial free to enroll. Retire (`POST /v1/operator/players/{player_id}/retire`) revokes its authority and refuses its serial from then on. Its netboot device row is **not** retired: its last healthy tag still counts toward the release frontier and its serial still netboots ([base-image selection](#base-image-auto-mirror-0012); owner Question 4 of the [slice 2 design](operator-console-ux-pass2-onboarding.md#12-costs-deferrals-and-questions) is pending).
+**To revoke a compromised bound Pi, unbind it, then retire it immediately.** Unbind alone leaves its session token valid and its serial free to enroll. Retire (`POST /v1/operator/players/{player_id}/retire`) revokes its authority and refuses its serial from then on. Its serial can still netboot ([the removed V1 base selection](#base-image-auto-mirror-0012-removed); owner Question 4 of the [slice 2 design](operator-console-ux-pass2-onboarding.md#12-costs-deferrals-and-questions) is pending).
 
 ### Returning known Pi
 
@@ -663,48 +495,32 @@ While a write is in flight, Esc and Cancel do nothing. Then the dialog shows one
 
 ## Operator console: calibration and conflict states
 
-In the console — served at `/` (aliased at `/console`) since the cutover retired the old flat page — select a Frame in the wall plan to open the Frame Inspector, then open its **Calibration** facet (`#/wall/frames/<id>/calibration`; the old `#/wall/frames/<id>/commissioning` address opens it too). It is reachable **only from the Wall section**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health label ([R4](#operator-console-sections-links-and-drafts)). The facet's design and wording are owned by [the domain-driven console design, pass 3](operator-console-ddd.md#19-screens). The legacy path rides the existing admin-authenticated `POST /v1/operator/frames/{frame_id}/calibration` route.
+Every Frame has **one page** (`#/wall/frames/<id>/<tab>`), opened with one click on its tile on the Wall plan (or its Unplaced tray entry, a To finish link, a Needs attention entry or a Player page's Frame link). Its heading is the Frame's name, with a link back to the Wall and its health. It has four tabs: **Overview** (what Photo Wall sends to it now and what waits underneath, how its Pi is, and how to put content on it; Central's own account, its Runs and their priorities, is under **Details**), **Position**, **Picture** and **Hardware**. Position and Picture are reachable **only from the Wall section**; calibration is a hardware concern deliberately hidden from show programming, which sees only a Frame-health label ([R4](#operator-console-sections-links-and-drafts)). The page is `central/console/src/pages/frame-page.tsx`.
 
-**What the facet shows.**
+**Position** sets where the picture sits on the Display: drag a corner of the drawing (or the square mid-way along an edge to trim that edge); or choose **Move** (the whole picture or one corner) and a **Step** of 1, 10 or 50 pixels and press the arrow buttons (or the arrow keys on the focused drawing). **Rotation** and **Reset to full screen** are below, and under **Exact values** each corner in pixels of the Pi's output and each edge's trim in percent. **Picture** has **Brightness — Photo Wall picture adjustment**: Photo Wall brightens or dims the picture it sends (the calibration's gain, 0–200 %); the Display's own brightness does not change.
 
-- **Committed calibration** — the SDR gain, rotation, corners, and crop Central holds for the Frame.
-- **Frame profile** (from `FrameProfile`) — pixel width/height, diagonal, and video-capable. These are **operator-declared at Frame creation and persist across a Panel swap**, so they are Frame facts, not Panel readings. **Edit Frame profile** works on an unbound Frame only.
-- An unbound Frame reads "No Output bound. Bind one on the Binding facet." The bound Player and Output, and the Panel record at the Player app's last enrollment, are on the **Binding** facet.
+**Changes show on the Display as you make them.** While the Position or Picture tab is open (and the browser tab is shown), the page keeps a live session with Central (Central calls it a calibration trial): each change is sent to Display Host on the Frame's Pi. The bar at the bottom of the tab reads "Previewing — waiting for the Pi" until the Pi presents the latest change, then "Presented by the Pi · 21:04:07" (Central's time of the acknowledgement). **Done**, in the same bar, saves the change and is offered only once the Pi has presented the latest change (Central refuses a save otherwise); the bar says why when it is not. **Revert** ends the session and returns the controls to the saved values. The session does not time out while the tab is open: the page sends `keepalive` (with its status read) every half second, and before Central's hard limit (110 s, under the Node's own 120 s cap) it hands the session over with `renew`, which ends it and begins the next one at your draft in one step, so the Display never shows the saved values in between. Your draft keeps the saved revision it was made from and sends it with every change, `begin` and `renew`, so a save made elsewhere meanwhile is never overwritten: Central refuses the draft and the page asks you to Revert. Leaving the tab with changes not kept asks **Keep** (Done), **Revert** or **Stay**; leaving the page reverts them, and the page says when on your next visit; hiding the browser tab ends the session at once and showing it again resumes your draft; a closed browser tab ends within Central's 5 s idle window. A refusal that passes (the Pi briefly away) shows while the page keeps trying and goes by itself. Every geometry change is validated by **the same convex test the server enforces** (the `1e-6` epsilon and clockwise winding): a folded or too-thin picture, an empty trim or a corner past the screen's edge is refused where it is made with a message such as **"corners must form a convex aperture"**, and nothing is sent. A background refresh never overwrites the draft.
 
-When both resolutions are known, the facet compares the declared Frame profile
-with the Output's resolution at the Player app's last enrollment, in the committed
-calibration's orientation when that calibration is valid; an invalidated
-calibration does not suppress a mismatch warning.
-A mismatch names both values and asks the operator to verify the Panel,
-restart the Player if the Panel changed, and correct the Frame profile
-before calibration if needed. The enrollment record may be stale; it never changes the
-profile automatically or prevents calibration.
-
-The facet has no colour or power controls: no wired path supports them, and each would arrive with its own served read.
-
-**Calibrate by direct manipulation.** In the *Adjust calibration* editor, drag the four corner handles and the two crop handles, or type the coordinates directly; SDR gain and rotation are separate draft controls. Every edit stays a **local draft** that a background inventory refresh never overwrites. Each geometry change is validated by the **same convex test the server enforces** (the `1e-6` epsilon and clockwise winding): a folded or too-thin quad snaps the handle back with the inline message **"corners must form a convex aperture"**, and an empty crop snaps back with **"crop must describe a nonempty rectangle"** — and **no request is sent**. A rejected drag changes nothing, on the client or the server.
-
-**Live calibration: two paths, one name.** Central chooses the path per Frame from its served calibration capability.
-
-- **With Display Host acknowledgment** (`native_trial`, a Player on the node lane with Display Host). **Start live calibration** sends each edit to Display Host. **Save calibration** stays disabled until Display Host acknowledges the latest edit ("Edit N presented to the compositor by Display Host · not proof of what the Panel shows"). **Stop live calibration** ends it; after it ends, **Start again**. Refusals name their condition, for example "Display Host has not acknowledged the latest edit. Save calibration stays unavailable."
-- **Without acknowledgment** (`legacy_preview`, every other Player). **Show on the Panel** sends the draft to the Player app under a server lease that expires in **30 seconds**; the facet counts the *server's* lease down on the browser's own clock from Central's answer (it can read up to one request's latency long; the lease's real end is Central's) ("Central sent the draft to the Player app; live calibration ends in N s. No layer acknowledges what is presented on this path."). There is **no auto-renew**. When the lease ends, the Player app returns to the saved calibration and the facet says "Live calibration expired; your draft is kept", with **Show again** to re-send the same draft. **Save without acknowledgment** saves the draft as a new calibration revision; it is never called Save calibration, because nothing on this path acknowledges what was presented. **Stop live calibration** clears the lease immediately and returns the draft to the committed calibration. Show and Save require a bound Frame.
-
-**One shared lease, last-writer-wins.** On the legacy path there is a **single lease slot per Frame and no lock** — the console never implies you have exclusive control of the Panel. A second tab or operator who shows or saves the same Frame overtakes you. The console's 5 s snapshot poll surfaces these changes as explicit states rather than a silent overwrite:
+A Frame whose Pi runs software without Display Host says "This Frame's Pi runs software that cannot show changes live" and links to its Software page; an unbound Frame says to choose its Pi and HDMI output on Hardware first.
 
 | What happened | What you see | What to do |
 |---|---|---|
-| Your lease expired with no interaction | "Live calibration expired; your draft is kept" | Show again to keep adjusting; your draft is retained. |
-| Another tab/operator saved or showed a calibration for the same Frame (the single slot was taken) | "Someone saved a calibration for this Frame meanwhile; review it, then start again" | Review the fresh state before writing again. |
-| Save refused — another save advanced the calibration revision (stale `expected_revision`) | "Another session changed this frame's calibration — reload and re-review." | Reload and re-review; your stale save was **refused**, not silently applied. |
-| Save refused — the Frame's binding changed via bind or unbind (stale `expected_generation`) | "This Frame's binding changed — its Output is no longer under your control; reload." | Reload and re-check the binding. |
+| Another window or operator is adjusting the same Frame | "Someone else is adjusting this Frame. Photo Wall connects as soon as they finish." | Wait; an abandoned session ends within 5 s. |
+| Someone saved this Frame's position or picture after your session began | "Someone saved a different position or picture for this Frame meanwhile. Press Revert to load it, then adjust again." | Revert, then adjust again; your stale Done was **refused**, not applied. |
+| The Pi has not presented your latest change | Done stays disabled ("Previewing — waiting for the Pi"; "Done is offered once the Pi presents your latest change.") | Wait; check the Display and its Pi if it does not change. |
+| The Pi or its Display is not reporting | The refusal in plain words ("Retrying"), while the page keeps trying; Central's code under **Details** | Check the Pi is on and the Display plugged in; it clears by itself. |
 
-Every write carries **both** concurrency tokens (`expected_revision` and `expected_generation`) against the baseline captured when you opened the facet, so a stale save is refused with a **409** rather than silently overwriting state you never reviewed. (A show or save against a Frame whose binding was removed underneath you is refused with "This Frame is no longer bound to an Output — bind it before calibrating.")
+**Hardware** holds the Pi and HDMI port feeding the Frame (**Connect Frame …** from a free port, **Disconnect from this Pi**, **Identify display** on a free port, and the Display the Pi reported when its photo app last started; Central's record, the Player app's last enrollment, is under **Details**) and the **Frame profile** (pixel width and height, diagonal, video capable). The Frame profile is **operator-declared at Frame creation and persists across a Display swap**; **Edit Frame profile** works on a Frame with no Pi only and clears its position. When both resolutions are known, the Frame profile is compared with the resolution the Pi last reported, in the saved rotation when the position is set; a mismatch is a "Check the Display" card naming both values, with **Edit Frame profile** as its action and how to restart the photo app or change the profile under Details. The record may be stale; it never changes the profile.
+
+Frames whose Pi reports only the older preview path (`legacy_preview`) cannot be positioned from the console: they are told so and linked to their Pi's software page. That is the V2-only cost of this page. The `POST /v1/operator/frames/{id}/calibration` route stays for scripts (`scripts/demo_wall.py`) and tests.
+
+The page has no colour or power controls yet: each arrives with its own served path in a later phase.
 
 ## Operator console: running the show
 
 The Show sections (**Now**, **Scenes**, **Schedule** and **Sources**) are the content-and-schedule layer: Sources, Scenes, Programs and Runs. The wording and states below are owned by the [slice 3 design](operator-console-ux-pass2-showrunner.md), and the step flows by [passes C and D](operator-console-ux-pass2-flow.md#7-the-flows-defaults-have-a-source); this section is how to use them, job by job.
 
-**Show sections never show the Calibration facet (R4).** Hardware setup (calibration geometry, SDR gain and the Frame profile) lives only on the Wall's [Calibration facet](#operator-console-calibration-and-conflict-states). The **only** hardware fact the Show sections see is each Frame's **health label**, the same one the Wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs calibration" when `calibration_valid` is false: a Frame that cannot present matters at show time. The label is **status, not a control**; you fix the cause on the Wall.
+**Show sections never show a Frame's Position or Picture (R4).** Hardware setup (position, brightness and the Frame profile) lives only on [the Frame's page](#operator-console-calibration-and-conflict-states) on the Wall. The **only** hardware fact the Show sections see is each Frame's **health label**, the same one the Wall shows ([wall health](#operator-console-wall-health-and-the-attention-strip)), including "Needs calibration" when `calibration_valid` is false: a Frame that cannot present matters at show time. The label is **status, not a control**; you fix the cause on the Wall.
 
 ### Step flows: one question at a time
 
@@ -730,7 +546,7 @@ A name whose id already exists is refused before anything is sent ("A Scene call
 
 Press **Show now** on Now, on a Scene's card, or after saving a Scene. The flow is **Scene → Review** (`#/now/show/scene`, `#/now/show/review`):
 
-1. **Scene to activate**, with the frames it reaches and their health. A Frame that needs attention links to its Wall Inspector recovery facet; a healthy Frame remains informational. The health label is Central's latest accepted Player readiness report, not confirmation of visible pixels. Opening a recovery link and returning keeps the Show now draft. From a Scene's card or a Scene's Save it is already chosen.
+1. **Scene to activate**, with the frames it reaches and their health. A Frame that needs attention links to its Frame page's recovery tab; a healthy Frame remains informational. The health label is Central's latest accepted Player readiness report, not confirmation of visible pixels. Opening a recovery link and returning keeps the Show now draft. From a Scene's card or a Scene's Save it is already chosen.
 
 Both Show now steps also show **Saved Source freshness** for the selected Scene's live Source references. It reads Central's latest completed catalog status for each Source and may offer **Refresh Source** when the status needs attention. A **202** response means Central accepted the refresh request; the displayed Source status remains the last completed worker result until a later snapshot carries the requested completion. A refresh receipt does not mean the catalog has refreshed, media is prepared for a Frame, or anything is visible. A missing historical Source has no current status or refresh action. Hand-picked media is described separately because refreshing a Source does not change its saved choices. The status is advisory: it does not block **Activate now**.
 2. **Review** lists the Scene, its frames, the **Priority** and **If it is already running**. Under **Advanced** are **Activation priority** and **If it is already running**. Press **Activate now**.
@@ -759,7 +575,7 @@ Queueing an activation and overriding protection ("force") are not offered: desi
 
 Now starts with each Frame's health label, then the **Runs**: "Central's Runs, not a readback of the panels. Each Frame's Why? shows which Run is on top there." Each live Run is a card named `Scene X`, with a **Running** or **Finishing** chip and its state ("Running", "Ending (outro)" or "Finishing: requested …"), where it came from ("Program Y", "Program Y, since removed", "started directly (Show now or the API)" or "part of Z's Run"), when it started (every clock time carries its zone, for example "18:00 BST", and Now and Schedule say "Times in Europe/London (this browser's time zone)"), its cycle, its priority, the frames it protects, its frames with their health, and its child Scenes. With none, it reads "No Run is running." **Finish** (`POST /v1/operator/runs/{id}/finish`) asks for a natural end. **Cancel** (`…/cancel`) asks for confirmation, then stops the Run now, skipping its outro; its child Scenes stop too. Runs that ended in the last day are under a closed "Recently ended (N)", as Completed and Cancelled.
 
-Below them, **Central's Runs per frame, and why nothing new** has one row per frame with two disclosures. **Why?** (and the Frame Inspector's Status facet on the Wall) states **Central's Runs** on that frame, for example "Central's Runs on lobby-left: evening (priority 5, Program weekday-evenings) on top." The Plan tile and the Status facet first show the same answer as one `planned` fact: "On top: evening · Program weekday-evenings (Central's Runs; media not checked; the Panel is not observed)"; on an unbound frame the basis reads "this Frame is unbound, so Central sends it no layers", and with nothing visible it reads "On top: nothing · no Run puts a layer on this Frame now (…)". It names Central's projection, made before any media is chosen, never what the Panel shows. Each layer underneath gets one sentence, always with its **priority N**:
+Below them, **Central's Runs per frame, and why nothing new** has one row per frame with two disclosures. **Why?** (and the Frame page's Overview on the Wall) states **Central's Runs** on that frame, for example "Central's Runs on lobby-left: evening (priority 5, Program weekday-evenings) on top." The Plan tile and the Overview first show the same answer as one `planned` fact: "On top: evening · Program weekday-evenings (Central's Runs; media not checked; the Panel is not observed)"; on an unbound frame the basis reads "this Frame is unbound, so Central sends it no layers", and with nothing visible it reads "On top: nothing · no Run puts a layer on this Frame now (…)". It names Central's projection, made before any media is chosen, never what the Panel shows. Each layer underneath gets one sentence, always with its **priority N**:
 - a lower priority: "morning (priority 1) is underneath: evening has priority 5.";
 - the same priority: the Run Central **admitted later** is on top. This is admission order, not the Program's start time; Programs starting at the same instant are admitted in Program-id order;
 - the same Run: the later child Scene is on top.
@@ -941,7 +757,7 @@ The [test database](../tests/integration/compose.test-database.yml) runs the dep
 
 A test that observes a lock wait counts only its own database's waiters through `support.database.waiting_backends`; `pg_locks` is cluster-wide, so an unscoped count also sees other workers' tests. `tests/test_lock_observation_scope.py` refuses unscoped queries of `pg_locks` or `pg_stat_activity`.
 
-CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health and the served console), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
+CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health, the served console, and that the worker reached the hub and created WALL), `node-bus` and `bus-fence` ([the Node bus](#the-node-bus-and-centrals-hub)), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The Immich adapter checks and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)). Passing CI does not establish physical Pi/PXE, rendering or visible timing.
 
 All CI worker builds reuse the architecture-matched native media base through
 the [shared dependency workflow](module-appliance-ci.md#shared-service-and-test-dependencies).
@@ -996,7 +812,7 @@ If an Output moves, bind the destination persistent Frame. Returning recognized 
 
 Preview carries a 30-second expiry and both proposed/committed settings in current process memory so the Executor can revert during a running-process outage. Commit and revert use optimistic revision and binding-generation checks. A stale browser must refresh before retrying. Partitioned equipment respects the bounded plan lease and rejects obsolete work when it obtains fresh session authority. Cold reboot requires central time/release/enrollment/control/media connectivity. A surviving cache file can avoid a media request only after the new process validates it against the current assignment; it cannot restore authority.
 
-The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player-only package builder](module-player-package.md), and [central release contract](module-appliance-release.md) provide commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md), [GitHub ARM image workflow](module-appliance-ci.md), and [headless image e2e gate](module-appliance-e2e.md) describe exact-artifact checks and their limits. Earlier signed image and hosted boot evidence remains useful for artifact identity and generic-VM behavior, but its durable-Player/local-update assumptions are superseded. Complete current-image native rendering, valid-cache reuse, corrupt-cache reacquisition, real automatic reboot/central rollback, and physical measurements remain pending until recorded against the final revision.
+The [real Immich fixture](module-immich-fixture.md), [full media-path demo](module-wall-demo.md), [Player package](module-player-package.md) and [Debian packaging module](module-debian-packaging.md), and [central release contract](module-appliance-release.md) provide commands and evidence boundaries. The [appliance builder/bootstrap](module-appliance-builder.md), [GitHub ARM image workflow](module-appliance-ci.md), and [headless image e2e gate](module-appliance-e2e.md) describe exact-artifact checks and their limits. Earlier signed image and hosted boot evidence remains useful for artifact identity and generic-VM behavior, but its durable-Player/local-update assumptions are superseded. Complete current-image native rendering, valid-cache reuse, corrupt-cache reacquisition, real automatic reboot/central rollback, and physical measurements remain pending until recorded against the final revision.
 
 
 ## Node control
@@ -1011,22 +827,22 @@ Node control is the one supported configuration. Set an installation-specific
 `PHOTO_WALL_NODE_AUDIENCE` and run Central with the node factory:
 
 ```sh
-uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 1048576
+uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
 ```
+
+Keep `--ws-max-size` at 16 MiB (the image's own command uses the same value): a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
 
 The ordinary `central.app:create_app` factory (still the default image and Compose
 command until the [V1 follow-up](player-fleet-implementation-map.md) switches them)
 keeps node transport disabled. That is a **misconfiguration**: Players that boot by
 node path are refused, and the console shows one banner ("Node management is off on
-this Central") above every page. Each Pi must also boot by node path: its kernel
-command line must carry `photowall.node=v2`. A Pi without it boots by the deprecated
-path, and its Player page shows one warning line; Select and Stage do not reach it.
-The release default command line does not carry the flag yet, so add it per Pi (for
-example through iac `cmdline_extra`). Do not add `cgroup_enable=memory`: release
-command lines from the 4 GB tracer release on carry it, once, and it must stay. Boot
-trees staged from an earlier release do not; restage them. Without the memory
-controller, which the Pi 5's device tree turns off, the base still mounts its store but
-no memory limit is enforced, and the console warns
+this Central") above every page. Every Pi boots by the node path: the V1 boot offer
+and the `photowall.node=v2` switch are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)),
+so the command line needs no flag. Do not add `cgroup_enable=memory`: every release's
+command line carries it, once, and it must stay. Boot trees staged from an earlier
+release do not; restage them. Without the memory controller, which the Pi 5's device
+tree turns off, the base still mounts its store but no memory limit is enforced, and
+the console warns
 ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
 A node release's boot tree carries both. The node factory enables observation, explicit session enrollment, immutable V2 boot
 offers and scoped command routes; it does **not** open the durable effect gate.
@@ -1045,8 +861,7 @@ have exact catalog provenance; manager primary and any accepted fallback are
 pinned to that base digest. Environment sources feed the existing content worker.
 A missing byte artifact is reported unavailable until the worker acquires and
 verifies it. An explicit no-app deployment still boots the independent base.
-Only the V2 cohort (`photowall.node=v2`) uses these frozen offers; it cannot silently
-fall back to a legacy manifest.
+Every Node boots by the node path; there is no other boot offer and no legacy manifest to fall back to.
 
 For ambiguity, `GET /v1/operator/node/devices/{device_id}` separates current and
 historical scoped credentials, observation sample/receipt ages, reboot requests,
@@ -1068,6 +883,53 @@ existing D17 all-serving/rollback certification and a real injected serving-imag
 verifier; there is no environment-variable bypass. The automated node scenarios and
 their limits are listed in [validation](validation.md).
 
+
+### Node storage: release images and memory lines
+
+Each release root on a Node is a squashfs image in the image pool, mounted read-only by PID1 at its root directory; the design is in the [Player architecture](player-architecture.md#release-roots-as-images-e2c) and the memory lines in the [Player node domain model](player-node-domain-model.md#memory-classes-and-the-node-store-2026-10-03).
+
+**Where things are on a Node.**
+
+| Path | Holds |
+|---|---|
+| `/run/photo-wall-node-storage/root-images/<sha>.squashfs` | One image per staged root, root:root 0444 |
+| `/run/photo-wall-node-storage/root-images/.cold-staging/` | The prepare step's downloads in flight (removed at the next prepare) |
+| `/run/photo-wall-node-storage/preparation/downloads/<sha>` | AppManager's online download, before the import worker adopts it |
+| `/run/photo-wall-node-storage/app-roots/<sha>`, `manager-roots/<sha>` | The mount points; the Player runs from `<sha>/rootfs` |
+
+**Is a root mounted read-only?** Do not trust `findmnt` OPTIONS: a squashfs superblock always says `ro`, even under a writable mount. Read the mount's own line and its loop device:
+
+```sh
+grep ' /run/photo-wall-node-storage/app-roots/' /proc/self/mountinfo   # field 3 is maj:min, field 6 must contain ro, fstype squashfs
+cat /sys/dev/block/<maj:min>/ro                                          # must be 1
+cat /sys/dev/block/<maj:min>/loop/backing_file                           # must be .../root-images/<sha>.squashfs
+systemctl list-units --type=mount | grep photo                         # the transient mount units
+```
+
+**Memory readings.** On the Player page's Every reported metric:
+
+- `memory_peak:preparation` is the preparation slice's peak. Images are page cache charged to the slice that wrote them, so the peak includes reclaimable cache and sits near the images held plus the preparing process. It is not by itself a problem.
+- `oom_kill:preparation` above 0 is the signal that the preparation line (960 MiB) is too low: an online stage or the cold prepare step was killed. Report it with the release and the board's memory size.
+- `memory_peak:app` and `oom_kill:app` cover the Player, whose file pages (its libraries, read from the image) now count against the app slice. Refaults show on the box, not in a metric: `cat /sys/fs/cgroup/photowallapp.slice/memory.events`, where rising `high` or `max` counts mean the Player's working set is pressing its line. These are clean file pages, so they slow the Player rather than kill it.
+
+**Staging faults.** These appear as a prepare-step fault on the Player page (cold path) or in the import worker's journal (online path, below).
+
+| Fault | Meaning | What to do |
+|---|---|---|
+| `environment_abi_mismatch` | The release was built for another base, graphics or plugin ABI than this Node measured; refused before any download or mount, and again at every launch | Select a release built for this base |
+| `root_image_digest_mismatch` | The pool file's sha256 is not the release's; the file was unlinked | Retry; a repeat points at Central's cached bytes |
+| `root_image_ownership` | A pool or incoming file is not a sealed regular file (owner, mode, link count or size); it was unlinked | Retry; a repeat is a defect |
+| `root_image_missing` | The fetched file was not where the stager expected it | Retry; a repeat is a defect |
+| `root_image_adopt_cross_device` | Moving the download into the pool would cross mounts (a unit's binds are wrong); nothing is copied | A base defect: report it with the release |
+| `image_mount_failed` | PID1 refused the mount (no loop device, no squashfs support, a timeout) | Reboot once; a repeat is a kernel or base defect |
+| `image_mount_not_visible` | PID1 mounted it but the stager's sandbox does not see it (mount propagation) | A base defect: report it |
+| `image_mount_conflict` | Something else is mounted at the root directory (another image, another type, or a writable mount); it is never unmounted | Reboot; a repeat is a defect |
+| `root_image_not_staged` | At launch, the root is not a read-only squashfs mount of its sealed pool image | Reboot; a repeat is a defect |
+| `environment_reference_mismatch`, `environment_provenance_mismatch`, `environment_entrypoint_missing` and the other `environment_*` checks | The image is mounted but does not match the ref Central paired it with; the image and mount stay, and a corrected ref for the same digest stages without a download | Report it with the release: a Central or release fault |
+
+**A refused online stage stalls without a report.** When staging refuses inside the import worker, the worker exits without its result, the broker raises `root_import_outcome_unknown` on every tick, and the operation stays `preparing` on the Node while the console shows it staged. The fault is only in the worker's journal: `journalctl -u 'photo-wall-root-import-*'`. Stage again from the console, or reboot the Player. The owner accepted this as a cost of E2c (2026-10-09); it is fixed when the effect protocol is rebuilt ([0017](decisions/0017-node-redesign-r3.md#costs)).
+
+Superseded images stay in the pool until the next reboot. A third distinct app image in one boot is refused as an App Manager storage refusal with both numbers; reboot the Player to clear the pool.
 
 ### Optional read-only Kubernetes node verifier
 
@@ -1114,3 +976,82 @@ CI matrices and signed guard records from those enforcement results. The adapter
 and signatures do not implement that controller. No real such controller or
 qualification is established by the local tests. An unconfigured or uncertified
 node factory therefore continues to serve observations with effects closed.
+
+
+## Reaching a Node over SSH
+
+Every Node's base OS runs Debian's OpenSSH server, so an agent or the operator on the LAN can read a Node's journal and units directly. It comes from rpi-image-gen's own `openssh-server` layer, enabled in the base build's [config](../appliance/rpi_image_gen/config/photo-wall-base.yaml), like any other OS dependency, not from a Photo Wall package. It starts with the OS, apart from the app, the display and Central, so it works when those are broken.
+
+- **The login.** One user, `photowall`, logs in with the agent key only: no password, no keyboard-interactive login, no root login. It has passwordless `sudo` and is in the `systemd-journal` group.
+- **The key.** The one authorized public key is [`appliance/rpi_image_gen/photo_wall_agent.pub`](../appliance/rpi_image_gen/photo_wall_agent.pub); the base build bakes it into `photowall`'s `authorized_keys`. Its private half lives only on the agent's machine, at `~/.ssh/photo_wall_agent`, never in the repo. Changing the key is a PR to that file, and a Node gets the new key only by booting a base from a release built after it.
+- **The host key changes at every boot.** The base carries no host key, and a Node's root is a RAM overlay, so each boot makes new host keys. Skip host-key checking for these boxes rather than editing `known_hosts` after each reboot:
+
+```sh
+ssh -i ~/.ssh/photo_wall_agent -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null photowall@<pi-ip>
+```
+
+- **Finding the Pi's address.** Central does not record a Node's IP yet. Read it from the DHCP server's lease table (the router's client list; a Pi's vendor shows as Raspberry Pi), or scan the LAN for an open port 22: `nmap -p 22 --open 192.168.1.0/24` (your subnet). On the box, `cat /run/photo-wall-node/host.json` shows the serial the Node claims, which its Player page names.
+- **The Pi's name.** Each Node is `photo-wall-<serial>`, where `<serial>` is the 8-hex serial of its TFTP directory (the last eight digits of `/proc/device-tree/serial-number`), for example `photo-wall-75628d0c`. Stage 1 sets it at every boot ([`hand_over_hostname`](../appliance/netboot_init.py)); the base image bakes only `localhost`.
+- **What to read.** `systemctl --failed`; `systemctl status photo-wall-display.service photo-wall-display-controller.service`; the display units' journal for this boot: `sudo journalctl -b --no-pager -u photo-wall-display.service -u photo-wall-display-controller.service`. The same `-u` form reads any other node unit (`photo-wall-host-core`, `photo-wall-app-broker`, `photo-wall-node-player`, `photo-wall-bus`).
+
+The journal lives in RAM and is lost at reboot, so read it before rebooting a broken Node. Shipping failed units' status and journal tail to Central is [issue 53](https://github.com/mcurcio/photo-wall/issues/53).
+
+## The Node bus and Central's hub
+
+Each V2 Node runs its own NATS server, the **bus**, and dials one leaf link to Central's **hub**; Central reads every Node's streams and state through that link and records them in PostgreSQL. The shape and its reasons are [decision 0017](decisions/0017-node-redesign-r3.md) C3–C5, C13, C19 and C20. Nothing is recorded until Nodes run the bus. The join, and the hub in the node-pid1 fixture, are E3e's (in progress).
+
+**What runs where.**
+
+| Piece | Runs as | What it does |
+|---|---|---|
+| Bus | `photo-wall-bus.service` on every Node, in `photowallbus.slice` (256 MiB) | nats-server on `127.0.0.1:4222`, memory store only: every start is empty, and each writer refills what it owns. `Restart=always`; nothing waits on it |
+| Leaf | the bus's one remote | dials the origin the Node booted from, `ws://` for http or `wss://` for https, host and explicit port, path `/photo-wall/bus/leafnode` |
+| Leaf bridge | Central's HTTP app, when `PHOTO_WALL_HUB_LEAF_URL` is set | relays that WebSocket, unchanged, to the hub's leaf listener; without the variable the route refuses |
+| Hub | Compose service `hub` (production: a pod sidecar) | nats-server from the file the worker writes, memory store only; no LAN port |
+| Bus side | one task in the media worker, when `PHOTO_WALL_HUB_URL` is set | every 2 s: writes the hub configuration for the enrolled Players, reloads the hub when the file or the hub's server id changed, re-creates WALL after a hub restart, closes leaves of Players no longer enrolled, and runs one fleet and one show link per enrolled Player |
+
+**Configuration.**
+
+| Variable | Service | Compose value | Meaning |
+|---|---|---|---|
+| `PHOTO_WALL_HUB_URL` | worker | `nats://photo-wall-hub:4222` | the hub's client URL. Unset: no bus side, the worker runs as before |
+| `PHOTO_WALL_HUB_CONFIG` | worker | `/var/lib/photo-wall/hub/hub.json` | the file the worker writes and the hub starts from (the shared `hub-config` volume; the hub mounts it read-only) |
+| `PHOTO_WALL_HUB_LEAF_URL` | central | `ws://photo-wall-hub:8080/leafnode` | the hub's leaf WebSocket. Unset: no leaf bridge |
+| `PHOTO_WALL_HUB_MONITOR_PORT` | Compose | `8222` | the host port of the hub's monitor, bound to `127.0.0.1` only |
+
+`docker compose up -d --wait` starts the hub after the worker; the hub waits until the worker's first file exists, which follows the worker's migrations, so its healthcheck allows 120 s. Central's command keeps `--ws-max-size 16777216`. The hub configuration turns leaf compression off: the relay cannot carry nats-server's S2 compression, which sits below the WebSocket framing.
+
+**Checking the hub.** The monitor answers on `http://127.0.0.1:8222` (Compose):
+
+```sh
+curl -s 'http://127.0.0.1:8222/connz?auth=true' | python3 -m json.tool   # the worker's clients: fleet, central-wall, and its links in each Player's account
+curl -s 'http://127.0.0.1:8222/leafz' | python3 -m json.tool             # every Node leaf linked now, by account
+curl -s 'http://127.0.0.1:8222/jsz?accounts=true&streams=true' | python3 -m json.tool   # stream WALL
+docker compose exec -T worker cat /var/lib/photo-wall/hub/hub.json | python3 -m json.tool   # one account per enrolled Player
+docker compose logs --tail 100 worker hub
+```
+
+The Player page shows **Node API link**: linked or not linked, with its age, as Central's inference from its last look at the hub. It reads unknown when that look is older than 30 s or no hub runs. It never gates anything.
+
+**What to expect.**
+
+- **Enrol or retire a Player:** within a look (2 s) the hub's file gains or loses its account and the hub reloads. A retired Player's leaf is closed and its links stop; its records stay.
+- **Hub restart or Central deploy** (production restarts the whole pod): the hub starts empty, the worker sees a new server id, reloads it and re-creates WALL. Leaves relink in about a second; Node WALL mirrors catch up within about 60 s. A Node whose leaf dialled before its account existed gets its first WALL about 40 s later. All self-recovering.
+- **Bus restart on a Node** (crash, OOM, reboot): the bus starts empty; Central records the unread tail as one gap row with count unknown per stream, and each Node program re-puts its state.
+- **No hub reachable:** the worker logs it, keeps the file, retries every look, and keeps media and jobs running. A failure of the bus side itself ends the worker non-zero, as a media or job loop failure does.
+
+**What Central keeps.** `node_link_records` (each message once), `node_link_gaps` (counted losses; `lost` is an upper bound if two workers overlapped during a deploy), `node_link_cursors`, `node_link_documents`, `node_link_actions`, `node_bus_wall` (the WALL mark) and the presence tables `node_bus_presence` and `node_bus_hub_looks`. Records and actions grow without bound until E5 sets their retention.
+
+**On a Node.** `journalctl -u photo-wall-bus` shows the bus; `/run/photo-wall-node/bus.env` holds its environment, written by the handoff stage from the located origin and the serial. HostCore reports `oom_kill:bus` and `memory_peak:bus` from the slice, so an OOM survives the restart it causes. A bus that cannot reach its hub keeps serving its Node; leaf redials are log noise only.
+
+**Kubernetes.** The hub is a native sidecar ordered after the worker, sharing an `emptyDir` for the configuration file; the worker and Central reach it on `127.0.0.1`, and a Node's leaf arrives on Central's existing port at `/photo-wall/bus/leafnode`, so no Service port or route is added. Deployment changes go through an iac PR the owner merges.
+
+**Tests.** The bus tests start real nats-server processes; fetch the pinned binary once:
+
+```sh
+export PHOTO_WALL_NATS_SERVER="$(python3 scripts/nats_server.py fetch --dest /tmp/nats)"
+.venv/bin/python -m pytest -q tests/integration -k node_bus -n 4
+.venv/bin/python scripts/test_local.py -q -m db -n 4 --dist loadgroup   # includes tests/integration/test_central_*.py
+```
+
+`test_central_worker_hub.py` binds the deployed hub ports (4222, 8080 and 8222 on all interfaces), so it fails while a local Compose hub or anything else holds them. The memory fence (`tests/integration/test_bus_memory_fence.py`, `PHOTO_WALL_BUS_FENCE_SERVER`) needs Docker on linux-arm64; CI's `bus-fence` job runs it.

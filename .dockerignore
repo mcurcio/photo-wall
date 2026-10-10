@@ -18,3 +18,5 @@ docs
 # stray host-built dist can never enter the image via `COPY central ./central` --
 # the console-builder stage is the SOLE source of central/console/dist/.
 central/console/dist
+# The console catalog's static build is never an image input.
+central/console/storybook-static

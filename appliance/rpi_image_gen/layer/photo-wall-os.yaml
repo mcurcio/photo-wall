@@ -1,0 +1,42 @@
+# METABEGIN
+# X-Env-Layer-Name: photo-wall-os
+# X-Env-Layer-Category: sys
+# X-Env-Layer-Desc: The base's OS configuration, set in the OS itself (owner,
+#  2026-10-09: OS configuration goes straight into the OS through
+#  rpi-image-gen, never through a Photo Wall package). Two settings and one
+#  package:
+#
+#  binfmt: Debian's python3.13-minimal ships /usr/lib/binfmt.d/python3.13.conf,
+#  so systemd-binfmt.service and the binfmt_misc mount start at every boot and
+#  fail: the Pi kernel has no binfmt_misc, and nothing on the Node runs a
+#  foreign binary format. Masked here, the idiom rpi-image-gen's own
+#  openssh-server layer uses for a Debian unit it replaces
+#  (`chroot "$1" systemctl mask ...`, layer/net-misc/openssh-server.yaml at
+#  262d4df).
+#
+#  Default locale: minbase writes none, so pam_env warns at every login
+#  (trixie's /etc/default/locale is a link to ../locale.conf). C.UTF-8 is built
+#  into trixie's libc, so no locales package is needed. rpi-image-gen's
+#  locale-base layer writes the same file but also installs console-setup and
+#  preseeds a keyboard and time zone this headless base has no use for.
+#
+#  libnss-myhostname: resolves the Node's own name, photo-wall-<serial>, which
+#  stage 1 writes at every boot (appliance/netboot_init.py hand_over_hostname)
+#  and no /etc/hosts line names (sudo, and anything else that looks its host
+#  up). The device layer bakes only a neutral name.
+#
+#  base-image.yml checks all three on the built image
+#  (scripts/device_root_checks.py).
+# X-Env-Layer-Version: 1.1.0
+# X-Env-Layer-Requires: systemd-min
+# METAEND
+---
+mmdebstrap:
+  packages:
+    - libnss-myhostname
+  customize-hooks:
+    - |-
+      set -eu
+      chroot "$1" systemctl mask systemd-binfmt.service \
+        proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount
+      printf 'LANG=C.UTF-8\n' > "$1/etc/locale.conf"

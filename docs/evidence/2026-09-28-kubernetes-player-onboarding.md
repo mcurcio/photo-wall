@@ -1,5 +1,7 @@
 # Kubernetes Player onboarding observation — 2026-09-28
 
+> **Historical record.** The provisioner, the per-device `.deb` path and the base-image auto-mirror this observation describes were deleted by [0019](../decisions/0019-debian-packaging-with-debhelper.md) ([runbook](../runbook.md#base-image-auto-mirror-0012-removed)).
+
 **Evidence class:** live Central HTTP observation and operator report. This is not a
 physical display or Player log qualification. The checkout was dirty during
 review; no new artifact was deployed.
@@ -25,8 +27,8 @@ The same client then posted repeated `POST /v1/player/readiness` requests with
 200 responses. No `GET /v1/netboot/manifest` or
 `POST /v1/player/base-health` request from that boot appeared in the inspected
 60-minute log window. This request path matches the default global `.deb`
-bootstrap in [the provisioner](../../appliance/provision.py) and the documented
-`PHOTO_WALL_PER_DEVICE_DEB` default in [the runbook](../runbook.md#base-image-auto-mirror-0012):
+bootstrap in the provisioner (`appliance/provision.py`) and the documented
+`PHOTO_WALL_PER_DEVICE_DEB` default in [the runbook](../runbook.md#base-image-auto-mirror-0012-removed):
 that path hands no base tag to the Player, so it sends no base-health report.
 The pending boot outcome alone therefore does not establish a Player failure.
 

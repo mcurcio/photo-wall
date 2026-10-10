@@ -1,5 +1,7 @@
 # Player health M1 — run brief (G7 seam, tracer part 1)
 
+**Note (2026-10-06):** leg `unresponsive` removed in 4c4cc2e ahead of r3; the 53 mentions below are historical.
+
 Working state for an unattended delivery run. Binding process: `~/.claude/skills/implementation-workflow/SKILL.md`. Binding frame: `player-shape-final.md` r8 (owner-accepted 2026-10-04) and the module design r9 (`player-module-design-r8.md`, history line r9). Both live in the orchestrator's scratchpad; **copy them to `docs/design/player-health/` in the first landed commit (B0)** so the plan of record is in the repo. Errata: `.claude/errata.md` (append-only, read with `grep -a`). Branch: `claude/player-health-tracer` (base `origin/main` 860465c). Owner instruction: "Start the build after the planning is complete."
 
 ## 1. Goal and scope

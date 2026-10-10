@@ -13,6 +13,8 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+import tls_fixture as tls
+from uplink_fakes import finding
 
 import player.service as player_service
 from appliance.bootstrap import LinuxOps
@@ -29,8 +31,6 @@ from player.service import (
     hardware_boot_context,
     resolve_boot_context,
 )
-from tests import tls_fixture as tls
-from tests.uplink_fakes import finding
 from uplink.trust import Trust
 
 RAW_PI_SERIAL = b"10000000abcd1234\n"

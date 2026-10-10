@@ -1,6 +1,6 @@
 import React, { useId, useRef, useState } from "react";
 
-import { FactLine } from "./FactLine.jsx";
+import { FactLine } from "./domain/fact-line.tsx";
 import { clock, fact } from "./facts.js";
 import {
   appOperationState,

@@ -6,15 +6,16 @@ import subprocess
 import time
 from pathlib import Path
 
-from appliance.boot_store import BootStore
-from appliance.clock import boot_id, boottime_ms
-from appliance.node.base_status import supervisor_document
-from appliance.node.environment import verify_root
-from appliance.node.lifecycle_storage import FileManagerRecoveryStore
+from appliance.apps.environment import verify_root
+from appliance.apps.lifecycle_storage import FileManagerRecoveryStore
+from appliance.apps.process_linux import process_root_matches, systemctl_show
+from appliance.host.base_status import supervisor_document
+from appliance.kernel.boot_store import BootStore
+from appliance.kernel.clock import boot_id, boottime_ms
 from appliance.node.manager import ManagerRecovery
-from appliance.node.process_linux import process_root_matches, systemctl_show
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
+from contracts.node_boot import MANAGER_PACKAGE
 from contracts.strict_json import loads_object
 
 UNIT = "photo-wall-node-manager.service"
@@ -28,7 +29,7 @@ class SystemdManagerLauncher:
 
     def verify(self, root_digest: str) -> bool:
         reference = self.references.get(root_digest)
-        if reference is None or reference.environment_sha256 != root_digest or reference.deb_name != "photo-wall-node-manager":
+        if reference is None or reference.environment_sha256 != root_digest or reference.deb_name != MANAGER_PACKAGE:
             return False
         try:
             verify_root(self.roots / root_digest, reference, **self.abi)
@@ -67,6 +68,7 @@ class SystemdManagerLauncher:
             "BindPaths=/run/photo-wall-node-storage/preparation:/run/photo-wall-preparation",
             "LoadCredential=node-config:/run/photo-wall-node/manager-client.json",
             "BindReadOnlyPaths=/etc/resolv.conf:/etc/resolv.conf",
+            "BindReadOnlyPaths=/run/photo-wall-node-storage/root-images:/run/photo-wall-root-images",
             "UnsetEnvironment=PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD GI_TYPELIB_PATH GST_PLUGIN_PATH",
         )
         args = ["/usr/bin/systemd-run", "--quiet", "--collect", "--unit=" + UNIT, "--service-type=exec"]

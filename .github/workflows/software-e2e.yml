@@ -8,9 +8,18 @@ name: Controller and Player software e2e
 # adapter and network-boundary checks; `two-players-three-outputs` is one job per fault segment
 # of the full wall scenario (scripts/demo_wall.py SCENARIOS), each starting a set-up fixture only
 # (`--setup-only`) and running the same setup and baseline before its segment. Every job's
-# shared setup is the software-e2e-setup action.
+# shared setup is the software-e2e-setup action. The scenario's Players run from the app root
+# (photo-wall-player, decision 0019) of the node component set the pipeline's node-components
+# job built for the same revision.
 on:
   workflow_call:
+    inputs:
+      revision:
+        description: >-
+          The exact commit node-components.yml built the node component set for; the wall
+          scenario runs the Player from that set's app image
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -55,11 +64,25 @@ jobs:
           media-base-image: ${{ needs.service-base.outputs.image }}
           central: 'true'
 
-      - name: Build the isolated Player package
-        run: |
-          .venv/bin/python -m scripts.build_player \
-            --revision "$GITHUB_SHA" \
-            --output "$RUNNER_TEMP/player-wheelhouse"
+      # The Player runs from the app root node-components.yml built for this run (its
+      # photo-wall-node-components-<revision> artifact): scripts/demo_wall.py unpacks the image in
+      # the roots container, read from that job's build cache.
+      - name: Download the V2 node components
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: photo-wall-node-components-${{ inputs.revision }}
+          path: ${{ runner.temp }}/node-components
+
+      - name: Expose the GHA cache service to the roots container build
+        uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
+
+      - name: Resolve the roots container's cache scope
+        id: cache
+        uses: ./.github/actions/buildkit-cache
+        with:
+          name: node-{role}
+          architecture: arm64
+          write: 'false'
 
       - name: Start a disposable real Immich fixture
         env:
@@ -77,14 +100,17 @@ jobs:
           PART: ${{ matrix.part }}
           CENTRAL_IMAGE: ${{ steps.setup.outputs.central-image }}
           WORKER_IMAGE: ${{ steps.setup.outputs.worker-image }}
+          REVISION: ${{ inputs.revision }}
+          PHOTO_WALL_NODE_BUILDER: ${{ steps.setup.outputs.builder }}
+          PHOTO_WALL_NODE_BUILD_CACHE_FROM: ${{ steps.cache.outputs.from }}
           PHOTO_WALL_DOCKER_DEBUG: '1'
           PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-software-e2e/docker-debug.log
         run: |
           .venv/bin/python -m scripts.demo_wall run \
             --state-dir "$RUNNER_TEMP/wall-demo" \
             --immich-state "$RUNNER_TEMP/immich-fixture" \
-            --wheelhouse "$RUNNER_TEMP/player-wheelhouse" \
-            --revision "$GITHUB_SHA" \
+            --app-image "$RUNNER_TEMP/node-components/app.squashfs" \
+            --revision "$REVISION" \
             --central-image "$CENTRAL_IMAGE" \
             --worker-image "$WORKER_IMAGE" \
             --scenario "$PART"

@@ -33,6 +33,7 @@ from central.kernel.assets import AssetKind
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository, RefreshLease
 from central.media_store import MediaStore, MediaStoreError
+from central.node_bus_wiring import NodeBus, build_node_bus
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
@@ -467,15 +468,18 @@ async def _media_writer(worker: MediaWorker, run_queue: Callable[[], Awaitable[N
         await run_queue()
 
 
-async def _run_workers(media: Awaitable[None], runtime: JobRuntime) -> None:
-    """The legacy media loop and the job runtime side by side, under ONE signal handler.
+async def _run_workers(media: Awaitable[None], runtime: JobRuntime,
+                       bus: NodeBus | None = None) -> None:
+    """The legacy media loop, the job runtime and, with a hub deployed, the Node bus side by side,
+    under ONE signal handler.
 
-    SIGTERM/SIGINT stops both gracefully (running jobs finish), then `_entry` returns and the
-    process exits 0. Neither installs its own handlers. A loop that fails, or ends without
-    being asked to stop (`until_stopped`), cancels the other and the process exits non-zero.
+    SIGTERM/SIGINT stops each gracefully (running jobs finish), then `_entry` returns and the
+    process exits 0. None installs its own handlers. A loop that fails, or ends without being
+    asked to stop (`until_stopped`), cancels the others and the process exits non-zero.
     """
     loop = asyncio.get_running_loop()
     stopping = False
+    bus_stop = asyncio.Event()
 
     def stopped() -> bool:
         return stopping
@@ -484,11 +488,14 @@ async def _run_workers(media: Awaitable[None], runtime: JobRuntime) -> None:
         async with asyncio.TaskGroup() as group:
             media_task = group.create_task(until_stopped(media, stopped), name="worker media")
             group.create_task(until_stopped(runtime.run(), stopped), name="worker jobs")
+            if bus is not None:
+                group.create_task(until_stopped(bus.run(bus_stop), stopped), name="worker node bus")
 
             def stop() -> None:
                 nonlocal stopping
                 stopping = True
                 runtime.stop()
+                bus_stop.set()
                 media_task.cancel()  # procrastinate stops a cancelled worker gracefully
 
             for number in _STOP_SIGNALS:
@@ -544,7 +551,8 @@ async def _entry():
     try:
         async with app.open_async():
             await _run_workers(
-                _media_writer(worker, lambda: _media_queue(app, additional_context)), runtime)
+                _media_writer(worker, lambda: _media_queue(app, additional_context)), runtime,
+                build_node_bus(dsn, os.environ))
     finally:
         await worker._close_clients()
         await thumbnails.aclose()

@@ -1,12 +1,12 @@
 """PostgreSQL atomicity checks for authored Scene adoption."""
 
 import pytest
+from test_authored_media import setup_source
 
 from central.coordination import Coordinator
 from central.media_repository import StoreLimits
 from central.registry import RegistryError
 from central.runtime import Contribution, Runtime, Scene
-from tests.test_authored_media import setup_source
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +102,7 @@ def test_authored_scene_preserves_media_freshness_membership_and_capacity_checks
 
 
 def test_atomic_scene_api_validates_authority_and_commits_complete_request(registry):
-    from tests.test_authored_media import ADMIN, client_for
+    from test_authored_media import ADMIN, client_for
 
     _, spec, originals = setup_source(registry)
     scene = authored_scene(originals[0].asset_id)

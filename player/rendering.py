@@ -13,6 +13,11 @@ from typing import Literal, Protocol
 
 from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
 
+REDRAW_RENEWAL = 1.0
+"""Seconds after which a native renderer redraws an unchanged composition (render on change)."""
+PRESENTATION_FRESHNESS = 2 * REDRAW_RENEWAL
+"""Seconds a draw acknowledgment stays current: one missed renewal never reads as pending."""
+
 
 @dataclass(frozen=True)
 class LocalLayer:
@@ -56,6 +61,8 @@ class PresentationResult:
 
 
 class Renderer(Protocol):
+    gl_renderer: str | None  # GL_RENDERER once a GL context exists; None without GL
+
     def set_unbound_outputs(self, output_ids: tuple[str, ...], player_id: str | None,
                             central_link_state: Literal["connecting", "reachable", "retrying"] = "reachable",
                             configuration_received: bool = True) -> None: ...
@@ -85,6 +92,7 @@ class RecordingRenderer:
         if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0:
             raise ValueError("capacity must be a nonnegative integer")
         self.limit = capacity
+        self.gl_renderer: str | None = None
         self.pending: set[str] = set()
         self.prepare_failures: set[str] = set()
         self.presentation_failures: set[str] = set()

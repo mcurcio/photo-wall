@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
-from appliance.boot_store import BootStore
+from appliance.kernel.boot_store import BootStore
 from appliance.node.recovery import (
     RESTORE_BUDGET_MS,
     STOP_BUDGET_MS,

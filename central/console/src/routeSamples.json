@@ -23,14 +23,19 @@
     "wall": [
       "#/wall",
       "#/wall/layout",
-      "#/wall/frames/sample-frame/status",
-      "#/wall/frames/sample-frame/binding",
-      "#/wall/frames/sample-frame/calibration"
+      "#/wall/frames/sample-frame/overview",
+      "#/wall/frames/sample-frame/position",
+      "#/wall/frames/sample-frame/picture",
+      "#/wall/frames/sample-frame/hardware"
     ]
   },
   "fleet": {
+    "hardware": [
+      "#/hardware",
+      "#/hardware?pi=device-0000000000000000000000000000000000000000000000000000000000000000",
+      "#/hardware/device-0000000000000000000000000000000000000000000000000000000000000000"
+    ],
     "players": [
-      "#/players",
       "#/players/device-0000000000000000000000000000000000000000000000000000000000000000"
     ],
     "releases": ["#/releases", "#/releases/update/v0.15.0", "#/releases/update/v0.15.0/try/sample-player",

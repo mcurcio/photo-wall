@@ -67,7 +67,7 @@ flowchart LR
 | **Panel** | The display hardware at a Frame. Requirements say Panel; the console stops saying "Display" for it. | Display Host |
 | **Binding** | The Output-to-Frame assignment Central has set. The Frame is its root: every bind carries the Frame's generation. Worded "Bound to Frame X", never "shows". | Presentation |
 | **Standing** | Not enrolled, Unbound, Bound or Retired (replaces "Pending", "New" and "In service"). | Liveness |
-| **Boot path** | One supported path: the **node offer** (`/v2/node/boot-offers`), taken when the Pi's kernel command line carries `photowall.node=v2`. Each Pi's command line decides at every boot; it is not stored per Player. A box whose newest boot record on Central is a deprecated boot offer or a base image served without an offer is **misconfigured**, shown as one line on its Player page (§25, G5), never as a mode. | A Player attribute: there is none |
+| **Boot path** | One supported path: the **node offer** (`/v2/node/boot-offers`), the only boot offer ([0019](decisions/0019-debian-packaging-with-debhelper.md) removed the V1 offer and the `photowall.node=v2` switch, and with them the deprecated-path line of §25 and G5). | A Player attribute: there is none |
 | **Boot selection** | The fleet-wide boot policy: the one deployment Central offers every node-path boot from now on, with its revision (§25). | A per-Player choice: there is none (R17) |
 | **Update the wall** | The guided journey (§25a): optionally try on one Frame, then Put vX on the wall (one confirmation; Select and reboot Players one at a time) or Back out. It adds no Central state or verb. | A stored rollout or canary: Central records neither |
 | **Source** | The requirements' **AssetSource** (`requirements.md:131`): a saved query against the operator's photo library that selects media, never a copy of it. The requirements keep their name; the console says Source. | A Scene (which uses Sources); a library connection (where a Source's query runs) |
@@ -75,6 +75,8 @@ flowchart LR
 | **Last reported** | The latest receipt time of a layer that reports periodically (heartbeat). | **First received**: when Central first received one particular fact, which says nothing about the layer since |
 
 ## 4. The proposed shape
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Pass 1's "Q1 = A, one home per box" no longer holds: the console is cut by feature domain (Part I), and a Pi has a Hardware page and a Software page, not one home. The rule that every other mention is a link to the owning home stands as H1.
 
 Each navigation group is one bounded context. Each aggregate gets one home page. Every other mention of it is a link to that home.
 
@@ -193,6 +195,8 @@ A `reported` fact must say which receipt it carries; without that, it becomes `u
 
 ## 8. Roadmap of passes
 
+> **Superseded for what comes next (2026-10-09).** The product [roadmap](roadmap.md) orders the console work from here, by the user's journey; this table is the record of passes 1 to 5 and batches 2 to 4. See [decision 0019](decisions/0019-first-principles-console.md).
+
 ```mermaid
 flowchart LR
   P1["Pass 1 · Fleet: Players<br/>one home per box, layers,<br/>reboot, operation states,<br/>V1 lane labelled<br/>(removed in E)<br/>UI only"] --> P2["Pass 2 · Fleet: current layers<br/>Output interruption,<br/>Display Host presentation<br/>two backend reads (gate)"]
@@ -223,6 +227,8 @@ flowchart LR
 # Part B: pass 1 (feature layer, for delivery)
 
 ## 9. Screens and read models
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The per-box Player page is replaced by the Hardware and Software Pi pages (Part I).
 
 **Before → after (navigation).** Navigation groups are unlabelled lists in `Shell.jsx`; pass 1 adds no group headings and renames nothing outside the fleet.
 
@@ -436,7 +442,7 @@ Delivery follows the owner's standing preference: the four beads are built back 
 | Finding | Owner document |
 |---|---|
 | Display Host posts every snapshot with `covered_through_sequence=0` (`appliance/display_host/service.py:264-270`). Central skips a fact whose sequence is not newer (`central/fleet/node_evidence.py:114`), and a surface's fact key excludes its state, so a later `withdrawn` or `invalidated` is dropped as historical. A probe showed `presented_to_compositor` surviving a withdrawal. The served projection therefore holds the first reported presentation, and Runtime reconciliation is blind to withdrawals. Display Host's per-Output **display exchanges** (`node_display_exchanges`, one per Output per sample) are a separate channel the defect does not touch; pass 2 reads presentation from them (§16), so the console no longer waits on this fix. | [Display host](display-host-backend.md); [implementation map](player-fleet-implementation-map.md) |
-| The app operation's `state` stays `staged` after the broker rejects (`node_lifecycle.py:307-318`), and the online broker raises locally on a changed old process without responding (`appliance/node/online_broker.py:66-79`), so a refused stage can look like "no response". | [Implementation map](player-fleet-implementation-map.md) |
+| The app operation's `state` stays `staged` after the broker rejects (`node_lifecycle.py:307-318`), and the online broker raises locally on a changed old process without responding (`appliance/apps/online_broker.py:66-79`), so a refused stage can look like "no response". | [Implementation map](player-fleet-implementation-map.md) |
 | Migrations 050–052 were deleted (commit 02ec7e5), against the forward-only rule. Docs still cite their behaviour. | AGENTS.md; [implementation map](player-fleet-implementation-map.md) |
 | `node_lifecycle` still refuses on `active_equipment_drains`, which nothing writes (dead fence) | [Implementation map](player-fleet-implementation-map.md) |
 | The implementation map still calls maintenance requests "an honest operator workflow", but `dispatched` is never written | [Implementation map](player-fleet-implementation-map.md) |
@@ -525,7 +531,7 @@ Each read is read-only. It is an additive field on an existing admin read, behin
 
 **Lock cost.** The interruption read takes no fleet lock. The display read rides the device read, which holds the global fleet advisory lock (`node_observations.py:52-54`). Its query (`DISPLAY_OUTPUTS_SQL`) walks the existing index `node_display_output_latest` (055:14): a recursive skip-scan finds the distinct Outputs of the current admission's newest Display Host producers (at most 4, newest by admission), then one newest-first probe per producer and Output; the per-Output winners are cut to 64 in SQL and only their stored requests are fetched. The node picks its incarnation ids, so it picks how many producers a boot has (up to the daily session cap); the producer bound is Central's, so the cost is at most 4 × 64 index probes plus 64 request rows, independent of that count and of how many exchanges the boot has accumulated, which matters because exchanges are immutable, never pruned, and arrive about every 3 s per Output. That adds one index-bounded query to the lock hold per open Player page per 5 s. The DB tests seed 20,000 exchanges and assert the plan reads fewer than 50 exchange rows, and seed 12 producers each flooding past 64 Outputs and assert the plan stays within the 4-producer bound; they bound rows, not time.
 
-**Not proposed.** A last-reported time for the App Effect Broker: it sends evidence only on change (`appliance/node/broker_runner.py` `emit_process_evidence`), and Central stores no poll receipt. That needs a heartbeat write (feature proposal). A non-locking device read also stays deferred.
+**Not proposed.** A last-reported time for the App Effect Broker: it sends evidence only on change (`appliance/apps/broker_runner.py` `emit_process_evidence`), and Central stores no poll receipt. That needs a heartbeat write (feature proposal). A non-locking device read also stays deferred.
 
 > **Q3 (backend reads).** Recommended: **A, both reads** (about +70 code and +110 test lines). **B: the interruption read only.** Display Host stays Unknown, so U6 stays incomplete for that layer. **C: none.** Interruption and Display Host stay Unknown, R6's "only this Player's Outputs interrupted" stays invisible, and batch 2 has no backend change.
 >
@@ -533,7 +539,7 @@ Each read is read-only. It is an additive field on an existing admin read, behin
 
 **The reboot fence (Q4).** "Outstanding" is defined once, in Central. A reboot command is **outstanding** while it is unexpired on Central's clock and has no `rejected` response, scoped to the session it targets.
 
-- **Received, accepted and initiated commands stay outstanding until they expire.** A second command id to the same session would mean two reboot requests for one box, because Host Management dedupes by command id (`appliance/node/host.py:108-116`).
+- **Received, accepted and initiated commands stay outstanding until they expire.** A second command id to the same session would mean two reboot requests for one box, because Host Management dedupes by command id (`appliance/host/host.py:108-116`).
 - **A command to an earlier session never blocks a new one.** Host Management accepts commands only for its current session (`host.py:100-104`).
 
 The fence goes in `NodeCommands.request_reboot`: it refuses a **new** command id with 409 `node_reboot_outstanding` while another command on the same session is outstanding. It runs under the locks `request_reboot` already holds (gate, global fleet lock and session row, `node_commands.py:66-72`), so the check cannot race. A retry of the same command id is unaffected.
@@ -739,7 +745,7 @@ There are five beads, built back to back, each green on its own package tests so
 
 ## 24. What Part E covers, and why
 
-**The console assumes one configuration: node control.** The owner's iac runs Central as `central.node_app` (`node_app.py:1-6`; mcurcio/iac `workloads/photo_wall/__init__.py:28-37`). The console stops presenting any other lane. Whether a given Pi boots by node path is **not** a Central setting: each Pi's kernel command line decides at every boot (`appliance/netboot_init.py:668-688`), the release default command line does not carry `photowall.node=v2` (`scripts/build_netboot_bundle.sh:297`), and the iac change that adds it per Pi is unverified as merged (§31 Assumptions). So the V2 posture has two misconfigurations to show, not one. Four consequences:
+**The console assumes one configuration: node control.** The owner's iac runs Central as `central.node_app` (`node_app.py:1-6`; mcurcio/iac `workloads/photo_wall/__init__.py:28-37`). The console stops presenting any other lane. Whether a Pi boots by node path is no longer a question: [0019](decisions/0019-debian-packaging-with-debhelper.md) deleted the V1 boot offer and the `photowall.node=v2` switch, so there is one misconfiguration to show (Node management off on this Central), not two. Four consequences:
 
 1. **No V1 surface.** The console shows no V1 boot offers section, no V1 app target, fleet V1 policy or V1 boot baseline, no V1 boot-path record ("V1 boot offer", "Netboot base without an offer"), no maintenance request, no `ManagementFacts` (V1 loader session, V1 app attempt, authenticated OS attempt claim), and no "release frontier" wording. This reverses Q2.
 2. **Central without node control is a misconfiguration, shown once.** Central serves `transport_enabled` on `GET /v1/operator/node/status`, which answers with node control off (it calls no `require_enabled`, `node_routes.py:119-125`; mounted in both compositions, `app.py:883`). The shell reads it and, when `false`, shows one banner. Per-section "Unknown: node management is off" lines, the `NODE_OFF` constant and `NodeDevice.enabled` are deleted.
@@ -823,7 +829,7 @@ flowchart LR
 
 | Section | Shows | Change |
 |---|---|---|
-| Boot | "Current node session's boot" (`claimed`), then the latest **Node boot offer** record (`set`, "not proof the Player booted"), or "No node boot offer recorded for this box." When G5 serves `deprecated_boot`, one warning line above them, §26's deprecated-path fact with the suffix "its kernel command line lacks `photowall.node=v2`; Select and Stage do not reach it" (one wording). Otherwise one static line: "A Pi boots by node path when its kernel command line carries `photowall.node=v2`." | "V1 boot offer" and "Netboot base without an offer" records deleted, with the per-boot-path note; the deprecated-path line added |
+| Boot | "Current node session's boot" (`claimed`), then the latest **Node boot offer** record (`set`, "not proof the Player booted"), or "No node boot offer recorded for this box." (The deprecated-path warning line and the static `photowall.node=v2` line this row once specified were removed by [0019](decisions/0019-debian-packaging-with-debhelper.md).) | "V1 boot offer" and "Netboot base without an offer" records deleted, with the per-boot-path note |
 | Layers, Reboot, App operations | As batch 2 | Every `node.enabled === false` branch deleted; a mid-session `node_control_disabled` is an ordinary failed read naming its code until the shell read raises the banner. A gate refusal on Reboot reads `effectGateFact`'s whole wording ("Reboot unavailable: Effect gate closed · Central's reason: no deployment certification has opened it · recorded <Central's time>") and links to Releases; the link keys on a structural `gate: true` flag that `rebootTarget` and `stageBlocker` set, never on a string match. Routes have no in-page anchors, so "Releases › Effect gate" links to `#/releases`, whose last section is the gate |
 | V1 boot offers | — | Section deleted |
 | Danger zone › Retire | As batch 2 | "Its netboot record still counts toward the release frontier" deleted (`ConfirmAction.jsx:521`) |
@@ -937,14 +943,14 @@ Every line below is a `fact()` (rule 2) rendered through `FactLine`, except plai
 | Deployment's release | `set` | "From release v0.15.0": a release row serves this deployment id (Central's own pairing). Absent for a deployment no release row serves (one published before the upgrade under another id). |
 | Boot selection | `set` | "Selected for every boot from now on: deployment 7c41… (revision 5) · recorded 1 h ago"; beside it "Previous selection: deployment 2222… (release v0.14.0)" |
 | No selection | `set` | "No boot selection · Central refuses every boot", or the first-run words of §25 |
-| Select scope (dialog) | plain statement | "Every Player that boots by node path from now on is offered this deployment, including Players Central has not seen. Central cannot list which Players will boot. A Pi whose kernel command line lacks `photowall.node=v2` is misconfigured and is not offered it." |
+| Select scope (dialog) | plain statement | "Every Player that boots by node path from now on is offered this deployment, including Players Central has not seen. Central cannot list which Players will boot." |
 | No-app consequence (dialog) | plain statement | "This deployment has no app: every boot from now on is offered no app." (Central's offer, not a prediction of what the Frames show.) |
 | Put on the wall (dialog) | plain statements | §25a's two forms and the readiness line |
 | Check GitHub releases now (result) | plain statement | "Central queued a check of GitHub releases; new releases appear here when the media worker records them." (202 `polling` is a queued job, never "found".) |
 | Effect gate, closed | `set` | "Effect gate closed · Central's reason: <reason words> · recorded <Central's timestamp>". Reason words: `never_certified` "no deployment certification has opened it"; `deployment_changed` "the deployment changed"; an expired certification (state `open`, effective `closed`) "its certification expired"; any other code shown as its words. No age: node status serves no `read_at`, so the timestamp is displayed, never subtracted from a browser clock (R10). |
 | Effect gate, open | `set` | "Effect gate open · certified by the deployment · generation N · Central re-checks its serving evidence on every Reboot and Stage" |
 | Node control off | banner | §25 banner text |
-| Deprecated boot path | `set` (Central's boot record) | Label "Booted by the deprecated path"; fact "Central's newest boot record for this box is a deprecated boot offer \| a base image served without an offer · recorded <age>" (Central's read time minus its record time); suffix "its kernel command line lacks `photowall.node=v2`; Select and Stage do not reach it". This is the one wording, used on the Player page (§25). Worded so that no scanned string is needed; no exemption |
+| Deprecated boot path | (removed) | Removed by [0019](decisions/0019-debian-packaging-with-debhelper.md) with the V1 boot offer; kept here as the design record of what Part E specified. |
 | Linked app environment | `reported`, first (source: Player app, via its app link) | "Player app linked environment 9f8e7d… · first received 2 h ago" |
 | Stored acceptance | `set` | "Qualified on this Player: app 9f8e7d… on base v0.15.0 (or "on a base other than the one this boot runs") · recorded 2 d ago · physical pixels unknown · Stage checks it against the current Outputs and base when you send" |
 | Stage refusal | `set` (Central's answer) | Central's code in the words below, as the send's result; nothing is recorded on a refusal |
@@ -1281,7 +1287,7 @@ The node-control banner and the effect gate section need no gate: `GET /v1/opera
 
 **Not planned:** raw deployment documents in the console; a stored "canary" (the journey's tried Player lives in its URL only); a list of Players a selection will reach; any V1 surface.
 
-**V1 backend follow-up programme** (separate; inventoried here, nothing removed in this PR). Order matters: items 1 and 1b first; item 9 is a constraint on every other.
+**V1 backend follow-up programme** (inventoried here when nothing had been removed; most of it was done by the [0019](decisions/0019-debian-packaging-with-debhelper.md) PR, see the [implementation map](player-fleet-implementation-map.md): the V1 routes, the `photowall.node=v2` switch, G5 and the console's deprecated-path line are gone, so the rows below that name them describe code that no longer exists). Order matters: items 1 and 1b first; item 9 is a constraint on every other.
 
 | # | What | Where | Consumers after NV1 |
 |---|---|---|---|
@@ -1303,7 +1309,7 @@ Forward-only migrations: V1 tables are dropped by new numbered migrations, never
 | Finding | Owner document |
 |---|---|
 | No production code opens the effect gate: `RolloutEffectGate.open` has callers only in tests (`tests/test_fleet_rollout_gate.py`, `tests/test_node_lifecycle.py`, the browser and PID1 fixtures). The runbook names the deployment controller as an external dependency (`runbook.md` "External implementation dependency"). Reboot and Stage are therefore never admitted on a real Central today | [Implementation map](player-fleet-implementation-map.md) |
-| The release default command line lacks `photowall.node=v2` (`build_netboot_bundle.sh:297`), so node path is opt-in per Pi through iac, contrary to the V2 posture | [Implementation map](player-fleet-implementation-map.md) |
+| Resolved by [0019](decisions/0019-debian-packaging-with-debhelper.md): the release default command line lacked `photowall.node=v2`, so node path was opt-in per Pi through iac, contrary to the V2 posture | [Implementation map](player-fleet-implementation-map.md) |
 | Resolved by B7: the synchronous in-request publish (download, verify, scratch-space race) and its `ValueError`-to-422 re-mapping are deleted with the route; Central ingests releases in the background | [Implementation map](player-fleet-implementation-map.md) |
 | The App Effect Broker reports none of its local stage refusals (`online_broker.py:56-93`): Central cannot tell "not fetched" from "refused" from "slow". A `rejected` response with a reason would make a Central fence on unsettled stages possible | [Implementation map](player-fleet-implementation-map.md) |
 | Central admits a stage while the latest is mid-switch, though the broker always strands it (`node_lifecycle.py:153-155`, `online_broker.py:37`, `:58-63`); the console refuses it, a hand POST does not | [Implementation map](player-fleet-implementation-map.md) |
@@ -1674,7 +1680,7 @@ Each lands as the first commit of the bead that shows it, behind the existing `a
 | **G10 · Tag list and thumbnails** | L2 | Autocomplete from the library's tags (R23); any media in the preview | Tag-list table, the worker's tick re-list and boot replace, one read route; `LIBRARY_THUMBNAIL` on the asset layer with its job, handler, `previews/` directory and route (PR 37 §6–§9 security kept whole) | Tags typed as ids (unusable), tiles as text | +170 / +320 (built about 4× code, 2× tests: the record lifecycle, the full client and re-encoder, the security tests) |
 | **G11 · Media times on one clock** (Q10 = yes) | M1 | Any media age or alarm: today the console subtracts the worker's clock from Central's, and the worker compares Central's preview expiry with its own (§33) | A connection-bound `TransactionClock` (§41). **Rule:** every media time that another process compares (another worker process included) is stamped by `now_in(conn)` on the transaction that writes it, and every comparison with one takes its "now" from `now_in(conn)` on its own transaction; a process clock reading is never carried into such a column. The snapshot's and the media read's `media.read_at` come from the same port. The process `Clock` stays for monotonic budgets and process-local decisions. Tests compose `ProcessTransactionClock(ManualClock)` | Worker-clock times labelled "by the media worker's clock", no ages, and no "quiet" or "overdue" alarms (not built: Q10 = yes) | +90 / +120 (built about +127 / −51 code, +238 / −55 tests) |
 
-**G8 withdrawn in review.** The first draft refused a claim for a superseded admission. That reverses designed behaviour: the owning document says "a claim for its matching offer always admits its boot … duplicate-serial Pis therefore flap visibly … rather than being fenced" (`player-node-domain-model.md:107`; `central/fleet/node_sessions.py:123-127`), the revival was recorded as accepted on 2026-10-01 (`.claude/errata.md:1993-1996`), and the owner's trust-identity decision says a new enrollment as X supersedes earlier boots. A superseded kernel boot can claim again only while it is still running (`appliance/node/session.py:63-69` re-enrolls with a new session and the same kernel boot id), so when "Ended by a later boot" returns to the earlier state, Central's record is right: that boot is current again and its operation is its own. The console is honest as built. A refusal would also have been an unhandled status on the node (`REFUSED = (401, 403)`, `session.py:27`; any other code is retried with the same claim forever). The reviewer's alternative, a monotonic admission epoch that keeps "ended" after re-admission, would state that a still-running boot's operation ended, which is false. R1 records the behaviour where it is owned and pins it with a test (§45).
+**G8 withdrawn in review.** The first draft refused a claim for a superseded admission. That reverses designed behaviour: the owning document says "a claim for its matching offer always admits its boot … duplicate-serial Pis therefore flap visibly … rather than being fenced" (`player-node-domain-model.md:107`; `central/fleet/node_sessions.py:123-127`), the revival was recorded as accepted on 2026-10-01 (`.claude/errata.md:1993-1996`), and the owner's trust-identity decision says a new enrollment as X supersedes earlier boots. A superseded kernel boot can claim again only while it is still running (`appliance/central_session/session.py:63-69` re-enrolls with a new session and the same kernel boot id), so when "Ended by a later boot" returns to the earlier state, Central's record is right: that boot is current again and its operation is its own. The console is honest as built. A refusal would also have been an unhandled status on the node (`REFUSED = (401, 403)`, `session.py:27`; any other code is retried with the same claim forever). The reviewer's alternative, a monotonic admission epoch that keeps "ended" after re-admission, would state that a still-running boot's operation ended, which is false. R1 records the behaviour where it is owned and pins it with a test (§45).
 
 **G11's mechanism, revised at the batch-5 reconcile.** The first draft composed a `DatabaseClock(db) -> Clock` into `MediaRepository`. Checked against the code, that is wrong twice: (1) `repository.clock` flows into `MediaStore`, `MediaWorker`, the `Preparer`, `ImmichClient` and the installation repository (`media/worker.py:156-170`, `central/media_store.py:141-142`), so swapping it silently re-means about thirty call sites, most of them monotonic budgets; (2) many clock reads happen inside an open transaction (`central/media_repository.py:307`, `:316`), and a clock that takes its own pooled connection there can exhaust the pool (ten connections, `central/db.py:15-27`) under load and stall until the five-second pool timeout. The connection-bound port cannot do either: it can only be called with a connection already held, and only where a media time is written or compared. It is also the port Part H's deferred **R-clock** (§69) names for fleet receipts; M1 builds it for media only, and R-clock stays a separate residual for the owner to schedule.
 
@@ -1849,6 +1855,8 @@ Three shapes were drafted in parallel and walked through five operator journeys 
 
 ## 48. The proposed shape
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The tree's Fleet home with one Player page per box, and the Wall-first landing, give way to the domain sidebar of Part I; Screens opens the console once a Frame exists.
+
 ```mermaid
 flowchart TB
   subgraph WORK["Worklist: link only"]
@@ -1927,6 +1935,8 @@ WORKLIST
 
 ## 50. Homes and the attention list: contracts
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The Fleet home's per-box contract is replaced by the Hardware and Software domains (Part I).
+
 | Home | Owns | Daily face | One-time or rare (same home) | Reads | Never |
 |---|---|---|---|---|---|
 | **Wall** | Frame, Binding, Calibration (Registry) | Read-only plan; its To finish list (or, with no Frames, the first step); tiles; Frame › Status | Edit layout; Binding (bind, bind a different Output, Identify, unbind); Calibration | Snapshot | Host detail beyond one chip; Show authoring |
@@ -1950,6 +1960,8 @@ Binding stays the one two-sided relationship (rule 1): the Frame's Binding facet
 | **Diagnose** (future) | What exactly is the box doing? | Player › Diagnostics (reserved, §53) |
 
 ## 52. Host health (batch A) and node metrics (batch B)
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Host health is the Hardware domain's, shown on the Hardware Pi page, not on a per-box Player page (Part I).
 
 **Home: Fleet.** The host is part of the box, and Fleet owns the box. Everything else links to it.
 
@@ -2187,7 +2199,7 @@ flowchart LR
 | **H1** | The Players table, worst first; Player › Health first; Reboot in the header | console |
 | **A1** | Threshold, refusal and storage incidents; the Status host chip; the strip's host suffix | console |
 
-**Finding 1: Host Management posts faster than Central admits.** Host Management ticks every 2 s (`appliance/node/host_runner.py:123`) and posts one host observation on every tick (`:74-79`), about 43,200 a day. Central admits 20,000 observations per device per UTC day and answers 429 after that (`central/fleet/node_sessions.py:63-70`). So for roughly the last 13 hours of each UTC day Central stores no host sample, and a host-silence incident built on G12 would fire every day. The rows are also immutable, with no retention (`central/migrations/053_node_control.sql:105-113`).
+**Finding 1: Host Management posts faster than Central admits.** Host Management ticks every 2 s (`appliance/host/host_runner.py:123`) and posts one host observation on every tick (`:74-79`), about 43,200 a day. Central admits 20,000 observations per device per UTC day and answers 429 after that (`central/fleet/node_sessions.py:63-70`). So for roughly the last 13 hours of each UTC day Central stores no host sample, and a host-silence incident built on G12 would fire every day. The rows are also immutable, with no retention (`central/migrations/053_node_control.sql:105-113`).
 
 **The class fix lives on Central's side.** Nodes on an older base keep their 2 s cadence until they reboot, and the fleet runs mixed bases by design (Releases, Stage). So a fix that relies on the node's cadence fixes nothing. Instead:
 - **Central stores at most one host observation per producer per interval.** It judges this on the producer's own boot clock: the post's `sampled_boottime_ms` against that of the producer's newest stored sample (`node_observations.py` `_coalesced_in`). A producer is one boot, so both readings come from one kernel's boot clock: a clock compared only with itself, as §15's display read does. No Central receipt clock, of this replica or another, enters the judgement (errata FX3-2, superseding FX2-3 for coalescing).
@@ -2215,7 +2227,7 @@ What it does not cover:
 | 2 s | About 43,200 rows a day per box. Silence is called after 8 s, so one slow poll on the Pi raises an incident |
 | Raise the cap only | Rejected: the class stays, and the next cadence change breaks it again |
 
-**Finding 2: App Manager's byte fields have no producer.** `ManagerPreparationV2` carries `available_bytes` and `required_bytes` (`contracts/node_preparation.py:23-24`). But its only constructor never passes them (`appliance/node/manager_observation.py:33-37`). A storage refusal also surfaces only as the generic `fault` state: the admission raises `node_storage_capacity` (`appliance/node/capacity.py:44-51`), and the runner reports it as `manager_preparation_fault`. So the tier-A ask "App Manager bytes" needs a node change. In N1, App Manager reports the two numbers of the admission decision itself, on a `refused` sample (§63).
+**Finding 2: App Manager's byte fields have no producer.** `ManagerPreparationV2` carries `available_bytes` and `required_bytes` (`contracts/node_preparation.py:23-24`). But its only constructor never passes them (`appliance/node/manager_observation.py:33-37`). A storage refusal also surfaces only as the generic `fault` state: the admission raises `node_storage_capacity` (`appliance/kernel/capacity.py:44-51`), and the runner reports it as `manager_preparation_fault`. So the tier-A ask "App Manager bytes" needs a node change. In N1, App Manager reports the two numbers of the admission decision itself, on a `refused` sample (§63).
 
 ## 61. Screens
 
@@ -2518,7 +2530,7 @@ No index is added: G12 reads `node_host_observations` through its primary key on
 | Malformed, including a non-token interface | Refuse | 422 |
 | Over the derived daily cap | Refuse | 429 `node_intake_capacity` |
 
-**A producer is one boot.** A producer is (admission, owner, incarnation) (`node_sessions.py:214-222`). The incarnation lives in the BootStore session row (`appliance/node/session.py:35-38`), which survives hourly session renewal and Host Management restarts (`RuntimeDirectoryPreserve=yes`). So one facts row per producer means one per boot.
+**A producer is one boot.** A producer is (admission, owner, incarnation) (`node_sessions.py:214-222`). The incarnation lives in the BootStore session row (`appliance/central_session/session.py:35-38`), which survives hourly session renewal and Host Management restarts (`RuntimeDirectoryPreserve=yes`). So one facts row per producer means one per boot.
 
 **On the node.** Host Management keeps its send state in memory:
 - **It resends on every process start.** Central answers `duplicate`, or stores the same values under a higher sequence and keeps `first_received_at`.
@@ -2546,7 +2558,7 @@ stateDiagram-v2
 
 ## 65. Interface sketch (signatures only)
 
-**Node** (`appliance/node/`):
+**Node** (`appliance/host/`, `appliance/kernel/`; `manager_observation.py` is in the retiring `appliance/node/`):
 
 ```
 class LinuxHostSampler:                                    # host_linux.py
@@ -2758,6 +2770,26 @@ W1 is also high-tier, for regression.
 - Part F (batch 5), where S1 adds the `planned` fact to Status.
 
 **Not planned:** a Set up section (Q12); thresholds or basis prose held in the console or served as text; an address used as identity; a node-reported base digest.
+
+# Part I: the console by domain (0018)
+
+**Status:** approved 2026-10-09. This part holds the domain table; [decision 0018](decisions/0018-console-by-domain-and-design-system.md) holds the owner's words, the answers, the design-system layers and rules, the migration and the costs. Sections that milestones 2 and 3 change in detail are marked superseded above and rewritten when they land. The layouts are a starting point to be re-evaluated as capabilities grow. **Superseded in part (2026-10-09)** by [decision 0019](decisions/0019-first-principles-console.md): the target navigation and the one Frame page are in the [operator console design](operator-console-design.md).
+
+## 70. The domain table
+
+Each domain is a bounded context; a Frame or Pi appears in each domain that shows it with only that domain's facts. The sidebar is this table: Show running (Screens, Now) · Show creating (Scenes, Schedule, Sources) · Wall · Fleet (Hardware, Software) · Needs attention.
+
+| Domain | The one question | Facts it owns | Actions it owns |
+|---|---|---|---|
+| **Wall setup** | Is every Frame placed, bound to an Output and calibrated? | placement, Binding, calibration, Frame profile, setup state, free Outputs | Edit layout, Bind, Unbind, Identify Panel, Calibrate |
+| **Screens** | What is each Frame presenting now, and why? | live health, the Run on top, Why, what Display Host reports | none |
+| **Now** | Which Runs are active, and is media flowing? | Runs and Activations, media pipeline | Show now, finish and cancel a Run |
+| **Show creating** | What will the show be? | Scenes, Programs, Sources | create, edit, delete |
+| **Hardware** | Is every Pi powered, healthy and linked? | host samples and facts, Node API link, Host Management sessions, standing, reboot history | Reboot, Retire |
+| **Software** | Is every Pi running the selected release, and did the last change take? | boot offer and steps, base, kernel, Player app, app operations, qualification, boot selection, effect gate | Stage app, Qualified fallback, Select, Update the wall |
+| **Needs attention** | What lost something it had? | none (links only) | none |
+
+Rule 1 of §5 becomes H1: a fact is judged, explained and acted on only in its owning domain, and elsewhere is a read-only link naming it. For the answers, the five design-system layers and rules S1 to S3, and the migration, see [decision 0018](decisions/0018-console-by-domain-and-design-system.md).
 
 # History
 

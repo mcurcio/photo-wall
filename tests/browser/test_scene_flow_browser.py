@@ -234,8 +234,8 @@ def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page,
     _seed_source(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        inspector = open_frame(page, VALID_FRAME, "calibration")
-        inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
+        inspector = open_frame(page, VALID_FRAME, "overview")
+        inspector.get_by_role("link", name="Make a Scene", exact=True).click()
         assert current_hash(page) == f"#/scenes/new/kind?target={VALID_FRAME}"
         form = scene_form(page)
         expect(form.get_by_role("heading", name="What kind of Scene?", exact=True)).to_be_visible()
@@ -274,8 +274,8 @@ def test_commissioning_link_keeps_an_existing_dirty_scene_draft(page, registry):
         form = start_scene(page)
         form.get_by_label("Source", exact=True).select_option(SOURCE)
         go(page, "wall")
-        inspector = open_frame(page, VALID_FRAME, "calibration")
-        inspector.get_by_role("link", name="Choose content for this Frame", exact=True).click()
+        inspector = open_frame(page, VALID_FRAME, "overview")
+        inspector.get_by_role("link", name="Make a Scene", exact=True).click()
         expect(form.get_by_role("status")).to_contain_text(
             f"Your open Scene draft was kept. Frame {VALID_FRAME} was not added.")
         form.get_by_role("button", name="Choose Frames", exact=True).click()

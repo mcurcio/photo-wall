@@ -14,6 +14,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from scripts.registry_pull import RegistryPullError, pull_image
+
 MARKER = b"# END MEDIA OS DEFINITION\n"
 ARCHITECTURES = ("amd64", "arm64")
 MIB = 1024**2
@@ -117,7 +119,10 @@ def select(ref: str, *, allow_build: bool) -> str | None:
 def pull(ref: str, *, platform: str = "linux/arm64") -> str:
     if platform not in ("linux/amd64", "linux/arm64"):
         raise ImageError("unsupported CI image platform")
-    run(["docker", "pull", "--platform", platform, ref], timeout=1200)
+    try:
+        pull_image(ref, platform=platform)
+    except RegistryPullError as error:
+        raise CommandError(f"{error}: {error.diagnostic.decode(errors='replace')[-4000:]}") from None
     return image_id(ref)
 
 

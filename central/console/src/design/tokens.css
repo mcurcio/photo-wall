@@ -1,0 +1,125 @@
+/* The console's design tokens: the ONE place a raw colour, radius, space or type value
+   lives (console design system, .claude/runs/console-design-system.md, S3). Every token is
+   semantic; Tailwind's default palette is cleared, so a class like `bg-red-500` names
+   nothing. tests/test_console_look.py reads this file and checks every contrast pair in
+   both schemes.
+
+   The look is the photo library's (Immich): the accent is its primary (#4250af light,
+   #accbfa dark), the dark surface its #0a0a0a, the font its Google Sans (renamed Console
+   Sans, fonts/README.md). Values are re-expressed from its published theme; no code,
+   markup or asset is copied.
+
+   Schemes: dark is written first (the @theme block); the light block overrides the same
+   tokens. The scheme follows the operator's system unless the root carries
+   `data-scheme="light"` or `data-scheme="dark"` (the catalog's toolbar sets it). */
+
+@font-face {
+  /* The Google Sans variable font, subset and renamed (OFL; fonts/README.md). The two
+     overrides are the photo library's, so the line boxes match. */
+  font-family: "Console Sans";
+  src: url("../fonts/ConsoleSans.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  size-adjust: 106.25%;
+  ascent-override: 106.25%;
+}
+
+/* `light:` and `dark:` follow the system, overridden by the root's data-scheme. */
+@custom-variant light {
+  &:where([data-scheme="light"], [data-scheme="light"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: light) {
+    &:not(:where([data-scheme="dark"], [data-scheme="dark"] *)) {
+      @slot;
+    }
+  }
+}
+@custom-variant dark {
+  &:where([data-scheme="dark"], [data-scheme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:not(:where([data-scheme="light"], [data-scheme="light"] *)) {
+      @slot;
+    }
+  }
+}
+
+@theme static {
+  --color-*: initial;
+  --radius-*: initial;
+
+  /* Surfaces: the page, a card raised on it, a well sunk in it, a form control. */
+  --color-surface: #0a0a0a;
+  --color-surface-raised: #171717;
+  --color-surface-sunken: #101116;
+  --color-surface-input: #1f2937;
+  /* Text: body, a field's label, secondary (never below 4.5:1). */
+  --color-text: #dbdbdb;
+  --color-label: #d1d5db;
+  --color-muted: #9ca3af;
+  /* Lines: a card's border, a form control's ring. */
+  --color-line: #262626;
+  --color-line-input: #737373;
+  /* The accent (links, outline buttons, selection), its tint, and text on it. */
+  --color-accent: #accbfa;
+  --color-accent-tint: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  --color-on-accent: #000000;
+  --color-focus: var(--color-accent);
+  /* Severity (Severity in tokens.ts): only an alarm is red; a to-do is work, not a fault. */
+  --color-ok: #48ed98;
+  --color-todo: #7ab7ff;
+  --color-notice: #ffd198;
+  --color-alarm: #f67d7d;
+  --color-unknown: var(--color-muted);
+  --color-on-alarm: #000000;
+  /* Truth kinds (TruthKind in tokens.ts, the six of facts.js): a fact's value colour. */
+  --color-truth-set: var(--color-text);
+  --color-truth-reported: var(--color-text);
+  --color-truth-claimed: var(--color-text);
+  --color-truth-derived: var(--color-text);
+  --color-truth-planned: var(--color-text);
+  --color-truth-unknown: var(--color-muted);
+  --color-shadow: rgba(0, 0, 0, 0.5);
+
+  /* Space: Tailwind's 4 px step; a table row's density. */
+  --spacing: 4px;
+  --spacing-row: 8px;
+
+  /* Radius. */
+  --radius-button: 12px;
+  --radius-input: 8px;
+  --radius-card: 16px;
+  --radius-pill: 999px;
+
+  /* Type. */
+  --font-sans: "Console Sans", system-ui, sans-serif;
+  --tracking-console: 0.1px;
+}
+
+:root {
+  color-scheme: dark;
+
+  @variant light {
+    color-scheme: light;
+    --color-surface: #ffffff;
+    --color-surface-raised: #fafafa;
+    --color-surface-sunken: #f5f5f5;
+    --color-surface-input: #f3f4f6;
+    --color-text: #3d3d3d;
+    --color-label: #5f6672;
+    --color-muted: #4b5563;
+    --color-line: #d4d4d4;
+    --color-line-input: #737373;
+    --color-accent: #4250af;
+    --color-on-accent: #ffffff;
+    --color-ok: #07702a;
+    --color-todo: #0a4e8e;
+    --color-notice: #805700;
+    --color-alarm: #b91c1c;
+    --color-on-alarm: #ffffff;
+    --color-shadow: rgba(0, 0, 0, 0.1);
+  }
+}

@@ -1,6 +1,5 @@
 import React from "react";
 
-import "./index.css";
 import { Shell } from "./Shell.jsx";
 import { SignInScreen } from "./SignInScreen.jsx";
 import { useSnapshot } from "./useSnapshot.js";

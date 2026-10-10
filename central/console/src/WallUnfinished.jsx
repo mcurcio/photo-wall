@@ -3,16 +3,16 @@ import React from "react";
 import { formatRoute } from "./routes.js";
 import { wallUnfinished } from "./unfinished.js";
 
-// Each step's wording and the name of the mode or facet that fixes it (console DDD §62).
+// Each step's wording and the name of the mode or Frame page tab that fixes it (console DDD §62).
 const STEPS = Object.freeze({
   place: { text: "not on the plan", link: "Edit layout" },
-  bind: { text: "needs a Player", link: "Binding" },
-  calibrate: { text: "needs calibration", link: "Calibration" },
+  bind: { text: "needs a Player", link: "Hardware" },
+  calibrate: { text: "needs calibration", link: "Position" },
 });
 
 /**
  * The Wall's To finish list (console DDD §61, G1-G2): one row per unfinished step, in
- * Frame order, each a fact and ONE link to the mode or facet that fixes it. It hosts no
+ * Frame order, each a fact and ONE link to the mode or Frame page tab that fixes it. It hosts no
  * editor and no write, and renders nothing when the list is empty (no flag, no dismissal).
  *
  * @param {{snapshot: object|null}} props

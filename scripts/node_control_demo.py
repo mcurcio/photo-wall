@@ -143,6 +143,19 @@ class RecordingAppDriver:
         self.running = None
         self.selected = None
         self.calls = []
+        self.display = "weston-1"  # the running display incarnation (None: down)
+        self.launch_display = None  # the incarnation the last start recorded
+        self.collected = True  # PID1 unloaded the old unit
+
+    def display_incarnation(self):
+        return self.display
+
+    def launched_display(self):
+        return self.launch_display
+
+    def unit_collected(self):
+        return self.running is None and self.collected
+
 
     def current(self):
         return self.running
@@ -156,10 +169,11 @@ class RecordingAppDriver:
         self.selected = environment
 
     def start(self, environment, operation_id):
-        from appliance.node.broker import RunningApp
+        from appliance.apps.broker import RunningApp
         from contracts.node_protocol import NodeProcessIdentity
 
         self.calls.append("start_simulated_process")
+        self.launch_display = self.display
         self.running = RunningApp(
             environment, NodeProcessIdentity(100, 50, UUID(int=6)), 1, operation_id,
         )
@@ -178,9 +192,9 @@ class SimulatedPreparer:
 
 def run_demo() -> dict:
     """Return a trace of real domain transitions driven by simulator adapters."""
+    from appliance.apps.broker import AppEffectBroker, ColdStart
     from appliance.display_host.domain import DisplayHost, Surface
-    from appliance.node.broker import AppEffectBroker, ColdStart
-    from appliance.node.host import HostCore, RebootRequest
+    from appliance.host.host import HostCore, RebootRequest
     from appliance.node.manager import AppManager
     from contracts.app_environment import AppEnvironmentRefV2
     from contracts.node_protocol import AppProcessFact

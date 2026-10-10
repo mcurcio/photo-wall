@@ -38,6 +38,11 @@ jobs:
       - run: .venv/bin/python -m ruff check .
       - run: .venv/bin/lint-imports
       - run: python scripts/check_docs.py
+      # The console's static checks (console design system S2, S3, types) and its catalog.
+      - uses: ./.github/actions/console-bundle
+      - run: npm --prefix central/console run typecheck
+      - run: npm --prefix central/console run lint
+      - run: npm --prefix central/console run build-storybook
 
   unit:
     runs-on: ubuntu-24.04
@@ -47,31 +52,74 @@ jobs:
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
-      - name: Prepare digest-pinned published Player wire fixtures
-        run: |
-          .venv/bin/python scripts/published_player_wire.py prepare \
-            "$RUNNER_TEMP/published-player-wire"
       - name: Run the unit tier, with no database
-        env:
-          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
         run: |
           .venv/bin/python -m pytest -q --tb=short --durations=25 \
             -m "not db and not browser" -n 4 --dist worksteal
 
-  db:
+  # The Node bus seam on real nats-server processes (tests/integration/bus_servers.py): the
+  # pinned binary, no Docker. The unit tier collects these tests and skips them, owned here.
+  node-bus:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
+      - name: Fetch the pinned nats-server
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
+      - name: Run the bus seam tests
+        run: .venv/bin/python -m pytest -q --tb=short --durations=25 tests/integration -k node_bus
+
+  # The Node bus inside its memory fence (tests/integration/test_bus_memory_fence.py; owner answer
+  # Q1 = start clean, E3b design §6): the pinned linux-arm64 nats-server in a container fenced as the
+  # bus unit is (MemoryMax, no swap, GOMEMLIMIT, the memory store), every stream at its consumer cap
+  # (E-W1-CONS-2) and every store line full and written for minutes; and a stalled hub while a Node
+  # program floods every subject the leaf might carry (erratum E-W1-LEAF-1). Fails on any OOM kill or
+  # restart. Two more legs (E3b design §15): a store full of the smallest nodeapi event, every stream
+  # at its consumer cap, whose measured heap factor (printed) must stay within contracts'
+  # MEMORY_STORE_FACTOR (E-E3C-S2-1); and a kill -9 inside the fence, the bus back within 15 s with
+  # an empty store that takes every line and re-syncs its WALL mirror.
+  # Native arm64 (ubuntu-24.04-arm, as node-components.yml and node-pid1.yml): the Pi's architecture.
+  bus-fence:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
+      - name: Fetch the pinned nats-server
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_BUS_FENCE_SERVER=$binary" >> "$GITHUB_ENV"
+      - name: Run the bus fence test
+        env:
+          PHOTO_WALL_BUS_FENCE_MINUTES: '5'
+          PHOTO_WALL_BUS_FENCE_STALL_SECONDS: '60'
+        run: .venv/bin/python -m pytest -q -s --tb=short tests/integration/test_bus_memory_fence.py
+
+  # Central's bus tests start real hubs and Nodes (E-E3D-CC1-3).
+  db:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
+      # Central's NodeLink tests (tests/integration/test_central_*.py) need PostgreSQL and the bus.
+      - name: Fetch the pinned nats-server
+        run: |
+          binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
+          echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
-      - name: Prepare digest-pinned published Player wire fixtures
-        run: |
-          .venv/bin/python scripts/published_player_wire.py prepare \
-            "$RUNNER_TEMP/published-player-wire"
       - name: Run the database tier
         env:
           # The built-in, repo-scoped GHA token (no manually-managed secret): the
@@ -83,7 +131,6 @@ jobs:
           # empty/restricted, so gate (b) skips (its guard treats an empty token as
           # unset) -- the correct safe behavior.
           PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PHOTO_WALL_PUBLISHED_PLAYER_WIRE_DIR: ${{ runner.temp }}/published-player-wire
         run: |
           .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
             -m db -n 4 --dist loadgroup
@@ -93,6 +140,8 @@ jobs:
     timeout-minutes: 7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - id: python-uv
         uses: ./.github/actions/python-uv
       - uses: ./.github/actions/console-bundle
@@ -118,6 +167,7 @@ jobs:
               uv sync --frozen --no-install-project --python /usr/bin/python3.12
               /tmp/photo-wall-browser-venv/bin/python scripts/test_local.py -q \
                 -p no:cacheprovider tests/browser -n 4 --browser chromium --durations=25 \
+                --ignore tests/browser/test_console_catalog_browser.py \
                 --tracing retain-on-failure --output /evidence --tb=short'
       # The xdist controller writes it from every worker's reports (tests/browser/conftest.py).
       - name: Require passed operator browser evidence
@@ -136,6 +186,57 @@ jobs:
         with:
           name: operator-browser-${{ github.sha }}
           path: ${{ runner.temp }}/operator-browser
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The console catalog walked: every Storybook story in both colour schemes renders clean, passes
+  # axe and matches its baseline screenshot (tests/browser/test_console_catalog_browser.py). Own
+  # leg, so the operator browser leg above does not wait on it; no database. Baselines are valid
+  # only in this image: `python3 scripts/catalog_baselines.py` rewrites them there and reads the
+  # image reference from this file.
+  console-catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: python-uv
+        uses: ./.github/actions/python-uv
+      - uses: ./.github/actions/console-bundle
+      - name: Build the catalog
+        run: npm --prefix central/console run build-storybook
+      - name: Walk the catalog in the pinned browser image
+        env:
+          UV_VERSION: ${{ steps.python-uv.outputs.uv-version }}
+        run: |
+          install -d "$RUNNER_TEMP/console-catalog"
+          docker run --rm --init --ipc=host --platform linux/amd64 \
+            --volume "$GITHUB_WORKSPACE:/work:ro" \
+            --volume "$RUNNER_TEMP/console-catalog:/evidence" --workdir /work \
+            --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env CI --env PHOTO_WALL_CATALOG_ACTUAL=/evidence \
+            --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
+            --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
+            --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/work \
+            mcr.microsoft.com/playwright/python:v1.62.0-noble@sha256:aa81288e738725378becba5b3e06cb0f3a7f012a610e87e8d767a090ea3f740d \
+            sh -ec 'python -m pip install "uv==$UV_VERSION"
+              uv sync --frozen --no-install-project --python /usr/bin/python3.12
+              /tmp/photo-wall-browser-venv/bin/python -m pytest -q \
+                -p no:cacheprovider tests/browser/test_console_catalog_browser.py -n 4 \
+                --browser chromium --durations=10 --tracing retain-on-failure \
+                --output /evidence/traces --tb=short'
+      - name: Make catalog evidence readable
+        if: always()
+        run: |
+          if [ -d "$RUNNER_TEMP/console-catalog" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/console-catalog"
+          fi
+      - name: Retain failed screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: console-catalog-${{ github.sha }}
+          path: ${{ runner.temp }}/console-catalog
           if-no-files-found: ignore
           retention-days: 7
 
@@ -158,6 +259,8 @@ jobs:
           test "$PREPARATION" = success
           test -n "$MEDIA_BASE_IMAGE"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - run: python3 scripts/configure.py
       - name: Authenticate to the durable image registry
         env:
@@ -165,6 +268,9 @@ jobs:
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
       - name: Build or restore the media worker image
         uses: ./.github/actions/service-image
         with:
@@ -204,6 +310,29 @@ jobs:
         # curl fails CI if that stage ever stops producing dist, which is exactly
         # the regression that shipped a broken published image.
       - run: curl --fail http://127.0.0.1:8000/ | grep -q '/console/assets/'
+      # The worker keeps the hub (E3d S5): Fleet's and WallWriter's clients are on the hub, and
+      # WallWriter created WALL. The hub starts once the worker wrote its file, so poll briefly.
+      - name: The worker keeps the hub
+        shell: python3 {0}
+        run: |
+          import json, sys, time, urllib.request
+
+          def read(path):
+              with urllib.request.urlopen(f"http://127.0.0.1:8222{path}", timeout=2) as response:
+                  return json.load(response)
+
+          deadline, missing = time.monotonic() + 60, None
+          while time.monotonic() < deadline:
+              users = {connection.get("authorized_user")
+                       for connection in read("/connz?auth=true&limit=1024").get("connections") or []}
+              streams = {stream["name"]
+                         for account in read("/jsz?accounts=true&streams=true").get("account_details") or []
+                         for stream in account.get("stream_detail") or []}
+              missing = sorted({"fleet", "central-wall"} - users) + sorted({"WALL"} - streams)
+              if not missing:
+                  sys.exit(0)
+              time.sleep(1)
+          sys.exit(f"the hub lacks {missing}")
       - name: Service diagnostics
         if: failure()
         run: docker compose logs --no-color --tail 100
@@ -228,12 +357,17 @@ jobs:
           test "$PREPARATION" = success
           test -n "$MEDIA_BASE_IMAGE"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
       - name: Authenticate to the durable image registry
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - name: Set up the container build cache
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+        with:
+          buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+          driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
       # Reads its cache on every run and writes it only on main: a pull request's write would
       # land in a scope only that pull request can read (docs/module-appliance-ci.md, "Limits").
       - name: Build the pinned Linux media test image

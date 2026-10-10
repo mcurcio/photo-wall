@@ -1,0 +1,17 @@
+/* The console's one stylesheet entry (main.jsx; the catalog's preview loads it too).
+
+   Cascade layers, lowest first: Tailwind's theme, base (empty: Tailwind's reset is off
+   until the design system's end condition), the legacy stylesheet, components, then
+   Tailwind's utilities, so a catalog primitive wins over the legacy element rules.
+
+   Tailwind generates utilities only from the catalog layers' sources; the legacy modules'
+   class names (`hidden`, `grid` among them) are not read, so they cannot pick up a
+   utility and change today's look. */
+@layer theme, base, legacy, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "./{design,ui,patterns,domain,pages}/**/*.{ts,tsx}";
+
+@import "./design/tokens.css";
+@import "./index.css" layer(legacy);

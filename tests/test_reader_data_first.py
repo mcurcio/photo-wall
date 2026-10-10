@@ -1,6 +1,6 @@
 """Readiness is the data; an outcome is a note (`docs/central-idempotent-jobs.md` rule 3, §11).
 
-One `FetchPackage` key on PostgreSQL: the real `AssetRecords`, `job_outcomes`, procrastinate queue
+One `FetchSealedEnvironment` key on PostgreSQL: the real `AssetRecords`, `job_outcomes`, procrastinate queue
 and `OutcomeFeed`. State is seeded through `AssetRecords`, `JobOutcomes` and the cache disk only.
 `CallRecordingPublisher` only notes each call before the real publish runs; it models nothing.
 """
@@ -29,7 +29,7 @@ from central.infra.publisher import ProcrastinatePublisher
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetReady, AssetReference, OriginLocator
-from central.kernel.job_types import FetchPackage, Prefetch
+from central.kernel.job_types import FetchSealedEnvironment, Prefetch
 from central.kernel.jobs import asset_key, job_keys
 from central.kernel.ports import Candidates
 from contracts.time import ManualClock
@@ -37,7 +37,7 @@ from contracts.time import ManualClock
 DEB = b"a player package " * 100
 SHA = hashlib.sha256(DEB).hexdigest()
 FACTS = AssetReady(size=len(DEB), sha256=SHA)
-JOB = FetchPackage(sha256=SHA)
+JOB = FetchSealedEnvironment(sha256=SHA)
 KEY = asset_key(JOB)
 TAG = "v1.0.0"
 LOCATOR = OriginLocator(f"https://example.test/{SHA}.deb", SHA, len(DEB))
@@ -84,7 +84,7 @@ class World:
             dsn, transactions=self.transactions, outcomes=self.outcomes, assets=self.records,
             clock=self.clock, feed=None)
         self.prefetch = PrefetchHandler(
-            catalog=StaticContentCatalog({}, desired=frozenset({JOB})),
+            catalog=StaticContentCatalog(desired=frozenset({JOB})),
             readiness=DiskStoredAssets(records=self.records, store=self.store),
             transactions=self.transactions, publisher=self.prefetch_publisher)
         with self.transactions.begin() as tx:

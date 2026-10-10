@@ -14,8 +14,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from support.image_mount import FakeImageMounter
 
-from appliance.node import boot_stage, bootstrap, preparer
+from appliance.boot import node_bootstrap as bootstrap
+from appliance.kernel import boot_stage
+from appliance.node import preparer
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from uplink import fetch
@@ -83,14 +86,18 @@ def stub_server():
 def roomy(monkeypatch):
     monkeypatch.setattr(preparer, "memory_values", lambda: (8 * GIB, 8 * GIB))
     monkeypatch.setattr(preparer.shutil, "disk_usage", lambda _: SimpleNamespace(total=8 * GIB, used=0, free=8 * GIB))
-    staged = []
+    downloaded = []
+    prepare = preparer.DownloadPreparer.prepare
 
-    def stage(archive, roots, environment, **_):
-        assert archive.read_bytes() == BODY
-        staged.append(archive)
-        return roots / environment.environment_sha256
-    monkeypatch.setattr(preparer, "stage_archive", stage)
-    return staged
+    def recorded(self, environment):
+        result = prepare(self, environment)
+        # Named by its digest alone; the stager re-hashes it (stage_image).
+        download = self.directory / environment.environment_sha256
+        assert download.read_bytes() == BODY
+        downloaded.append(download)
+        return result
+    monkeypatch.setattr(preparer.DownloadPreparer, "prepare", recorded)
+    return downloaded
 
 
 def make(directory, url, **extra):
@@ -235,35 +242,35 @@ def test_stage_stays_running_through_retries(tmp_path, stub_server, roomy):
 def test_killed_attempt_debris_is_removed_before_admission(tmp_path, monkeypatch, roomy):
     environment = reference()
     directory = tmp_path / "work"
-    (directory / "verified/.stage-abc123/rootfs").mkdir(parents=True)
-    (directory / "verified/.stage-abc123/rootfs/big").write_bytes(b"x" * 4096)
+    directory.mkdir()
     (directory / (environment.environment_sha256 + ".partial")).write_bytes(b"half")
     (directory / ("f" * 64 + ".partial")).write_bytes(b"other")
-    (directory / (environment.environment_sha256 + ".tar")).write_bytes(BODY)  # complete: kept
+    (directory / environment.environment_sha256).write_bytes(BODY)  # complete: kept
     admitted = []
 
     def admit(*_, **__):
         admitted.append(sorted(p.relative_to(directory).as_posix() for p in directory.rglob("*")))
     monkeypatch.setattr(preparer, "admit_preparation", admit)
     make(directory, "http://central.invalid/x").prepare(environment)
-    assert admitted == [[environment.environment_sha256 + ".tar", "verified"]]
+    assert admitted == [[environment.environment_sha256]]
 
 
 def test_prepare_stage_clears_cold_staging_before_admission(tmp_path, monkeypatch):
-    from tests.test_node_boot_linux import ROOT, offer
+    from node.boot.test_node_boot_linux import ROOT, offer
     selected = offer(app=True)
     abi = {name: getattr(selected.base, name) for name in ("base_abi", "graphics_abi", "plugin_abi")}
     monkeypatch.setattr(bootstrap, "materialize_handoff", lambda **_: (ROOT, selected, abi))
     monkeypatch.setattr(bootstrap, "memory_values", lambda: (8 * GIB, 8 * GIB))
     node_store = tmp_path / str(bootstrap.STORE).lstrip("/")
-    debris = node_store / "app-roots/.cold-staging/app"
-    (debris / "verified/.stage-xyz").mkdir(parents=True)
+    debris = node_store / "root-images/.cold-staging/app"
+    debris.mkdir(parents=True)
     (debris / ("a" * 64 + ".partial")).write_bytes(b"half")
-    (node_store / "app-roots/.cold-staging").chmod(0o700)
+    (debris / ("b" * 64)).write_bytes(b"whole")
+    (node_store / "root-images/.cold-staging").chmod(0o700)
     seen = []
 
     def admit(*_, **__):
-        seen.append((node_store / "app-roots/.cold-staging").exists())
+        seen.append((node_store / "root-images/.cold-staging").exists())
     monkeypatch.setattr(bootstrap, "admit_cold", admit)
     windows = []
 
@@ -276,7 +283,7 @@ def test_prepare_stage_clears_cold_staging_before_admission(tmp_path, monkeypatc
     monkeypatch.setattr(bootstrap, "DownloadPreparer", Preparer)
     before = time.monotonic()
     with pytest.raises(ValueError, match="stop"):
-        bootstrap.prepare_roots(root=tmp_path)
+        bootstrap.prepare_roots(root=tmp_path, mounter=FakeImageMounter())
     assert seen == [False]
     # The boot path retries inside the stage's window.
     assert before + bootstrap.DOWNLOAD_WINDOW_SECONDS <= windows[0] <= time.monotonic() + bootstrap.DOWNLOAD_WINDOW_SECONDS

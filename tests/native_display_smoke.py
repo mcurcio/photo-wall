@@ -1,11 +1,13 @@
 """Manual native compositor fixture, run only inside a disposable Linux container.
 
-Mount tests at /smoke and appliance/display_host at /current-source, both read-only.
-Requires the pinned native build image's compiler, Weston14, Cairo and Wayland deps,
-plus pywayland (scripts/run_display_harness.py builds that image and runs this file).
-This executes a real headless compositor, not a recorded callback simulator. It
-uses fixture controller authority and does not qualify systemd, GTK or HDMI.
-Output pixels are read back through Weston's own weston_capture_v1 (enabled by --debug).
+The display under test is the built one: photo-wall-node-display and photo-wall-frame-client
+installed from the local repo (decision 0019; scripts/run_display_harness.py builds that image,
+FROM the pinned Debian build container, and runs this file). Mount tests at /smoke and
+appliance/display_host/native at /current-native, both read-only: only the private protocol's XML
+and the client library's header are read there, to build the test probe against the installed
+library. This executes a real headless compositor, not a recorded callback simulator. It uses
+fixture controller authority and does not qualify systemd, GTK or HDMI. Output pixels are read
+back through Weston's own weston_capture_v1 (enabled by --debug).
 """
 
 import json
@@ -20,28 +22,31 @@ import sys
 import time
 import uuid
 
-subprocess.run(
-    ["meson", "setup", "/tmp/native-build", "/current-source", "--prefix=/usr", "--libdir=lib"],
-    check=True,
-)
-subprocess.run(["meson", "compile", "-C", "/tmp/native-build"], check=True)
-subprocess.run(["meson", "install", "-C", "/tmp/native-build"], check=True)
+DISPLAY = "/usr/lib/photo-wall/node-display"
+CLIENT = "/usr/lib/photo-wall/frame-client"
+PROTOCOL_XML = "/current-native/photo-wall-frame-v1.xml"
 # The private client the shell spawns becomes B5's overlay client plus a health layer per Output.
-SPAWNED = "/usr/lib/photo-wall-display/diagnostic-client"
+SPAWNED = DISPLAY + "/diagnostic-client"
 shutil.copyfile("/smoke/display_harness_health_client.py", SPAWNED)
 os.chmod(SPAWNED, 0o755)
 HEALTH_MODE = "/tmp/pw-health-client-mode"  # display_harness_health_client.py MODE_FILE
-# The production client's health drawing (overlay/render.py card_rect) and its fake judge.
-sys.path.append("/current-source")
+# The production client's health drawing (overlay/render.py card_rect), as installed, and its
+# fake judge.
+sys.path.append(DISPLAY)
 from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
 from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
 from overlay.render import card_rect  # noqa: E402
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
+# The probe's protocol code, generated as the library's own build does.
 xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
 subprocess.run(["wayland-scanner", "private-code", xml, "/tmp/xdg-shell.c"], check=True)
+subprocess.run(["wayland-scanner", "client-header", PROTOCOL_XML,
+                "/tmp/photo-wall-frame-client.h"], check=True)
+subprocess.run(["wayland-scanner", "private-code", PROTOCOL_XML,
+                "/tmp/photo-wall-frame-protocol.c"], check=True)
 subprocess.run(
     [
         "cc",
@@ -49,13 +54,12 @@ subprocess.run(
         "-Wextra",
         "-Werror",
         "-I/tmp",
-        "-I/tmp/native-build",
-        "-I/current-source/native",
+        "-I/current-native",
         "/smoke/native_display_probe.c",
         "/tmp/xdg-shell.c",
-        "/tmp/native-build/photo-wall-frame-protocol.c",
-        "-L/usr/lib/photo-wall-client",
-        "-Wl,-rpath,/usr/lib/photo-wall-client",
+        "/tmp/photo-wall-frame-protocol.c",
+        "-L" + CLIENT,
+        "-Wl,-rpath," + CLIENT,
         "-lphoto-wall-frame-client",
         "-lwayland-client",
         "-ljansson",
@@ -65,7 +69,8 @@ subprocess.run(
     check=True,
 )
 # Python bindings, generated here as the overlay client's build will: the core protocol (the
-# generated interfaces import it relatively), Weston's capture protocol and the private one.
+# generated interfaces import it relatively), Weston's capture and debug protocols and the
+# private one.
 GENERATED = pathlib.Path("/tmp/pw-protocols")
 subprocess.run(
     [
@@ -75,7 +80,8 @@ subprocess.run(
         "-i",
         "/usr/share/wayland/wayland.xml",
         "/usr/share/libweston-14/protocols/weston-output-capture.xml",
-        "/current-source/native/photo-wall-frame-v1.xml",
+        "/usr/share/libweston-14/protocols/weston-debug.xml",
+        PROTOCOL_XML,
         "-o",
         str(GENERATED / "pw_protocols"),
     ],
@@ -86,6 +92,7 @@ sys.path.insert(0, str(GENERATED))
 import pywayland  # noqa: E402
 from pw_protocols.photo_wall_frame_v1 import PwDiagnosticManagerV1  # noqa: E402
 from pw_protocols.wayland import WlOutput, WlShm  # noqa: E402
+from pw_protocols.weston_debug import WestonDebugV1  # noqa: E402
 from pw_protocols.weston_output_capture import WestonCaptureV1  # noqa: E402
 from pywayland.client import Display  # noqa: E402
 
@@ -156,7 +163,7 @@ p = subprocess.Popen(
         "weston",
         "--backend=headless-backend.so",
         "--renderer=pixman",
-        "--shell=/usr/lib/photo-wall-display/photo-wall-shell.so",
+        "--shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so",
         "--width=640",
         "--height=480",
         "--idle-time=0",
@@ -247,6 +254,51 @@ def capture_pixel(x, y):
         raise AssertionError(("capture_retries", state))
     finally:
         display.disconnect()
+
+
+def health_view():
+    """Weston's own record of the health layer's view: its block of the one-shot `scene-graph`
+    debug dump (weston_debug_v1, enabled by --debug), written into a memfd so a long dump never
+    blocks the compositor. Exactly one view has the role."""
+    display = Display(str(root / "wayland-0"))
+    display.connect()
+    fd = os.memfd_create("pw-scene-graph")
+    try:
+        found = {}
+        registry = display.get_registry()
+        registry.dispatcher["global"] = lambda _r, name, iface, _v: found.setdefault(iface, name)
+        display.roundtrip()
+        debug = registry.bind(found["weston_debug_v1"], WestonDebugV1, 1)
+        state = {}
+        stream = debug.subscribe("scene-graph", fd)
+        stream.dispatcher["complete"] = lambda _s: state.update(done="complete")
+        stream.dispatcher["failure"] = lambda _s, message: state.update(done=message)
+        end = time.monotonic() + 3
+        while "done" not in state:
+            assert time.monotonic() < end, "scene_graph_timeout"
+            display.roundtrip()
+        assert state["done"] == "complete", state
+        dump = os.pread(fd, 1 << 22, 0).decode(errors="replace")
+    finally:
+        os.close(fd)
+        display.disconnect()
+    views = [block for block in dump.split("\tView ")[1:] if "role photo-wall-health," in block]
+    assert len(views) == 1, dump
+    return views[0]
+
+
+def assert_health_view(*lines):
+    """The health view's scene-graph block holds every one of `lines`."""
+    view = health_view()
+    assert all(line in view for line in lines), (lines, view)
+    return view
+
+
+# The production client's tint-off health view: a transparent single-pixel buffer, scaled over
+# the whole 640 x 480 Output (never a small shm buffer: Weston 14 DRM's cursor-plane path).
+HEALTH_CLEAR_VIEW = ("position: (0, 0) -> (640, 480)", "solid-colour buffer",
+                     "[R 0.000000, G 0.000000, B 0.000000, A 0.000000]")
+HEALTH_TINT_VIEW = ("position: (0, 0) -> (640, 480)", "SHM buffer", "width: 640, height: 480")
 
 
 def assert_pixel(x, y, expected, tolerance=2):
@@ -565,11 +617,13 @@ try:
     assert_pixel(*HEALTH, PROBE_APP, tolerance=0)
     judge.await_client(opened + 1, 3, drain)
     assert not judge.reports and not judge.refused, (judge.reports, judge.refused)
+    assert_health_view(*HEALTH_CLEAR_VIEW)
     print("PASS production_health_layer_mapped_before_instruction", flush=True)
     # (2) Tint on: the darkened Output and the card, above the still-live app, reported presented.
     judge.send(name, 7, True, CARD_LINES)
     judge.await_report(name, 7, 3, drain)
     tinted = await_pixel(320, 240, HEALTH_TINT, 1)
+    assert_health_view(*HEALTH_TINT_VIEW)
     print("PASS health_tint_and_card_above_live_app", tinted,
           assert_pixel(*CARD_PIXEL, SLATE), flush=True)
     # (3) Tint off: a mapped transparent buffer, so the app shows exactly (no amber fallback).
@@ -577,6 +631,7 @@ try:
     judge.await_report(name, 8, 3, drain)
     await_pixel(320, 240, PROBE_APP, 1, tolerance=0)
     hold_pixel(320, 240, PROBE_APP, 0.5, tolerance=0)
+    assert_health_view(*HEALTH_CLEAR_VIEW)
     print("PASS health_tint_off_restores_app", assert_pixel(*CARD_PIXEL, PROBE_APP, tolerance=0),
           flush=True)
     # (4) A new connection may count from 1 again (a restarted judge): taken, drawn, reported.

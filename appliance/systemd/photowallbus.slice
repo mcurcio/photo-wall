@@ -1,0 +1,7 @@
+[Unit]
+Description=Node bus memory fence and its counters (they outlive every bus restart)
+# PID1 recreates the bus service's own cgroup at every restart, zeroing its memory.events and
+# memory.peak; this slice persists, so HostCore's oom_kill:bus and memory_peak:bus read here
+# (erratum E-E3C-S5-3).
+[Slice]
+MemoryMax=256M

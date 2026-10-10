@@ -1,85 +1,23 @@
-# Player package build
+# Player package
 
-This module turns one explicit committed Git revision into the stateless Player application and its offline Python dependency wheelhouse. The [platform decision](decisions/0005-native-platform-and-registration-fallback.md) owns native OS libraries; the [Player service](module-player-service.md) owns process startup. This builder does not contain central services, media preparation, signing keys, OS packages, PostgreSQL/Psycopg, Procrastinate, a local database, or update-state machinery.
+The Player ships as the Debian binary package `photo-wall-player`, one of the packages the `photo-wall` source package builds ([Debian packaging module](module-debian-packaging.md), [decision 0019](decisions/0019-debian-packaging-with-debhelper.md)). It replaces the earlier wheelhouse (`scripts/build_player.py`) and the Player `.deb` that a netboot bootstrapper installed with `dpkg --install` (decisions 0009 and 0010); both builders and the bootstrapper are deleted, and nothing installs a package on a Node at boot. The [platform decision](decisions/0005-native-platform-and-registration-fallback.md) owns native OS libraries; the [Player service](module-player-service.md) owns process startup.
 
-## Contract and design
+## What the package holds
 
-`scripts/build_player.py --revision <40-character commit> --output <new directory outside Git>` reads only `git archive` at that exact commit for `player/`, `contracts/`, `pyproject.toml`, and `uv.lock`. The working checkout may contain concurrent work; none enters the archive. Archive members must be regular Python files in those two packages or the two exact metadata files. Symlinks, unexpected files and oversized archives fail closed. Git stdout is streamed into a bounded temporary file, with an 8 MiB archive limit and a 30-second subprocess deadline; overflow and timeout kill and reap the child before returning.
+- **Contents.** `player/*.py` under `/usr/lib/photo-wall/player/player/` and the launcher `appliance/launchers/player/__main__.py` under `/usr/lib/photo-wall/player/`. The program runs as `python3 -I -B /usr/lib/photo-wall/player --config /etc/photo-wall/public.json`. The launcher puts three package directories on `sys.path` (`common`, `player`, `uplink`) and runs `player.service`; the import check refuses any other.
+- **Depends.** Debian packages for what the Player imports (`python3-httpx`, `-websockets`, `-pydantic`, `-cryptography`, `-zeroconf`, `-gi`, `-opengl`) and its render stack (GTK, GStreamer, Mesa), plus `photo-wall-common`, `photo-wall-uplink` and `photo-wall-frame-client` at their exact versions. Python libraries come from Debian, not from `uv.lock`; the import check holds each import to a declared Depends.
+- **Nothing else.** It carries no `central_origin` and no deployment configuration: the Node binds `/etc/photo-wall/public.json` over the root at start. It contains no Central, media, Immich or database code ([import layering](../AGENTS.md#code-map): `player` never imports `central`, `media`, `appliance` or a database; Players are Immich-unaware).
 
-The separate `photo-wall-player` distribution contains only `player`, neutral Pydantic `contracts`, and its own wheel metadata. Its version is the archived project version plus `+g<full commit>`. A deterministic standard-library wheel writer emits PEP 427 metadata and a complete SHA-256 `RECORD`. It avoids introducing a separately resolved backend dependency tree. The build host uses Python 3.12 and the `packaging` version pinned in `appliance/build-tools.txt` solely for standard marker, version and wheel-tag parsing; that build tool is excluded from the runtime wheelhouse.
+## How it reaches a Node
 
-The runtime roots are exactly `pydantic`, `httpx`, `websockets`, and `cryptography`, using their exact archived project pins. Their dependency graph, markers, versions, wheel URLs, sizes and SHA-256 hashes come only from the archived lock. This allowlist is also the enforcement point that keeps central persistence and queue clients out of the Player. Selection targets CPython 3.12.3 on Linux AArch64 with glibc 2.39 (Ubuntu Noble); compatible older manylinux and CPython stable-ABI wheels and universal Python wheels are permitted. Unspecified platform-release markers, ambiguous package variants, extras, source distributions, missing compatible wheels and missing hashes fail closed. No resolver or package-index search is invoked. All selected wheel URLs must be HTTPS on `files.pythonhosted.org`; download size and hash are checked before use.
+The package is not installed on the Node. `debian-packaging/build-root.sh --package photo-wall-player` runs `mmdebstrap` from the Debian snapshot pin and the run's local repo, seals the root and writes it as a squashfs image: the **app root**. The release writer ships that image, with the package's `.deb` as `app.deb`, in the node component set; Central stages the image to the Node, and PID1 mounts it read-only ([Player architecture](player-architecture.md#release-roots-as-images-e2c)). The app root's size is held to its memory line (`appliance/kernel/capacity.py`, `app-image`) by the release writer.
 
-The output is published only after all artifacts validate:
+The wall e2e runs the Player from the same app root: `scripts/demo_wall.py --app-image` imports it into the Player containers ([wall demo](module-wall-demo.md)).
 
-```text
-<output>/
-  source.tar
-  inventory.json
-  requirements.txt
-  wheels/
-    photo_wall_player-<version>-py3-none-any.whl
-    <one compatible locked wheel per runtime dependency>
-```
+## Release sourcing
 
-`requirements.txt` pins and hashes every runtime package including the locally built Player wheel. The appliance builder installs it with `python -m pip install --no-index --find-links <output>/wheels --require-hashes -r <output>/requirements.txt`. `inventory.json` records the full commit and tree, source archive hash, each packaged source hash, every wheel hash/size and upstream URL, target environment, build-tool version and builder script hash. The caller supplies an unused output path outside every Git tree. A private staging directory in its parent is removed on handled failure; a per-output reservation prevents concurrent builders from publishing to the same path. Publication uses one directory rename. An uncatchable process termination can leave the reservation/staging directory; an operator must establish that the builder stopped before removing those exact artifacts. No unrelated paths are copied.
+Central's worker polls the project's GitHub Releases and records them for the node release catalog ([decision 0010](decisions/0010-github-release-sourcing.md); [runbook](runbook.md#release-sourcing-from-github-0010)). The operator selects a release in the console; the V1 `.deb` promotion routes and `GET /v1/app/*` are removed.
 
-## Prepared input for offline image assembly
+## Qualification
 
-CI builds this wheelhouse before entering its network-disabled final assembly
-container. `build_player.restore` accepts the prepared directory, exact Git
-revision, and a new external destination. It reuses the canonical builder with
-a local-only dependency supplier, verifies every dependency against the
-committed lock, and compares the reconstructed application wheel, source
-archive, requirements, and inventory to the supplied package. Missing, changed,
-additional, or symlinked inputs are rejected. No package server is contacted.
-
-The [reusable OS base decision](decisions/0007-reusable-os-base.md) describes the
-separate native dependency artifact. The existing offline pip installation
-contract is unchanged.
-
-## The `.deb` package (0009)
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) wraps the Player into a `.deb` central publishes and a netboot bootstrapper downloads, instead of baking it into a signed base image. `scripts/build_player_deb.py` builds it, reusing `build_player.py`'s `build`/`ROOTS`/`locked_runtime`/`make_player_wheel` verbatim rather than reimplementing them:
-
-- **Payload:** the Player's computed first-party import closure (from `scripts/module_closure.py` `PLAYER_POLICY`, rooted at `player.service`) along with the `player`, `contracts`, and `uplink` modules staged under `/usr/lib/photo-wall-player` with a generated `__main__.py` and `closure.json`. There is no venv and nothing in dist-packages; all imports are resolved from the closure. The Player and weston systemd units are included, as before. Provisioning installs the .deb with `dpkg --install` alone.
-- **Version:** exactly the player wheel version (`base_version+g<commit>`) — one identifier for source, wheel, and `.deb`. The V2 node component set's `app.deb` is the exception: it is versioned by its staged content (`base_version+<12 hex>`), so equal inputs at any commit give equal bytes ([node component output cache](module-appliance-ci.md#service-image-builds)).
-- **Dependencies:** `Depends:` names only the native system libraries the Player needs at run time (GTK/GStreamer/weston, from `debian_packages.packages("player")` in the one Debian declaration `scripts/debian_packages.py`); every PyPI package stays vendored in the staged closure, preserving the hashed-wheelhouse integrity model. See [decision 0014](decisions/0014-reaching-central-from-every-boot-stage.md) for the bootstrap and discovery rationale.
-- **No deployment configuration.** The package carries no `central_origin` and no other deployment config — per 0009, the bootstrapper supplies that at boot, never a published asset.
-
-The central side was designed (0009) as register-then-promote by reference: an operator staged the `.deb` bytes under central's `PHOTO_WALL_APP_ROOT`, then `POST /v1/operator/app` recorded `{version, sha256, size}` and `PUT /v1/operator/app/current` promoted it. Those hand-staging routes no longer exist; [0010](#operator-release-sourcing-0010) replaced them — see [the app-package contract](module-appliance-release.md#the-app-package-contract-0009-unsigned-in-parallel) and the [runbook](runbook.md#player-provisioning-netboot-and-promote-the-app-0009-in-progress). The sha256 involved is a corruption check only, per the owner's home-LAN ruling — there is no signing anywhere in this path.
-
-**Status:** the builder is implemented, split so its staging/metadata logic is tested on any host and only its closure/`dpkg-deb` assembly (`tests/test_build_player_deb.py`) is gated to Linux with the image tools installed, the same gating `tests/test_appliance_build.py` already uses. This establishes that the `.deb` builds and installs correctly as a package; it does not establish that a netboot base can fetch and run it, since the boot chain that would do that is not yet wired — see [the appliance builder module](module-appliance-builder.md#the-0009-minimal-base-and-bootstrapper-in-progress).
-
-## Operator release sourcing (0010)
-
-[Decision 0010](decisions/0010-github-release-sourcing.md) automates the register-then-promote step above. Instead of an operator hand-staging `.deb` bytes, central's worker polls the project's GitHub Releases, records each semver release with a mirror state, and — only on an operator **promote** — lazily downloads that release's `.deb` into the same store this module's package lands in — the derived `apps/` subdir of the single cache root as of [decision 0013](decisions/0013-unified-cache-root.md) (which retired `PHOTO_WALL_APP_ROOT`). The Player-facing surface is unchanged: Players still `GET /v1/app/manifest` and `/v1/app/package/{sha}.deb` from central, which serves local bytes and never depends on GitHub being reachable.
-
-The operator flow is three admin routes on central — `GET /v1/operator/app/releases` (list tracked releases), `POST /v1/operator/app/releases/{tag}/promote` (200 `{"status": "promoted"}`, 404 unknown tag, 409 undeployable, 422 not a version tag), and `POST /v1/operator/app/releases/refresh` (poll now). Release sourcing is **always-on** as of [decision 0013](decisions/0013-unified-cache-root.md) — the old opt-in gate (and its `503 release_sourcing_unconfigured` branch) is removed; the worker and central share the one cache root and the worker mirrors into its `apps/` subdir unconditionally. The [runbook](runbook.md#player-provisioning-promote-a-release-from-github-0010) has the copy-pasteable env config and `curl` commands. There is no manual stage path any more: the hand-staging routes above were removed, and central downloads every `.deb` from the GitHub release that lists it.
-
-## Package qualification
-
-Unit checks cover package boundaries and metadata, deterministic output and `RECORD`, dependency markers and target tags, invalid or ambiguous locks, hash failures, unsafe archives and output paths. A real build must also be installed with pip into a clean CPython 3.12 Linux ARM64 environment, using only the emitted wheelhouse and hash-locked requirements. Successful installation is package evidence; it does not establish Pi boot or physical rendering behavior.
-
-On 2026-09-05, 64 focused unit tests passed with `.venv/bin/python -m pytest -q --noconftest tests/test_player_package.py`; scoped Ruff and repository documentation links passed. The standalone file owns all its fixtures; `--noconftest` avoided an unrelated shared PostgreSQL import stalled under host memory pressure. The earlier 62-test version also passed with the normal shared configuration. The real build used committed core revision `dda8e98c5c54dc8ca9c007599f8a919eadbd5248` and produced 16 wheels (the Player plus 15 locked dependencies), with 7,651,401 bytes across the complete output. This command creates an equivalent package from an available committed revision:
-
-```sh
-.venv/bin/python scripts/build_player.py \
-  --revision dda8e98c5c54dc8ca9c007599f8a919eadbd5248 \
-  --output /absolute/external/new-player-artifact
-```
-
-The local benchmark artifact is `/Volumes/Dock/PhotoWallArtifacts/2026-09-05-01a0731f/player-dda8e98-bounded`. A final appliance release must regenerate the package from its own exact later commit, including matching version and inventory metadata. The benchmark checksums are:
-
-| Artifact | SHA-256 |
-|---|---|
-| Player wheel | `11987db71bfb853c83b2570097692c1d1c0c0a80b1eaf61ae6c5dc5f06c85575` |
-| Source archive | `d1a6a68fe4555f72b95b9f43f5abf2e771a6850220ab2d7a721af7d91b02b994` |
-| Requirements | `af16498fc10114e9121a3bd09e688c2b358f373cda1a5d26c4e19997689ceb1b` |
-| Final inventory | `cd6c36ce25d5547870f051184c2fcd1dfa7ac17c8c527e34b621d7caf39c83e0` |
-
-Actual installation ran in a fresh virtual environment on CPython 3.12.3, Linux `aarch64`, glibc 2.39, using a Docker build with network disabled. `pip --isolated install --no-index --find-links /wheelhouse/wheels --require-hashes -r /wheelhouse/requirements.txt` and `pip check` passed. Eighteen module imports resolved inside the new environment, covering all Player/contract modules and the four direct dependencies. Ed25519 key generation/sign/verify and Pydantic native validation passed. Imports for `central`, `media`, `fastapi`, `psycopg`, `PIL`, `uvicorn`, `packaging`, and `hatchling` were absent.
-
-The qualification image is `photo-wall-player-package-check:dda8e98`, built from the existing native fixture image `sha256:8bf573f5fd7e4d09e4f8c0e0ad51e70d2ebb6058d3f15d7f7651284d20249e6d`. Its new environment omitted system site packages and invoked Python with `-I` outside the fixture source directory. This establishes the wheel and installed environment boundary; the underlying fixture image still contains its older separate native test environment. It is not the production appliance image. The benchmark's wheels, archive and requirements were compared byte for byte with the installed artifacts after the output-path guard changed; only the inventory's builder hash changed. The subsequent bounded Git-reader change passed oversized-output and deadline regressions plus a real local Git-read smoke check. Native system GI/OpenGL integration, appliance boot and physical Outputs have separate qualification owners.
-
-After the bounded Git-reader fix, the orchestrator rebuilt the complete bundle offline from already-verified dependency files. Its source archive, requirements and all 16 wheels are byte-identical to the installed qualification payloads. The inventory above records final builder SHA-256 `ff2657623e0ec4e07a4c1ac2a818449a36bbba587978fc26030b6adee754359e`.
+The package's imports, files, Depends and installability are proved on the built `.deb`s by `tests/debs/test_context_packages.py` and `tests/debs/test_local_repo.py`; the sealed app root by the release writer's checks and by the [PID1 scenarios](evidence/player-node-handoff-support/node-lifecycle-qualification.md); the Player on a headless Weston by the display harness. None of these establishes Pi boot, HDMI output or physical timing.

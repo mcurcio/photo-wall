@@ -22,13 +22,13 @@ A wall-clock delay, an old successful snapshot, or another Source's completion c
 
 ## Reproducing the current checkpoint
 
-Build a Player-only wheelhouse, central image, and media-worker image from the same clean committed revision. Image construction explicitly uses the daemon `default` builder with `--load`, allowing derived fixtures to reuse locally loaded parent images.
+Build the node component set (its `app.squashfs` is the Player's app root; [Debian packaging module](module-debian-packaging.md), CI's `node-components` job), the central image and the media-worker image from the same clean committed revision. The Players run from the app root, imported into their containers. Image construction explicitly uses the daemon `default` builder with `--load`, allowing derived fixtures to reuse locally loaded parent images.
 
 ```sh
 .venv/bin/python scripts/demo_wall.py run \
   --state-dir /absolute/new-wall-demo \
   --immich-state /absolute/retained-immich-fixture \
-  --wheelhouse /absolute/player-wheelhouse \
+  --app-image /absolute/node-components/app.squashfs \
   --revision <final-40-character-revision> \
   --central-image sha256:<exact-central-image-id> \
   --worker-image sha256:<exact-worker-image-id> \
@@ -37,7 +37,7 @@ Build a Player-only wheelhouse, central image, and media-worker image from the s
 
 `--scenario full` runs every fault segment in order against one wall: `upstream-faults` (live membership, deletion after security, permission loss, upstream outage) then `central-player-faults` (Central outage past every held lease, Central restart, Player restart). Each segment is also a scenario of its own, after the same setup and baseline; the software e2e workflow runs the two as parallel jobs. To keep those waits short, the demo's Central plans a 15 s horizon renewed every 10 s (a deployment: 300 s and 30 s), so a held lease ends 15-25 s ahead, and the Player runner retries a lost Central within 5 s rather than backing off to 60 s.
 
-Preflight rejects a dirty source tree, revision mismatch, Player inventory mismatch, mutable image tag, missing paired image ID, reused state directory, or unverified fixture. This means an uncommitted workspace cannot produce final evidence. The selected revision, image IDs, source inventory, wheel inventory, media hashes, session epochs, observations, and phase results are retained in the private report.
+Preflight rejects a dirty source tree, revision mismatch, app image revision stamp mismatch (`revision.json` beside the image), or a reference in `components.json` that does not match the image, mutable image tag, missing paired image ID, reused state directory, or unverified fixture. This means an uncommitted workspace cannot produce final evidence. The selected revision, image IDs, source inventory, app image reference, media hashes, session epochs, observations, and phase results are retained in the private report.
 
 The wall helper is assembled from an explicit dependency bundle that preserves Python import layout and records every copied file digest. Its container-side Immich client does not import the host Docker driver or diagnostic recorder. Setup journals `running`, `passed`, or `failed` before and after each image-build, volume, upstream, Central, Source, refresh, and runtime operation. A failure retains a bounded schema with `phase`, `role`, `action`, and `code`; cleanup has its own failure field and cannot erase the primary operation. The same safe envelope is printed by failing helper roles, while credentials and arbitrary exception text remain private.
 

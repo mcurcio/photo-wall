@@ -9,7 +9,7 @@ where the drawer's layout is the point.
 
 Sections are pages with hash routes. The Show pages stay mounted and `hidden` when not current
 (rule 2), so a draft survives any navigation; the Wall and neutral pages mount only while
-current, so no Show or neutral page holds Calibration DOM (R4). The route tables' sample paths
+current, so no Show or neutral page holds a Frame page (R4). The route tables' sample paths
 come from routeSamples.json, the file the tables themselves read (tests/test_console_routes_r4.py
 checks that every table takes its samples from its own group), so these visits follow the
 tables without parsing JSX.
@@ -30,6 +30,7 @@ from console_tasks import (
     go,
     scene_continue,
     scene_form,
+    section_heading,
     start_scene,
     visible_page,
     visit,
@@ -74,7 +75,7 @@ NARROW = {"width": 390, "height": 844}
 
 
 def _heading(page, section):
-    return page.get_by_role("heading", level=1, name=LABELS[section], exact=True)
+    return section_heading(page, section)
 
 
 def _sidebar_link(page, section):
@@ -84,6 +85,11 @@ def _sidebar_link(page, section):
 
 def _expect_on(page, section):
     expect(_heading(page, section)).to_be_visible()
+    if section == "players":
+        # One Pi's Software and screens page has no sidebar link (fleetRoutes.jsx): none is current.
+        expect(page.get_by_role("navigation", name="Sections", exact=True).locator(
+            "[aria-current=page]")).to_have_count(0)
+        return
     expect(_sidebar_link(page, section)).to_have_attribute("aria-current", "page")
 
 
@@ -179,7 +185,7 @@ def test_the_sidebar_groups_wall_show_fleet_and_needs_attention_in_a_fixed_order
         expect(nav.get_by_role("list")).to_have_count(4)
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
-                              ("Fleet", ["Players", "Releases"]),
+                              ("Fleet", ["Hardware", "Releases"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
@@ -226,12 +232,12 @@ def test_a_stale_frame_route_says_it_no_longer_exists(page, registry):
     _frame(registry, "first")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        visit(page, "#/wall/frames/ghost/binding")
+        visit(page, "#/wall/frames/ghost/hardware")
         _expect_on(page, "wall")
         expect(page.get_by_text("Frame ghost: This no longer exists.")).to_be_visible()
         expect(page.get_by_role("tab")).to_have_count(0)
         # A typed id that is no id at all is never echoed (routes.js `routeIdName`).
-        visit(page, "#/wall/frames/Call%20555%20now!/binding")
+        visit(page, "#/wall/frames/Call%20555%20now!/hardware")
         expect(page.get_by_text("An unknown Frame: This no longer exists.")).to_be_visible()
         expect(page.get_by_text(re.compile("Call 555"))).to_have_count(0)
 
@@ -245,13 +251,19 @@ def test_back_and_forward_move_between_sections(page, registry):
         connect(page, origin)
         for section in ("scenes", "schedule", "wall"):
             go(page, section)
-        # A plain tile selection moves the route to the frame but replaces the entry.
+        # A tile click opens the Frame's page as a new entry; a tab change replaces it.
         before = page.evaluate("history.length")
         page.get_by_role("button", name="Frame first", exact=True).click()
-        expect(page.get_by_role("region", name="Frame first inspector", exact=True)
-               ).to_be_visible()
-        assert current_hash(page) == "#/wall/frames/first/status"
-        assert page.evaluate("history.length") == before
+        frame = page.get_by_role("heading", level=1, name="Frame first", exact=True)
+        expect(frame).to_be_visible()
+        assert current_hash(page) == "#/wall/frames/first/overview"
+        page.get_by_role("tab", name="Hardware", exact=True).click()
+        expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute("aria-selected", "true")
+        assert current_hash(page) == "#/wall/frames/first/hardware"
+        assert page.evaluate("history.length") == before + 1
+        page.go_back()
+        _expect_on(page, "wall")
+        expect(page.get_by_role("button", name="Frame first", exact=True)).to_be_visible()
         page.go_back()
         _expect_on(page, "schedule")
         page.go_back()
@@ -259,9 +271,10 @@ def test_back_and_forward_move_between_sections(page, registry):
         page.go_forward()
         _expect_on(page, "schedule")
         page.go_forward()
+        page.go_forward()
         _expect_on(page, "wall")
-        expect(page.get_by_role("region", name="Frame first inspector", exact=True)
-               ).to_be_visible()
+        expect(frame).to_be_visible()
+        assert current_hash(page) == "#/wall/frames/first/hardware"
 
 
 def test_the_poll_keeps_running_across_sections(page, registry):
@@ -284,7 +297,7 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
             re.compile(r"^Frame first: "))
         expect(badge).to_have_accessible_name("Frame first: Enrolled 0 s ago, no report yet")
-        for section in ("wall", "attention", "players", "schedule"):
+        for section in ("wall", "attention", "hardware", "schedule"):
             go(page, section)
             count = len(reads)
             drive_poll(page)
@@ -370,19 +383,18 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         commissioning = [
-            page.get_by_role("tab", name="Calibration", exact=True, include_hidden=True),
-            page.get_by_role("group", name="Committed calibration", include_hidden=True),
-            page.get_by_role("group", name="Adjust calibration", include_hidden=True),
-            page.get_by_role("region", name=re.compile(r"inspector$"), include_hidden=True),
+            page.get_by_role("tablist", name="Frame settings", include_hidden=True),
+            page.get_by_role("tab", name="Position", exact=True, include_hidden=True),
+            page.get_by_role("region", name="Position", exact=True, include_hidden=True),
         ]
-        # Positive control: every Wall sample is a Wall page, and the Calibration sample
+        # Positive control: every Wall sample is a Wall page, and the Position sample
         # shows the controls, so the checks below are not vacuous.
         for section, paths in SAMPLES["wall"].items():
             for path in paths:
                 visit(page, path)
                 _expect_on(page, section)
                 assert current_hash(page) == path
-        visit(page, f"#/wall/frames/{SAMPLE_FRAME}/calibration")
+        visit(page, f"#/wall/frames/{SAMPLE_FRAME}/position")
         for landmark in commissioning:
             expect(landmark).to_have_count(1)
 
@@ -403,10 +415,10 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
 # --- The Needs attention page.
 
 
-def test_needs_attention_links_each_frame_to_the_facet_showing_its_cause(page, registry):
+def test_needs_attention_links_each_frame_to_the_tab_showing_its_cause(page, registry):
     # Incidents only (console DDD G2): the unbound and needs-calibration Frames are the
     # Wall's To finish items, never rows here; a silent Player is an incident whose cause
-    # shows on Binding.
+    # shows on the Frame page's Hardware tab.
     _bound_commissioned(registry, "silent", x_mm=900)
     registry.clock.advance(240)
     _frame(registry, "no-player", x_mm=100)
@@ -424,17 +436,15 @@ def test_needs_attention_links_each_frame_to_the_facet_showing_its_cause(page, r
         entry = "silent — Player app silent · last reported 4 min ago"
         expect(entries.get_by_role("link")).to_have_text([entry])
         expect(entries.get_by_role("link", name=entry)).to_have_attribute(
-            "href", "#/wall/frames/silent/binding")
+            "href", "#/wall/frames/silent/hardware")
         expect(visible_page(page).get_by_text(re.compile("to set up", re.I))).to_have_count(0)
         entries.get_by_role("link", name=entry).click()
 
         _expect_on(page, "wall")
-        inspector = page.get_by_role("region", name="Frame silent inspector", exact=True)
-        expect(inspector.get_by_role("tab", name="Binding", exact=True)).to_have_attribute(
+        expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(inspector.get_by_role("heading", name="Frame silent", exact=True)
-               ).to_be_focused()
-        assert current_hash(page) == "#/wall/frames/silent/binding"
+        expect(page.get_by_role("heading", name="Frame silent", exact=True)).to_be_focused()
+        assert current_hash(page) == "#/wall/frames/silent/hardware"
 
 
 # --- The drawer under 850 px.

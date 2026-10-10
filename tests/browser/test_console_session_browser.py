@@ -14,7 +14,7 @@ import os
 import re
 
 import pytest
-from console_tasks import open_player
+from console_tasks import open_pi
 from operator_harness import answer_first, operator_server, sign_in, submit_sign_in
 from playwright.sync_api import expect
 from test_registry import ADMIN, enroll
@@ -238,7 +238,7 @@ def test_a_write_from_another_address_explains_the_origin_refusal(page, registry
         sign_in(page, first)
         expect(_frame(page)).to_be_visible()
         # The same host on another port: the cookie is sent, so reads work...
-        page.goto(second + f"/console#/players/{request.device_id}")
+        page.goto(second + f"/console#/hardware/{request.device_id}")
         player = page.locator("main > section:not([hidden])")
         expect(page.get_by_role("heading", level=2, name=name, exact=True)).to_be_visible()
         # ...but a write is refused for its Origin, and the console says what to do.
@@ -253,7 +253,7 @@ def test_a_write_from_another_address_explains_the_origin_refusal(page, registry
             exact=False)).to_be_visible()
         # Signing in at this address binds it, and the same write then succeeds.
         sign_in(page, second)
-        open_player(page, name)
+        open_pi(page, name)
         player.get_by_role("button", name=f"Retire player {player_id}", exact=True).click()
         dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
         dialog.get_by_role("button", name="Confirm retire", exact=True).click()

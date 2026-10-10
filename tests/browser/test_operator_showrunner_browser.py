@@ -11,7 +11,7 @@ tests were retired at the Bead 17 cutover (this file re-hosts their Showrunner
 content on the redesign).
 
 The R4 rule (design §2 R4, J4) is the load-bearing check: the Calibration
-facet — the home of every Display CONTROL — is UNREACHABLE in Showrunner mode.
+tab — the home of every Display CONTROL — is UNREACHABLE in Showrunner mode.
 This is the now-fully-enforceable version of Bead 4's placeholder probe: with
 Showrunner mode existing, "Calibration is Wall-only" is a real, red-able
 assertion.
@@ -55,6 +55,7 @@ from operator_harness import (
 )
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
+from public_media import public_photo, publish_photo
 from test_registry import ADMIN, enroll
 
 from central.catalog import CatalogSnapshot
@@ -67,7 +68,6 @@ from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Calibration, FrameProfile
 from media.models import RefreshResult, SourceSpec
-from tests.public_media import public_photo, publish_photo
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -183,10 +183,10 @@ def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
 
-        # The Wall side: the plan on the Wall page; the boxes on Players.
+        # The Wall side: the plan on the Wall page; the boxes on Hardware.
         expect(page.get_by_role("group", name="Wall plan for surface wall")).to_be_visible()
-        go(page, "players")
-        expect(page.get_by_role("table", name="Players", exact=True)).to_be_visible()
+        go(page, "hardware")
+        expect(page.get_by_role("region", name="Pis", exact=True)).to_be_visible()
 
         # Each Show region has its own page, and none of them holds a Wall-only surface
         # (not even hidden: include_hidden and get_by_label count hidden DOM too).
@@ -229,31 +229,32 @@ def test_showrunner_frame_health_badges_match_the_wall(page, registry):
 
 
 def test_r4_commissioning_unreachable_in_showrunner(page, registry):
-    """R4: the Calibration facet — the only home of Display CONTROLS — cannot
-    be reached in the show layer. Showrunner never mounts the Inspector, so there
-    is no Calibration tab and no committed-calibration control anywhere in the
-    show-mode DOM (design §2 R4 / J4).
+    """R4: the Frame page's Position tab — the home of Display CONTROLS — cannot
+    be reached in the show layer. Showrunner never mounts the Frame page, so there
+    is no Position tab and no live adjustment anywhere in the show-mode DOM
+    (design §2 R4 / J4).
     """
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
 
-        # Sanity: on the Wall the Calibration facet IS reachable (proves the
+        # Sanity: on the Wall the Position tab IS reachable (proves the
         # assertion below is meaningful, not vacuously true).
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
-        expect(page.get_by_role("tab", name="Calibration", exact=True)).to_be_visible()
+        page.get_by_role("tab", name="Position", exact=True).click()
+        expect(page.get_by_role("region", name="Position", exact=True)).to_be_visible()
 
-        # On every Show page: no Calibration tab, no committed-calibration control,
-        # no editor, not even in hidden DOM — the facet is composed out of the show
-        # layer entirely (tests/browser/test_console_shell_browser.py visits every
-        # Show route; this visits each Show page from an open Calibration facet).
+        # On every Show page: no Position tab and no live adjustment, not even in
+        # hidden DOM — the Frame page is composed out of the show layer entirely
+        # (tests/browser/test_console_shell_browser.py visits every Show route; this
+        # visits each Show page from an open Position tab).
         for section in ("now", "scenes", "schedule", "sources"):
             go(page, section)
-            expect(page.get_by_role("tab", name="Calibration", exact=True,
+            expect(page.get_by_role("tab", name="Position", exact=True,
                                     include_hidden=True)).to_have_count(0)
-            expect(page.get_by_role("group", name="Committed calibration",
+            expect(page.get_by_role("region", name="Position", exact=True,
                                     include_hidden=True)).to_have_count(0)
-            expect(page.get_by_role("group", name="Adjust calibration",
+            expect(page.get_by_role("group", name="Show on the Display",
                                     include_hidden=True)).to_have_count(0)
 
 
@@ -1340,8 +1341,8 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         # The Now page names the zone its clock times use.
         expect(runs).to_contain_text(re.compile(r"Times in .+ \(this browser's time zone\)"))
 
-        # The Program's Run is the planned fact on the read-only Wall tile and on Frame ›
-        # Status (console DDD §35): Central's Runs, never what the Panel shows.
+        # The Program's Run is the planned fact on the read-only Wall tile and on the Frame
+        # page's Overview (console DDD §35): Central's Runs, never what the Panel shows.
         planned = ("On top: evening · Program weekday-evenings (Central's Runs; media not "
                    "checked; the Panel is not observed)")
         go(page, "wall")
@@ -1350,7 +1351,10 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
         expect(tile.get_by_role("img", name=planned, exact=True)).to_have_count(1)
         expect(tile).not_to_contain_text("Ending (outro)")
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
-        inspector = page.get_by_role("region", name=f"Frame {VALID_FRAME} inspector", exact=True)
+        inspector = page.locator("main > section:not([hidden])")
+        expect(inspector).to_contain_text("Photo Wall is sending the Scene “evening” to this Frame.")
+        inspector.get_by_role("region", name="Now", exact=True).get_by_role(
+            "button", name="Details", exact=True).click()
         expect(inspector).to_contain_text(planned)
         expect(inspector).to_contain_text(
             f"Central's Runs on {VALID_FRAME}: evening (priority 5, Program weekday-evenings) on top.")

@@ -1,7 +1,7 @@
 import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { AttentionStrip } from "./AttentionStrip.jsx";
-import { useBootFacts } from "./bootFacts.js";
+import { bootFactsFrom } from "./bootFacts.js";
 import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { CloseIcon, MenuIcon } from "./icons.jsx";
@@ -38,7 +38,12 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *   read `on` (nodeControl.js) and while the shell is signed out.
  * @typedef {{section: import("./routes.js").Section, label: string,
  *            render: (ctx: RouteContext) => React.ReactNode,
- *            samplePaths: string[]}} RouteEntry
+ *            samplePaths: string[], inSidebar?: boolean,
+ *            ownsHeading?: (route: import("./routes.js").Route) => boolean}} RouteEntry
+ *   `inSidebar: false` keeps a section that is only ever one instance's page (reached by a
+ *   link) out of the sidebar; its label is still its page's heading. `ownsHeading` true for a
+ *   route whose page renders its own level-1 heading (an object page names the object), so
+ *   the section's label is not one too.
  */
 
 // The Central pill's colour: the shared health severity for each /healthz state.
@@ -48,7 +53,7 @@ const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 const WIDE = "(min-width: 850px)";
 
 // Sidebar groups, in a fixed order (console DDD §48): Wall; Show (Now, Scenes, Schedule,
-// Sources); Fleet (Players, Releases); Needs attention. Nothing reorders or counts on state.
+// Sources); Fleet (Hardware, Releases); Needs attention. Nothing reorders or counts on state.
 const GROUPS = [
   { name: "Wall", table: wallRoutes },
   { name: "Show", table: showRoutes },
@@ -71,7 +76,7 @@ function SectionNav({ current, hrefFor, onChoose, drafts }) {
     <nav className="nav" aria-label="Sections">
       {GROUPS.map(({ name, table }) => (
         <ul key={name} className="nav__group" aria-label={name}>
-          {table.map(({ section, label }) => (
+          {table.filter((entry) => entry.inSidebar !== false).map(({ section, label }) => (
             <li key={section}>
               <a
                 className="nav__link"
@@ -141,9 +146,12 @@ function SnapshotAge({ refreshFailed }) {
 const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
   return (
     <section className={`page page--${entry.section}`} hidden={hidden}>
-      <h1 className="page__title" tabIndex={-1}>
-        {entry.label}
-      </h1>
+      {/* An object page (a Frame's) names itself in its own heading. */}
+      {!entry.ownsHeading?.(ctx.route) && (
+        <h1 className="page__title" tabIndex={-1}>
+          {entry.label}
+        </h1>
+      )}
       {ready ? (
         <div className="page__content">
           {/* A hidden page's confirmations put their dialogs away (pageVisibility.js). */}
@@ -168,8 +176,8 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
  * status and alert regions leave the accessibility tree). Wall, fleet and neutral
- * sections mount only while current, so no hidden page ever holds Calibration DOM
- * (R4) and a Player page's node read stops when it is left.
+ * sections mount only while current, so no hidden page ever holds a Frame's Position tab
+ * (R4) and a Pi page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the first snapshot
  * is in. The landing route is always the Wall (routes.js `landingRoute`).
@@ -195,9 +203,6 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
 export function Shell({ hidden = false }) {
   const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
-  // Boot facts (slice 2 §5): ONE optional read of the netboot records, shared by
-  // the Players pages and the output chooser.
-  const bootFacts = useBootFacts(snapshot);
   // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
   const health = useHealth();
   // Node control (Part E §25): ONE node status read, the effect gate's one source.
@@ -210,6 +215,9 @@ export function Shell({ hidden = false }) {
   const hostsSkipped = hidden || nodeControl.state !== "on";
   const fleetHosts = useFleetHosts({ skip: hostsSkipped });
   const hosts = hostsSkipped ? null : fleetHosts;
+  // Boot facts (slice 2 §5): each box's serial from the host read, shared by the fleet pages
+  // and the output chooser.
+  const bootFacts = useMemo(() => bootFactsFrom(hosts), [hosts]);
   const wall = useWallMemory(route, snapshot, navigate);
   // Flow hand-offs (see RouteContext): the Scene last saved or picked, and the Show
   // sections holding an unsaved draft. Log out remounts the shell and clears both.
@@ -308,7 +316,7 @@ export function Shell({ hidden = false }) {
       return;
     }
     if (headingFor.section === current) {
-      mainRef.current?.querySelector(":scope > section:not([hidden]) > h1")?.focus();
+      mainRef.current?.querySelector(":scope > section:not([hidden]) h1")?.focus();
       setHeadingFor(null);
     } else if (headingFor.from !== current) {
       setHeadingFor(null);
@@ -317,7 +325,10 @@ export function Shell({ hidden = false }) {
 
   const focusHeadingOf = (section) => setHeadingFor({ section, from: current });
 
-  const hrefFor = (section) => formatRoute(section === "wall" ? wall.lastWall : { section });
+  // The Wall link returns to the Wall as last shown, except from the Wall itself (a Frame's
+  // page), where it leads back to the plan.
+  const hrefFor = (section) =>
+    formatRoute(section === "wall" && current !== "wall" ? wall.lastWall : { section });
 
   const chooseFromDrawer = (section) => {
     choosingRef.current = true;
@@ -344,7 +355,7 @@ export function Shell({ hidden = false }) {
   );
 
   return (
-    <div className="shell" hidden={hidden} inert={hidden ? "" : undefined}>
+    <div className="shell" hidden={hidden} inert={hidden}>
       <button type="button" className="skip-link" onClick={() => mainRef.current?.focus()}>
         Skip to content
       </button>

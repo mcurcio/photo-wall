@@ -11,7 +11,7 @@ through `wallRoutes.jsx`. The browser half (tests/browser/test_console_shell_bro
 visits every sample path.
 
 G1 (console DDD §49) by the same graph: the worklists (Needs attention, the Wall's To finish
-list), the one host classifier they read and the Status host chip import models, never a page
+list), the one host classifier they read and the Overview host chip import models, never a page
 module (a route table, the shell or a `*Page.jsx`) and never a write module (`WRITE_MODULES`),
 followed transitively. A worklist only links; the write lives in the home it links to.
 
@@ -30,6 +30,12 @@ reads (`import … from "x"`, `import "x"`, `export … from "x"`, `import("x")`
 as Vite reads it) or a package; anything else (`import.meta.glob`, a computed `import()`) is
 an error, not a skip. The self-tests below give both small synthetic sources.
 
+S1 (console design system) by the same scan and bundler, over every module of the catalog
+layers: imports point down only, `pages -> domain -> patterns -> ui -> design`, and the
+design, primitive and pattern layers import no console module outside the layers (no
+model: `facts`, `health`, `hostHealth`, `join`, `players`, `routes`). TypeScript's type-only
+imports count too. The legacy modules at the top of src/ may import any layer.
+
 The round trip runs routes.js itself under Node (a pure module, no React), which the console
 build already requires.
 """
@@ -37,23 +43,25 @@ build already requires.
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
-
-from tests.test_console_flow import _require_node
+from test_console_flow import _require_node
 
 CONSOLE = Path(__file__).parents[1] / "central/console"
 SRC = CONSOLE / "src"
 ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
+SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
           "neutral": "neutralRoutes.jsx"}
-DISPLAY_CONTROLS = {"CalibrationFacet.jsx", "Inspector.jsx", "useCalibration.js"}
-# The display's calibration route (central/app.py `/v1/operator/frames/{frame_id}/calibration`):
-# only the Wall side may name it. Matched with the interpolated Frame id's closing brace, so the
-# Calibration facet's own hash (`#/wall/frames/<id>/calibration`, a route sample) is not it.
+# The Frame page, its Position tab and the live adjustment that writes a Frame's calibration.
+DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js"}
+# The display's calibration routes (central/fleet/node_routes.py
+# `/v1/operator/frames/{frame_id}/calibration-…`): only the Wall side may name them. Matched with
+# the interpolated Frame id's closing brace, so no hash route can be mistaken for one.
 CALIBRATION_ROUTE = "}/calibration"
 # Modules the Wall table reaches that the Show, fleet or neutral sides use too, besides the
 # shell's own. The
@@ -61,10 +69,11 @@ CALIBRATION_ROUTE = "}/calibration"
 # here, and none of these may be a display control or name the calibration route.
 SHARED_WITH_SHOW = {
     "ConfirmAction.jsx",  # every confirmation
-    "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Status facet and the Now page's Why
+    "PrecedenceExplanation.jsx",  # Central's Runs on a frame: Frame Overview and the Now page's Why
     "equipmentApi.js",  # the equipment reads and writes
     "sendOutcome.js",  # the one outcome pattern: UNKNOWN_MESSAGE, CHANGED_MESSAGE, held requests
-    "FactLine.jsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
+    "fact-line.tsx",  # the one fact renderer: the Binding facet's Panel at enrollment (§19)
+    "hosts-read.ts",  # the fleet host read's shape (a type): the host link and the Hardware pages
     "framesApi.js",
     "projection.js",
     "routeSamples.json",  # every route table's sample paths
@@ -78,9 +87,9 @@ SHARED_WITH_SHOW = {
 WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.js",
                  "equipmentApi.js"}
 # G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
-# Wall's To finish list and model, the one host classifier they read, and the Status host chip.
+# Wall's To finish list and model, the one host classifier they read, and the Overview host chip.
 G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "WallUnfinished.jsx",
-                   "unfinished.js", "hostHealth.js", "HostChip.jsx"]
+                   "unfinished.js", "hostHealth.js", "domain/host-health-link.tsx"]
 # The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
 SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
 # sceneTargets.js is not listed: since S1 join.js reads a Run's origin from showState.js, which
@@ -192,13 +201,27 @@ _IMPORT_BARE = re.compile(r"import\s*" + _STR)
 _IMPORT_CALL = re.compile(r"import\s*\(\s*" + _STR + r"\s*\)")
 _EXPORT_FROM = re.compile(r"export\s*(?:\*(?:\s*as\s+[\w$]+)?|\{[^}]*\})\s*from\s*" + _STR)
 _EXPORT_LOCAL = re.compile(
-    r"export\s+(?:default|const|let|var|function|class|async)\b|export\s*\{[^}]*\}(?!\s*from\b)")
+    r"export\s+(?:default|const|let|var|function|class|async|type|interface|enum|abstract)\b"
+    r"|export\s*\{[^}]*\}(?!\s*from\b)")
 _KEYWORD = re.compile(r"\b(import|export)\b")
 _PACKAGE = re.compile(r"(?:@[\w.-]+/)?[\w.-]+(?:/[\w./-]+)?")
 
 
-def _specifiers(text, name="<source>"):
+def _type_only(statement):
+    """Whether an import or re-export statement carries types alone (`import type …`, or
+    every named binding marked `type`): TypeScript erases it, so the bundler never sees it."""
+    if re.match(r"(?:import|export)\s+type\b(?!\s*(?:,|from\b))", statement):
+        return True
+    names = re.search(r"\{([^}]*)\}", statement)
+    if names is None or re.match(r"import\s*[\w$]+\s*,", statement):
+        return False
+    bindings = [part.strip() for part in names.group(1).split(",") if part.strip()]
+    return bool(bindings) and all(re.match(r"type\s", part) for part in bindings)
+
+
+def _specifiers(text, name="<source>", *, values_only=False):
     """Every module specifier `text` imports or re-exports, statically or dynamically.
+    With `values_only`, the type-only statements (`_type_only`) are left out.
 
     Raises ScanError for an `import`/`export` in code that is none of the forms read here.
     """
@@ -224,28 +247,35 @@ def _specifiers(text, name="<source>"):
                 continue
         if match is None:
             raise ScanError(f"{name}:{line}: an {keyword.group()} the scan cannot read")
+        if values_only and _type_only(match.group()):
+            continue
         found.append(next(group for group in match.group("d", "s", "t") if group is not None))
     return found
 
 
-def _imports(path, root=CONSOLE):
-    """The console modules `path` imports, resolved to files; packages are left out.
+def _imports(path, root=CONSOLE, *, values_only=False):
+    """The console modules `path` imports, resolved to files; packages are left out. With
+    `values_only`, the type-only imports are left out too (the bundler's view).
 
     Relative specifiers resolve against `path`, root-relative ones ("/src/…") against the
-    Vite `root`, with Vite's extensions and index files. Anything unresolved is a ScanError.
+    Vite `root`, the catalog layers' alias ("@/…", tsconfig.json `paths`) against its `src/`,
+    with Vite's extensions and index files. Anything unresolved is a ScanError.
     """
     resolved = set()
-    for specifier in _specifiers(path.read_text(), path.name):
+    for specifier in _specifiers(path.read_text(), path.name, values_only=values_only):
         if specifier.startswith(("./", "../")):
             base = (path.parent / specifier).resolve()
+        elif specifier.startswith("@/"):
+            base = (root / "src" / specifier[2:]).resolve()
         elif specifier.startswith("/"):
             base = (root / specifier.lstrip("/")).resolve()
         elif _PACKAGE.fullmatch(specifier) and not specifier.startswith("."):
             continue  # a package (react, react-dom/client)
         else:
             raise ScanError(f"{path.name}: cannot resolve {specifier!r}")
-        candidates = [base, *(base.with_name(base.name + ext) for ext in (".js", ".jsx", ".json")),
-                      base / "index.js", base / "index.jsx"]
+        candidates = [base, *(base.with_name(base.name + ext) for ext in SOURCE_SUFFIXES),
+                      base.with_name(base.name + ".json"),
+                      *(base / f"index{ext}" for ext in SOURCE_SUFFIXES)]
         found = next((candidate for candidate in candidates if candidate.is_file()), None)
         if found is None:
             raise ScanError(f"{path.name}: cannot resolve {specifier!r}")
@@ -283,16 +313,19 @@ def bundler_graph(entries, root, workdir):
 
 def module_graph(entries, root, workdir):
     """The bundler's graph (`bundler_graph`), cross-checked module by module against the
-    import scan (`_imports`): any disagreement is a ScanError."""
+    import scan (`_imports`): any disagreement is a ScanError. A TypeScript module's
+    type-only imports, which the bundler erases, join the graph from the scan, so a layer
+    rule holds for types too."""
     graph = bundler_graph(entries, root, workdir)
-    for module, imports in graph.items():
-        if module.suffix in {".js", ".jsx"}:
-            scanned = _imports(module, root)
+    for module, imports in list(graph.items()):
+        if module.suffix in SOURCE_SUFFIXES:
+            scanned = _imports(module, root, values_only=True)
             if scanned != imports:
                 raise ScanError(
                     f"{module.name}: the scan and the bundler disagree: only the scan sees "
                     f"{sorted(p.name for p in scanned - imports)}, only the bundler sees "
                     f"{sorted(p.name for p in imports - scanned)}")
+            graph[module] = _imports(module, root)
     return graph
 
 
@@ -321,7 +354,7 @@ def scan_closure(path, root=CONSOLE):
         if module in seen:
             continue
         seen.add(module)
-        if module.suffix in {".js", ".jsx"}:
+        if module.suffix in SOURCE_SUFFIXES:
             stack.extend(_imports(module, root) - seen)
     return {module.name for module in seen}
 
@@ -330,7 +363,7 @@ def g1_forbidden(names):
     """Of module `names`, those a G1 list module must never reach: page and write modules."""
     return {name for name in names
             if name in WRITE_MODULES or name in SHELL_PAGES or name in TABLES.values()
-            or name.endswith("Page.jsx")}
+            or name.endswith("Page.jsx") or name.endswith("-page.tsx")}
 
 
 @pytest.fixture(scope="module")
@@ -443,7 +476,7 @@ def test_the_cross_check_agrees_where_the_scan_reads_every_import(tmp_path):
 
 def test_the_import_scan_reads_every_console_module():
     # Fail closed over the real sources too: every module lexes and resolves.
-    for module in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]:
+    for module in [path for path in SRC.rglob("*") if path.suffix in SOURCE_SUFFIXES]:
         _imports(module)
 
 
@@ -455,10 +488,16 @@ def _shell_own(graph):
     return reachable(graph, "main.jsx", stop=set(TABLES.values()))
 
 
+def _catalog(graph):
+    """The design system's model-free members (design tokens, primitives, patterns): they know no
+    Photo Wall concept (S1), so they hold no display control and every side shares them."""
+    return {module.name for module in graph if _layer(module) in MODEL_FREE}
+
+
 def _wall_only(graph):
-    """The Wall-only closure: what the Wall table reaches, but the shell's own modules and
-    those declared shared with the Show side."""
-    return reachable(graph, TABLES["wall"]) - _shell_own(graph) - SHARED_WITH_SHOW - {
+    """The Wall-only closure: what the Wall table reaches, but the shell's own modules, the
+    catalog's model-free members and those declared shared with the Show side."""
+    return reachable(graph, TABLES["wall"]) - _shell_own(graph) - _catalog(graph) - SHARED_WITH_SHOW - {
         TABLES["wall"]}
 
 
@@ -486,8 +525,8 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     wall = reachable(graph, TABLES["wall"]) - _shell_own(graph)
     shown = (reachable(graph, TABLES["show"]) | reachable(graph, TABLES["fleet"])
              | reachable(graph, TABLES["neutral"]))
-    assert wall & shown == SHARED_WITH_SHOW
-    assert not SHARED_WITH_SHOW & DISPLAY_CONTROLS
+    assert wall & shown - _catalog(graph) == SHARED_WITH_SHOW
+    assert not (SHARED_WITH_SHOW | _catalog(graph)) & DISPLAY_CONTROLS
 
 
 @pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
@@ -498,8 +537,8 @@ def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, t
 
 
 def test_the_wall_routes_do_reach_display_controls(graph):
-    # Positive control: the closure holds the Calibration facet and the calibration write, where
-    # they are meant to be.
+    # Positive control: the closure holds the Frame page, its Position tab and the calibration
+    # write, where they are meant to be.
     assert DISPLAY_CONTROLS <= _wall_only(graph)
     assert any(CALIBRATION_ROUTE in module.read_text() for module in graph
                if module.name in _wall_only(graph))
@@ -511,9 +550,9 @@ def test_the_wall_routes_do_reach_display_controls(graph):
 @pytest.mark.parametrize("name", G1_LIST_MODULES)
 def test_g1_list_modules_reach_no_page_and_no_write_module(graph, name):
     modules = reachable(graph, name)
-    assert name in modules and len(modules) > 1  # the walk reached past the module itself
+    assert Path(name).name in modules and len(modules) > 1  # the walk reached past the module itself
     # The Needs attention page is itself a page; what it reaches must not be one.
-    reached = modules - {name}
+    reached = modules - {Path(name).name}
     assert not g1_forbidden(reached), sorted(g1_forbidden(reached))
 
 
@@ -521,8 +560,9 @@ def test_g1_list_modules_are_in_the_graph_and_the_homes_do_reach_writes(graph):
     # Positive controls: every listed module is one the console builds (a renamed file cannot
     # drop out of the check silently), and the homes the lists link to own the writes.
     names = {module.name for module in graph}
-    assert set(G1_LIST_MODULES) <= names
+    assert {Path(name).name for name in G1_LIST_MODULES} <= names
     assert "apiWrite.js" in reachable(graph, "PlayerPage.jsx")
+    assert "apiWrite.js" in reachable(graph, "pages/hardware-pi-page.tsx")
     assert "framesApi.js" in reachable(graph, "LayoutEditor.jsx")
 
 
@@ -531,14 +571,12 @@ def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
     # polling hook again (as batch 4 first did) puts the write primitive in the closure of
     # Needs attention, and the check names it.
     src = tmp_path / "src"
-    src.mkdir()
-    for module in SRC.iterdir():
-        if module.is_file():
-            (src / module.name).write_bytes(module.read_bytes())
+    shutil.copytree(SRC, src)
     assert not g1_forbidden(scan_closure(src / "AttentionList.jsx", tmp_path))
     classifier = src / "hostHealth.js"
     classifier.write_text('import { useFleetHosts } from "./fleetHosts.js";\n' + classifier.read_text())
-    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js", "HostChip.jsx"):
+    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js",
+                 "domain/host-health-link.tsx"):
         assert "apiWrite.js" in g1_forbidden(scan_closure(src / name, tmp_path)), name
 
 
@@ -554,11 +592,11 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases", "attention"])
 
 
 ROUND_TRIP = r"""
-const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS, FACETS, FACET_ALIASES } =
+const { parseRoute, formatRoute, sameRoute, landingRoute, SECTIONS, TABS } =
   await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
 const out = {};
@@ -576,19 +614,15 @@ out.invalidRoutes = input.invalidRoutes.map((route) => {
   try { formatRoute(route); return "formatted"; } catch { return "refused"; }
 });
 out.landing = [landingRoute(), landingRoute(0), landingRoute(5)];
-out.nowshowing = parseRoute("#/wall/frames/x/nowshowing");
-out.noFacet = parseRoute("#/wall/frames/x");
-out.facets = FACETS;
-out.aliases = FACET_ALIASES;
+out.oldFacets = ["status", "binding", "calibration", "nowshowing", "commissioning"].map(
+  (facet) => parseRoute(`#/wall/frames/x/${facet}`));
+out.noTab = parseRoute("#/wall/frames/x");
+out.tabs = TABS;
 out.layout = { hash: formatRoute({ section: "wall", mode: "layout" }),
                route: parseRoute("#/wall/layout") };
 out.targetRoute = formatRoute({ section: "scenes", flow: "new", step: "kind",
                                 initialTarget: "frame_one" });
 out.equipment = parseRoute("#/equipment");
-out.commissioning = parseRoute("#/wall/frames/x/commissioning");
-out.commissioningRoute = (() => { try {
-  return formatRoute({ section: "wall", id: "x", facet: "commissioning" });
-} catch { return "refused"; } })();
 out.badTargetRoute = (() => { try {
   return formatRoute({ section: "scenes", flow: "new", step: "kind", initialTarget: "old:frame" });
 } catch { return "refused"; } })();
@@ -597,8 +631,12 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "players", "releases", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "attention")
 ] + [
+    {"section": "hardware", "id": "device-" + "a" * 64},
+    {"section": "hardware", "id": "a/b ç?#%"},
+    {"section": "hardware", "pi": "device-" + "a" * 64},
+    {"section": "hardware", "pi": "a/b ç?#%&=+"},
     {"section": "players", "id": "device-" + "a" * 64},
     {"section": "players", "id": "a/b ç?#%"},
     {"section": "now", "flow": "show", "step": "review"},
@@ -611,10 +649,10 @@ ROUTES = [
     {"section": "sources", "id": "all-photos", "flow": "edit", "step": "review"},
     {"section": "schedule", "flow": "new", "step": "when"},
     {"section": "schedule", "id": "evening/program", "flow": "edit", "step": "review"},
-    {"section": "wall", "id": "reception north", "facet": "calibration"},
-    {"section": "wall", "id": "a/b", "facet": "binding"},
-    {"section": "wall", "id": "frames", "facet": "status"},
-    {"section": "wall", "id": "layout", "facet": "status"},
+    {"section": "wall", "id": "reception north", "tab": "position"},
+    {"section": "wall", "id": "a/b", "tab": "hardware"},
+    {"section": "wall", "id": "frames", "tab": "overview"},
+    {"section": "wall", "id": "layout", "tab": "picture"},
     {"section": "wall", "mode": "layout"},
     {"section": "releases", "flow": "update", "id": "v0.15.0"},
     {"section": "releases", "flow": "update", "id": "v1/rc ç?#%", "tried": "player/one ç"},
@@ -625,9 +663,9 @@ ROUTES = [
 INVALID_HASHES = [
     "", "#", "#/", "#/nope", "#now", "#/now/", "#//now", "#/wall/frames/x/bogus",
     "#/wall/layout/x", "#/wall/bogus", "#/now/layout", "#/wall/layout?target=x",
-    "#/wall/x/binding", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
+    "#/wall/x/hardware", "#/equipment/new/x", "#/now/new/x", "#/equipment/x",
     "#/equipment?target=x", "#/players/a/b", "#/players/x?target=y",
-    "#/scenes/new", "#/wall/frames/%E0%A4%A/binding",
+    "#/scenes/new", "#/wall/frames/%E0%A4%A/hardware",
     "#/scenes/new/kind?target=bad%20id", "#/scenes/new/kind?target=x&target=y",
     "#/scenes/new/kind?other=x", "#/scenes/new/kind?target=legacy%3Aframe",
     "#/sources/new/name?target=frame",
@@ -635,13 +673,18 @@ INVALID_HASHES = [
     "#/releases/update/v1/try/p/x", "#/releases/v1", "#/releases/update/v1?target=x",
     "#/releases/update/v1/skip", "#/releases/update/v1/try/p/skip", "#/releases/update/v1/skip/a/a",
     "#/releases/update/v1/skip/a?target=x",
+    # No aliases and no Players list: the retired Equipment and Players pages' bookmarks are gone.
+    "#/players", "#/equipment", "#/players?pi=x",
+    # A focus is one non-empty `pi` on the Hardware list alone (design rule H2).
+    "#/hardware?pi=", "#/hardware?pi=a&pi=b", "#/hardware?pi=a&other=b", "#/hardware?other=x",
+    "#/hardware/x?pi=y", "#/hardware/a/b", "#/now?pi=x", "#/releases?pi=x",
 ]
 INVALID_ROUTES = [
-    {"section": "nope"}, {"section": "now", "facet": "binding", "id": "x"},
-    {"section": "wall", "id": "x"}, {"section": "wall", "id": "x", "facet": "bogus"},
-    {"section": "wall", "id": "x", "facet": "nowshowing"},
+    {"section": "nope"}, {"section": "now", "tab": "hardware", "id": "x"},
+    {"section": "wall", "id": "x"}, {"section": "wall", "id": "x", "tab": "bogus"},
+    {"section": "wall", "id": "x", "tab": "status"}, {"section": "wall", "id": "x", "facet": "status"},
     {"section": "wall", "mode": "layout", "id": "x"}, {"section": "now", "mode": "layout"},
-    {"section": "wall", "mode": "bogus"}, {"section": "wall", "mode": "layout", "facet": "status"},
+    {"section": "wall", "mode": "bogus"}, {"section": "wall", "mode": "layout", "tab": "overview"},
     {"section": "now", "flow": "new", "step": "x"}, {"section": "scenes", "flow": "edit",
                                                     "step": "x"},
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
@@ -651,6 +694,9 @@ INVALID_ROUTES = [
     {"section": "players", "id": "x", "skipped": ["p"]},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": ["a", "a"]},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": [""]},
+    {"section": "players"}, {"section": "hardware", "id": "x", "pi": "y"}, {"section": "now", "pi": "x"},
+    {"section": "hardware", "pi": ""},
+    {"section": "scenes", "flow": "new", "step": "kind", "initialTarget": "x", "pi": "y"},
 ]
 
 
@@ -677,17 +723,158 @@ def test_routes_parse_format_and_round_trip():
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
     # The landing route is always the Wall, with no Frames and with five (console DDD §48).
     assert out["landing"] == [{"section": "wall"}] * 3
-    # The retired Equipment page's bookmark lands on the Players list, and is never formatted.
-    assert out["equipment"] == {"section": "players"}
-    # The renamed facet's old bookmark opens Calibration, and is never formatted (§19).
-    assert out["commissioning"] == {"section": "wall", "id": "x", "facet": "calibration"}
-    assert out["commissioningRoute"] == "refused"
-    # The Now-showing facet's old bookmark, and a Frame route with no facet, open Status
-    # (console DDD §61); neither is ever formatted.
-    assert out["nowshowing"] == {"section": "wall", "id": "x", "facet": "status"}
-    assert out["noFacet"] == {"section": "wall", "id": "x", "facet": "status"}
-    assert out["facets"] == ["status", "binding", "calibration"]
-    assert out["aliases"] == {"nowshowing": "status", "commissioning": "calibration"}
+    # No aliases (owner rule): the retired Equipment page's bookmark parses to nothing.
+    assert out["equipment"] is None
+    # No aliases (owner rule): the retired Inspector facets' bookmarks parse to nothing.
+    assert out["oldFacets"] == [None] * 5
+    # A Frame route with no tab opens Overview; it is never formatted.
+    assert out["noTab"] == {"section": "wall", "id": "x", "tab": "overview"}
+    assert out["tabs"] == ["overview", "position", "picture", "hardware"]
     assert out["layout"] == {"hash": "#/wall/layout", "route": {"section": "wall", "mode": "layout"}}
     assert out["targetRoute"] == "#/scenes/new/kind?target=frame_one"
     assert out["badTargetRoute"] == "refused"
+
+
+# --- S1: the catalog layers' imports point down only (console design system).
+
+# Top to bottom; a layer imports its own and the layers below it.
+LAYERS = ("pages", "domain", "patterns", "ui", "design")
+# Layers that know no Photo Wall concept: they import no console module outside the layers.
+MODEL_FREE = {"patterns", "ui", "design"}
+MODELS = {"facts.js", "health.js", "hostHealth.js", "join.js", "players.js", "routes.js"}
+# What a page or a domain component may import from outside the catalog: the models, and the
+# node read (a hook, no markup) and the one time formatter (no markup). Anything else that
+# renders markup is a legacy module.
+PAGE_IMPORTS = MODELS | {"nodeRead.js", "timeWords.js"}
+# Legacy modules that render markup the Hardware Pi page still composes: the confirmation
+# dialog (ConfirmAction.jsx, whose typed handle, terminal phases and page-hidden suspension the
+# Dialog primitive does not carry yet), the Reboot section and the node-control gate's notice.
+# Declared in .claude/errata.md E-CDS-FIX-1; the dialogs' migration (DS2) empties this set.
+LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx", "nodeControl.js"}
+# The Frame page's modules, each with the legacy modules it alone may import, until they move
+# to the catalog: the page composes the bind chooser and the live adjustment (a hook); the
+# Overview the two read-only explanations the Now page shares, the readiness report and the
+# Frame id rule; the Frame profile its write and refresh-after-write; the live adjustment's
+# view the hook's type. No other page or domain module may import any of them.
+FRAME_PAGE_IMPORTS = {
+    "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js"},
+    "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
+                           "frameIds.js"},
+    "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
+    "live-adjustment.tsx": {"liveAdjustment.js"},
+}
+
+
+def _layer(module, src=SRC):
+    """The catalog layer `module` belongs to, or None for any other console module."""
+    try:
+        parts = module.resolve().relative_to(src.resolve()).parts
+    except ValueError:
+        return None
+    return parts[0] if len(parts) > 1 and parts[0] in LAYERS else None
+
+
+def layer_violations(graph, src=SRC):
+    """Every (module, import) edge of `graph` that breaks S1, as names relative to `src`."""
+    found = []
+    for module, imports in graph.items():
+        layer = _layer(module, src)
+        if layer is None:
+            continue  # a legacy module may import any layer
+        for imported in imports:
+            target = _layer(imported, src)
+            if target is None:
+                broken = layer in MODEL_FREE
+            else:
+                broken = LAYERS.index(target) < LAYERS.index(layer)
+            if broken:
+                found.append((str(module.resolve().relative_to(src.resolve())),
+                              str(imported.resolve().relative_to(src.resolve()))))
+    return sorted(found)
+
+
+def _layer_modules(src=SRC):
+    return sorted(path for layer in LAYERS if (src / layer).is_dir()
+                  for path in (src / layer).rglob("*") if path.suffix in SOURCE_SUFFIXES)
+
+
+@pytest.fixture(scope="module")
+def layer_graph(tmp_path_factory):
+    """Every catalog module's imports, its type-only ones included."""
+    _require_esbuild()
+    return module_graph(_layer_modules(), CONSOLE, tmp_path_factory.mktemp("layers"))
+
+
+def test_catalog_imports_point_down_only(layer_graph):
+    assert {"button.tsx", "dialog.tsx", "table.tsx", "tokens.ts"} <= {
+        module.name for module in layer_graph}  # the walk reached the catalog
+    assert layer_violations(layer_graph) == []
+
+
+def test_primitives_and_patterns_import_no_console_model(layer_graph):
+    reached = {imported.name for module, imports in layer_graph.items()
+               if _layer(module) in MODEL_FREE for imported in imports}
+    assert not reached & MODELS, sorted(reached & MODELS)
+
+
+def test_a_layer_rule_break_is_found(tmp_path):
+    # Guards the check: an upward import, a primitive's type-only import of a model, and an
+    # alias import upward are each a violation; a downward import and a domain component
+    # reading a model are not.
+    _require_esbuild()
+    _write(tmp_path, {
+        "tsconfig.json": '{"compilerOptions": {"paths": {"@/*": ["./src/*"]}}}',
+        "src/facts.js": "export const f = 1;\n",
+        "src/design/tokens.ts": "export type Severity = 'ok';\nexport const S = 1;\n",
+        "src/ui/chip.tsx": 'import type { Severity } from "../design/tokens";\n'
+                           'import { Page } from "../pages/Page";\n'
+                           'export const Chip = (s: Severity) => Page(s);\n',
+        "src/ui/fact.tsx": 'import { type F } from "../facts.js";\nexport const x = 1 as unknown as F;\n',
+        "src/patterns/list.tsx": 'import { D } from "@/domain/D";\nexport const L = D;\n',
+        "src/domain/D.tsx": 'import { f } from "../facts.js";\nimport { S } from "../design/tokens";\n'
+                            "export const D = f + S;\n",
+        "src/pages/Page.tsx": 'import { D } from "../domain/D";\nexport const Page = (x: unknown) => [x, D];\n',
+    })
+    src = tmp_path / "src"
+    graph = module_graph(_layer_modules(src), tmp_path, tmp_path)
+    assert layer_violations(graph, src) == [
+        ("patterns/list.tsx", "domain/D.tsx"),
+        ("ui/chip.tsx", "pages/Page.tsx"),
+        ("ui/fact.tsx", "facts.js"),
+    ]
+
+
+def test_the_truth_kinds_token_list_is_the_fact_models():
+    # tokens.ts names a tone per truth kind; facts.js owns the kinds (S1 keeps the two apart).
+    tokens = re.search(r"TRUTH_KINDS = \[([^\]]*)\]", (SRC / "design/tokens.ts").read_text())
+    kinds = re.search(r"const KINDS = new Set\(\[([^\]]*)\]\)", (SRC / "facts.js").read_text())
+    assert tokens and kinds
+    assert re.findall(r'"(\w+)"', tokens.group(1)) == re.findall(r'"(\w+)"', kinds.group(1))
+
+
+def test_pages_and_domain_components_import_only_models_and_declared_legacy_markup(layer_graph):
+    # A page composes the catalog and reads models: it never imports a legacy module that
+    # renders markup (and styles it with the legacy sheet), except the declared ones; each
+    # Frame page module imports exactly its own declared set, and no other module any of it.
+    legacy, frame = set(), {}
+    for module, imports in layer_graph.items():
+        if _layer(module) not in ("pages", "domain"):
+            continue
+        extra = {imported.name for imported in imports if _layer(imported) is None} - PAGE_IMPORTS
+        if module.name in FRAME_PAGE_IMPORTS:
+            frame[module.name] = extra
+        else:
+            legacy |= extra
+    assert legacy == LEGACY_MARKUP, sorted(legacy)
+    assert frame == FRAME_PAGE_IMPORTS, frame
+
+
+def test_reboot_and_retire_have_one_home_and_it_is_not_the_software_page(graph):
+    # H1: the Hardware Pi page owns Reboot, Retire and Health; the Software page (PlayerPage)
+    # offers none of them, however it is edited.
+    software = (SRC / "PlayerPage.jsx").read_text()
+    for name in ("RebootSection", "retireRequest", "HostHealthPanel", "host-health"):
+        assert name not in software, f"PlayerPage.jsx names {name}: it belongs on Hardware"
+    assert "host-health.tsx" not in reachable(graph, "PlayerPage.jsx")
+    home = (SRC / "pages/hardware-pi-page.tsx").read_text()
+    assert {"RebootSection", "retireRequest", "HostHealthPanel"} <= set(re.findall(r"\w+", home))

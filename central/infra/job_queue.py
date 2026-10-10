@@ -14,6 +14,9 @@ Task kwargs are the job's `model_dump(mode="json")` plus the attempt under `ATTE
 procrastinate passes kwargs through verbatim (worker.py:301), and pydantic forbids fields that
 start with `_`, so the attempt can never collide with a job field. A periodic tick adds a
 `timestamp` kwarg, which `decode` drops (the kernel reserves that field name).
+
+`async_connector` is the ONLY way to build an async procrastinate connector (ruff TID251 bans
+`procrastinate.PsycopgConnector` everywhere else).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any, Final
 
 import procrastinate
+import psycopg_pool
 from procrastinate.exceptions import AlreadyEnqueued
 
 from central.kernel.jobs import PERIODIC_CADENCES, Job, job_keys, registered_job_type
@@ -76,6 +80,23 @@ def periodic_cron(every: timedelta) -> str:
     if hours < 24:
         return f"0 */{hours} * * * 0"
     return "0 0 * * * 0"
+
+
+def _pool_without_check(**pool_args: Any) -> psycopg_pool.AsyncConnectionPool:
+    # procrastinate 3.9.0 passes `check=AsyncConnectionPool.check_connection` to every async pool
+    # (psycopg_connector.py `_create_pool`). psycopg_pool 3.3.1 runs that check under
+    # `except CLIENT_EXCEPTIONS`, which includes `asyncio.CancelledError` (pool_async.py
+    # `_getconn_with_check_loop`): a cancel landing during the check is swallowed and getconn
+    # retries, so a cancelled loop-forever side task (heartbeat, periodic deferrer, abort poll)
+    # never finishes and the worker hangs on SIGTERM. Cost: a connection broken while idle (a
+    # PostgreSQL restart) now fails its next use instead of being replaced silently.
+    return psycopg_pool.AsyncConnectionPool(**{**pool_args, "check": None})
+
+
+def async_connector(dsn: str, **pool_args: Any) -> procrastinate.PsycopgConnector:
+    """An async procrastinate connector whose pool a cancel always stops (no getconn check)."""
+    return procrastinate.PsycopgConnector(conninfo=dsn, pool_factory=_pool_without_check,
+                                          **pool_args)
 
 
 def _publish_only(job_type: type[Job[Any]]) -> TaskBody:

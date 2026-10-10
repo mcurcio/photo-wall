@@ -1,0 +1,3 @@
+appliance/kernel/*.py usr/lib/photo-wall/node-kernel/appliance/kernel
+appliance/feed.py usr/lib/photo-wall/node-kernel/appliance
+appliance/feed_socket.py usr/lib/photo-wall/node-kernel/appliance

@@ -76,8 +76,8 @@ METRIC_FAMILIES: Final[tuple[MetricFamily, ...]] = (
         "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
         "local_recovery_active", "local_recovery_reboot",
         "memcg_present", "cma_total", "cma_free")),
-    MetricFamily("memory_peak:", 5),  # hostcore, base, preparation, app, display (Weston)
-    MetricFamily("oom_kill:", 3),  # base, preparation, app
+    MetricFamily("memory_peak:", 6),  # hostcore, base, preparation, app, display (Weston), bus
+    MetricFamily("oom_kill:", 4),  # base, preparation, app, bus
     MetricFamily("metrics_dropped", 1),  # reserved: appended by valid_metrics only
 )
 

@@ -11,11 +11,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from test_verify_netboot_initrd import newc_archive
 
 import appliance.netboot_init as netboot_module
 from appliance.bootstrap import BootstrapError
 from scripts import initrd_mount_probe as probe_module
-from scripts.build_boot_data import newc_archive
 from scripts.initrd_mount_probe import (
     INITRAMFS_PATH,
     MARKER,
@@ -32,7 +32,7 @@ from scripts.initrd_mount_probe import (
     unpack,
 )
 
-BOOT_DATA = newc_archive({"usr/lib/python3.13/appliance/bootstrap.py": b"code"})
+FLOOR_LAYER = newc_archive({"usr/lib/photo-wall/clock-floor": b"1760000000\n"})
 EARLY = newc_archive({"kernel/x86/microcode/fake.bin": b"ucode"})
 CACHED = newc_archive({"usr/bin/mount": b"klibc"})
 RELEASE = "6.18.50+rpt-rpi-2712"
@@ -69,27 +69,27 @@ class RecordingRun:
         return completed(argv)
 
 
-def test_unpack_extracts_boot_data_then_early_archives_then_the_compressed_one(tmp_path):
+def test_unpack_extracts_the_floor_then_early_archives_then_the_compressed_one(tmp_path):
     initrd = tmp_path / "initrd.img"
-    initrd.write_bytes(BOOT_DATA + EARLY + gzip.compress(CACHED))
+    initrd.write_bytes(FLOOR_LAYER + EARLY + gzip.compress(CACHED))
     run = RecordingRun()
     assert unpack(initrd, tmp_path, run=run) == []
     assert [(argv[0], data) for argv, data in run.calls] == [
-        ("cpio", BOOT_DATA), ("cpio", EARLY), ("gzip", gzip.compress(CACHED)), ("cpio", CACHED)]
+        ("cpio", FLOOR_LAYER), ("cpio", EARLY), ("gzip", gzip.compress(CACHED)), ("cpio", CACHED)]
 
 
-def test_unpack_refuses_an_initrd_without_boot_data_in_front(tmp_path):
+def test_unpack_refuses_an_initrd_without_the_floors_layer_in_front(tmp_path):
     initrd = tmp_path / "initrd.img"
     initrd.write_bytes(gzip.compress(CACHED))
     assert unpack(initrd, tmp_path, run=RecordingRun())[0].startswith(
-        "initrd does not start with the boot-data archive")
+        "initrd does not start with the floor's layer")
 
 
 def test_unpack_names_an_unknown_compression(tmp_path):
     initrd = tmp_path / "initrd.img"
-    initrd.write_bytes(BOOT_DATA + b"LZMA??" + bytes(10))
+    initrd.write_bytes(FLOOR_LAYER + b"LZMA??" + bytes(10))
     assert unpack(initrd, tmp_path, run=RecordingRun()) == [
-        f"archive at byte {len(BOOT_DATA)}: unknown compression (leading bytes "
+        f"archive at byte {len(FLOOR_LAYER)}: unknown compression (leading bytes "
         f"{(b'LZMA??').hex()})"]
 
 
@@ -260,7 +260,7 @@ class FakeHost:
 @pytest.fixture
 def initrd(tmp_path):
     path = tmp_path / "initrd.img"
-    path.write_bytes(BOOT_DATA + gzip.compress(CACHED))
+    path.write_bytes(FLOOR_LAYER + gzip.compress(CACHED))
     return path
 
 

@@ -1,9 +1,9 @@
 name: Software e2e setup
 description: >-
-  The setup every software-e2e job shares, after its media OS guard and checkout: the Immich
-  fixture images prefetched in the background, the pinned CPython and uv, the locked harness
-  environment, registry access, the build cache and the media worker image, and on request the
-  central image. One definition, so the parallel e2e jobs cannot drift apart.
+  The setup every software-e2e job shares, after its media OS guard and checkout: the Docker Hub
+  mirror, the pinned CPython and uv, the locked harness environment, registry access, the Immich
+  fixture images prefetched in the background, the build cache and the media worker image, and on
+  request the central image. One definition, so the parallel e2e jobs cannot drift apart.
 
 inputs:
   media-base-image:
@@ -21,18 +21,17 @@ outputs:
   central-image:
     description: The central image ID when `central` is 'true', else empty
     value: ${{ steps.central.outputs.imageid }}
+  builder:
+    description: >-
+      The buildx builder the build cache runs on, for builds outside the service-image action
+      (scripts/demo_wall.py's roots container, through debian-packaging/build-container.sh)
+    value: ${{ steps.buildx.outputs.name }}
 
 runs:
   using: composite
   steps:
-    # Overlap the fixture's largest pulls with this setup and the image builds; the fixture's
-    # own (retried) pull joins any still in flight.
-    - name: Prefetch the Immich fixture images in the background
-      shell: bash
-      run: |
-        FIXTURE_DB_PASSWORD=unused FIXTURE_IMAGE=unused nohup docker compose \
-          -f tests/integration/compose.immich.yml pull --quiet immich database redis \
-          > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
+    - id: docker-hub-mirror
+      uses: ./.github/actions/docker-hub-mirror
 
     - uses: ./.github/actions/python-uv
 
@@ -46,8 +45,21 @@ runs:
         REGISTRY_TOKEN: ${{ github.token }}
       run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
+    # The job's one pull of the Immich fixture images, signed in and through the fixture's
+    # retrying pull, overlapping the image builds below. The fixture's own pull later skips
+    # every image already present and joins any still in flight in the daemon.
+    - name: Prefetch the Immich fixture images in the background
+      shell: bash
+      run: |
+        nohup .venv/bin/python -m scripts.immich_fixture prefetch \
+          > "$RUNNER_TEMP/immich-prefetch.log" 2>&1 &
+
     - name: Set up the container build cache
+      id: buildx
       uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      with:
+        buildkitd-config-inline: ${{ steps.docker-hub-mirror.outputs.buildkitd-config }}
+        driver-opts: image=${{ steps.docker-hub-mirror.outputs.buildkit-image }}
 
     - name: Build or restore the central image
       id: central

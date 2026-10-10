@@ -9,6 +9,11 @@ Those scratch files are pipeline working state and do **not** ship; their
 content is folded in here. If this document and any predecessor disagree, this
 document wins.
 
+> **Superseded (2026-10-09) by the [operator console design](operator-console-design.md).**
+> This document is the historical gate record of 2026-09-13 with its later notes.
+> Where the two differ, the operator console design wins; see
+> [decision 0019](decisions/0019-first-principles-console.md) for what changed.
+
 **What the reader is being asked:** approve the shape and the costed decisions
 in [§10 Decisions that are yours](#10-decisions-that-are-yours) so the delivery
 phase can begin with the tracer slice in
@@ -56,6 +61,22 @@ sold.
 > arriving with its own served read. The console says **Panel** for the display
 > hardware ("Display" survives only in Display Host). The tier and Commissioning
 > text below is kept as the record of the 2026-09-13 gate, not as current design.
+
+> **One page per Frame (2026-10-09).** The owner, 2026-10-09: "I cant find some of the simple
+> config knobs, like how do i set the visible frame position on a display? ... how do i change
+> the brightness and contrast?" The Frame Inspector and its Status · Binding · Calibration
+> facets are replaced by **one Frame page** (`#/wall/frames/<id>/<tab>`,
+> `pages/frame-page.tsx`), opened with one click on a Frame's tile: **Overview** (the former
+> Status), **Position** (corners, nudges in 1, 10 or 50 pixel steps, trims, rotation), **Picture**
+> (Brightness — Photo Wall picture adjustment, the former SDR gain) and **Hardware** (the former
+> Binding, and the Frame profile). Position and Picture show each change on the Display while
+> the tab is open and offer **Done** once the Pi has shown the latest change, and **Revert**;
+> the live session no longer times out while the tab is open (`liveAdjustment.js`, Central's
+> `keepalive`, and `renew`, which hands a session over at the draft in one step; the draft
+> carries the saved revision it was made from, so a save made elsewhere is never overwritten). A Pi without Display Host cannot adjust live and is told so; the 30-second
+> preview path is no longer offered by the console. The old facet addresses are gone (no
+> aliases). How to use it: the [runbook](runbook.md#operator-console-calibration-and-conflict-states).
+> The facet text below is kept as the record of its gate, not as current design.
 
 > **Fleet releases and the V2-only console (2026-10-02).** [Part E of the
 > domain-driven console design](operator-console-ddd.md#24-what-part-e-covers-and-why)
@@ -247,6 +268,8 @@ Every row below was re-checked against source while writing this document.
 
 ## 2. The answer in one picture
 
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** The diagram's "one row per box; one Player page each" no longer holds: Hardware and Software are the Fleet domains, each with a Pi page, and Screens carries the Frame's live state.
+
 ```mermaid
 graph TD
   subgraph SHARED["Shared layer (one admin token, one snapshot)"]
@@ -390,15 +413,17 @@ entries below that it changed say so; where the two differ, that glossary wins.
   one Output bound), or **Not enrolled** (Central saw the box at netboot but it
   never enrolled). These replace the earlier "Pending", "New" and "In service".
   Standing is a Central record, not liveness.
-- **Players list / Player page** — the fleet's homes for a Player (the
-  **Players** section, `#/players`): the list is one table, one row per box, worst
-  host tier first, with its standing, bound Frames and host health; it makes no
-  per-box node read (its host columns come from the shell's one fleet host read).
-  The Player page (`#/players/<device-id>`) is the one home for a box, with Reboot in
-  its header, then Health, node layers,
-  Outputs, boot records, app operations, Stage app and Qualified fallback,
-  each section with its own read time (no V1 section since 2026-10-02). They replace the Equipment rail and roster; the old
-  `#/equipment` address opens the Players list.
+- **Hardware list / Hardware page / Software and screens page** — the fleet's homes for
+  a Pi. The **Hardware** section (`#/hardware`) is a list of three tables (Driving a Frame
+  worst host tier first, Not driving a Frame, Retired), one row per box, with its
+  standing, bound Frames and host health; it makes no per-box node read (its host
+  columns come from the shell's one fleet host read). A Pi's Hardware page
+  (`#/hardware/<device-id>`) holds Reboot, Health, its Node API link and sessions and
+  Retire. Its **Software and screens** page (`#/players/<device-id>`, no sidebar entry)
+  holds node layers, Outputs, boot records, app operations, Stage app and Qualified
+  fallback, each section with its own read time (no V1 section since 2026-10-02). They
+  replace the Equipment rail, roster and Players list; the old `#/equipment` and
+  `#/players` addresses open the Wall.
 - **Releases / boot selection** — **Fleet › Releases** (`#/releases`) is the home of
   the fleet-wide release aggregates: the **boot selection** (the one deployment Central
   offers every node-path boot from now on, with its revision, and the previous
@@ -1128,6 +1153,8 @@ Two independent shape choices were each drafted twice: the console's overall sha
 (A vs B) and where Commissioning lives (Shape 1 vs Shape 2).
 
 ### 8a. Overall shape — Workspaces vs Wall-First (chosen: B)
+
+> **Superseded in part by [decision 0018](decisions/0018-console-by-domain-and-design-system.md).** Wall-first becomes setup-first: the console opens on Screens once a Frame exists, and the Wall is where a Frame is placed, bound and calibrated.
 
 **Shape A — Domain-Workspaces:** four peer workspaces (Equipment, Wall, Content,
 Schedule) behind a left rail. **Shape B — Wall-First Canvas** (chosen): the

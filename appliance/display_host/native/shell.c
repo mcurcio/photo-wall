@@ -936,7 +936,7 @@ static void start_diagnostic(struct shell *s) {
         if (fcntl(pair[1], F_SETFD, 0) < 0) _exit(126);
         char socket_fd[32]; snprintf(socket_fd, sizeof socket_fd, "%d", pair[1]);
         setenv("WAYLAND_SOCKET", socket_fd, 1);
-        execl("/usr/lib/photo-wall-display/diagnostic-client", "diagnostic-client", (char *)NULL);
+        execl("/usr/lib/photo-wall/node-display/diagnostic-client", "diagnostic-client", (char *)NULL);
         _exit(127);
     }
     close(pair[1]);

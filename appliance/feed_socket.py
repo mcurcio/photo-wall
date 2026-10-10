@@ -4,7 +4,7 @@ Every node feed publisher (the app broker's probe feed, the display controller's
 its readers through this listener. The publisher names its socket path, owner, group, reader
 uids, answer (request document -> reply body) and reply bound; this module knows no context.
 A peer outside the readers is closed with its request unread and no reply. Stdlib plus the
-shared strict JSON reader (`contracts.strict_json`, as `appliance.boot_store`).
+shared strict JSON reader (`contracts.strict_json`, as `appliance.kernel.boot_store`).
 """
 
 from __future__ import annotations

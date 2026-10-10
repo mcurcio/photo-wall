@@ -34,7 +34,7 @@ export function attentionSummary({ alarms, players, awaiting, hostsUnread }) {
 /**
  * @typedef {{key: string, text: string, severity?: string, frameId?: string,
  *            health?: import("./health.js").FrameHealth, deviceId?: string, name?: string,
- *            frames?: string[], playerHref?: string}} AttentionRow
+ *            frames?: string[], hardwareHref?: string}} AttentionRow
  *   A Player row (`deviceId` set) is a host incident of a Bound Player (hostHealth.js
  *   `hostIncidents`): it names the Player and its Frames, and links to both.
  */
@@ -111,7 +111,7 @@ function PlayerEntry({ row, entry }) {
           {entry({ key: frameId, frameId, text: `Frame ${frameId}` })}
         </React.Fragment>
       ))}{" "}
-      <a className="attention__player" href={row.playerHref}>{row.name}</a>
+      <a className="attention__player" href={row.hardwareHref}>{row.name}</a>
     </>
   );
 }
@@ -124,7 +124,7 @@ function PlayerEntry({ row, entry }) {
  * side, a link on the Needs attention page); otherwise, and for the scheduler row, it
  * is plain text, so a Show page sees health as status only (R4). A Player row, with
  * `entry`, is its text, then `entry` for each of its Frames ("Frame <id>") and a link to
- * its Player page; without `entry` it too is plain text.
+ * its Hardware page; without `entry` it too is plain text.
  *
  * @param {{rows: AttentionRow[], cap?: number, id?: string, className?: string,
  *          entry?: ((row: AttentionRow) => React.ReactNode)|null}} props
