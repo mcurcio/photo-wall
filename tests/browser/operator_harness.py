@@ -144,7 +144,9 @@ def run_page_clock(page, ms):
     `AbortSignal.timeout` (15 s for every console read and write), so a read begun inside
     a long jump is aborted when the jump outruns its real response, and the single-flight
     poller makes nothing more until the clock runs again. Each step here is one poll
-    interval and waits for that poll (`drive_poll`), so every read the steps start lands.
+    interval and waits for that poll's snapshot read to land (`drive_poll`). Other reads
+    the steps start (release, netboot, node) are not awaited; they survive because each
+    step is 5 s, under the 15 s request timeout, so no single step can abort one.
     """
     assert ms % POLL_MS == 0, f"{ms} ms is not a whole number of {POLL_MS} ms polls"
     for _ in range(ms // POLL_MS):
