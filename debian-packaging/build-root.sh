@@ -70,6 +70,7 @@ git -C "$root" archive --format=tar "$commit" | tar -x -C "$work/src"
 # The common mmdebstrap arguments (positional $@ of the in-container scripts).
 MMDEBSTRAP='
 	echo "deb [trusted=yes] copy:/repo ./" > /tmp/photo-wall-local.list
+	mkdir -m 0755 /tmp/image
 	set -- --mode=root --variant=apt --arch=arm64 \
 		--aptopt="Acquire::Check-Valid-Until \"false\"" --include="$package" "$@" \
 		trixie /tmp/image/rootfs /src/debian-packaging/snapshot.list /tmp/photo-wall-local.list'
@@ -81,8 +82,8 @@ roots() {
 
 if [ -n "$resolve" ]; then
 	roots --env package="$package" "$ROOTS_IMAGE" sh -ec "$MMDEBSTRAP"'
-		mmdebstrap --simulate --verbose "$@" 2>&1 |
-			sed -n "s/^Inst \([^ ]*\) (\([^ ]*\) .*/\1=\2/p" | LC_ALL=C sort -u'
+		mmdebstrap --simulate --verbose "$@" > /tmp/simulated 2>&1 || { cat /tmp/simulated >&2; exit 1; }
+		sed -n "s/^Inst \([^ ]*\) (\([^ ]*\) .*/\1=\2/p" /tmp/simulated | LC_ALL=C sort -u'
 	exit 0
 fi
 
@@ -105,7 +106,6 @@ build() {
 			tar -xO ./usr/lib/photo-wall/node/abi.json > /tmp/abi/base.json
 		dpkg-deb --fsys-tarfile "$(deb photo-wall-node-display)" |
 			tar -xO ./usr/lib/photo-wall/node-display/abi.json > /tmp/abi/display.json
-		mkdir -m 0755 /tmp/image
 		mmdebstrap --quiet "$@" --skip=output/dev \
 			--dpkgopt="path-exclude=/usr/share/doc/*" \
 			--dpkgopt="path-include=/usr/share/doc/*/copyright" \
