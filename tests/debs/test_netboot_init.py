@@ -54,7 +54,7 @@ tree=/tmp/initrd/usr/lib/python3.13
 probe='import sys; sys.path.insert(0, sys.argv[1]); import appliance.netboot_init'
 imported=0; python3 -I -S -c "$probe" "$tree" 2>/tmp/import.err || imported=$?
 partial=0; python3 -I -S -c "$probe" /tmp/partial/usr/lib/python3.13 2>/tmp/partial.err || partial=$?
-harness=0; python3 -I -S /harness.py run --tree "$tree" --certs /certs > /tmp/harness.out 2>&1 \
+harness=0; python3 -I -S /src/scripts/uplink_device_harness.py run --tree "$tree" --certs /certs > /tmp/harness.out 2>&1 \
     || harness=$?
 exec python3 -I -c '
 import filecmp, json, os, sys
@@ -81,7 +81,7 @@ def report(tmp_path_factory) -> dict:
     run = subprocess.run(
         ["docker", "run", "--rm", "--platform", "linux/arm64", "--network", "none",
          "--volume", f"{BUILT}:/repo:ro", "--volume", f"{certs}:/certs:ro",
-         "--volume", f"{REPO / 'scripts/uplink_device_harness.py'}:/harness.py:ro",
+         "--volume", f"{REPO / 'scripts'}:/src/scripts:ro",
          BUILDER_IMAGE, "sh", "-c", SCRIPT],
         capture_output=True, text=True, timeout=300)
     assert run.returncode == 0, run.stderr

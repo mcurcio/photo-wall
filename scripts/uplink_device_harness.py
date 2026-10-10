@@ -9,8 +9,9 @@ against the tree photo-wall-netboot-init's initramfs hook copies into the initrd
                                 the leaves tests/tls_fixture.py mints (no key kept in-tree)
   run --tree DIR --certs DIR    in the container, under `python3 -I -S`, DIR first on sys.path:
                                 import every first-party module stage 1 (`ENTRY`) reaches in DIR
-                                (modulefinder, function bodies included; a module it reaches
-                                that DIR lacks is a failed import), then run the 301 chain, a
+                                (scripts/module_closure.py's Finder, function bodies included;
+                                a module it reaches that DIR lacks is a failed import), then run
+                                the 301 chain, a
                                 TLS-to-TLS hop, the downgrade chain and the name-mismatch rows
                                 (verify codes 62, 64) against stdlib servers on loopback
 
@@ -24,7 +25,6 @@ import argparse
 import contextlib
 import http.server
 import importlib
-import modulefinder
 import ssl
 import sys
 import sysconfig
@@ -33,6 +33,18 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
+
+# The one stdlib-only Finder (scripts/module_closure.py), from this file's own repository root.
+# The root leaves sys.path again at once: `run` imports stage 1 from the tree under test only, and
+# the repository's own `appliance` would join that PEP 420 package.
+_ROOT = str(Path(__file__).resolve().parents[1])
+_ADDED = _ROOT not in sys.path
+if _ADDED:
+    sys.path.insert(0, _ROOT)
+from scripts.module_closure import Finder  # noqa: E402
+
+if _ADDED:
+    sys.path.remove(_ROOT)
 
 # The certificates `mint` writes: (certfile, keyfile) per leaf, plus the CA bundle.
 CA_BUNDLE = "ca.pem"
@@ -150,54 +162,29 @@ def mint(directory: Path) -> None:
             (directory / f"{name}.key").write_bytes(Path(keyfile).read_bytes())
 
 
-class _Finder(modulefinder.ModuleFinder):
-    """modulefinder over `tree` that scans first-party code only: a top-level name the tree holds
-    and the interpreter's own stdlib directory does not (the hook copies the stdlib into the same
-    directory). It also finds the tree's PEP 420 portions (`appliance`: each package directory
-    adds modules to it, none ships its __init__.py), which modulefinder cannot find itself."""
-
-    def __init__(self, tree: Path) -> None:
-        super().__init__(path=[str(tree), *sys.path])
-        stdlib = Path(sysconfig.get_path("stdlib"))
-        self.first_party = frozenset(
-            path.stem for path in tree.iterdir()
-            if (path.is_dir() or path.suffix == ".py") and path.stem.isidentifier()
-            and not (stdlib / path.name).exists())
-        self.namespaces = {name: str(tree / name) for name in self.first_party
-                           if (tree / name).is_dir()
-                           and not (tree / name / "__init__.py").exists()}
-
-    def is_first_party(self, name: str) -> bool:
-        return name.partition(".")[0] in self.first_party
-
-    def find_module(self, name, path, parent=None):
-        if parent is None and name in self.namespaces:
-            return None, self.namespaces[name], ("", "", modulefinder._PKG_DIRECTORY)
-        return super().find_module(name, path, parent)
-
-    def load_package(self, fqname, pathname):
-        if fqname in self.namespaces:
-            module = self.add_module(fqname)
-            module.__path__ = [pathname]
-            return module
-        return super().load_package(fqname, pathname)
-
-    def scan_code(self, co, m):
-        if self.is_first_party(m.__name__):
-            super().scan_code(co, m)
-
-
 def stage1_modules(tree: Path) -> tuple[list[str], list[str]]:
     """(the first-party modules `ENTRY` reaches in `tree`, the imports of first-party code that
     are missing: a first-party module the tree lacks, or a top-level name outside the stdlib),
-    each sorted."""
-    finder = _Finder(tree)
+    each sorted. First-party is a top-level name the tree holds and the interpreter's own stdlib
+    directory does not (the hook copies the stdlib into the same directory); a directory of it
+    without an __init__.py is a PEP 420 portion (`appliance`)."""
+    stdlib = Path(sysconfig.get_path("stdlib"))
+    names = frozenset(path.stem for path in tree.iterdir()
+                      if (path.is_dir() or path.suffix == ".py") and path.stem.isidentifier()
+                      and not (stdlib / path.name).exists())
+    namespaces = {name: str(tree / name) for name in names
+                  if (tree / name).is_dir() and not (tree / name / "__init__.py").exists()}
+    finder = Finder([str(tree), *sys.path], names, namespaces)
     finder.import_hook(ENTRY)
+
+    def first_party(name: str) -> bool:
+        return name.partition(".")[0] in finder.first_party
+
     found = sorted(name for name, module in finder.modules.items()
-                   if finder.is_first_party(name) and module.__file__)
+                   if first_party(name) and module.__file__)
     missing = sorted(name for name, importers in finder.badmodules.items()
-                     if any(finder.is_first_party(importer) for importer in importers)
-                     and (finder.is_first_party(name)
+                     if any(first_party(importer) for importer in importers)
+                     and (first_party(name)
                           or name.partition(".")[0] not in sys.stdlib_module_names))
     return found, missing
 
