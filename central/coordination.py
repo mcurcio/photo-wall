@@ -293,6 +293,16 @@ class Coordinator:
                 cue["members"][assignment_id(intent)] = owners.get(intent.target)
                 cue["ends"][assignment_id(intent)] = intent.interval_end
         assignments = {}
+        cue_keys = {identity("cue-", list(key)) for key in cues}
+        # A pending future cue is a forecast; one the timeline no longer holds is withdrawn
+        # now rather than surfacing later as a not_ready skip.
+        for orphan in conn.execute(
+            "SELECT id,cue_key FROM coordination_groups WHERE status='pending' "
+            "AND starts_at>%s AND starts_at<%s ORDER BY starts_at,id",
+            (now, horizon_end),
+        ).fetchall():
+            if orphan["cue_key"] not in cue_keys:
+                self._skip_group(conn, orphan["id"], "superseded")
         for (root, starts), cue in cues.items():
             cue_key = identity("cue-", [root, starts])
             previous = conn.execute(
@@ -301,17 +311,35 @@ class Coordinator:
                 (cue_key,),
             ).fetchone()
             if previous:
-                if not cue["members"].keys() <= previous["members"].keys():
-                    raise CoordinationError("cue_membership_changed")
-                # A child completing cannot shrink a skipped cue into a new successful one.
-                changed_authority = any(
-                    (tuple(previous["members"][a]) if previous["members"][a] else None) != owner
-                    for a, owner in cue["members"].items()
-                )
-                if not changed_authority:
+                if (
+                    cue["members"].keys() != previous["members"].keys()
+                    and previous["status"] == "pending"
+                    and starts > now
+                ):
+                    # An operator edit rewrote the forecast: a fresh cohort replaces it.
+                    self._skip_group(conn, previous["id"], "superseded")
+                elif not cue["members"].keys() <= previous["members"].keys():
+                    # A committed or started cue is immutable. Growth invalidates this one
+                    # cue, never the tick that offers every other Frame its plan.
+                    if previous["status"] != "skipped":
+                        self._skip_group(conn, previous["id"], "cue_membership_changed")
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
-            group_id = identity("group-", [cue_key, cue["members"]])
+                else:
+                    # A child completing cannot shrink a skipped cue into a new successful one.
+                    changed_authority = any(
+                        (tuple(previous["members"][a]) if previous["members"][a] else None)
+                        != owner
+                        for a, owner in cue["members"].items()
+                    )
+                    if not changed_authority:
+                        assignments.update({a: previous["id"] for a in cue["members"]})
+                        continue
+            # The previous cohort names the new one, so a forecast that returns to an
+            # earlier membership never collides with that earlier, skipped cohort.
+            group_id = identity(
+                "group-", [cue_key, cue["members"], *([previous["id"]] if previous else [])]
+            )
             deadline = now + self.limits.prepare_seconds if starts <= now else starts
             conn.execute(
                 "INSERT INTO coordination_groups(id,members,starts_at,deadline,valid_until,status,cue_key,member_ends) "
