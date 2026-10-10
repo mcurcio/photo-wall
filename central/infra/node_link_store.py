@@ -38,6 +38,17 @@ _T = TypeVar("_T")
 _CLOCK: Final = DatabaseTransactionClock()
 
 
+class RecordJudge(Protocol):
+    """Reads one stream's newly recorded items inside the commit that records them (roadmap 1b,
+    slice C1): Central records, then judges, in one transaction, so a judged fact never runs ahead
+    of its raw record and a repeat (`ON CONFLICT DO NOTHING`) is judged at most once. `PgLinkStores`
+    takes a judge per stream name (`KV_state_display` -> the Output report judge) when slice C1
+    lands; a stream with no judge is only recorded, as today."""
+
+    def judge_in(self, conn: Any, device_id: str, stream: str, items: tuple[Read, ...]) -> None: ...
+        # `items` are the batch's Reads that this commit inserted (not the repeats), in sequence order
+
+
 class PgLinkStores:
     """One per process: every (Node, pipe) link's store over one Database, behind one gate."""
 

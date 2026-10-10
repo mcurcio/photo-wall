@@ -23,6 +23,9 @@ from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME
 from appliance.kernel.unix_credentials import receive_credential_packet
 
+from .bus import (
+    display_session as display_session,  # the display line's session; slice D1 starts it in main()
+)
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel

@@ -13,12 +13,22 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Collection
+from typing import Protocol
 
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_link import Pipe
 from nodeapi.hub import DocumentSource, run_link
 
 log = logging.getLogger(__name__)
+
+
+class DocumentSources(Protocol):
+    """Central's desired-document projections, one `DocumentSource` per (Node, pipe) link, as
+    `PgLinkStores.store` is one LinkStore per link (roadmap 1b, slice C1): a projection is per Node,
+    and `nodeapi.hub.DocumentSource.documents(stream)` names no Node. `NodeLinks` takes this in
+    place of one shared source when slice C1 lands."""
+
+    def source(self, serial: str, pipe: Pipe) -> DocumentSource: ...
 
 
 class NodeLinks:

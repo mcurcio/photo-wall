@@ -37,6 +37,9 @@ class _NoDocuments:
     async def documents(self, stream: str) -> Mapping[str, bytes]:
         return {}
 
+    async def changed(self) -> None:
+        await asyncio.Event().wait()   # nothing here ever changes
+
     async def wall_documents(self) -> Mapping[str, bytes]:
         return {}
 

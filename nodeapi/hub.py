@@ -102,7 +102,15 @@ class LinkStore(Protocol):
 
 
 class DocumentSource(Protocol):
+    """Central's projection of one Node's desired documents, one source per (Node, pipe) link."""
+
     async def documents(self, stream: str) -> Mapping[str, bytes]: ...   # Central's projection for one desired bucket
+
+    async def changed(self) -> None: ...
+        # returns once any of this source's projections may differ from its last `documents`
+        # answer (a hint: a spurious return costs one diff, a missed one waits for the next
+        # reconcile); a source that never changes never returns. NodeLink.run awaits it while
+        # attached and then asserts every desired bucket of its pipe (slice T1).
 
 
 DRAIN_BATCH: Final = 64
