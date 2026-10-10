@@ -89,22 +89,6 @@ def test_every_desired_file_is_kept_and_only_the_unwanted_releases_are_removed(r
     assert world.reads.asset(key).produced is not None
 
 
-def test_the_promoted_deb_is_kept(registry, tmp_path):
-    from content_db import facts_of, put_file
-    from test_content_catalog_sync import deb
-
-    from central.content_catalog.ports import ReleaseRow
-    world = make_sync_world(registry, tmp_path)(
-        Upstream(), releases=[ReleaseRow("v0.0.1", False, deb("v0.0.1"), None)],
-        promoted="v0.0.1")
-    kept = AssetKey(AssetKind.PLAYER_DEB, deb("v0.0.1").sha256)
-    gone = AssetKey(AssetKind.PLAYER_DEB, "9" * 64)
-    for key in (kept, gone):
-        age(put_file(world.store, key, b"deb bytes"), OLD)
-    assert sweep(cleaner(world, registry)) == [world.store.layout.path(gone)]
-    assert world.store.present(kept, facts_of(b"deb bytes"))
-
-
 def test_a_key_that_becomes_desired_between_mark_and_unlink_is_kept(registry, wall):
     """Mark and sweep without a lock: the desired set is re-read right before each unlink, so a
     selection committed after the run picked its candidates still keeps its files."""

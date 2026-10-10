@@ -10,20 +10,18 @@ from central.kernel.assets import (
     AssetReference,
     OriginLocator,
 )
-from central.kernel.job_types import FetchOsImage, FetchPackage
+from central.kernel.job_types import FetchOsImage, FetchSealedEnvironment
 from central.kernel.ports import (
     Candidates,
-    PackageRequest,
     PublishedRelease,
     ReleaseListing,
-    Unknown,
     UpstreamVersion,
 )
 
 SHA = "ab" * 32
 LOCATOR = OriginLocator(url="https://example.test/a.deb", sha256=SHA, size=10)
 REF = AssetReference(owner="v1.0.0", locator=LOCATOR, expected_size=10, expected_sha256=SHA)
-KEY = AssetKey(AssetKind.PLAYER_DEB, SHA)
+KEY = AssetKey(AssetKind.SEALED_ENVIRONMENT, SHA)
 
 
 def test_candidates_invariants():
@@ -36,7 +34,7 @@ def test_candidates_invariants():
     with pytest.raises(ValueError):
         Candidates((one, two), pinned=True)
     with pytest.raises(ValueError):
-        Candidates((one, FetchPackage(sha256=SHA)), pinned=False)
+        Candidates((one, FetchSealedEnvironment(sha256=SHA)), pinned=False)
     with pytest.raises(ValueError):
         Candidates((one, FetchOsImage(tarball_sha256="1" * 64)), pinned=False)
 
@@ -66,10 +64,6 @@ def test_value_invariants():
         OriginLocator(url="https://" + "x" * 2041, sha256=None, size=None)
     with pytest.raises(ValueError):
         AssetReference(owner="", locator=LOCATOR, expected_size=None, expected_sha256=None)
-    with pytest.raises(ValueError):
-        PackageRequest(sha256="XYZ")
-    with pytest.raises(ValueError):
-        Unknown(reason="Not A Reason")
 
 
 def test_published_release_invariants():

@@ -9,11 +9,17 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-from central.content_routes import ClientDisconnected, stream_opened, until_disconnect
+from central.content_routes import (
+    ClientDisconnected,
+    error_response,
+    stream_opened,
+    until_disconnect,
+)
 from central.content_wiring import ContentServices
 from central.coordination import Coordinator
 from central.db import Database
 from central.fleet.bytes import OfferByteReader
+from central.fleet.models import FleetError
 from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
@@ -88,6 +94,14 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         if request.url.path.startswith("/v2/node/"):  # operator routes: operator_auth
             response.headers["Cache-Control"] = "private, no-store"
         return response
+
+    @app.exception_handler(FleetError)
+    async def fleet_error(_request: Request, exc: FleetError) -> JSONResponse:
+        """A spent daily quota (429) retries after the day ends; the offer bytes' 503 carries
+        its own Retry-After."""
+        retry_after = (max(1, 86400 - int(clock.utc()) % 86400) if exc.status == 429
+                       else exc.retry_after)
+        return error_response(exc.code, exc.status, retry_after=retry_after)
 
     @app.exception_handler(NodeControlError)
     async def node_error(_request: Request, error: NodeControlError):

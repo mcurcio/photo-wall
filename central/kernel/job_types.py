@@ -14,7 +14,7 @@ from central.kernel.jobs import Delivery, Job, QueueName
 from central.kernel.types import LibraryAssetId, Sha256
 
 _FETCH_RETRY = (timedelta(seconds=5), timedelta(minutes=1), timedelta(minutes=5))
-# A preview tile is picked after every queued boot or package fetch on the shared FETCH queue
+# A preview tile is picked after every queued boot or environment fetch on the shared FETCH queue
 # (procrastinate picks `priority DESC, id ASC`). Pick order only: a tile already running still
 # holds a FETCH slot for up to the client's `metadata_seconds`.
 _THUMBNAIL_PRIORITY = -50
@@ -23,11 +23,6 @@ _THUMBNAIL_PRIORITY = -50
 class FetchOsImage(Job[AssetReady], name="os_image.fetch", asset=AssetKind.OS_IMAGE,
                    delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
     tarball_sha256: Sha256  # the base tarball's sha256: the image is a pure function of it
-
-
-class FetchPackage(Job[AssetReady], name="player_deb.fetch", asset=AssetKind.PLAYER_DEB,
-                   delivery=Delivery(queue=QueueName.FETCH, retry=_FETCH_RETRY)):
-    sha256: Sha256
 
 
 class FetchSealedEnvironment(Job[AssetReady], name="sealed_environment.fetch",
@@ -42,7 +37,7 @@ class FetchLibraryThumbnail(Job[AssetReady], name="library_thumbnail.fetch",
                                               priority=_THUMBNAIL_PRIORITY)):
     """One preview tile; its handler's library half is injected by the media worker (R22).
 
-    Below every other FETCH job's priority: a queued OS image, package or environment fetch is
+    Below every other FETCH job's priority: a queued OS image or environment fetch is
     always picked first. A running tile still holds a FETCH slot for its attempt (at most
     the client's metadata budget, `ImmichClient.thumbnail`).
     """
@@ -75,8 +70,7 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
-AssetJob: TypeAlias = (FetchOsImage | FetchPackage | FetchSealedEnvironment
-                       | FetchLibraryThumbnail)
+AssetJob: TypeAlias = (FetchOsImage | FetchSealedEnvironment | FetchLibraryThumbnail)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
-    FetchOsImage, FetchPackage, FetchSealedEnvironment, FetchLibraryThumbnail,
+    FetchOsImage, FetchSealedEnvironment, FetchLibraryThumbnail,
     SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs)

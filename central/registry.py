@@ -702,10 +702,6 @@ class Registry:
             conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1,"
                          "revoked_at=%s WHERE device_id=%s AND revoked_at IS NULL",
                          (now, device_id))
-            conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=%s "
-                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
-            conn.execute("UPDATE fleet_app_attempts SET revoked_at=%s "
-                         "WHERE device_id=%s AND revoked_at IS NULL", (now, device_id))
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (now, player_id))
             self._audit(conn, "player_retired", player_id)

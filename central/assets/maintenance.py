@@ -62,7 +62,7 @@ CLOCK_MARKER: Final = ".maintain-cache-clock"
 # the cleaner never touches them.
 RELEASE_KINDS: Final[tuple[tuple[AssetKind, ...], ...]] = (
     (AssetKind.OS_IMAGE,),
-    (AssetKind.SEALED_ENVIRONMENT, AssetKind.PLAYER_DEB),
+    (AssetKind.SEALED_ENVIRONMENT,),
 )
 
 

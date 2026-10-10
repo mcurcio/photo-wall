@@ -46,9 +46,6 @@ def publish_deployment(db, deployment, clock) -> bool:
 
 def cold_setup(registry, *, app=True):
     _seed(registry)
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE app_releases SET base_tarball_url=%s,base_tarball_size=256 WHERE tag=%s",
-                     ("https://example.invalid/base.tar", BASE_TAG))
     sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
     manager = environment("2", "photo-wall-node-manager")
     selected = environment() if app else None
@@ -190,7 +187,7 @@ def _desired(registry):
     from central.content_catalog.catalog import ReleaseCatalog
     from central.infra.catalog_records import PgReleaseRecords
     from central.infra.transactions import PgTransactions
-    catalog = ReleaseCatalog(releases=PgReleaseRecords(), stored=None,
+    catalog = ReleaseCatalog(releases=PgReleaseRecords(),
                              transactions=PgTransactions(registry.db), publisher=None,
                              clock=registry.clock)
     with PgTransactions(registry.db).begin() as tx:

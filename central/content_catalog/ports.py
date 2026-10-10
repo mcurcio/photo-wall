@@ -1,35 +1,20 @@
-"""The catalog's seams: release rows over the existing tables, and disk presence.
+"""The catalog's seams: the release listing's records and the node half of a release sync.
 
-`ReleaseRecords` covers `app_releases`, `app_release_policy` and `app_release_poll`. It takes the
-kernel's opaque `Transaction`, so the domain never sees psycopg
+`ReleaseRecords` covers the release listing's ETag (`app_release_poll`) and the wanted node
+deployments' files. It takes the kernel's opaque `Transaction`, so the domain never sees psycopg
 (`central/infra/catalog_records.py` implements it).
-`StoredAssets` answers "is this asset on disk now" (`central/infra/stored_assets.py`).
 `NodeReleaseRecords` is the node half of a release sync (`central/infra/node_releases.py`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol
 
-from central.kernel.assets import OriginLocator
 from central.kernel.job_types import AssetJob
 from central.kernel.ports import PublishedRelease
-from central.kernel.ports import StoredAssets as StoredAssets  # re-exported: the catalog's seam
 from central.kernel.transactions import Transaction
 from central.kernel.types import require_reason
-
-# Who set the current promotion (027's `promoted_by`). Only the operator promotes now; a
-# promotion the retired automatic promotion recorded reads "auto".
-Promoter: TypeAlias = Literal["auto", "operator"]
-
-
-@dataclass(frozen=True, slots=True)
-class ReleaseRow:
-    tag: str
-    is_prerelease: bool
-    package: OriginLocator | None  # the .deb (asset_url/asset_sha256/asset_size)
-    os_image: OriginLocator | None  # the base tarball (base_tarball_url/_sha256/_size)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,60 +88,10 @@ class StoredEtag:
     stored_at: float
 
 
-@dataclass(frozen=True, slots=True)
-class Promotion:
-    tag: str
-    by: Promoter
-
-
 class ReleaseRecords(Protocol):
-    def get(self, tx: Transaction, tag: str) -> ReleaseRow | None: ...
-
-    def all(self, tx: Transaction) -> tuple[ReleaseRow, ...]: ...
-
     def fleet_desired_assets(self, tx: Transaction) -> FleetDesiredAssets:
         """Digest roots of the wanted node deployments (`central/infra/node_releases.py`
         `wanted_deployments`: selected, previous, and the window as `window`)."""
-        ...
-
-    def shipping(self, tx: Transaction, sha256: str) -> tuple[ReleaseRow, ...]:
-        """The releases whose `.deb` sha is `sha256` (an indexed WHERE, never a scan)."""
-        ...
-
-    def claim(self, tx: Transaction, release: PublishedRelease, *,
-              now: float) -> ReleaseRow | None:
-        """Insert the release if its tag is absent, and return None: this first observation is
-        applied. Otherwise lock the row (`FOR UPDATE`) and return it: the PREVIOUS row, which
-        the caller derives from and then offers the observation to `apply`.
-
-        A concurrent first insert of the same tag waits for the winner, then returns its row.
-        """
-        ...
-
-    def apply(self, tx: Transaction, release: PublishedRelease, *, now: float) -> bool:
-        """Write the observation over the claimed row, unless its upstream version is older than
-        the stored one: a stored NULL version takes any observation; a stored version takes only
-        a set, not older one (equal re-applies). True when written; a refusal writes nothing.
-        The row's package columns are never written here."""
-        ...
-
-    def promoted_tag(self, tx: Transaction) -> str | None: ...
-
-    def promotion(self, tx: Transaction) -> Promotion | None:
-        """The promoted tag and who set it; None when nothing is promoted."""
-        ...
-
-    def set_promoted(self, tx: Transaction, tag: str) -> Promotion | None:
-        """Move the promoted pointer to `tag` as the operator's, and return the promotion it
-        replaced, read under the policy row's lock (None when nothing was promoted)."""
-        ...
-
-    def last_good_tag(self, tx: Transaction) -> str | None:
-        """The last promoted tag whose `.deb` was on disk (main's `current_sha256` pointer)."""
-        ...
-
-    def set_last_good(self, tx: Transaction, tag: str) -> None:
-        """Only while a tag is promoted (the policy row exists)."""
         ...
 
     def load_etag(self, tx: Transaction) -> StoredEtag | None:

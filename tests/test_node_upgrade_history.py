@@ -76,6 +76,15 @@ def seed_historical_committed_stop(registry, player, request):
 SESSION_ID = uuid4()
 
 
+def seed_historical_release(registry) -> None:
+    """The base release row the V1 offers named, as Central recorded it before 070 dropped
+    `app_releases`: SQL against the historical schema."""
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
+                     "discovered_at,updated_at,base_tarball_sha256) "
+                     "VALUES('v1.0.0',1,0,0,FALSE,900,900,%s)", (BASE_TARBALL_SHA,))
+
+
 def seed_historical_v1_offer(registry, *, session: bool = True) -> None:
     """A V1 boot offer for BOOT_ID (and an OS command session naming it), as Central recorded
     them before 069 dropped the offers: SQL against the historical schema."""
@@ -97,25 +106,26 @@ def seed_historical_v1_offer(registry, *, session: bool = True) -> None:
 
 
 def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
-    # A committed drain row written before the node migrations still fences its Player; the
-    # kept OS command session keeps its row, and only the V1 offer it named goes (069).
+    # A committed drain row written before the node migrations still fences its Player; the V1
+    # offer goes (069) and so does the OS command session that named it (070).
     with history(49) as (registry, _through):
         _seed(registry)
+        seed_historical_release(registry)
         seed_historical_v1_offer(registry)
         player, _, request = enroll(registry, device_id=DEVICE_ID)
         seed_historical_committed_stop(registry, player, request)
         before = ledger(registry.db)
         with registry.db.transaction() as conn:
             drain = conn.execute("SELECT * FROM equipment_drains").fetchone()
-            session = conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone()
+            assert conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone()
         registry.db.migrate()
         registry.db.migrate()
         assert ledger(registry.db)[:len(before)] == before
         with registry.db.transaction() as conn:
             assert conn.execute("SELECT * FROM equipment_drains").fetchone() == drain
-            assert conn.execute("SELECT * FROM fleet_os_command_sessions").fetchone() == session
-            assert conn.execute("SELECT to_regclass('fleet_boot_offers') AS name").fetchone()[
-                "name"] is None
+            for table in ("fleet_boot_offers", "fleet_os_command_sessions"):
+                assert conn.execute("SELECT to_regclass(%s) AS name", (table,)).fetchone()[
+                    "name"] is None
             assert fenced_players_in(conn) == frozenset({player["player_id"]})
             with pytest.raises(RegistryError, match="equipment_draining"):
                 require_unfenced_player_in(conn, player["player_id"])
@@ -126,6 +136,7 @@ def test_049_to_current_preserves_committed_legacy_stop_and_identity(history):
 def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
     with history(53) as (registry, through):
         _seed(registry)
+        seed_historical_release(registry)
         seed_historical_v1_offer(registry, session=False)
         admission = uuid4()
         with registry.db.transaction() as conn:

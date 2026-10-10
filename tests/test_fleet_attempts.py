@@ -20,10 +20,7 @@ BASE_ABI = "sha256:" + "c" * 64
 
 
 def _seed(registry) -> None:
-    """The base release and the device every node test boots."""
+    """The device every node test boots."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,"
-                     "discovered_at,updated_at,base_tarball_sha256) "
-                     "VALUES(%s,1,0,0,FALSE,900,900,%s)", (BASE_TAG, BASE_TARBALL_SHA))
         conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
                      "VALUES(%s,%s,900,900)", (DEVICE_ID, SERIAL))

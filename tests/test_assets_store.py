@@ -15,7 +15,7 @@ from central.kernel.assets import AssetKey, AssetKind, AssetReady
 TAG = "v1.2.3"
 SHA = "ab" * 32
 OS_KEY = AssetKey(AssetKind.OS_IMAGE, TAG)
-DEB_KEY = AssetKey(AssetKind.PLAYER_DEB, SHA)
+DEB_KEY = AssetKey(AssetKind.SEALED_ENVIRONMENT, SHA)
 DATA = b"squashfs bytes " * 100
 FACTS = AssetReady(size=len(DATA), sha256=hashlib.sha256(DATA).hexdigest())
 
@@ -35,9 +35,9 @@ def _put(store: CacheStore, key: AssetKey, data: bytes = DATA):
 def test_layout_keeps_todays_file_names(tmp_path):
     layout = CacheLayout(tmp_path)
     assert layout.directory(AssetKind.OS_IMAGE) == tmp_path / "os-images"
-    assert layout.directory(AssetKind.PLAYER_DEB) == tmp_path / "apps"
+    assert layout.directory(AssetKind.SEALED_ENVIRONMENT) == tmp_path / "apps"
     assert layout.path(OS_KEY) == tmp_path / "os-images" / f"base-{TAG}.squashfs"
-    assert layout.path(DEB_KEY) == tmp_path / "apps" / f"app-{SHA}.deb"
+    assert layout.path(DEB_KEY) == tmp_path / "apps" / f"environment-{SHA}.tar"
     assert not layout.path(OS_KEY).name.startswith(TEMP_PREFIX)
 
 
@@ -82,7 +82,7 @@ def test_temp_path_is_unique_non_existent_and_in_the_kind_directory(store):
     first = store.temp_path(DEB_KEY)
     second = store.temp_path(DEB_KEY)
     assert first != second
-    assert first.parent == store.layout.directory(AssetKind.PLAYER_DEB)
+    assert first.parent == store.layout.directory(AssetKind.SEALED_ENVIRONMENT)
     assert first.parent.is_dir()
     assert first.name.startswith(TEMP_PREFIX)
     assert not first.exists() and not second.exists()

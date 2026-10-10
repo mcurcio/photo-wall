@@ -47,9 +47,7 @@ DROPPED_TABLES = ("fleet_boot_offers", "fleet_offer_artifact_roots", "fleet_app_
 DROPPED_COLUMNS = {
     "devices": ("attached_tag", "known_good_tag", "known_good_at", "last_served_tag",
                 "last_served_at", "boot_outcome", "failed_tag"),
-    "app_releases": ("payload_url", "payload_sha256", "payload_size", "payload_format",
-                     "payload_base_abi", "payload_source_manifest", "base_abi",
-                     "base_abi_squashfs_sha256", "base_abi_source_manifest"),
+    # app_releases' payload_* and base_abi_* columns went too; 070 drops the table itself.
     "node_offer_contexts": ("legacy_offer_id",),
 }
 DELETED_ROUTES = (
@@ -79,6 +77,9 @@ def before_069(empty_database):
 
 def _seed_v1(conn) -> None:
     """A row of every V1 kind 069 drops, against the device the node boot uses."""
+    conn.execute("INSERT INTO app_releases(tag,major,minor,patch,is_prerelease,discovered_at,"
+                 "updated_at,base_tarball_sha256) VALUES(%s,1,0,0,FALSE,900,900,%s)",
+                 (V1_TAG, "b" * 64))
     conn.execute("UPDATE app_releases SET payload_url='https://example.test/p.tar.gz',"
                  "payload_sha256=%s,payload_size=100,payload_format='pw-player-data-v1',"
                  "payload_base_abi=%s,payload_source_manifest='manifest.v2.json',base_abi=%s,"
@@ -179,11 +180,8 @@ def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path)
     with TestClient(app) as client:
         for method, path in DELETED_ROUTES:
             assert client.request(method, path, headers=auth, json={}).status_code == 404, path
-        fleet = client.get("/v1/operator/fleet", headers=auth)
-        assert fleet.status_code == 200
-        assert [device["serial"] for device in fleet.json()["devices"]] == [SERIAL]
-        assert client.get("/v1/operator/app/releases", headers=auth).status_code == 200
-        assert client.get("/v1/app/manifest").json() == {"error": "app_unconfigured"}
+        status = client.get("/v1/operator/node/status", headers=auth)
+        assert status.status_code == 200  # the app serves; the V1 fleet routes are 070's
 
 
 def _release_files(tmp_path, tag: str) -> dict[str, bytes]:
@@ -230,7 +228,5 @@ def test_a_release_still_carrying_v1_files_lands_its_node_release_and_no_v1_asse
     assert observed == [{"tag": tag, "manifest_sha256": upload.sha, "problem": None}]
     assert _rows(registry, "SELECT deployment_id FROM node_deployments") == [
         {"deployment_id": upload.deployment_id}]
-    release = world.reads.release(tag)
-    assert release.package is None and release.os_image is not None  # its base tarball only
     kinds = {row["kind"] for row in _rows(registry, "SELECT DISTINCT kind FROM assets")}
     assert kinds == {"os-image", "sealed-environment"}  # no 'player-deb', no 'player-payload'

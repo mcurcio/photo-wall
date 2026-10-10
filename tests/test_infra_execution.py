@@ -15,7 +15,7 @@ from content_db import RecordingTransactions
 from fakes.transactions import FakeTransactions
 from runtime_fakes import (
     FACTS,
-    FetchPackageStub,
+    FetchSealedEnvironmentStub,
     PrefetchStub,
     PurgeStub,
     RescueStub,
@@ -265,7 +265,7 @@ def test_boot_refuses_a_handler_without_exact_hints():
 
 def test_boot_refuses_two_handlers_for_one_type():
     with pytest.raises(ValueError, match="two handlers"):
-        build([*catalog_stubs(), FetchPackageStub()])
+        build([*catalog_stubs(), FetchSealedEnvironmentStub()])
 
 
 def test_boot_refuses_a_catalog_type_with_no_handler():

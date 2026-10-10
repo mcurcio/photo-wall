@@ -60,6 +60,6 @@ def test_asset_layout_ignores_retired_base_and_app_root_envs(tmp_path):
     # os-images/ and apps/ dirs from PHOTO_WALL_CACHE_ROOT, NOT the legacy envs.
     layout = CacheLayout(cache_layout.cache_root(env))
     assert layout.directory(AssetKind.OS_IMAGE) == cache_root / "os-images"
-    assert layout.directory(AssetKind.PLAYER_DEB) == cache_root / "apps"
+    assert layout.directory(AssetKind.SEALED_ENVIRONMENT) == cache_root / "apps"
     for kind in AssetKind:
         assert _BOGUS_LEGACY not in str(layout.directory(kind))

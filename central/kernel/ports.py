@@ -1,4 +1,4 @@
-"""Domain seams: content requests and resolutions, the Asset record store, and release origins.
+"""Domain seams: read candidates, the desired set, the Asset record store, and release origins.
 
 `ReleaseOrigin.download` contract: `into` must not exist and is created `O_EXCL` with mode 0600;
 it streams at most `max_bytes`; it verifies `locator.size` and `locator.sha256` when set, then
@@ -20,15 +20,7 @@ from central.kernel.job_types import (
     AssetJob,
 )
 from central.kernel.transactions import Transaction
-from central.kernel.types import release_version, require_reason, require_sha256
-
-
-@dataclass(frozen=True, slots=True)
-class PackageRequest:
-    sha256: str  # require_sha256
-
-    def __post_init__(self) -> None:
-        require_sha256(self.sha256)
+from central.kernel.types import release_version, require_reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,17 +42,6 @@ class Candidates:
 
 
 @dataclass(frozen=True, slots=True)
-class Unknown:
-    reason: str  # require_reason
-
-    def __post_init__(self) -> None:
-        require_reason(self.reason)
-
-
-Resolution: TypeAlias = Candidates | Unknown
-
-
-@dataclass(frozen=True, slots=True)
 class DesiredTiers:
     """The desired set split by download urgency. Prefetch fetches every missing `wanted` job;
     `background` (disjoint from `wanted`, newest release first) is desired only because its
@@ -76,8 +57,6 @@ class DesiredTiers:
 
 
 class ContentCatalog(Protocol):
-    async def resolve(self, request: PackageRequest) -> Resolution: ...
-
     async def desired_assets(self) -> frozenset[AssetJob]: ...
 
     async def desired_tiers(self) -> DesiredTiers: ...

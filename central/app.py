@@ -8,7 +8,6 @@ import logging
 import mimetypes
 import os
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -20,7 +19,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
 from central import cache_layout
-from central.content_catalog.catalog import CatalogError
 from central.content_routes import mount_content_routes
 from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
@@ -31,7 +29,6 @@ from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.rollout_gate import ServingImageVerifier
-from central.fleet.routes import mount_fleet_routes
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.mdns_advertise import MdnsCentralAdvertiser
@@ -76,8 +73,6 @@ from media.models import SourcePreviewQuery, SourceSpec
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
-# CatalogError kinds -> HTTP status; the body is always {"error": code}.
-CATALOG_ERROR_STATUS = {"not_found": 404, "conflict": 409, "invalid": 422}
 
 
 class Challenge(Model):
@@ -387,10 +382,6 @@ def create_app(
             "scene_ids": exc.scene_ids,
         }, status_code=409)
 
-    @app.exception_handler(CatalogError)
-    async def catalog_error(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=CATALOG_ERROR_STATUS[exc.kind])
-
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         # Do not reflect request bodies, private keys, token strings, or upstream fields.
@@ -628,20 +619,6 @@ def create_app(
             raise RegistryError("content_unavailable", 503)
         return content
 
-    @app.get("/v1/operator/app/releases", dependencies=[Depends(admin)])
-    async def list_releases():
-        # Discovered releases, semver DESC, each flagged deployable/promoted/has_os_image, and
-        # promoted_by ("auto" | "operator", null unless promoted).
-        return [asdict(view) for view in await _content().catalog.releases_view()]
-
-    @app.post("/v1/operator/app/releases/{tag}/promote", dependencies=[Depends(admin)])
-    async def promote_release(tag: str):
-        # Records the promoted tag and publishes its `.deb` fetch in one transaction
-        # (unknown tag -> 404, no `.deb` -> 409). The manifest never waits on the
-        # bytes: the package route reads them through the cache.
-        await _content().catalog.promote(tag)
-        return {"status": "promoted"}
-
     @app.post("/v1/operator/app/releases/refresh", dependencies=[Depends(admin)])
     async def refresh_releases():
         # Publishes SyncReleases now (merged with a pending tick) so a newly-cut
@@ -840,7 +817,6 @@ def create_app(
     mount_library_routes(app, admin=admin, media=media_application, content=content)
     if content is not None:
         mount_content_routes(app, content)
-    mount_fleet_routes(app, db=db, clock=clock, admin=admin)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       serving_verifier=node_serving_verifier, content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)

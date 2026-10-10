@@ -10,7 +10,12 @@ from types import SimpleNamespace
 import procrastinate
 import pytest
 from fakes.transactions import FakeTransactions
-from runtime_fakes import FetchPackageStub, PrefetchStub, apply_procrastinate_schema, catalog_stubs
+from runtime_fakes import (
+    FetchSealedEnvironmentStub,
+    PrefetchStub,
+    apply_procrastinate_schema,
+    catalog_stubs,
+)
 
 from central.infra import runtime as runtime_module
 from central.infra.asset_records import PgAssetRecords
@@ -50,7 +55,7 @@ def test_boot_refuses_a_missing_handler():
 
 def test_boot_refuses_a_duplicate_handler():
     with pytest.raises(ValueError, match="two handlers"):
-        make([*catalog_stubs(), FetchPackageStub()])
+        make([*catalog_stubs(), FetchSealedEnvironmentStub()])
 
 
 @pytest.mark.parametrize("concurrency", [

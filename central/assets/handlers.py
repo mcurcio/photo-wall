@@ -19,7 +19,6 @@ from central.kernel.job_types import (
     AssetJob,
     FetchLibraryThumbnail,
     FetchOsImage,
-    FetchPackage,
     FetchSealedEnvironment,
     Prefetch,
 )
@@ -37,7 +36,6 @@ from contracts.node_boot import MAX_ENVIRONMENT_BYTES
 from contracts.release import MAX_ROOTFS_BYTES
 
 MAX_TARBALL_BYTES: Final = MAX_ROOTFS_BYTES
-MAX_PACKAGE_BYTES: Final = 1024**3
 
 
 class FetchOsImageHandler:
@@ -69,32 +67,20 @@ class FetchOsImageHandler:
             self._store.discard(tarball)
 
 
-class FetchPackageHandler:
-    """Download the `.deb` from one reference; one file for every tag that ships it.
-
-    `AssetProduction` tries every reference, newest first.
-    """
-
-    MAX_DOWNLOAD_BYTES = MAX_PACKAGE_BYTES
+class FetchSealedEnvironmentHandler:
+    """Cache exact closure bytes from one reference; base verifies the sealed root before any
+    launch. `AssetProduction` tries every reference, newest first."""
 
     def __init__(self, *, production: AssetProduction, origin: ReleaseOrigin) -> None:
         self._production = production
         self._origin = origin
 
-    async def handle(self, job: FetchPackage) -> AssetReady:
+    async def handle(self, job: FetchSealedEnvironment) -> AssetReady:
         return await self._production.produce(job, self._write)
 
     async def _write(self, temp: Path, locator: OriginLocator) -> None:
-        await self._origin.download(locator, temp, max_bytes=min(locator.size or self.MAX_DOWNLOAD_BYTES, self.MAX_DOWNLOAD_BYTES))
-
-
-class FetchSealedEnvironmentHandler(FetchPackageHandler):
-    """Cache exact closure bytes; base verifies the sealed root before any launch."""
-
-    MAX_DOWNLOAD_BYTES = MAX_ENVIRONMENT_BYTES
-
-    async def handle(self, job: FetchSealedEnvironment) -> AssetReady:
-        return await self._production.produce(job, self._write)
+        await self._origin.download(locator, temp, max_bytes=min(
+            locator.size or MAX_ENVIRONMENT_BYTES, MAX_ENVIRONMENT_BYTES))
 
 
 class FetchLibraryThumbnailHandler:

@@ -1,16 +1,13 @@
-"""Device lifecycle revokes OS command state without promoting T0 claims."""
+"""Player retirement advances the device lifecycle and refuses re-enrollment of a retired device."""
 
 import base64
 from uuid import UUID
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
-from central.fleet.models import CheckIn
-from central.fleet.service import FleetService
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -25,11 +22,6 @@ DEVICE_ID = device_id_for_serial(SERIAL)
 assert DEVICE_ID is not None
 PLAYER_ID = "p-lifecycle-test"
 BOOT_ID = UUID(int=41)
-SESSION_ID = UUID(int=42)
-ATTEMPT_ID = UUID(int=43)
-OFFER_ID = UUID(int=44)
-AUDIENCE = "test-installation-1"
-KEY_SHA = "a" * 64
 
 
 def _seed_player(registry, *, canonical_device: bool) -> None:
@@ -40,14 +32,6 @@ def _seed_player(registry, *, canonical_device: bool) -> None:
         conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,"
                      "device_id) VALUES(%s,%s,%s,900,900,%s)",
                      (PLAYER_ID, "test-public-key", "test-token-hash", DEVICE_ID))
-
-
-def _seed_session(conn, session_id: UUID) -> None:
-    conn.execute("INSERT INTO fleet_os_command_sessions(command_session_id,device_id,"
-                 "device_generation,kernel_boot_id,offer_id,installation_audience,trust_mode,"
-                 "agent_key_sha256,verifier_ref,issued_at,expires_at) "
-                 "VALUES(%s,%s,1,%s,%s,%s,'t1',%s,'test-gateway-session',900,1100)",
-                 (session_id, DEVICE_ID, BOOT_ID, OFFER_ID, AUDIENCE, KEY_SHA))
 
 
 def test_ticketless_player_retirement_creates_canonical_tombstone_once(registry) -> None:
@@ -67,56 +51,6 @@ def test_ticketless_player_retirement_creates_canonical_tombstone_once(registry)
     assert device["retired_at"] == 1000
     assert lifecycle == {"generation": 2, "revoked_at": 1000}
     assert player == {"retired_at": 1000, "authority_epoch": 2}
-
-
-def test_retirement_revokes_same_generation_session_and_queued_attempt(registry) -> None:
-    _seed_player(registry, canonical_device=True)
-    with registry.db.transaction() as conn:
-        _seed_session(conn, SESSION_ID)
-        conn.execute("INSERT INTO fleet_app_attempts(attempt_id,device_id,offer_id,"
-                     "desired_revision,target_sha256,phase,created_at,updated_at,"
-                     "device_generation) VALUES(%s,%s,%s,1,%s,'queued',900,900,1)",
-                     (ATTEMPT_ID, DEVICE_ID, OFFER_ID, "d" * 64))
-        assert conn.execute("SELECT count(*) AS n FROM "
-                            "fleet_generation_current_app_attempts").fetchone()["n"] == 1
-    registry.retire(PLAYER_ID)
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM "
-                            "fleet_generation_current_os_command_sessions").fetchone()["n"] == 0
-        assert conn.execute("SELECT count(*) AS n FROM "
-                            "fleet_generation_current_app_attempts").fetchone()["n"] == 0
-        assert conn.execute("SELECT revoked_at FROM fleet_os_command_sessions "
-                            "WHERE command_session_id=%s", (SESSION_ID,)
-                            ).fetchone()["revoked_at"] == 1000
-        assert conn.execute("SELECT revoked_at FROM fleet_app_attempts "
-                            "WHERE attempt_id=%s", (ATTEMPT_ID,)
-                            ).fetchone()["revoked_at"] == 1000
-
-
-def test_new_os_session_requires_explicit_revocation_of_previous_one(registry) -> None:
-    _seed_player(registry, canonical_device=True)
-    with registry.db.transaction() as conn:
-        _seed_session(conn, SESSION_ID)
-    with pytest.raises(UniqueViolation):
-        with registry.db.transaction() as conn:
-            _seed_session(conn, UUID(int=45))
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE fleet_os_command_sessions SET revoked_at=1000 "
-                     "WHERE command_session_id=%s", (SESSION_ID,))
-        _seed_session(conn, UUID(int=45))
-
-
-def test_retired_device_still_accepts_bounded_t0_observation_only(registry) -> None:
-    _seed_player(registry, canonical_device=True)
-    registry.retire(PLAYER_ID)
-    receipt = FleetService(registry.db, registry.clock).record_check_in(
-        CheckIn(schema=1, kind="pi", serial=SERIAL, kernel_boot_id=BOOT_ID,
-                agent_incarnation="test-agent", observation_sequence=1,
-                phase="base_ready"))
-    assert receipt == {"accepted": True}
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM fleet_os_command_sessions"
-                            ).fetchone()["n"] == 0
 
 
 def test_retired_canonical_device_refuses_new_app_enrollment(registry) -> None:

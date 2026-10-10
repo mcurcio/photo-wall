@@ -23,7 +23,6 @@ from typing import Final
 from central.assets.handlers import (
     FetchLibraryThumbnailHandler,
     FetchOsImageHandler,
-    FetchPackageHandler,
     FetchSealedEnvironmentHandler,
     PrefetchHandler,
 )
@@ -101,8 +100,8 @@ def _core(db: Database, clock: Clock, *, cache_root: Path, feed_wanted: bool) ->
                                        assets=assets, clock=clock, feed=feed)
     store = CacheStore(CacheLayout(cache_root))
     stored = DiskStoredAssets(records=assets, store=store)
-    catalog = ReleaseCatalog(releases=PgReleaseRecords(), stored=stored,
-                             transactions=transactions, publisher=publisher, clock=clock)
+    catalog = ReleaseCatalog(releases=PgReleaseRecords(), transactions=transactions,
+                             publisher=publisher, clock=clock)
     return _Core(transactions, assets, outcomes, publisher, catalog, store, stored, feed)
 
 
@@ -159,12 +158,11 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
                                  transactions=core.transactions)
     admin = QueueAdmin(db.dsn)
     handlers = (
-        SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(), assets=core.assets,
+        SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
                             transactions=core.transactions, publisher=core.publisher,
                             clock=clock, node_releases=PgNodeReleaseRecords(clock),
-                            readiness=core.stored, catalog=core.catalog),
+                            readiness=core.stored),
         FetchOsImageHandler(production=production, origin=origin, store=core.store),
-        FetchPackageHandler(production=production, origin=origin),
         FetchSealedEnvironmentHandler(production=production, origin=origin),
         FetchLibraryThumbnailHandler(production=production, origin=thumbnails),
         PrefetchHandler(catalog=core.catalog, readiness=core.stored,

@@ -48,7 +48,7 @@ PRESENCE_STALE_SECONDS: Final = 30.0   # a look older than this at a read: prese
 
 def enrolled_serials_in(conn) -> frozenset[str]:
     """Serials of devices with retired_at IS NULL whose fleet_device_lifecycle.revoked_at IS NULL and
-    serial IS NOT NULL (the predicate FleetService.status uses). A serial `account_id` refuses has
+    serial IS NOT NULL. A serial `account_id` refuses has
     no hub account: it is left out and logged."""
     return frozenset(_enrolled_accounts_in(conn))
 
