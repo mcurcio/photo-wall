@@ -2,21 +2,24 @@
 
 import asyncio
 import hashlib
+import inspect
 import json
-import os
 from uuid import UUID
 
 import pytest
 from media_queue import RecordingMediaQueue
+from support.library_store_fake import FakeLibraryStore
 from test_media_store import ORIGINAL, RECIPE, VARIANT, grant, queued, ready, row
 
 from central.db import ProcessTransactionClock
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore
+from central.photo_library.model import LibraryAsset
 from central.planner import AcquisitionRequest
 from central.registry import RegistryError
-from media.models import ConnectionConfig, DownloadedOriginal, MediaError, OriginalAsset
+from media.library_client import FetchedRendition
+from media.models import MediaError, OriginalAsset
 from media.prepare import BuildIdentity, PreparedMedia
 from media.task_queue import (
     MediaTaskFailed,
@@ -24,99 +27,21 @@ from media.task_queue import (
     RetryableMediaTask,
     create_worker_app,
 )
-from media.worker import MediaWorker, WorkerLimits, _media_writer, load_connections
+from media.worker import MediaWorker, WorkerLimits, _media_writer
 
 SECRET = "PUBLIC_SYNTHETIC_PRIVATE_KEY"
 
 
-def configuration():
-    return dict(connection_id="fixture", base_url="https://immich.invalid/api",
-                owner_id=str(UUID(int=1)), api_key=SECRET)
-
-
-def private_file(tmp_path, document=None):
-    path = tmp_path / "connections.json"
-    path.write_text(json.dumps(document or {"schema": 1, "connections": [configuration()]}))
-    path.chmod(0o600)
-    return path
-
-
-def test_private_connection_file_keeps_keys_out_of_models_and_repr(tmp_path):
-    connections = load_connections(private_file(tmp_path))
-    assert connections["fixture"].api_key.get_secret_value() == SECRET
-    assert SECRET not in repr(connections)
-    assert SECRET not in connections["fixture"].model_dump_json()
-
-
-def test_worker_reports_only_sorted_connection_ids(worker_storage):
-    instance = MediaWorker(worker_storage.repository, worker_storage,
-        {"zeta": ConnectionConfig(**{**configuration(), "connection_id": "zeta"}),
-         "alpha": ConnectionConfig(**{**configuration(), "connection_id": "alpha"})},
-        preparer=FakePreparer())
+def test_no_environment_variable_names_a_connections_file(worker_storage):
+    """Roadmap 4: connections and keys are the store's; the worker reads no file and reports no
+    connection list (the photo library's own view replaces it)."""
+    import media.worker as module
+    source = inspect.getsource(module)
+    assert "PHOTO_WALL_CONNECTIONS_FILE" not in source and "load_connections" not in source
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
     instance.store.recover = lambda: None
-
-    async def exercise():
-        await instance.maintain()
-
-    asyncio.run(exercise())
-    health = worker_storage.repository.health()
-    assert health["connection_ids"] == ["alpha", "zeta"]
-    assert SECRET not in repr(health)
-    assert "immich.invalid" not in repr(health)
-
-
-def test_worker_reports_valid_empty_connection_list(worker_storage):
-    instance = MediaWorker(worker_storage.repository, worker_storage, {}, preparer=FakePreparer())
-    instance.store.recover = lambda: None
-
-    async def exercise():
-        await instance.maintain()
-
-    asyncio.run(exercise())
-    assert worker_storage.repository.health()["connection_ids"] == []
-
-
-@pytest.mark.parametrize("fault", [
-    "mode", "symlink", "owner", "oversize", "empty", "json", "duplicate_key",
-    "duplicate_id", "schema", "unknown", "bad_secret", "nonfinite", "fifo",
-])
-def test_private_connection_failures_return_only_fixed_code(tmp_path, monkeypatch, fault):
-    path = private_file(tmp_path)
-    if fault == "mode":
-        path.chmod(0o644)
-    elif fault == "symlink":
-        target = tmp_path / "linked"
-        target.symlink_to(path)
-        path = target
-    elif fault == "owner":
-        monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid + 1)
-    elif fault == "oversize":
-        path.write_bytes(b"x" * (1024**2 + 1))
-    elif fault == "empty":
-        path.write_bytes(b"")
-    elif fault == "json":
-        path.write_text(SECRET)
-    elif fault == "duplicate_key":
-        path.write_text('{"schema":1,"schema":1,"connections":[]}')
-    elif fault == "duplicate_id":
-        path.write_text(json.dumps({"schema": 1, "connections": [configuration(), configuration()]}))
-    elif fault == "schema":
-        path.write_text('{"schema":2,"connections":[]}')
-    elif fault == "unknown":
-        path.write_text(json.dumps({"schema": 1, "connections": [], "private": SECRET}))
-    elif fault == "bad_secret":
-        path.write_text(json.dumps({"schema": 1, "connections": [
-            {**configuration(), "api_key": "x\n" + SECRET},
-        ]}))
-    elif fault == "nonfinite":
-        path.write_text('{"schema":NaN,"connections":[]}')
-    else:
-        path.unlink()
-        os.mkfifo(path, 0o600)
-    with pytest.raises(MediaError) as caught:
-        load_connections(path)
-    assert caught.value.code == "connection_file"
-    assert SECRET not in str(caught.value)
+    asyncio.run(instance.maintain())
+    assert worker_storage.repository.health()["connection_ids"] is None
 
 
 def original():
@@ -125,17 +50,21 @@ def original():
         raw_height=1920, orientation=1, captured_at=1000, file_size=len(ORIGINAL))
 
 
-class FakeSource:
-    def __init__(self, clock, assets=()):
-        self.clock, self.assets = clock, assets
+class FakeLibrary:
+    """The connection's LibraryClient: fetches write the fetched rendition's bytes."""
+
+    def __init__(self, clock):
+        self.clock = clock
         self.downloads, self.closed = 0, False
+        self.edges = []
         self.fault = None
         self.gate = None
         self.entered = asyncio.Event()
         self.cancelled = False
 
-    async def download_original(self, asset, destination):
+    async def fetch_rendition(self, asset, *, frame_long_edge, destination):
         self.downloads += 1
+        self.edges.append(frame_long_edge)
         destination.write_bytes(b"partial public original")
         self.entered.set()
         try:
@@ -147,9 +76,9 @@ class FakeSource:
         if self.fault:
             raise self.fault
         destination.write_bytes(ORIGINAL)
-        return DownloadedOriginal(path=destination, size=len(ORIGINAL),
-            sha1=hashlib.sha1(ORIGINAL).hexdigest(),
-            sha256=hashlib.sha256(ORIGINAL).hexdigest())
+        return FetchedRendition(path=destination, rendition="preview", media_type="image/jpeg",
+                                size=len(ORIGINAL), sha256=hashlib.sha256(ORIGINAL).hexdigest(),
+                                width=1080, height=1920)
 
     async def close(self):
         self.closed = True
@@ -168,11 +97,14 @@ class FakePreparer:
         self.recipe, self.fault, self.gate = RECIPE, None, None
         self.entered = asyncio.Event()
         self.cancelled = False
+        self.prepared = []
 
     async def describe_recipe(self):
         return RECIPE, self.build
 
-    async def prepare(self, asset, source, destination):
+    async def prepare_rendition(self, asset, rendition, destination):
+        self.prepared.append(asset)
+        source = rendition.path
         destination.write_bytes(VARIANT)
         self.entered.set()
         try:
@@ -193,13 +125,47 @@ def worker_storage(registry, tmp_path):
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000,
         max_video_bytes=2000), queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     repository.set_recipe(RECIPE)
-    return MediaStore(repository, tmp_path / "media")
+    store = MediaStore(repository, tmp_path / "media")
+    # Until the planner slice (P1) claims pool rows as LibraryAsset leases, a claimed job's
+    # OriginalAsset becomes the same photo as the pool knows it: an unedited photo's revision is
+    # its checksum, so the asset id (and the job row) is the same.
+    claim = repository.claim_job
+    originals = {}
+
+    def claim_pool_asset(job_id=None):
+        lease = claim(job_id)
+        if lease is None or not isinstance(lease.asset, OriginalAsset):
+            return lease
+        asset = lease.asset
+        pool_asset = LibraryAsset(connection_ref=asset.connection_id,
+                                  upstream_id=asset.upstream_id, revision=asset.original_sha1,
+                                  kind=asset.kind, taken_at=asset.captured_at,
+                                  width=asset.original_width, height=asset.original_height,
+                                  duration=asset.duration)
+        assert pool_asset.asset_id == asset.asset_id
+        originals[lease.job_id] = lease
+        return lease.model_copy(update={"asset": pool_asset})
+    repository.claim_job = claim_pool_asset
+    # MediaStore.publish still reads OriginalAsset fields (erratum E-P4-M3-1): the publication
+    # under test is handed the claimed original lease of the same job and attempt.
+    publish = store.publish
+    store.publish = lambda lease, prepared: publish(
+        originals[lease.job_id].model_copy(update={"attempt_token": lease.attempt_token}),
+        prepared)
+    return store
+
+
+def library_store(clock):
+    library = FakeLibraryStore(clock)
+    library.add_connection("fixture", "https://immich.invalid/api", SECRET)
+    library.frame_edge = 2160
+    return library
 
 
 def worker(storage, source, preparer=None, **kwargs):
-    return MediaWorker(storage.repository, storage,
-        {"fixture": ConnectionConfig(**configuration())}, preparer=preparer or FakePreparer(),
-        client_factory=lambda _: source, **kwargs)
+    return MediaWorker(storage.repository, storage, library_store(storage.clock),
+                       preparer=preparer or FakePreparer(),
+                       client_factory=lambda _: source, **kwargs)
 
 
 async def close(instance):
@@ -209,7 +175,7 @@ async def close(instance):
 def test_procrastinate_task_processes_only_exact_job_and_publishes(worker_storage):
     queued(worker_storage)
     queued(worker_storage, 2)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     instance = worker(worker_storage, source)
     async def exercise():
         try:
@@ -226,7 +192,7 @@ def test_procrastinate_task_processes_only_exact_job_and_publishes(worker_storag
 
 def test_retryable_task_cleanup_leaves_domain_job_claimable_without_local_delay(worker_storage):
     queued(worker_storage)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     source.fault = MediaError("upstream_unavailable")
     instance = worker(worker_storage, source)
     with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="upstream_unavailable"):
@@ -242,7 +208,7 @@ def test_procrastinate_worker_consumes_deferred_job(worker_storage):
     queue.apply_schema(worker_storage.db.dsn)
     with worker_storage.repository.transaction() as conn:
         queue.enqueue_in(conn, "job-1")
-    instance = worker(worker_storage, FakeSource(worker_storage.clock))
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
 
     async def exercise():
         app = create_worker_app(worker_storage.db.dsn)
@@ -270,7 +236,7 @@ def test_procrastinate_worker_consumes_deferred_job(worker_storage):
 ])
 def test_task_failures_are_typed_and_do_not_leak(worker_storage, failure, state, error):
     queued(worker_storage)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     source.fault = failure
     instance = worker(worker_storage, source)
     with worker_storage.worker_lock(), pytest.raises(error) as caught:
@@ -283,7 +249,7 @@ def test_task_failures_are_typed_and_do_not_leak(worker_storage, failure, state,
 
 def test_fourth_queue_attempt_becomes_final_domain_failure(worker_storage):
     queued(worker_storage)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     source.fault = MediaError("upstream_unavailable")
     instance = worker(worker_storage, source)
     with worker_storage.worker_lock(), pytest.raises(MediaTaskFailed):
@@ -293,7 +259,7 @@ def test_fourth_queue_attempt_becomes_final_domain_failure(worker_storage):
 
 def test_cancellation_cleans_partial_bytes_and_keeps_attempt_fence(worker_storage):
     queued(worker_storage)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     source.gate = asyncio.Event()
     instance = worker(worker_storage, source)
     async def exercise():
@@ -314,7 +280,7 @@ def test_recipe_change_between_claim_and_preparation_never_publishes(worker_stor
     queued(worker_storage)
     preparation = FakePreparer()
     preparation.recipe = "f" * 64
-    instance = worker(worker_storage, FakeSource(worker_storage.clock), preparation)
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock), preparation)
     with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="recipe_changed"):
         asyncio.run(instance.process_job("job-1", attempt=1))
     assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "retry"
@@ -326,7 +292,7 @@ def test_pressure_collects_unused_content_then_processes_request(worker_storage)
         ready(worker_storage)
     queued(worker_storage, 2)
     worker_storage.set_quota(2010)
-    instance = worker(worker_storage, FakeSource(worker_storage.clock))
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
     with worker_storage.worker_lock():
         asyncio.run(instance.process_job("job-2", attempt=1))
     assert row(worker_storage, "media_jobs", "id", "job-2")["state"] == "ready"
@@ -340,7 +306,7 @@ def test_pressure_cannot_collect_secured_content(worker_storage, registry):
         grant(worker_storage, registry, prepared.variant, secured=True)
     queued(worker_storage, 2)
     worker_storage.set_quota(2010)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     instance = worker(worker_storage, source)
     with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="media_job_unavailable"):
         asyncio.run(instance.process_job("job-2", attempt=1))
@@ -367,7 +333,7 @@ def test_evicted_job_only_requeues_on_new_request_and_obeys_capacity(worker_stor
 
 def test_stale_failure_cleanup_cannot_overwrite_newer_attempt(worker_storage):
     queued(worker_storage)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     source.gate = asyncio.Event()
     instance = worker(worker_storage, source)
     async def exercise():
@@ -388,7 +354,7 @@ def test_stale_failure_cleanup_cannot_overwrite_newer_attempt(worker_storage):
 
 def test_outer_job_deadline_cancels_partial_download(worker_storage):
     queued(worker_storage)
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     source.gate = asyncio.Event()
     instance = worker(worker_storage, source, limits=WorkerLimits(job_seconds=.2))
     with worker_storage.worker_lock(), pytest.raises(RetryableMediaTask, match="worker_timeout"):
@@ -400,7 +366,7 @@ def test_outer_job_deadline_cancels_partial_download(worker_storage):
 
 
 def test_nonfinite_clock_cannot_start_task_activity(worker_storage):
-    instance = worker(worker_storage, FakeSource(worker_storage.clock))
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
     worker_storage.clock.wall = float("nan")
     with pytest.raises(MediaError, match="clock_invalid"):
         asyncio.run(instance.process_job("missing", attempt=1))
@@ -409,9 +375,9 @@ def test_nonfinite_clock_cannot_start_task_activity(worker_storage):
 
 
 def test_hung_client_close_is_bounded(worker_storage):
-    source = FakeSource(worker_storage.clock)
+    source = FakeLibrary(worker_storage.clock)
     instance = worker(worker_storage, source, limits=WorkerLimits(close_seconds=.05))
-    instance._client("fixture")
+    asyncio.run(instance._client("fixture"))
     async def hang():
         await asyncio.Event().wait()
     source.close = hang
@@ -451,7 +417,7 @@ def test_command_reports_the_job_runtime_exit_code(monkeypatch, capsys, error, c
 def test_the_boot_path_runs_maintenance_and_checks_the_worker_in_then_runs_the_queue(
         worker_storage):
     """No refresh, preview or tag list at boot (roadmap 4): the library tick queues checks."""
-    instance = worker(worker_storage, FakeSource(worker_storage.clock))
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
     instance.store.recover = lambda: None
     ran = []
 
@@ -467,7 +433,7 @@ def test_the_boot_path_runs_maintenance_and_checks_the_worker_in_then_runs_the_q
 def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(worker_storage):
     queue = ProcrastinateMediaQueue(worker_storage.db.dsn)
     queue.apply_schema(worker_storage.db.dsn)
-    instance = worker(worker_storage, FakeSource(worker_storage.clock))
+    instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
 
     class Checks:
         def __init__(self):
@@ -494,3 +460,49 @@ def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(wo
         await close(instance)
     asyncio.run(exercise())
     assert sorted(checks.calls) == [("connection", "main"), ("pool", "a" * 64)]
+
+
+def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(worker_storage):
+    queued(worker_storage)
+    source = FakeLibrary(worker_storage.clock)
+    preparer = FakePreparer()
+    instance = worker(worker_storage, source, preparer)
+
+    async def exercise():
+        try:
+            with worker_storage.worker_lock():
+                await instance.process_job("job-1", attempt=1)
+        finally:
+            await close(instance)
+    asyncio.run(exercise())
+    assert source.edges == [2160]
+    assert isinstance(preparer.prepared[0], LibraryAsset)
+    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "ready"
+
+
+def test_a_refreshed_original_lease_is_superseded_and_not_retried(worker_storage):
+    queued(worker_storage)
+    worker_storage.repository.claim_job = lambda job_id=None: MediaRepository.claim_job(
+        worker_storage.repository, job_id)
+    source = FakeLibrary(worker_storage.clock)
+    instance = worker(worker_storage, source)
+    with worker_storage.worker_lock(), pytest.raises(MediaTaskFailed, match="asset_superseded"):
+        asyncio.run(instance.process_job("job-1", attempt=1))
+    assert source.downloads == 0
+    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "failed"
+
+
+def test_a_new_key_gets_a_new_client(worker_storage):
+    made = []
+    instance = MediaWorker(worker_storage.repository, worker_storage,
+                           library_store(worker_storage.clock), preparer=FakePreparer(),
+                           client_factory=lambda secret: made.append(secret) or FakeLibrary(
+                               worker_storage.clock))
+    asyncio.run(instance._client("fixture"))
+    asyncio.run(instance._client("fixture"))
+    instance.library.connection("fixture").key = "another-synthetic-key"
+    asyncio.run(instance._client("fixture"))
+    assert [secret.api_key.get_secret_value() for secret in made] == [
+        SECRET, "another-synthetic-key"]
+    with pytest.raises(MediaError, match="connection_unknown"):
+        asyncio.run(instance._client("removed"))

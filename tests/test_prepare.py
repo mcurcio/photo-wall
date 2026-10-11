@@ -594,3 +594,63 @@ def test_invalid_recipe_settings_are_rejected_without_native_tools(recipe):
 def test_invalid_preparation_limits_are_rejected_without_native_tools(limits):
     with pytest.raises(ValueError):
         PreparationLimits(**limits)
+
+
+# -- roadmap 4 (M3): the photo Immich shows, as fetched ---------------------------------------
+
+
+def rendition_of(path, *, rendition="preview", media_type="image/jpeg", size=None, width=96,
+                 height=64):
+    from media.library_client import FetchedRendition
+    data = path.read_bytes()
+    return FetchedRendition(path=path, rendition=rendition, media_type=media_type,
+                            size=len(data) if size is None else size,
+                            sha256=hashlib.sha256(data).hexdigest(), width=width, height=height)
+
+
+def pool_asset(*, width=96, height=64):
+    from central.photo_library.model import LibraryAsset
+    return LibraryAsset(connection_ref="fixture", upstream_id=str(UUID(int=1)),
+                        revision="a" * 40, kind="image", taken_at=1767225600,
+                        width=width, height=height)
+
+
+def prepare_rendition(tools, asset, rendition, destination, **changes):
+    return asyncio.run(preparer(tools, **changes).prepare_rendition(asset, rendition,
+                                                                    destination))
+
+
+def test_a_webp_preview_prepares_to_a_jpeg_of_the_recipes_size(tmp_path, native_tools):
+    source = tmp_path / "preview"
+    corners((800, 400)).save(source, "WEBP", quality=90)
+    result = prepare_rendition(native_tools, pool_asset(width=800, height=400),
+                               rendition_of(source, width=800, height=400),
+                               tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
+    assert (result.variant.media_type, result.variant.width, result.variant.height) == (
+        "image/jpeg", 200, 100)
+    assert result.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
+    with Image.open(tmp_path / "variant") as image:
+        assert image.format == "JPEG" and image.size == (200, 100)
+
+
+def test_a_full_size_jpeg_carrying_exif_orientation_six_prepares_upright(tmp_path, native_tools):
+    source = tmp_path / "fullsize"
+    save_jpeg(source, orientation=6, size=(96, 64))
+    result = prepare_rendition(native_tools, pool_asset(width=64, height=96),
+                               rendition_of(source, rendition="fullsize", width=64, height=96),
+                               tmp_path / "variant")
+    assert (result.variant.width, result.variant.height) == (64, 96)
+    with Image.open(tmp_path / "variant") as image:
+        assert image.size == (64, 96) and image.getexif().get(0x0112, 1) == 1
+
+
+def test_a_rendition_whose_size_differs_from_the_fetch_is_an_integrity_failure(
+        tmp_path, native_tools):
+    source = tmp_path / "preview"
+    save_jpeg(source)
+    with pytest.raises(MediaError) as caught:
+        prepare_rendition(native_tools, pool_asset(),
+                          rendition_of(source, size=source.stat().st_size + 1),
+                          tmp_path / "variant")
+    assert caught.value.code == "asset_integrity"
+    assert not (tmp_path / "variant").exists()

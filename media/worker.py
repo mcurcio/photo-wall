@@ -4,23 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import signal
-import stat
 import sys
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Final, Literal, Protocol
+from typing import Final, Protocol
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import Field
 
 from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
-from central.content_wiring import build_job_runtime, build_library_thumbnails
+from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.runtime import (
@@ -34,19 +34,16 @@ from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import JobLease, MediaRepository
 from central.media_store import MediaStore, MediaStoreError
 from central.node_bus_wiring import NodeBus, build_node_bus
+from central.photo_library.model import ConnectionSecret, LibraryAsset
+from central.photo_library.ports import LibraryWorkerStore
 from central.registry import RegistryError
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
-from media.immich import ImmichClient
+from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
+from media.library_client import FetchedRendition, LibraryClient
 from media.library_thumbnails import LibraryThumbnailOrigin
-from media.models import (
-    ConnectionConfig,
-    DownloadedOriginal,
-    MediaError,
-    MediaLimits,
-    OriginalAsset,
-)
+from media.models import MediaError
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
 from media.task_queue import (
     MediaTaskFailed,
@@ -58,58 +55,13 @@ from media.task_queue import (
 logger = logging.getLogger("photo_wall.worker")
 
 
-_FILE_LIMIT = 1024**2
 # The job runtime's process-ending conditions; any other RuntimeError stays `worker_internal`.
 _RUNTIME_EXITS: Final = frozenset({WORKER_EXITED, COMPLETION_NOT_RECORDED})
 _PERMANENT = frozenset({
     "asset_integrity", "asset_oversize", "unsupported_media", "unsupported_color",
     "metadata_invalid", "item_over_limits", "metadata_mismatch", "preparation_limit", "preparation_invalid",
-    "media_original_mismatch", "media_result_mismatch", "media_journal_invalid",
+    "media_original_mismatch", "media_result_mismatch", "media_journal_invalid", "asset_superseded",
 })
-
-
-class _ConnectionFile(Model):
-    model_config = ConfigDict(hide_input_in_errors=True)
-    schema_version: Literal[1] = Field(alias="schema")
-    connections: tuple[ConnectionConfig, ...] = Field(max_length=128)
-
-    @model_validator(mode="after")
-    def unique_connections(self):
-        if len({c.connection_id for c in self.connections}) != len(self.connections):
-            raise ValueError("duplicate connection")
-        return self
-
-
-def load_connections(path: Path) -> dict[str, ConnectionConfig]:
-    """Read a small private file as data; report no path, key, or validation input."""
-    def pairs(items):
-        result = {}
-        for key, value in items:
-            if key in result:
-                raise ValueError
-            result[key] = value
-        return result
-
-    def constants(_):
-        raise ValueError
-
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            before = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600
-                    or before.st_uid != os.geteuid() or not 0 < before.st_size <= _FILE_LIMIT):
-                raise ValueError
-            content = stream.read(_FILE_LIMIT + 1)
-            after = os.fstat(stream.fileno())
-            if (len(content) != before.st_size or before.st_size != after.st_size
-                    or before.st_mtime_ns != after.st_mtime_ns or before.st_mode != after.st_mode
-                    or before.st_uid != after.st_uid):
-                raise ValueError
-        document = _ConnectionFile.model_validate(json.loads(content, object_pairs_hook=pairs, parse_constant=constants))
-        return {connection.connection_id: connection for connection in document.connections}
-    except (OSError, ValueError, TypeError, RecursionError, UnicodeError):
-        raise MediaError("connection_file", "incompatible") from None
 
 
 class WorkerLimits(Model):
@@ -118,20 +70,10 @@ class WorkerLimits(Model):
     close_seconds: Positive = Field(default=5, le=10)
 
 
-class SourceClient(Protocol):
-    async def download_original(self, asset: OriginalAsset, destination: Path) -> DownloadedOriginal: ...
-    async def close(self) -> None: ...
-
-
-class ThumbnailPrefetch(Protocol):
-    """`central.assets.library.LibraryThumbnails`: reference and publish a preview's tiles."""
-
-    async def prefetch(self, asset_ids: Sequence[str]) -> None: ...
-
-
 class PreparationClient(Protocol):
     async def describe_recipe(self) -> tuple[str, BuildIdentity]: ...
-    async def prepare(self, asset: OriginalAsset, original: Path, destination: Path) -> PreparedMedia: ...
+    async def prepare_rendition(self, asset: LibraryAsset, rendition: FetchedRendition,
+                                destination: Path) -> PreparedMedia: ...
 
 
 async def _drain(task: asyncio.Task):
@@ -158,18 +100,15 @@ async def _blocking(function, *args, **kwargs):
 
 class MediaWorker:
     def __init__(self, repository: MediaRepository, store: MediaStore,
-                 connections: Mapping[str, ConnectionConfig], *,
+                 library: LibraryWorkerStore, *,
                  preparer: PreparationClient | None = None,
-                 client_factory: Callable[[ConnectionConfig], SourceClient] | None = None,
-                 limits: WorkerLimits = WorkerLimits(),
-                 thumbnails: ThumbnailPrefetch | None = None, previews: Path | None = None):
+                 client_factory: Callable[[ConnectionSecret], LibraryClient] | None = None,
+                 limits: WorkerLimits = WorkerLimits(), previews: Path | None = None):
         self.repository, self.store, self.clock, self.limits = repository, store, repository.clock, limits
         if store.repository is not repository or limits.job_seconds + 30 > repository.limits.lease_seconds:
             raise MediaError("worker_config", "incompatible")
-        if len(connections) > 128 or any(not isinstance(c, ConnectionConfig) or key != c.connection_id
-                                         for key, c in connections.items()):
-            raise MediaError("connection_config", "incompatible")
-        self.connections = dict(connections)
+        # Roadmap 4: connections and their keys are the photo library store's (no file).
+        self.library = library
         self.preparer = preparer or Preparer(clock=self.clock, limits=PreparationLimits(
             max_original_bytes=repository.limits.max_original_bytes,
             max_image_bytes=repository.limits.max_image_bytes,
@@ -177,12 +116,12 @@ class MediaWorker:
             max_staging_bytes=repository.limits.max_original_bytes + max(
                 repository.limits.max_image_bytes, repository.limits.max_video_bytes),
         ))
-        self.client_factory = client_factory or (lambda config: ImmichClient(config, clock=self.clock,
-            limits=MediaLimits(max_original_bytes=repository.limits.max_original_bytes)))
-        self._clients: dict[str, SourceClient] = {}
-        # A completed preview's tiles are prefetched (`thumbnails`); `previews` is the thumbnail
-        # directory, swept of files whose record maintenance retired.
-        self.thumbnails, self.previews = thumbnails, previews
+        self.client_factory = client_factory or (lambda secret: ImmichClient.for_connection(
+            secret, clock=self.clock,
+            limits=LibraryLimits(max_fetch_bytes=repository.limits.max_original_bytes)))
+        self._clients: dict[str, tuple[str, LibraryClient]] = {}
+        # The thumbnail directory, swept of files whose record maintenance retired.
+        self.previews = previews
         self._error: str | None = None
         self._recipe: str | None = None
 
@@ -204,12 +143,18 @@ class MediaWorker:
             raise MediaError("clock_invalid")
         return now
 
-    def _client(self, connection_id: str) -> SourceClient:
-        if connection_id not in self.connections:
+    async def _client(self, connection_ref: str) -> LibraryClient:
+        """The connection's client for its key now; a new key gets a new client."""
+        secret = await _blocking(self.library.connection_secret, connection_ref)
+        if secret is None:
             raise MediaError("connection_unknown")
-        if connection_id not in self._clients:
-            self._clients[connection_id] = self.client_factory(self.connections[connection_id])
-        return self._clients[connection_id]
+        key = hashlib.sha256(secret.api_key.get_secret_value().encode()).hexdigest()
+        held = self._clients.get(connection_ref)
+        if held is None or held[0] != key:
+            if held is not None:
+                await self._close(held[1])
+            held = self._clients[connection_ref] = (key, self.client_factory(secret))
+        return held[1]
 
     async def _register_recipe(self):
         self._utc()
@@ -217,10 +162,6 @@ class MediaWorker:
         if recipe != self._recipe:
             await _blocking(self.repository.set_recipe, recipe)
             self._recipe = recipe
-
-    def _connection_ids(self) -> tuple[str, ...]:
-        """Return only the bounded identifiers safe for the central operator view."""
-        return tuple(sorted(self.connections))
 
     async def _fail(self, lease: JobLease, code: str, *, retry: bool = True):
         try:
@@ -256,13 +197,19 @@ class MediaWorker:
                 raise RetryableMediaTask("media_job_unavailable")
         try:
             async with asyncio.timeout(self.limits.job_seconds):
+                if not isinstance(lease.asset, LibraryAsset):
+                    # A refreshed original from before roadmap 4: its pool row supersedes it.
+                    raise MediaError("asset_superseded", "incompatible")
                 paths = await _blocking(self.store.staging, lease)
-                client = self._client(lease.asset.connection_id)
-                original = await client.download_original(lease.asset, paths.original)
-                if original.path.absolute() != paths.original or original.sha1 != lease.asset.original_sha1:
+                client = await self._client(lease.asset.connection_ref)
+                edge = await _blocking(self.library.largest_frame_edge)
+                fetched = await client.fetch_rendition(lease.asset, frame_long_edge=edge,
+                                                       destination=paths.original)
+                if fetched.path.absolute() != paths.original:
                     raise MediaError("asset_integrity")
-                prepared = await self.preparer.prepare(lease.asset, paths.original, paths.variant)
-                if prepared.original_sha256 != original.sha256:
+                prepared = await self.preparer.prepare_rendition(lease.asset, fetched,
+                                                                 paths.variant)
+                if prepared.original_sha256 != fetched.sha256:
                     raise MediaError("asset_integrity")
                 if prepared.recipe_id != lease.recipe_id:
                     raise MediaError("recipe_changed")
@@ -280,15 +227,15 @@ class MediaWorker:
                 raise RetryableMediaTask(self._error) from None
             raise MediaTaskFailed(self._error) from None
         finally:
-            await _blocking(self.repository.worker_status, self._error, self._connection_ids())
+            await _blocking(self.repository.worker_status, self._error)
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
         # Listed BEFORE the purge: a file written after it is never discarded by this pass.
         files = await _blocking(self._thumbnail_files)
-        recorded = await _blocking(self.repository.maintain_source_previews)
+        recorded = await _blocking(self.library.retire_unwanted)
         await _blocking(self._discard_thumbnails, files, recorded)
-        await _blocking(self.repository.worker_status, self._error, self._connection_ids())
+        await _blocking(self.repository.worker_status, self._error)
 
     def _thumbnail_files(self) -> dict[str, Path]:
         """Thumbnail files by asset id (temps excluded: their writer removes them)."""
@@ -303,15 +250,16 @@ class MediaWorker:
             if asset_id not in recorded:
                 path.unlink(missing_ok=True)
 
+    async def _close(self, client: LibraryClient) -> None:
+        try:
+            async with asyncio.timeout(self.limits.close_seconds):
+                await client.close()
+        except Exception:
+            self._error = "connection_close"
+
     async def _close_clients(self):
-        async def close(client):
-            try:
-                async with asyncio.timeout(self.limits.close_seconds):
-                    await client.close()
-            except Exception:
-                self._error = "connection_close"
-        await asyncio.gather(*(close(client) for client in self._clients.values()))
-        self._clients.clear()
+        clients, self._clients = [held[1] for held in self._clients.values()], {}
+        await asyncio.gather(*(self._close(client) for client in clients))
 
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
@@ -400,8 +348,7 @@ def build_repository(dsn: str, clock: Clock | None = None, *,
 
 async def _entry():
     try:
-        dsn, connection_file = (os.environ[name] for name in
-            ("PHOTO_WALL_DATABASE_URL", "PHOTO_WALL_CONNECTIONS_FILE"))
+        dsn = os.environ["PHOTO_WALL_DATABASE_URL"]
     except KeyError:
         raise MediaError("worker_config", "incompatible") from None
     # 0013: the media store lives at the media/ subdir of the one cache root
@@ -411,20 +358,18 @@ async def _entry():
     clock = SystemClock()
     repository = build_repository(dsn, clock, queue=ProcrastinateMediaQueue(dsn))
     db = repository.db
-    connections = load_connections(Path(connection_file))
     # Roadmap 4: connections, their keys and the photo pools live in Central's database; the
     # checks read Immich through ImmichClient.for_connection (run ledger slice M2).
     library = PgPhotoLibrary(db, times=DatabaseTransactionClock(),
                              queue=ProcrastinateMediaQueue(dsn))
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)
-    worker = MediaWorker(repository, MediaStore(repository, Path(root)), connections,
-                         thumbnails=build_library_thumbnails(db, clock, cache_root=cache_root),
+    worker = MediaWorker(repository, MediaStore(repository, Path(root)), library,
                          previews=previews)
     # The library half of the thumbnail fetch (R22): only this package holds the key.
     thumbnails = LibraryThumbnailOrigin(
-        repository.servable_thumbnail, connections,
-        lambda config: ImmichClient(config, clock=clock, limits=MediaLimits()))
+        library.pool_thumbnail, library.connection_secret,
+        lambda secret: ImmichClient.for_connection(secret, clock=clock))
     # The one worker kind (design §10.5): every asset handler behind JobRuntime, in EVERY worker
     # process; only the legacy media loop is single-writer. Its boot checks run here, so a wiring
     # mistake fails before any job is claimed.

@@ -1,8 +1,8 @@
 """Library thumbnails on the one asset layer (console DDD §38 shape A, §40, G10; PR 37 §7-§9).
 
-Unit: the re-encoding drops every metadata block, the client re-checks the item before fetching,
-the worker's origin refuses a non-servable id. DB: servability is a member of a LIVE preview; a
-completed preview queues its tiles once; maintenance retires records no live preview selects;
+Unit: the re-encoding drops every metadata block, the client re-checks the photo's revision
+before fetching its edited thumbnail, the worker's origin refuses an id no wanted pool holds
+(roadmap 4, M3). DB: maintenance keeps the files of the records the photo library still holds;
 the route's gate (admin first, `Sec-Fetch-Site` when sent, servability, CORP) and its short wait.
 All images are generated here; no library media.
 """
@@ -22,10 +22,11 @@ from media_queue import RecordingMediaQueue
 from PIL import Image
 from procrastinate.testing import InMemoryConnector
 from runtime_fakes import apply_procrastinate_schema
+from support.library_store_fake import FakeLibraryStore
 from test_immich import Upstream
 from test_immich import asset as library_asset
 from test_media_repository import sample, stored_member
-from test_media_worker import FakePreparer, FakeSource, configuration, worker_storage  # noqa: F401
+from test_media_worker import FakePreparer, worker_storage  # noqa: F401
 
 from central.app import create_app
 from central.content_wiring import build_job_runtime, build_library_thumbnails
@@ -34,9 +35,10 @@ from central.kernel.handling import OriginUnavailable, TerminalFailure
 from central.kernel.job_types import CATALOG, FetchLibraryThumbnail, FetchOsImage
 from central.kernel.jobs import QueueName
 from central.media_repository import ServableThumbnail
-from media.immich import THUMBNAIL_EDGE, reencode_thumbnail
+from central.photo_library.model import ConnectionSecret, PoolThumbnail
+from media.immich import THUMBNAIL_EDGE, edits_fingerprint, reencode_thumbnail
 from media.library_thumbnails import LibraryThumbnailOrigin
-from media.models import ConnectionConfig, MediaError, SourcePreviewQuery
+from media.models import MediaError, SourcePreviewQuery
 from media.worker import MediaWorker, ensure_previews_directory
 
 ADMIN = "library-thumbnails-operator-" + "y" * 32
@@ -122,7 +124,7 @@ def stored_checksum(row):
     return base64.b64decode(row["checksum"]).hex()
 
 
-def test_the_client_rechecks_the_item_then_returns_its_own_encoding():
+def test_the_client_rechecks_the_item_then_returns_its_own_encoding_of_the_edited_one():
     row = library_asset(7)
     upstream = _thumbnail_upstream(row, response=httpx.Response(
         200, content=jpeg_with_metadata(), headers={"content-type": "image/jpeg"}))
@@ -130,6 +132,21 @@ def test_the_client_rechecks_the_item_then_returns_its_own_encoding():
     assert b"SyntheticCam" not in data
     paths = [request.url.path for request in upstream.requests]
     assert paths[-2:] == [f"/api/assets/{row['id']}", f"/api/assets/{row['id']}/thumbnail"]
+    assert dict(upstream.requests[-1].url.params) == {"size": "thumbnail", "edited": "true"}
+
+
+def test_an_edited_photos_thumbnail_is_fetched_at_its_edit_revision():
+    edits = [{"action": "crop", "parameters": {"x": 0, "y": 0, "width": 40, "height": 30}}]
+    row = {**library_asset(12), "isEdited": True}
+    upstream = _thumbnail_upstream(row, response=httpx.Response(
+        200, content=jpeg_with_metadata(), headers={"content-type": "image/jpeg"}))
+    upstream.overrides[f"/api/assets/{row['id']}/edits"] = httpx.Response(
+        200, json={"assetId": row["id"], "edits": edits})
+    revision = f"{stored_checksum(row)}-{edits_fingerprint(edits)}"
+    assert b"SyntheticCam" not in _fetch(upstream, row, revision)
+    with pytest.raises(MediaError) as caught:   # the unedited revision is no longer shown
+        _fetch(upstream, row, stored_checksum(row))
+    assert caught.value.code == "asset_changed"
 
 
 @pytest.mark.parametrize(("change", "response", "code"), [
@@ -156,8 +173,8 @@ class ThumbnailClient:
     def __init__(self, fault=None):
         self.fault, self.calls = fault, []
 
-    async def thumbnail(self, upstream_id, checksum):
-        self.calls.append((upstream_id, checksum))
+    async def thumbnail(self, upstream_id, revision):
+        self.calls.append((upstream_id, revision))
         if self.fault:
             raise self.fault
         return reencode_thumbnail(jpeg_with_metadata())
@@ -166,12 +183,20 @@ class ThumbnailClient:
         pass
 
 
-def _origin(servable, client):
-    config = ConnectionConfig(**configuration())
-    return LibraryThumbnailOrigin(lambda _id: servable, {"fixture": config}, lambda _c: client)
+SECRET = ConnectionSecret(connection_ref="fixture", base_url="https://immich.invalid/api",
+                          api_key="synthetic-thumbnail-key")
 
 
-def test_the_origin_refuses_an_id_no_live_preview_selects_without_calling_the_library(tmp_path):
+def _origin(servable, client, secret=SECRET):
+    return LibraryThumbnailOrigin(lambda _id: servable, lambda _ref: secret, lambda _s: client)
+
+
+def _pool_row(member):
+    return PoolThumbnail(connection_ref="fixture", upstream_id=member.upstream_id,
+                         revision=member.checksum)
+
+
+def test_the_origin_refuses_an_id_no_wanted_pool_holds_without_calling_the_library(tmp_path):
     client = ThumbnailClient()
     with pytest.raises(TerminalFailure) as caught:
         asyncio.run(_origin(None, client).thumbnail("asset-" + "1" * 64, tmp_path / "t"))
@@ -184,20 +209,36 @@ def test_the_origin_refuses_an_id_no_live_preview_selects_without_calling_the_li
     (MediaError("asset_changed", "incompatible"), TerminalFailure),
 ])
 def test_library_failures_map_to_retry_or_terminal(tmp_path, fault, failure):
-    servable = ServableThumbnail("fixture", stored_member(3))
+    member = stored_member(3)
     with pytest.raises(failure):
-        asyncio.run(_origin(servable, ThumbnailClient(fault)).thumbnail(
-            servable.member.asset_id, tmp_path / "t"))
+        asyncio.run(_origin(_pool_row(member), ThumbnailClient(fault)).thumbnail(
+            member.asset_id, tmp_path / "t"))
     assert not (tmp_path / "t").exists()
 
 
-def test_the_origin_writes_a_private_new_file_from_the_stored_identity(tmp_path):
+def test_the_origin_writes_a_private_new_file_from_the_pool_rows_identity(tmp_path):
     member = stored_member(4)
     client = ThumbnailClient()
-    asyncio.run(_origin(ServableThumbnail("fixture", member), client).thumbnail(
-        member.asset_id, tmp_path / "t"))
+    asyncio.run(_origin(_pool_row(member), client).thumbnail(member.asset_id, tmp_path / "t"))
     assert client.calls == [(member.upstream_id, member.checksum)]
     assert stat.S_IMODE((tmp_path / "t").stat().st_mode) == 0o600
+
+
+def test_the_origin_refuses_a_connection_with_no_key_and_rekeys_its_client(tmp_path):
+    member = stored_member(5)
+    with pytest.raises(TerminalFailure) as caught:
+        asyncio.run(_origin(_pool_row(member), ThumbnailClient(), secret=None).thumbnail(
+            member.asset_id, tmp_path / "t"))
+    assert caught.value.reason == "connection_unknown"
+    secrets, made = [SECRET], []
+    origin = LibraryThumbnailOrigin(lambda _id: _pool_row(member), lambda _ref: secrets[-1],
+                                    lambda secret: made.append(secret) or ThumbnailClient())
+    asyncio.run(origin.thumbnail(member.asset_id, tmp_path / "a"))
+    asyncio.run(origin.thumbnail(member.asset_id, tmp_path / "b"))
+    secrets.append(ConnectionSecret(connection_ref="fixture", base_url=SECRET.base_url,
+                                    api_key="another-synthetic-key"))
+    asyncio.run(origin.thumbnail(member.asset_id, tmp_path / "c"))
+    assert len(made) == 2   # a new key gets a new client
 
 
 # -- DB: servability, prefetch, retirement --------------------------------------------------------
@@ -223,25 +264,6 @@ def test_servable_means_a_member_of_a_live_preview(worker_storage):  # noqa: F81
     assert repo.servable_thumbnail(live.asset_id) is None
 
 
-class PrefetchSpy:
-    def __init__(self, inner):
-        self.inner, self.calls = inner, []
-
-    async def prefetch(self, asset_ids):
-        self.calls.append(list(asset_ids))
-        await self.inner.prefetch(asset_ids)
-
-
-class TwentyFour(FakeSource):
-    members = tuple(stored_member(n, captured_at=900.0 + n) for n in range(1, 25))
-
-    async def preview(self, query):
-        self.started = getattr(self, "started", 0) + 1
-        while self.started < 2:  # both deliveries hold the pending row before either finishes
-            await asyncio.sleep(0.005)
-        return sample(*sorted(self.members, key=lambda m: -m.captured_at))
-
-
 def _thumbnail_jobs(db):
     with db.transaction() as conn:
         return conn.execute("SELECT count(*) AS n FROM procrastinate_jobs WHERE task_name LIKE "
@@ -260,46 +282,19 @@ def _thumbnail_records(db):
             "SELECT identity FROM assets WHERE kind='library-thumbnail'").fetchall()}
 
 
-def test_a_completed_preview_queues_its_24_tiles_exactly_once(worker_storage, tmp_path):  # noqa: F811
-    db = worker_storage.db
-    apply_procrastinate_schema(db.dsn)
-    spy = PrefetchSpy(build_library_thumbnails(db, worker_storage.clock, cache_root=tmp_path))
-    source = TwentyFour(None)
-    instance = MediaWorker(worker_storage.repository, worker_storage,
-                           {"fixture": ConnectionConfig(**configuration())},
-                           preparer=FakePreparer(), client_factory=lambda _c: source,
-                           thumbnails=spy)
-    receipt = worker_storage.repository.request_source_preview(
-        SourcePreviewQuery(connection_ref="fixture"))
-
-    async def two_deliveries():  # e.g. a rescued job and its original, racing
-        await asyncio.gather(instance.preview_source(receipt.request_id),
-                             instance.preview_source(receipt.request_id))
-    asyncio.run(asyncio.wait_for(two_deliveries(), 10))
-    asyncio.run(instance.preview_source(receipt.request_id))  # later: already complete
-    ids = {member.asset_id for member in TwentyFour.members}
-    assert len(spy.calls) == 1 and set(spy.calls[0]) == ids
-    assert _thumbnail_jobs(db) == 24 and _thumbnail_records(db) == ids
-
-
-def test_maintenance_retires_records_and_files_no_live_preview_selects(worker_storage, tmp_path):  # noqa: F811
-    db, repo = worker_storage.db, worker_storage.repository
-    apply_procrastinate_schema(db.dsn)
-    thumbnails = build_library_thumbnails(db, worker_storage.clock, cache_root=tmp_path)
+def test_maintenance_keeps_only_the_files_the_photo_library_still_records(
+        worker_storage, tmp_path):  # noqa: F811
     previews = ensure_previews_directory(tmp_path)
     old, kept = stored_member(1), stored_member(2)
-    _complete(repo, old)
-    asyncio.run(thumbnails.prefetch([old.asset_id]))
-    worker_storage.clock.advance(601)  # the first preview expires
-    _complete(repo, kept)
-    asyncio.run(thumbnails.prefetch([kept.asset_id]))
     for member in (old, kept):
         (previews / f"{member.asset_id}.jpg").write_bytes(b"jpeg")
     (previews / ".tmp-inflight").write_bytes(b"partial")
-    instance = MediaWorker(repo, worker_storage, {}, preparer=FakePreparer(), previews=previews)
+    library = FakeLibraryStore(worker_storage.clock)
+    library.retire_unwanted = lambda: frozenset({kept.asset_id})
+    instance = MediaWorker(worker_storage.repository, worker_storage, library,
+                           preparer=FakePreparer(), previews=previews)
     instance.store.recover = lambda: None
     asyncio.run(instance.maintain())
-    assert _thumbnail_records(db) == {kept.asset_id}
     assert sorted(p.name for p in previews.iterdir()) == [".tmp-inflight", f"{kept.asset_id}.jpg"]
 
 
