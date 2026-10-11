@@ -1,6 +1,6 @@
 """The photo library's rules, each with one home (roadmap 4; run ledger .claude/runs/photo-4.md).
 
-Constants are real in F0. Functions are slice C1's (their docstrings are the contract); every
+Constants are real in F0; the functions are slice T0's (their docstrings are the contract). Every
 consumer calls these, never a copy: the store judges contacts, the routes normalise URLs and
 hint keys, the media worker asks Immich for exactly `REQUIRED_PERMISSIONS`, and the Immich
 fixture's key is pinned equal to it by a test.
@@ -8,14 +8,23 @@ fixture's key is pinned equal to it by a test.
 
 from __future__ import annotations
 
+import re
 from typing import Final
+from urllib.parse import urlsplit
 
 from central.photo_library.model import (
+    ContactRefused,
     ContactResult,
+    HealthOk,
     ImmichTooOld,
     ImmichUser,
     ImmichVersion,
     LibraryHealth,
+    LibraryNote,
+    MissingPermissions,
+    NeedsALook,
+    NoFullSizeCopies,
+    OtherUser,
     UntestedVersion,
 )
 
@@ -33,6 +42,9 @@ CHECK_EVERY_SECONDS: Final = 900
 DRAFT_KEEP_SECONDS: Final = 86400
 # One page of a pool in the console (newest first).
 POOL_PAGE_SIZE: Final = 60
+# A stored connection URL's longest form (ConnectionSecret.base_url).
+_MAX_URL_LENGTH: Final = 2048
+_UNSAFE_URL_TEXT = re.compile(r"[\s\x00-\x1f\x7f]")
 
 
 def normalise_url(text: str) -> str:
@@ -40,18 +52,38 @@ def normalise_url(text: str) -> str:
     trailing slashes dropped and "/api" appended when the path does not already end in it
     ("http://immich.local:2283" -> "http://immich.local:2283/api"). ValueError otherwise
     (routes: 422 invalid_url). Plain http is accepted (UX over security, owner 2026-10-09)."""
-    raise NotImplementedError("slice C1")
+    text = text.strip()
+    if _UNSAFE_URL_TEXT.search(text) or "?" in text or "#" in text:
+        raise ValueError("a connection URL has no spaces, query or fragment")
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("a connection URL is http or https with a host")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("a connection URL carries no user or password")
+    _ = parts.port   # ValueError on a port that is not a number in range
+    path = parts.path.rstrip("/")
+    if not path.endswith("/api"):
+        path += "/api"
+    url = f"{parts.scheme}://{parts.netloc}{path}"
+    if len(url) > _MAX_URL_LENGTH:
+        raise ValueError("a connection URL is too long")
+    return url
 
 
 def key_hint(key: str) -> str:
     """What the console shows of a stored key: "…" and its last four characters."""
-    raise NotImplementedError("slice C1")
+    return "…" + key[-4:]
 
 
 def version_verdict(version: ImmichVersion) -> ImmichTooOld | UntestedVersion | None:
     """Older than OLDEST_VERSION: ImmichTooOld(found, oldest). A release newer than
     TESTED_RELEASE: UntestedVersion(found). The tested release: None."""
-    raise NotImplementedError("slice C1")
+    found = (version.major, version.minor, version.patch)
+    if found < (OLDEST_VERSION.major, OLDEST_VERSION.minor, OLDEST_VERSION.patch):
+        return ImmichTooOld(found=str(version), oldest=str(OLDEST_VERSION))
+    if found[:2] > TESTED_RELEASE:
+        return UntestedVersion(found=str(version))
+    return None
 
 
 def contact_health(result: ContactResult, *, bound_user: ImmichUser | None,
@@ -63,5 +95,30 @@ def contact_health(result: ContactResult, *, bound_user: ImmichUser | None,
     answer's user differs; then ImmichTooOld; then MissingPermissions. With none of these, ok
     with notes: UntestedVersion, and NoFullSizeCopies when `full_size_copies` is False.
     `since` stays `previous.since` while the problem's kind is unchanged, else `checked_at`.
+    An OtherUser names each user by name, or by email when the name is empty.
     """
-    raise NotImplementedError("slice C1")
+    if isinstance(result, ContactRefused):
+        problem = result.problem
+    else:
+        verdict = version_verdict(result.version)
+        if bound_user is not None and result.user.user_ref != bound_user.user_ref:
+            problem = OtherUser(expected=_named(bound_user), found=_named(result.user))
+        elif isinstance(verdict, ImmichTooOld):
+            problem = verdict
+        elif result.missing_permissions:
+            problem = MissingPermissions(missing=tuple(sorted(set(result.missing_permissions))))
+        else:
+            notes: list[LibraryNote] = []
+            if isinstance(verdict, UntestedVersion):
+                notes.append(verdict)
+            if result.full_size_copies is False:
+                notes.append(NoFullSizeCopies())
+            return HealthOk(checked_at=checked_at, notes=tuple(notes))
+    since = checked_at
+    if isinstance(previous, NeedsALook) and previous.problem.kind == problem.kind:
+        since = previous.since
+    return NeedsALook(problem=problem, since=since, checked_at=checked_at)
+
+
+def _named(user: ImmichUser) -> str:
+    return user.name or user.email
