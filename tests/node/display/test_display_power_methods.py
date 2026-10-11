@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from appliance.display_host.ddc import DdcChannel
 from appliance.display_host.output_power import OutputPowerController, in_force, next_deadline
 from appliance.display_host.power_methods import (
     CEC_CTL,
@@ -182,7 +183,7 @@ class Sink:
 
 
 def ddc(display: Display) -> DdcCiAdapter:
-    return DdcCiAdapter(display.run, drm_root=display.drm, cache_dir=display.root / "cache")
+    return DdcCiAdapter(DdcChannel(display.run, drm_root=display.drm, cache_dir=display.root / "cache"))
 
 
 def cec(display: Display) -> HdmiCecAdapter:
