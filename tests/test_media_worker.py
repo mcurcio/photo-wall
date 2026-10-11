@@ -3,21 +3,25 @@
 import asyncio
 import hashlib
 import inspect
+import io
 import json
 
 import pytest
 from media_queue import RecordingMediaQueue
+from PIL import Image
 from support.library_store_fake import FakeLibraryStore
+from support.photo_pools import photo, seed_pool
 from test_media_store import ORIGINAL, RECIPE, VARIANT, grant, queued, ready, row
 
 from central.db import ProcessTransactionClock
+from central.infra.key_content_store import PgKeyContent
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import LibraryAsset, Unreachable
 from central.planner import AcquisitionRequest
 from central.registry import RegistryError
-from media.library_client import FetchedRendition
+from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
 from media.prepare import BuildIdentity, PreparedMedia
 from media.task_queue import (
@@ -463,3 +467,96 @@ def test_a_new_key_or_address_gets_a_new_client(worker_storage):
         ("https://other.invalid/api", "another-synthetic-key")]   # a new key, then address
     with pytest.raises(MediaError, match="connection_unknown"):
         asyncio.run(instance._client("removed"))
+
+
+# Roadmap 5a (slice M1): measuring one photo's key content ---------------------------------------
+
+
+def _grey_jpeg() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (64, 48), (128, 128, 128)).save(output, "JPEG")
+    return output.getvalue()
+
+
+class FakeFaces:
+    """The connection's LibraryClient for a measurement: Immich's faces and its thumbnail."""
+
+    def __init__(self, thumbnail=b"", *, faces=(), faces_fault=None, thumbnail_fault=None,
+                 delay=0.0):
+        self.thumbnail_bytes, self.boxes, self.delay = thumbnail, faces, delay
+        self.faces_fault, self.thumbnail_fault = faces_fault, thumbnail_fault
+        self.asked = []
+
+    async def faces(self, upstream_id):
+        self.asked.append(("faces", upstream_id))
+        if self.faces_fault:
+            raise self.faces_fault
+        return self.boxes
+
+    async def thumbnail(self, upstream_id, revision):
+        self.asked.append(("thumbnail", upstream_id, revision))
+        await asyncio.sleep(self.delay)
+        if self.thumbnail_fault:
+            raise self.thumbnail_fault
+        return self.thumbnail_bytes
+
+    async def close(self):
+        pass
+
+
+def _measuring(storage, client, **limits):
+    pooled = photo("measured", taken_at=900)
+    seed_pool(storage, "family:1", (pooled,))
+    store = PgKeyContent(storage.db, times=ProcessTransactionClock(storage.clock))
+    instance = worker(storage, client, key_content=store, limits=WorkerLimits(**limits))
+    return pooled, store, instance
+
+
+def _analysis(storage, store, asset_id):
+    with storage.db.transaction() as conn:
+        return store.analyses_in(conn, [asset_id], now=storage.clock.utc()).get(asset_id)
+
+
+def test_measure_records_the_faces_and_interest_of_the_photo_at_its_revision(worker_storage):
+    face = FaceBox(x1=0, y1=0, x2=20, y2=20, image_width=64, image_height=48)
+    client = FakeFaces(_grey_jpeg(), faces=(face,))
+    pooled, store, instance = _measuring(worker_storage, client)
+    asyncio.run(instance.measure(pooled.asset_id))
+    analysis = _analysis(worker_storage, store, pooled.asset_id)
+    assert analysis.status == "measured" and len(analysis.key.faces) == 1
+    assert client.asked == [("faces", pooled.upstream_id),
+                            ("thumbnail", pooled.upstream_id, pooled.revision)]
+    asyncio.run(instance.measure("asset-gone"))       # the asset is gone: nothing to do
+    assert client.asked[2:] == []
+
+
+@pytest.mark.parametrize(("client", "limits", "reason"), [
+    (FakeFaces(b"corrupt thumbnail"), {}, "decode"),
+    (FakeFaces(thumbnail_fault=MediaError("thumbnail_unsupported", "incompatible")), {},
+     "decode"),
+    (FakeFaces(_grey_jpeg(), delay=0.5), {"measure_seconds": 0.05}, "timeout"),
+])
+def test_a_photo_that_cannot_be_measured_is_recorded_failed(worker_storage, client, limits,
+                                                            reason):
+    pooled, store, instance = _measuring(worker_storage, client, **limits)
+    asyncio.run(instance.measure(pooled.asset_id))
+    assert _analysis(worker_storage, store, pooled.asset_id).model_dump() == {
+        "status": "failed", "reason": reason}
+
+
+@pytest.mark.parametrize("client", [
+    FakeFaces(_grey_jpeg(), faces_fault=LibraryUnavailable(Unreachable())),
+    FakeFaces(_grey_jpeg(), thumbnail_fault=MediaError("asset_changed", "incompatible")),
+    FakeFaces(_grey_jpeg(), thumbnail_fault=MediaError("upstream_unavailable")),
+])
+def test_a_library_failure_is_retried_and_records_nothing(worker_storage, client):
+    pooled, store, instance = _measuring(worker_storage, client)
+    with pytest.raises(RetryableMediaTask):
+        asyncio.run(instance.measure(pooled.asset_id))
+    assert _analysis(worker_storage, store, pooled.asset_id) is None
+
+
+def test_measure_without_a_key_content_store_is_a_configuration_error(worker_storage):
+    instance = worker(worker_storage, FakeFaces())
+    with pytest.raises(MediaError, match="media_config"):
+        asyncio.run(instance.measure("asset-1"))

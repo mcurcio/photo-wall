@@ -72,14 +72,19 @@ class ProcrastinateMediaQueue:
         """Queue MEASURE_KEY_CONTENT_TASK(asset_id=...) on MEDIA_QUEUE in the caller's
         transaction, queueing lock KEY_CONTENT_QUEUE_PREFIX + asset id and no lock (slice M1); an
         already queued measurement coalesces."""
-        raise NotImplementedError
+        return self._defer_coalescing(conn, MEASURE_KEY_CONTENT_TASK,
+                                      KEY_CONTENT_QUEUE_PREFIX + asset_id, exclusive=False,
+                                      asset_id=asset_id)
 
-    def _defer_coalescing(self, conn: Any, task: str, lock: str, **arguments: str) -> QueueReceipt:
-        """Defer `task` once per `lock`: a queued (not yet running) duplicate coalesces. The
-        savepoint keeps the caller's transaction usable after Procrastinate's refusal."""
+    def _defer_coalescing(self, conn: Any, task: str, lock: str, *, exclusive: bool = True,
+                          **arguments: str) -> QueueReceipt:
+        """Defer `task` once per `lock`: a queued (not yet running) duplicate coalesces; with
+        `exclusive` it also runs one at a time per `lock`. The savepoint keeps the caller's
+        transaction usable after Procrastinate's refusal."""
         try:
             with conn.transaction():
-                self.app.configure_task(task, queue=MEDIA_QUEUE, lock=lock, queueing_lock=lock,
+                self.app.configure_task(task, queue=MEDIA_QUEUE,
+                                        lock=lock if exclusive else None, queueing_lock=lock,
                                         connection=conn).defer(**arguments)
             return QueueReceipt(coalesced=False)
         except procrastinate.exceptions.AlreadyEnqueued:
