@@ -4,10 +4,12 @@ import { apiWrite } from "./apiWrite.js";
 import {
   buildSave,
   draftId,
+  inRange,
   NEW_SCENE_DRAFT,
   normalizeScene,
   sceneEditDraft,
   sceneProblems,
+  SETTING_RANGES,
   UNAUTHORABLE_REASON,
 } from "./authoring.js";
 import { useConfirm } from "./ConfirmAction.jsx";
@@ -144,12 +146,16 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   }, [loaded, frameKey, value.targets, draft.key, patch]);
 
   // A hand-picked Scene picks from its first Source; its candidates are read again when that
-  // Source's check moves on (a new check, or one completed).
+  // Source's check moves on (a new check, or one completed). Central judges each photo's fit at
+  // the draft's crop limit (roadmap 5a, run ledger K2), so a Frame offers exactly what the Scene
+  // will show there; a limit outside its range is Playback's problem, and Central's default
+  // judges meanwhile.
   const firstSource = sources.find((source) => source.source_ref === value.sourceRefs[0]) ?? null;
   const candidates = useCandidates(
     draft.key !== null && value.mode === "authored" ? value.sourceRefs[0] ?? "" : "",
     value.targets,
     checkStamp(firstSource?.check),
+    inRange(value.cropLimit, SETTING_RANGES.cropLimit) ? Number(value.cropLimit) : undefined,
   );
 
   // A per-frame choice belongs to one Source's catalog: once a frame's candidates are

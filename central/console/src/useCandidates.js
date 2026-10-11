@@ -18,14 +18,16 @@ const EMPTY = {};
  * @param {string} sourceRef "" reads nothing
  * @param {string[]} targetIds
  * @param {number} catalogRevision the Source's served completed refresh revision
+ * @param {number} [cropLimit] the Scene's crop limit (a fraction) Central judges each
+ *   photo's fit at (roadmap 5a); Central's default when not given. A change reads again.
  * @returns {{byFrame: Record<string, Array<object>>, loading: boolean,
  *            error: string|null, ready: boolean, reload: () => void}}
  */
-export function useCandidates(sourceRef, targetIds, catalogRevision = 0) {
+export function useCandidates(sourceRef, targetIds, catalogRevision = 0, cropLimit = undefined) {
   const [nonce, setNonce] = useState(0);
   const targetKey = targetIds.join(" ");
   const key = sourceRef === "" || targetKey === "" ? "" :
-    `${nonce}\n${sourceRef}\n${targetKey}\n${catalogRevision}`;
+    `${nonce}\n${sourceRef}\n${targetKey}\n${catalogRevision}\n${cropLimit ?? ""}`;
   const [loaded, setLoaded] = useState(
     /** @type {{key: string, byFrame: Record<string, Array<object>>, error: string|null}} */ ({
       key: "",
@@ -45,7 +47,7 @@ export function useCandidates(sourceRef, targetIds, catalogRevision = 0) {
         const entries = await Promise.all(
           frameIds.map(async (frameId) => [
             frameId,
-            (await readCandidates(sourceRef, frameId)).candidates,
+            (await readCandidates(sourceRef, frameId, cropLimit)).candidates,
           ]),
         );
         if (!ignore) {
@@ -60,7 +62,7 @@ export function useCandidates(sourceRef, targetIds, catalogRevision = 0) {
     return () => {
       ignore = true;
     };
-    // `key` carries sourceRef, targetKey and the reload nonce.
+    // `key` carries sourceRef, targetKey, the crop limit and the reload nonce.
   }, [key]);
 
   const current = key !== "" && loaded.key === key;
