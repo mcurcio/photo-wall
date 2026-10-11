@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol
 from pydantic import Field
 
 from central.catalog import SourcePool
+from central.installation_models import FrameOutput
 from central.photo_library.model import (
     AlbumRef,
     AssetRevision,
@@ -24,6 +25,7 @@ from central.photo_library.model import (
     ConnectionSecret,
     ContactResult,
     ContactTicket,
+    CopySize,
     Count,
     DraftRef,
     LibraryAlbum,
@@ -31,6 +33,8 @@ from central.photo_library.model import (
     LibraryRef,
     LibraryTag,
     ListKind,
+    MeasurableCopy,
+    MeasuredCopy,
     PersonRef,
     Place,
     PoolCursor,
@@ -46,6 +50,7 @@ from central.photo_library.views import (
     ConnectionWrite,
     LibraryConnectionView,
     ListAnswer,
+    PhotoFacts,
     SourcePoolView,
 )
 from contracts.models import Instant, Model
@@ -99,6 +104,13 @@ class PhotoLibraryQueries(Protocol):
 
     def tags_by_id(self, connection_ref: ConnectionRef,
                    ids: tuple[TagRef, ...]) -> ListAnswer[LibraryTag]:
+        ...
+
+    def photo_facts(self, asset_id: str) -> PhotoFacts:
+        """GET /v1/operator/library/photos/{asset_id} (follow-ups 2026-10-11, slice A3): one
+        photo of a wanted pool, its original file and Immich's copies. LibraryRefused
+        ("photo_not_found", 404) for an id no wanted pool row selects (the thumbnail route's
+        rule: only such an id may be referenced)."""
         ...
 
 
@@ -272,7 +284,25 @@ class LibraryWorkerStore(Protocol):
         ...
 
     def largest_frame_edge(self) -> int | None:
-        """The long edge in pixels of the wall's largest Frame profile; None with no Frame."""
+        """The long edge in pixels of the wall's largest Frame profile; None with no Frame.
+        Retired by slice A4 (follow-ups 2026-10-11) for `frame_outputs`."""
+        ...
+
+    def frame_outputs(self) -> tuple[FrameOutput, ...]:
+        """Every Frame's Frame output (`central.infra.display_store.frame_outputs_in`, its own
+        transaction): what the rendition choice must cover (slice A1; read by A4)."""
+        ...
+
+    def copy_sizes(self, asset_id: str) -> dict[MeasurableCopy, CopySize]:
+        """Every copy of this revision Photo Wall has measured (its `asset_copies` rows; slice
+        A2). Empty for an unknown asset id."""
+        ...
+
+    def record_copies(self, asset_id: str, measured: Sequence[MeasuredCopy]) -> None:
+        """After a fetch: upsert each measured copy's type and size at the database's time, one
+        `asset_copies` row per (asset_id, copy). Idempotent; a cache of Immich, never the source
+        of truth (a fetch always measures what it downloads). An asset id with no
+        `asset_revisions` row writes nothing (slice A2)."""
         ...
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:

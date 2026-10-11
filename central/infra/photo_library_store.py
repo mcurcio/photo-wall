@@ -130,6 +130,17 @@ def _item_ref(kind: str, item: Any) -> str:
             return _FIELD.join((item.country, item.state or "", item.city or ""))
 
 
+def library_assets_in(conn: Any, asset_ids: Iterable[str]) -> dict[str, LibraryAsset]:
+    """Each named revision as a LibraryAsset, in the caller's transaction (follow-ups 2026-10-11,
+    owner item 6; slice A2): its `asset_revisions` row (revision, width, height, duration) joined
+    to its parent `library_assets` row (connection, Immich id, kind, taken time, the original's
+    facts as `OriginalFile`, None when every original column is NULL). An id with no row is
+    absent. The one place a stored asset becomes a LibraryAsset: job leases
+    (`central.media_repository`, `central.media_store`) and the key content measurement
+    (roadmap 5a, `central.infra.key_content_store`) all read here."""
+    raise NotImplementedError
+
+
 class DraftForSave(NamedTuple):
     pool_key: PoolKey
     query: SourceQuery
