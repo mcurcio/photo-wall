@@ -5024,3 +5024,7 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - The `check_this_frame` browser cases seed their Source's catalog through the old refresh (candidates still come from it until P1/I1) and now also give it a pool (`_pooled`), since step 4 reads pools.
 - `tests/browser/test_show_now_browser.py` (not on the page, the console lane's) follows Show now's "Saved Sources" region and Check now; its historical and authored case is renamed `…_without_check_now`.
 - The grep proof is `tests/test_console_sources.py::test_no_console_module_reads_a_retired_source_field` (the release list's own `/refresh` route is allowed).
+
+## E-P4-K-BASELINES (console lane, 2026-10-11) · provisional catalog baselines
+- The 33 new stories' baselines (66 PNGs) were rendered by `scripts/catalog_baselines.py` with `PHOTO_WALL_CATALOG_PLATFORM=linux/arm64`: this Mac's Docker cannot run the pinned amd64 image (`exec format error`). They passed render and axe there; CI's `console-catalog` leg (amd64) confirms them, and a leg that differs past its threshold is re-rendered there with the same command.
+- Running it needs `--output /tmp/pw-results`: pytest-playwright otherwise clears the repo's own `test-results/` through the read-only mount.
