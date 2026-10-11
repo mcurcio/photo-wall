@@ -122,22 +122,24 @@ G6 follows the existing release choices in [console DDD Part E](operator-console
 
 **1a → 1x → 1b → 1c → 4 → 2a → 2b → 3b-i → 3b-ii → 5a → 5b → 3 → 6 → 7.** The owner's priority is a visibly working wall: real photo sources (4) depend on nothing and give the most visible change, so they come right after the three knobs (the owner can move 4 back). Home Assistant (3) comes after the slideshow work because it needs Frame names, status words and Show now with an end time first.
 
-| # | Delivery | Size | Outcome | Depends on |
-|---|---|---|---|---|
-| [1a](#1a-the-frame-page) | The Frame page | M | Set a Frame's position from its own page, with no timeout | none |
-| [1x](#1x-expose-what-already-exists) | Expose what already exists | S | Every setting Central or the Pi can already do has a control | none |
-| [1b](#1b-display-identity-and-power) | Display identity and power | L | Turn a display off and on from the console; its settings follow it | 1a |
-| [1c](#1c-brightness-contrast-and-colour) | Brightness, contrast and colour | M | Brightness and contrast act on the display where it allows | 1b |
-| [4](#4-real-photo-sources) | Real photo sources | L | Connect Immich and build a real Photo source in the console | none |
-| [2a](#2a-power-night-off-and-all-offon) | Power: Night off and All off/on | M | Displays go off at 23:00 and on at 07:00 | 1b; **owner: U1 amendment** |
-| [2b](#2b-the-week) | The week | M | One repeating Schedule; every Frame says why it plays | 2a |
-| [3b-i](#3b-i-home-and-phone) | Home and phone | L | Check and act on the wall from a phone, signed in | 2a, 2b |
-| [3b-ii](#3b-ii-the-live-map) | The live map | M | Each tile shows what its Pi presents | 3b-i |
-| [5a](#5a-photo-fit-and-order) | Photo fit and order | L | No cropped portraits, no bare letterbox, shuffle | 4; **owner: D13** (for no-repeat) |
-| [5b](#5b-video-captions-and-transitions) | Video, captions and transitions | M | Muted, capped videos; captions on request | 5a |
-| [3](#3-home-assistant) | Home Assistant | L | Frames as Home Assistant devices; motion wakes a room | 2a, 2b, 3b-i |
-| [6](#6-setup-and-hardware-life) | Setup and hardware life | L | Fresh install to photos, and a Pi swap, without help | 1b, 2b |
-| [7](#7-peace-of-mind) | Peace of mind | L | Backups, safe upgrades, notifications, logs | 3b-i |
+**Developed** names the merged pull request that built the delivery; a dash means it is still to do. Each delivery's pull request fills in its own row.
+
+| # | Delivery | Size | Outcome | Depends on | Developed |
+|---|---|---|---|---|---|
+| [1a](#1a-the-frame-page) | The Frame page | M | Set a Frame's position from its own page, with no timeout | none | [#70](https://github.com/mcurcio/photo-wall/pull/70) |
+| [1x](#1x-expose-what-already-exists) | Expose what already exists | S | Every setting Central or the Pi can already do has a control | none | [#71](https://github.com/mcurcio/photo-wall/pull/71) |
+| [1b](#1b-display-identity-and-power) | Display identity and power | L | Turn a display off and on from the console; its settings follow it | 1a | [#76](https://github.com/mcurcio/photo-wall/pull/76) |
+| [1c](#1c-brightness-contrast-and-colour) | Brightness, contrast and colour | M | Brightness and contrast act on the display where it allows | 1b | [#79](https://github.com/mcurcio/photo-wall/pull/79) |
+| [4](#4-real-photo-sources) | Real photo sources | L | Connect Immich and build a real Photo source in the console | none | — |
+| [2a](#2a-power-night-off-and-all-offon) | Power: Night off and All off/on | M | Displays go off at 23:00 and on at 07:00 | 1b; **owner: U1 amendment** | — |
+| [2b](#2b-the-week) | The week | M | One repeating Schedule; every Frame says why it plays | 2a | — |
+| [3b-i](#3b-i-home-and-phone) | Home and phone | L | Check and act on the wall from a phone, signed in | 2a, 2b | — |
+| [3b-ii](#3b-ii-the-live-map) | The live map | M | Each tile shows what its Pi presents | 3b-i | — |
+| [5a](#5a-photo-fit-and-order) | Photo fit and order | L | No cropped portraits, no bare letterbox, shuffle | 4; **owner: D13** (for no-repeat) | — |
+| [5b](#5b-video-captions-and-transitions) | Video, captions and transitions | M | Muted, capped videos; captions on request | 5a | — |
+| [3](#3-home-assistant) | Home Assistant | L | Frames as Home Assistant devices; motion wakes a room | 2a, 2b, 3b-i | — |
+| [6](#6-setup-and-hardware-life) | Setup and hardware life | L | Fresh install to photos, and a Pi swap, without help | 1b, 2b | — |
+| [7](#7-peace-of-mind) | Peace of mind | L | Backups, safe upgrades, notifications, logs | 3b-i | — |
 
 ### Owner decisions the order waits on
 
