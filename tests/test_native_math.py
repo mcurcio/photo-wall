@@ -23,7 +23,6 @@ from player.geometry import (
     output_pixel,
     output_to_picture,
     photo_rect,
-    picture_aspect,
     picture_source_uv,
     transform,
 )
@@ -180,42 +179,47 @@ def test_corners_fit_stretches_the_picture_onto_the_corners(corners, rotation):
         assert picture_source_uv(x, y, fit, HD, 1.6, 320, 200) == pytest.approx((s, t), abs=1e-9)
 
 
-@pytest.mark.parametrize("rotation", (0, 7, 45, 90, 135))
-def test_cover_is_tight_and_unskewed(rotation):
-    """R1 case 2: in Cover every opening corner lands in the picture, the picture touches the
-    opening on every side, and the picture is turned and scaled evenly in output pixels."""
-    fit = CoverFit(corners=OPENING, rotation=rotation)
-    matrix = output_to_picture(fit, HD)
-    mapped = [transform(matrix, x, y) for x, y in OPENING]
-    for u, v in mapped:
-        assert -1e-9 <= u <= 1 + 1e-9 and -1e-9 <= v <= 1 + 1e-9
-    us, vs = [u for u, _ in mapped], [v for _, v in mapped]
-    assert min(us) == pytest.approx(0, abs=1e-9) and max(us) == pytest.approx(1, abs=1e-9)
-    assert min(vs) == pytest.approx(0, abs=1e-9) and max(vs) == pytest.approx(1, abs=1e-9)
-    # The linear part from output PIXELS to the picture, inverted: the picture's u and v edges in
-    # pixels. Orthogonal, and as long as the cover rectangle is wide and tall: no skew.
+def _picture_edges(matrix) -> tuple[tuple[float, float], tuple[float, float]]:
+    """The linear part of `matrix` from output PIXELS to the picture, inverted: the picture's u
+    and v edges in output pixels."""
     a, b = matrix[0] / HD[0], matrix[1] / HD[1]
     c, d = matrix[3] / HD[0], matrix[4] / HD[1]
     det = a*d - b*c
-    u_edge, v_edge = (d/det, -c/det), (-b/det, a/det)
-    rectangle = cover_rectangle(OPENING, rotation, HD)
+    return (d/det, -c/det), (-b/det, a/det)
+
+
+@pytest.mark.parametrize("aspect", (16 / 9, 9 / 16))
+@pytest.mark.parametrize("rotation", (0, 7, 45, 90, 135))
+def test_cover_is_the_smallest_unskewed_rectangle_of_the_profiles_aspect(rotation, aspect):
+    """R1 case 2, with the owner's rule of 2026-10-11 (""landscape" and "portrait" are
+    descriptions of the aspect ratio. whereas the angle of rotation is a quality of the way frames
+    are hung on the wall"): in Cover every opening corner lands in the picture; the picture is
+    turned and scaled evenly in output pixels (no skew); its width-to-height is the Frame
+    profile's at every angle; and it is the smallest such rectangle: shrunk by 1 % about its
+    centre, a corner falls outside. Mutation probes: centre on the corners' average, or take the
+    aspect from the corners' bounding box -> this fails."""
+    fit = CoverFit(corners=OPENING, rotation=rotation)
+    matrix = output_to_picture(fit, HD, aspect)
+    mapped = [transform(matrix, x, y) for x, y in OPENING]
+    for u, v in mapped:
+        assert -1e-9 <= u <= 1 + 1e-9 and -1e-9 <= v <= 1 + 1e-9
+    shrunk = [((u - .5) / .99 + .5, (v - .5) / .99 + .5) for u, v in mapped]
+    assert any(not (0 <= u <= 1 and 0 <= v <= 1) for u, v in shrunk)
+    u_edge, v_edge = _picture_edges(matrix)
     assert u_edge[0]*v_edge[0] + u_edge[1]*v_edge[1] == pytest.approx(0, abs=1e-6)
-    assert math.hypot(*u_edge) == pytest.approx(rectangle.width, rel=1e-9)
-    assert math.hypot(*v_edge) == pytest.approx(rectangle.height, rel=1e-9)
+    assert math.hypot(*u_edge) / math.hypot(*v_edge) == pytest.approx(aspect, rel=1e-9)
     turn = math.radians(rotation)
     assert u_edge[0] / math.hypot(*u_edge) == pytest.approx(math.cos(turn), abs=1e-9)
     assert u_edge[1] / math.hypot(*u_edge) == pytest.approx(math.sin(turn), abs=1e-9)
 
 
 @pytest.mark.parametrize("rotation", (0, 7, 20, 45, 90))
-def test_cover_crops_the_photo_to_the_rectangle_it_draws_not_the_stored_profile(rotation):
-    """In Cover the photo's aspect is the cover rectangle's, never the stored Frame profile's (16:9
-    here, as a trial or a just-migrated Frame still has it): one output pixel along the picture's
-    width and one along its height cover the same number of photo pixels, so circles stay circles.
-    Mutation probe: crop to the profile's aspect -> the two steps differ."""
+def test_cover_crops_the_photo_once_to_the_profiles_aspect(rotation):
+    """One fit: the photo is cropped to the Frame profile's aspect (16:9 here) and the rectangle
+    Cover draws has that aspect too, so one output pixel along the picture's width and one along
+    its height cover the same number of photo pixels at any angle: circles stay circles."""
     fit = CoverFit(corners=OPENING, rotation=rotation)
-    rectangle = cover_rectangle(OPENING, rotation, HD)
-    assert picture_aspect(fit, HD, 16 / 9) == pytest.approx(rectangle.width / rectangle.height)
+    rectangle = cover_rectangle(OPENING, rotation, HD, 16 / 9)
     turn, step, source = math.radians(rotation), 20, (400, 300)
     x, y = rectangle.centre_x / HD[0], rectangle.centre_y / HD[1]
 
@@ -228,14 +232,10 @@ def test_cover_crops_the_photo_to_the_rectangle_it_draws_not_the_stored_profile(
     assert along_width == pytest.approx(along_height, rel=1e-9)
 
 
-def test_corners_crops_the_photo_to_the_stored_profile():
-    assert picture_aspect(CornersFit(corners=OPENING), HD, 16 / 9) == 16 / 9
-
-
 def test_cover_at_a_quarter_turn_puts_the_picture_top_on_the_right():
-    """A clockwise quarter turn on the full screen: the picture's top-left is the output's
-    top-right, as Corners' quarter turn has it."""
-    matrix = output_to_picture(CoverFit(rotation=90), HD)
+    """A clockwise quarter turn on the full screen of a Frame hung on its side (a 9:16 profile):
+    the picture's top-left is the output's top-right, as Corners' quarter turn has it."""
+    matrix = output_to_picture(CoverFit(rotation=90), HD, 9 / 16)
     assert transform(matrix, 1, 0) == pytest.approx((0, 0))
     assert transform(matrix, 1, 1) == pytest.approx((1, 0))
     assert transform(matrix, 0, 0) == pytest.approx((0, 1))
@@ -244,12 +244,12 @@ def test_cover_at_a_quarter_turn_puts_the_picture_top_on_the_right():
 def test_a_frame_draws_nothing_outside_its_opening():
     """R1 case 3: inside the cover rectangle but outside the opening, the Frame samples nothing."""
     fit = CoverFit(corners=((.3, .3), (.7, .3), (.7, .7), (.3, .7)), rotation=30)
-    backward = inverse(output_to_picture(fit, HD))
-    x, y = transform(backward, .02, .02)        # near the picture's top-left, outside the opening
+    backward = inverse(output_to_picture(fit, HD, 16 / 9))
+    x, y = transform(backward, .1, .1)          # near the picture's top-left, outside the opening
     assert 0 <= x <= 1 and 0 <= y <= 1
-    assert 0 < transform(output_to_picture(fit, HD), x, y)[0] < 1
-    assert picture_source_uv(x, y, fit, HD, 1, 100, 100) is None
-    assert picture_source_uv(.5, .5, fit, HD, 1, 100, 100) is not None
+    assert 0 < transform(output_to_picture(fit, HD, 16 / 9), x, y)[0] < 1
+    assert picture_source_uv(x, y, fit, HD, 16 / 9, 100, 100) is None
+    assert picture_source_uv(.5, .5, fit, HD, 16 / 9, 100, 100) is not None
 
 
 def test_two_frames_on_one_output_keep_to_their_openings():
@@ -259,7 +259,8 @@ def test_two_frames_on_one_output_keep_to_their_openings():
     reaches over A's opening and only the per-Frame mask keeps it out."""
     a = ((.04, .1), (.46, .1), (.46, .9), (.04, .9))
     b = ((.54, .15), (.95, .1), (.92, .9), (.58, .85))
-    frames = ((CoverFit(corners=a), (1.0, 0.0, 0.0)), (CoverFit(corners=b, rotation=30), (0.0, 1.0, 0.0)))
+    frames = ((CoverFit(corners=a), 9 / 16, (1.0, 0.0, 0.0)),
+              (CoverFit(corners=b, rotation=30), 9 / 16, (0.0, 1.0, 0.0)))
     operations = _operations(slope=.5)
     red, green, black = (.75, .25, .25, 1), (.25, .75, .25, 1), (0, 0, 0, 1)   # worked by hand
     seen = set()
@@ -268,7 +269,7 @@ def test_two_frames_on_one_output_keep_to_their_openings():
             x, y = (i + .5) / 97, (j + .5) / 61
             pixel = output_pixel(x, y, frames, operations, HD)
             in_a = .04 < x < .46 and .1 < y < .9
-            in_b = transform(output_to_picture(CornersFit(corners=b), HD), x, y)
+            in_b = transform(output_to_picture(CornersFit(corners=b), HD, 1), x, y)
             in_b = 0 < in_b[0] < 1 and 0 < in_b[1] < 1
             expected = red if in_a else green if in_b else black
             assert pixel == pytest.approx(expected, abs=1e-12), (x, y)

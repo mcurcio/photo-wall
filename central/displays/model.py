@@ -41,8 +41,6 @@ from enum import StrEnum
 from typing import Final, TypeGuard
 from uuid import UUID
 
-from contracts.frame_fit import OutputSize, cover_rectangle
-from contracts.models import CoverFit, FrameProfile
 from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
@@ -156,20 +154,6 @@ def adopts(position: FramePosition, seen_before: UUID | None, seen_now: UUID) ->
     """Whether the bound Frame takes `seen_now` as its Position's Display when it is recorded on its
     Output: only on a first sighting (seen_before None) and only when the commit names none."""
     return position.bound and seen_before is None and position.position_display_id is None
-
-
-def cover_profile(profile: FrameProfile, fit: CoverFit, output: OutputSize) -> FrameProfile:
-    """The Frame profile Position Save writes in Cover (roadmap 1c, slice C3; Save is its only
-    writer in Cover): width_px and height_px are the cover rectangle's
-    (contracts/frame_fit.py `cover_rectangle` at `output`, the bound Output's size in pixels as
-    the Pi reported it), rounded, each at least 1; diagonal_inches and video are kept. Writing it
-    is part of the Position commit and never raises the Frame's generation (it would invalidate
-    the commit it belongs to). The caller checks it against the Frame's physical orientation
-    (central/registry.py `_orientation_coherent`, the one copy) and refuses
-    `fit_orientation_mismatch`."""
-    cover = cover_rectangle(fit.corners, fit.rotation, output)
-    return FrameProfile.model_validate({**profile.model_dump(), "width_px": max(1, round(cover.width)),
-                                        "height_px": max(1, round(cover.height))})
 
 
 @dataclass(frozen=True)

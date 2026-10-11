@@ -65,7 +65,7 @@ def _seed(registry, profile=LANDSCAPE, rotation=None):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
     saved position in Cover (its top-left corner SAVED_X pixels in, revision 2); returns the
     Player's id. With `rotation`, the position is a Corners fit at that quarter turn, which the
-    Hardware tab's Frame profile check reads (a Cover profile is the picture's own shape)."""
+    Hardware tab's Frame profile check reads."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
@@ -409,7 +409,9 @@ def _mismatch(frame):
 
 
 def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, registry):
-    _seed(registry, PORTRAIT, rotation=0)
+    """In Cover too: the profile is the Frame's own shape, set here, never by Position's Save
+    (owner 2026-10-11). Mutation probe: compare only a Corners fit's profile -> no note."""
+    _seed(registry, PORTRAIT)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")

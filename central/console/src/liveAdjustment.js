@@ -67,10 +67,6 @@ const REFUSALS = {
   trial_baseline_revision_changed: OVERTAKEN,
   calibration_revision_conflict: OVERTAKEN,
   calibration_trial_baseline_changed: OVERTAKEN,
-  // Done in Cover (roadmap 1c F-4): the picture's shape must agree with the Frame's.
-  fit_orientation_mismatch:
-    "At this angle the picture is taller than it is wide, or the other way round, unlike this Frame. Turn it nearer to a quarter turn that matches the Frame.",
-  output_size_unknown: "The Pi has not reported this Display's size, so Cover cannot be worked out yet. Check that the Display is on and plugged in.",
 };
 const NO_ANSWER = "no_answer";
 const NO_ANSWER_WORDS = "Photo Wall's server did not answer.";
@@ -80,9 +76,6 @@ const STOPPING = new Set([
   "trial_frame_unbound",
 ]);
 const NOT_PRESENTED = "trial_latest_not_presented";
-// Refusals of the draft itself (at Done): they stay until the draft changes, not until the next
-// keepalive succeeds.
-const UNTIL_CHANGED = new Set(["fit_orientation_mismatch", "output_size_unknown"]);
 // Begin is refused while another session for this Frame runs (another window, or this page's
 // own a moment ago); Central ends an abandoned one within seconds, so it is tried again.
 const BUSY = "trial_already_active";
@@ -236,9 +229,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     const passing = current.error;
     const shown = result.data.presented_sequence === result.data.sequence &&
       result.data.presented_sha256 === result.data.candidate_sha256;
-    const clears = passing !== null && !passing.stops && (passing.code === NOT_PRESENTED ? shown
-      : !UNTIL_CHANGED.has(passing.code) || operation === "edit");
-    if (clears) {
+    if (passing !== null && !passing.stops && (passing.code !== NOT_PRESENTED || shown)) {
       current.error = null;
       setError(null);
     }

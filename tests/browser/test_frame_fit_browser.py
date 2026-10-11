@@ -3,9 +3,10 @@ more sensible default, and skewing transforms or rotations should be an explicit
 edges removed; the angle: "optional rotation angle", any angle with quarter-turn presets).
 
 The live session is test_console_frame_page_browser.py's fake Central (`FakeSessions`: Central's
-trial rules, Save through the real Registry's Save CAS), so Save in Cover writes the Frame profile's
-shape and refuses a picture whose shape disagrees with the Frame's (`fit_orientation_mismatch`, F-4)
-exactly as Central does.
+trial rules, Save through the real Registry's Save CAS), so Save keeps the fit at any angle and
+leaves the Frame profile, the one source of the Frame's aspect and orientation, as it was, exactly
+as Central does (owner 2026-10-11: ""landscape" and "portrait" are descriptions of the aspect
+ratio. whereas the angle of rotation is a quality of the way frames are hung on the wall").
 
 Mutation probes: read every saved fit as Corners (useDraft.js `fitOf`'s `mode`) -> the
 opens-on-Cover case fails (its no-saved-position fallback is not reached here: Central serves every
@@ -35,14 +36,11 @@ from test_console_frame_page_browser import (
 )
 
 from central.displays.model import Readiness
-from contracts.frame_fit import cover_rectangle
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
-
-MISMATCH = "At this angle the picture is taller than it is wide, or the other way round, unlike this Frame."
 
 
 @pytest.fixture
@@ -125,34 +123,11 @@ def test_the_90_button_and_a_typed_angle_each_send_the_angle(page, registry, ses
         expect(position.get_by_role("slider", name="Angle", exact=True)).to_have_value("7.5")
 
 
-def test_save_in_cover_shows_the_profile_shape_on_the_hardware_tab(page, registry, sessions):
-    """Cover's Save writes the Frame profile's shape: the cover rectangle of the opening at the
-    saved angle (contracts/frame_fit.py `cover_rectangle` on the 1920 x 1080 output)."""
-    _seed(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        position = _position(open_frame(page, FRAME, "position"))
-        bar = _bar(page)
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        position.get_by_label("Angle in degrees", exact=True).fill("5")
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        bar.get_by_role("button", name="Done", exact=True).click()
-        expect(page.get_by_role("status").filter(has_text="Saved at")).to_be_visible()
-        fit = _saved(registry).fit
-        assert (fit.mode, fit.rotation) == ("cover", 5)
-        cover = cover_rectangle(fit.corners, fit.rotation, (1920, 1080))
-        width, height = round(cover.width), round(cover.height)
-        assert (width, height) != (1920, 1080)
-        profile = page.get_by_role("region", name="Frame profile", exact=True)
-        open_frame(page, FRAME, "hardware")
-        expect(profile).to_contain_text(f"Pixel width: {width} px")
-        expect(profile).to_contain_text(f"Pixel height: {height} px")
-
-
-def test_a_60_degree_save_on_a_landscape_frame_says_why_in_plain_words(page, registry, sessions):
-    """At 60 degrees the cover rectangle of a landscape opening is portrait, unlike the Frame's
-    500 x 300 mm: Save refuses it (`fit_orientation_mismatch`) and the page says why, until the
-    draft changes."""
+def test_a_60_degree_save_on_a_landscape_frame_keeps_its_landscape_profile(page, registry, sessions):
+    """At 60 degrees the turned corners' bounding box is portrait, but the angle is how the Frame
+    is hung, not its orientation: Done saves the angle, and the Hardware tab still shows the
+    Frame's own 1920 x 1080 profile. Mutation probe: write the profile from the turned corners at
+    Save, or refuse the angle -> this fails."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -161,14 +136,16 @@ def test_a_60_degree_save_on_a_landscape_frame_says_why_in_plain_words(page, reg
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         position.get_by_label("Angle in degrees", exact=True).fill("60")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
         bar.get_by_role("button", name="Done", exact=True).click()
-        alert = position.get_by_role("alert")
-        expect(alert).to_contain_text(MISMATCH)
-        page.wait_for_timeout(1500)  # kept past several keepalives
-        expect(alert).to_contain_text(MISMATCH)
-        alert.get_by_role("button", name="Details", exact=True).click()
-        expect(alert).to_contain_text("fit_orientation_mismatch")
+        expect(page.get_by_role("status").filter(has_text="Saved at")).to_be_visible()
+        expect(position.get_by_role("alert")).to_have_count(0)
+        fit = _saved(registry).fit
+        assert (fit.mode, fit.rotation) == ("cover", 60)
+        profile = page.get_by_role("region", name="Frame profile", exact=True)
+        open_frame(page, FRAME, "hardware")
+        expect(profile).to_contain_text("Pixel width: 1920 px")
+        expect(profile).to_contain_text("Pixel height: 1080 px")
+        expect(page.get_by_role("group", name="Check the Display", exact=True)).to_have_count(0)
 
 
 def test_a_frame_to_check_again_is_kept_by_done_with_no_change(page, registry, sessions):
@@ -200,10 +177,10 @@ def test_a_frame_to_check_again_is_kept_by_done_with_no_change(page, registry, s
 
 def test_with_no_reported_output_size_a_step_is_a_pixel_of_a_common_screen_not_the_profile(
         page, registry, sessions):
-    """The Frame profile is the picture's shape (in Cover the cover rectangle's), never the
-    output's size: while the Pi reports no size, a step is a pixel of 1920 x 1080 and the tab says
-    so (here its output last reported disconnected). Mutation probe: fall back to the profile (1080 x 1920 here) -> the 10 px step moves the
-    corner 10/1080 of the width."""
+    """The Frame profile is the Frame's shape, never the output's size: while the Pi reports no
+    size, a step is a pixel of 1920 x 1080 and the tab says so (here its output last reported
+    disconnected). Mutation probe: fall back to the profile (1080 x 1920 here) -> the 10 px step
+    moves the corner 10/1080 of the width."""
     _seed(registry, profile=PORTRAIT, rotation=90)
     with registry.db.transaction() as conn:
         conn.execute("UPDATE outputs SET observation = jsonb_set(observation, '{connected}', 'false')")

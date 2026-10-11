@@ -19,7 +19,7 @@ from uuid import UUID
 
 from contracts.models import AppliedCalibration
 from contracts.node_frame import PictureOperations
-from player.geometry import output_to_picture, photo_rect, picture_aspect
+from player.geometry import output_to_picture, photo_rect
 from player.mainloop import Tick, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
@@ -1062,7 +1062,9 @@ class NativeRenderer:
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_ONE, gl.GL_ONE_MINUS_SRC_ALPHA)
         fit = _drawn_fit(draw)
-        matrix = output_to_picture(fit, surface.size)
+        profile = draw.composition.binding.profile
+        aspect = profile.width_px / profile.height_px      # the Frame's aspect: Cover's and the photo's
+        matrix = output_to_picture(fit, surface.size, aspect)
         gl.glUniformMatrix3fv(gl.glGetUniformLocation(program, "output_to_picture"), 1, False,
                               [matrix[row*3+column] for column in range(3) for row in range(3)])
         _set_opening(gl, program, fit.corners)
@@ -1081,9 +1083,7 @@ class NativeRenderer:
                 texture = self._upload(surface, local)
                 gl.glActiveTexture(gl.GL_TEXTURE0)
                 gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
-                profile = draw.composition.binding.profile
-                rectangle = photo_rect(picture_aspect(fit, surface.size, profile.width_px/profile.height_px),
-                                       variant.width, variant.height)
+                rectangle = photo_rect(aspect, variant.width, variant.height)
                 gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), *rectangle)
             gl.glUniform1i(gl.glGetUniformLocation(program, "video"), int(bool(variant and variant.duration)))
             gl.glUniform1i(gl.glGetUniformLocation(program, "black"), int(variant is None))

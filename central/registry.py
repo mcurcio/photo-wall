@@ -16,7 +16,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, model_validator
 
 from central.db import Database
-from central.displays.model import Readiness, cover_profile
+from central.displays.model import Readiness
 from central.infra.asset_roots import lock_fleet_assets_in
 from central.infra.display_store import (
     POSITION_COLUMNS,
@@ -761,35 +761,12 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        profile = self._cover_profile_in(conn, row, committed)
-        # The profile is part of this commit: writing it never raises the generation, so the
-        # commit below is made at the generation it belongs to (roadmap 1c, slice C3).
-        conn.execute("UPDATE frames SET calibration=%s,profile=COALESCE(%s,profile),"
+        conn.execute("UPDATE frames SET calibration=%s,"
                      "configuration_revision=configuration_revision+1 WHERE id=%s",
-                     (Jsonb(committed.model_dump(mode="json")),
-                      None if profile is None else Jsonb(profile.model_dump()), frame_id))
+                     (Jsonb(committed.model_dump(mode="json")), frame_id))
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
-
-    @staticmethod
-    def _cover_profile_in(conn, frame, committed: Calibration) -> FrameProfile | None:
-        """In Cover, the profile Position Save writes (`model.cover_profile`, at the bound Output's
-        size as the Pi reported it); None in Corners, whose profile is set as before. Refuses
-        output_size_unknown (the Output reported no size) and fit_orientation_mismatch (the cover
-        rectangle's orientation disagrees with the Frame's physical one, `_orientation_coherent`)."""
-        if not isinstance(committed.fit, CoverFit):
-            return None
-        output = conn.execute("SELECT observation FROM outputs WHERE player_id=%s AND output_id=%s",
-                              (frame["player_id"], frame["output_id"])).fetchone()
-        observation = {} if output is None else output["observation"]
-        size = (observation.get("width_px") or 0, observation.get("height_px") or 0)
-        if not all(size):
-            raise RegistryError("output_size_unknown", 409)
-        profile = cover_profile(FrameProfile.model_validate(frame["profile"]), committed.fit, size)
-        if not _orientation_coherent(frame["width_mm"], frame["height_mm"], profile.width_px, profile.height_px):
-            raise RegistryError("fit_orientation_mismatch", 409)
-        return profile
 
     def bindings_for(self, player_id: str, epoch: int, *, include_unvalidated=False) -> list[OutputBinding]:
         config = self.configuration_for(player_id, epoch)

@@ -11,9 +11,9 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
 
 1. cover_at_<angle>_degrees_matches_the_reference (0, 7, 90): Cover through the one matrix, with
    non-neutral picture operations, equals the reference at sampled pixels; black outside. The
-   binding's profile stays 16:9 while the cover rectangle is not, so the photo must be cropped to
-   the rectangle the fit draws (`picture_aspect`), not to the stored profile, or the quadrants
-   squeeze off the reference's.
+   binding's 16:9 profile sets both the cover rectangle's aspect and the photo's crop (one fit,
+   owner 2026-10-11), so a renderer that sized either another way puts the quadrants off the
+   reference's.
 2. outside_the_opening_stays_black_at_low_contrast: contrast slope 0.5 lifts black inside the
    opening, and every sampled pixel outside the opening is exactly (0, 0, 0): the mask is last.
 3. corners_fit_matches_the_reference: a skewed CornersFit at 90 degrees draws the reference's

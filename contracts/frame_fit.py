@@ -1,29 +1,29 @@
 """The Frame fit's shared geometry (roadmap 1c; run ledger .claude/runs/display-1c.md): stdlib only.
 
-Both sides that must agree on a Frame's picture import this one module: the Player draws the
-picture through it (player/geometry.py builds its one matrix on `cover_rectangle`), and Central
-writes the Frame profile's shape from it at Position Save in Cover (central/displays/model.py
-`cover_profile`). Display Host never imports it (pyproject.toml: "Display Host never computes a
-Frame's geometry"): the host never implements a second transform.
+The Player draws a Frame's picture through this one module (player/geometry.py builds its one
+matrix on `cover_rectangle`, and the scalar reference is that same code). Display Host never
+imports it (pyproject.toml: "Display Host never computes a Frame's geometry"): the host never
+implements a second transform.
 
 Rules this module owns (one home each):
 - **Corners are convex and clockwise** (`convex_clockwise`): the four corners, top-left,
   top-right, bottom-right, bottom-left in fractions of the output (origin top-left), turn the
   same way at every corner with a cross product above `CONVEX_EPSILON`, so a folded or
   degenerate quad is refused. Both fits check it; contracts/models.py's `Calibration` too.
-- **The cover rectangle** (`cover_rectangle`): in Cover, the Frame's picture is the tightest
-  unskewed rectangle, turned `rotation` degrees clockwise, that holds every corner. Worked in
-  output PIXELS, so a non-square output never skews it: the picture's axes are
-  u = (cos r, sin r) and v = (-sin r, cos r) in y-down pixels; its width is the spread of the
-  corners projected on u, its height their spread on v, and its centre is the midpoint of both
-  spreads (never the corners' average).
-- **Orientation** (setting #96) follows the cover rectangle's shape: landscape when it is at
-  least as wide as tall, so a square (45 degrees on a square opening) reads landscape and
-  nothing jumps at 45 degrees.
+- **The cover rectangle** (`cover_rectangle`): in Cover, the Frame's picture has the Frame
+  profile's aspect ratio (width_px : height_px; the profile is the one source of the Frame's
+  aspect), is turned `rotation` degrees clockwise, and is the smallest such rectangle that holds
+  every corner. Worked in output PIXELS, so a non-square output never skews it: the picture's
+  axes are u = (cos r, sin r) and v = (-sin r, cos r) in y-down pixels; with the corners'
+  projected spans du on u and dv on v and the aspect a = width / height, the height is
+  max(du / a, dv) and the width a x height; the centre is the midpoint of both spans (never the
+  corners' average).
 
-Rules it does NOT own: the per-Frame and per-Output masks and the final pass (the Player,
-player/geometry.py and player/native.py); which fit a Frame uses and where its profile is stored
-(Central).
+Rules it does NOT own: orientation (setting #96), which is the Frame profile's aspect alone (the
+angle never changes it; owner 2026-10-11: ""landscape" and "portrait" are descriptions of the
+aspect ratio. whereas the angle of rotation is a quality of the way frames are hung on the
+wall"); the per-Frame and per-Output masks and the final pass (the Player, player/geometry.py and
+player/native.py); which fit a Frame uses and where its profile is stored (Central).
 """
 from __future__ import annotations
 
@@ -61,23 +61,22 @@ class CoverRectangle:
     height: float
     rotation: float
 
-    @property
-    def landscape(self) -> bool:
-        """Orientation (#96): at least as wide as tall (a square reads landscape)."""
-        return self.width >= self.height
 
-
-def cover_rectangle(corners: Corners, rotation: float, output: OutputSize) -> CoverRectangle:
-    """The tightest rectangle turned `rotation` degrees clockwise that holds every corner, worked in
-    output pixels (corners scaled by `output`). Pure. ValueError("cover_rotation") unless
-    0 <= rotation < 360 and finite; ValueError("cover_output") unless both sizes >= 1;
-    ValueError("cover_corners") unless `convex_clockwise(corners)`."""
+def cover_rectangle(corners: Corners, rotation: float, output: OutputSize, aspect: float) -> CoverRectangle:
+    """The smallest rectangle of width-to-height `aspect` (the Frame profile's width_px / height_px)
+    turned `rotation` degrees clockwise that holds every corner, worked in output pixels (corners
+    scaled by `output`). Pure. ValueError("cover_rotation") unless 0 <= rotation < 360 and finite;
+    ValueError("cover_output") unless both sizes >= 1; ValueError("cover_aspect") unless `aspect`
+    is finite and above 0; ValueError("cover_corners") unless `convex_clockwise(corners)`."""
     if not (isinstance(rotation, (int, float)) and not isinstance(rotation, bool)
             and math.isfinite(rotation) and 0 <= rotation < 360):
         raise ValueError("cover_rotation")
     width, height = output
     if not (type(width) is int and type(height) is int and width >= 1 and height >= 1):
         raise ValueError("cover_output")
+    if not (isinstance(aspect, (int, float)) and not isinstance(aspect, bool)
+            and math.isfinite(aspect) and aspect > 0):
+        raise ValueError("cover_aspect")
     if not convex_clockwise(corners):
         raise ValueError("cover_corners")
     turn = math.radians(rotation)
@@ -87,9 +86,9 @@ def cover_rectangle(corners: Corners, rotation: float, output: OutputSize) -> Co
     along_v = [-x * sin + y * cos for x, y in pixels]
     mid_u = (min(along_u) + max(along_u)) / 2
     mid_v = (min(along_v) + max(along_v)) / 2
+    tall = max((max(along_u) - min(along_u)) / aspect, max(along_v) - min(along_v))
     return CoverRectangle(centre_x=mid_u * cos - mid_v * sin, centre_y=mid_u * sin + mid_v * cos,
-                          width=max(along_u) - min(along_u), height=max(along_v) - min(along_v),
-                          rotation=float(rotation))
+                          width=aspect * tall, height=tall, rotation=float(rotation))
 
 
 __all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize", "Point",

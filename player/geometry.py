@@ -4,15 +4,16 @@ Roadmap 1c (run ledger .claude/runs/display-1c.md, slice R1) adds the Frame fit 
 pass, each stated once here and mirrored by player/native.py's shaders:
 - **One matrix per fit** (`output_to_picture`): output fractions -> the picture's unit square.
   Corners: the inverse perspective onto the corners with the quarter turn folded in. Cover: the
-  inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle, worked
-  in output pixels so a non-square output never skews it.
+  inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle (the
+  Frame profile's aspect), worked in output pixels so a non-square output never skews it.
 - **Per-Frame mask** (`inside_opening`): a Frame draws nothing outside its own opening (owner
   2026-10-10 q2: outside the Frame is "someone else's territory"), in the position pass.
 - **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated
   order, then the per-Output mask LAST, so black stays black outside every opening whatever
   the picture settings.
-- **Photo fit** (`photo_rect`): each photo's source rectangle, centred cover of the Frame's
-  aspect (Photo fit #48/#102; no trim, owner q3).
+- **Photo fit** (`photo_rect`): each photo's source rectangle, centred cover of the Frame
+  profile's aspect (Photo fit #48/#102; no trim, owner q3). It is the one crop in either fit: in
+  Cover the drawn rectangle has that same aspect, so the photo is never cropped twice or squeezed.
 """
 
 from __future__ import annotations
@@ -117,14 +118,12 @@ def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], flo
     return (*(encode_srgb(v) for v in rgb), 1.0)
 
 
-def _cover_matrix(fit: CoverFit, output: OutputSize) -> Matrix:
+def _cover_matrix(fit: CoverFit, output: OutputSize, aspect: float) -> Matrix:
     """Output fractions -> picture unit square for Cover: the inverse of "rotate `rotation`
     clockwise, scale to the cover rectangle's width and height, move to its centre", all in
     output pixels. With the picture axes u = (cos r, sin r), v = (-sin r, cos r) (y down) and the
     pixel point p = (x W, y H): u = (p - centre).u_axis / width + 1/2, likewise v with height."""
-    rectangle = cover_rectangle(fit.corners, fit.rotation, output)
-    if not (rectangle.width > 0 and rectangle.height > 0):
-        raise ValueError("singular homography")
+    rectangle = cover_rectangle(fit.corners, fit.rotation, output, aspect)
     width_px, height_px = output
     turn = math.radians(rectangle.rotation)
     cos, sin = math.cos(turn), math.sin(turn)
@@ -135,25 +134,14 @@ def _cover_matrix(fit: CoverFit, output: OutputSize) -> Matrix:
             0.0, 0.0, 1.0)
 
 
-def output_to_picture(fit: CornersFit | CoverFit, output: OutputSize) -> Matrix:
+def output_to_picture(fit: CornersFit | CoverFit, output: OutputSize, aspect: float) -> Matrix:
     """The one matrix of a fit: output fractions (x, y) -> the picture's unit square (u, v), origin
-    top-left. Pure. ValueError("singular homography") for a degenerate fit."""
+    top-left, for a Frame whose profile has width-to-height `aspect` (Cover's rectangle has it;
+    Corners stretches the picture onto the corners whatever it is). Pure. ValueError("singular
+    homography") for a degenerate Corners fit; contracts/frame_fit.py's for a bad Cover one."""
     if isinstance(fit, CoverFit):
-        return _cover_matrix(fit, output)
+        return _cover_matrix(fit, output, aspect)
     return multiply(UNDO_QUARTER_TURN[fit.rotation], inverse(homography(fit.corners)))
-
-
-def picture_aspect(fit: CornersFit | CoverFit, output: OutputSize, profile_aspect: float) -> float:
-    """The width-to-height of the picture the fit draws, the one aspect a photo is cropped to. In
-    Cover it is the cover rectangle's, worked from the same `cover_rectangle` the matrix uses, so a
-    turned or trial angle never squeezes the photo; in Corners the picture is stretched onto the
-    corners, and its aspect is the stored Frame profile's (`profile_aspect`). Pure."""
-    if isinstance(fit, CoverFit):
-        rectangle = cover_rectangle(fit.corners, fit.rotation, output)
-        if not (rectangle.width > 0 and rectangle.height > 0):
-            raise ValueError("singular homography")
-        return rectangle.width / rectangle.height
-    return profile_aspect
 
 
 def inside_opening(corners: Corners, x: float, y: float) -> bool:
@@ -187,14 +175,14 @@ def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: Ou
                       source_width: int, source_height: int) -> tuple[float, float] | None:
     """The source UV one Frame samples at output point (x, y); None outside its opening or its
     picture. The per-Frame mask (the opening) comes first, so a Frame never
-    draws over its neighbour, then the picture's unit square. The photo is cropped to
-    `picture_aspect` (`profile_aspect` counts only in Corners)."""
+    draws over its neighbour, then the picture's unit square. The photo is cropped to the Frame
+    profile's aspect (`profile_aspect`), in either fit."""
     if not inside_opening(fit.corners, x, y):
         return None
-    u, v = transform(output_to_picture(fit, output), x, y)
+    u, v = transform(output_to_picture(fit, output, profile_aspect), x, y)
     if not (0 <= u <= 1 and 0 <= v <= 1):
         return None
-    left, top, right, bottom = photo_rect(picture_aspect(fit, output, profile_aspect), source_width, source_height)
+    left, top, right, bottom = photo_rect(profile_aspect, source_width, source_height)
     return left + u*(right-left), top + v*(bottom-top)
 
 
@@ -214,16 +202,17 @@ def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool) 
     return (*pixel, 1.0)
 
 
-def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFit, Linear]],
+def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFit, float, Linear]],
                  operations: PictureOperations, output: OutputSize) -> tuple[float, float, float, float]:
-    """The reference for one Output carrying several Frames, each drawn as one flat linear colour:
+    """The reference for one Output carrying several Frames, each a fit, its profile's aspect and
+    one flat linear colour:
     the colour of the last Frame whose opening holds (x, y), black where none does, through
     `final_pixel` with `inside` = some opening holds it. Pure; the two-Frames test's oracle. Each
     Frame's coverage is where it samples its picture (`picture_source_uv`), so the per-Frame mask
     decides what a Frame paints; the per-Output mask is the union of the openings."""
     colour: Linear = (0.0, 0.0, 0.0)
-    for fit, flat in frames:
-        if picture_source_uv(x, y, fit, output, 1.0, 1, 1) is not None:
+    for fit, aspect, flat in frames:
+        if picture_source_uv(x, y, fit, output, aspect, 1, 1) is not None:
             colour = flat
-    inside = any(inside_opening(fit.corners, x, y) for fit, _ in frames)
+    inside = any(inside_opening(fit.corners, x, y) for fit, _, _ in frames)
     return final_pixel(colour, operations, inside=inside)

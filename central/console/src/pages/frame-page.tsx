@@ -54,8 +54,8 @@ const TABS = [
 /**
  * The output's size in pixels, as the Pi reported it; null when it reported none. Position's
  * steps and corner pixels are pixels of the output, whatever way the picture is turned in it.
- * Never the Frame profile: in Cover that is the cover rectangle's size, not the output's (the
- * same reason Central refuses a Cover Save `output_size_unknown`).
+ * Never the Frame profile: that is the Frame's shape, not the output's (a Frame may fill part
+ * of its output, or be hung turned in it).
  */
 function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
   const reported = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
