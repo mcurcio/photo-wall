@@ -20,6 +20,7 @@ from contracts.models import (
     Readiness,
     Revocation,
 )
+from contracts.on_screen import kept_from
 from contracts.time import Clock, TimeMapping
 from player.cache import Cache, CacheCapacityError, CacheError
 from player.rendering import (
@@ -452,12 +453,12 @@ class Executor:
     def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
         """A drawn layer, covered or not, sets what its Frame keeps for when nothing plays
         (`Layer.after_end`, planned by Central): nothing, from its first draw; or this photo,
-        at full strength, from the first draw after its fade-in."""
+        at full strength, from its first draw at or after `kept_from` (contracts/on_screen.py)."""
         layer = local.layer
         if layer.after_end == "keep_nothing":
             self._retained.pop(binding.output_id, None)
             return
-        if layer.after_end == "leave_as_is" or now < layer.start + layer.fade_in:
+        if layer.after_end == "leave_as_is" or now < kept_from(layer):
             return
         identity = (f"{binding.output_id}:{binding.frame_id}:"
                     f"{binding.generation}:{layer.assignment_id}")
