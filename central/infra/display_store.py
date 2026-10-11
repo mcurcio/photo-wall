@@ -16,6 +16,14 @@ display" and of the Output document's body:
   `NOTIFY OUTPUT_DOCUMENTS_CHANNEL, '<device_id>'`, sent from app code (no trigger); the worker
   `LISTEN`s on one connection (`DisplayWakes.listen`), and the source also wakes at the earliest
   live `ends_at` of its Node, so a test leaves the document when it ends with no other write.
+- Roadmap 1c (run ledger .claude/runs/display-1c.md, slices C1 and C2; migration 075): each
+  document also carries the picture part of the Display last seen on its Output
+  (central/displays/picture.py `output_picture` of `effective_picture`), with its own
+  `picture_change` that rises only when that part's digest differs; the judge places a Display's
+  unplaced settings at its first report with a picture part; `PgPictureSessions` is the Picture
+  tab (`PictureQueries`, `PictureCommands`): the session, Done, Revert and Copy. The source also
+  wakes at the earliest idle deadline of a picture session on its Node's Displays, so an abandoned
+  session's revert reaches the Pi with no reaper.
 
 Readiness (slice C2; migration 073) is worked out by `model.readiness` from facts read here and
 nowhere else: `POSITION_COLUMNS` over `SEEN_DISPLAY_JOIN` gives every reader (the Registry's
@@ -40,6 +48,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any, Final
 from uuid import UUID
 
@@ -68,29 +77,46 @@ from central.displays.model import (
     serial_usable,
 )
 from central.displays.picture import (
+    PICTURE_IDLE_SECONDS,
     DisplayPicture,
+    PictureRefused,
     PictureSession,
+    PictureStatus,
     Setting,
     StoredSetting,
+    copied,
     default_picture,
+    edited,
     effective_picture,
     output_picture,
+    picture_status,
+    placed,
     placed_at_first_probe,
+    reverted,
 )
 from central.displays.ports import DisplayRefused
 from central.displays.views import (
+    CopyOutcome,
     DisplayPowerSettings,
     DisplayView,
     FrameDisplayView,
+    FramePictureView,
     FramePowerView,
     InForceView,
     ModeView,
+    PictureCopyRequest,
+    PictureCopyResult,
+    PictureEdit,
+    PicturePlace,
+    PictureSequence,
+    PictureSessionView,
+    PictureSettingView,
     PowerTestAccepted,
     PowerTestView,
 )
 from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgLinkStores
-from central.live_session import Lease
+from central.live_session import Lease, begin_lease, touched
 from contracts.node_link import Pipe
 from contracts.node_output import (
     AS_THE_DISPLAY_HAS_IT,
@@ -105,6 +131,7 @@ from contracts.node_output import (
     Power,
     PowerMethod,
     RequestReason,
+    SettingReport,
     decode_output_document,
     decode_output_report,
     encode_output_document,
@@ -291,14 +318,15 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
 
 def _place_at_first_probe(conn: Any, display_id: UUID, probe: PictureReport) -> None:
     """Place the Display's unplaced picture settings by what the display answered
-    (`picture.placed_at_first_probe`); a placed setting is never moved by a report (sticky)."""
+    (`picture.placed_at_first_probe`, the one home of "sticky": a placed setting is never moved by
+    a report); written only when that placed something."""
     row = conn.execute(f"SELECT {_PICTURE_COLUMNS} FROM displays d WHERE d.id=%s FOR NO KEY UPDATE",  # noqa: S608
                        (display_id,)).fetchone()
     stored = stored_picture(row)
-    if stored.brightness.acts_on is not None and stored.contrast.acts_on is not None:
-        return
-    write_picture(conn, display_id, placed_at_first_probe(
-        stored, brightness_answered=probe.brightness_answered, contrast_answered=probe.contrast_answered))
+    placed = placed_at_first_probe(stored, brightness_answered=probe.brightness_answered,
+                                   contrast_answered=probe.contrast_answered)
+    if placed != stored:
+        write_picture(conn, display_id, placed)
 
 
 def resolve_output(conn: Any, player_id: str, output_id: str) -> None:
@@ -792,7 +820,235 @@ class PgDisplayCommands:
         return DisplayPowerSettings(**row)
 
 
+# --- The Picture tab (roadmap 1c, slice C2) ------------------------------------------------------
+
+# A Frame `f` with its binding, the Display last seen on its Output, that Display's open session
+# and the Output's latest document and report.
+_PICTURE_FRAME: Final = (
+    f"SELECT f.id AS frame_id, b.player_id, seen.display_id, seen.connected, seen.report, w.document, "  # noqa: S608
+    f"d.id AS d_id, {_PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+    f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id "
+    "LEFT JOIN picture_sessions ps ON ps.display_id=d.id "
+    "LEFT JOIN output_documents w ON w.player_id=b.player_id AND w.output_id=b.output_id")
+
+# A session `ps` with its Display and the Output report and document of the Frame it was opened on.
+_PICTURE_SESSION: Final = (
+    f"SELECT {_SESSION_COLUMNS}, {_PICTURE_COLUMNS}, seen.report, w.document FROM picture_sessions ps "  # noqa: S608
+    "JOIN displays d ON d.id=ps.display_id LEFT JOIN bindings b ON b.frame_id=ps.frame_id "
+    f"{SEEN_DISPLAY_JOIN} LEFT JOIN output_documents w ON w.player_id=b.player_id AND w.output_id=b.output_id "
+    "WHERE ps.id=%s FOR UPDATE OF ps, d")
+
+_NODES_SEEING: Final = ("SELECT DISTINCT p.device_id FROM output_displays o JOIN players p ON p.id=o.player_id "
+                        "WHERE o.display_id=%s")
+
+
+def _stored_document(row: Mapping[str, Any]) -> OutputDocument | None:
+    return None if row["document"] is None else decode_output_document(_json_bytes(row["document"]))
+
+
+def _stored_report(row: Mapping[str, Any]) -> OutputReport | None:
+    return None if row["report"] is None else decode_output_report(_json_bytes(row["report"]))
+
+
+def _setting_view(setting: StoredSetting, answered: bool | None, report: SettingReport | None,
+                  current: bool) -> PictureSettingView:
+    """One of brightness and contrast on the Picture tab; the write result only when the report
+    answers the document's latest picture change (`current`)."""
+    return PictureSettingView(
+        acts_on=setting.acts_on, value=None if setting.value == AS_THE_DISPLAY_HAS_IT else setting.value,
+        answered=answered, read=None if report is None else report.read,
+        result=None if report is None or not current else report.result)
+
+
+class PgPictureSessions:
+    """`PictureQueries` and `PictureCommands` over PostgreSQL (displays, picture_sessions). The rules
+    are central/displays/picture.py's; every write locks the Display row and wakes the document
+    source of every Node that last saw that Display, in its own transaction (`_notify`)."""
+
+    def __init__(self, db: Database) -> None:
+        self._db = db
+
+    def frame_picture(self, frame_id: str) -> FramePictureView:
+        with self._db.transaction() as conn:
+            row = conn.execute(_PICTURE_FRAME + " WHERE f.id=%s", (frame_id,)).fetchone()
+            if row is None:
+                raise DisplayRefused("unknown_frame", 404)
+            now = _CLOCK.now_in(conn)
+        session = picture_session(row)
+        picture = (default_picture() if row["d_id"] is None
+                   else effective_picture(stored_picture(row), session, now))
+        document, report = _stored_document(row), _stored_report(row)
+        probe = None if report is None else report.picture
+        current = probe is not None and document is not None and probe.for_change == document.picture_change
+        live = session is not None and session.lease.live(now)
+        return FramePictureView(
+            frame_id=frame_id, display_id=row["display_id"],
+            status=picture_status(bound=row["player_id"] is not None and row["display_id"] is not None,
+                                  document=document, report=report),
+            brightness=_setting_view(picture.brightness, None if probe is None else probe.brightness_answered,
+                                     None if probe is None else probe.brightness, current),
+            contrast=_setting_view(picture.contrast, None if probe is None else probe.contrast_answered,
+                                   None if probe is None else probe.contrast, current),
+            colour_temperature_kelvin=picture.colour_temperature_kelvin, gamma_tenths=picture.gamma_tenths,
+            connected=row["connected"],
+            session=_session_view(session) if live and session is not None else None)
+
+    def begin_picture(self, frame_id: str) -> PictureSessionView:
+        with self._db.transaction() as conn:
+            frame = conn.execute(_PICTURE_FRAME + " WHERE f.id=%s FOR NO KEY UPDATE OF f", (frame_id,)).fetchone()
+            if frame is None:
+                raise DisplayRefused("unknown_frame", 404)
+            if frame["player_id"] is None:
+                raise DisplayRefused("frame_unbound", 409)
+            display_id = frame["display_id"]
+            if display_id is None:
+                raise DisplayRefused("no_display", 409)
+            now = _CLOCK.now_in(conn)
+            stored = _fold_in(conn, display_id, now)
+            if stored is None:
+                raise DisplayRefused("session_open", 409)
+            report = _stored_report(frame)
+            probe = None if report is None else report.picture
+            lease = begin_lease(now, idle_seconds=PICTURE_IDLE_SECONDS, hard_seconds=None)
+            session = PictureSession(uuid.uuid4(), display_id, 1, stored,
+                                     (None if probe is None else probe.brightness.read,
+                                      None if probe is None else probe.contrast.read), frozenset(), lease)
+            conn.execute(
+                "INSERT INTO picture_sessions(id, display_id, frame_id, sequence, draft, before_brightness, "
+                "before_contrast, touched, idle_until, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (session.session_id, display_id, frame_id, session.sequence, Jsonb(picture_fields(stored)),
+                 *session.before_read, [], lease.idle_until, now))
+            _notify(conn, _NODES_SEEING, (display_id,))
+        return _session_view(session)
+
+    def edit_picture(self, session_id: UUID, edit: PictureEdit) -> PictureSequence:
+        with self._db.transaction() as conn:
+            row, session, now = self._session_in(conn, session_id)
+            changed = edited(session, edit.setting, edit.value, expected_sequence=edit.expected_sequence, now=now)
+            self._write_session_in(conn, changed)
+        return PictureSequence(sequence=changed.sequence)
+
+    def place_picture(self, session_id: UUID, place: PicturePlace) -> PictureSequence:
+        with self._db.transaction() as conn:
+            row, session, now = self._session_in(conn, session_id)
+            report = _stored_report(row)
+            probe = None if report is None else report.picture
+            answered = probe is not None and (probe.brightness_answered if place.setting is Setting.BRIGHTNESS
+                                              else probe.contrast_answered)
+            changed = placed(session, place.setting, place.acts_on, expected_sequence=place.expected_sequence,
+                             answered=answered, now=now)
+            self._write_session_in(conn, changed)
+        return PictureSequence(sequence=changed.sequence)
+
+    def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:
+        with self._db.transaction() as conn:
+            _row, session, now = self._session_in(conn, session_id)
+            _require_live(session, now)
+            kept = replace(session, lease=touched(session.lease, now, idle_seconds=PICTURE_IDLE_SECONDS))
+            conn.execute("UPDATE picture_sessions SET idle_until=%s WHERE id=%s",
+                         (kept.lease.idle_until, session_id))
+        return _session_view(kept)
+
+    def picture_done(self, session_id: UUID) -> None:
+        with self._db.transaction() as conn:
+            row, session, now = self._session_in(conn, session_id)
+            _require_live(session, now)
+            document = _stored_document(row)
+            # The Pi must have answered the document that carries this draft, not an older one.
+            if (document is None or document.picture != output_picture(session.draft)
+                    or picture_status(bound=True, document=document, report=_stored_report(row))
+                    is not PictureStatus.SHOWN):
+                raise PictureRefused("not_presented_yet", 409)
+            self._end_in(conn, session, session.draft)
+
+    def revert_picture(self, session_id: UUID) -> None:
+        with self._db.transaction() as conn:
+            row, session, now = self._session_in(conn, session_id)
+            _require_live(session, now)
+            self._end_in(conn, session, reverted(stored_picture(row), session))
+
+    def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
+        with self._db.transaction() as conn:
+            frames = {row["frame_id"]: row for row in conn.execute(
+                _PICTURE_FRAME + " WHERE f.id=ANY(%s)", ([frame_id, *request.to_frames],)).fetchall()}
+            if frame_id not in frames or any(target not in frames for target in request.to_frames):
+                raise DisplayRefused("unknown_frame", 404)
+            source = frames[frame_id]
+            if source["display_id"] is None:
+                raise DisplayRefused("no_display", 409)
+            values = stored_picture(source)
+            now = _CLOCK.now_in(conn)
+            outcomes = []
+            for target in request.to_frames:
+                display_id = frames[target]["display_id"]
+                if display_id is None:
+                    outcome = CopyOutcome.NO_DISPLAY
+                elif display_id == source["display_id"]:
+                    outcome = CopyOutcome.SAME_DISPLAY
+                elif (stored := _fold_in(conn, display_id, now)) is None:
+                    outcome = CopyOutcome.SESSION_OPEN
+                else:
+                    write_picture(conn, display_id, copied(values, stored))
+                    _notify(conn, _NODES_SEEING, (display_id,))
+                    outcome = CopyOutcome.COPIED
+                outcomes.append(PictureCopyResult(frame_id=target, outcome=outcome))
+        return tuple(outcomes)
+
+    @staticmethod
+    def _session_in(conn: Any, session_id: UUID) -> tuple[Mapping[str, Any], PictureSession, float]:
+        """The session's row (its Display locked) and rules' view; unknown_session when there is none."""
+        row = conn.execute(_PICTURE_SESSION, (session_id,)).fetchone()
+        if row is None:
+            raise DisplayRefused("unknown_session", 404)
+        session = picture_session(row)
+        assert session is not None
+        return row, session, _CLOCK.now_in(conn)
+
+    @staticmethod
+    def _write_session_in(conn: Any, session: PictureSession) -> None:
+        conn.execute("UPDATE picture_sessions SET sequence=%s, draft=%s, touched=%s, idle_until=%s WHERE id=%s",
+                     (session.sequence, Jsonb(picture_fields(session.draft)),
+                      sorted(setting.value for setting in session.touched), session.lease.idle_until,
+                      session.session_id))
+        _notify(conn, _NODES_SEEING, (session.display_id,))
+
+    @staticmethod
+    def _end_in(conn: Any, session: PictureSession, picture: DisplayPicture) -> None:
+        """Store `picture` on the Display and end the session, in one transaction."""
+        write_picture(conn, session.display_id, picture)
+        conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
+        _notify(conn, _NODES_SEEING, (session.display_id,))
+
+
+def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
+    """The Display's stored picture with its row locked, after folding a session whose lease ran out
+    (its `reverted` result stored, the session removed); None while a live session holds it."""
+    row = conn.execute(f"SELECT {_PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM displays d "  # noqa: S608
+                       "LEFT JOIN picture_sessions ps ON ps.display_id=d.id WHERE d.id=%s FOR NO KEY UPDATE OF d",
+                       (display_id,)).fetchone()
+    stored, session = stored_picture(row), picture_session(row)
+    if session is None:
+        return stored
+    if session.lease.live(now):
+        return None
+    folded = reverted(stored, session)
+    write_picture(conn, display_id, folded)
+    conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
+    return folded
+
+
+def _require_live(session: PictureSession, now: float) -> None:
+    if not session.lease.live(now):
+        raise PictureRefused("session_ended", 410)
+
+
+def _session_view(session: PictureSession) -> PictureSessionView:
+    return PictureSessionView(session_id=session.session_id, sequence=session.sequence,
+                              idle_until=session.lease.idle_until)
+
+
 __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "POSITION_FACTS", "REPORT_STREAM", "SEEN_DISPLAY_JOIN",
            "DisplayDocuments", "DisplayWakes", "OutputReportJudge", "PgDisplayCommands", "PgDisplayQueries",
+           "PgPictureSessions",
            "commit_position", "frame_position", "frame_readiness", "frame_readiness_in", "output_documents",
            "record_report", "resolve_output"]

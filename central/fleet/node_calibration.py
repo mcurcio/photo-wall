@@ -18,6 +18,9 @@ base is not the saved revision (`trial_baseline_revision_changed`), as `edit` do
 save made elsewhere is never overwritten across trials.
 The only persistence write crosses Registry's in-transaction CAS port. Failed Save
 rolls back its row lock and all writes; it cannot strand a durable frozen trial.
+
+The lease and the expected sequence are the Live model's shared rules (central/live_session.py),
+which the Display's picture session follows too; this module maps them to its own error codes.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 
 from central.fleet.node_sessions import NodeControlError
+from central.live_session import Lease, StaleSequence, next_sequence, touched
 from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration
 from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
@@ -161,7 +165,7 @@ class NodeCalibration:
             now = self.sessions.clock.utc()
             terminal = None
             if row["state"] == "active":
-                if now >= row["expires_at"]:
+                if not _lease(row).live(now):
                     terminal = "expired"
                 elif context is None or not self._same(
                     row, context.producer_id, context.request.admitted
@@ -180,10 +184,12 @@ class NodeCalibration:
                 return self._view(conn.execute(
                     "UPDATE node_calibration_trials SET touched_at=%s,expires_at=%s "
                     "WHERE trial_id=%s RETURNING *",
-                    (now, min(row["hard_expires_at"], now + self.inactivity_seconds), trial_id),
+                    (now, self._touched(row, now), trial_id),
                 ).fetchone())
-            if row["sequence"] != expected_sequence:
-                raise NodeControlError("trial_sequence_conflict", 409)
+            try:
+                sequence = next_sequence(row["sequence"], expected_sequence)
+            except StaleSequence:
+                raise NodeControlError("trial_sequence_conflict", 409) from None
             if operation == "renew":
                 # The handover: this trial ends and the next generation begins at the draft, in
                 # this one transaction (the module docstring).
@@ -201,7 +207,6 @@ class NodeCalibration:
             elif operation == "edit":
                 if proposed.revision != row["calibration_revision"]:
                     raise NodeControlError("trial_baseline_revision_changed", 409)
-                sequence = row["sequence"] + 1
                 sha = candidate_hash(
                     trial_id,
                     row["generation"],
@@ -218,7 +223,7 @@ class NodeCalibration:
                         Jsonb(proposed.model_dump(mode="json")),
                         sha,
                         now,
-                        min(row["hard_expires_at"], now + self.inactivity_seconds),
+                        self._touched(row, now),
                         trial_id,
                     ),
                 ).fetchone()
@@ -250,6 +255,10 @@ class NodeCalibration:
                 ).fetchone()
             return self._view(row)
 
+    def _touched(self, row, now: float) -> float:
+        """The trial's idle deadline after an edit or keepalive at `now` (never past its hard one)."""
+        return touched(_lease(row), now, idle_seconds=self.inactivity_seconds).idle_until
+
     @staticmethod
     def _same(row, producer_id, surface) -> bool:
         return (
@@ -267,14 +276,15 @@ class NodeCalibration:
         ).fetchone()
         if row is None:
             return None
+        live = _lease(row).live(now)
         if (
-            now >= row["expires_at"]
+            not live
             or not self._same(row, principal.producer_id, request.admitted)
             or row["authority_epoch"] != link.authority_epoch
         ):
             conn.execute(
                 "UPDATE node_calibration_trials SET state=%s WHERE trial_id=%s",
-                ("expired" if now >= row["expires_at"] else "invalidated", row["trial_id"]),
+                ("invalidated" if live else "expired", row["trial_id"]),
             )
             return None
         receipt = request.receipt
@@ -304,3 +314,8 @@ class NodeCalibration:
             request.sampled_boottime_ms + max(1, int((row["hard_expires_at"] - now) * 1000)),
         )
         return encode_trial(candidate)
+
+
+def _lease(row) -> Lease:
+    """A trial row's lease: its idle deadline (`expires_at`) and its hard one."""
+    return Lease(row["expires_at"], row["hard_expires_at"])

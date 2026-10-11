@@ -22,8 +22,8 @@ answers {"error": code} with its status, the shape apiWrite.js reads. create_app
 `mount_display_routes`: GET display (slice C1) and the Power tab's four, `_mount_power_routes`
 (slice C3). POST is Test: turn off; DELETE is Turn on, which ends the test so the request underneath
 takes over (owner q1, 2026-10-10). The Picture tab's eight (roadmap 1c, run ledger
-.claude/runs/display-1c.md, slice C2) are `mount_picture_routes`, declared here and mounted by
-create_app in C2; picture refusals (central/displays/picture.py PictureRefused) answer the same way.
+.claude/runs/display-1c.md, slice C2) are `mount_picture_routes`, which create_app mounts too;
+picture refusals (central/displays/picture.py PictureRefused) answer the same way.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.displays.picture import PictureRefused
 from central.displays.ports import (
     DisplayCommands,
     DisplayQueries,
@@ -100,7 +101,12 @@ def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, co
 
 
 def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, commands: PictureCommands) -> None:
-    """The Picture tab's eight routes (roadmap 1c, slice C2); mounted by create_app in C2."""
+    """The Picture tab's eight routes (roadmap 1c, slice C2), mounted by create_app beside
+    `mount_display_routes` (whose handler answers DisplayRefused); PictureRefused answers the same way."""
+
+    @app.exception_handler(PictureRefused)
+    async def picture_refused(request: Request, exc: PictureRefused) -> JSONResponse:
+        return JSONResponse({"error": exc.code}, status_code=exc.status)
 
     @app.get(FRAMES + "{frame_id}/picture", dependencies=[Depends(admin)], response_model=FramePictureView)
     def frame_picture(frame_id: Identifier) -> FramePictureView:
