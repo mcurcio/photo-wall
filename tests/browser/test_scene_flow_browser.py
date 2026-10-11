@@ -1305,3 +1305,95 @@ def test_a_fade_longer_than_the_cycle_is_the_fades_problem(page, registry):
         expect(_row(form, "Fade between photos").locator("xpath=..")).to_contain_text(
             "Fade between photos must be no longer than Seconds per cycle.")
         expect(form.get_by_label("Fade between photos", exact=True)).to_be_focused()
+
+
+# --- Roadmap 5a: how a Scene's Frames pick from its photos.
+
+
+def test_order_no_repeat_and_crop_limit_are_set_saved_and_shown_again(page, registry):
+    """Roadmap 5a (run ledger K1): Order, Don't repeat within and Crop limit each show their
+    default on Playback, are saved as the Scene's `selection` (the crop limit a fraction), are
+    answered by Review, show again on Edit with no unsaved change, and Reset puts each default
+    back. Mutation probes: send the crop limit as the percent (the stored-Scene assertion fails,
+    Central refuses it); leave `selection` out of `decodeScene` (Edit is withheld, or opens
+    changed)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Playback")
+
+        order, days, crop = (_row(form, label) for label in (
+            "Order", "Don't repeat within", "Crop limit"))
+        expect(order).to_contain_text("Default: Shuffle")
+        expect(days).to_contain_text("Default: 7 days")
+        expect(days).to_contain_text("A photo shown recently waits its turn, but a Frame never "
+                                     "goes blank because of it.")
+        expect(crop).to_contain_text("Default: 35 %")
+        expect(crop).to_contain_text("The most of a photo a Frame may cut away to fill itself.")
+        for row in (order, days, crop):
+            expect(row.get_by_role("button", name=re.compile("^Reset"))).to_have_count(0)
+        order.get_by_role("radio", name="Oldest first", exact=True).check()
+        form.get_by_label("Don't repeat within", exact=True).fill("3")
+        form.get_by_label("Crop limit", exact=True).fill("30")
+        expect(crop).to_contain_text("30 %")
+
+        scene_continue(page, "Review")
+        answers = ("OrderOldest first", "Don't repeat within3 days", "Crop limit30 %")
+        for answer in answers:
+            expect(form).to_contain_text(answer)
+        form.get_by_label("Scene name", exact=True).fill("oldest-first")
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/scenes/oldest-first")
+                                  and r.request.method == "PUT") as info:
+            form.get_by_role("button", name="Save Scene", exact=True).click()
+        assert info.value.status == 200
+        assert _definition(page, origin, "oldest-first")["selection"] == {
+            "order": "chronological", "no_repeat_days": 3, "crop_limit": 0.3}
+
+        # Edit shows each value again, and opening it changes nothing.
+        page.wait_for_url(re.compile(r"#/scenes$"))
+        page.reload()
+        go(page, "scenes")
+        _scenes(page).get_by_role("button", name="Edit Scene oldest-first", exact=True).click()
+        for answer in answers:
+            expect(form).to_contain_text(answer)
+        go(page, "scenes")
+        expect(_scenes(page).get_by_role("button", name=re.compile("^Resume draft"))).to_have_count(0)
+        _scenes(page).get_by_role("button", name="Edit Scene oldest-first", exact=True).click()
+        form.get_by_role("button", name="Change Order", exact=True).click()
+        expect(order.get_by_role("radio", name="Oldest first", exact=True)).to_be_checked()
+        expect(form.get_by_label("Don't repeat within", exact=True)).to_have_value("3")
+        expect(form.get_by_label("Crop limit", exact=True)).to_have_value("30")
+
+        # Reset puts each default back; 0 days reads Off.
+        order.get_by_role("button", name="Reset Order (Default: Shuffle)").click()
+        expect(order.get_by_role("radio", name="Shuffle", exact=True)).to_be_checked()
+        days.get_by_role("button", name="Reset Don't repeat within (Default: 7 days)").click()
+        expect(form.get_by_label("Don't repeat within", exact=True)).to_have_value("7")
+        crop.get_by_role("button", name="Reset Crop limit (Default: 35 %)").click()
+        expect(form.get_by_label("Crop limit", exact=True)).to_have_value("35")
+        for row in (order, days, crop):
+            expect(row.get_by_role("button", name=re.compile("^Reset"))).to_have_count(0)
+        form.get_by_label("Don't repeat within", exact=True).fill("0")
+        expect(days).to_contain_text("days: Off")
+        scene_continue(page, "Review")
+        expect(form).to_contain_text("Don't repeat withinOff")
+
+
+def test_a_no_repeat_window_outside_its_range_is_its_problem(page, registry):
+    """Central refuses more than 365 days, so the console says so on the field."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = author_scene(page, "quick", SOURCE, (VALID_FRAME,), submit=False)
+        form.get_by_role("button", name="Change Don't repeat within", exact=True).click()
+        form.get_by_label("Don't repeat within", exact=True).fill("400")
+        scene_continue(page)
+        expect(_row(form, "Don't repeat within").locator("xpath=..")).to_contain_text(
+            "Don't repeat within must be a whole number of days from 0 to 365.")
+        expect(form.get_by_label("Don't repeat within", exact=True)).to_be_focused()

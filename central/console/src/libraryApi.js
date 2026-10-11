@@ -17,7 +17,8 @@ import { usePolledRead } from "./polledRead.js";
  *   | {kind: "immich_too_old", found: string, oldest: string} | {kind: "unreachable"}
  *   | {kind: "unexpected_answer", detail: string}
  *   | {kind: "other_user", expected: string, found: string}} LibraryProblem
- * @typedef {{kind: "untested_version", found: string} | {kind: "no_full_size_copies"}} LibraryNote
+ * @typedef {{kind: "untested_version", found: string} | {kind: "no_full_size_copies"}
+ *           | {kind: "no_face_detection"}} LibraryNote
  * @typedef {{state: "not_checked"} | {state: "ok", checked_at: number, notes: LibraryNote[]}
  *   | {state: "needs_a_look", problem: LibraryProblem, since: number, checked_at: number}} LibraryHealth
  * @typedef {{connection_ref: string, name: string, url: string|null, key_hint: string|null,

@@ -21,7 +21,10 @@ export type LibraryProblem =
   | { kind: "unexpected_answer"; detail: string }
   | { kind: "other_user"; expected: string; found: string };
 
-export type LibraryNote = { kind: "untested_version"; found: string } | { kind: "no_full_size_copies" };
+export type LibraryNote =
+  | { kind: "untested_version"; found: string }
+  | { kind: "no_full_size_copies" }
+  | { kind: "no_face_detection" };
 
 export type LibraryHealth =
   | { state: "not_checked" }
@@ -113,11 +116,17 @@ export function problemWords(connection: LibraryConnectionView, problem: Library
   }
 }
 
-/** The notes of a passing check: shown, nothing stops. */
+/** The notes of a passing check: shown, nothing stops. One arm per kind, so a new kind is a
+ * compile error here rather than worded as another. */
 export function noteWords(note: LibraryNote): string {
-  return note.kind === "untested_version"
-    ? `Immich ${note.found} is newer than Photo Wall has been tested with; it keeps working.`
-    : "HEIC and RAW photos play at preview size: turn on full-size copies in Immich.";
+  switch (note.kind) {
+    case "untested_version":
+      return `Immich ${note.found} is newer than Photo Wall has been tested with; it keeps working.`;
+    case "no_full_size_copies":
+      return "HEIC and RAW photos play at preview size: turn on full-size copies in Immich.";
+    case "no_face_detection":
+      return "Immich's face detection is off, so crops ignore faces.";
+  }
 }
 
 export interface LibraryHealthCardProps {
