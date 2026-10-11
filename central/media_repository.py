@@ -11,7 +11,7 @@ import re
 import secrets
 from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, get_args
 
 from psycopg.types.json import Jsonb
 from pydantic import Field
@@ -22,8 +22,10 @@ from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset, PoolMember
-from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing, eligible
+from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing
 from central.registry import RegistryError
+from central.wall_plan.assignment import fit_of
+from central.wall_plan.fit import DEFAULT_CROP_LIMIT, DoesNotFit, FitRefusal
 from contracts.models import (
     Digest,
     FrameProfile,
@@ -159,27 +161,40 @@ class MediaRepository:
             }))
         return tuple(hydrated)
 
-    def source_candidates(self, source_ref: str, *, profile: FrameProfile | None = None) -> dict:
+    def source_candidates(self, source_ref: str, *, profile: FrameProfile | None = None,
+                          crop_limit: float = DEFAULT_CROP_LIMIT) -> dict:
         """A Source revision's whole pool as neutral candidates, newest first, with no limit
         (F-10); `ready` is whether the pool has a complete check.
 
-        With a Frame profile, only the candidates eligible for it, each with the
-        planner's `standing` for that profile (`planner.candidate_standing`).
+        With a Frame profile (roadmap 5a, slice W1): only the candidates the photo fit rule
+        accepts on it at `crop_limit`, or, not measured yet, that pass on their size alone
+        (central/wall_plan/assignment.py `fit_of`), each with the planner's `standing` for that
+        profile (`planner.candidate_standing`) and its `fit` ("fits" | "not_measured"); and
+        `skipped`, how many it left out for each fit refusal (every one named, 0 included), plus
+        `not_measured`, how many of those listed are not measured yet.
         """
         with self.transaction() as conn:
             pool = self.source_pools_in(conn, {source_ref}).get(source_ref)
             if pool is None:
                 raise RegistryError("source_not_found", 404)
-            candidates = pool.candidates
-            if profile is not None:
-                candidates = tuple(candidate for candidate in candidates if eligible(candidate, profile))
-            return {"source_ref": source_ref, "ready": pool.ready,
-                    "count": len(candidates),
-                    "candidates": [
-                        candidate.model_dump(mode="json") | (
-                            {} if profile is None
-                            else {"standing": candidate_standing(candidate, profile)})
-                        for candidate in candidates]}
+            if profile is None:
+                return {"source_ref": source_ref, "ready": pool.ready,
+                        "count": len(pool.candidates),
+                        "candidates": [candidate.model_dump(mode="json")
+                                       for candidate in pool.candidates]}
+            skipped = dict.fromkeys(get_args(FitRefusal), 0)
+            listed = []
+            for candidate in pool.candidates:
+                verdict = fit_of(candidate, profile, crop_limit)
+                if isinstance(verdict, DoesNotFit):
+                    skipped[verdict.reason] += 1
+                    continue
+                listed.append(candidate.model_dump(mode="json") | {
+                    "standing": candidate_standing(candidate, profile),
+                    "fit": "not_measured" if verdict is None else "fits"})
+            skipped["not_measured"] = sum(item["fit"] == "not_measured" for item in listed)
+            return {"source_ref": source_ref, "ready": pool.ready, "count": len(listed),
+                    "candidates": listed, "skipped": skipped}
 
     @staticmethod
     def authored_candidates_in(conn, asset_ids: tuple[str, ...]) -> dict[str, Candidate]:

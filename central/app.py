@@ -54,6 +54,8 @@ from central.registry import (
 from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
+from central.wall_plan.fit import DEFAULT_CROP_LIMIT
+from central.wall_plan.selection import MAX_CROP_LIMIT, MIN_CROP_LIMIT
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     Identifier,
@@ -657,9 +659,14 @@ def create_app(
         return source_names.delete(name, expected_revision)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
-    def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):
+    def source_candidates(
+        source_ref: Identifier, frame_id: Identifier | None = None,
+        crop_limit: float = Query(default=DEFAULT_CROP_LIMIT, ge=MIN_CROP_LIMIT,
+                                  le=MAX_CROP_LIMIT),
+    ):
         profile = registry.frame_profile(frame_id) if frame_id is not None else None
-        return media_application.source_candidates(source_ref, profile=profile)
+        return media_application.source_candidates(source_ref, profile=profile,
+                                                   crop_limit=crop_limit)
 
     @app.post("/v1/operator/authored-candidates", dependencies=[Depends(admin)])
     def author_candidates(request: AuthoredCandidatesRequest):

@@ -62,6 +62,9 @@ class CoordinationLimits(Model):
     readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
+    # Roadmap 5a (slice W1): how far ahead the wall plan reaches, every Frame together; layers
+    # are still offered only inside `horizon_seconds`.
+    plan_seconds: float = Field(default=3600, gt=0, le=3600)
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,7 +478,16 @@ class Coordinator:
                 locked_assignments=locks,
                 history=history,
                 horizon_seconds=horizon_end - now,
-                limits=PlannerLimits(max_horizon_seconds=self.limits.horizon_seconds + quantum),
+                plan_seconds=self.limits.plan_seconds,
+                max_clock_uncertainty=self.limits.max_uncertainty,
+                limits=PlannerLimits(
+                    max_horizon_seconds=max(
+                        self.limits.plan_seconds, self.limits.horizon_seconds + quantum),
+                    # Roadmap 5a: the Runtime's transition budget was sized for the
+                    # preparation horizon; the wall plan reads its timeline that many times
+                    # further ahead.
+                    max_events=PlannerLimits().max_events * math.ceil(
+                        self.limits.plan_seconds / (self.limits.horizon_seconds + quantum))),
             )
             groups = self._groups(conn, runtime, now, horizon_end, configurations)
             for proposal in projection.players:

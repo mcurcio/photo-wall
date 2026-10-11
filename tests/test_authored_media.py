@@ -26,8 +26,10 @@ class SavedSource(NamedTuple):
     source_ref: str
 
 
-def asset(number=1, *, width=30, height=50, original_bytes=None, kind="image"):
-    """A pool photo; with `original_bytes`, the unedited photo whose checksum is theirs."""
+def asset(number=1, *, width=1080, height=1920, original_bytes=None, kind="image"):
+    """A pool photo; with `original_bytes`, the unedited photo whose checksum is theirs. Its
+    default size fills a 1080 x 1920 Frame (roadmap 5a: a photo goes only on a Frame it fills,
+    with at least the Frame's pixels)."""
     revision = (hashlib.sha1(original_bytes).hexdigest() if original_bytes is not None
                 else f"{number:040x}")
     return LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(uuid.UUID(int=number)),

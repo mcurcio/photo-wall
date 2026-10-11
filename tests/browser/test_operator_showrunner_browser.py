@@ -76,7 +76,9 @@ pytestmark = pytest.mark.skipif(
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
+# Roadmap 5a: a photo goes only on a Frame whose pixels its kept window covers, so the Frames
+# here are as small as the public photos (108 x 192 and 120 x 200, tests/public_media.py).
+PORTRAIT = FrameProfile(width_px=108, height_px=192, diagonal_inches=24)
 
 VALID_FRAME = "valid-frame"
 INVALID_FRAME = "invalid-frame"

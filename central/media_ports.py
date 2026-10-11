@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from central.catalog import Candidate, SourcePool
 from central.planner import AcquisitionRequest, MeasureRequest
+from central.wall_plan.fit import DEFAULT_CROP_LIMIT
 from contracts.models import FrameProfile, Variant
 
 
@@ -63,6 +64,7 @@ class MediaApplication(Protocol):
 
     def source_candidates(
         self, source_ref: str, *, profile: FrameProfile | None = None,
+        crop_limit: float = DEFAULT_CROP_LIMIT,
     ) -> dict: ...
 
     def author_authored_candidates(
