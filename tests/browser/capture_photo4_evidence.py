@@ -61,11 +61,19 @@ def _tiles(page):
 
 def _shot(page, name: str, scheme: str, *, full_page=True) -> None:
     """One PNG. An editor is shot as the view shows it (`full_page=False`): its preview column
-    and Save bar are sticky, and a full-page shot would draw them where the view's bottom was."""
+    and Save bar are sticky, and a full-page shot would draw them where the view's bottom was.
+    A full-page shot first grows the view to the page's height, so a sticky bar (the Scene flow's
+    Back and Continue) lands at the page's end rather than over the content mid-page."""
     OUT.mkdir(parents=True, exist_ok=True)
     page.wait_for_timeout(400)
+    view = page.viewport_size
+    if full_page:
+        height = page.evaluate("document.documentElement.scrollHeight")
+        page.set_viewport_size({"width": view["width"], "height": max(height, view["height"])})
+        page.wait_for_timeout(200)
     page.screenshot(path=str(OUT / f"{name}.{scheme}.png"), full_page=full_page, animations="disabled",
                     caret="hide")
+    page.set_viewport_size(view)
 
 
 def _open(page, scheme):
