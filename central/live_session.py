@@ -27,24 +27,31 @@ class Lease:
 
     def live(self, now: float) -> bool:
         """Whether the session is still open at `now` (before both deadlines)."""
-        raise NotImplementedError
+        return now < self.idle_until and (self.hard_until is None or now < self.hard_until)
 
 
 def begin_lease(now: float, *, idle_seconds: float, hard_seconds: float | None) -> Lease:
     """A new lease at `now`. ValueError("lease_bounds") unless 0 < idle_seconds <= hard_seconds
     (when set)."""
-    raise NotImplementedError
+    if not 0 < idle_seconds or (hard_seconds is not None and idle_seconds > hard_seconds):
+        raise ValueError("lease_bounds")
+    return Lease(now + idle_seconds, None if hard_seconds is None else now + hard_seconds)
 
 
 def touched(lease: Lease, now: float, *, idle_seconds: float) -> Lease:
     """The lease after an edit or keepalive at `now`: idle_until = min(now + idle_seconds,
     hard_until). ValueError("lease_ended") when it is no longer live at `now`."""
-    raise NotImplementedError
+    if not lease.live(now):
+        raise ValueError("lease_ended")
+    idle_until = now + idle_seconds
+    return Lease(idle_until if lease.hard_until is None else min(idle_until, lease.hard_until), lease.hard_until)
 
 
 def next_sequence(current: int, expected: int) -> int:
     """`current + 1` when `expected == current`; StaleSequence otherwise."""
-    raise NotImplementedError
+    if expected != current:
+        raise StaleSequence(expected)
+    return current + 1
 
 
 __all__ = ["Lease", "StaleSequence", "begin_lease", "next_sequence", "touched"]

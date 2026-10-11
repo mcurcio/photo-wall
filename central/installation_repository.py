@@ -74,11 +74,6 @@ class PostgresInstallationRepository:
     ) -> dict[str, list[OutputBinding]] | None:
         if not self.session_is_current_in(conn, player_id, authority_epoch, lock=True):
             return None
-        conn.execute(
-            "UPDATE frames SET preview=NULL,preview_expires=NULL,"
-            "configuration_revision=configuration_revision+1 WHERE preview_expires<=%s",
-            (self.clock.utc(),),
-        )
         rows = conn.execute(
             f"SELECT f.*,b.output_id,{POSITION_COLUMNS} FROM bindings b "  # noqa: S608
             f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} "
@@ -93,8 +88,6 @@ class PostgresInstallationRepository:
                 configuration_revision=row["configuration_revision"],
                 profile=FrameProfile.model_validate(row["profile"]),
                 calibration=Calibration.model_validate(row["calibration"]),
-                preview=(Calibration.model_validate(row["preview"]) if row["preview"] else None),
-                preview_expires=row["preview_expires"],
             )
             for row in rows
         ]

@@ -61,7 +61,6 @@ from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
-    Calibration,
     Identifier,
     Model,
     Observation,
@@ -94,13 +93,6 @@ class UnbindRequest(Model):
 class ProgramReplacementRequest(Model):
     expected: Program
     program: Program
-
-
-class CalibrationRequest(Model):
-    operation: Literal["preview", "commit", "revert"]
-    expected_revision: int = Field(ge=1)
-    expected_generation: int = Field(ge=1)
-    calibration: Calibration | None = None
 
 
 class ActivationRequest(Model):
@@ -684,16 +676,6 @@ def create_app(
     @app.delete("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def unbind(frame_id: Identifier, request: UnbindRequest):
         return registry.unbind(frame_id, expected_generation=request.expected_generation)
-
-    @app.post("/v1/operator/frames/{frame_id}/calibration", dependencies=[Depends(admin)])
-    def calibrate(frame_id: Identifier, request: CalibrationRequest):
-        return registry.calibrate(
-            frame_id,
-            request.operation,
-            request.expected_revision,
-            request.calibration,
-            expected_generation=request.expected_generation,
-        )
 
     @app.post("/v1/operator/players/{player_id}/retire", dependencies=[Depends(admin)])
     def retire(player_id: Identifier):
