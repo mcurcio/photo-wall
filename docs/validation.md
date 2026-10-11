@@ -72,7 +72,7 @@ Dual-output viability permits appliance integration during cross-Player measurem
 
 ### Media integration and recovery
 
-Use a real Immich instance with recorded version, permissions, and fixtures: eligible portrait/landscape media, landscape photos excluded from portrait Frames, a 720p original excluded from a 40-inch Frame, insufficient originals with larger derivatives, and spatially authored alternatives. Distinguish empty eligibility from API incompatibility, denied permission, and transport failure.
+Use a real Immich instance with recorded version, permissions, and fixtures: eligible portrait/landscape media, photos placed only on Frames they fill by the [photo fit rule](module-planner.md#the-photo-fit-rule) (a landscape photo never on a portrait Frame at the default crop limit), a 720p original excluded from a 40-inch Frame, insufficient originals with larger derivatives, and spatially authored alternatives. Distinguish empty eligibility from API incompatibility, denied permission, and transport failure.
 
 Block direct Player-to-Immich traffic while allowing central upstream access. With empty Player caches, verify acquisition, variant preparation, playback, and recovery exclusively through the central show system. Inspect Player code, packaged dependencies, configuration, manifests/control messages, and request traces: no Immich-specific SDK or integration logic, Immich credentials, upstream API details, direct upstream calls, redirects to Immich, PostgreSQL driver, or Procrastinate dependency.
 
