@@ -1370,3 +1370,29 @@ def test_the_demo_operator_drives_centrals_photo_routes_end_to_end(registry, tmp
         assert library.finish_check(lease, CheckComplete())
         after = operator_action("check")
         assert demo.check_finished({"pool": after}, before, "ok")
+
+
+@pytest.mark.parametrize("project", ["pw-wall-demo-000000000000", "pw-wall-demo-5a5a5a5a5a5a",
+                                     "pw-wall-demo-f00dfeedbeef"])
+def test_every_demo_upload_fills_every_demo_frame(project):
+    """Roadmap 5a's fit rule refuses a photo whose Frame-shaped window, inside the Scene's crop
+    limit, has fewer pixels than the Frame, or cuts its key content. Every demo image, measured
+    as the worker measures it (no faces: the fixture's machine learning is off), and the video
+    fill every demo Frame at the demo Scene's crop limit, so the wall's baseline shows both."""
+    from central.wall_plan.fit import Fits, judge, shape_fit
+    from contracts.models import FrameProfile
+    from media.key_content import measure
+    from scripts.demo_wall import (
+        DEMO_CROP_LIMIT,
+        DEMO_FRAME_PROFILE,
+        DEMO_IMAGES,
+        DEMO_VIDEO_SIZE,
+    )
+    from scripts.immich_actions import synthetic_image
+
+    profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
+    for label, (size, _) in DEMO_IMAGES.items():
+        key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"))
+        verdict = judge("image", *size, key, profile, DEMO_CROP_LIMIT)
+        assert isinstance(verdict, Fits), (label, verdict)
+    assert shape_fit("video", *DEMO_VIDEO_SIZE, profile, DEMO_CROP_LIMIT) is None

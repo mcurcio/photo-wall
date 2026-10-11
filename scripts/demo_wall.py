@@ -40,6 +40,17 @@ CORE_SOURCE_PATHS = ("central", "media", "contracts", "player", "Dockerfile", "p
 DEMO_HORIZON_SECONDS = 15
 DEMO_RENEWAL_SECONDS = 10
 SCENE_CYCLE_SECONDS = 8
+# Roadmap 5a's fit rule (central/wall_plan/fit.py): a photo shows on a Frame only when a window
+# of the Frame's shape, inside the Scene's crop limit, has at least the Frame's pixels. The demo's
+# uploads are small (160 x 96, 96 x 160, 144 x 96, 152 x 96; the video 320 x 180), so its Frames
+# are square and sized to them, and its Scene's crop limit (45 %) lets every one of them fill
+# every Frame: 5:3 and 3:5 crop 40 %, 3:2 33 %, 19:12 37 %, the 16:9 video 44 %.
+DEMO_FRAME_PROFILE = {"width_px": 90, "height_px": 90, "diagonal_inches": 24, "video": True}
+DEMO_CROP_LIMIT = 0.45
+# The upstream role's uploads: label -> (size, capture offset); "evolve" adds the last two.
+DEMO_IMAGES = {"landscape": ((160, 96), 10), "portrait": ((96, 160), 20),
+               "older-live": ((144, 96), 5), "newer-live": ((152, 96), 40)}
+DEMO_VIDEO_SIZE = (320, 180)
 # The deletion step needs a secured assignment that starts at least this far ahead.
 SECURED_LEAD_SECONDS = 3
 # The library connection, pasted through Central's API (roadmap 4): the upstream role hands the
@@ -744,7 +755,8 @@ def upstream_action(action: str):
     def stamp(offset):
         return datetime.fromtimestamp(capture + offset, timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def image(label, size, offset):
+    def image(label):
+        size, offset = DEMO_IMAGES[label]
         name = project + "-" + label
         fixture.upload(state["assets"], name, size, 1, stamp(offset), True)
         state["assets"][name]["label"] = label
@@ -755,7 +767,7 @@ def upstream_action(action: str):
         name = project + "-video"
         filename = Path("/setup") / (name + ".mp4")
         result = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=12", "-t", "3", "-an",
+            "-f", "lavfi", "-i", "testsrc2=size={}x{}:rate=12".format(*DEMO_VIDEO_SIZE), "-t", "3", "-an",
             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
             "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
             "-metadata", "creation_time=" + stamp(30), "-movflags", "+faststart", str(filename)],
@@ -782,14 +794,14 @@ def upstream_action(action: str):
             # The handoff to the operator role, which pastes it through Central's API; the
             # worker reads no file (roadmap 4). The key never enters a result or the evidence.
             write_json(CONNECTION_HANDOFF, {"url": UPSTREAM_URL, "key": key["secret"]})
-            image("landscape", (160, 96), 10)
-            image("portrait", (96, 160), 20)
+            image("landscape")
+            image("portrait")
             video()
         elif action == "evolve":
             require(not any(item["label"] == "older-live" for item in state["assets"].values()),
                     "already_evolved")
-            image("older-live", (144, 96), 5)
-            image("newer-live", (152, 96), 40)
+            image("older-live")
+            image("newer-live")
             selected = next(item for item in state["assets"].values()
                             if item["label"] == "landscape")
             fixture.request("PUT", "/assets/" + selected["upstream_id"],
@@ -947,8 +959,8 @@ def operator_action(action: str):
         try:
             for index, output in enumerate(outputs):
                 frame = "demo-frame-" + str(index + 1)
-                request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 500, "height_mm": 300,
-                    "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
+                request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 400, "height_mm": 400,
+                    "profile": DEMO_FRAME_PROFILE})
                 request("PUT", "/v1/operator/frames/" + frame + "/binding", {
                     "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
                 save_position(registry, frame)
@@ -956,7 +968,7 @@ def operator_action(action: str):
         finally:
             database.close()
         request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True,
-            "cycle_seconds": SCENE_CYCLE_SECONDS,
+            "cycle_seconds": SCENE_CYCLE_SECONDS, "selection": {"crop_limit": DEMO_CROP_LIMIT},
             "contributions": [{"target": "frame:" + frame, "kind": "media", "source_refs": ["demo:1"]}
                               for frame in frames]})
         now = time.time()
