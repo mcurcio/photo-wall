@@ -35,7 +35,7 @@ out.states = [
   state({ state: "failed", problem: "connection", last_complete_at: NOW - 3600 }),
   state({ state: "failed", problem: "chosen_item_gone", last_complete_at: null }),
   state(undefined),
-].map(({ state, severity, label }) => ({ state, severity, label: label.replace(/\d\d:\d\d( [A-Z+0-9:-]+)?/, "HH:MM") }));
+].map(({ state, severity, label }) => ({ state, severity, label: label.replace(/[A-Z][a-z]{2} \d\d:\d\d/, "Ddd HH:MM") }));
 const query = {
   connection_ref: "home", albums: [], people: ["p-anna", "p-ben"], place: null,
   taken: { kind: "last", years: 3, months: 0 }, favourites_only: false, tags: [],
@@ -87,7 +87,7 @@ def test_a_sources_state_is_its_checks_and_a_failure_keeps_photos_playing():
     assert out["states"] == [
         {"state": "never-checked", "severity": "todo", "label": "Not checked yet"},
         {"state": "checking", "severity": "notice", "label": "Checking: 12,400 photos so far"},
-        {"state": "complete", "severity": "ok", "label": "Checked HH:MM"},
+        {"state": "complete", "severity": "ok", "label": "Checked Ddd HH:MM"},
         {"state": "incomplete", "severity": "notice",
          "label": "Checked part of it: more than 1,000 photos share one moment"},
         {"state": "failed", "severity": "notice",

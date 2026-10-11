@@ -799,6 +799,9 @@ PHOTO_PAGE_IMPORTS = {
     "photo-source-page.tsx": {"libraryApi.js", "photoSourcesApi.js", "useDraftPool.js", "useSourceCheck.js"},
     # A Source's words have one home (sourceWords.js), which the Show side's models read too.
     "source-pool-view.tsx": {"sourceWords.js"},
+    "source-query-editor.tsx": {"sourceWords.js"},
+    # A saved Source as a card (follow-ups D1): its counts and first photos (its pool route).
+    "source-card.tsx": {"photoSourcesApi.js", "sourceWords.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 
