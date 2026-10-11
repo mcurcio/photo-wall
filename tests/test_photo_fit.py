@@ -14,6 +14,7 @@ from central.wall_plan.fit import (
     FitVerdict,
     band,
     crop_share,
+    interest_kept,
     judge,
     shape_fit,
 )
@@ -247,3 +248,26 @@ def test_shape_fit_agrees_with_judge_on_every_size_only_refusal(kind, width, hei
     refused = shape_fit(kind, width, height, full_screen(profile), limit, HOUSE)
     assert refused is not None
     assert judge(kind, width, height, key, full_screen(profile), limit, HOUSE) == refused
+
+
+def test_interest_kept_is_the_grid_weight_inside_the_window() -> None:
+    """The row and column totals a whole-width or whole-height window sums equal the cell by
+    cell share (the oracle here), for banded and uneven grids."""
+    grids = (banded_grid(rows=12, top=.25, weight=.9), banded_grid(left=.3, right=.1, weight=.7),
+             key_content(4000, 3000).interest)
+
+    def cell_by_cell(grid, window) -> float:
+        left, top, right, bottom = window
+        total = 0.0
+        for row in range(grid.rows):
+            for column in range(grid.columns):
+                x0, x1 = column / grid.columns, (column + 1) / grid.columns
+                y0, y1 = row / grid.rows, (row + 1) / grid.rows
+                wide = max(0.0, min(right, x1) - max(left, x0)) / (x1 - x0)
+                tall = max(0.0, min(bottom, y1) - max(top, y0)) / (y1 - y0)
+                total += grid.weights[row * grid.columns + column] * wide * tall
+        return total
+
+    for grid in grids:
+        for window in ((0, .1, 1, .85), (.2, 0, .93, 1), (0, 0, 1, 1), (.1, .2, .6, .9)):
+            assert interest_kept(grid, window) == pytest.approx(cell_by_cell(grid, window))

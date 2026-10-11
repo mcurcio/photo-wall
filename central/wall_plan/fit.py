@@ -37,6 +37,7 @@ Key content is ignored.
 """
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 from typing import Final, Literal
 
@@ -133,8 +134,21 @@ def shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_
 
 def interest_kept(grid: InterestGrid, window: Window) -> float:
     """The share of the grid's weight inside `window` (UV fractions), each cell counted by the
-    fraction of its area the window covers. Pure."""
+    fraction of its area the window covers. Pure. A crop window spans the photo's whole width or
+    whole height (contracts/photo_crop.py), so the common case sums the grid's row or column
+    totals along the cut axis only (the same arithmetic, one axis's coverage being 1)."""
     left, top, right, bottom = window
+    whole_width, whole_height = left <= 0 and right >= 1, top <= 0 and bottom >= 1
+    if whole_width or whole_height:
+        rows, columns = _marginals(grid)
+        if whole_width:
+            kept = sum(total * _covered(top, bottom, row / grid.rows, (row + 1) / grid.rows)
+                       for row, total in enumerate(rows))
+        else:
+            kept = sum(total * _covered(left, right, column / grid.columns,
+                                        (column + 1) / grid.columns)
+                       for column, total in enumerate(columns))
+        return min(1.0, max(0.0, kept))
     kept = 0.0
     for row in range(grid.rows):
         tall = _covered(top, bottom, row / grid.rows, (row + 1) / grid.rows)
@@ -210,6 +224,16 @@ def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None, targ
     kept, offset = max(passing, key=lambda pair: (round(pair[0], 9), -abs(pair[1] - 0.5),
                                                   -pair[1]))
     return Fits(crop=PhotoCrop(offset=offset), crop_share=share, interest_kept=kept)
+
+
+@lru_cache(maxsize=4096)
+def _marginals(grid: InterestGrid) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """The grid's weight per row and per column (the grid is frozen, so the memo holds)."""
+    rows = tuple(math.fsum(grid.weights[row * grid.columns:(row + 1) * grid.columns])
+                 for row in range(grid.rows))
+    columns = tuple(math.fsum(grid.weights[column::grid.columns])
+                    for column in range(grid.columns))
+    return rows, columns
 
 
 @lru_cache(maxsize=16)

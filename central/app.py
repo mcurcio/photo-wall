@@ -34,6 +34,7 @@ from central.infra.display_store import (
     PgPictureSessions,
     frame_outputs_in,
 )
+from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import InstallationInventory
@@ -159,6 +160,8 @@ def create_app(
     # Follow-ups B1: the photo fit settings' one store (the Planner, the authoring check, the
     # candidates read, the settings routes and the fit analysis all read it).
     fit_settings = PgFitSettings(db, times=media_times)
+    # Follow-ups B2: the one fit analysis read (every console moment asks it).
+    fit_analysis_reader = PgFitAnalysisReader(db, times=media_times)
     coordinator = Coordinator(
         db,
         clock,
@@ -750,8 +753,7 @@ def create_app(
     mount_photo_source_routes(app, admin=admin, queries=photo_sources, commands=photo_sources)
     mount_photo_fit_routes(
         app, admin=admin, settings=fit_settings,
-        # B2 binds the PostgreSQL reader; until then the frozen `analyse` answers nothing.
-        analysis=lambda request: analyse(request, None, fit_settings.fit_settings()))  # type: ignore[arg-type]
+        analysis=lambda request: analyse(request, fit_analysis_reader, fit_settings.fit_settings()))
     mount_library_routes(app, admin=admin, library=photo_library, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
     pictures = PgPictureSessions(db)
