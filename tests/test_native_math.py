@@ -11,8 +11,9 @@ import pytest
 
 import player.native as native_module
 from contracts.frame_fit import cover_rectangle
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, CornersFit, CoverFit, PhotoCrop
 from contracts.node_frame import PictureOperations
+from contracts.photo_crop import CENTRED
 from player.geometry import (
     compose_pixel,
     decode_channel,
@@ -309,15 +310,41 @@ def test_neutral_operations_change_nothing(encoded):
         compose_pixel([((*encoded, 1), 1, False)]), abs=1e-12)
 
 
-def test_photo_rect_is_centred_cover_without_trim():
-    assert photo_rect(1, 200, 100) == pytest.approx((.25, 0, .75, 1))
-    assert photo_rect(2, 200, 100) == pytest.approx((0, 0, 1, 1))
-    assert photo_rect(4, 200, 100) == pytest.approx((0, .25, 1, .75))
-    assert photo_rect(.5, 200, 100) == pytest.approx((.375, 0, .625, 1))
+@pytest.mark.parametrize("crop", [None, CENTRED])
+def test_photo_rect_is_centred_cover_without_trim(crop):
+    assert photo_rect(1, 200, 100, crop) == pytest.approx((.25, 0, .75, 1))
+    assert photo_rect(2, 200, 100, crop) == pytest.approx((0, 0, 1, 1))
+    assert photo_rect(4, 200, 100, crop) == pytest.approx((0, .25, 1, .75))
+    assert photo_rect(.5, 200, 100, crop) == pytest.approx((.375, 0, .625, 1))
     with pytest.raises(ValueError):
         photo_rect(0, 200, 100)
     with pytest.raises(ValueError):
         photo_rect(1, 0, 100)
+
+
+def test_photo_rect_draws_the_window_the_crop_names():
+    """Roadmap 5a P1: offset 0 keeps the left (wide source) or top (tall source) edge, offset 1
+    the right or bottom one (contracts/photo_crop.py `crop_window`)."""
+    wide, tall = (200, 100), (100, 200)
+    assert photo_rect(1, *wide, PhotoCrop(offset=0)) == pytest.approx((0, 0, .5, 1))
+    assert photo_rect(1, *wide, PhotoCrop(offset=1)) == pytest.approx((.5, 0, 1, 1))
+    assert photo_rect(1, *tall, PhotoCrop(offset=0)) == pytest.approx((0, 0, 1, .5))
+    assert photo_rect(1, *tall, PhotoCrop(offset=1)) == pytest.approx((0, .5, 1, 1))
+
+
+def test_picture_source_uv_samples_inside_the_crop_window():
+    """A 2:1 source on a 1:1 Frame with offset 0 samples u in [0, .5] across the whole picture,
+    offset 1 u in [.5, 1]; v is the full height."""
+    fit = CornersFit()
+    for offset, low in ((0, 0), (1, .5)):
+        crop = PhotoCrop(offset=offset)
+        samples = [picture_source_uv(x / 10, y / 10, fit, (100, 100), 1, 200, 100, crop)
+                   for x in range(11) for y in range(11)]
+        assert all(low - 1e-9 <= u <= low + .5 + 1e-9 for u, _ in samples)
+        assert min(u for u, _ in samples) == pytest.approx(low)
+        assert max(u for u, _ in samples) == pytest.approx(low + .5)
+        assert min(v for _, v in samples) == pytest.approx(0)
+        assert max(v for _, v in samples) == pytest.approx(1)
 
 
 def test_srgb_and_bt709_transfer():

@@ -1083,7 +1083,7 @@ class NativeRenderer:
                 texture = self._upload(surface, local)
                 gl.glActiveTexture(gl.GL_TEXTURE0)
                 gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
-                rectangle = photo_rect(aspect, variant.width, variant.height)
+                rectangle = photo_rect(aspect, variant.width, variant.height, local.layer.crop)
                 gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), *rectangle)
             gl.glUniform1i(gl.glGetUniformLocation(program, "video"), int(bool(variant and variant.duration)))
             gl.glUniform1i(gl.glGetUniformLocation(program, "black"), int(variant is None))

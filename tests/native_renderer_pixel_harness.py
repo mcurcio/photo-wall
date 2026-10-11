@@ -26,6 +26,11 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    compose as `compose_pixel`, a corrupt picture fails its prepare without stopping the Frame,
    and the enrollment diagnostic shows only while the Output is unbound. Its video assertions
    are not moved: this image's GStreamer cannot link H.264 pads yet (errata, the G8 finding (8)).
+9. crop_offset_keeps_the_left_edge (roadmap 5a P1): the picture on a 9:16 binding profile in
+   Cover at 0 degrees, its layer carrying `PhotoCrop(offset=0)`: sampled pixels equal the
+   reference (`picture_source_uv` with that crop) and show only the left quadrants' colours
+   (red, blue); with offset 1 only the right ones (green, white). A renderer that ignored the
+   crop, or swapped its axes, draws the centre's four colours.
 """
 import hashlib
 import os
@@ -56,6 +61,7 @@ from contracts.models import (  # noqa: E402
     FrameProfile,
     Layer,
     OutputBinding,
+    PhotoCrop,
     Variant,
 )
 from contracts.node_frame import PictureOperations  # noqa: E402
@@ -107,16 +113,18 @@ def variant_of(path: pathlib.Path) -> Variant:
 
 
 def layer(assignment_id: str, path: pathlib.Path | None, variant: Variant | None,
-          alpha: float = 1.0) -> LocalLayer:
+          alpha: float = 1.0, crop: PhotoCrop | None = None) -> LocalLayer:
     """A picture layer, or with no variant a black one."""
     return LocalLayer(Layer(assignment_id=assignment_id, run_id="run", output_id="headless",
                             frame_id="frame", binding_generation=1, start=0, end=10**9,
                             media_origin=0, variant=variant,
-                            presentation="media" if variant else "black"), path, 0.0, alpha)
+                            presentation="media" if variant else "black", crop=crop),
+                      path, 0.0, alpha)
 
 
-def composition(variant: Variant, calibration: Calibration, *layers: LocalLayer) -> OutputComposition:
-    return OutputComposition(BINDING, calibration, layers or (layer("quadrants", PHOTO, variant),))
+def composition(variant: Variant, calibration: Calibration, *layers: LocalLayer,
+                binding: OutputBinding = BINDING) -> OutputComposition:
+    return OutputComposition(binding, calibration, layers or (layer("quadrants", PHOTO, variant),))
 
 
 class Frames:
@@ -229,15 +237,16 @@ def close(actual, expected) -> bool:
     return max(abs(a - b) for a, b in zip(actual, expected, strict=True)) <= TOLERANCE
 
 
-def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None) -> tuple[int, int]:
+def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None, *,
+              profile: FrameProfile = PROFILE, crop: PhotoCrop | None = None) -> tuple[int, int]:
     """Every sample equals the reference: inside, the picture through `final_pixel`; outside,
     opaque black. The (inside, outside) sample counts."""
     width, height, _ = native.captured
     applied = operations or PictureOperations("headless", 1, (1.0, 1.0, 1.0), 1.0, 1.0, 1.0)
     counts = [0, 0]
     for i, j, x, y in samples(native, fit.corners):
-        uv = picture_source_uv(x, y, fit, (width, height), PROFILE.width_px / PROFILE.height_px,
-                               WIDTH, HEIGHT)
+        uv = picture_source_uv(x, y, fit, (width, height), profile.width_px / profile.height_px,
+                               WIDTH, HEIGHT, crop)
         if uv is None:
             expected = final_pixel((0.0, 0.0, 0.0), applied, inside=False)
             counts[1] += 1
@@ -379,12 +388,45 @@ def the_diagnostic_shows_only_while_the_output_is_unbound(native, frames, varian
     assert not surface.diagnostic.get_visible()
 
 
+TALL = FrameProfile(width_px=900, height_px=1600, diagonal_inches=10)     # 9:16 cuts the sides
+TALL_BINDING = OutputBinding(output_id="headless", frame_id="frame", generation=1, profile=TALL)
+
+
+def crop_offset_keeps_the_left_edge(native, frames, variant) -> None:
+    """Roadmap 5a P1: the layer's crop picks the window. The 4:3 picture on a 9:16 Frame keeps
+    (9/16)/(4/3) of its width: offset 0 its left part (red over blue), offset 1 its right part
+    (green over white). Each sampled pixel is named by its nearest quadrant colour."""
+    frames.operations = None
+    fit = CoverFit(corners=OPENING)
+    sides = {0: {0, 2}, 1: {1, 3}}          # indices into QUADRANTS
+    for offset, colours in sides.items():
+        crop = PhotoCrop(offset=offset)
+        show(native, composition(variant, Calibration(fit=fit),
+                                 layer(f"crop{offset}", PHOTO, variant, crop=crop),
+                                 binding=TALL_BINDING))
+        inside, _ = check_fit(native, fit, None, profile=TALL, crop=crop)
+        width, height, _ = native.captured
+        seen = set()
+        for i, j, x, y in samples(native, fit.corners):
+            uv = picture_source_uv(x, y, fit, (width, height), TALL.width_px / TALL.height_px,
+                                   WIDTH, HEIGHT, crop)
+            if uv is None or texel_colour(*uv) is None:
+                continue
+            actual = pixel(native, i, j)[:3]
+            seen.add(min(range(4), key=lambda index: sum(
+                abs(a - c / 255) for a, c in zip(actual, QUADRANTS[index][:3], strict=True))))
+        print(f"CROP offset={offset} inside={inside} colours={sorted(seen)}", flush=True)
+        assert inside > 300, (offset, inside)
+        assert seen == colours, ("crop_colours", offset, sorted(seen), sorted(colours))
+        native.release(f"crop{offset}")
+
+
 CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_matches_the_reference(90), outside_the_opening_stays_black_at_low_contrast,
          corners_fit_matches_the_reference, operations_change_the_picture_and_the_tag,
          no_trim_and_no_gain_uniforms, alpha_and_black_layers_compose_as_the_reference,
          a_corrupt_picture_fails_and_the_frame_still_presents,
-         the_diagnostic_shows_only_while_the_output_is_unbound)
+         the_diagnostic_shows_only_while_the_output_is_unbound, crop_offset_keeps_the_left_edge)
 
 
 def main() -> None:
