@@ -22,7 +22,7 @@ import math
 from collections.abc import Iterable, Sequence
 
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
-from contracts.models import CornersFit, CoverFit
+from contracts.models import CornersFit, CoverFit, PhotoCrop
 from contracts.node_frame import PictureOperations, srgb_to_linear
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -155,9 +155,13 @@ def inside_opening(corners: Corners, x: float, y: float) -> bool:
     return True
 
 
-def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tuple[float, float, float, float]:
+def photo_rect(frame_aspect: float, source_width: int, source_height: int,
+               crop: PhotoCrop | None = None) -> tuple[float, float, float, float]:
     """The photo's source UV rectangle (left, top, right, bottom) for centred cover of
-    `frame_aspect` (Photo fit). Pure; ValueError for a non-positive or non-finite aspect or size."""
+    `frame_aspect` (Photo fit). Pure; ValueError for a non-positive or non-finite aspect or size.
+
+    Roadmap 5a (slice P1): the window `crop` names (contracts/photo_crop.py `crop_window`); None
+    until the 5a INTEGRATE step makes a media layer's crop required."""
     if not math.isfinite(frame_aspect) or frame_aspect <= 0:
         raise ValueError("positive finite Frame aspect required")
     if source_width <= 0 or source_height <= 0:

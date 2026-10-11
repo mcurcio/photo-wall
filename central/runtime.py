@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
+from central.wall_plan.selection import SceneSelection
 from contracts.models import TARGET_ID_PATTERN, AfterEnd
 
 if TYPE_CHECKING:
@@ -87,6 +88,8 @@ class Scene(FrozenModel):
     outro_seconds: Seconds = 0
     outro_contributions: tuple[Contribution, ...] = ()
     protect_frames: bool = False
+    # Roadmap 5a: how this Scene's Frames pick from its photos (order, no-repeat days, crop limit).
+    selection: SceneSelection = SceneSelection()
 
     @model_validator(mode="after")
     def coherent_cycle(self) -> Self:
@@ -170,6 +173,9 @@ class Intent(FrozenModel):
     after_end: AfterEnd = "leave_as_is"
     actuator_value: Unit | None = None
     phase: Literal["body", "outro"]
+    # Roadmap 5a: the Intent's own Scene's selection (a child Scene's is its own), copied by
+    # `timeline` (slice O1); the Planner reads it.
+    selection: SceneSelection = SceneSelection()
 
     @property
     def precedence(self) -> tuple[int, int, int]:

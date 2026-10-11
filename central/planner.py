@@ -17,7 +17,18 @@ from pydantic import Field
 
 from central.catalog import Candidate, SourcePool
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
-from contracts.models import AfterEnd, FrameProfile, Layer, Model, OutputBinding
+from central.wall_plan.fit import DEFAULT_CROP_LIMIT
+from central.wall_plan.order import WallHistory
+from contracts.models import (
+    AfterEnd,
+    FrameProfile,
+    Identifier,
+    Instant,
+    Layer,
+    Model,
+    OutputBinding,
+    PhotoCrop,
+)
 
 if TYPE_CHECKING:
     from central.execution_outcomes import ExecutionOutcome
@@ -53,6 +64,8 @@ class PlannerLimits(Model):
     max_diagnostics: int = Field(default=8192, ge=1)
     max_players: int = Field(default=128, ge=1)
     max_bindings: int = Field(default=256, ge=1)
+    # Roadmap 5a: measurement requests per projection (central/wall_plan/assignment.py).
+    max_measurements: int = Field(default=64, ge=0)
 
 
 class AcquisitionRequest(Model):
@@ -61,10 +74,38 @@ class AcquisitionRequest(Model):
     earliest_start: float
 
 
+class MeasureRequest(Model):
+    """Roadmap 5a: measure this photo's key content (the media worker's measurement task)."""
+
+    asset_id: Identifier
+
+
 class AssignmentSelection(Model):
     assignment_id: str
     asset_id: str | None = None
     locked: bool = False
+    # Roadmap 5a (slice W1 sets them on every new media selection): its Scene and that Scene's
+    # pass, which coordination records with the offer (central/wall_plan/ports.py ShownHistory).
+    scene_id: str | None = None
+    pass_number: int | None = Field(default=None, ge=1)
+
+
+PlannedState = Literal["locked", "offered", "tentative", "unfilled"]
+
+
+class PlannedPhoto(Model):
+    """Roadmap 5a: one slot of the wall plan over the plan horizon. "locked": an offered or
+    secured layer; "offered": a new layer in this projection; "tentative": beyond the preparation
+    horizon, not yet a layer; "unfilled": no photo (`reason` says why)."""
+
+    assignment_id: Identifier
+    frame_id: Identifier
+    start: Instant
+    end: Instant
+    state: PlannedState
+    asset_id: Identifier | None = None
+    crop: PhotoCrop | None = None
+    reason: str | None = None
 
 
 class Diagnostic(Model):
@@ -87,13 +128,20 @@ class Projection(Model):
     acquisitions: tuple[AcquisitionRequest, ...]
     diagnostics: tuple[Diagnostic, ...]
     selections: tuple[AssignmentSelection, ...]
+    # Roadmap 5a: the measurements this plan needs, and the whole wall plan (slice W1).
+    measurements: tuple[MeasureRequest, ...] = ()
+    plan: tuple[PlannedPhoto, ...] = ()
 
     def for_player(self, player_id: str) -> PlayerProposal | None:
         return next((player for player in self.players if player.player_id == player_id), None)
 
 
-def eligible(candidate: Candidate, profile: FrameProfile) -> bool:
-    """Hard original-media policy, also applied to every authored alternative."""
+def eligible(candidate: Candidate, profile: FrameProfile,
+             crop_limit: float = DEFAULT_CROP_LIMIT) -> bool:
+    """Hard original-media policy, also applied to every authored alternative.
+
+    Roadmap 5a (slice W1): becomes the photo fit rule's size-only part
+    (central/wall_plan/fit.py `shape_fit` is None) at `crop_limit`."""
     if candidate.kind == "image":
         return not (
             profile.height_px > profile.width_px
@@ -387,10 +435,19 @@ def project(
     source_pools: Mapping[str, SourcePool],
     authored_candidates: Mapping[str, Candidate],
     locked_assignments: Mapping[str, Layer],
+    history: WallHistory = WallHistory(),
     horizon_seconds: float = 300,
+    plan_seconds: float | None = None,
+    max_clock_uncertainty: float = 0.1,
     limits: PlannerLimits = PlannerLimits(),
 ) -> Projection:
-    """Build complete-cycle proposals without changing any supplied state."""
+    """Build complete-cycle proposals without changing any supplied state.
+
+    Roadmap 5a (slice W1): the wall plan covers `plan_seconds` (None: `horizon_seconds`; at most
+    `limits.max_horizon_seconds`) from `now`, every Frame together; layers are proposed only for
+    slots starting before now + `horizon_seconds` (the preparation horizon). `history` is the
+    shown history and the locks' photos (central/infra/shown_history_store.py);
+    `max_clock_uncertainty` sets the on-screen extents' guard (contracts/on_screen.py)."""
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:

@@ -63,7 +63,7 @@ def test_authored_api_is_neutral_idempotent_and_membership_bound(registry):
         assert source.status_code == 200
         candidate = source.json()["candidates"][0]
         assert set(candidate) == {"asset_id", "kind", "original_width", "original_height",
-                                  "captured_at", "variant", "preparation_failure"}
+                                  "captured_at", "variant", "preparation_failure", "analysis"}
         assert all(secret not in source.text for secret in ("fixture-1", "connection_ref", "upstream"))
         assert client.post("/v1/operator/authored-candidates", headers=headers,
                            json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id] * 2}).status_code == 422

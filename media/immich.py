@@ -52,6 +52,7 @@ from contracts.time import Clock, SystemClock
 from media.library_client import (
     ChosenItemGone,
     ExclusionQuery,
+    FaceBox,
     FetchedRendition,
     IdsPage,
     KeysetPosition,
@@ -572,6 +573,10 @@ class ImmichClient:
             raise _media_error(error.problem) from None
         if not shown or now != revision:
             raise MediaError("asset_changed", "incompatible")
+
+    async def faces(self, upstream_id: str) -> tuple[FaceBox, ...]:
+        """LibraryClient.faces (roadmap 5a, slice M1)."""
+        raise NotImplementedError
 
     async def thumbnail(self, upstream_id: str, revision: AssetRevision) -> bytes:
         """The edited thumbnail, re-encoded by Photo Wall; MediaError("asset_changed") when the

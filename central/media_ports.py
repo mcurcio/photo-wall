@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from central.catalog import Candidate, SourcePool
-from central.planner import AcquisitionRequest
+from central.planner import AcquisitionRequest, MeasureRequest
 from contracts.models import FrameProfile, Variant
 
 
@@ -54,6 +54,8 @@ class MediaApplication(Protocol):
     """Central application operations exposed to schedulers and operators."""
 
     def request_acquisitions(self, requests: tuple[AcquisitionRequest, ...]) -> int: ...
+
+    def request_measurements(self, requests: tuple[MeasureRequest, ...]) -> int: ...
 
     def sources(self) -> list[dict]: ...
 

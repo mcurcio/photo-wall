@@ -88,7 +88,9 @@ def _console_literal(name):
 
 
 def _model_defaults(model):
-    return {name: json.loads(json.dumps(field.default))
+    # A model-valued default (Scene.selection, roadmap 5a) is compared as its JSON.
+    return {name: json.loads(json.dumps(field.default,
+                                        default=lambda value: value.model_dump(mode="json")))
             for name, field in model.model_fields.items() if not field.is_required()}
 
 

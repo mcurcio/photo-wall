@@ -36,6 +36,7 @@ from central.node_bus_wiring import NodeBus, build_node_bus
 from central.photo_library.model import ConnectionSecret, LibraryAsset
 from central.photo_library.ports import LibraryWorkerStore
 from central.registry import RegistryError
+from central.wall_plan.ports import KeyContentWriter
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient, LibraryLimits
@@ -67,6 +68,8 @@ _PERMANENT = frozenset({
 class WorkerLimits(Model):
     job_seconds: Positive = Field(default=330, le=330)
     close_seconds: Positive = Field(default=5, le=10)
+    # Roadmap 5a: one key content measurement, Immich's two answers and the saliency included.
+    measure_seconds: Positive = Field(default=30, le=120)
 
 
 class PreparationClient(Protocol):
@@ -102,7 +105,8 @@ class MediaWorker:
                  library: LibraryWorkerStore, *,
                  preparer: PreparationClient | None = None,
                  client_factory: Callable[[ConnectionSecret], LibraryClient] | None = None,
-                 limits: WorkerLimits = WorkerLimits(), previews: Path | None = None):
+                 limits: WorkerLimits = WorkerLimits(), previews: Path | None = None,
+                 key_content: KeyContentWriter | None = None):
         self.repository, self.store, self.clock, self.limits = repository, store, repository.clock, limits
         if store.repository is not repository or limits.job_seconds + 30 > repository.limits.lease_seconds:
             raise MediaError("worker_config", "incompatible")
@@ -121,6 +125,9 @@ class MediaWorker:
         self._clients = LibraryClients(self.client_factory, self._close)
         # The thumbnail directory, swept of files whose record maintenance retired.
         self.previews = previews
+        # Roadmap 5a (slice M1): where measurements are read and recorded; `_entry` passes the
+        # PostgreSQL store, and `measure` refuses with media_config without one.
+        self.key_content = key_content
         self._error: str | None = None
         self._recipe: str | None = None
 
@@ -218,6 +225,15 @@ class MediaWorker:
             raise MediaTaskFailed(self._error) from None
         finally:
             await _blocking(self.repository.worker_status, self._error)
+
+    async def measure(self, asset_id: str) -> None:
+        """Measure one photo's key content (roadmap 5a, slice M1; MEASURE_KEY_CONTENT_TASK): read
+        its asset row (gone: nothing to do), ask its connection's client for `faces` and the
+        `thumbnail` at its revision, `media.key_content.measure` them off the event loop, and
+        record the result. A decode failure, or the whole step running past
+        `WorkerLimits.measure_seconds`, is recorded as failed (its retry is the store's); a
+        library or asset-changed failure raises RetryableMediaTask (Procrastinate retries)."""
+        raise NotImplementedError
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)

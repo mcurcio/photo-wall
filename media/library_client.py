@@ -129,6 +129,20 @@ class FetchedRendition(Model):
     height: int = Field(gt=0)
 
 
+class FaceBox(Model):
+    """One face Immich found (`GET /faces?id=<asset id>`, v2.5.6 `AssetFaceResponseDto`): its
+    pixel box on the `image_width` x `image_height` image Immich measured it on (its preview,
+    upright and edited; not the original's pixels). media/key_content.py `faces_of` turns it into
+    fractions (roadmap 5a, slice M1)."""
+
+    x1: int = Field(ge=0)
+    y1: int = Field(ge=0)
+    x2: int = Field(ge=0)
+    y2: int = Field(ge=0)
+    image_width: int = Field(gt=0)
+    image_height: int = Field(gt=0)
+
+
 class LibraryClient(Protocol):
     """One connection's client; async, every call bounded by its own budget (no retry loops: the
     worker's tasks own retries)."""
@@ -183,6 +197,14 @@ class LibraryClient(Protocol):
     async def thumbnail(self, upstream_id: str, revision: AssetRevision) -> bytes:
         """The edited thumbnail, re-encoded by Photo Wall (no metadata survives); raises
         MediaError("asset_changed") when the asset's revision moved."""
+        ...
+
+    async def faces(self, upstream_id: str) -> tuple[FaceBox, ...]:
+        """Every face Immich holds for the asset (`GET /faces?id=`, permission `face.read`), in
+        Immich's order. Owner, 2026-10-11: "If immich face detection is unavailable, then smart
+        crop doesn't take into account faces": a 403 (the key lacks face.read) answers () like an
+        asset with no faces (the connection's health already names the missing permission); a
+        malformed box is left out. Other failures raise LibraryUnavailable."""
         ...
 
     async def fetch_rendition(self, asset: LibraryAsset, *, frame_long_edge: int | None,

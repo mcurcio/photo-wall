@@ -21,7 +21,7 @@ from central.db import MEDIA_LOCK, Database, TransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset, PoolMember
-from central.planner import AcquisitionRequest, candidate_standing, eligible
+from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing, eligible
 from central.registry import RegistryError
 from contracts.models import (
     Digest,
@@ -314,6 +314,13 @@ class MediaRepository:
                 self.queue.enqueue_in(conn, job_id)
                 inserted += 1
         return inserted
+
+    def request_measurements(self, requests: tuple[MeasureRequest, ...]) -> int:
+        """Roadmap 5a (slice M1): queue a key content measurement for each requested photo that
+        has none current (central.wall_plan.ports.KeyContentReader.request_in), in one
+        transaction; returns how many were queued. The scheduler calls it after every advance,
+        beside `request_acquisitions`."""
+        raise NotImplementedError
 
     @staticmethod
     def _active_jobs(conn) -> int:

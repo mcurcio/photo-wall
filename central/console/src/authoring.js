@@ -298,7 +298,12 @@ export const SCENE_DEFAULTS = {
   "duration_seconds": null,
   "outro_seconds": 0,
   "outro_contributions": [],
-  "protect_frames": false
+  "protect_frames": false,
+  "selection": {
+    "order": "shuffle",
+    "no_repeat_days": 7,
+    "crop_limit": 0.35
+  }
 };
 
 export const CONTRIBUTION_DEFAULTS = {

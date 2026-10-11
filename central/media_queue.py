@@ -15,6 +15,11 @@ CHECK_CONNECTION_TASK = "photo_wall.library.check_connection"
 CHECK_POOL_TASK = "photo_wall.library.check_pool"
 LIBRARY_CONNECTION_LOCK_PREFIX = "photo-wall-library-connection:"
 LIBRARY_POOL_LOCK_PREFIX = "photo-wall-library-pool:"
+# Roadmap 5a (run ledger .claude/runs/photo-5a.md, slice M1): measure one photo's key content. Its
+# queueing lock (prefix + asset id) keeps one queued measurement per photo; it takes no lock, so
+# it runs beside preparation and the library checks.
+MEASURE_KEY_CONTENT_TASK = "photo_wall.media.measure"
+KEY_CONTENT_QUEUE_PREFIX = "photo-wall-measure:"
 MEDIA_QUEUE = "photo-wall-media"
 MEDIA_STORAGE_LOCK = "photo-wall-media-storage"
 _SCHEMA_LOCK = 734118326
@@ -24,6 +29,7 @@ class MediaTaskQueue(Protocol):
     def enqueue_in(self, conn: Any, job_id: str) -> int: ...
     def enqueue_connection_check_in(self, conn: Any, connection_ref: str) -> "QueueReceipt": ...
     def enqueue_pool_check_in(self, conn: Any, pool_key: str) -> "QueueReceipt": ...
+    def enqueue_measure_in(self, conn: Any, asset_id: str) -> "QueueReceipt": ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,12 @@ class ProcrastinateMediaQueue:
         already waiting absorbs a second request."""
         return self._defer_coalescing(conn, CHECK_POOL_TASK, LIBRARY_POOL_LOCK_PREFIX + pool_key,
                                       pool_key=pool_key)
+
+    def enqueue_measure_in(self, conn: Any, asset_id: str) -> QueueReceipt:
+        """Queue MEASURE_KEY_CONTENT_TASK(asset_id=...) on MEDIA_QUEUE in the caller's
+        transaction, queueing lock KEY_CONTENT_QUEUE_PREFIX + asset id and no lock (slice M1); an
+        already queued measurement coalesces."""
+        raise NotImplementedError
 
     def _defer_coalescing(self, conn: Any, task: str, lock: str, **arguments: str) -> QueueReceipt:
         """Defer `task` once per `lock`: a queued (not yet running) duplicate coalesces. The
