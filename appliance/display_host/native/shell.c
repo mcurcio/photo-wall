@@ -30,6 +30,10 @@
 #define MAX_FEEDBACK 128
 #define MAX_PACKET 16384
 #define LEASE_MS 5000
+#define FRAME_VERSION 4      /* pw_frame_manager_v1 and pw_diagnostic_manager_v1: v4 carries the picture (1c) */
+#define MAX_OPERATIONS 512   /* contracts.node_frame.PICTURE_OPERATIONS_BYTES */
+#define MAX_BRIGHTNESS 128
+#define MAX_PICTURE_CHANGE 20
 
 struct shell;
 struct app_surface;
@@ -60,6 +64,8 @@ struct output {
     uint32_t diagnostic_serial;
     char reason[97];
     bool testing;
+    /* The controller's latest `picture` op, forwarded verbatim and never parsed (1c). */
+    char picture_operations[MAX_OPERATIONS + 1], brightness[MAX_BRIGHTNESS + 1];
     struct app_surface *diagnostic;
     bool released;
     struct app_surface *app;
@@ -74,7 +80,7 @@ struct app_surface {
     bool diagnostic;
     uint32_t diagnostic_ack;
     struct wl_listener committed, destroyed;
-    char pending_grant[37], pending_tag[97];
+    char pending_grant[37], pending_tag[97], pending_picture[MAX_PICTURE_CHANGE + 1];
     char overlay_grant[37], overlay_tag[97], primitives[513];
 };
 /* The private client's per-Output health surface: above app and slate, never touched by
@@ -91,7 +97,7 @@ struct feedback {
     struct app_surface *surface;
     uint64_t commit, output_generation;
     uint32_t diagnostic_ack;
-    char grant[37], tag[97], primitives[513];
+    char grant[37], tag[97], primitives[513], picture_change[MAX_PICTURE_CHANGE + 1];
 };
 struct shell {
     struct weston_compositor *compositor;
@@ -251,8 +257,22 @@ static void grant_identity_to(struct output *o, struct wl_resource *resource, ui
         pw_frame_manager_v1_send_grant_frame(resource, o->name, grant,
             json_string_value(json_object_get(identity, "frame_id")), generation, revision, state);
 }
+/* The Output's stored picture operations to one frame manager resource: version 4, the Output's
+ * app client only, verbatim. */
+static void picture_to(struct output *o, struct wl_resource *resource) {
+    if (!o->picture_operations[0] || wl_resource_get_version(resource) < 4 || !o->identity ||
+        !client_matches(o, wl_resource_get_client(resource))) return;
+    pw_frame_manager_v1_send_picture(resource, o->name, o->picture_operations);
+}
+/* The Output's stored base page brightness line to the private client (manager v4). */
+static void brightness_to(struct output *o) {
+    struct wl_resource *r = o->shell->diagnostic_resource;
+    if (r && o->brightness[0] && wl_resource_get_version(r) >= 4)
+        pw_diagnostic_manager_v1_send_brightness(r, o->name, o->brightness);
+}
 static void grant_to(struct output *o, struct wl_resource *resource, uint32_t state) {
     grant_identity_to(o, resource, state, o->identity, o->grant);
+    if (state != 2) picture_to(o, resource);   /* a newly granted or bound app gets the stored picture */
     if (state != 2 && o->revision_identity)
         grant_identity_to(o, resource, 3, o->revision_identity, o->revision_grant);
 }
@@ -336,6 +356,22 @@ static void tag_frame(struct wl_client *client, struct wl_resource *resource,
     }
     snprintf(a->pending_grant, sizeof a->pending_grant, "%s", grant);
     snprintf(a->pending_tag, sizeof a->pending_tag, "%s", tag);
+    a->pending_picture[0] = 0;   /* a v3 tag names no picture change: `presented` echoes null */
+}
+/* contracts.node_frame.picture_change_text: "0" or a decimal, at most 20 digits. */
+static bool picture_change_token(const char *s) {
+    if (!s || !*s || strlen(s) > MAX_PICTURE_CHANGE) return false;
+    for (const char *c = s; *c; c++) if (*c < '0' || *c > '9') return false;
+    return true;
+}
+static void tag_picture_frame(struct wl_client *client, struct wl_resource *resource,
+    struct wl_resource *surface, const char *grant, const char *tag, const char *picture_change) {
+    if (!picture_change_token(picture_change)) {
+        wl_resource_post_error(resource, 0, "invalid_picture_change"); return;
+    }
+    tag_frame(client, resource, surface, grant, tag);
+    struct app_surface *a = find_surface(wl_resource_get_user_data(resource), surface);
+    if (a) snprintf(a->pending_picture, sizeof a->pending_picture, "%s", picture_change);
 }
 static bool bounded_primitives(const char *text) {
     if (!text || strlen(text) > 512) return false;
@@ -368,7 +404,8 @@ static void destroy_resource(struct wl_client *client, struct wl_resource *resou
     (void)client; wl_resource_destroy(resource);
 }
 static const struct pw_frame_manager_v1_interface frame_impl = {
-    .destroy = destroy_resource, .tag = tag_frame, .overlay = overlay_frame
+    .destroy = destroy_resource, .tag = tag_frame, .overlay = overlay_frame,
+    .tag_picture = tag_picture_frame
 };
 static void frame_resource_gone(struct wl_resource *r) {
     struct shell *s = wl_resource_get_user_data(r);
@@ -376,7 +413,8 @@ static void frame_resource_gone(struct wl_resource *r) {
 }
 static void bind_frame(struct wl_client *client, void *data, uint32_t version, uint32_t id) {
     (void)version;
-    struct wl_resource *r = wl_resource_create(client, &pw_frame_manager_v1_interface, version < 3 ? version : 3, id);
+    struct wl_resource *r = wl_resource_create(client, &pw_frame_manager_v1_interface,
+        version < FRAME_VERSION ? version : FRAME_VERSION, id);
     if (!r) { wl_client_post_no_memory(client); return; }
     struct shell *s = data;
     wl_resource_set_implementation(r, &frame_impl, data, frame_resource_gone);
@@ -525,11 +563,15 @@ static void bind_diagnostic(struct wl_client *client, void *data, uint32_t versi
     if (client != s->diagnostic_client || s->diagnostic_resource) {
         wl_client_post_implementation_error(client, "private_diagnostic_role"); return;
     }
-    struct wl_resource *r = wl_resource_create(client, &pw_diagnostic_manager_v1_interface, version < 3 ? version : 3, id);
+    struct wl_resource *r = wl_resource_create(client, &pw_diagnostic_manager_v1_interface,
+        version < FRAME_VERSION ? version : FRAME_VERSION, id);
     if (!r) { wl_client_post_no_memory(client); return; }
     s->diagnostic_resource = r;
     wl_resource_set_implementation(r, &diagnostic_impl, s, diagnostic_resource_gone);
-    for (int i = 0; i < MAX_OUTPUTS; i++) if (s->outputs[i].name[0]) diagnostic_configure(&s->outputs[i]);
+    for (int i = 0; i < MAX_OUTPUTS; i++) if (s->outputs[i].name[0]) {
+        diagnostic_configure(&s->outputs[i]);
+        brightness_to(&s->outputs[i]);
+    }
 }
 static void protocol_log(void *data, enum wl_protocol_logger_type direction,
                          const struct wl_protocol_logger_message *m) {
@@ -560,8 +602,9 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
             if (!strcmp(a->overlay_grant, a->pending_grant) && !strcmp(a->overlay_tag, a->pending_tag))
                 memcpy(f->primitives, a->primitives, sizeof f->primitives);
             memcpy(f->tag, a->pending_tag, sizeof f->tag);
+            memcpy(f->picture_change, a->pending_picture, sizeof f->picture_change);
         }
-        a->pending_grant[0] = a->pending_tag[0] = 0;
+        a->pending_grant[0] = a->pending_tag[0] = a->pending_picture[0] = 0;
         a->overlay_grant[0] = a->overlay_tag[0] = a->primitives[0] = 0;
         a->diagnostic_ack = 0;
         return;
@@ -611,9 +654,10 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
             o->recent_presented[o->recent_next].at = now_ms();
             o->recent_next = (o->recent_next + 1) % 128;
             char buffer[64]; snprintf(buffer, sizeof buffer, "weston-%"PRIu64, f->commit);
-            send_event(s, json_pack("{s:s,s:O,s:s,s:s,s:s,s:I}", "event", "presented",
+            send_event(s, json_pack("{s:s,s:O,s:s,s:s,s:s,s:I,s:s?}", "event", "presented",
                 "identity", o->identity, "grant_id", o->grant, "buffer_id", buffer,
-                "frame_tag", f->tag, "observed_monotonic_ms", (json_int_t)now_ms()));
+                "frame_tag", f->tag, "observed_monotonic_ms", (json_int_t)now_ms(),
+                "picture_change", f->picture_change[0] ? f->picture_change : NULL));
             if (o->trial_json[0] && boot_ms() < o->trial_until &&
                 !strcmp(f->tag, o->trial_tag) && f->primitives[0] && s->diagnostic_resource) {
                 o->overlay_visible = true;
@@ -726,6 +770,18 @@ static bool command(struct shell *s, json_t *j) {
         else weston_output_power_on(o->weston);
         send_event(s, json_pack("{s:s,s:s,s:s}", "event", "output_power",
             "output_id", o->name, "power", output_power_state(o)));
+        return true;
+    }
+    /* Picture (1c P2): the controller's operations for the Output's app and its base page line for
+     * the private client, stored and forwarded verbatim; the shell never parses `operations`. */
+    if (!strcmp(op, "picture")) {
+        const char *operations = string(j, "operations"), *brightness = string(j, "brightness");
+        if (!operations || !*operations || strlen(operations) > MAX_OPERATIONS ||
+            !brightness || strlen(brightness) > MAX_BRIGHTNESS) return false;
+        snprintf(o->picture_operations, sizeof o->picture_operations, "%s", operations);
+        snprintf(o->brightness, sizeof o->brightness, "%s", brightness);
+        for (int i = 0; i < MAX_SURFACES; i++) if (s->frame_resources[i]) picture_to(o, s->frame_resources[i]);
+        brightness_to(o);
         return true;
     }
     if (!strcmp(op, "withdraw")) {
@@ -1060,8 +1116,9 @@ WL_EXPORT int wet_shell_init(struct weston_compositor *ec, int *argc, char *argv
     weston_layer_set_position(&s->health_layer, WESTON_LAYER_POSITION_LOCK + 1);
     s->desktop = weston_desktop_create(ec, &desktop_api, s);
     if (!s->desktop) return -1;
-    s->frame_global = wl_global_create(ec->wl_display, &pw_frame_manager_v1_interface, 3, s, bind_frame);
-    s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, 3, s, bind_diagnostic);
+    s->frame_global = wl_global_create(ec->wl_display, &pw_frame_manager_v1_interface, FRAME_VERSION, s, bind_frame);
+    s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, FRAME_VERSION, s,
+        bind_diagnostic);
     s->logger = wl_display_add_protocol_logger(ec->wl_display, protocol_log, s);
     if (!s->frame_global || !s->diagnostic_global || !s->logger) return -1;
     s->output_created.notify = output_created;
