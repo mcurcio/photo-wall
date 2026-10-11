@@ -20,8 +20,9 @@ from pydantic import Field, model_validator
 from contracts.models import Fraction, Model
 
 # A new value re-measures every photo (the store keeps one row per asset; hydration reads a row
-# only at this version). Bump it when the measurement's method or constants change.
-ANALYSIS_VERSION: Final = "1"
+# only at this version). Bump it when the measurement's method or constants change. "2"
+# (follow-ups B1): raw face boxes and the saliency spread, padding and thresholds at judge time.
+ANALYSIS_VERSION: Final = "2"
 # The interest grid's columns; its rows follow the thumbnail's aspect (at least 1).
 INTEREST_COLUMNS: Final = 16
 
@@ -63,12 +64,17 @@ class InterestGrid(Model):
 
 
 class KeyContent(Model):
-    """One photo's key content at `analysis_version`: faces (padded, each kept whole by any
-    crop) and the interest grid."""
+    """One photo's key content at `analysis_version`, as measured, with no tuning value applied
+    (follow-ups 2026-10-11, slice B1): `faces` are Immich's boxes as fractions, clamped and
+    unpadded, every non-degenerate box kept; `interest` is the grid of the salience above the
+    map's mean; `spread` is the saliency map's max minus its min. The fit rule pads faces, drops
+    small ones and treats a flat map as even when it judges (central/wall_plan/fit.py
+    `faces_judged`, `interest_judged`), so a settings change needs no new measurement."""
 
     analysis_version: str = Field(min_length=1, max_length=16)
     faces: tuple[UnitBox, ...] = ()
     interest: InterestGrid
+    spread: float = Field(ge=0, le=1, allow_inf_nan=False)
 
 
 class Measured(Model):

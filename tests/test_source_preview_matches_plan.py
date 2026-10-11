@@ -46,7 +46,7 @@ from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceNameService
-from contracts.models import FrameProfile
+from contracts.models import Calibration, CornersFit, FrameProfile
 from contracts.time import ManualClock
 from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
@@ -164,7 +164,12 @@ class Wall:
                                                    profile=profile))
             self.registry.bind(frame_id, player["player_id"], f"HDMI-A-{index + 1}",
                                expected_generation=0)
-            save_position(self.registry, frame_id)
+            # Follow-ups B1: the fit rule needs the Frame output (its picture on the enrolled
+            # 1920 x 1080 Output), so each Frame's Position is a corner of the profile's own
+            # pixels and the fixture's 96 x 64 photos hold it.
+            right, bottom = profile.width_px / 1920, profile.height_px / 1080
+            save_position(self.registry, frame_id, Calibration(fit=CornersFit(
+                corners=((0.0, 0.0), (right, 0.0), (right, bottom), (0.0, bottom)))))
 
     def show(self, frame_ids, source_refs):
         runtime = self.coordinator.runtime

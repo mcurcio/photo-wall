@@ -46,21 +46,20 @@ from pydantic import Field
 
 from central.catalog import Candidate
 from central.wall_plan.fit import (
-    LARGE_FRAME_INCHES,
-    LARGE_FRAME_VIDEO_SHORT_SIDE,
     Fits,
+    FitTarget,
     FitVerdict,
     MediaKind,
     crop_share,
     judge,
     shape_fit,
 )
+from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import KeyContent, Measured, MeasureFailed
 from central.wall_plan.order import KeptStill, SceneLine
 from contracts.models import (
     AfterEnd,
     Fraction,
-    FrameProfile,
     Identifier,
     Instant,
     Model,
@@ -91,10 +90,11 @@ class Slot(Model):
     """One Frame's showing to fill: an Intent of the Runtime's timeline.
 
     It can take a candidate when: the candidate is in its pool (`pools[slot.pool]`), or in
-    `authored` for a hand-placed slot; the fit rule accepts it on `profile` at `crop_limit`
+    `authored` for a hand-placed slot; the fit rule accepts it on `target` (its Frame's profile
+    and Frame output) at `crop_limit`, the Scene's resolved value
     (`central.wall_plan.fit.judge`, measured key content for an image); it is not
     `preparation_failure`d nor measure-failed; inside the preparation window its variant is usable
-    for the profile; and no extent of that photo on another Frame overlaps this slot's."""
+    for the Frame; and no extent of that photo on another Frame overlaps this slot's."""
 
     slot_id: Identifier                      # the assignment id
     frame_id: Identifier
@@ -103,9 +103,9 @@ class Slot(Model):
     end: Instant
     fade_in: float = Field(ge=0, allow_inf_nan=False)
     after_end: AfterEnd
-    profile: FrameProfile
+    target: FitTarget
     crop_limit: Fraction
-    pool: str = ""                           # key into `pools`; "" for a hand-placed slot
+    pool: str = ""                        # key into `pools`; "" for a hand-placed slot
     authored: tuple[Identifier, ...] = ()    # hand-placed photos, in authored order
 
 
@@ -160,10 +160,12 @@ class WallPlan(Model):
 def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequence[KeptStill],
               candidates: Mapping[str, Candidate], lines: Mapping[str, SceneLine],
               pools: Mapping[str, frozenset[str]], *, window: PlanWindow,
-              max_clock_uncertainty: float, limits: WallLimits = WallLimits()) -> WallPlan:
+              max_clock_uncertainty: float, limits: WallLimits = WallLimits(),
+              settings: FitSettings) -> WallPlan:
     """The wall assignment over `window` (module docstring). `candidates` are hydrated (variant,
     preparation failure, analysis); `lines` are keyed by scene id and mutated through `pick`;
-    `pools` maps each slot's pool key to the asset ids its contribution's Sources hold.
+    `pools` maps each slot's pool key to the asset ids its contribution's Sources hold;
+    `settings` are the photo fit settings every slot is judged with.
     Deterministic for equal inputs. Never changes a fixed showing. ValueError on a Scene-line
     slot whose scene has no line (a hand-placed slot needs none), or more than
     `limits.max_slots` slots."""
@@ -173,7 +175,7 @@ def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequen
         if slot.pool and slot.scene_id not in lines:
             raise ValueError(f"slot {slot.slot_id} names scene {slot.scene_id!r}, which has no line")
     return _Walk(candidates, lines, pools, window=window, uncertainty=max_clock_uncertainty,
-                 limits=limits).run(slots, fixed, kept)
+                 limits=limits, settings=settings).run(slots, fixed, kept)
 
 
 def layer_after_end(after_end: AfterEnd, kind: MediaKind) -> AfterEnd:
@@ -185,11 +187,11 @@ def layer_after_end(after_end: AfterEnd, kind: MediaKind) -> AfterEnd:
     return after_end
 
 
-def variant_usable(candidate: Candidate, profile: FrameProfile) -> bool:
-    """Whether the candidate's prepared copy can be drawn on a Frame of `profile`: its media type
-    and duration, and requirements :186's floor for a video on a large Frame. Landscape or
-    portrait is not a test (the fit rule judges the original's ratio; owner 2026-10-11, "It's about the
-    ratio, not strict labels")."""
+def variant_usable(candidate: Candidate, target: FitTarget, settings: FitSettings) -> bool:
+    """Whether the candidate's prepared copy can be drawn on the Frame `target`: its media type
+    and duration, and requirements :186's floor for a video on a large Frame (`settings`).
+    Landscape or portrait is not a test (the fit rule judges the original's ratio; owner
+    2026-10-11, "It's about the ratio, not strict labels")."""
     variant = candidate.variant
     if variant is None:
         return False
@@ -197,18 +199,20 @@ def variant_usable(candidate: Candidate, profile: FrameProfile) -> bool:
         return variant.media_type in ("image/jpeg", "image/png") and variant.duration is None
     return (
         variant.media_type == "video/mp4" and variant.duration is not None
-        and (profile.diagonal_inches < LARGE_FRAME_INCHES
-             or min(variant.width, variant.height) >= LARGE_FRAME_VIDEO_SHORT_SIDE)
+        and (target.profile.diagonal_inches < settings.large_frame_inches
+             or min(variant.width, variant.height) >= settings.large_frame_video_short_side)
     )
 
 
-def fit_of(candidate: Candidate, profile: FrameProfile, crop_limit: float) -> FitVerdict | None:
-    """The photo fit rule's verdict for a hydrated candidate on `profile` at `crop_limit`
-    (central/wall_plan/fit.py). None: an image that passes on its size alone and whose key
-    content is not measured yet. Memoised: `judge` is pure, so the memo is keyed by every input
-    and never disagrees with it; an empty memo gives the same answers."""
+def fit_of(candidate: Candidate, target: FitTarget, crop_limit: float,
+           settings: FitSettings) -> FitVerdict | None:
+    """The photo fit rule's verdict for a hydrated candidate on `target` at `crop_limit` with
+    `settings` (central/wall_plan/fit.py). None: an image that passes on its size alone and
+    whose key content is not measured yet. Memoised: `judge` is pure, so the memo is keyed by
+    every input (`settings` included) and never disagrees with it; an empty memo gives the same
+    answers."""
     refused = shape_fit(candidate.kind, candidate.original_width, candidate.original_height,
-                        profile, crop_limit)
+                        target, crop_limit, settings)
     if refused is not None:
         return refused
     analysis = candidate.analysis
@@ -216,41 +220,41 @@ def fit_of(candidate: Candidate, profile: FrameProfile, crop_limit: float) -> Fi
     if candidate.kind == "image" and key is None:
         return None
     return _judged(candidate.kind, candidate.original_width, candidate.original_height, key,
-                   profile, crop_limit)
+                   target, crop_limit, settings)
 
 
-def fits_slot(candidate: Candidate, slot: Slot) -> bool:
+def fits_slot(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
     """Whether `candidate` could fill `slot` on its own merits, apart from where else it is on
     screen: measured, it fits, it has not failed, and a prepared copy (if any) is usable. A
     Scene's line counts these as pickable (a pass ends once each is picked)."""
-    return _standing(candidate, slot.profile, slot.crop_limit, inside=False)[0] == "take"
+    return _standing(candidate, slot.target, slot.crop_limit, settings, inside=False)[0] == "take"
 
 
 @lru_cache(maxsize=65536)
 def _judged(kind: MediaKind, width: int, height: int, key: KeyContent | None,
-            profile: FrameProfile, crop_limit: float) -> FitVerdict:
-    return judge(kind, width, height, key, profile, crop_limit)
+            target: FitTarget, crop_limit: float, settings: FitSettings) -> FitVerdict:
+    return judge(kind, width, height, key, target, crop_limit, settings)
 
 
 _Standing = Literal["take", "measure", "prepare", "unusable", "no"]
 
 
-def _standing(candidate: Candidate, profile: FrameProfile, crop_limit: float, *,
-              inside: bool) -> tuple[_Standing, Fits | None]:
+def _standing(candidate: Candidate, target: FitTarget, crop_limit: float, settings: FitSettings,
+              *, inside: bool) -> tuple[_Standing, Fits | None]:
     """What a slot does with one candidate of its pool, before asking where else it is on
     screen: take it (with the fit rule's crop), request a measurement or (inside the
     preparation window) a prepared copy, leave it ("unusable": it fits, but its prepared copy
     cannot be drawn here), or nothing (it does not fit, or it failed)."""
     if candidate.preparation_failure or isinstance(candidate.analysis, MeasureFailed):
         return "no", None
-    verdict = fit_of(candidate, profile, crop_limit)
+    verdict = fit_of(candidate, target, crop_limit, settings)
     if verdict is None:
         return "measure", None
     if not isinstance(verdict, Fits):
         return "no", None
     if candidate.variant is None:
         return ("prepare" if inside else "take"), verdict
-    return ("take" if variant_usable(candidate, profile) else "unusable"), verdict
+    return ("take" if variant_usable(candidate, target, settings) else "unusable"), verdict
 
 
 _Offer = tuple[str, _Standing, Fits | None]
@@ -356,9 +360,9 @@ class _Walk:
 
     def __init__(self, candidates: Mapping[str, Candidate], lines: Mapping[str, SceneLine],
                  pools: Mapping[str, frozenset[str]], *, window: PlanWindow, uncertainty: float,
-                 limits: WallLimits) -> None:
+                 limits: WallLimits, settings: FitSettings) -> None:
         self.candidates, self.lines, self.pools = candidates, lines, pools
-        self.window, self.limits = window, limits
+        self.window, self.limits, self.settings = window, limits, settings
         self.wall = _Wall(uncertainty)
         self.placed: dict[str, Placed] = {}
         self.unfilled: dict[str, Unfilled] = {}
@@ -366,8 +370,8 @@ class _Walk:
         self.prepare: dict[str, tuple[list[str], float]] = {}
         self.reserved: frozenset[str] = frozenset()
         # Caches within this call. A slot's class is what its standings depend on (its pool,
-        # profile, crop limit and side of the preparation window), numbered once per slot so a
-        # standing is looked up by (asset id, class) without hashing the profile again.
+        # Frame target, crop limit and side of the preparation window), numbered once per slot so a
+        # standing is looked up by (asset id, class) without hashing the target again.
         self._classes: dict[tuple, int] = {}
         self._class_of: dict[str, int] = {}
         self._standings: dict[tuple[str, int], tuple[_Standing, Fits | None]] = {}
@@ -491,9 +495,10 @@ class _Walk:
                     or candidate.kind != "image" or candidate.preparation_failure
                     or isinstance(candidate.analysis, Measured)
                     or shape_fit("image", candidate.original_width, candidate.original_height,
-                                 slot.profile, slot.crop_limit) is not None):
+                                 slot.target, slot.crop_limit, self.settings) is not None):
                 continue
-            if candidate.variant is not None and not variant_usable(candidate, slot.profile):
+            if (candidate.variant is not None
+                    and not variant_usable(candidate, slot.target, self.settings)):
                 continue
             if not self._free(candidate, slot):
                 continue
@@ -504,7 +509,7 @@ class _Walk:
                 continue
             self._place(slot, candidate, Fits(
                 crop=CENTRED, crop_share=crop_share(candidate.original_width,
-                                                    candidate.original_height, slot.profile),
+                                                    candidate.original_height, slot.target.profile),
                 interest_kept=1.0), pass_number=self._pick(slot.scene_id, asset_id))
             return True
         return False
@@ -512,7 +517,7 @@ class _Walk:
     def _slot_class(self, slot: Slot) -> int:
         number = self._class_of.get(slot.slot_id)
         if number is None:
-            key = (slot.pool, slot.profile, slot.crop_limit,
+            key = (slot.pool, slot.target, slot.crop_limit,
                    slot.start < self.window.preparation_end)
             number = self._classes.setdefault(key, len(self._classes))
             self._class_of[slot.slot_id] = number
@@ -523,7 +528,7 @@ class _Walk:
         standing = self._standings.get(key)
         if standing is None:
             standing = self._standings[key] = _standing(
-                candidate, slot.profile, slot.crop_limit,
+                candidate, slot.target, slot.crop_limit, self.settings,
                 inside=slot.start < self.window.preparation_end)
         return standing
 

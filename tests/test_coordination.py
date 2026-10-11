@@ -144,8 +144,11 @@ def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a", *, al
     `also` names more (asset, digest) photos of the same pool, prepared the same way: one photo
     is never on two Frames at once (roadmap 5a), so a Scene on N Frames needs N photos."""
     variant = Variant(sha256=digest, size=10, media_type="image/jpeg", width=1080, height=1920)
-    pool_photo = photo(asset, taken_at=registry.clock.utc())
-    others = [(photo(label, taken_at=registry.clock.utc()), other) for label, other in also]
+    # 4K portrait: a 9:16 Frame full screen (Cover) on the enrolled 1920 x 1080 Output draws
+    # its picture at 1920 x 3414 (its Frame output, follow-ups B1), which this photo holds.
+    pool_photo = photo(asset, taken_at=registry.clock.utc(), width=2160, height=3840)
+    others = [(photo(label, taken_at=registry.clock.utc(), width=2160, height=3840), other)
+              for label, other in also]
     seed_pool(registry, "library:1", (pool_photo, *(item for item, _ in others)))
     measure_all(registry, (pool_photo, *(item for item, _ in others)))
     recipe = "f" * 64
@@ -174,8 +177,10 @@ def test_a_scene_naming_two_sources_plays_only_their_pools_and_asks_for_their_ph
     """F-1: a contribution's photos are the union of the pools of the Sources it names, whether or
     not each pool's check completed (C7); a pool it does not name never plays."""
     setup_players(registry, count=1)
-    family = (photo("family", taken_at=900), photo("shared", taken_at=950))
-    garden = (family[1], photo("garden", taken_at=990))
+    # 4K portrait: what the 9:16 Frame on the 1920 x 1080 Output needs (its Frame output).
+    family = (photo("family", taken_at=900, width=2160, height=3840),
+              photo("shared", taken_at=950, width=2160, height=3840))
+    garden = (family[1], photo("garden", taken_at=990, width=2160, height=3840))
     seed_pool(registry, "family:1", family)
     seed_pool(registry, "garden:1", garden, complete=False)
     seed_pool(registry, "other:1", (photo("other", taken_at=999),))

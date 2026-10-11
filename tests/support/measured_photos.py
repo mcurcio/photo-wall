@@ -26,7 +26,8 @@ def measure(registry, photo: LibraryAsset, *, faces: tuple[UnitBox, ...] = (),
     rows = max(1, min(64, round(INTEREST_COLUMNS * photo.height / photo.width)))
     PgKeyContent(registry.db, times=ProcessTransactionClock(registry.clock)).record_measured(
         photo.asset_id, KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces,
-                                   interest=grid or uniform_grid(INTEREST_COLUMNS, rows)))
+                                   interest=grid or uniform_grid(INTEREST_COLUMNS, rows),
+                                   spread=1.0))
 
 
 def measure_all(registry, photos: Iterable[LibraryAsset]) -> None:

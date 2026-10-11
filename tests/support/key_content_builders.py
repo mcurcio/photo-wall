@@ -52,10 +52,20 @@ def face(left: float, top: float, right: float, bottom: float) -> UnitBox:
 
 def measured(asset_id: str, width: int, height: int, *, faces: tuple[UnitBox, ...] = (),
              grid: InterestGrid | None = None, kind: str = "image",
-             captured_at: float = 0, variant: Variant | None = None) -> Candidate:
-    """A hydrated candidate with `Measured` key content at ANALYSIS_VERSION."""
+             captured_at: float = 0, variant: Variant | None = None,
+             spread: float = 1.0) -> Candidate:
+    """A hydrated candidate with `Measured` key content at ANALYSIS_VERSION: `faces` as Immich
+    found them (the fit rule pads them when it judges); `spread` the saliency map's (1.0: the
+    grid counts as it is)."""
+    return Candidate(asset_id=asset_id, kind=kind, original_width=width, original_height=height,
+                     captured_at=captured_at, variant=variant,
+                     analysis=Measured(key=key_content(width, height, faces=faces, grid=grid,
+                                                       spread=spread)))
+
+
+def key_content(width: int, height: int, *, faces: tuple[UnitBox, ...] = (),
+                grid: InterestGrid | None = None, spread: float = 1.0) -> KeyContent:
+    """Key content at ANALYSIS_VERSION for a `width` x `height` photo (uniform grid by default)."""
     if grid is None:
         grid = uniform_grid(INTEREST_COLUMNS, max(1, min(64, round(INTEREST_COLUMNS * height / width))))
-    key = KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces, interest=grid)
-    return Candidate(asset_id=asset_id, kind=kind, original_width=width, original_height=height,
-                     captured_at=captured_at, variant=variant, analysis=Measured(key=key))
+    return KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces, interest=grid, spread=spread)

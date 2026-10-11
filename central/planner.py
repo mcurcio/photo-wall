@@ -36,7 +36,8 @@ from central.wall_plan.assignment import (
     plan_wall,
     variant_usable,
 )
-from central.wall_plan.fit import shape_fit
+from central.wall_plan.fit import FitTarget, shape_fit
+from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
     SceneLine,
     ScenePass,
@@ -44,9 +45,9 @@ from central.wall_plan.order import (
     last_shown_at,
     scene_passes,
 )
+from central.wall_plan.selection import crop_limit_of
 from contracts.models import (
     AfterEnd,
-    FrameProfile,
     Identifier,
     Instant,
     Layer,
@@ -167,12 +168,13 @@ class Projection(Model):
         return next((player for player in self.players if player.player_id == player_id), None)
 
 
-def eligible(candidate: Candidate, profile: FrameProfile, crop_limit: float) -> bool:
+def eligible(candidate: Candidate, target: FitTarget, crop_limit: float,
+             settings: FitSettings) -> bool:
     """Hard original-media policy, also applied to every authored alternative: the photo fit
-    rule's size-only part (central/wall_plan/fit.py `shape_fit` is None) at `crop_limit`.
-    Key content is judged by the wall assignment once measured."""
+    rule's size-only part (central/wall_plan/fit.py `shape_fit` is None) on the Frame `target`
+    at `crop_limit` with `settings`. Key content is judged by the wall assignment once measured."""
     return shape_fit(candidate.kind, candidate.original_width, candidate.original_height,
-                     profile, crop_limit) is None
+                     target, crop_limit, settings) is None
 
 
 # What Central may revise on a layer it has already offered (each offered layer is a lock:
@@ -210,17 +212,17 @@ def _bound(size: int | float, limit: int | float, name: str) -> None:
 Standing = Literal["usable", "preparing", "failed_to_prepare", "no_compatible_variant"]
 
 
-def candidate_standing(candidate: Candidate, profile: FrameProfile) -> Standing:
-    """What planning does with one candidate eligible for a Frame's profile, as to its prepared
-    copy: a recorded preparation failure drops it; with no copy yet, a slot inside the
-    preparation horizon requests one and a later slot may take it tentatively; a copy the
-    profile cannot draw (central/wall_plan/assignment.py `variant_usable`) is never taken. The
-    operator candidates route serves it as is."""
+def candidate_standing(candidate: Candidate, target: FitTarget, settings: FitSettings) -> Standing:
+    """What planning does with one candidate eligible for a Frame, as to its prepared copy: a
+    recorded preparation failure drops it; with no copy yet, a slot inside the preparation
+    horizon requests one and a later slot may take it tentatively; a copy the Frame cannot draw
+    (central/wall_plan/assignment.py `variant_usable`) is never taken. The operator candidates
+    route serves it as is."""
     if candidate.preparation_failure:
         return "failed_to_prepare"
     if candidate.variant is None:
         return "preparing"
-    return "usable" if variant_usable(candidate, profile) else "no_compatible_variant"
+    return "usable" if variant_usable(candidate, target, settings) else "no_compatible_variant"
 
 
 def _after_end(intent: Intent, *, still: bool) -> AfterEnd:
@@ -256,9 +258,12 @@ class _ProjectionBuilder:
         authored: Mapping[str, Candidate],
         locks: Mapping[str, Layer],
         limits: PlannerLimits,
+        settings: FitSettings,
+        frame_outputs: Mapping[str, tuple[int, int] | None],
     ) -> None:
         self.limits, self.source_pools, self.authored, self.locks = (
             limits, source_pools, authored, locks)
+        self.settings, self.frame_outputs = settings, frame_outputs
         self.frames: dict[str, tuple[str, OutputBinding]] = {}
         self.layers: dict[str, list[Layer]] = {player: [] for player in bindings_by_player}
         self.diagnostics: dict[tuple, Diagnostic] = {}
@@ -395,7 +400,9 @@ class _ProjectionBuilder:
             slot_id=identity, frame_id=binding.frame_id, scene_id=intent.scene_id,
             start=intent.interval_start, end=intent.interval_end,
             fade_in=intent.fade_in_seconds, after_end=intent.after_end,
-            profile=binding.profile, crop_limit=intent.selection.crop_limit,
+            target=FitTarget(profile=binding.profile,
+                             output_px=self.frame_outputs.get(binding.frame_id)),
+            crop_limit=crop_limit_of(intent.selection, self.settings),
             pool=pool, authored=intent.asset_refs)))
 
     def _candidates(self) -> tuple[dict[str, Candidate], dict[str, frozenset[str]]]:
@@ -434,14 +441,14 @@ class _ProjectionBuilder:
         for scene_id, items in by_scene.items():
             classes: dict[tuple, Slot] = {}
             for item in items:
-                classes.setdefault((item.slot.pool, item.slot.profile, item.slot.crop_limit),
+                classes.setdefault((item.slot.pool, item.slot.target, item.slot.crop_limit),
                                    item.slot)
             members = {asset_id: candidates[asset_id] for asset_id in sorted(
                 set().union(*(pools[slot.pool] for slot in classes.values())))}
             pickable = frozenset(
                 asset_id for asset_id, candidate in members.items()
                 if asset_id not in reserved and any(
-                    asset_id in pools[slot.pool] and fits_slot(candidate, slot)
+                    asset_id in pools[slot.pool] and fits_slot(candidate, slot, self.settings)
                     for slot in classes.values()))
             lines[scene_id] = SceneLine(
                 scene_id, items[0].intent.selection, tuple(members.values()),
@@ -503,7 +510,8 @@ class _ProjectionBuilder:
         current_pass = {scene_id: line.pass_number for scene_id, line in lines.items()}
         wall = plan_wall(tuple(item.slot for item in self.pending), tuple(self.fixed),
                          history.kept, candidates, lines, pools, window=window,
-                         max_clock_uncertainty=max_clock_uncertainty, limits=wall_limits)
+                         max_clock_uncertainty=max_clock_uncertainty, limits=wall_limits,
+                         settings=self.settings)
         placed = {placement.slot_id: placement for placement in wall.placed}
         unfilled = {gap.slot_id: gap.reason for gap in wall.unfilled}
         planned: list[PlannedPhoto] = []
@@ -590,6 +598,8 @@ def project(
     plan_seconds: float = PLAN_SECONDS,
     max_clock_uncertainty: float = 0.1,
     limits: PlannerLimits = PlannerLimits(),
+    settings: FitSettings,
+    frame_outputs: Mapping[str, tuple[int, int] | None],
 ) -> Projection:
     """Build complete-cycle proposals without changing any supplied state.
 
@@ -598,7 +608,10 @@ def project(
     layers are proposed only for slots starting before now + `horizon_seconds` (the preparation
     horizon). `history` is the shown history and the locks' photos
     (central/infra/shown_history_store.py); `max_clock_uncertainty` sets the on-screen extents'
-    guard (contracts/on_screen.py)."""
+    guard (contracts/on_screen.py). Follow-ups B1: every slot is judged with `settings` (the
+    photo fit settings) against its Frame's `FitTarget`, whose Frame output is
+    `frame_outputs[frame_id]` (None, or a Frame absent from it: judged by shape only); a Scene
+    without its own crop limit follows `settings.crop_limit`."""
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:
@@ -616,6 +629,7 @@ def project(
     builder = _ProjectionBuilder(
         bindings_by_player=bindings_by_player, source_pools=source_pools,
         authored=authored_candidates, locks=locked_assignments, limits=limits,
+        settings=settings, frame_outputs=frame_outputs,
     )
     try:
         timeline = runtime.timeline(now, window.plan_end, max_events=limits.max_events)

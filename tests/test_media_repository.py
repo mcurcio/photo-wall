@@ -145,7 +145,7 @@ def test_source_pools_in_hydrates_key_content_and_a_measurement_is_requested_onc
     measured, unmeasured = photo("measured", taken_at=990), photo("unmeasured", taken_at=900)
     seed_pool(registry, "family:1", (unmeasured, measured))
     key = KeyContent(analysis_version=ANALYSIS_VERSION,
-                     interest=InterestGrid(columns=1, rows=1, weights=(1.0,)))
+                     interest=InterestGrid(columns=1, rows=1, weights=(1.0,)), spread=0.0)
     repo.key_content.record_measured(measured.asset_id, key)
     with registry.db.transaction() as conn:
         pool = repo.source_pools_in(conn, {"family:1"})["family:1"]

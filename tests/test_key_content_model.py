@@ -52,7 +52,7 @@ def test_the_builders_make_valid_grids() -> None:
 
 @pytest.mark.parametrize("analysis", [
     Measured(key=KeyContent(analysis_version=ANALYSIS_VERSION, faces=(face(.1, .2, .3, .4),),
-                            interest=banded_grid(left=.2))),
+                            interest=banded_grid(left=.2), spread=0.3)),
     MeasureFailed(reason="timeout"),
 ])
 def test_an_analysis_round_trips_through_json(analysis) -> None:

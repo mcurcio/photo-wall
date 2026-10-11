@@ -17,6 +17,8 @@ from pydantic import Field
 
 from central.db import Database, DatabaseTransactionClock
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
+from central.infra.display_store import frame_outputs_in
+from central.infra.fit_settings_store import PgFitSettings
 from central.infra.shown_history_store import PgShownHistory
 from central.installation_models import OutputInterruption, PlayerReports
 from central.installation_ports import InstallationSessions
@@ -40,8 +42,10 @@ from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
+from central.wall_plan.fit import FitTarget
 from central.wall_plan.order import PhotoShowing
-from central.wall_plan.ports import ShownHistory
+from central.wall_plan.ports import FitSettingsStore, ShownHistory
+from central.wall_plan.selection import crop_limit_of
 from contracts.models import (
     Commit,
     IdentifyOutput,
@@ -99,6 +103,7 @@ class Coordinator:
         outcomes: ExecutionOutcomeRouter | None = None,
         installation: InstallationSessions | None = None,
         shown: ShownHistory | None = None,
+        fit: FitSettingsStore | None = None,
     ):
         self.db, self.clock = db, clock
         self.limits = limits or CoordinationLimits()
@@ -107,6 +112,8 @@ class Coordinator:
         self.installation = installation or PostgresInstallationRepository(clock)
         # Roadmap 5a: what each offered layer shows and which were displayed (shown history).
         self.shown: ShownHistory = shown or PgShownHistory()
+        # Follow-ups B1: the photo fit settings, read once per planning pass and authoring check.
+        self.fit: FitSettingsStore = fit or PgFitSettings(db, times=DatabaseTransactionClock())
         self.outcomes = outcomes or ExecutionOutcomeRouter(
             handle_runtime_outcome,
             handle_planning_outcome,
@@ -145,10 +152,15 @@ class Coordinator:
         self, conn, scene: Scene, asset_ids: tuple[str, ...], profiles
     ) -> None:
         candidates = self.media.authored_candidates_in(conn, asset_ids)
+        settings = self.fit.fit_settings_in(conn)
+        crop_limit = crop_limit_of(scene.selection, settings)
+        outputs = {output.frame_id: output.output_px for output in frame_outputs_in(conn)}
         for contribution in self._scene_contributions(scene):
-            if contribution.asset_refs and not any(
-                eligible(candidates[asset_id], profiles[contribution.target.removeprefix("frame:")],
-                         scene.selection.crop_limit)
+            frame_id = contribution.target.removeprefix("frame:")
+            target = FitTarget(profile=profiles[frame_id], output_px=outputs.get(frame_id)) \
+                if contribution.asset_refs else None
+            if target is not None and not any(
+                eligible(candidates[asset_id], target, crop_limit, settings)
                 for asset_id in contribution.asset_refs
             ):
                 raise RegistryError("authored_incompatible", 409)
@@ -478,6 +490,9 @@ class Coordinator:
                 authored_candidates=authored,
                 locked_assignments=locks,
                 history=history,
+                settings=self.fit.fit_settings_in(conn),
+                frame_outputs={output.frame_id: output.output_px
+                               for output in frame_outputs_in(conn)},
                 horizon_seconds=horizon_end - now,
                 plan_seconds=self.limits.plan_seconds,
                 max_clock_uncertainty=self.limits.max_uncertainty,

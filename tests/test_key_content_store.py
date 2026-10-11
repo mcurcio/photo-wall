@@ -31,7 +31,7 @@ from central.wall_plan.key_content import (
 
 KEY = KeyContent(analysis_version=ANALYSIS_VERSION,
                  faces=(UnitBox(left=0.1, top=0.1, right=0.3, bottom=0.4),),
-                 interest=InterestGrid(columns=2, rows=1, weights=(0.75, 0.25)))
+                 interest=InterestGrid(columns=2, rows=1, weights=(0.75, 0.25)), spread=0.4)
 
 
 class Queue:

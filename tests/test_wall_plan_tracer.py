@@ -37,10 +37,20 @@ from central.media_repository import MediaRepository
 from central.planner import Projection, project
 from central.registry import FrameCreate
 from central.runtime import Contribution, Program, Runtime, Scene
-from central.wall_plan.fit import Fits, judge
+from central.wall_plan.fit import Fits, FitTarget, judge
+from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import CornersFit, FrameProfile, Observation, OutputBinding, Variant
+from contracts.models import (
+    Calibration,
+    CornersFit,
+    CoverFit,
+    FrameProfile,
+    Observation,
+    OutputBinding,
+    Variant,
+    frame_output,
+)
 from player.geometry import picture_source_uv
 
 WIDE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
@@ -76,17 +86,26 @@ def wall(crop_limit: float | None = None) -> Runtime:
     return instance
 
 
-def an_hour(instance: Runtime, photos) -> Projection:
+def full_screen(frame: str) -> FitTarget:
+    """A Frame full screen on a Display of its profile's size: its Frame output is the profile's."""
+    profile = PROFILES[frame]
+    return FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px))
+
+
+def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projection:
+    """`outputs`: each Frame's Frame output (default: full screen, `full_screen`)."""
     return project(
         instance, 0,
         bindings_by_player={"player": tuple(
             OutputBinding(output_id=f"out-{frame}", frame_id=frame, generation=1,
-                          profile=PROFILES[frame]) for frame in FRAMES)},
+                          profile=PROFILES[frame]) for frame in frames)},
         source_pools={POOL: SourcePool(source_ref=POOL, ready=True,
                                        candidates=tuple(photos.values()))},
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=3600,
-        max_clock_uncertainty=UNCERTAINTY)
+        max_clock_uncertainty=UNCERTAINTY, settings=FitSettings(),
+        frame_outputs=outputs if outputs is not None else {
+            frame: full_screen(frame).output_px for frame in frames})
 
 
 def placed_by_frame(projection: Projection) -> dict[str, list]:
@@ -111,7 +130,7 @@ def test_an_hour_of_the_wall_fills_each_frame_and_crops_on_the_player():
         for entry in entries:
             candidate = photos[entry.asset_id]
             verdict = judge(candidate.kind, candidate.original_width, candidate.original_height,
-                            candidate.analysis.key, PROFILES[frame], 0.35)
+                            candidate.analysis.key, full_screen(frame), 0.35, FitSettings())
             assert isinstance(verdict, Fits), (frame, entry.asset_id, verdict)
             assert entry.crop == verdict.crop
     assert "square" not in {entry.asset_id for entries in planned.values() for entry in entries}
@@ -130,6 +149,32 @@ def test_an_hour_of_the_wall_fills_each_frame_and_crops_on_the_player():
     assert min(u for u, _ in samples) == pytest.approx(0)
     assert max(u for u, _ in samples) == pytest.approx(kept_width)
     assert all(u <= kept_width + 1e-9 for u, _ in samples)    # the right side, faceless, is never drawn
+
+
+def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
+    """Follow-ups B1 case 9 (owner, 2026-10-11: compatibility "measuring against the Frame
+    output and not the Display"): one 16:9 Frame drawn through a 40 % x 40 % Cover opening of a
+    3,840 x 2,160 Display needs 1,536 x 864 pixels, so a 1,600 x 900 photo fills it all hour;
+    judged against the Display's size the same wall has nothing to show.
+    Mutation probe: judge rule 2 against the profile's pixels -> nothing is placed."""
+    mat = Calibration(fit=CoverFit(corners=((.3, .3), (.7, .3), (.7, .7), (.3, .7))))
+    small = {"small": measured("small", 1600, 900, variant=Variant(
+        sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
+        width=1600, height=900))}
+    instance = Runtime()
+    instance.set_scene(Scene(
+        scene_id="tracer", cycle_seconds=30, loop=True, selection=SceneSelection(),
+        contributions=(Contribution(target="frame:wide", source_refs=(POOL,),
+                                    after_end="keep_this_photo"),)))
+    instance.activate("tracer", "run", 0)
+    opening = frame_output(WIDE, mat, (3840, 2160))
+    assert opening == (1536, 864)
+    planned = placed_by_frame(an_hour(instance, small, frames=("wide",),
+                                      outputs={"wide": opening}))
+    assert len(planned["wide"]) == 120
+    assert {entry.asset_id for entry in planned["wide"]} == {"small"}
+    on_display = an_hour(instance, small, frames=("wide",), outputs={"wide": (3840, 2160)})
+    assert placed_by_frame(on_display) == {}
 
 
 def test_photos_that_fit_both_frames_are_never_on_both_at_once():
