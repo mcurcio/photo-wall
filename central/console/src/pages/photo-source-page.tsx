@@ -8,9 +8,10 @@ import {
   type Place,
   type SourceQuery,
   SourceQueryEditor,
+  activeFilters,
   defaultQuery,
 } from "../domain/source-query-editor";
-import { type SourcePoolViewData, SourcePoolView } from "../domain/source-pool-view";
+import { type SourcePoolViewData, SourcePoolView, poolWords } from "../domain/source-pool-view";
 import {
   albumsById,
   peopleById,
@@ -23,15 +24,16 @@ import {
 } from "../libraryApi.js";
 import { createDraft, saveDraft, setDraftQuery } from "../photoSourcesApi.js";
 import { EmptyState } from "../patterns/entity-page";
+import { EditorPage } from "../patterns/editor-page";
 import { EntityHeader } from "../patterns/entity-header";
 import { Note } from "../patterns/fact-row";
 import type { PickerAnswer } from "../patterns/item-picker";
+import { SaveBar } from "../patterns/save-bar";
 import { useDraftPool } from "../useDraftPool.js";
 import { sourceCheckMessage, useSourceCheck } from "../useSourceCheck.js";
 import { Button } from "../ui/button";
 import { Field, TextInput } from "../ui/field";
 import { Link } from "../ui/link";
-import { Section } from "../ui/section";
 import { Inline, Stack } from "../ui/stack";
 
 /** How long typing settles before the query is sent: every change re-reads the pool. */
@@ -221,7 +223,8 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
     }
   };
 
-  const title = editing === null ? "New Source" : `Edit Source ${editing.name}`;
+  // One title: "New Photo source", or the Source's own name.
+  const title = editing === null ? "New Photo source" : editing.name;
   if (library.connections !== null && connections.length === 0) {
     return (
       <Stack>
@@ -232,37 +235,54 @@ export function PhotoSourcePage({ editing, forLabel, onSaved, onDiscard, onChang
       </Stack>
     );
   }
+  const filters = query === null ? [] : activeFilters(query).map(({ label, cleared }) => ({ label, onClear: () => change(cleared) }));
   return (
-    <Stack>
-      <EntityHeader title={title}>
-        {forLabel !== null && <Note>{`For ${forLabel}: saving returns there with this Source chosen.`}</Note>}
-      </EntityHeader>
-      <Field label="Name" help="What Scenes and Show now call this Source.">
-        <TextInput value={name} onChange={(next) => { setName(next); onChanged(true); }} />
-      </Field>
-      {query === null || lookups === null ? <Note>Loading…</Note> : (
-        <SourceQueryEditor connections={connections} value={query} onChange={change}
-          lookups={lookups} datesProblem={dates} />
+    <EditorPage
+      header={(
+        <EntityHeader title={title}>
+          {forLabel !== null && <Note>{`For ${forLabel}: saving returns there with this Source chosen.`}</Note>}
+        </EntityHeader>
       )}
-      <Section title="Photos in this Source">
+      form={(
+        <>
+          <Field label="Name" help="What Scenes and Show now call this Source.">
+            <TextInput value={name} width="long" onChange={(next) => { setName(next); onChanged(true); }} />
+          </Field>
+          {query === null || lookups === null ? <Note>Loading…</Note> : (
+            <SourceQueryEditor connections={connections} value={query} onChange={change}
+              lookups={lookups} datesProblem={dates} />
+          )}
+        </>
+      )}
+      previewTitle="Photos in this Source"
+      previewLine={view === null ? "Reading the pool…" : poolWords(view)}
+      preview={() => (
         <SourcePoolView view={view} pages={pool.pages} hasMore={pool.hasMore} onLoadMore={() => void pool.loadMore()}
-          loadingMore={pool.loadingMore} error={pool.error} />
-      </Section>
-      {problem !== null && <Note live>{problem}</Note>}
-      {checkNote !== null && <Note live>{checkNote}</Note>}
-      <Inline label="Source actions">
-        <Button variant="primary" disabled={saving || draftRef === null} onClick={() => void save()}>
-          {saving ? "Saving…" : editing === null ? "Save Source" : "Save changes"}
-        </Button>
-        {editing !== null && (
-          <Button disabled={check.pending !== null} onClick={() => void check.run(editing.sourceRef, view?.check ?? null)}>
-            Check now
+          loadingMore={pool.loadingMore} error={pool.error} filters={filters} />
+      )}
+      saveBar={(
+        <SaveBar
+          label="Source actions"
+          message={(problem !== null || checkNote !== null) && (
+            <>
+              {problem !== null && <Note live>{problem}</Note>}
+              {checkNote !== null && <Note live>{checkNote}</Note>}
+            </>
+          )}
+        >
+          <Button variant="primary" disabled={saving || draftRef === null} onClick={() => void save()}>
+            {saving ? "Saving…" : editing === null ? "Save Photo source" : "Save changes"}
           </Button>
-        )}
-        <Button variant="ghost" disabled={saving} onClick={onDiscard}>
-          {forLabel !== null ? `Back to ${forLabel} without saving` : "Discard changes"}
-        </Button>
-      </Inline>
-    </Stack>
+          {editing !== null && (
+            <Button disabled={check.pending !== null} onClick={() => void check.run(editing.sourceRef, view?.check ?? null)}>
+              Check now
+            </Button>
+          )}
+          <Button variant="ghost" disabled={saving} onClick={onDiscard}>
+            {forLabel !== null ? `Back to ${forLabel} without saving` : "Discard changes"}
+          </Button>
+        </SaveBar>
+      )}
+    />
   );
 }

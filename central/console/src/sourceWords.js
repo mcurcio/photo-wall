@@ -1,4 +1,4 @@
-import { captureDay, clockTime, countWords, dateTime } from "./timeWords.js";
+import { captureDay, countWords, sinceTime } from "./timeWords.js";
 
 /**
  * A Photo source in words (roadmap 4): one home for what its query includes and for its check's
@@ -14,14 +14,13 @@ import { captureDay, clockTime, countWords, dateTime } from "./timeWords.js";
 export const counted = countWords;
 
 /**
- * A check time against the media read time (both the database's clock): "21:04 BST" today,
- * else with its day.
+ * A check time (timeWords.js `sinceTime`, the one format of check and contact times): "Sun 03:39".
  *
  * @param {number} at
- * @param {number|null|undefined} now `media.read_at`
+ * @param {number|null|undefined} now `media.read_at` (the database's clock), when served
  */
 export function checkTime(at, now) {
-  return Number.isFinite(now) && captureDay(at) === captureDay(now) ? clockTime(at) : dateTime(at);
+  return sinceTime(at, now ?? undefined);
 }
 
 export const PHOTOS_KEEP_PLAYING = "Photos keep playing.";

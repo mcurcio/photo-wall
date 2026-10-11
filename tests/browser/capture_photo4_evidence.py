@@ -75,7 +75,7 @@ def _region(page, name):
 def test_before_pages(page, registry, scheme):
     """main: the Sources cards, Scene Photos, Show now's freshness and Needs attention, over one
     saved live query (`holiday:1`) awaiting its refresh."""
-    from console_tasks import connect, go, start_scene, start_show_now
+    from console_tasks import choose_source, connect, go, start_scene, start_show_now
     from operator_harness import operator_server
     from test_operator_showrunner_browser import (
         SCENE_ID,
@@ -97,7 +97,7 @@ def test_before_pages(page, registry, scheme):
         _shot(page, "sources-before", scheme)
 
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         expect(form.get_by_role("region", name="Source media status")).to_be_visible()
         _shot(page, "scene-photos-before", scheme)
 
@@ -174,7 +174,7 @@ def _library(registry):
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_after_pages(page, registry, scheme):
     """The Sources cards, Scene Photos and Show now over the saved Photo source "garden"."""
-    from console_tasks import connect, start_scene, start_show_now
+    from console_tasks import choose_source, connect, start_scene, start_show_now
     from operator_harness import operator_server
     from test_operator_showrunner_browser import SCENE_ID, VALID_FRAME, _runtime, _seed
 
@@ -192,7 +192,7 @@ def test_after_pages(page, registry, scheme):
         _shot(page, "sources-after", scheme)
 
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(garden)
+        choose_source(form, garden)
         expect(form.get_by_role("region", name="Source media status")).to_contain_text("garden")
         _shot(page, "scene-photos-after", scheme)
 

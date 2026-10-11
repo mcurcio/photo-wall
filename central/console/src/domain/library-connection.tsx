@@ -14,6 +14,7 @@ import {
   libraryCountsWords,
   libraryVerdict,
   noteWords,
+  problemWords,
   waitingForKey,
 } from "./library-health-card";
 
@@ -123,6 +124,10 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
     return outcome;
   };
   const fix = (chosen: LibraryFix) => (chosen === "paste_key" ? setEditing("key") : onCheck());
+  // A connection that needs a look shows its ProblemCard, whose chip and one button are its
+  // status and its fix: neither is repeated beside it.
+  const { health } = connection;
+  const problemFix = health.state === "needs_a_look" ? problemWords(connection, health.problem).fix : null;
   const remove = async () => {
     setRemoveBusy(true);
     const outcome = await onRemove();
@@ -135,9 +140,9 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
     }
   };
   return (
-    <Section title={connection.name}>
+    <Section title={connection.name} heading="name">
       <Stack>
-        <HealthBadge verdict={libraryVerdict(connection)} />
+        {problemFix === null && <HealthBadge verdict={libraryVerdict(connection)} />}
         {waiting ? (
           <>
             <Note>Paste the address and key of this Immich to start new photos again.</Note>
@@ -186,9 +191,11 @@ export function LibraryConnection({ connection, onSave, onCheck, checkNote, onRe
           />
         )}
         <Inline label={`${connection.name} actions`}>
-          {!waiting && <Button onClick={onCheck}>Check now</Button>}
+          {!waiting && problemFix !== "check_again" && <Button onClick={onCheck}>Check now</Button>}
           {!waiting && editing === "none" && <Button variant="ghost" onClick={() => setEditing("change")}>Change name or address</Button>}
-          {!waiting && editing === "none" && <Button variant="ghost" onClick={() => setEditing("key")}>Paste a new key</Button>}
+          {!waiting && editing === "none" && problemFix !== "paste_key" && (
+            <Button variant="ghost" onClick={() => setEditing("key")}>Paste a new key</Button>
+          )}
           <Button variant="ghost" onClick={() => { setRemoveRefused(null); setRemoving(true); }}>Remove</Button>
         </Inline>
       </Stack>

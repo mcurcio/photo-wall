@@ -72,7 +72,8 @@ export function RunsRegion({ snapshot, route, navigate, recentScene, markDraft }
       role="region"
       aria-label="Runs"
     >
-      <h2 className="showrunner__region-title">Runs</h2>
+      {/* While Show now runs, its own title is the heading (follow-ups D1: no "Runs" there). */}
+      <h2 className="showrunner__region-title" hidden={inFlow}>Runs</h2>
       <ShowNowFlow
         snapshot={snapshot}
         route={route}

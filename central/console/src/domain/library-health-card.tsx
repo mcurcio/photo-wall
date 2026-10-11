@@ -1,7 +1,7 @@
 import type { Verdict } from "../patterns/health-badge";
 import { ProblemCard, type ProblemAction } from "../patterns/problem-card";
 import { Note } from "../patterns/fact-row";
-import { countWords, dateTime } from "../timeWords.js";
+import { countWords, sinceTime } from "../timeWords.js";
 
 /*
  * A photo library connection as Central serves it (central/photo_library/views.py
@@ -63,8 +63,8 @@ export function libraryVerdict(connection: LibraryConnectionView): Verdict {
   if (waitingForKey(connection)) return { severity: "todo", label: "Paste the address and key", receipt: null };
   const { health } = connection;
   if (health.state === "not_checked") return { severity: "notice", label: "Checking", receipt: null };
-  if (health.state === "ok") return { severity: "ok", label: "Connected", receipt: `checked ${dateTime(health.checked_at)}` };
-  return { severity: "notice", label: "Needs a look", receipt: `checked ${dateTime(health.checked_at)}` };
+  if (health.state === "ok") return { severity: "ok", label: "Connected", receipt: `checked ${sinceTime(health.checked_at)}` };
+  return { severity: "notice", label: "Needs a look", receipt: `checked ${sinceTime(health.checked_at)}` };
 }
 
 interface ProblemWords {
@@ -117,7 +117,7 @@ export function problemWords(connection: LibraryConnectionView, problem: Library
 export function noteWords(note: LibraryNote): string {
   return note.kind === "untested_version"
     ? `Immich ${note.found} is newer than Photo Wall has been tested with; it keeps working.`
-    : "HEIC and RAW photos play at preview size: turn on full-size copies in Immich.";
+    : "RAW photos without a full-size copy in Immich play at Immich's preview size. Turn on full-size copies in Immich to show them in full.";
 }
 
 export interface LibraryHealthCardProps {
@@ -128,9 +128,17 @@ export interface LibraryHealthCardProps {
   href?: string;
 }
 
+/** How a connection is named where it is not on its own page: "Archive (Immich)". */
+export function connectionSubject(connection: LibraryConnectionView): string {
+  return `${connection.name} (Immich)`;
+}
+
 /**
  * LibraryHealthCard: a connection that needs a look, as the error template (ProblemCard) with its
- * one fix, for Needs attention and Settings › Photo library. Nothing when it needs no look.
+ * one fix, for Needs attention and Settings › Photo library: "Archive (Immich): Needs a look since
+ * Sun 03:39. Immich rejected the API key. Photos keep playing." The fix is the same button on both
+ * pages; on Needs attention it opens Settings › Photo library, where the fix is made. Nothing when
+ * the connection needs no look.
  */
 export function LibraryHealthCard({ connection, onFix, href = "#/photo-library" }: LibraryHealthCardProps) {
   const { health } = connection;
@@ -138,12 +146,12 @@ export function LibraryHealthCard({ connection, onFix, href = "#/photo-library" 
   const words = problemWords(connection, health.problem);
   const action: ProblemAction = onFix
     ? { label: words.label, onAction: () => onFix(words.fix) }
-    : { label: words.label, href };
+    : { label: words.label, onAction: () => { window.location.hash = href; } };
   return (
     <ProblemCard
       scope="live"
-      subject={`Photo library ${connection.name}`}
-      since={dateTime(health.since)}
+      subject={connectionSubject(connection)}
+      since={sinceTime(health.since)}
       verdict={libraryVerdict(connection)}
       what={words.what}
       doing="Photos keep playing."

@@ -173,3 +173,19 @@ def test_dialog_ignores_escape_and_outside_presses_while_busy_and_yields_when_id
     page.wait_for_timeout(300)
     assert dialog.is_visible(), "Escape or an outside press closed a busy dialog"
     dialog.wait_for(state="hidden", timeout=5000)  # the request ends: it closes itself
+
+
+def test_media_grid_draws_each_photo_at_its_own_ratio(page, catalog_origin):
+    # MediaGrid (follow-ups D1): justified rows at each photo's ratio, never square crops. The
+    # story's alt texts end with the photo's ratio ("…, 16:9"). Mutation probe: give each tile
+    # `aspect-square` again -> the 9:16 and 4:1 tiles fail.
+    page.set_viewport_size(VIEWPORT)
+    page.goto(f"{catalog_origin}/iframe.html?id=patterns-mediagrid--default&viewMode=story")
+    page.wait_for_selector("body.sb-show-main")
+    images = page.get_by_role("list", name="Photos in the pool").get_by_role("img")
+    shapes = images.evaluate_all(
+        "els => els.map(e => { const r = e.getBoundingClientRect(); return [e.alt, r.width, r.height]; })")
+    assert len(shapes) == 9
+    for alt, width, height in shapes:
+        w, h = (int(n) for n in alt.rsplit(", ", 1)[1].split(":"))
+        assert abs(width / height - w / h) / (w / h) < 0.05, (alt, width, height)

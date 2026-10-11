@@ -25,12 +25,14 @@ from console_tasks import (
     LABELS,
     add_source,
     author_scene,
+    choose_source,
     connect,
     current_hash,
     go,
     scene_continue,
     scene_form,
     section_heading,
+    source_choice,
     start_scene,
     visible_page,
     visit,
@@ -350,7 +352,7 @@ def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page
 
         expect(form.get_by_label("Scene name", exact=True)).to_have_value("evening-draft")
         form.get_by_role("button", name="Change Photos from", exact=True).click()
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        expect(source_choice(form, SOURCE)).to_be_checked()
         scene_continue(page, "Review")
         form.get_by_role("button", name="Change Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
@@ -526,7 +528,7 @@ def test_skip_to_content_focuses_main_without_changing_the_route(page, registry)
 def _fill_hand_picked_draft(page, portrait_a, portrait_b):
     """A hand-picked Scene draft named "kept-draft", left on its Review step."""
     form = start_scene(page, hand_picked=True)
-    form.get_by_label("Source", exact=True).select_option(SOURCE)
+    choose_source(form, SOURCE)
     scene_continue(page, "Frames")
     form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
     form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
@@ -596,7 +598,7 @@ def test_log_out_discards_the_draft(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scenes_link = page.get_by_role("navigation", name="Sections", exact=True).get_by_role(
@@ -614,7 +616,7 @@ def test_log_out_discards_the_draft(page, registry):
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         expect(scenes.get_by_role("button", name=re.compile("^Resume draft"))).to_have_count(0)
         form = start_scene(page)
-        expect(form.get_by_label("Source", exact=True)).to_have_value("")
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        expect(form.get_by_role("group", name="Photo sources", exact=True).locator("input:checked")).to_have_count(0)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).not_to_be_checked()

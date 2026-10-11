@@ -6,6 +6,8 @@ What the media worker would write, written through the store's own worker side
 queue here, so nothing runs it.
 """
 
+import struct
+import zlib
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
@@ -93,6 +95,90 @@ def asset(ref: str, number: int, taken_at: float, kind="image") -> LibraryAsset:
 def in_pool(ref: str, numbers, kind="image", newest=1_790_000_000.0):
     """Pool entries for `numbers`, one day apart, the lowest number newest."""
     return [InPool(asset=asset(ref, n, newest - n * 86400, kind)) for n in numbers]
+
+
+# --- The varied library (follow-ups D2): every shape a Frame judges, drawn at its true ratio ------
+
+# (what it is, width, height, where its subject sits as a share of each axis): 3:2, 4:3, 16:9,
+# 9:16, 1:1, a 4:1 panorama, an 8 MP 4:3 photo (smaller than a 4K Frame) and a 4:3 photo whose
+# face sits at its left edge.
+VARIED = (
+    ("3:2", 6000, 4000, (0.5, 0.5)),
+    ("4:3", 4032, 3024, (0.5, 0.45)),
+    ("16:9", 3840, 2160, (0.5, 0.5)),
+    ("9:16", 2160, 3840, (0.5, 0.35)),
+    ("1:1", 3000, 3000, (0.5, 0.5)),
+    ("4:1 panorama", 12000, 3000, (0.5, 0.5)),
+    ("8 MP 4:3", 3264, 2448, (0.5, 0.5)),
+    ("4:3, face at the edge", 4032, 3024, (0.08, 0.4)),
+)
+
+
+def shaped(ref: str, number: int, width: int, height: int, taken_at: float, kind="image") -> LibraryAsset:
+    """One Immich asset of `width` x `height` (upright pixels)."""
+    return LibraryAsset(connection_ref=ref, upstream_id=str(UUID(int=number)), revision=f"{number:040x}",
+                        kind=kind, taken_at=taken_at, width=width, height=height,
+                        duration=5.0 if kind == "video" else None)
+
+
+def varied_assets(ref: str, *, first=0x500, newest=1_790_000_000.0) -> list[LibraryAsset]:
+    """The varied library's photos (VARIED), one hour apart, in VARIED's order (newest first)."""
+    return [shaped(ref, first + index, width, height, newest - index * 3600)
+            for index, (_name, width, height, _subject) in enumerate(VARIED)]
+
+
+def seed_varied_library(store: PgPhotoLibrary, connection_ref: str, *, pool_key: str | None = None) -> tuple[str, ...]:
+    """The varied library in one complete check of `pool_key` (by default a new unsaved Source
+    of every photo of `connection_ref`), seeded through the store's worker side, no Immich.
+    Returns the seeded asset ids, in VARIED's order."""
+    if pool_key is None:
+        draft = store.create_draft(SourceQuery(connection_ref=connection_ref), None)
+        with store.db.transaction() as conn:
+            pool_key = store.pool_of_draft_in(conn, draft)
+    assets = varied_assets(connection_ref)
+    filled(store, pool_key, [InPool(asset=a) for a in assets])
+    return tuple(a.asset_id for a in assets)
+
+
+def thumbnail_png(width: int, height: int, subject=(0.5, 0.5), long_edge=120) -> bytes:
+    """A thumbnail at a photo's true ratio: a gradient with a bright disc where its subject sits,
+    so a ratio, a crop and an off-centre subject all read on a screenshot."""
+    scale = long_edge / max(width, height)
+    w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    cx, cy, r = subject[0] * w, subject[1] * h, min(w, h) / 4
+
+    def pixel(x, y):
+        if (x - cx) ** 2 + (y - cy) ** 2 <= r * r:
+            return (238, 214, 160)
+        return (40 + x * 150 // w, 70 + y * 120 // h, 150 - x * 60 // w)
+
+    rows = b"".join(b"\x00" + bytes(c for x in range(w) for c in pixel(x, y)) for y in range(h))
+
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    header = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows))
+            + chunk(b"IEND", b""))
+
+
+def route_thumbnails(page, assets) -> None:
+    """Answer Central's thumbnail route in the browser with each asset's `thumbnail_png` (a
+    VARIED subject where the asset is one), 4:3 for any other id."""
+    subjects = {a.asset_id: VARIED[i][3] for i, a in enumerate(varied_assets(assets[0].connection_ref))} \
+        if assets else {}
+    sizes = {a.asset_id: (a.width, a.height) for a in assets}
+    cache: dict[str, bytes] = {}
+
+    def answer(route):
+        asset_id = route.request.url.split("?", 1)[0].rsplit("/", 1)[-1]
+        if asset_id not in cache:
+            width, height = sizes.get(asset_id, (4000, 3000))
+            cache[asset_id] = thumbnail_png(width, height, subjects.get(asset_id, (0.5, 0.5)))
+        route.fulfill(status=200, content_type="image/png", body=cache[asset_id])
+
+    page.route("**/v1/operator/library/thumbnails/**", answer)
 
 
 def draft_pool_key(registry, draft_ref: str | None = None) -> str:

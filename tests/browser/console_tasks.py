@@ -25,8 +25,8 @@ Scenes page, then Kind → Photos → Frames → [Media per frame] → Playback 
 at a time behind Continue. `author_scene` walks it; `start_scene`, `scene_continue` and
 `scene_form` are its parts, for tests about the flow's own steps.
 
-A Source is made in the Photo source editor (#/sources/new/query, roadmap 4): "New Source"
-opens an unsaved Source whose pool fills as Immich is read; Name and Save Source work at any
+A Source is made in the Photo source editor (#/sources/new/query, roadmap 4): "New Photo
+source" opens an unsaved Source whose pool fills as Immich is read; Name and Save Photo source work at any
 time. `add_source` makes one; `start_source` and `source_editor` are its parts. A connection
 must be seeded first (tests/browser/photo_seed.py).
 
@@ -221,7 +221,7 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     """
     picks = frames if isinstance(frames, Mapping) else None
     form = start_scene(page, hand_picked=picks is not None)
-    form.get_by_label("Source", exact=True).select_option(source)
+    choose_source(form, source)
     scene_continue(page, "Frames")
     for frame_id in frames:
         form.get_by_label(f"Target frame {frame_id}", exact=True).check()
@@ -250,6 +250,18 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     return info.value
 
 
+def source_choice(form, source_ref):
+    """The Scene flow's Photos step: the card control (a checkbox, or a radio for a hand-picked
+    Scene) that chooses the saved Source `source_ref`; its value is the stored ref."""
+    return form.get_by_role("group", name="Photo sources", exact=True).locator(
+        f'input[value="{source_ref}"]')
+
+
+def choose_source(form, source_ref):
+    """Choose the saved Source `source_ref` on the Scene flow's Photos step (its card's control)."""
+    source_choice(form, source_ref).check()
+
+
 def source_editor(page):
     """The Photo source editor (`#/sources/new/query`, `#/sources/<name>/edit/query`): the
     Sources region while it shows the editor, its Name field first."""
@@ -259,27 +271,27 @@ def source_editor(page):
 
 
 def start_source(page):
-    """Go to Sources and press "New Source"; returns the editor once its unsaved Source exists
+    """Go to Sources and press "New Photo source"; returns the editor once its unsaved Source exists
     (the draft POST answered). A connection must be seeded (tests/browser/photo_seed.py)."""
     go(page, "sources")
     with page.expect_response(lambda r: r.url.endswith("/v1/operator/photo-drafts")
                               and r.request.method == "POST") as created:
         page.get_by_role("region", name="Sources", exact=True).get_by_role(
-            "button", name="New Source", exact=True).click()
+            "button", name="New Photo source", exact=True).click()
     assert created.value.status == 201, created.value.text()
     return source_editor(page)
 
 
 def add_source(page, name, *, submit=True):
-    """Make a Photo source named `name` (every photo of the one seeded connection): New Source,
-    the name, Save Source. With `submit`, returns the save response once the Source's card is
+    """Make a Photo source named `name` (every photo of the one seeded connection): New Photo
+    source, the name, Save Photo source. With `submit`, returns the save response once the Source's card is
     listed; without it, returns the editor, named and unsaved."""
     editor = start_source(page)
     editor.get_by_label("Name", exact=True).fill(name)
     if not submit:
         return editor
     with page.expect_response(lambda r: r.url.endswith("/save") and r.request.method == "POST") as info:
-        editor.get_by_role("button", name="Save Source", exact=True).click()
+        editor.get_by_role("button", name="Save Photo source", exact=True).click()
     if info.value.ok:
         expect(page.get_by_role("region", name="Sources", exact=True).get_by_role(
             "article", name=name, exact=True)).to_be_visible()
@@ -375,7 +387,7 @@ def start_show_now(page, scene_id=None):
         "button", name="Show now", exact=True).click()
     form = show_form(page)
     if scene_id is not None:
-        form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
+        form.get_by_label("Scene", exact=True).select_option(scene_id)
     return form
 
 
@@ -437,3 +449,10 @@ def open_frame(page, frame_id, tab):
     expect(page.get_by_role("tablist", name="Frame settings", exact=True).get_by_role(
         "tab", name=TABS[tab], exact=True)).to_have_attribute("aria-selected", "true")
     return visible_page(page)
+
+
+def source_card_action(page, card, name, action):
+    """On the Sources list, a Source card's overflow action: More, then `action` ("Check now",
+    "Delete"). The menu opens over the page, outside the card."""
+    card.get_by_role("button", name=f"More actions for {name}", exact=True).click()
+    page.get_by_role("menuitem", name=action, exact=True).click()

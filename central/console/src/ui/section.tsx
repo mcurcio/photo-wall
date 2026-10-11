@@ -5,6 +5,9 @@ export interface SectionProps {
   title: string;
   /** A new value (the section's next read) tries a failed section again. */
   resetKey?: unknown;
+  /** `label` (default): a quiet small-caps label over a section of a page. `name`: the title is
+   * a thing's own name (a connection, a card), in sentence case as typed. */
+  heading?: "label" | "name";
   children: React.ReactNode;
 }
 
@@ -42,13 +45,17 @@ class Boundary extends React.Component<BoundaryProps, { failed: boolean }> {
  * Section: a titled card and region with its own error boundary, so a section whose
  * render throws (a served payload that drifted) says so while the rest of the page stays.
  */
-export function Section({ title, resetKey, children }: SectionProps) {
+export function Section({ title, resetKey, heading = "label", children }: SectionProps) {
   return (
     <section
       aria-label={title}
       className="min-w-0 rounded-card border border-line bg-surface-raised px-4 py-3"
     >
-      <h3 className="m-0 mb-2 text-sm font-normal tracking-wide text-muted uppercase">{title}</h3>
+      <h3 className={heading === "name"
+        ? "m-0 mb-2 text-base font-medium wrap-anywhere text-text"
+        : "m-0 mb-2 text-sm font-normal tracking-wide text-muted uppercase"}>
+        {title}
+      </h3>
       <Boundary resetKey={resetKey}>{children}</Boundary>
     </section>
   );

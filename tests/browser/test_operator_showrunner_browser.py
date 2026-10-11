@@ -28,6 +28,7 @@ import pytest
 from console_tasks import (
     add_source,
     author_scene,
+    choose_source,
     connect,
     current_hash,
     go,
@@ -38,6 +39,8 @@ from console_tasks import (
     schedule_program,
     show_advanced,
     show_now,
+    source_card_action,
+    source_choice,
     start_scene,
     start_schedule,
     start_source,
@@ -275,7 +278,7 @@ def test_sources_render_name_rev_with_refresh(page, registry):
             lambda r: r.url.endswith(f"/v1/operator/sources/{quote(garden, safe='')}/checks")
             and r.request.method == "POST"
         ) as info:
-            card.get_by_role("button", name="Check garden now", exact=True).click()
+            source_card_action(page, card, "garden", "Check now")
         assert info.value.status == 202
         expect(card.get_by_role("status")).to_have_text(
             "Check requested. Photos keep playing while Photo Wall reads Immich.")
@@ -288,7 +291,7 @@ NEW_SOURCE = "spring"
 
 def test_source_configuration_creates_source_awaiting_refresh(page, registry):
     """Roadmap 4 (K2): an operator makes a Photo source from the console. New Source opens an
-    unsaved Source of every photo (the draft POST), Save Source saves it under its name, and the
+    unsaved Source of every photo (the draft POST), Save Photo source saves it under its name, and the
     new Source is listed by name, not yet checked (no worker runs here).
 
     Mutation probe: break the save (send no name) and the Source is never stored, so the
@@ -313,7 +316,7 @@ def test_source_configuration_creates_source_awaiting_refresh(page, registry):
 
         card = sources.get_by_role("article", name=NEW_SOURCE, exact=True)
         expect(card).to_be_visible()
-        expect(card.get_by_text("Not checked yet", exact=True)).to_be_visible()
+        expect(card).to_contain_text("Not checked yet")
         expect(card.get_by_text("Every photo · no screenshots", exact=True)).to_be_visible()
 
 
@@ -381,7 +384,7 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         # The flow: Kind (hand-picked) → Photos → Frames → Media per frame → Playback →
         # Review, with the same field labels the single form had.
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
@@ -447,7 +450,7 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
         connect(page, origin, "scenes")
 
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Media per frame")
@@ -468,7 +471,7 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
 
         reads = RequestGate(page, "**/v1/operator/snapshot")
@@ -941,7 +944,7 @@ def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
         connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Playback")
@@ -1323,7 +1326,7 @@ def test_the_target_picker_groups_by_surface_with_health_in_the_description(page
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         lobby = form.get_by_role("group", name="Frames on lobby", exact=True)
         wall = form.get_by_role("group", name="Frames on wall", exact=True)
@@ -1343,7 +1346,7 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
@@ -1671,7 +1674,7 @@ def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
         end.fill("2024-12-31")
         editor.get_by_label("Name", exact=True).fill(NEW_SOURCE)
         with page.expect_response(lambda r: r.url.endswith("/save") and r.request.method == "POST") as info:
-            editor.get_by_role("button", name="Save Source", exact=True).click()
+            editor.get_by_role("button", name="Save Photo source", exact=True).click()
         assert info.value.status == 200
         query = sent[-1]["query"]
         assert query["favourites_only"] is True
@@ -1761,7 +1764,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         # The stored values, exactly, where each is asked: every Change link opens its
         # step, and Continue returns to Review.
         form.get_by_role("button", name="Change Photos from", exact=True).click()
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        expect(source_choice(form, SOURCE)).to_be_checked()
         scene_continue(page, "Review")
         form.get_by_role("button", name="Change Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
@@ -1891,7 +1894,7 @@ def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidate
         expect(answers).to_contain_text("Not chosen")
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Photos", exact=True).click()
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         scene_continue(page, "Media per frame")
         expect(form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)).to_have_value(a)
@@ -2278,7 +2281,7 @@ def test_the_chooser_says_dated_and_readiness_and_waits_while_loading(page, regi
         # Bead 2: the chooser is on the Media per frame step, whose Continue (the old
         # Save) reports the loading state.
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         reads = RequestGate(page, "**/candidates*")
         reads.holding = True
