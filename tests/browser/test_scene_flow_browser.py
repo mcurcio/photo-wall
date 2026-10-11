@@ -10,6 +10,7 @@ the vanished-frame prune on every step, and the narrow layout.
 
 import os
 import re
+from uuid import UUID
 
 import pytest
 from console_tasks import (
@@ -33,6 +34,7 @@ from operator_harness import (
     operator_server,
     submit_sign_in,
 )
+from photo_seed import connected, filled, in_pool, library_of, saved_source
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from test_operator_showrunner_browser import (
@@ -46,13 +48,14 @@ from test_operator_showrunner_browser import (
     _runtime,
     _seed,
     _seed_source,
-    _set_source,
 )
 from test_registry import ADMIN
 
 from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
+from central.photo_library.model import SourceQuery
+from central.photo_library.ports import CheckFailed
 from media.models import RefreshResult
 
 pytestmark = pytest.mark.skipif(
@@ -72,98 +75,102 @@ def _steps(page):
     return page.get_by_role("navigation", name="Steps", exact=True)
 
 
-@pytest.mark.parametrize(
-    ("state", "setup", "expected", "consequence"),
-    [
-        ("awaiting", lambda registry, now: None, "Awaiting refresh", "No catalog has been loaded yet"),
-        ("failed", lambda registry, now: _set_source(
-            registry, SOURCE, status="unavailable", next_refresh=now + 30,
-            refresh_completed_revision=0, refresh_requested_revision=1,
-            diagnostics=[{"code": "upstream_unavailable"}],
-        ), "Your photo library is unreachable", "last refresh failed"),
-        ("empty", lambda registry, now: _set_source(
-            registry, SOURCE, status="ok", next_refresh=now + 30, last_success=now,
-            counts={"valid": 0, "discovered": 0, "pending": 0, "rejected": 0},
-        ), "nothing valid in the last refresh", "found no valid items"),
-    ],
-)
-def test_scene_photos_and_review_explain_source_readiness(
-    page, registry, state, setup, expected, consequence,
-):
+def _photo_sources(registry, *names):
+    """Saved Photo sources (roadmap 4) of one connection, each with its own pool."""
+    library = library_of(registry)
+    ref = connected(library)
+    refs = [saved_source(registry, library, name, SourceQuery(
+        connection_ref=ref, people=(str(UUID(int=0x1000 + number)),)))
+        for number, name in enumerate(names, start=1)]
+    return library, ref, refs
+
+
+def _pool_key(registry, source_ref):
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
+                            (source_ref,)).fetchone()["pool_key"]
+
+
+READINESS = {
+    "never_checked": (lambda library, ref, key: None, "Not checked yet",
+                      "Still being read: what is found so far plays."),
+    "failed": (lambda library, ref, key: filled(library, key, in_pool(ref, (1,)),
+                                                CheckFailed(problem="connection")),
+               "Immich could not be read: see Photo library. Photos keep playing.", None),
+    "empty": (lambda library, ref, key: filled(library, key, []), "Checked",
+              "This Source has no photos."),
+}
+
+
+@pytest.mark.parametrize("state", sorted(READINESS))
+def test_scene_photos_and_review_say_each_sources_state_and_readiness(page, registry, state):
     _seed(registry)
-    _seed_source(registry)
-    now = registry.clock.utc()
-    setup(registry, now)
+    library, ref, [garden] = _photo_sources(registry, "garden")
+    setup, expected, readiness_line = READINESS[state]
+    setup(library, ref, _pool_key(registry, garden))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label("Source", exact=True).select_option(garden)
         readiness = form.get_by_role("region", name="Source media status")
-        expect(readiness).to_contain_text(expected)
-        expect(readiness).to_contain_text(consequence)
+        expect(readiness.get_by_role("listitem", name="garden")).to_contain_text(expected)
+        if readiness_line is not None:
+            expect(readiness).to_contain_text(readiness_line)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Playback")
         scene_continue(page, "Review")
         readiness = form.get_by_role("region", name="Source media status")
         expect(readiness).to_contain_text(expected)
-        expect(readiness).to_contain_text(consequence)
+        if readiness_line is not None:
+            expect(readiness).to_contain_text(readiness_line)
 
 
-def test_refresh_source_from_scene_photos_preserves_draft_and_reports_request(
-    page, registry,
-):
+def test_check_now_from_scene_photos_preserves_draft_and_reports_request(page, registry):
     _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+    _library, _ref, [garden] = _photo_sources(registry, "garden")
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        form.get_by_label("Source", exact=True).select_option(garden)
         readiness = form.get_by_role("region", name="Source media status")
-        expect(readiness).to_contain_text("Awaiting refresh")
+        expect(readiness).to_contain_text("Not checked yet")
         with page.expect_response(
-            lambda response: response.url.endswith("/refresh")
-            and response.request.method == "POST"
+            lambda response: response.url.endswith("/checks") and response.request.method == "POST"
         ) as info:
-            readiness.get_by_role("button", name="Refresh Source", exact=True).click()
+            readiness.get_by_role("button", name="Check garden now", exact=True).click()
         assert info.value.status == 202
         expect(readiness).to_contain_text(
-            "Refresh requested. The status will update when the media worker finishes."
-        )
-        assert info.value.json()["requested_revision"] == 1
+            "Check requested. Photos keep playing while Photo Wall reads Immich.")
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Playback")
         scene_continue(page, "Review")
-        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("holiday")
-        form.get_by_label("Scene name", exact=True).fill("source-refresh-keeps-draft")
-        expect(form.get_by_label("Scene name", exact=True)).to_have_value(
-            "source-refresh-keeps-draft"
-        )
-        expect(form.get_by_role("region", name="Source media status")).to_contain_text(
-            "Refresh requested."
-        )
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden")
+        form.get_by_label("Scene name", exact=True).fill("check-keeps-draft")
         form.get_by_role("region", name="Source media status").get_by_role(
-            "button", name="Manage in Sources", exact=True
-        ).click()
+            "button", name="Manage in Sources", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Sources", exact=True)).to_be_visible()
-        expect(page.get_by_role("region", name="Sources", exact=True)).to_contain_text("holiday")
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
         assert current_hash(page) == "#/scenes/new/review"
-        expect(form.get_by_label("Scene name", exact=True)).to_have_value(
-            "source-refresh-keeps-draft"
-        )
-        answers = form.get_by_label("Your answers", exact=True)
-        expect(answers).to_contain_text("holiday")
-        expect(answers).to_contain_text(VALID_FRAME)
+        expect(form.get_by_label("Scene name", exact=True)).to_have_value("check-keeps-draft")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden")
 
 
-def test_completed_source_refresh_reloads_authored_candidates_once(page, registry):
+def test_a_completed_check_reloads_authored_candidates_once(page, registry):
+    """A hand-picked Scene's candidates are read again, once, when its Source's check moves
+    on (useCandidates' key is the served check, never a refresh revision). The candidates
+    themselves still come from the Source's catalog until the integrate slice moves it."""
     _seed(registry)
     first, second, incompatible = _authored_photos(registry)
     queue = _seed_source(registry, (first,))
-    _set_source(registry, SOURCE, next_refresh=registry.clock.utc() - 1000)
+    library = library_of(registry)
+    ref = connected(library)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE media_sources SET query=%s WHERE source_ref=%s",
+                     (Jsonb(SourceQuery(connection_ref=ref).model_dump(mode="json")), SOURCE))
+        key = library.pool_key_of_source_in(conn, SOURCE)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         candidate_responses = []
@@ -180,53 +187,99 @@ def test_completed_source_refresh_reloads_authored_candidates_once(page, registr
         chooser.select_option(selected_before)
         assert len(candidate_responses) == 1
 
-        _steps(page).get_by_role("button", name="Photos", exact=True).click()
-        readiness = form.get_by_role("region", name="Source media status")
-        with page.expect_response(
-            lambda response: response.url.endswith("/refresh")
-            and response.request.method == "POST"
-        ) as response:
-            readiness.get_by_role("button", name="Refresh Source", exact=True).click()
-        assert response.value.status == 202
-        requested_revision = response.value.json()["requested_revision"]
-
-        repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
+        repository = MediaRepository(registry.db, registry.clock, queue=queue,
+                                     times=ProcessTransactionClock(registry.clock))
+        repository.request_refresh(SOURCE)
         lease = repository.begin_requested_refresh(SOURCE)
-        assert lease is not None and lease.request_revision == requested_revision
+        assert lease is not None
         assert repository.publish_refresh(lease, RefreshResult(
             snapshot=CatalogSnapshot(
-                source_ref=SOURCE,
-                refreshed_at=registry.clock.utc(),
-                candidates=tuple(photo.asset.candidate for photo in (first, second, incompatible)),
-            ),
-            assets=tuple(photo.asset for photo in (first, second, incompatible)),
-        ))
+                source_ref=SOURCE, refreshed_at=registry.clock.utc(),
+                candidates=tuple(photo.asset.candidate for photo in (first, second, incompatible))),
+            assets=tuple(photo.asset for photo in (first, second, incompatible))))
+        filled(library, key, [])   # the Source's check completes: the served check moves on
 
-        # The source revision is applied by the snapshot poll; useCandidates then
-        # schedules its reload in a React effect. Waiting only for the refresh
-        # message can observe the new source revision before that request reaches
-        # the browser, so synchronize on the candidate response itself.
         with page.expect_response(
-            lambda item: "/candidates?" in item.url
-            and f"frame_id={VALID_FRAME}" in item.url
+            lambda item: "/candidates?" in item.url and f"frame_id={VALID_FRAME}" in item.url
         ) as refreshed_candidates:
             drive_poll(page)
-        expect(readiness).to_contain_text("Refresh finished.")
         assert refreshed_candidates.value.status == 200
-        assert len(candidate_responses) == 2, [
-            (item.status, item.url, item.text()) for item in candidate_responses
-        ]
-        scene_continue(page, "Frames")
-        scene_continue(page, "Media per frame")
+        assert len(candidate_responses) == 2
         expect(chooser.locator("option")).to_have_count(3)
         expect(chooser).to_have_value(selected_before)
-        labels = chooser.locator("option").all_inner_texts()
-        assert any("Photo 120×200" in label for label in labels), labels
-        assert not any("Photo 192×108" in label for label in labels), labels
-        assert len(candidate_responses) == 2
-
         drive_poll(page)
         assert len(candidate_responses) == 2
+
+
+def _scene_puts(page):
+    bodies = []
+    page.on("request", lambda r: bodies.append(r.post_data_json)
+            if r.method == "PUT" and "/v1/operator/scenes/" in r.url else None)
+    return bodies
+
+
+def test_a_scene_with_two_sources_writes_both_on_every_frame_and_reopens_with_both(page, registry):
+    """#36 (K3): every media Contribution carries the chosen Sources, in order; Edit reopens with
+    both; removing one leaves one. Mutation probe: write only the first ref -> this fails."""
+    _seed(registry)
+    _add_lobby_frame(registry)
+    _library, _ref, [garden, family] = _photo_sources(registry, "garden", "family")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "scenes")
+        puts = _scene_puts(page)
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(garden)
+        form.get_by_label("Add another Source", exact=True).select_option(family)
+        chosen = form.get_by_role("region", name="Source media status")
+        expect(chosen.get_by_role("listitem")).to_have_count(2)
+        scene_continue(page, "Frames")
+        for frame in (VALID_FRAME, LOBBY_FRAME):
+            form.get_by_label(f"Target frame {frame}", exact=True).check()
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("Photos from")
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden, family")
+        form.get_by_label("Scene name", exact=True).fill("both-sources")
+        form.get_by_role("button", name="Save Scene", exact=True).click()
+        expect(_scenes(page).get_by_label("Scene both-sources", exact=True)).to_be_visible()
+        [saved] = puts
+        assert [c["source_refs"] for c in saved["contributions"]] == [[garden, family]] * 2
+
+        _scenes(page).get_by_role("button", name="Edit Scene both-sources", exact=True).click()
+        _steps(page).get_by_role("button", name="Photos", exact=True).click()
+        chosen = form.get_by_role("region", name="Source media status")
+        expect(chosen.get_by_role("listitem")).to_have_count(2)
+        chosen.get_by_role("button", name="Remove family", exact=True).click()
+        expect(chosen.get_by_role("listitem")).to_have_count(1)
+        scene_continue(page, "Frames")
+        scene_continue(page, "Playback")
+        scene_continue(page, "Review")
+        form.get_by_role("button", name="Replace Scene", exact=True).click()
+        page.get_by_role("dialog").get_by_role("button", name=re.compile("^Confirm")).click()
+        for _ in range(50):
+            if len(puts) == 2:
+                break
+            page.wait_for_timeout(100)
+        assert [c["source_refs"] for c in puts[-1]["contributions"]] == [[garden]] * 2
+
+
+def test_new_source_from_the_scene_returns_with_it_chosen(page, registry):
+    _seed(registry)
+    _library, _ref, [garden] = _photo_sources(registry, "garden")
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label("Source", exact=True).select_option(garden)
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/photo-drafts")
+                                  and r.request.method == "POST"):
+            form.get_by_role("button", name="New Source…", exact=True).click()
+        sources = page.get_by_role("region", name="Sources", exact=True)
+        expect(sources).to_contain_text("For your Scene: saving returns there with this Source chosen.")
+        sources.get_by_label("Name", exact=True).fill("autumn")
+        sources.get_by_role("button", name="Save Source", exact=True).click()
+        chosen = form.get_by_role("region", name="Source media status")
+        expect(chosen.get_by_role("listitem")).to_have_count(2)
+        expect(chosen.get_by_role("listitem", name="autumn")).to_be_visible()
 
 
 def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page, registry):
@@ -713,7 +766,7 @@ def test_a_save_that_lands_after_the_operator_left_keeps_them_where_they_went(pa
         # Read-only in flight: the fields, Back, Change and the stepper take no edit.
         expect(form.get_by_label("Scene name", exact=True)).to_be_disabled()
         expect(form.get_by_role("button", name="Back", exact=True)).to_be_disabled()
-        expect(form.get_by_role("button", name="Change Photos", exact=True)).to_be_disabled()
+        expect(form.get_by_role("button", name="Change Photos from", exact=True)).to_be_disabled()
         expect(_steps(page).get_by_role("button")).to_have_count(0)
 
         go(page, "now")

@@ -5017,3 +5017,37 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - **`tests/test_content_wiring.py`.** `MediaStub` lost its dead `list_tags` and `refresh_once`.
 - **Staleness rule edge.** A `checking` pool with `step_at` NULL counts as stale (only a test database migrated before 080 gained the column can hold one).
 - **Rescue copies restart Procrastinate's attempt count** (`defer_job_async` cannot carry `attempts`), unlike the content runtime's rescue, which re-publishes at the same attempt. For `PREPARE_MEDIA_TASK` the copy usually claims nothing: the `media_jobs` row stays `running` (claims take only `queued` or `retry`) until `MediaStore.recover`, run by the maintenance task, handles it; not proven by an S1 test. What the rescue guarantees is that `MEDIA_STORAGE_LOCK` is free again.
+
+## E-P4-K1-1 (console lane, K1, 2026-10-11) · files and words outside the page, resolved in the lane
+- New files the page did not list, all inside the console lane's paths: `ui/field.tsx` gains the `TextInput` primitive (a domain component may not style, and the catalog had no text field; stories `Primitives/Field/Text`, `/Password`); `domain/library.fixtures.ts` (story fixtures, as `hardware.fixtures.ts`); `tests/test_console_routes_r4.py` learns the Settings route table and declares the photo pages' legacy imports (`PHOTO_PAGE_IMPORTS`); `tests/browser/console_tasks.py` learns the section's label.
+- G1: Needs attention may reach no write module, so the connections read for its cards lives beside it in `neutralRoutes.jsx` (`AttentionWithLibrary`), and `AttentionPage.jsx` takes it as `library`.
+- "Update Immich" is not a fix Photo Wall can perform (design-language error template), so the `immich_too_old` card says "Update Immich, then check again." and its button is **Check again**; `missing_permissions` lists the permissions in its sentence and its button is **Paste a new key**.
+- `tests/test_console_sources.py`'s source scan forbade "album", "Immich" and "photo source" in console strings (§37's one noun, before 4); delivery 4 names all three (console design #8-#33, row A3), so the scan keeps only the retired preview words.
+
+## E-P4-K2-1 (console lane, K2, 2026-10-11) · as built, resolved in the lane
+- The editor is one page (T4) at `#/sources/new/query` and `#/sources/<name>/edit/query` (any other step a bookmark names opens it too); `SourcesRegion.jsx` keeps it mounted while it is open, so a section change keeps what was typed, and hand-offs from the Scene editor still open it and return `{sourceRef}`. New files beyond the page: `patterns/media-grid.tsx` (DL §4's `MediaGrid`, delivery 4), `domain/source.fixtures.ts`, `tests/browser/photo_seed.py` (the store's worker side for every console browser test of 4).
+- `sourceState`'s failed check is `severity: "notice"` (the page said "warn"; the severity scale has no warn, and Needs a look is notice).
+- `sourceWords.js` is rewritten as the one home of a Source's words (`checkWords`, `queryWords`, `takenWords`); its pre-4 refusal table (`SOURCE_REFUSALS`) goes with the refresh it described, and so do `tests/test_console_sources.py`'s two refusal-owner tests (one was the known red `test_every_served_refusal_code_has_one_owner`, I1's). Count words have one home, `timeWords.js` `countWords`/`countText` (the house formatter; `tests/test_console_planned.py` forbids `toLocaleString` elsewhere).
+- `test_sources_have_no_immich_or_album_language` is deleted: 4 names Immich and albums by design. The Source flow's model cases in `tests/test_console_flow.py` go (the hand-off cases stay); its two refresh-based `sourceState` cases move to `tests/test_console_sources.py` on the check.
+- `mediaHealth.js` keeps `SOURCE_REFRESH_SECONDS` and `REFRESH_RUN_SECONDS` unused only because `tests/test_media_queue.py` (lane seams) pins them; I1 retires both with the refresh.
+- Delete stays on `DELETE /v1/operator/source-names/{name}` (not retired by the route table).
+
+## E-P4-K3-1 (console lane, K3, 2026-10-11) · as built, resolved in the lane
+- Scene editor › What keeps "Source" as the first Source's picker (every scene test and helper picks by that label) and adds "Add another Source" beside the chosen ones; the chosen Sources are listed with their state, readiness, Check now and Remove. A hand-picked Scene picks from one Source, so it offers no second one. "New selection from your photo library" is now "New Source…".
+- The answer label is "Photos from" (Review's row and Reload's "Changed: …" name it), so its Change button is "Change Photos from"; the scene browser cases that press it follow.
+- A chosen Source's readiness ("Still being read: what is found so far plays", "This Source has no photos") is read from its pool's first page (`useDraftPool`), since a served `sources` row carries its check but not its counts.
+- `useCandidates`' reload key is the first Source's served check (`at` or `started_at`), not `refresh_completed_revision`; its browser case seeds candidates through the old catalog until I1 moves `source_candidates` onto pools (P1).
+- `authoring.js` loses `sourceProblems` and `localDayStart`, the Source flow's, which nothing calls since K2.
+
+## E-P4-K4-1 (console lane, K4, 2026-10-11) · as built, resolved in the lane
+- "Why nothing new?" step 4 needs each Source's pool, which the snapshot does not carry: `MediaPipeline.jsx`'s `WhyNothingNew` reads the winning Run's Sources' first pool pages (`photoSourcesApi.sourcePool`) once per served check, and `mediaHealth.whyNothingNew` takes them as `pools`. A pool not read yet makes the step "info", never a stop.
+- The `check_this_frame` browser cases seed their Source's catalog through the old refresh (candidates still come from it until P1/I1) and now also give it a pool (`_pooled`), since step 4 reads pools.
+- `tests/browser/test_show_now_browser.py` (not on the page, the console lane's) follows Show now's "Saved Sources" region and Check now; its historical and authored case is renamed `…_without_check_now`.
+- The grep proof is `tests/test_console_sources.py::test_no_console_module_reads_a_retired_source_field` (the release list's own `/refresh` route is allowed).
+
+## E-P4-K-BASELINES (console lane, 2026-10-11) · provisional catalog baselines
+- The 33 new stories' baselines (66 PNGs) were rendered by `scripts/catalog_baselines.py` with `PHOTO_WALL_CATALOG_PLATFORM=linux/arm64`: this Mac's Docker cannot run the pinned amd64 image (`exec format error`). They passed render and axe there; CI's `console-catalog` leg (amd64) confirms them, and a leg that differs past its threshold is re-rendered there with the same command.
+- Running it needs `--output /tmp/pw-results`: pytest-playwright otherwise clears the repo's own `test-results/` through the read-only mount.
+
+## E-P4-K-DOCS (console lane, 2026-10-11) · one historical doc link
+- Deleting the Source flow broke two links in `docs/production-readiness-v0.13.md` (`check_docs` red). The docs lane owns docs; to keep the lane's static gate green the two links became plain words naming the removed files. X2 may reword it.

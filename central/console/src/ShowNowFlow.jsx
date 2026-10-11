@@ -40,7 +40,7 @@ import {
 } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips } from "./TargetPicker.jsx";
-import { sourceRefreshMessage, useSourceRefresh } from "./useSourceRefresh.js";
+import { sourceCheckMessage, useSourceCheck } from "./useSourceCheck.js";
 
 const EMPTY = {};
 
@@ -100,7 +100,8 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
   const frames = useMemo(() => sceneFrames(scene), [scene]);
   const sourceRefs = useMemo(() => sceneSourceRefs(scene), [scene]);
   const authoredMedia = useMemo(() => sceneHasAuthoredMedia(scene), [scene]);
-  const sourceRefresh = useSourceRefresh(JSON.stringify([value.sceneId, scene?.revision ?? null]));
+  // Check now on the chosen Scene's Sources: its receipts belong to that Scene.
+  const sourceCheck = useSourceCheck(JSON.stringify([value.sceneId, scene?.revision ?? null]));
   const covering = coveringPriority(snapshot, frames);
   // Whether a live Run covers the frames at all: one may itself have priority 0.
   const covered = coveringRuns(snapshot, frames).length > 0;
@@ -198,7 +199,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
     });
 
   const priorityValid = !problemList.some((problem) => problem.field === "priority");
-  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceRefresh };
+  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceCheck };
   const views = {
     scene: () => (
       <SceneStep
@@ -273,7 +274,7 @@ function SceneFramesValue({ snapshot, frames }) {
  * Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. `offered`
  * is a Scene handed over while the draft keeps its own: a button offers it instead.
  */
-function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceRefresh, definitions, offered, onTake }) {
+function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceCheck, definitions, offered, onTake }) {
   return (
     <>
       <OfferedScene
@@ -299,7 +300,7 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
               <SceneFramesValue snapshot={snapshot} frames={frames} />
             </dd>
           </dl>
-          <SourceFreshness snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} refresh={sourceRefresh} />
+          <SavedSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} check={sourceCheck} />
         </>
       )}
     </>
@@ -338,7 +339,7 @@ function ReviewStep({
   frames,
   sourceRefs,
   authoredMedia,
-  sourceRefresh,
+  sourceCheck,
   definitions,
   covering,
   covered,
@@ -375,7 +376,7 @@ function ReviewStep({
         ]}
       />
       {value.sceneId !== "" && (
-        <SourceFreshness snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} refresh={sourceRefresh} />
+        <SavedSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} check={sourceCheck} />
       )}
       <Advanced
         summary={`Priority ${priority} · ${REPEAT_LABELS[value.repeat]}`}
@@ -424,41 +425,44 @@ function ReviewStep({
   );
 }
 
-/** Current catalog freshness for the selected Scene's saved live Source refs. */
-function SourceFreshness({ snapshot, refs, authoredMedia, refresh }) {
+/**
+ * The chosen Scene's Photo sources (roadmap 4, K4): each with its state in words (from its check)
+ * and Check now, whose receipt lasts until Central serves a check that differs (useSourceCheck).
+ */
+function SavedSources({ snapshot, refs, authoredMedia, check }) {
   const sources = snapshot?.media?.sources ?? [];
   const now = mediaNow(snapshot);
   const rows = refs.map((ref) => {
     const source = sources.find((candidate) => candidate.source_ref === ref) ?? null;
-    return { ref, source, state: source === null ? null : sourceState(source, now, false) };
+    return { ref, source, state: source === null ? null : sourceState(source, now) };
   });
   const needsAttention = rows.some(({ state }) => state === null || state.severity !== "ok");
   return (
     <section
       className={`notice show-now__sources${needsAttention ? " notice--warn" : ""}`}
-      aria-label="Saved Source freshness"
+      aria-label="Saved Sources"
     >
-      <p><strong>Saved Source freshness</strong> is Central's latest catalog status. It does not confirm prepared media or visible playback.</p>
+      <p><strong>Saved Sources.</strong> A Source keeps playing what it has found while it is checked, and while Immich cannot be read.</p>
       {refs.length === 0 ? (
         <p>{authoredMedia
-          ? "This Scene uses hand-picked media; refreshing a Source does not change its chosen items."
-          : "This Scene has no live Sources to refresh."}</p>
+          ? "This Scene uses hand-picked media; checking a Source does not change its chosen items."
+          : "This Scene has no live Sources."}</p>
       ) : (
         <ul className="show-now__source-list">
           {rows.map(({ ref, source, state }) => {
-            const feedback = refresh.feedback[ref] ?? null;
-            const message = sourceRefreshMessage(feedback, source, state);
+            const message = source === null ? null : sourceCheckMessage(check.feedback[ref], source.check);
+            const name = sourceName(source ?? ref);
             return (
               <li key={ref}>
-                <span>{sourceName(source ?? ref)}: {state?.label ?? "Current Source status is unavailable."}</span>
-                {state !== null && state.state !== "ok" && (
+                <span>{name}: {state?.label ?? "Its state is not served."}</span>
+                {source !== null && (
                   <button
                     type="button"
-                    disabled={refresh.pending !== null}
-                    aria-label={`Refresh ${sourceName(source)}`}
-                    onClick={() => refresh.run(ref)}
+                    disabled={check.pending !== null}
+                    aria-label={`Check ${name} now`}
+                    onClick={() => void check.run(ref, source.check ?? null)}
                   >
-                    {refresh.pending === ref ? "Requesting refresh…" : "Refresh Source"}
+                    {check.pending === ref ? "Asking…" : "Check now"}
                   </button>
                 )}
                 {message !== null && <p role="status">{message}</p>}

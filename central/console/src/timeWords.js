@@ -159,3 +159,21 @@ export function occurrenceTime(epochSeconds) {
   }).format(date);
   return `${clock} (${zonePart(date, "longOffset") ?? "local time"})`;
 }
+
+/**
+ * A count in the house's number words, with its noun: "41,203 photos", "1 person" (design
+ * language §7, Counts: locale grouping, exact). The one home of count words, beside the times.
+ *
+ * @param {number} count
+ * @param {string} noun the singular
+ * @param {string} [plural]
+ * @returns {string}
+ */
+export function countWords(count, noun, plural = `${noun}s`) {
+  return `${countText(count)} ${count === 1 ? noun : plural}`;
+}
+
+/** A bare count with locale grouping: "41,203". */
+export function countText(count) {
+  return new Intl.NumberFormat().format(count);
+}

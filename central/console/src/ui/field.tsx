@@ -106,3 +106,47 @@ export function NumberInput({ value, onChange, min, max, step, disabled, autoFoc
     />
   );
 }
+
+export interface TextInputProps {
+  value: string;
+  onChange: (value: string) => void;
+  /** `password` for a secret pasted once (an API key): the browser never shows it back. */
+  type?: "text" | "password" | "url" | "search" | "date";
+  /** How wide the field is: `short` for a name, `long` for an address. */
+  width?: "short" | "long";
+  placeholder?: string;
+  disabled?: boolean;
+  /** A combobox's wiring (ItemPicker): the list it controls and the option it points at. */
+  combobox?: { listId: string; expanded: boolean; activeId?: string };
+  onKeyDown?: (event: React.KeyboardEvent<HTMLInputElement>) => void;
+  onBlur?: () => void;
+}
+
+/** TextInput: text typed in a Field (a name, an address, a key pasted once). */
+export function TextInput({
+  value, onChange, type = "text", width = "short", placeholder, disabled, combobox, onKeyDown, onBlur,
+}: TextInputProps) {
+  const { id, describedBy, invalid } = useFieldControl();
+  return (
+    <input
+      id={id}
+      aria-describedby={describedBy}
+      aria-invalid={invalid || undefined}
+      type={type}
+      className={cn(controlClass, width === "long" ? "w-full max-w-xl" : "w-64 max-w-full")}
+      value={value}
+      placeholder={placeholder}
+      disabled={disabled}
+      autoComplete={type === "password" ? "new-password" : "off"}
+      spellCheck={false}
+      role={combobox ? "combobox" : undefined}
+      aria-autocomplete={combobox ? "list" : undefined}
+      aria-controls={combobox?.listId}
+      aria-expanded={combobox ? combobox.expanded : undefined}
+      aria-activedescendant={combobox?.activeId}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={onKeyDown}
+      onBlur={onBlur}
+    />
+  );
+}

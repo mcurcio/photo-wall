@@ -37,7 +37,7 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"attention"} Section
+ * @typedef {"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"photo-library"|"attention"} Section
  * @typedef {"new"|"edit"|"show"|"update"} Flow
  * @typedef {"overview"|"position"|"picture"|"power"|"hardware"} Tab
  * @typedef {"layout"} Mode
@@ -76,7 +76,7 @@ export function routeIdName(noun, id, { start = false } = {}) {
   return `${start ? "An" : "an"} unknown ${noun}`;
 }
 
-/** Every section, in sidebar order (console DDD §48: Wall, Show, Fleet, Needs attention). */
+/** Every section, in sidebar order (console DDD §48: Wall, Show, Fleet, Settings, Needs attention). */
 export const SECTIONS = Object.freeze([
   "wall",
   "now",
@@ -86,6 +86,7 @@ export const SECTIONS = Object.freeze([
   "hardware",
   "players",
   "releases",
+  "photo-library",
   "attention",
 ]);
 
