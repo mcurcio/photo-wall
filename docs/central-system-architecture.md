@@ -269,6 +269,7 @@ work runs inside the serving process, and N pods multiply the load on the origin
 - **The hand-upload route still exists, and there is no `.deb` budget or orphan sweep.**
   An unknown netboot serial gets 503 before any release exists; the target returns 404.
 - **Photo sources were built by delivery 4 without `SyncMediaSource`.** Membership lives in the photo pools above, filled by `CheckPool` steps on the media queue, and the Planner reads the pools directly; there is no media catalog snapshot and no `Prefetch` from a source sync. Preparation stays a planner-requested `media_jobs` job ([media module](module-media.md)).
+- **How a selection fits the Frames is one synchronous read** (follow-ups 2026-10-11): `POST /v1/operator/photo-fit/analysis` judges the stored pools and key content with the photo fit rule in the HTTP process, a grouped statement and a bounded sample, no job and no Immich call ([the fit analysis](module-planner.md#the-fit-analysis)).
 - **Media is served by output hash (`/v1/media/{sha256}`).** The target uses
   `/v1/media/{original}/{recipe}`. This is a **coordinated player + Central change**: the plan's
   media reference and the player's download and cache paths move in the same release.
