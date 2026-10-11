@@ -26,7 +26,7 @@ interface Frame {
   id: string;
   generation?: number;
   profile?: Profile;
-  calibration?: { rotation?: number };
+  calibration?: { fit?: { mode?: "cover" | "corners"; rotation?: number } };
   readiness?: Readiness;
   player_id?: string | null;
   output_id?: string | null;
@@ -90,11 +90,14 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
   const profile = frame.profile ?? {};
   const observation = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
     ?.observation ?? null;
-  const rotation = frame.calibration?.rotation ?? 0;
-  const quarterTurn = frame.readiness === "ready" && (rotation === 90 || rotation === 270);
+  const fit = frame.calibration?.fit;
+  const quarterTurn = frame.readiness === "ready" && (fit?.rotation === 90 || fit?.rotation === 270);
   // A changed display has its own card on this tab (frame-display.tsx), which confirms the profile
   // from the new display's own modes: a second card from the enrollment record would contradict it.
-  const mismatch = frame.readiness !== "display-changed" && isBound(frame) && observation?.connected === true
+  // In Cover, Position's Save writes the profile as the picture's own shape (the cover rectangle),
+  // which is not the output's size by design, so only a Corners fit compares it with the output.
+  const mismatch = fit?.mode === "corners" && frame.readiness !== "display-changed" && isBound(frame)
+    && observation?.connected === true
     && usable(profile) && usable(observation) &&
     (profile.width_px !== (quarterTurn ? observation.height_px : observation.width_px) ||
       profile.height_px !== (quarterTurn ? observation.width_px : observation.height_px));
@@ -169,7 +172,7 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
           subject="Frame profile"
           variant="inline"
           verdict={{ severity: "todo", label: "Check the Display", receipt: null }}
-          what={`The Pi reported its Display at ${observation.width_px} × ${observation.height_px}, but this Frame's profile is ${profile.width_px} × ${profile.height_px}. ${frame.readiness === "ready" ? `The saved rotation ${rotation}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
+          what={`The Pi reported its Display at ${observation.width_px} × ${observation.height_px}, but this Frame's profile is ${profile.width_px} × ${profile.height_px}. ${frame.readiness === "ready" ? `The saved rotation ${fit?.rotation ?? 0}° was considered.` : "This Frame's position is not set for this Pi yet."}`}
           doing={null}
           action={{ label: "Edit Frame profile", onAction: begin }}
           details={(

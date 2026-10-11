@@ -33,18 +33,13 @@ export const quarterTurn = (rotation) => (Math.round(rotation / 90) * 90) % 360;
 
 /**
  * The fit a saved position holds, as a fresh copy (so a later edit never mutates the snapshot).
- * A record from before 1c carries no `fit`: the Player draws it as Corners (run ledger seam b),
- * so it is shown as Corners on its saved corners and quarter turn.
+ * With no saved position, Cover on the whole output at angle 0 (owner 2026-10-10 q1).
  *
  * @param {object|null|undefined} committed
  * @returns {Fit}
  */
 export function fitOf(committed) {
-  const fit = committed?.fit ?? {
-    mode: "corners",
-    corners: Array.isArray(committed?.corners) ? committed.corners : FULL_SCREEN,
-    rotation: committed?.rotation ?? 0,
-  };
+  const fit = committed?.fit ?? { mode: "cover", corners: FULL_SCREEN, rotation: 0 };
   return {
     mode: fit.mode,
     corners: (fit.corners ?? FULL_SCREEN).map((point) => [point[0], point[1]]),

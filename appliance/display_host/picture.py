@@ -267,12 +267,10 @@ class PictureController:
             worker.join(timeout)
 
     def document(self, output_id: str, document: OutputDocument) -> None:
-        """A document arrived; acts when its picture_change rose (newest wins). A document with no
-        picture part (picture None, before 1c's INTEGRATE) does nothing. Thread-safe, never blocks."""
+        """A document arrived; acts when its picture_change rose (newest wins). Thread-safe, never
+        blocks."""
         if document.output_id != output_id:
             raise ValueError("output_document_output")
-        if document.picture is None or document.picture_change is None:
-            return
         with self._wake:
             port = self._ports.setdefault(output_id, _Port())
             seen = port.document

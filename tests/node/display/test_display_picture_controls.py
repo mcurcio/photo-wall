@@ -194,11 +194,11 @@ def picture(brightness=UNSET, contrast=UNSET, kelvin=6500, gamma=22) -> OutputPi
     return OutputPicture(brightness, contrast, kelvin, gamma)
 
 
-def document(picture_change: int | None, part: OutputPicture | None = None, *, change: int = 1,
+def document(picture_change: int, part: OutputPicture | None = None, *, change: int = 1,
              output_id: str = OUTPUT) -> OutputDocument:
     standing = PowerRequest("standing", Power.ON, RequestReason.STANDING)
     return OutputDocument(output_id, change, (standing,), BEST_DETECTED, False, False,
-                          picture_change=picture_change, picture=part if picture_change else None)
+                          picture_change=picture_change, picture=picture() if part is None else part)
 
 
 def on_display(value: int) -> PictureSetting:
@@ -488,11 +488,8 @@ def test_presented_follows_the_shells_echo_and_equal_operations_count_at_once(di
 
 # 10 --------------------------------------------------------------------------------------------
 
-def test_a_document_without_a_picture_part_or_a_power_change_alone_writes_nothing(display, running):
+def test_a_power_change_alone_or_an_older_picture_writes_nothing(display, running):
     run = running()
-    run.controller.document(OUTPUT, document(None))
-    time.sleep(0.3)
-    assert run.shell.sent == [] and display.writes() == []
     run.controller.document(OUTPUT, document(3, picture(on_display(60)), change=1))
     run.reported(3)
     sent = len(run.shell.sent)

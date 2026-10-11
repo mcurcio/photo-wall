@@ -26,7 +26,7 @@ from support.position import save_position
 from test_registry import enroll
 
 from central.registry import FrameCreate, RegistryError
-from contracts.models import Calibration, CoverFit, FrameProfile
+from contracts.models import Calibration, CornersFit, CoverFit, FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -64,8 +64,8 @@ def _corners(x):
 def _seed(registry, profile=LANDSCAPE, rotation=None):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
     saved position in Cover (its top-left corner SAVED_X pixels in, revision 2); returns the
-    Player's id. With `rotation`, the position is one saved before 1c (no fit: drawn as Corners),
-    which the Hardware tab's Frame profile check reads."""
+    Player's id. With `rotation`, the position is a Corners fit at that quarter turn, which the
+    Hardware tab's Frame profile check reads (a Cover profile is the picture's own shape)."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
@@ -75,7 +75,7 @@ def _seed(registry, profile=LANDSCAPE, rotation=None):
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     position = (Calibration(fit=CoverFit(corners=_corners(SAVED_X))) if rotation is None
-                else Calibration(corners=_corners(SAVED_X), rotation=rotation))
+                else Calibration(fit=CornersFit(corners=_corners(SAVED_X), rotation=rotation)))
     save_position(registry, FRAME, position, expected_revision=1)
     return identity["player_id"]
 
@@ -87,9 +87,9 @@ def _saved(registry):
 def _top_left_x(calibration):
     """A saved or drafted position's top-left corner, in pixels of the output."""
     if isinstance(calibration, dict):
-        corners = (calibration.get("fit") or calibration)["corners"]
+        corners = calibration["fit"]["corners"]
     else:
-        corners = calibration.fit.corners if calibration.fit is not None else calibration.corners
+        corners = calibration.fit.corners
     return round(corners[0][0] * 1920)
 
 

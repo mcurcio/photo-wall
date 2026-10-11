@@ -12,7 +12,7 @@ pass, each stated once here and mirrored by player/native.py's shaders:
   order, then the per-Output mask LAST, so black stays black outside every opening whatever
   the picture settings.
 - **Photo fit** (`photo_rect`): each photo's source rectangle, centred cover of the Frame's
-  aspect (today's `cover_rect`, renamed for Photo fit #48/#102; trim removed, owner q3).
+  aspect (Photo fit #48/#102; no trim, owner q3).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import math
 from collections.abc import Iterable, Sequence
 
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import CornersFit, CoverFit
 from contracts.node_frame import PictureOperations
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
@@ -74,7 +74,7 @@ def transform(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
 
 
 # Undo a clockwise quarter turn of the picture, as a matrix on the unit square: the one home of
-# the quarter-turn rule (Corners folds it into its matrix; `inverse_rotation` reads it).
+# the quarter-turn rule (Corners folds it into its matrix).
 UNDO_QUARTER_TURN: dict[int, Matrix] = {
     0: (1, 0, 0, 0, 1, 0, 0, 0, 1),
     90: (0, 1, 0, -1, 0, 1, 0, 0, 1),         # (u, v) -> (v, 1-u)
@@ -89,45 +89,6 @@ def multiply(left: Matrix, right: Matrix) -> Matrix:
                  for row in range(3) for column in range(3))
 
 
-def inverse_rotation(x: float, y: float, rotation: int) -> tuple[float, float]:
-    """Undo a clockwise image rotation in screen coordinates."""
-    if rotation not in UNDO_QUARTER_TURN:
-        raise ValueError("rotation must be a quarter-turn")
-    return transform(UNDO_QUARTER_TURN[rotation], x, y)
-
-
-def cover_rect(crop: tuple[float, float, float, float], frame_aspect: float,
-               source_width: int, source_height: int) -> tuple[float, float, float, float]:
-    """Source UV rectangle used by centered cover, with crop applied exactly once."""
-    if not math.isfinite(frame_aspect) or frame_aspect <= 0:
-        raise ValueError("positive finite Frame aspect required")
-    if source_width <= 0 or source_height <= 0:
-        raise ValueError("positive source dimensions required")
-    left, top, right, bottom = crop
-    if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
-        raise ValueError("invalid crop")
-    width, height = right-left, bottom-top
-    aspect = source_width*width / (source_height*height)
-    if aspect > frame_aspect:
-        width *= frame_aspect / aspect
-    else:
-        height *= aspect / frame_aspect
-    return ((left+right-width)/2, (top+bottom-height)/2,
-            (left+right+width)/2, (top+bottom+height)/2)
-
-
-def source_uv(x: float, y: float, calibration: Calibration, frame_aspect: float,
-              source_width: int, source_height: int) -> tuple[float, float] | None:
-    u, v = transform(inverse(homography(calibration.corners)), x, y)
-    if not (0 <= u <= 1 and 0 <= v <= 1):
-        return None
-    u, v = inverse_rotation(u, v, calibration.rotation)
-    left, top, right, bottom = cover_rect(
-        calibration.crop, frame_aspect, source_width, source_height
-    )
-    return left + u*(right-left), top + v*(bottom-top)
-
-
 def decode_channel(value: float, video: bool = False) -> float:
     value = min(1.0, max(0.0, value))
     if video:
@@ -140,32 +101,20 @@ def encode_srgb(value: float) -> float:
     return 12.92*value if value <= .0031308 else 1.055*value**(1/2.4)-.055
 
 
-def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], float, bool]],
-                  gain: float = 1) -> tuple[float, float, float, float]:
-    """Bottom-to-top straight encoded RGBA/effective alpha/video -> opaque sRGB.
+def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], float, bool]]) -> tuple[float, float, float, float]:
+    """Bottom-to-top straight encoded RGBA/effective alpha/video -> opaque sRGB, with neutral
+    picture operations (`final_pixel` is the final pass).
 
     Empty output is opaque black. Source alpha and Layer alpha multiply in linear
-    premultiplied source-over; gain applies once after the complete composition.
+    premultiplied source-over.
     """
-    if not math.isfinite(gain) or not 0 <= gain <= 2:
-        raise ValueError("gain must be finite in [0, 2]")
     rgb = [0.0, 0.0, 0.0]
     for rgba, opacity, video in samples:
         if not all(math.isfinite(v) and 0 <= v <= 1 for v in (*rgba, opacity)):
             raise ValueError("finite normalized samples required")
         alpha = rgba[3]*opacity
         rgb = [decode_channel(rgba[i], video)*alpha + rgb[i]*(1-alpha) for i in range(3)]
-    return (*(encode_srgb(v*gain) for v in rgb), 1.0)
-
-
-# -- roadmap 1c, slice R1 ------------------------------------------------------------------------
-
-def fit_of(calibration: Calibration) -> CornersFit | CoverFit:
-    """The fit a Position draws: `calibration.fit`, or until INTEGRATE, a record without one read
-    as CornersFit(corners, rotation) (exactly today's picture). INTEGRATE deletes the second arm."""
-    if calibration.fit is not None:
-        return calibration.fit
-    return CornersFit(corners=calibration.corners, rotation=calibration.rotation)
+    return (*(encode_srgb(v) for v in rgb), 1.0)
 
 
 def _cover_matrix(fit: CoverFit, output: OutputSize) -> Matrix:
@@ -207,7 +156,7 @@ def inside_opening(corners: Corners, x: float, y: float) -> bool:
 
 def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tuple[float, float, float, float]:
     """The photo's source UV rectangle (left, top, right, bottom) for centred cover of
-    `frame_aspect` (Photo fit). Pure; ValueError as `cover_rect` for bad sizes."""
+    `frame_aspect` (Photo fit). Pure; ValueError for a non-positive or non-finite aspect or size."""
     if not math.isfinite(frame_aspect) or frame_aspect <= 0:
         raise ValueError("positive finite Frame aspect required")
     if source_width <= 0 or source_height <= 0:
@@ -224,7 +173,7 @@ def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tu
 def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, frame_aspect: float,
                       source_width: int, source_height: int) -> tuple[float, float] | None:
     """The source UV one Frame samples at output point (x, y); None outside its opening or its
-    picture. Replaces `source_uv`. The per-Frame mask (the opening) comes first, so a Frame never
+    picture. The per-Frame mask (the opening) comes first, so a Frame never
     draws over its neighbour, then the picture's unit square."""
     if not inside_opening(fit.corners, x, y):
         return None

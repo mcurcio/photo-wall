@@ -48,8 +48,6 @@ class FrameInventory(Model):
     generation: int = Field(ge=0)
     calibration: Calibration
     readiness: Readiness                      # worked out (central/displays/model.py), never stored
-    preview: Calibration | None = None
-    preview_expires: Instant | None = None
     configuration_revision: int = Field(ge=1)
     player_id: Identifier | None = None
     output_id: Identifier | None = None
@@ -98,7 +96,7 @@ class InstallationInventory(Model):
         """A copy carrying each Player's last accepted report, read after this inventory.
 
         read_at is at least every last_seen and every report, so no age taken from it is
-        negative; it does not bound preview_expires, which is in the future by design."""
+        negative."""
         return self.model_copy(update={
             "players": tuple(
                 player.model_copy(update={"last_report_at": reports.reports.get(player.id)})

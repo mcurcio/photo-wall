@@ -19,7 +19,7 @@ from uuid import UUID
 
 from contracts.models import AppliedCalibration
 from contracts.node_frame import PictureOperations
-from player.geometry import fit_of, output_to_picture, photo_rect
+from player.geometry import output_to_picture, photo_rect
 from player.mainloop import Tick, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
@@ -127,8 +127,8 @@ def _trial_key(frames, composition: OutputComposition, grant) -> object:
 
 def _drawn_fit(draw: _Draw):
     """The fit a draw shows: its applied calibration (a trial's), else its composition's."""
-    return fit_of(draw.applied_calibration.calibration if draw.applied_calibration
-                  else draw.composition.calibration)
+    return (draw.applied_calibration.calibration if draw.applied_calibration
+            else draw.composition.calibration).fit
 
 
 def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening) -> None:

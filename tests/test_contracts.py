@@ -44,9 +44,19 @@ def test_clock_uncertainty_is_not_pipeline_position():
 @pytest.mark.parametrize("corners", [((0, 0), (1, 1), (1, 0), (0, 1)),
                                      ((0, 0), (0, 0), (1, 1), (0, 1)),
                                      ((0, 0), (2, 0), (1, 1), (0, 1))])
-def test_calibration_rejects_folded_or_invalid_aperture(corners):
+@pytest.mark.parametrize("mode", ["cover", "corners"])
+def test_calibration_rejects_folded_or_invalid_aperture(corners, mode):
     with pytest.raises(ValidationError):
-        Calibration(corners=corners)
+        Calibration.model_validate({"revision": 1, "fit": {"mode": mode, "corners": corners}})
+
+
+def test_a_position_is_its_fit_cover_by_default_and_the_retired_fields_are_refused():
+    assert Calibration().model_dump(mode="json") == {
+        "revision": 1, "fit": {"mode": "cover", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 0}}
+    for retired in ({"rotation": 90}, {"corners": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                    {"crop": [0, 0, 1, 1]}, {"gain": 1}):
+        with pytest.raises(ValidationError):
+            Calibration.model_validate({"revision": 1, **retired})
 
 
 def test_wire_rejects_upstream_fields_and_failure_text():

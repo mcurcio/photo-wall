@@ -111,8 +111,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         config = binding(conn, row["player_id"], row["authority_epoch"])["bindings"][0]
     calibration = Calibration(
         revision=config.calibration.revision,
-        gain=0,
-        corners=((0.4, 0.1), (0.9, 0.3), (0.8, 0.9), (0.1, 0.8)),
+        fit=CornersFit(corners=((0.4, 0.1), (0.9, 0.3), (0.8, 0.9), (0.1, 0.8))),
     )
     raw = canonical(calibration.model_dump(mode="json"))
     candidate = replace(
@@ -128,8 +127,8 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
     applied = state.apply(
         encode_trial(candidate), OutputComposition(config, config.calibration), 1500
     )
-    assert applied.calibration.gain == 0
-    for observed, expected in zip(applied.primitives, calibration.corners, strict=True):
+    assert applied.calibration == calibration
+    for observed, expected in zip(applied.primitives, calibration.fit.corners, strict=True):
         assert observed == pytest.approx(expected)
     assert (
         state.apply(

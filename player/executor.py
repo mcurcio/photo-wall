@@ -478,7 +478,7 @@ class Executor:
                 layers.sort(key=lambda local: (
                     local.layer.priority, local.layer.root_order, local.layer.admission_order
                 ))
-                result.append(OutputComposition(binding, binding.effective_calibration(now),
+                result.append(OutputComposition(binding, binding.calibration,
                                                 tuple(layers)))
         return tuple(result)
 
@@ -695,7 +695,7 @@ class Executor:
     def _fallback(self, binding: OutputBinding, now: float) -> OutputComposition:
         retained = self._retained.get(binding.output_id)
         layers = (retained.local,) if retained else ()
-        return OutputComposition(binding, binding.effective_calibration(now), layers, fallback=True)
+        return OutputComposition(binding, binding.calibration, layers, fallback=True)
 
     def _show_fallback(self, composition: OutputComposition) -> bool:
         """Only observed fallback replaces state; unavailable retained media yields black."""
@@ -776,7 +776,7 @@ class Executor:
                 return ()
             for output_id, binding in tuple(self._retired_outputs.items()):
                 if self._show_fallback(OutputComposition(
-                    binding, binding.effective_calibration(now), fallback=True
+                    binding, binding.calibration, fallback=True
                 )):
                     del self._retired_outputs[output_id]
             active = []
@@ -872,7 +872,7 @@ class Executor:
                     self._valid_current(local, previous, now) for local in previous.layers
                 ):
                     continuation = OutputComposition(
-                        binding, binding.effective_calibration(now), tuple(
+                        binding, binding.calibration, tuple(
                             LocalLayer(local.layer, local.path, local.layer.position(now),
                                        _alpha(local.layer, now)) for local in previous.layers
                         )

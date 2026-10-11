@@ -223,7 +223,8 @@ def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
     _stored_1b(registry, "kitchen", gain=0.8, rotation=90, corners=SKEWED_CORNERS)
     _sql(registry, "UPDATE frames SET preview=calibration, preview_expires=2000")
     before = _sql(registry, "SELECT configuration_revision FROM frames")[0]["configuration_revision"]
-    assert _frame_row(registry, "kitchen").readiness is Readiness.READY
+    # Positioned before 075 (the readiness rule's own input; the 1b record no longer parses).
+    assert _sql(registry, "SELECT position_generation = generation AS positioned FROM frames")[0]["positioned"]
     _migrate(registry)
 
     [row] = _sql(registry, "SELECT calibration, configuration_revision FROM frames")
@@ -231,7 +232,6 @@ def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
     assert row["configuration_revision"] == before + 1
     saved = Calibration.model_validate(row["calibration"])
     assert saved.fit == CoverFit(corners=tuple(map(tuple, SKEWED_CORNERS)), rotation=0)
-    assert (saved.crop, saved.gain, saved.rotation) == ((0, 0, 1, 1), 1, 0)
     assert _frame_row(registry, "kitchen").readiness is Readiness.POSITION_NEEDED
     assert not _sql(registry, "SELECT 1 FROM information_schema.columns WHERE table_name='frames' "
                               "AND column_name IN ('preview', 'preview_expires')")

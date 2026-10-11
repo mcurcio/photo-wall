@@ -10,7 +10,7 @@ from __future__ import annotations
 from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration, CornersFit
 
-# Today's stretched fit on the whole output: what `Calibration()` meant before 1c's Cover.
+# Corners on the whole output: a Save that needs no reported output size (Cover's profile does).
 FULL_SCREEN_CORNERS = Calibration(fit=CornersFit())
 
 

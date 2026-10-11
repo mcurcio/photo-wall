@@ -4,8 +4,8 @@ Run only inside the display harness container (scripts/run_display_harness.py), 
 native_player_resource_harness.py, with `player` and `contracts` mounted read-only at /repo and
 `tests` at /smoke. It starts its own headless Weston (kiosk shell, pixman) and drives the real
 NativeRenderer on software GL, reading each render's pixels back with glReadPixels and comparing
-them, within 0.015, to the scalar reference (`picture_source_uv`, `final_pixel`, and for Corners
-today's `source_uv` and `compose_pixel`). The display host is a fake `_frames` (one admitted
+them, within 0.015, to the scalar reference (`picture_source_uv`, `final_pixel`, and
+`compose_pixel` with neutral operations). The display host is a fake `_frames` (one admitted
 grant, the Output's picture operations, every tag recorded), as in 1b P1a case 4. Its picture is
 a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with the stdlib.
 
@@ -13,8 +13,8 @@ a 64x48 PNG of four flat quadrants (red, green, blue, white) written here with t
    non-neutral picture operations, equals the reference at sampled pixels; black outside.
 2. outside_the_opening_stays_black_at_low_contrast: contrast slope 0.5 lifts black inside the
    opening, and every sampled pixel outside the opening is exactly (0, 0, 0): the mask is last.
-3. corners_fit_equals_today: a skewed CornersFit at 90 degrees draws today's pixels (`source_uv`
-   of the same corners and quarter turn, `compose_pixel`).
+3. corners_fit_matches_the_reference: a skewed CornersFit at 90 degrees draws the reference's
+   pixels (`picture_source_uv` of the same fit, `compose_pixel`).
 4. operations_change_the_picture_and_the_tag: new operations with picture change 7 redraw at
    once, the pixels follow them, and the tag names change 7 (None before any operations).
 5. no_trim_and_no_gain_uniforms: neither linked program has a `crop`, `gain`, `rotation`,
@@ -62,7 +62,6 @@ from player.geometry import (  # noqa: E402
     final_pixel,
     inside_opening,
     picture_source_uv,
-    source_uv,
 )
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
@@ -280,15 +279,14 @@ def outside_the_opening_stays_black_at_low_contrast(native, frames, variant) -> 
     assert outside > 1000 and inside > 200, (outside, inside)
 
 
-def corners_fit_equals_today(native, frames, variant) -> None:
+def corners_fit_matches_the_reference(native, frames, variant) -> None:
     frames.operations = None
     fit = CornersFit(corners=SKEWED, rotation=90)
     show(native, composition(variant, Calibration(fit=fit)))
     width, height, _ = native.captured
-    today = Calibration(corners=SKEWED, rotation=90)
     compared = 0
     for i, j, x, y in samples(native, SKEWED):
-        uv = source_uv(x, y, today, PROFILE.width_px / PROFILE.height_px, WIDTH, HEIGHT)
+        uv = picture_source_uv(x, y, fit, (width, height), PROFILE.width_px / PROFILE.height_px, WIDTH, HEIGHT)
         if uv is None:
             expected = compose_pixel([])
         else:
@@ -342,7 +340,8 @@ def centre(native: CapturingRenderer) -> tuple[float, ...]:
 
 def alpha_and_black_layers_compose_as_the_reference(native, frames, variant) -> None:
     """Moved from tests/native/smoke.py: straight alpha and a black layer's fade compose in linear
-    premultiplied source-over, as `compose_pixel` (today's record with no fit draws full screen)."""
+    premultiplied source-over, as `compose_pixel` (the default position, Cover at angle 0 on the
+    whole output, covers the centre)."""
     frames.operations = None
     red = png_fixture(RUNTIME / "red.png", lambda _x, _y: (255, 0, 0, 128))
     white = png_fixture(RUNTIME / "white.png", lambda _x, _y: (255, 255, 255, 255))
@@ -379,7 +378,7 @@ def the_diagnostic_shows_only_while_the_output_is_unbound(native, frames, varian
 
 CASES = (cover_matches_the_reference(0), cover_matches_the_reference(7),
          cover_matches_the_reference(90), outside_the_opening_stays_black_at_low_contrast,
-         corners_fit_equals_today, operations_change_the_picture_and_the_tag,
+         corners_fit_matches_the_reference, operations_change_the_picture_and_the_tag,
          no_trim_and_no_gain_uniforms, alpha_and_black_layers_compose_as_the_reference,
          a_corrupt_picture_fails_and_the_frame_still_presents,
          the_diagnostic_shows_only_while_the_output_is_unbound)

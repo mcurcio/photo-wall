@@ -29,9 +29,13 @@ from appliance.display_host.power_methods import (
     run_tool,
 )
 from contracts.node_output import (
+    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
+    ActsOn,
     DisplayIdentity,
     OutputDocument,
+    OutputPicture,
+    PictureSetting,
     Power,
     PowerMethod,
     PowerRequest,
@@ -193,10 +197,12 @@ def cec(display: Display) -> HdmiCecAdapter:
 def document(change: int, *requests: PowerRequest, method=BEST_DETECTED, never_off_on_other_input=False,
              switch_input_on_power_on=False) -> OutputDocument:
     return OutputDocument(OUTPUT, change, (*requests, STANDING), method, switch_input_on_power_on,
-                          never_off_on_other_input)
+                          never_off_on_other_input, 1, PICTURE)
 
 
 STANDING = PowerRequest("standing", Power.ON, RequestReason.STANDING)
+PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
+                        PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22)
 
 
 def console_off(seconds: int = 300, request_id: str = "17") -> PowerRequest:

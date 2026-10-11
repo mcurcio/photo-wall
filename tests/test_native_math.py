@@ -15,19 +15,15 @@ from contracts.models import Calibration, CornersFit, CoverFit
 from contracts.node_frame import PictureOperations
 from player.geometry import (
     compose_pixel,
-    cover_rect,
     decode_channel,
     encode_srgb,
     final_pixel,
-    fit_of,
     homography,
     inverse,
-    inverse_rotation,
     output_pixel,
     output_to_picture,
     photo_rect,
     picture_source_uv,
-    source_uv,
     transform,
 )
 from player.native import NativeOutput, NativeRenderer, SampleMailbox, diagnostic_text, packed_rgba
@@ -133,27 +129,17 @@ def test_singular_or_nonfinite_homography_rejected():
         inverse((0,)*9)
 
 
-def test_crop_once_then_cover_uses_frame_aspect():
-    assert cover_rect((.25, 0, .75, 1), 1, 200, 100) == pytest.approx((.25, 0, .75, 1))
-    assert cover_rect((.25, 0, .75, 1), 2, 200, 100) == pytest.approx((.25, .25, .75, .75))
-    assert cover_rect((0, 0, 1, 1), .5, 200, 100) == pytest.approx((.375, 0, .625, 1))
-    calibration = Calibration(crop=(.25, 0, .75, 1))
-    assert source_uv(.2, .3, calibration, 1, 200, 100) == pytest.approx((.35, .3))
-
-
 @pytest.mark.parametrize("rotation, expected", [(0, (.2, .3)), (90, (.3, .8)),
                                                  (180, (.8, .7)), (270, (.7, .2))])
-def test_inverse_quarter_turn_before_cover(rotation, expected):
-    assert inverse_rotation(.2, .3, rotation) == pytest.approx(expected)
-    calibration = Calibration(rotation=rotation, crop=(.25, 0, .75, 1))
-    result = source_uv(.2, .3, calibration, 1, 200, 100)
-    assert result == pytest.approx((.25+expected[0]*.5, expected[1]))
+def test_corners_undoes_the_quarter_turn(rotation, expected):
+    fit = CornersFit(rotation=rotation)
+    assert picture_source_uv(.2, .3, fit, (100, 100), 1, 100, 100) == pytest.approx(expected)
 
 
-def test_aperture_clips_before_rotation():
-    calibration = Calibration(corners=((.2, .2), (.8, .2), (.8, .8), (.2, .8)), rotation=90)
-    assert source_uv(.1, .4, calibration, 1, 100, 100) is None
-    assert source_uv(.5, .5, calibration, 1, 100, 100) == pytest.approx((.5, .5))
+def test_the_opening_clips_before_the_quarter_turn():
+    fit = CornersFit(corners=((.2, .2), (.8, .2), (.8, .8), (.2, .8)), rotation=90)
+    assert picture_source_uv(.1, .4, fit, (100, 100), 1, 100, 100) is None
+    assert picture_source_uv(.5, .5, fit, (100, 100), 1, 100, 100) == pytest.approx((.5, .5))
 
 
 # -- roadmap 1c R1: one matrix per Frame fit, masks per Frame and per Output, the final pass ------
@@ -174,24 +160,23 @@ def _operations(rgb=(1.0, 1.0, 1.0), light=1.0, slope=1.0, exponent=1.0):
     return PictureOperations("HDMI-A-1", 1, rgb, light, slope, exponent)
 
 
+# Where a clockwise quarter turn puts picture point (s, t) on the unit square the corners span.
+TURNED = {0: lambda s, t: (s, t), 90: lambda s, t: (1 - t, s),
+          180: lambda s, t: (1 - s, 1 - t), 270: lambda s, t: (t, 1 - s)}
+
+
 @pytest.mark.parametrize("corners", CORNER_SETS)
 @pytest.mark.parametrize("rotation", (0, 90, 180, 270))
-def test_corners_fit_equals_todays_picture(corners, rotation):
-    """R1 case 1: Corners through the one matrix samples exactly what today's path samples."""
+def test_corners_fit_stretches_the_picture_onto_the_corners(corners, rotation):
+    """R1 case 1: Corners samples, at the output point where the forward
+    perspective puts a turned picture point, exactly that picture point."""
     rng = random.Random(f"{corners}{rotation}")
     fit = CornersFit(corners=corners, rotation=rotation)
-    today = Calibration(corners=corners, rotation=rotation)
-    assert fit_of(today) == fit
-    hits = 0
+    forward = homography(corners)
     for _ in range(200):
-        x, y = rng.random(), rng.random()
-        old = source_uv(x, y, today, 1.6, 300, 200)
-        new = picture_source_uv(x, y, fit, HD, 1.6, 300, 200)
-        assert (old is None) == (new is None), (x, y)
-        if old is not None:
-            hits += 1
-            assert new == pytest.approx(old, abs=1e-9)
-    assert hits
+        s, t = rng.uniform(.01, .99), rng.uniform(.01, .99)
+        x, y = transform(forward, *TURNED[rotation](s, t))
+        assert picture_source_uv(x, y, fit, HD, 1.6, 320, 200) == pytest.approx((s, t), abs=1e-9)
 
 
 @pytest.mark.parametrize("rotation", (0, 7, 45, 90, 135))
@@ -301,28 +286,20 @@ def test_photo_rect_is_centred_cover_without_trim():
     assert photo_rect(1, 200, 100) == pytest.approx((.25, 0, .75, 1))
     assert photo_rect(2, 200, 100) == pytest.approx((0, 0, 1, 1))
     assert photo_rect(4, 200, 100) == pytest.approx((0, .25, 1, .75))
-    assert photo_rect(.5, 200, 100) == cover_rect((0, 0, 1, 1), .5, 200, 100)
+    assert photo_rect(.5, 200, 100) == pytest.approx((.375, 0, .625, 1))
     with pytest.raises(ValueError):
         photo_rect(0, 200, 100)
     with pytest.raises(ValueError):
         photo_rect(1, 0, 100)
 
 
-def test_fit_of_reads_the_new_fit_when_present():
-    fit = CoverFit(corners=OPENING, rotation=7)
-    assert fit_of(Calibration(fit=fit)) is fit
-
-
-def test_srgb_and_bt709_transfer_and_gain():
+def test_srgb_and_bt709_transfer():
     assert decode_channel(.04045) == pytest.approx(.00313080495)
     assert decode_channel(.081-1e-9, video=True) == pytest.approx(.018)
     assert decode_channel(.5, video=True) > decode_channel(.5)
     for value in (0, .002, .03, .3, .8, 1):
         assert encode_srgb(decode_channel(value)) == pytest.approx(value, abs=1e-7)
-    assert compose_pixel([((.5, .5, .5, 1), 1, False)], gain=2)[:3] == pytest.approx(
-        (encode_srgb(decode_channel(.5)*2),)*3
-    )
-    assert compose_pixel([((1, 1, 1, 1), 1, False)], gain=2) == pytest.approx((1, 1, 1, 1))
+    assert compose_pixel([((.5, .5, .5, 1), 1, False)])[:3] == pytest.approx((.5,)*3)
 
 
 def test_linear_premultiplied_alpha_black_and_transparency():

@@ -451,8 +451,12 @@ def test_the_backend_asks_the_shell_for_output_power_from_another_thread():
 def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
     from appliance.display_host.runner import document_feed
     from contracts.node_output import (
+        AS_THE_DISPLAY_HAS_IT,
         BEST_DETECTED,
+        ActsOn,
         OutputDocument,
+        OutputPicture,
+        PictureSetting,
         Power,
         PowerRequest,
         RequestReason,
@@ -464,7 +468,9 @@ def test_the_document_feed_decodes_each_document_and_ignores_the_rest():
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
                          SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))))
     wanted = OutputDocument("HDMI-A-1", 2, (PowerRequest("standing", Power.ON, RequestReason.STANDING),),
-                            BEST_DETECTED, False, False)
+                            BEST_DETECTED, False, False, 1,
+                            OutputPicture(PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT),
+                                          PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT), 6500, 22))
     feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
     feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key
     feed("output-HDMI-A-1", Document(b'{"output_id":"HDMI-A-1"}', "central", None))       # undecodable

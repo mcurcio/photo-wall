@@ -74,49 +74,12 @@ FrameFit = Annotated[CornersFit | CoverFit, Field(discriminator="mode")]
 
 
 class Calibration(Model):
-    """A Frame's Position (the console's word): how its picture sits on the output.
-
-    1c (run ledger .claude/runs/display-1c.md) is additive here until its INTEGRATE slice: `fit`
-    is the new truth; `rotation`, `corners`, `crop` and `gain` are retiring and, when `fit` is
-    set, must keep their defaults (one truth per value, checked at construction). INTEGRATE
-    deletes them and makes `fit` required. Trim (`crop`) is gone in 1c (owner 2026-10-10 q3) and
-    brightness (`gain`) moves to the Display's picture settings.
-
-    Corner order: top-left, top-right, bottom-right, bottom-left; normalized output.
-    """
+    """A Frame's Position (the console's word): how its picture sits on the output, as its Frame
+    fit (roadmap 1c; Cover by default, Corners an explicit opt-in, owner 2026-10-10 q1).
+    `revision` rises with every saved Position."""
 
     revision: int = Field(default=1, ge=1)
-    fit: FrameFit | None = None
-    rotation: Literal[0, 90, 180, 270] = 0
-    corners: tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] = (
-        (0, 0), (1, 0), (1, 1), (0, 1)
-    )
-    crop: tuple[float, float, float, float] = (0, 0, 1, 1)
-    gain: float = Field(default=1, ge=0, le=2)
-
-    @model_validator(mode="after")
-    def geometry(self) -> Self:
-        if any(not 0 <= n <= 1 for point in self.corners for n in point):
-            raise ValueError("corners must lie in normalized output space")
-        left, top, right, bottom = self.crop
-        if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
-            raise ValueError("crop must describe a nonempty normalized rectangle")
-        # Consistently convex clockwise in screen coordinates; excludes folded/degenerate quads.
-        if not convex_clockwise(self.corners):
-            raise ValueError("corners must form a nondegenerate ordered convex aperture")
-        if self.fit is not None and (self.rotation, tuple(map(tuple, self.corners)), self.crop, self.gain) != (
-                0, FULL_SCREEN, (0, 0, 1, 1), 1):
-            raise ValueError("calibration_retiring_fields_with_fit")
-        return self
-
-    @model_serializer(mode="wrap")
-    def serialize_fit(self, handler):
-        # Until INTEGRATE, a record with no fit serializes byte-identically to before 1c (witness
-        # tags, trial hashes and stored JSON unchanged).
-        value = handler(self)
-        if self.fit is None:
-            value.pop("fit", None)
-        return value
+    fit: FrameFit = Field(default_factory=CoverFit)
 
 
 class OutputBinding(Model):
@@ -126,21 +89,6 @@ class OutputBinding(Model):
     configuration_revision: int = Field(default=1, ge=1)
     profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
-    preview: Calibration | None = None
-    preview_expires: Instant | None = None
-
-    @model_validator(mode="after")
-    def preview_lease(self) -> Self:
-        if (self.preview is None) != (self.preview_expires is None):
-            raise ValueError("preview and expiry must be supplied together")
-        if self.preview and self.preview.revision != self.calibration.revision:
-            raise ValueError("preview must reference committed calibration revision")
-        return self
-
-    def effective_calibration(self, now: float) -> Calibration:
-        if self.preview is not None and self.preview_expires is not None and now < self.preview_expires:
-            return self.preview
-        return self.calibration
 
 
 class IdentifyOutput(Model):

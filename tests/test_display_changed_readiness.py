@@ -31,7 +31,7 @@ from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.displays.model import Readiness
 from central.transaction_locks import acquire_runtime_locks
-from contracts.models import Calibration
+from contracts.models import Calibration, CornersFit
 from contracts.node_output import DisplayIdentity
 
 OTHER_DISPLAY = DisplayIdentity("DEL", 41200, "DELL U2720Q", "CN0F1X8Z")
@@ -71,7 +71,7 @@ def _commit_by_trial(registry, frame_id: str, player_id: str) -> None:
             conn, frame_id=frame_id, player_id=player_id, authority_epoch=_epoch(registry, player_id),
             output_id=frame.output_id, binding_generation=frame.generation,
             config_revision=frame.configuration_revision, calibration_revision=frame.calibration.revision,
-            calibration=Calibration())
+            calibration=Calibration(fit=CornersFit()))
 
 
 POSITION_COMMITS = pytest.mark.parametrize("commit", [_commit_by_calibrate, _commit_by_trial],

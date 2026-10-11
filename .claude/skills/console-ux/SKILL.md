@@ -72,8 +72,9 @@ One page per step. Fill every line; write "none" rather than deleting one.
 - `EntityHeader`: "Living room left", Wall and room, status (`HealthBadge`), Identify
 - `Tabs` (1a): Overview · **Position** · Picture · Hardware
 - `LivePreviewEditor`:
-  - controls: `QuadEditor` (the four corners and crop edges over an outline of the output; arrow keys
-    move the selected corner), `NudgePad` (1 / 10 / 50 px steps), Rotation, "Reset to full screen"
+  - controls: Fit (Cover by default, Corners an explicit choice), `QuadEditor` (the four corners over
+    an outline of the output; arrow keys move the selected corner), `NudgePad` (1 / 10 / 50 px
+    steps), Rotation (quarter-turn buttons, and any angle in Cover), "Reset to full screen"
   - `AckBadge`; **Done** · **Revert**
 
 **Settings:**

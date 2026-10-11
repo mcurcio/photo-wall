@@ -36,7 +36,7 @@ import hashlib
 import json
 import math
 from collections.abc import Collection
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, TypeGuard
 from uuid import UUID
@@ -59,7 +59,7 @@ from contracts.node_output import (
 
 TEST_SECONDS: Final = 300                    # owner q1, 2026-10-10
 STANDING_REQUEST_ID: Final = "standing"
-_DIGEST_CHANGE: Final = 1                    # any fixed change number: the digest covers everything but it
+_DIGEST_CHANGE: Final = 1                    # any fixed change number: neither digest covers it
 
 
 def standing_on() -> PowerRequest:
@@ -204,23 +204,31 @@ class ProjectedOutput:
     picture: OutputPicture
 
     def digest(self) -> str:
-        """sha256 hex of the canonical power part; the projector raises `change` when it differs."""
-        return hashlib.sha256(encode_output_document(self._power_part(_DIGEST_CHANGE))).hexdigest()
+        """sha256 hex of the canonical power part (the document but its change numbers and picture
+        part); the projector raises `change` when it differs."""
+        part = self._fields()
+        for name in ("change", "picture_change", "picture"):
+            del part[name]
+        return _sha256(part)
 
     def picture_digest(self) -> str:
         """sha256 hex of the picture part's canonical encoding; the projector raises
         `picture_change` when it differs."""
-        part = json.loads(encode_output_document(self.at_change(_DIGEST_CHANGE, _DIGEST_CHANGE)))["picture"]
-        return hashlib.sha256(json.dumps(part, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return _sha256(self._fields()["picture"])
 
     def at_change(self, change: int, picture_change: int) -> OutputDocument:
-        return replace(self._power_part(change), picture_change=picture_change, picture=self.picture)
-
-    def _power_part(self, change: int) -> OutputDocument:
         settings = self.settings
         return OutputDocument(self.output_id, change, self.power,
                               BEST_DETECTED if settings.power_method is None else settings.power_method,
-                              settings.switch_input_on_power_on, settings.never_off_on_other_input)
+                              settings.switch_input_on_power_on, settings.never_off_on_other_input,
+                              picture_change, self.picture)
+
+    def _fields(self) -> dict:
+        return json.loads(encode_output_document(self.at_change(_DIGEST_CHANGE, _DIGEST_CHANGE)))
+
+
+def _sha256(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def project_output(output_id: str, *, test: PowerTest | None, settings: DisplaySettings | None,

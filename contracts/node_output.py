@@ -21,8 +21,8 @@ Roadmap 1c (run ledger .claude/runs/display-1c.md) adds a **picture part** to bo
 with its own `picture_change`, which rises only when the picture part changes and never with
 `change` (a picture edit never re-runs power); the report's `picture` (what the display answered,
 each setting's result for the `picture_change` it names, and the newest picture change the Player
-has presented). Until 1c's INTEGRATE slice both document fields are optional (None, None) so 1b's
-writers stay valid; INTEGRATE makes them required and raises SCHEMA_MAJOR to 2.
+has presented). Both document fields are required: the display line's schema major is 2 from 1c on,
+and Central records no report from a schema-1 writer (no backwards compatibility).
 
 Rules this module owns (one home each):
 - the wire shape and its JSON codec (canonical: sorted keys, no spaces, so a digest of the bytes
@@ -57,7 +57,7 @@ from typing import Any, Final, Literal, TypeVar
 from contracts.node_protocol import token
 from contracts.strict_json import loads_object
 
-SCHEMA_MAJOR: Final = 1                         # the display line's schema major (birth, envelope)
+SCHEMA_MAJOR: Final = 2                         # the display line's schema major (birth, envelope); 2 from 1c
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
 # software end-to-end tier runs (player/output_discovery.py's `weston_ini` iterates these).
@@ -241,14 +241,13 @@ class OutputDocument:
     method: MethodChoice
     switch_input_on_power_on: bool      # #117
     never_off_on_other_input: bool      # #118
-    picture_change: int | None = None   # 1c: rises only when `picture` changes; never with `change`
-    picture: OutputPicture | None = None    # 1c: the Display's picture settings
+    picture_change: int                 # rises only when `picture` changes; never with `change`
+    picture: OutputPicture              # the Display's picture settings (#111-#114)
 
     def __post_init__(self) -> None:
         """ValueError("output_document") unless output_id is in OUTPUT_IDS, change >= 1, power has
         1..MAX_POWER_REQUESTS requests with unique request_ids and an untimed last one, and method
-        is a PowerMethod or BEST_DETECTED. 1c (slice T0): and picture_change and picture are both
-        None or both set, with picture_change >= 1 and picture an OutputPicture."""
+        is a PowerMethod or BEST_DETECTED, picture_change >= 1 and picture an OutputPicture."""
         power = self.power
         _require(self.output_id in OUTPUT_IDS and _count(self.change, 1)
                  and isinstance(power, tuple) and 1 <= len(power) <= MAX_POWER_REQUESTS
@@ -257,8 +256,7 @@ class OutputDocument:
                  and power[-1].for_seconds is None
                  and (isinstance(self.method, PowerMethod) or _is_best_detected(self.method))
                  and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool
-                 and ((self.picture_change is None and self.picture is None)
-                      or (_count(self.picture_change, 1) and isinstance(self.picture, OutputPicture))),
+                 and _count(self.picture_change, 1) and isinstance(self.picture, OutputPicture),
                  "output_document")
 
 
@@ -397,7 +395,7 @@ def decode_output_document(raw: bytes) -> OutputDocument:
         return OutputDocument(**{
             **value, "power": tuple(_power_request(request) for request in _list(value["power"])),
             "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method),
-            "picture": None if picture is None else _output_picture(picture)})
+            "picture": _output_picture(picture)})
     return _decode(raw, OUTPUT_DOCUMENT_BYTES, OutputDocument, build, "output_document")
 
 

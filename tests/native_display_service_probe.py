@@ -219,7 +219,8 @@ try:
                     assert status == 200, (status, raw)
                     trial = json.loads(raw)
                     trial_path += "/" + trial["trial_id"]
-                    calibration = {**trial["calibration"], "gain": 0.5}
+                    calibration = {**trial["calibration"], "fit": {
+                        "mode": "corners", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 180}}
                     status, raw = transport.request("POST", trial_path, json.dumps({
                         "operation": "edit", "expected_sequence": 1, "calibration": calibration,
                     }).encode())
@@ -259,7 +260,7 @@ try:
                         }).encode())
                         assert status == 200, (status, raw)
                         saved = json.loads(raw)
-                        assert saved["state"] == "saved" and saved["saved_calibration"]["gain"] == 0.5
+                        assert saved["state"] == "saved" and saved["saved_calibration"]["fit"]["rotation"] == 180
                         print("PASS first_calibration_operator_trial_native_save", flush=True)
                         if gtk and os.environ.get("PHOTO_WALL_MEDIA_PROBE") == "1":
                             Path("/tmp/fixture-media-authorized").touch()

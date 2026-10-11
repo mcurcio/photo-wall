@@ -433,7 +433,7 @@ def test_a_saved_position_survives_restart(registry):
     restarted = Registry(Database(registry.db.dsn), registry.clock)
     restarted.db.migrate()  # Idempotent migration on a fresh connection.
     saved = restarted.bindings_for(identity["player_id"], 1)[0]
-    assert (saved.calibration.revision, saved.calibration.fit, saved.preview) == (2, SKEWED.fit, None)
+    assert (saved.calibration.revision, saved.calibration.fit) == (2, SKEWED.fit)
 
 
 def test_http_operator_and_player_authority_are_separate_and_errors_are_sanitized(registry):
