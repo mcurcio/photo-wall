@@ -17,6 +17,7 @@ from pydantic import Field
 
 from central.db import Database, DatabaseTransactionClock
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
+from central.infra.shown_history_store import PgShownHistory
 from central.installation_models import OutputInterruption, PlayerReports
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
@@ -38,6 +39,8 @@ from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
+from central.wall_plan.order import PhotoShowing
+from central.wall_plan.ports import ShownHistory
 from contracts.models import (
     Commit,
     IdentifyOutput,
@@ -91,12 +94,15 @@ class Coordinator:
         media: CoordinationMedia | None = None,
         outcomes: ExecutionOutcomeRouter | None = None,
         installation: InstallationSessions | None = None,
+        shown: ShownHistory | None = None,
     ):
         self.db, self.clock = db, clock
         self.limits = limits or CoordinationLimits()
         self.runtime = RuntimeStore(db, clock)
         self.media: CoordinationMedia = media or MediaRepository(db, clock, times=DatabaseTransactionClock())
         self.installation = installation or PostgresInstallationRepository(clock)
+        # Roadmap 5a: what each offered layer shows and which were displayed (shown history).
+        self.shown: ShownHistory = shown or PgShownHistory()
         self.outcomes = outcomes or ExecutionOutcomeRouter(
             handle_runtime_outcome,
             handle_planning_outcome,
@@ -137,7 +143,8 @@ class Coordinator:
         candidates = self.media.authored_candidates_in(conn, asset_ids)
         for contribution in self._scene_contributions(scene):
             if contribution.asset_refs and not any(
-                eligible(candidates[asset_id], profiles[contribution.target.removeprefix("frame:")])
+                eligible(candidates[asset_id], profiles[contribution.target.removeprefix("frame:")],
+                         scene.selection.crop_limit)
                 for asset_id in contribution.asset_refs
             ):
                 raise RegistryError("authored_incompatible", 409)
@@ -450,6 +457,12 @@ class Coordinator:
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
             horizon_end = (math.floor(now / quantum) + 1) * quantum + self.limits.horizon_seconds
+            selections = runtime.planning_selections()
+            history = self.shown.wall_history_in(
+                conn, selections, now=now,
+                window_seconds=86400 * max(
+                    (selection.no_repeat_days for selection in selections.values()), default=0),
+            )
             projection = project(
                 runtime,
                 now,
@@ -460,6 +473,7 @@ class Coordinator:
                 source_pools=pools,
                 authored_candidates=authored,
                 locked_assignments=locks,
+                history=history,
                 horizon_seconds=horizon_end - now,
                 limits=PlannerLimits(max_horizon_seconds=self.limits.horizon_seconds + quantum),
             )
@@ -512,6 +526,8 @@ class Coordinator:
                     self._event(
                         conn, "offer_unavailable", proposal.player_id, detail={"code": exc.code}
                     )
+                else:
+                    self._record_selected(conn, plan, projection)
             self._commit_due(conn, configurations, now)
             self.media.expire_pins_in(conn, now)
             self._cleanup(
@@ -524,9 +540,28 @@ class Coordinator:
             )
             return projection
 
-    @staticmethod
-    def _cleanup(conn, now, active_sessions: set[tuple[str, int]]):
+    def _record_selected(self, conn, plan: Plan, projection: Projection) -> None:
+        """Roadmap 5a: record what each layer of an offered plan shows, for the layers whose
+        selection names its photo, Scene and pass (a re-offered locked layer keeps its first
+        row)."""
+        selections = {selection.assignment_id: selection for selection in projection.selections}
+        showings = []
+        for layer in plan.layers:
+            selection = selections.get(layer.assignment_id)
+            if (selection is None or selection.asset_id is None or selection.scene_id is None
+                    or selection.pass_number is None):
+                continue
+            showings.append(PhotoShowing(
+                assignment_id=layer.assignment_id, asset_id=selection.asset_id,
+                frame_id=layer.frame_id, scene_id=selection.scene_id,
+                pass_number=selection.pass_number, start=layer.start, end=layer.end,
+                fade_in=layer.fade_in, after_end=layer.after_end,
+            ))
+        self.shown.record_selected_in(conn, showings)
+
+    def _cleanup(self, conn, now, active_sessions: set[tuple[str, int]]):
         """Expiry releases leases, while one latest manifest preserves revision high-water."""
+        self.shown.prune_in(conn, now=now)
         conn.execute("DELETE FROM assignment_locks WHERE valid_until<=%s", (now,))
         conn.execute(
             "DELETE FROM execution_commits c USING plan_offers o WHERE "
@@ -1074,3 +1109,6 @@ class Coordinator:
                 layer.assignment_id,
                 observation.model_dump(mode="json"),
             )
+            if observation.status == "presented":
+                # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11).
+                self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
