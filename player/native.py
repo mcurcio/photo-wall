@@ -19,7 +19,7 @@ from uuid import UUID
 
 from contracts.models import AppliedCalibration
 from contracts.node_frame import PictureOperations
-from player.geometry import output_to_picture, photo_rect
+from player.geometry import output_to_picture, photo_rect, picture_aspect
 from player.mainloop import Tick, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
@@ -1082,7 +1082,7 @@ class NativeRenderer:
                 gl.glActiveTexture(gl.GL_TEXTURE0)
                 gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
                 profile = draw.composition.binding.profile
-                rectangle = photo_rect(profile.width_px/profile.height_px,
+                rectangle = photo_rect(picture_aspect(fit, surface.size, profile.width_px/profile.height_px),
                                        variant.width, variant.height)
                 gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), *rectangle)
             gl.glUniform1i(gl.glGetUniformLocation(program, "video"), int(bool(variant and variant.duration)))

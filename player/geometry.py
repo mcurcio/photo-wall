@@ -143,6 +143,19 @@ def output_to_picture(fit: CornersFit | CoverFit, output: OutputSize) -> Matrix:
     return multiply(UNDO_QUARTER_TURN[fit.rotation], inverse(homography(fit.corners)))
 
 
+def picture_aspect(fit: CornersFit | CoverFit, output: OutputSize, profile_aspect: float) -> float:
+    """The width-to-height of the picture the fit draws, the one aspect a photo is cropped to. In
+    Cover it is the cover rectangle's, worked from the same `cover_rectangle` the matrix uses, so a
+    turned or trial angle never squeezes the photo; in Corners the picture is stretched onto the
+    corners, and its aspect is the stored Frame profile's (`profile_aspect`). Pure."""
+    if isinstance(fit, CoverFit):
+        rectangle = cover_rectangle(fit.corners, fit.rotation, output)
+        if not (rectangle.width > 0 and rectangle.height > 0):
+            raise ValueError("singular homography")
+        return rectangle.width / rectangle.height
+    return profile_aspect
+
+
 def inside_opening(corners: Corners, x: float, y: float) -> bool:
     """Whether output point (x, y) lies in the convex opening (edges included): the per-Frame mask,
     by half-planes. Pure. The corners turn clockwise in y-down coordinates (convex_clockwise), so
@@ -170,17 +183,18 @@ def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tu
     return ((1-width)/2, (1-height)/2, (1+width)/2, (1+height)/2)
 
 
-def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, frame_aspect: float,
+def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, profile_aspect: float,
                       source_width: int, source_height: int) -> tuple[float, float] | None:
     """The source UV one Frame samples at output point (x, y); None outside its opening or its
     picture. The per-Frame mask (the opening) comes first, so a Frame never
-    draws over its neighbour, then the picture's unit square."""
+    draws over its neighbour, then the picture's unit square. The photo is cropped to
+    `picture_aspect` (`profile_aspect` counts only in Corners)."""
     if not inside_opening(fit.corners, x, y):
         return None
     u, v = transform(output_to_picture(fit, output), x, y)
     if not (0 <= u <= 1 and 0 <= v <= 1):
         return None
-    left, top, right, bottom = photo_rect(frame_aspect, source_width, source_height)
+    left, top, right, bottom = photo_rect(picture_aspect(fit, output, profile_aspect), source_width, source_height)
     return left + u*(right-left), top + v*(bottom-top)
 
 

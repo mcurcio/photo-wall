@@ -23,6 +23,7 @@ from player.geometry import (
     output_pixel,
     output_to_picture,
     photo_rect,
+    picture_aspect,
     picture_source_uv,
     transform,
 )
@@ -204,6 +205,31 @@ def test_cover_is_tight_and_unskewed(rotation):
     turn = math.radians(rotation)
     assert u_edge[0] / math.hypot(*u_edge) == pytest.approx(math.cos(turn), abs=1e-9)
     assert u_edge[1] / math.hypot(*u_edge) == pytest.approx(math.sin(turn), abs=1e-9)
+
+
+@pytest.mark.parametrize("rotation", (0, 7, 20, 45, 90))
+def test_cover_crops_the_photo_to_the_rectangle_it_draws_not_the_stored_profile(rotation):
+    """In Cover the photo's aspect is the cover rectangle's, never the stored Frame profile's (16:9
+    here, as a trial or a just-migrated Frame still has it): one output pixel along the picture's
+    width and one along its height cover the same number of photo pixels, so circles stay circles.
+    Mutation probe: crop to the profile's aspect -> the two steps differ."""
+    fit = CoverFit(corners=OPENING, rotation=rotation)
+    rectangle = cover_rectangle(OPENING, rotation, HD)
+    assert picture_aspect(fit, HD, 16 / 9) == pytest.approx(rectangle.width / rectangle.height)
+    turn, step, source = math.radians(rotation), 20, (400, 300)
+    x, y = rectangle.centre_x / HD[0], rectangle.centre_y / HD[1]
+
+    def photo_step(dx: float, dy: float) -> float:
+        here = picture_source_uv(x, y, fit, HD, 16 / 9, *source)
+        there = picture_source_uv(x + dx / HD[0], y + dy / HD[1], fit, HD, 16 / 9, *source)
+        return math.hypot((there[0] - here[0]) * source[0], (there[1] - here[1]) * source[1])
+    along_width = photo_step(step * math.cos(turn), step * math.sin(turn))
+    along_height = photo_step(-step * math.sin(turn), step * math.cos(turn))
+    assert along_width == pytest.approx(along_height, rel=1e-9)
+
+
+def test_corners_crops_the_photo_to_the_stored_profile():
+    assert picture_aspect(CornersFit(corners=OPENING), HD, 16 / 9) == 16 / 9
 
 
 def test_cover_at_a_quarter_turn_puts_the_picture_top_on_the_right():
