@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 
 from PIL import Image
+from support.photo_pools import FIXTURE_CONNECTION
 
 from central.media_store import MediaStore
 from central.photo_library.model import LibraryAsset
@@ -28,7 +29,9 @@ class PublicPhoto:
         return hashlib.sha256(self.original).hexdigest()
 
 
-def public_photo(*, connection_id="fixture-library", number=1,
+# The fixture connection's photos (follow-ups A2: an Immich asset is keyed by its connection, so a
+# pool's photos must be its connection's for its counts to find them).
+def public_photo(*, connection_id=FIXTURE_CONNECTION, number=1,
                  width=108, height=192, captured_at=1000) -> PublicPhoto:
     buffers = (io.BytesIO(), io.BytesIO())
     for buffer, quality in zip(buffers, (95, 90)):

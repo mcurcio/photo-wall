@@ -18,6 +18,7 @@ import pytest
 from console_tasks import connect, open_frame, scene_continue, start_scene
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from psycopg.types.json import Jsonb
 from public_media import public_photo
 from support.key_content_builders import banded_grid
 from support.measured_photos import measure, measure_all
@@ -36,7 +37,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 FRAME = "hall-wide"
-# 16:9, and small enough that every photo below holds more pixels than it (the fit rule's floor).
+# 16:9, and small enough that every photo below holds more pixels than it (the fit rule's floor):
+# its Display reports this size too, so its Frame output (follow-ups B1) is 192 x 108.
 WIDE = FrameProfile(width_px=192, height_px=108, diagonal_inches=24)
 SCENE_ID = "hall-photos"
 
@@ -46,6 +48,10 @@ def _wide_frame(registry):
     identity, _key, _request = enroll(registry, count=1)
     registry.create_frame(FrameCreate(id=FRAME, surface_id="wall", x_mm=100, y_mm=100,
                                       width_mm=480, height_mm=270, profile=WIDE))
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE outputs SET observation = observation || %s WHERE player_id=%s",
+                     (Jsonb({"width_px": WIDE.width_px, "height_px": WIDE.height_px}),
+                      identity["player_id"]))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     save_position(registry, FRAME)
 
@@ -72,7 +78,7 @@ def test_the_frame_page_says_how_many_photos_fit_and_why_the_rest_do_not(page, r
     queue = _photos(registry, wide, tall, banded)
     measure_all(registry, (wide.asset, tall.asset))
     measure(registry, banded.asset, grid=banded_grid(columns=16, rows=12, top=0.2, bottom=0.2))
-    _runtime(registry).command("set_scene", Scene(scene_id=SCENE_ID, loop=True, contributions=(
+    _runtime(registry).command("set_scene", Scene(scene_id=SCENE_ID, loop=True, selection=SceneSelection(crop_limit=0.35), contributions=(
         Contribution(target=f"frame:{FRAME}", source_refs=(SOURCE,)),)))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin)
