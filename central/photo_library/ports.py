@@ -222,6 +222,10 @@ class LibraryWorkerStore(Protocol):
         """Take the next contact number and the secret; None for an unknown or keyless one."""
         ...
 
+    def connection_secret(self, connection_ref: ConnectionRef) -> ConnectionSecret | None:
+        """The key and URL for a fetch or a thumbnail (preparation, M3); None: unknown or keyless."""
+        ...
+
     def record_contact(self, ticket: ContactTicket, result: ContactResult) -> bool:
         """Apply iff `ticket.contact_number` is newer than the last applied (False: stale, nothing
         written). Health through policy.contact_health; the first passing contact binds the
@@ -253,8 +257,10 @@ class LibraryWorkerStore(Protocol):
 
     def record_step(self, lease: CheckLease, step: CheckStep) -> bool:
         """In one transaction, fenced by `lease.check_number` (False: superseded, nothing
-        written): upsert each entry's row as seen by this check (an InPool's asset also into
-        asset_revisions), store the marks and the progress, and queue the next step."""
+        written): store the marks, then upsert each entry's row as seen by this check (an InPool's
+        asset also into asset_revisions), except an entry whose upstream id carries a mark of this
+        check (stored now or by an earlier step): the subtraction's one home. Store the progress
+        and queue the next step."""
         ...
 
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
@@ -271,9 +277,11 @@ class LibraryWorkerStore(Protocol):
         an id may be referenced, fetched or served (replaces servable_thumbnail)."""
         ...
 
-    def retire_unwanted(self) -> None:
+    def retire_unwanted(self) -> frozenset[str]:
         """Maintenance: drafts older than DRAFT_KEEP_SECONDS go; pools nothing wants go with
-        their rows and marks."""
+        their rows and marks; library-thumbnail records no wanted pool row selects go. Returns
+        the thumbnail ids still recorded, so the worker discards every other file (as
+        MediaRepository.maintain_source_previews did)."""
         ...
 
 

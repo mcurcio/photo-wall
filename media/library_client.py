@@ -80,6 +80,7 @@ class SearchItem(Model):
     width: int | None = Field(default=None, gt=0)     # upright; None: Immich has not read it yet
     height: int | None = Field(default=None, gt=0)
     duration: Positive | None = None
+    stack_primary: LibraryRef | None = None           # `stack.primaryAssetId` when Immich sends it
     problem: LeftOutReason | None = None
 
 
@@ -101,7 +102,9 @@ ExclusionKind = Literal["album", "person", "tag", "screenshot_name", "screenshot
 
 class ExclusionQuery(Model):
     """One exclusion, its own Immich query (C4). A screenshot is a file named "screenshot"
-    (screenshot_name) or a PNG with no camera maker (screenshot_png)."""
+    (screenshot_name: `originalFileName`) or a PNG with no camera (screenshot_png: in Immich
+    v2.5.6's MetadataSearchDto `make` is not nullable but `model` is, so "no camera" is
+    `model: null`)."""
 
     kind: ExclusionKind
     ref: LibraryRef | None = None                     # set exactly for album, person, tag
@@ -152,7 +155,10 @@ class LibraryClient(Protocol):
         ...
 
     async def stacked_buckets(self, *, partners: bool) -> tuple[TimeBucket, ...]:
-        """Months whose timeline counts differ with stacks shown and hidden (where copies hide)."""
+        """Months whose timeline counts differ with stacks shown and hidden (where copies hide).
+        The fallback for C9 (design parked note): used only if a `withStacked` search answer does
+        not carry `stack.primaryAssetId` on a stacked copy; M1 settles which on the fixture's stack
+        and deletes this pair when the search answer carries it (erratum E-P4-M1-n records it)."""
         ...
 
     async def stack_primaries(self, buckets: tuple[TimeBucket, ...]) -> frozenset[str]:

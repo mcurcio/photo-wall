@@ -21,6 +21,7 @@ from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database, TransactionClock
 from central.media_ports import RefreshReceipt, SourcePreviewReceipt
 from central.media_queue import MediaTaskQueue
+from central.photo_library.model import LibraryAsset
 from central.planner import AcquisitionRequest, candidate_standing, eligible
 from central.registry import RegistryError
 from contracts.models import (
@@ -109,7 +110,9 @@ class RefreshLease(Model):
 class JobLease(Model):
     job_id: Identifier
     attempt_token: Identifier
-    asset: OriginalAsset
+    # Roadmap 4: a pool's asset (LibraryAsset, slice P1's claim_job) or, until the integrate
+    # slice, a refreshed original (OriginalAsset).
+    asset: OriginalAsset | LibraryAsset
     recipe_id: Digest
     lease_until: Instant
     reserved_bytes: int = Field(gt=0)
