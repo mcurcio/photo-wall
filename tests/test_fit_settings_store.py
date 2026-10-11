@@ -110,3 +110,41 @@ def test_the_house_crop_limit_moves_scenes_without_their_own_at_the_next_pass(
         assert {entry.asset_id for entry in fresh} == {four_three.asset_id}
     else:
         assert {(entry.asset_id, entry.reason) for entry in fresh} == {(None, "no_photo_fits")}
+
+
+def test_saved_settings_reach_the_analysis_the_candidates_and_the_authoring_check(registry):
+    """The Fit board, the candidates route and the authoring check judge with the settings saved
+    in Settings > Photo fit, as the Planner does: with the house crop limit saved at 20 %, a 4:3
+    photo (25 % lost on a 16:9 Frame) fits under none of them, and fits again once it is back at
+    the default. Mutation probes: read the defaults instead of the saved settings in any of the
+    three -> its assertion fails."""
+    from central.photo_fit_routes import ANALYSIS_PATH
+    _one_wide_frame(registry)
+    four_three = photo("four-three", taken_at=900, width=4000, height=3000)
+    seed_pool(registry, POOL, (four_three,))
+    measure(registry, four_three)
+    client = _client(registry)
+
+    def judged() -> tuple[int, int, set[str], int]:
+        analysis = client.post(ANALYSIS_PATH, headers=AUTH, json={"selection": {"sources": [POOL]}})
+        assert analysis.status_code == 200, analysis.text
+        (frame,) = analysis.json()["frames"]
+        candidates = client.get(f"/v1/operator/sources/{POOL}/candidates",
+                                params={"frame_id": "frame-wide"}, headers=AUTH)
+        assert candidates.status_code == 200, candidates.text
+        scene = Scene(scene_id="hand-placed", contributions=(
+            Contribution(target="frame:frame-wide", asset_refs=(four_three.asset_id,)),))
+        authored = client.put(f"/v1/operator/scenes/{scene.scene_id}/authored", headers=AUTH,
+                              json={"scene": scene.model_dump(mode="json"), "source_ref": POOL,
+                                    "asset_ids": [four_three.asset_id]})
+        return (frame["fit_by_shape"], frame["fit_checked"],
+                {c["asset_id"] for c in candidates.json()["candidates"]}, authored.status_code)
+
+    assert client.put(SETTINGS_PATH, headers=AUTH, json=FitSettings(
+        crop_limit=0.2).model_dump(mode="json")).status_code == 200
+    assert client.post(ANALYSIS_PATH, headers=AUTH, json={
+        "selection": {"sources": [POOL]}}).json()["settings"]["crop_limit"] == 0.2
+    assert judged() == (0, 0, set(), 409)
+    assert client.put(SETTINGS_PATH, headers=AUTH, json=FitSettings().model_dump(
+        mode="json")).status_code == 200
+    assert judged() == (1, 1, {four_three.asset_id}, 200)

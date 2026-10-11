@@ -29,6 +29,7 @@ from central.wall_plan.fit_analysis import (
     analyse,
 )
 from central.wall_plan.fit_settings import FitSettings
+from central.wall_plan.key_content import UnitBox
 from contracts.models import Calibration, CoverFit, FrameProfile, frame_output
 
 DISPLAY = (3840, 2160)
@@ -169,6 +170,40 @@ def test_draft_settings_judge_the_whole_answer() -> None:
     # The request's own crop limit wins over the settings'.
     explicit = analyse(request(tier="shape", crop_limit=.5), Reader(photos, three_frames()), narrow)
     assert explicit.crop_limit == .5 and explicit.settings == narrow
+
+
+def test_draft_settings_judge_the_content_tier_too() -> None:
+    """Draft settings reach the content tier, not only the shape tier: a face filling 70 % of a
+    4:3 photo's height fits a 16:9 Frame's 75 % window unpadded, but not padded by the house's
+    20 %. Mutation probe: judge the sample with the house settings -> the draft still reads
+    face_cut."""
+    face = UnitBox(left=.35, top=.05, right=.65, bottom=.75)
+    photos = [SamplePhoto(asset_id=f"asset-{n:04d}", kind="image", width=4000, height=3000,
+                          key=key_content(4000, 3000, faces=(face,))) for n in range(20)]
+    frames = (output("hall", WIDE),)
+    house = analyse(request(), Reader(photos, frames), HOUSE).frames[0]
+    unpadded = FitSettings(face_padding=0.0)
+    drafted = analyse(request(settings=unpadded), Reader(photos, frames), HOUSE).frames[0]
+    assert (house.checked, house.fit_checked) == (20, 0)
+    assert {c.reason: c.photos for c in house.refused_by_content} == {"face_cut": 20,
+                                                                     "interest_cut": 0}
+    assert (drafted.checked, drafted.fit_checked) == (20, 20)
+    assert not any(c.photos for c in drafted.refused_by_content)
+
+
+def test_draft_settings_move_the_video_floor() -> None:
+    """A 720p video is under the house floor (1,080 px short side on a Frame of 40 inches or
+    more) on the 55-inch hall, and over a drafted 720 px floor. Mutation probe: run the shape
+    tier with the house settings -> the draft still refuses it."""
+    videos = [photo(n, 1280, 720, kind="video") for n in range(5)]
+    frames = (output("hall", WIDE),)
+    house = analyse(request(tier="shape"), Reader(videos, frames), HOUSE).frames[0]
+    drafted = analyse(request(tier="shape",
+                              settings=FitSettings(large_frame_video_short_side=720)),
+                      Reader(videos, frames), HOUSE).frames[0]
+    assert house.fit_by_shape == 0
+    assert {c.reason: c.photos for c in house.refused_by_shape}["below_frame_pixels"] == 5
+    assert drafted.fit_by_shape == 5
 
 
 def test_the_content_tier_judges_a_seeded_sample() -> None:
