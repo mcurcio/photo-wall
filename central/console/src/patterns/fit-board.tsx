@@ -234,7 +234,7 @@ function Line({ title, state, strip = false, lead, named, ...rest }: Omit<FitBoa
         <span className="shrink-0 text-accent" aria-hidden="true">Show ›</span>
       </button>
       {strip && view !== null && view.empty === null && (
-        <WallStrip frames={view.frames} height={56} faded={state.status !== "ready" || state.updating}
+        <WallStrip frames={view.frames} size="small" faded={state.status !== "ready" || state.updating}
           onFrame={() => setOpen(true)} />
       )}
       <Sheet open={open} onOpenChange={setOpen} title={title}>

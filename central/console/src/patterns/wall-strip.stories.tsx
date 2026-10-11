@@ -17,6 +17,6 @@ export const Wall: Story = {};
 /** Every Frame has photos that fit. */
 export const AllFit: Story = { args: { frames: [LIVING, OFFICE] } };
 /** Small, under a line (Review, Show now). */
-export const Small: Story = { args: { height: 56 } };
+export const Small: Story = { args: { size: "small" } };
 /** An older answer while a newer one is read. */
 export const Faded: Story = { args: { faded: true } };

@@ -6,8 +6,9 @@ export interface WallStripProps {
   /** The Frames, each with the photo it would show (the answer's leads are distinct across
    * Frames, as the Planner never shows one photo on two Frames at once). */
   frames: readonly FrameFitView[];
-  /** The tiles' height in pixels (each is as wide as its Frame output's shape). */
-  height?: number;
+  /** `full` tiles (88 px high) or `small` ones (56 px, under a line); each is as wide as its
+   * Frame output's shape. */
+  size?: "full" | "small";
   /** Its pictures dimmed: an older answer, while a newer one is read. */
   faded?: boolean;
   /** Pressing a Frame (its row, its sheet). */
@@ -23,12 +24,17 @@ export interface WallStripProps {
  * would go without or with only a few, a short warning in words. It shows how a Scene fills its
  * Frames together, as a picture; the counts and reasons are the Frame rows'.
  */
-export function WallStrip({ frames, height = 88, faded = false, onFrame, label = "On the wall together" }: WallStripProps) {
+/** The tiles' heights, and the classes that keep a row of them on one baseline. */
+const HEIGHTS = { full: [88, "h-22"], small: [56, "h-14"] } as const;
+
+export function WallStrip({ frames, size = "full", faded = false, onFrame, label = "On the wall together" }: WallStripProps) {
+  const [height, row] = HEIGHTS[size];
   return (
-    <ul aria-label={label} className="m-0 flex min-w-0 list-none flex-wrap items-end gap-x-4 gap-y-3 p-0">
+    <ul aria-label={label} className="m-0 flex min-w-0 list-none flex-wrap items-start gap-x-4 gap-y-3 p-0">
       {frames.map((frame) => {
+        // Every tile sits on one baseline, so the names under them line up.
         const tile = (
-          <span className={cn("block", faded ? "opacity-60" : "")}>
+          <span className={cn("flex items-end", row, faded ? "opacity-60" : "")}>
             <FrameTile aspect={frame.aspect} lead={frame.lead} height={height}
               label={`${frame.name}, ${frame.ratio}`} emptyText={frame.emptyText} />
           </span>
