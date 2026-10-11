@@ -20,6 +20,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from support.position import save_position
+from test_coordination import schedule, setup_players
 from test_display_identity import (
     ADMIN,
     AUTH,
@@ -35,10 +36,11 @@ from test_display_identity import (
 )
 
 from central.app import create_app
+from central.coordination import Coordinator
 from central.displays.model import Readiness
 from central.infra.display_store import DOCUMENT_STREAM, DisplayDocuments, DisplayWakes
 from central.infra.node_link_store import PgLinkStores
-from contracts.models import Calibration, CoverFit
+from contracts.models import Calibration, CoverFit, Plan
 from contracts.node_link import Pipe
 from contracts.node_output import (
     AS_THE_DISPLAY_HAS_IT,
@@ -237,6 +239,61 @@ def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
                               "AND column_name IN ('preview', 'preview_expires')")
     epoch = next(p.authority_epoch for p in registry.inventory().players if p.id == player)
     assert registry.configuration_for(player, epoch)["execution_bindings"] == []
+
+
+STORED_1B = {"revision": 2, "rotation": 90, "corners": SKEWED_CORNERS, "crop": [0.1, 0, 1, 1], "gain": 1.0}
+
+
+def _bindings_as_1b(registry, table: str, column: str) -> int:
+    """Every binding in `table`.`column` carries a Position as 1b stored it; the rows rewritten."""
+    rows = _sql(registry, f"SELECT ctid, {column} AS body FROM {table}")  # noqa: S608
+    for row in rows:
+        body = {**row["body"], "bindings": [{**binding, "calibration": STORED_1B}
+                                            for binding in row["body"]["bindings"]]}
+        _sql(registry, f"UPDATE {table} SET {column}=%s WHERE ctid=%s", (Jsonb(body), row["ctid"]))  # noqa: S608
+    return len(rows)
+
+
+def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plans(registry):
+    """(6b) A Player's last configuration and its plan offers hold copies of the Frame's Position;
+    after 075 the strict 1c models still read them, so Central hands the Player a configuration and
+    plans. Mutation probe: drop the two binding rewrites -> `configuration` raises."""
+    [player] = setup_players(registry, 1)
+    coordinator = Coordinator(registry.db, registry.clock)
+    epoch = player["authority_epoch"]
+    coordinator.configuration(player["player_id"], epoch)
+    schedule(coordinator, ["frame-0"])
+    _before_075(registry)
+    _stored_1b(registry, "frame-0", gain=1.0, rotation=90, corners=SKEWED_CORNERS)
+    assert _bindings_as_1b(registry, "player_configurations", "configuration") == 1
+    assert _bindings_as_1b(registry, "plan_offers", "manifest") >= 1
+    _migrate(registry)
+
+    configuration = coordinator.configuration(player["player_id"], epoch)
+    [binding] = configuration.bindings
+    assert binding.calibration.fit == CoverFit(corners=tuple(map(tuple, SKEWED_CORNERS)), rotation=0)
+    coordinator.advance()
+    for row in _sql(registry, "SELECT manifest FROM plan_offers"):
+        Plan.model_validate(row["manifest"])
+
+
+def test_075_gives_a_stored_1b_report_and_document_a_picture_part(registry):
+    """(6c) A Pi's report and Central's document as 1b stored them (no picture part) still decode
+    after 075, so the Power and Picture tabs answer before the Pi reports again. Mutation probe:
+    drop the report statement -> the Power tab answers 422."""
+    _bound(registry)
+    _probe(registry, brightness=True, contrast=False)
+    _projected(registry)
+    _before_075(registry)
+    _sql(registry, "UPDATE output_displays SET report = report - 'picture'")
+    _sql(registry, "UPDATE output_documents SET document = document - 'picture' - 'picture_change'")
+    _migrate(registry)
+
+    with _client(registry) as client:
+        assert client.get("/v1/operator/frames/kitchen/power", headers=AUTH).status_code == 200
+        assert client.get("/v1/operator/frames/kitchen/picture", headers=AUTH).status_code == 200
+    projected = _projected(registry)
+    assert projected.picture_change == 2     # the neutral part's change 1, then the Display's own
 
 
 def test_the_v1_calibration_route_is_gone(registry):

@@ -64,6 +64,42 @@ UPDATE frames SET
             'rotation', 0)),
     configuration_revision = configuration_revision + 1;
 
+-- The stored copies of each Frame's Position (every binding in a Player's last configuration and in
+-- each plan offer) take the Frame's new one, so the strict 1c models still read them; a binding
+-- whose Frame is gone takes the default. Its configuration revision stays, so Central still sees a
+-- change and issues the next configuration.
+UPDATE player_configurations pc SET configuration = jsonb_set(pc.configuration, '{bindings}', (
+    SELECT COALESCE(jsonb_agg(CASE WHEN f.calibration IS NULL THEN e.binding - 'calibration'
+                                   ELSE jsonb_set(e.binding, '{calibration}', f.calibration) END
+                              ORDER BY e.ordinal), '[]'::jsonb)
+    FROM jsonb_array_elements(pc.configuration->'bindings') WITH ORDINALITY AS e(binding, ordinal)
+    LEFT JOIN frames f ON f.id = e.binding->>'frame_id'))
+WHERE jsonb_typeof(pc.configuration->'bindings') = 'array';
+
+UPDATE plan_offers po SET manifest = jsonb_set(po.manifest, '{bindings}', (
+    SELECT COALESCE(jsonb_agg(CASE WHEN f.calibration IS NULL THEN e.binding - 'calibration'
+                                   ELSE jsonb_set(e.binding, '{calibration}', f.calibration) END
+                              ORDER BY e.ordinal), '[]'::jsonb)
+    FROM jsonb_array_elements(po.manifest->'bindings') WITH ORDINALITY AS e(binding, ordinal)
+    LEFT JOIN frames f ON f.id = e.binding->>'frame_id'))
+WHERE jsonb_typeof(po.manifest->'bindings') = 'array';
+
+-- A Pi's last Output report and Central's last Output document as 1b stored them have no picture
+-- part; the 1c decoders need one. A report gets "no picture seen" (what a Pi without a picture
+-- document reports); a document gets the neutral picture part at picture change 1, and no picture
+-- digest, so the next projection raises the change and sends the Display's real settings.
+UPDATE output_displays SET report = report || '{"picture": null}'::jsonb
+WHERE NOT report ? 'picture';
+
+UPDATE output_documents SET picture_change = 1, document = document || jsonb_build_object(
+    'picture_change', 1,
+    'picture', jsonb_build_object(
+        'brightness', jsonb_build_object('acts_on', 'picture-adjustment', 'value', 'as-the-display-has-it'),
+        'contrast', jsonb_build_object('acts_on', 'picture-adjustment', 'value', 'as-the-display-has-it'),
+        'colour_temperature_kelvin', 6500,
+        'gamma_tenths', 22))
+WHERE NOT document ? 'picture';
+
 -- Readiness (owner q1's accepted cost; run ledger F-1): each Frame's picture changed, so none is
 -- ready until its Position is checked again. This one statement is the only thing that makes a
 -- migrated Frame not ready.
