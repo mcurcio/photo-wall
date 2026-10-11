@@ -42,13 +42,13 @@ ADMIN = "test-operator-" + "x" * 40
 SKEWED = Calibration(fit=CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))))
 
 
-def enroll(registry, key=None, count=2, device_id=None):
+def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
     boot_id = str(uuid.uuid4())
     nonce = registry.challenge(public)["nonce"]
-    outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
+    outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=size[0], height_px=size[1])
                     for i in range(count))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
                          device_id=device_id, boot_id=boot_id,
