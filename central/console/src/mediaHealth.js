@@ -4,7 +4,7 @@ import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from
 import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import { checkWords } from "./sourceWords.js";
-import { captureDay, clockTime } from "./timeWords.js";
+import { captureDay, clockTime, countWords } from "./timeWords.js";
 
 /**
  * The media pipeline in words (pass 2 slice 3 §14). Pure reads of the served
@@ -242,12 +242,18 @@ function lastEnded(runtime, frameId) {
  * each step a served fact. The first step that is not ok is marked `stops`.
  * `check` is the result of "Check this frame" (null until asked).
  *
+ * Step 4 ("The Source") judges the Scene's pools, not their checks (roadmap 4, C7): a Source
+ * counts when its pool has photos, whatever its check's state, since the last pool keeps
+ * playing while Immich cannot be read. `pools` is each Source's pool as read (its photos and
+ * whether its check is running), by ref; a ref not read yet is absent.
+ *
  * @param {object|null} snapshot
  * @param {string} frameId
  * @param {{counts?: object, error?: string}|null} [check]
+ * @param {Readonly<Record<string, {photos: number, checking: boolean}>>} [pools]
  * @returns {Step[]}
  */
-export function whyNothingNew(snapshot, frameId, check = null) {
+export function whyNothingNew(snapshot, frameId, check = null, pools = {}) {
   const runtime = snapshot?.runtime;
   const now = mediaNow(snapshot);
   const [winner] = rankedContributions(runtime, frameId);
@@ -290,20 +296,7 @@ export function whyNothingNew(snapshot, frameId, check = null) {
   }
 
   if (live) {
-    const sources = snapshot?.media?.sources ?? [];
-    const read = winner.source_refs.map((ref) => {
-      const source = sources.find((candidate) => candidate.source_ref === ref);
-      return source === undefined
-        ? { ok: false, saved: true, text: `${sourceName(ref)}: this Run uses saved Source settings; their current status is not shown here` }
-        : (({ severity, label }) => ({ ok: severity === "ok", text: `${sourceName(source)}: ${label}` }))(
-          sourceState(source, now),
-        );
-    });
-    steps.push({
-      title: "The Source",
-      state: read.some((entry) => entry.ok) ? "ok" : read.some((entry) => entry.saved) ? "info" : "stop",
-      text: `${read.map((entry) => entry.text).join("; ")}.`,
-    });
+    steps.push(sourceStep(snapshot?.media?.sources ?? [], winner.source_refs, pools, now));
     steps.push({ title: "Check this frame", ...checkStep(frameId, check) });
   } else {
     steps.push(skip("The Source"), skip("Check this frame"));
@@ -324,6 +317,35 @@ export function whyNothingNew(snapshot, frameId, check = null) {
 
   const first = steps.findIndex((step) => step.state === "stop");
   return steps.map((step, index) => (index === first ? { ...step, stops: true } : step));
+}
+
+/**
+ * Step 4: whether any of the Run's Sources has photos in its pool (C7: a failed check keeps its
+ * pool playing). Each Source is named with its pool and its state in words.
+ */
+function sourceStep(sources, refs, pools, now) {
+  const read = refs.map((ref) => {
+    const source = sources.find((candidate) => candidate.source_ref === ref);
+    const pool = Object.hasOwn(pools, ref) ? pools[ref] : null;
+    const state = source === undefined ? null : sourceState(source, now);
+    const name = sourceName(source ?? ref);
+    const held = pool === null ? "its pool is being read" : `${countWords(pool.photos, "photo")} in its pool`;
+    return { pool, text: `${name}: ${held}${state === null ? "" : ` · ${state.label}`}` };
+  });
+  const text = `${read.map((entry) => entry.text).join("; ")}.`;
+  if (read.some((entry) => entry.pool !== null && entry.pool.photos > 0)) {
+    return { title: "The Source", state: "ok", text };
+  }
+  if (read.some((entry) => entry.pool === null)) {
+    return { title: "The Source", state: "info", text };
+  }
+  return {
+    title: "The Source",
+    state: "stop",
+    text: read.some((entry) => entry.pool.checking)
+      ? "Photo Wall is still reading this Scene's Sources."
+      : "None of this Scene's Sources has photos yet.",
+  };
 }
 
 /** Step 2 for a frame nothing targets now: the Run that last did (§14). */

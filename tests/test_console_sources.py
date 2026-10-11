@@ -137,3 +137,27 @@ def test_no_console_string_says_a_retired_preview_word():
     # The scan sees strings: a comment-free probe line is caught.
     assert RETIRED.search(_console_strings_of("const label = `${kind} · taken ${day}`;"))
     assert RETIRED.search(_console_strings_of('filters.push(`taken ${year}`);'))
+
+
+# --- The retiring Source fields (roadmap 4, K4; moved here from the integrate slice): a Source's
+# state is its check, so no console module reads what the refresh served for it.
+
+RETIRED_SOURCE_FIELDS = re.compile(
+    r"next_refresh|last_success|refresh_requested_revision|refresh_completed_revision|connection_ids"
+    r"|source-previews|sources/[^\"'`]*/refresh\b|sourceRefreshPath"
+    r"|\bsource\w*\??\.(?:spec|status|diagnostics|counts|limited)\b"
+    r"|\bspec\??\.(?:connection_ref|tags|media_types|favorites|captured_from|captured_until)\b")
+
+
+def test_no_console_module_reads_a_retired_source_field():
+    modules = sorted(path for path in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx"), *SRC.rglob("*.ts"),
+                                       *SRC.rglob("*.tsx")] if "node_modules" not in path.parts)
+    offenders = sorted(f"{path.relative_to(SRC)}: {match.group(0)}" for path in modules
+                       for match in RETIRED_SOURCE_FIELDS.finditer(_console_strings_of(path.read_text())))
+    assert offenders == [], offenders
+    # The scan sees each kind of read; the release list's own refresh route is not a Source's.
+    for probe in ("source.next_refresh", "row.refresh_completed_revision", "source.status",
+                  "source?.spec", "spec.tags", "`/v1/operator/sources/${ref}/refresh`",
+                  '"/v1/operator/source-previews"'):
+        assert RETIRED_SOURCE_FIELDS.search(probe), probe
+    assert not RETIRED_SOURCE_FIELDS.search('apiWrite("/v1/operator/app/releases/refresh")')

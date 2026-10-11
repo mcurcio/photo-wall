@@ -33,11 +33,11 @@ from operator_harness import (
     report_readiness,
     submit_sign_in,
 )
+from photo_seed import connected, library_of, saved_source
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SCENE_ID,
-    SOURCE,
     VALID_FRAME,
     _runs_of,
     _runtime,
@@ -46,6 +46,7 @@ from test_operator_showrunner_browser import (
     _seed_source,
 )
 
+from central.photo_library.model import SourceQuery
 from central.runtime import Contribution, Scene
 
 pytestmark = pytest.mark.skipif(
@@ -87,33 +88,51 @@ def _covered(registry):
     return runtime
 
 
-def test_show_now_reports_saved_source_freshness_and_refresh_receipt(page, registry):
+def _garden(registry):
+    """A saved Photo source "garden" (roadmap 4) and a Scene on VALID_FRAME playing it."""
+    library = library_of(registry)
+    ref = connected(library)
+    garden = saved_source(registry, library, "garden", SourceQuery(connection_ref=ref))
+    return library, garden
+
+
+def _on(scene_id, source_ref, frame=VALID_FRAME):
+    return Scene(scene_id=scene_id, loop=True, contributions=(
+        Contribution(target=f"frame:{frame}", source_refs=(source_ref,)),))
+
+
+def test_show_now_lists_the_scenes_sources_with_their_state_and_check_now(page, registry):
+    """K4 case 1: Show now lists the chosen Scene's Sources with their state and Check now;
+    pressing it posts once to /checks and shows the receipt, which lasts until the served
+    check differs (useSourceCheck.js; tests/test_console_show_now.py has the rule)."""
     _seed(registry)
-    queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+    _library, garden = _garden(registry)
+    _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, SCENE_ID)
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("holiday: Awaiting refresh")
-        expect(freshness).to_contain_text("does not confirm prepared media or visible playback")
-        expect(freshness).not_to_contain_text(SOURCE)
-
+        saved = form.get_by_role("region", name="Saved Sources", exact=True)
+        expect(saved).to_contain_text("garden: Not checked yet")
+        expect(saved).to_contain_text(
+            "A Source keeps playing what it has found while it is checked, and while Immich cannot be read.")
+        expect(saved).not_to_contain_text(garden)
+        posts = []
+        page.on("request", lambda r: posts.append(r.url) if r.url.endswith("/checks") else None)
         with page.expect_response(lambda response: response.url.endswith(
-                f"/v1/operator/sources/{quote(SOURCE, safe='')}/refresh") and
+                f"/v1/operator/sources/{quote(garden, safe='')}/checks") and
                 response.request.method == "POST") as info:
-            freshness.get_by_role("button", name="Refresh holiday", exact=True).click()
+            saved.get_by_role("button", name="Check garden now", exact=True).click()
         assert info.value.status == 202
-        expect(freshness).to_contain_text(
-            "Refresh requested. The status will update when the media worker finishes.")
+        expect(saved).to_contain_text("Check requested. Photos keep playing while Photo Wall reads Immich.")
         form.get_by_role("button", name="Continue", exact=True).click()
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("holiday: Awaiting refresh")
-        expect(freshness).to_contain_text("Refresh requested.")
+        saved = form.get_by_role("region", name="Saved Sources", exact=True)
+        expect(saved).to_contain_text("garden: Not checked yet")
+        expect(saved).to_contain_text("Check requested.")
         expect(form.get_by_role("button", name="Activate now", exact=True)).to_be_enabled()
+        assert len(posts) == 1
 
 
-def test_show_now_handles_historical_and_authored_scenes_without_refresh(page, registry):
+def test_show_now_handles_historical_and_authored_scenes_without_check_now(page, registry):
     _seed(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(scene_id="historical", contributions=(
@@ -123,43 +142,43 @@ def test_show_now_handles_historical_and_authored_scenes_without_refresh(page, r
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, "historical")
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("gone: Current Source status is unavailable.")
-        expect(freshness).not_to_contain_text("gone:1")
-        expect(freshness.get_by_role("button", name=re.compile("Refresh"))).to_have_count(0)
+        saved = form.get_by_role("region", name="Saved Sources", exact=True)
+        expect(saved).to_contain_text("gone: Its state is not served.")
+        expect(saved).not_to_contain_text("gone:1")
+        expect(saved.get_by_role("button", name=re.compile("Check"))).to_have_count(0)
         form.get_by_role("button", name="Continue", exact=True).click()
-        expect(form.get_by_role("region", name="Saved Source freshness", exact=True)).to_contain_text(
-            "Current Source status is unavailable.")
+        expect(form.get_by_role("region", name="Saved Sources", exact=True)).to_contain_text(
+            "Its state is not served.")
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Scene", exact=True).click()
         form.get_by_label("Scene to activate", exact=True).select_option("fixed")
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text(
-            "This Scene uses hand-picked media; refreshing a Source does not change its chosen items.")
-        expect(freshness.get_by_role("button", name=re.compile("Refresh"))).to_have_count(0)
+        saved = form.get_by_role("region", name="Saved Sources", exact=True)
+        expect(saved).to_contain_text(
+            "This Scene uses hand-picked media; checking a Source does not change its chosen items.")
+        expect(saved.get_by_role("button", name=re.compile("Check"))).to_have_count(0)
 
 
-def test_show_now_ignores_refresh_receipt_after_scene_change(page, registry):
+def test_show_now_ignores_a_check_receipt_after_a_scene_change(page, registry):
     _seed(registry)
-    _seed_source(registry)
+    _library, garden = _garden(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("first"))
-    runtime.command("set_scene", _scene("second"))
+    runtime.command("set_scene", _on("first", garden))
+    runtime.command("set_scene", _on("second", garden))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, "first")
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        gate = RequestGate(page, "**/v1/operator/sources/*/refresh")
+        saved = form.get_by_role("region", name="Saved Sources", exact=True)
+        gate = RequestGate(page, "**/v1/operator/sources/*/checks")
         gate.holding = True
-        freshness.get_by_role("button", name="Refresh holiday", exact=True).click()
+        saved.get_by_role("button", name="Check garden now", exact=True).click()
         gate.wait_held()
-        expect(freshness.get_by_role("button", name="Refresh holiday", exact=True)).to_be_disabled()
+        expect(saved.get_by_role("button", name="Check garden now", exact=True)).to_be_disabled()
         form.get_by_label("Scene to activate", exact=True).select_option("second")
-        gate.release(status=202, content_type="application/json", body='{"requested_revision": 1}')
-        freshness = form.get_by_role("region", name="Saved Source freshness", exact=True)
-        expect(freshness).to_contain_text("holiday: Awaiting refresh")
-        expect(freshness).not_to_contain_text("Refresh requested.")
-        expect(freshness.get_by_role("button", name="Refresh holiday", exact=True)).to_be_enabled()
+        gate.release(status=202, content_type="application/json", body="null")
+        saved = form.get_by_role("region", name="Saved Sources", exact=True)
+        expect(saved).to_contain_text("garden: Not checked yet")
+        expect(saved).not_to_contain_text("Check requested.")
+        expect(saved.get_by_role("button", name="Check garden now", exact=True)).to_be_enabled()
 
 
 def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(page, registry):

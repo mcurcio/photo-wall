@@ -5018,3 +5018,9 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - A chosen Source's readiness ("Still being read: what is found so far plays", "This Source has no photos") is read from its pool's first page (`useDraftPool`), since a served `sources` row carries its check but not its counts.
 - `useCandidates`' reload key is the first Source's served check (`at` or `started_at`), not `refresh_completed_revision`; its browser case seeds candidates through the old catalog until I1 moves `source_candidates` onto pools (P1).
 - `authoring.js` loses `sourceProblems` and `localDayStart`, the Source flow's, which nothing calls since K2.
+
+## E-P4-K4-1 (console lane, K4, 2026-10-11) · as built, resolved in the lane
+- "Why nothing new?" step 4 needs each Source's pool, which the snapshot does not carry: `MediaPipeline.jsx`'s `WhyNothingNew` reads the winning Run's Sources' first pool pages (`photoSourcesApi.sourcePool`) once per served check, and `mediaHealth.whyNothingNew` takes them as `pools`. A pool not read yet makes the step "info", never a stop.
+- The `check_this_frame` browser cases seed their Source's catalog through the old refresh (candidates still come from it until P1/I1) and now also give it a pool (`_pooled`), since step 4 reads pools.
+- `tests/browser/test_show_now_browser.py` (not on the page, the console lane's) follows Show now's "Saved Sources" region and Check now; its historical and authored case is renamed `…_without_check_now`.
+- The grep proof is `tests/test_console_sources.py::test_no_console_module_reads_a_retired_source_field` (the release list's own `/refresh` route is allowed).

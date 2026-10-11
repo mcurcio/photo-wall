@@ -21,6 +21,7 @@ import os
 import re
 from datetime import UTC, datetime
 from urllib.parse import quote
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -52,7 +53,7 @@ from operator_harness import (
     report_readiness,
     tile_health,
 )
-from photo_seed import connected, library_of, saved_source
+from photo_seed import begin, connected, filled, in_pool, library_of, saved_source, step
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import public_photo, publish_photo
@@ -64,6 +65,7 @@ from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.photo_library.model import SourceQuery, TakenBetween
+from central.photo_library.ports import CheckFailed
 from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Program, Scene
@@ -259,38 +261,28 @@ def test_r4_commissioning_unreachable_in_showrunner(page, registry):
 
 
 def test_sources_render_name_rev_with_refresh(page, registry):
-    """A Source renders by its `name:rev` identity with a Refresh button that
-    POSTs …/sources/{ref}/refresh; the mutate-driven snapshot refresh keeps the
-    Source listed (design J4).
-    """
+    """Roadmap 4: a Source renders by its name with Check now, which POSTs
+    …/sources/{name:rev}/checks; the mutate-driven snapshot refresh keeps it listed."""
     _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+    library = library_of(registry)
+    garden = saved_source(registry, library, "garden", SourceQuery(connection_ref=connected(library)))
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")
-
         sources = page.get_by_role("region", name="Sources", exact=True)
-        expect(sources).to_be_visible()
-        # The Source is identified by its `name:rev` string, not an album title.
-        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
-
-        refresh = sources.get_by_role(
-            "button", name="Refresh holiday", exact=True)
+        card = sources.get_by_role("article", name="garden", exact=True)
+        expect(card).to_be_visible()
         with page.expect_response(
-            lambda r: r.url.endswith("/refresh")
-            and "/v1/operator/sources/" in r.url
+            lambda r: r.url.endswith(f"/v1/operator/sources/{quote(garden, safe='')}/checks")
             and r.request.method == "POST"
         ) as info:
-            refresh.click()
+            card.get_by_role("button", name="Check garden now", exact=True).click()
         assert info.value.status == 202
+        expect(card.get_by_role("status")).to_have_text(
+            "Check requested. Photos keep playing while Photo Wall reads Immich.")
+        expect(sources.get_by_role("article", name="garden", exact=True)).to_be_visible()
 
-        # After the useMutate() refresh, the Source is still listed (Plane A —
-        # including the media catalog — was re-fetched, not dropped).
-        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
-
-# Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
-# GAP 2). A distinct name:rev the seeded SOURCE does not use, so its appearance
-# below is caused by THIS create, not the fixture.
+# A Source name the seeded SOURCE does not use, so its appearance is caused by the test's own save.
 NEW_SOURCE = "spring"
 
 
@@ -2026,40 +2018,37 @@ def _pipeline(page):
 
 @pytest.mark.browser_context_args(timezone_id="UTC")
 def test_the_media_pipeline_states_each_source(page, registry):
+    """K4 case 2: each Source's check, as served: running ("Checking: N so far"), complete
+    ("Last complete check"), failed with its last pool playing ("Photos keep playing")."""
     _seed(registry)
-    now = registry.clock.utc()
-    good = {"valid": 790, "discovered": 800, "pending": 4, "rejected": 6}
-    _set_source(registry, "awaiting:1")
-    _set_source(registry, "fresh:1", next_refresh=now + 30, last_success=now - 60, status="ok",
-                counts=good, spec={"favorites": True, "media_types": ("image",),
-                                   "captured_from": _utc(2024), "captured_until": _utc(2025)})
-    _set_source(registry, "failing:1", next_refresh=now + 30, last_success=now - 7200,
-                status="unavailable", diagnostics=[{"code": "upstream_unavailable"}])
-    _set_source(registry, "empty:1", next_refresh=now + 30, last_success=now, status="ok",
-                counts={"valid": 0})
+    library = library_of(registry)
+    ref = connected(library)
+    keys = {}
+    for number, name in enumerate(("waiting", "reading", "done", "down"), start=1):
+        source_ref = saved_source(registry, library, name, SourceQuery(
+            connection_ref=ref, people=(str(UUID(int=0x1000 + number)),)))
+        with registry.db.transaction() as conn:
+            keys[name] = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
+                                      (source_ref,)).fetchone()["pool_key"]
+    lease = begin(library, keys["reading"])
+    step(library, lease, in_pool(ref, range(1, 4)), seen=12400, up_to=41203)
+    filled(library, keys["done"], in_pool(ref, range(1, 3)))
+    filled(library, keys["down"], in_pool(ref, range(1, 3)))
+    filled(library, keys["down"], [], CheckFailed(problem="connection"))
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "now", paused_at=now)
+        connect(page, origin, "now")
         pipeline = _pipeline(page)
 
-        def state(ref):
-            return pipeline.get_by_label(f"Refresh of {ref.rsplit(':', 1)[0]}", exact=True)
-        expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
-        expect(state("fresh:1")).to_contain_text(
-            "Your photo library last reported 1 min ago · the media worker accepted 790 in that refresh"
-            " · 10 items pending or rejected · favourites only · photos only · dated 2024")
-        expect(state("fresh:1")).to_contain_text("found 800 · valid 790 · pending 4 · rejected 6")
-        expect(state("failing:1")).to_contain_text("Your photo library is unreachable · last good refresh 2 h ago")
-        expect(state("failing:1")).to_contain_text("upstream unavailable")
-        expect(state("empty:1")).to_contain_text("nothing valid in the last refresh")
-
-        registry.clock.advance(30 + 125 + 240)  # every refresh is 6 min past due
-        page.clock.run_for(5000)
-        expect(state("fresh:1")).to_contain_text("Refresh overdue by 6 min")
-        expect(state("awaiting:1")).to_contain_text("Awaiting refresh")
-        expect(state("failing:1")).to_contain_text("Your photo library is unreachable")
+        def check(name):
+            return pipeline.get_by_label(f"Check of {name}", exact=True)
+        expect(check("waiting")).to_contain_text("Not checked yet")
+        expect(check("reading")).to_contain_text("Checking: 12,400 photos so far")
+        expect(check("done")).to_contain_text(re.compile(r"Last complete check \S"))
+        expect(check("down")).to_contain_text("Immich could not be read: see Photo library. Photos keep playing.")
+        expect(check("down")).to_contain_text("Last complete check")
         copy = pipeline.inner_text()
-        for claim in ("LIVE", "online", "connected", "Immich"):
-            assert claim not in copy
+        for retired in ("Last refresh", "Reported", "Next refresh", "LIVE", "online"):
+            assert retired not in copy, retired
 
 
 def test_the_media_pipeline_states_each_worker_state(page, registry):
@@ -2176,6 +2165,57 @@ def test_why_nothing_new_stops_at_an_authored_scene(page, registry):
             "listitem")).to_have_count(1)
 
 
+WHY_POOLS = {
+    "empty": (lambda library, ref, key: filled(library, key, []), False,
+              "The Source None of this Scene's Sources has photos yet."),
+    "reading": (lambda library, ref, key: step(library, begin(library, key), [], seen=0), False,
+                "The Source Photo Wall is still reading this Scene's Sources."),
+    "failed_with_photos": (lambda library, ref, key: (
+        filled(library, key, in_pool(ref, range(1, 3))),
+        filled(library, key, [], CheckFailed(problem="connection"))), True,
+        "The Source garden: 2 photos in its pool · Immich could not be read"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(WHY_POOLS))
+def test_why_nothing_new_judges_the_scenes_pools_not_their_checks(page, registry, case):
+    """K4 case 3 (C7): step 4 passes when a pool has photos, whatever its check's state, and
+    stops at "None of this Scene's Sources has photos yet" (or "still reading") when every pool
+    is empty. Mutation probe: treat a failed check as no photos -> the third case fails."""
+    _seed(registry)
+    library = library_of(registry)
+    ref = connected(library)
+    garden = saved_source(registry, library, "garden", SourceQuery(connection_ref=ref))
+    with registry.db.transaction() as conn:
+        key = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
+                           (garden,)).fetchone()["pool_key"]
+    setup, passes, text = WHY_POOLS[case]
+    setup(library, ref, key)
+    _run_now(registry, Scene(scene_id=SCENE_ID, loop=True, contributions=(
+        Contribution(target=f"frame:{VALID_FRAME}", source_refs=(garden,)),)))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "now")
+        chain = _why_chain(page)
+        source_step = chain.get_by_role("listitem").filter(has_text=re.compile(r"^(Stops here\. )?The Source"))
+        expect(source_step).to_contain_text(text)
+        if passes:
+            expect(source_step).not_to_contain_text("Stops here.")
+        else:
+            expect(_stop(chain)).to_contain_text(text)
+
+
+def _pooled(registry, source_ref, photos=1):
+    """`source_ref` (a pre-4 Source seeded through the old refresh) given a query and a pool of
+    `photos` photos, as the cut-over converts one: step 4 of "Why nothing new?" reads pools."""
+    library = library_of(registry)
+    ref = connected(library, name=f"pool-of-{source_ref.replace(':', '-')}")
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE media_sources SET query=%s WHERE source_ref=%s",
+                     (Jsonb(SourceQuery(connection_ref=ref).model_dump(mode="json")), source_ref))
+        key = library.pool_key_of_source_in(conn, source_ref)
+    filled(library, key, in_pool(ref, range(1, photos + 1)))
+
+
 def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
     """§14 step 5: the frame's candidates tallied by the standing Central serves —
     usable, still preparing, failed to prepare. The candidates route's count includes a
@@ -2184,16 +2224,13 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
     portrait_a, portrait_b, landscape = _authored_photos(registry)
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
     now = registry.clock.utc()
-    with registry.db.transaction() as conn:  # the refresh found them usable
-        conn.execute("UPDATE media_sources SET counts=%s WHERE source_ref=%s",
-                     (Jsonb({"valid": 3, "discovered": 3}), SOURCE))
+    _pooled(registry, SOURCE, photos=3)
     _run_now(registry, _console_scene(SCENE_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now", paused_at=now)
         chain = _why_chain(page)
-        expect(chain).to_contain_text(
-            "The Source holiday: Your photo library last reported 0 s ago · the media worker accepted 3 "
-            "in that refresh.")
+        expect(chain).to_contain_text(re.compile(
+            r"The Source holiday: 3 photos in its pool · Checked .*\d\d:\d\d"))
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
             "Check this frame Nothing usable yet: 2 still preparing.")
@@ -2238,6 +2275,7 @@ def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(p
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO source_members VALUES(%s,%s),(%s,%s)",
                      ("shared:1", a, "down:1", b))
+    _pooled(registry, SOURCE)
     _run_now(registry, Scene(scene_id=SCENE_ID, loop=True, contributions=(Contribution(
         target=f"frame:{VALID_FRAME}", source_refs=(SOURCE, "shared:1", "down:1")),)))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
