@@ -13,7 +13,7 @@ some window with the Frame profile's aspect, slid along the photo's free axis
    against `FitTarget.output_px`; owner, 2026-10-11: compatibility "measuring against the Frame
    output and not the Display"); skipped for a Frame whose Output never reported a size
    (a guess would refuse photos on a guess; the rendition choice, which only sizes a fetch,
-   guesses the profile's pixels instead: media/library_client.py `rendition_needs`),
+   guesses the profile's pixels instead: central/photo_library/rendition.py `frame_need`),
 3. keeps every face whole (`faces_judged`: each face of at least `min_face_share` of the photo's
    area, padded by `face_padding` of its own width and height, inside the window), and
 4. cuts no key content: the share of the interest grid it removes (1 - `interest_kept`) is at
