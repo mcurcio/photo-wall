@@ -850,6 +850,14 @@ def _stored_report(row: Mapping[str, Any]) -> OutputReport | None:
     return None if row["report"] is None else decode_output_report(_json_bytes(row["report"]))
 
 
+def _presented(picture: DisplayPicture, document: OutputDocument | None, report: OutputReport | None) -> bool:
+    """The Pi presented the document that carries `picture`, not an older one: the document is
+    projected from the session asynchronously, so a report answering the previous document must
+    neither show the Picture tab `shown` nor let Done keep the draft."""
+    return (document is not None and document.picture == output_picture(picture)
+            and picture_status(bound=True, document=document, report=report) is PictureStatus.SHOWN)
+
+
 def _setting_view(setting: StoredSetting, answered: bool | None, report: SettingReport | None,
                   current: bool) -> PictureSettingView:
     """One of brightness and contrast on the Picture tab; the write result only when the report
@@ -881,10 +889,12 @@ class PgPictureSessions:
         probe = None if report is None else report.picture
         current = probe is not None and document is not None and probe.for_change == document.picture_change
         live = session is not None and session.lease.live(now)
+        status = picture_status(bound=row["player_id"] is not None and row["display_id"] is not None,
+                                document=document, report=report)
+        if status is PictureStatus.SHOWN and not _presented(picture, document, report):
+            status = PictureStatus.WAITING
         return FramePictureView(
-            frame_id=frame_id, display_id=row["display_id"],
-            status=picture_status(bound=row["player_id"] is not None and row["display_id"] is not None,
-                                  document=document, report=report),
+            frame_id=frame_id, display_id=row["display_id"], status=status,
             brightness=_setting_view(picture.brightness, None if probe is None else probe.brightness_answered,
                                      None if probe is None else probe.brightness, current),
             contrast=_setting_view(picture.contrast, None if probe is None else probe.contrast_answered,
@@ -954,10 +964,7 @@ class PgPictureSessions:
             row, session, now = self._session_in(conn, session_id)
             _require_live(session, now)
             document = _stored_document(row)
-            # The Pi must have answered the document that carries this draft, not an older one.
-            if (document is None or document.picture != output_picture(session.draft)
-                    or picture_status(bound=True, document=document, report=_stored_report(row))
-                    is not PictureStatus.SHOWN):
+            if not _presented(session.draft, document, _stored_report(row)):
                 raise PictureRefused("not_presented_yet", 409)
             self._end_in(conn, session, session.draft)
 
