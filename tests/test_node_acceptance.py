@@ -62,7 +62,8 @@ class Witnesses:
             self.requests[fact.output.output_id] = request
         for run in self.coordinator.runtime.read().project(registry.clock.utc()).runs:
             self.coordinator.runtime.command('cancel',run.run_id,registry.clock.utc())
-        publish_fixture_catalog(registry)
+        # Two Frames, so two photos: one photo is never on two Frames at once (roadmap 5a).
+        publish_fixture_catalog(registry,also=(('original-a2','c'*64),))
         self.coordinator.runtime.command('set_scene',Scene(scene_id='representative',loop=True,cycle_seconds=300,
             contributions=tuple(Contribution(target='frame:node-f'+str(i),kind='media',source_refs=('library:1',)) for i in range(2))))
         self.coordinator.runtime.command('activate','representative','representative-start',registry.clock.utc())
@@ -121,7 +122,8 @@ class Witnesses:
     def replace_media(self):
         for run in self.coordinator.runtime.read().project(self.registry.clock.utc()).runs:
             self.coordinator.runtime.command('cancel',run.run_id,self.registry.clock.utc())
-        publish_fixture_catalog(self.registry,digest='b'*64,asset='new-representative')
+        publish_fixture_catalog(self.registry,digest='b'*64,asset='new-representative',
+                                also=(('new-representative-2','d'*64),))
         self.coordinator.runtime.command('activate','representative','replacement-start',self.registry.clock.utc())
         self.coordinator.advance()
         self.sequence += 1
