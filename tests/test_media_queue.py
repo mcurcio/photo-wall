@@ -15,13 +15,10 @@ from central.media_queue import (
     LIBRARY_CONNECTION_LOCK_PREFIX,
     LIBRARY_POOL_LOCK_PREFIX,
     MEDIA_QUEUE,
-    MEDIA_REFRESH_LOCK_PREFIX,
     MEDIA_STORAGE_LOCK,
     PREPARE_MEDIA_TASK,
-    REFRESH_MEDIA_SOURCE_TASK,
     ProcrastinateMediaQueue,
 )
-from central.media_repository import StoreLimits
 from media.task_queue import (
     MAINTENANCE_CRON,
     REFRESH_CRON,
@@ -34,7 +31,6 @@ from media.task_queue import (
     create_worker_app,
     rescue_stalled,
 )
-from media.worker import WorkerLimits
 
 
 class Deferrer:
@@ -69,60 +65,6 @@ def test_adapter_passes_the_caller_owned_connection_and_exact_job_identity():
         "connection": connection,
         "payload": {"job_id": "job-one"},
     }
-
-
-def test_refresh_adapter_uses_source_scoped_coalescing_and_shared_execution_lock():
-    queue = object.__new__(ProcrastinateMediaQueue)
-    queue.app = App()
-    connection = SimpleNamespace(transaction=nullcontext)
-
-    receipt = queue.enqueue_refresh_in(connection, "source:one")
-
-    assert not receipt.coalesced
-    assert queue.app.configured == {
-        "name": REFRESH_MEDIA_SOURCE_TASK,
-        "queue": MEDIA_QUEUE,
-        "lock": MEDIA_REFRESH_LOCK_PREFIX + "source:one",
-        "queueing_lock": "media-refresh:source:one",
-        "connection": connection,
-        "payload": {"source_ref": "source:one"},
-    }
-
-
-def test_refresh_adapter_coalesces_already_queued_request_without_private_job_lookup():
-    class Savepoint:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-    class TransitionConnection:
-        def transaction(self):
-            return Savepoint()
-
-    class TransitionDeferrer:
-        def defer(self, **kwargs):
-            del kwargs
-            raise procrastinate.exceptions.AlreadyEnqueued()
-
-    class TransitionApp(App):
-        def __init__(self):
-            super().__init__()
-            self.calls = 0
-
-        def configure_task(self, name, **kwargs):
-            self.calls += 1
-            self.configured = {"name": name, **kwargs}
-            return TransitionDeferrer()
-
-    queue = object.__new__(ProcrastinateMediaQueue)
-    queue.app = TransitionApp()
-
-    receipt = queue.enqueue_refresh_in(TransitionConnection(), "source:one")
-
-    assert receipt.coalesced
-    assert queue.app.calls == 1
 
 
 @pytest.mark.parametrize("enqueue,task,prefix,argument", [
@@ -266,9 +208,6 @@ def test_the_console_media_thresholds_follow_the_worker_schedule():
     source = (Path(__file__).parents[1] / "central/console/src/mediaHealth.js").read_text()
     pinned = dict(re.findall(r"^export const ([A-Z_]+_SECONDS) = (\d+);$", source, re.MULTILINE))
     assert int(pinned["WORKER_CHECK_IN_SECONDS"]) == _every_seconds(MAINTENANCE_CRON)
-    assert int(pinned["SOURCE_REFRESH_SECONDS"]) == _every_seconds(REFRESH_CRON)
-    assert int(pinned["SOURCE_REFRESH_SECONDS"]) == StoreLimits().refresh_seconds
-    assert int(pinned["REFRESH_RUN_SECONDS"]) == WorkerLimits().refresh_seconds
 
 
 def test_the_worker_healthcheck_window_is_the_console_worker_quiet_window():

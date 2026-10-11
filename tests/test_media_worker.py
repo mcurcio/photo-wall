@@ -40,7 +40,7 @@ def test_no_environment_variable_names_a_connections_file(worker_storage):
     instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
     instance.store.recover = lambda: None
     asyncio.run(instance.maintain())
-    assert worker_storage.repository.health()["connection_ids"] is None
+    assert "connection_ids" not in worker_storage.repository.health()
 
 
 class FakeLibrary:
@@ -446,17 +446,7 @@ def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(wo
     assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "ready"
 
 
-def test_a_refreshed_original_lease_is_superseded_and_not_retried(worker_storage):
-    queued(worker_storage, pre_4=True)
-    source = FakeLibrary(worker_storage.clock)
-    instance = worker(worker_storage, source)
-    with worker_storage.worker_lock(), pytest.raises(MediaTaskFailed, match="asset_superseded"):
-        asyncio.run(instance.process_job("job-1", attempt=1))
-    assert source.downloads == 0
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "failed"
-
-
-def test_a_new_key_gets_a_new_client(worker_storage):
+def test_a_new_key_or_address_gets_a_new_client(worker_storage):
     made = []
     instance = MediaWorker(worker_storage.repository, worker_storage,
                            library_store(worker_storage.clock), preparer=FakePreparer(),
@@ -466,7 +456,10 @@ def test_a_new_key_gets_a_new_client(worker_storage):
     asyncio.run(instance._client("fixture"))
     instance.library.connection("fixture").key = "another-synthetic-key"
     asyncio.run(instance._client("fixture"))
-    assert [secret.api_key.get_secret_value() for secret in made] == [
-        SECRET, "another-synthetic-key"]
+    instance.library.connection("fixture").url = "https://other.invalid/api"
+    asyncio.run(instance._client("fixture"))
+    assert [(secret.base_url, secret.api_key.get_secret_value()) for secret in made][1:] == [
+        (made[0].base_url, "another-synthetic-key"),
+        ("https://other.invalid/api", "another-synthetic-key")]   # a new key, then address
     with pytest.raises(MediaError, match="connection_unknown"):
         asyncio.run(instance._client("removed"))

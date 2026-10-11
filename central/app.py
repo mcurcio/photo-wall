@@ -33,12 +33,7 @@ from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.media_gateway import MediaGateway
-from central.media_ports import (
-    MediaApplication,
-    RefreshReceipt,
-    SourceConfigurationReceipt,
-    SourcePreviewReceipt,
-)
+from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
@@ -58,7 +53,7 @@ from central.registry import (
 )
 from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
-from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
+from central.source_names import SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     Identifier,
@@ -69,7 +64,6 @@ from contracts.models import (
 )
 from contracts.player_control import ControlAck, ControlHello
 from contracts.time import Clock, SystemClock
-from media.models import SourcePreviewQuery, SourceSpec
 
 LOG = logging.getLogger("central.app")
 
@@ -655,44 +649,9 @@ def create_app(
     def media_state():
         return media_application.media_read()
 
-    @app.put("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
-    def configure_source_name(name: str, request: NamedSourceWrite):
-        return source_names.put(name, request)
-
     @app.delete("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
     def delete_source_name(name: str, expected_revision: int = Query(ge=1)):
         return source_names.delete(name, expected_revision)
-
-    @app.put(
-        "/v1/operator/sources/{source_ref}",
-        dependencies=[Depends(admin)],
-        response_model=SourceConfigurationReceipt,
-    )
-    def configure_source(source_ref: Identifier, source: SourceSpec):
-        if source.source_ref != source_ref:
-            raise ValueError("Source identity mismatch")
-        return SourceConfigurationReceipt(
-            source_ref=source_ref,
-            created=media_application.configure_source(source),
-        )
-
-    @app.post(
-        "/v1/operator/sources/{source_ref}/refresh",
-        dependencies=[Depends(admin)],
-        status_code=202,
-        response_model=RefreshReceipt,
-    )
-    def refresh_source(source_ref: Identifier):
-        return media_application.request_refresh(source_ref)
-
-    @app.post("/v1/operator/source-previews", dependencies=[Depends(admin)],
-              status_code=202, response_model=SourcePreviewReceipt)
-    def request_source_preview(query: SourcePreviewQuery):
-        return media_application.request_source_preview(query)
-
-    @app.get("/v1/operator/source-previews/{request_id}", dependencies=[Depends(admin)])
-    def source_preview(request_id: Identifier):
-        return media_application.source_preview(request_id)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):

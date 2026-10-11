@@ -277,14 +277,13 @@ class LibraryWorkerStore(Protocol):
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         """The library identity of a row of a wanted pool with this asset id, or None: only such
-        an id may be referenced, fetched or served (replaces servable_thumbnail)."""
+        an id may be referenced, fetched or served."""
         ...
 
     def retire_unwanted(self) -> frozenset[str]:
         """Maintenance: drafts older than DRAFT_KEEP_SECONDS go; pools nothing wants go with
         their rows and marks; library-thumbnail records no wanted pool row selects go. Returns
-        the thumbnail ids still recorded, so the worker discards every other file (as
-        MediaRepository.maintain_source_previews did)."""
+        the thumbnail ids still recorded, so the worker discards every other file."""
         ...
 
 

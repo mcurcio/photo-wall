@@ -6,22 +6,18 @@ The GET reads stored data only and serves ids, paths and names. Listing is a con
 
 from __future__ import annotations
 
-import asyncio
 from uuid import UUID
 
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
 from runtime_fakes import apply_procrastinate_schema
-from test_immich import Upstream
-from test_media_worker import SECRET
 
 from central.app import create_app
-from central.media_repository import TAG_FIELDS
-from media.models import LibraryTag, MediaError
+from central.photo_library.model import LibraryTag
 
 ADMIN = "library-tags-operator-" + "t" * 32
+TAG_FIELDS = ("tag_ref", "path", "name", "parent_ref")  # the served tag (R22), nothing else
 AUTH = {"Authorization": "Bearer " + ADMIN}
 
 
@@ -32,44 +28,6 @@ def tag(number, path, parent=None):
 
 TAGS = (tag(1, "Family"), tag(2, "Family/Christmas", 1), tag(3, "Holidays/Family trip"),
         tag(4, "Work"))
-
-
-# -- the client (unit) ---------------------------------------------------------------------------
-
-
-def _listed(rows):
-    upstream = Upstream()
-    upstream.overrides["/api/tags"] = httpx.Response(200, json=rows)
-
-    async def perform():
-        async with upstream.client() as client:
-            return await client.list_tags()
-    return asyncio.run(perform())
-
-
-def raw_tag(number, value, parent=None, name=None):
-    return {"id": str(UUID(int=number)), "name": name or value.rsplit("/", 1)[-1], "value": value,
-            "parentId": None if parent is None else str(UUID(int=parent)),
-            "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:00.000Z"}
-
-
-def test_listed_tags_are_stripped_of_control_and_bidi_characters_and_sorted():
-    tags = _listed([raw_tag(2, "Zoo"), raw_tag(1, "Fam\u202eily\u2066", name="Fam\u202eily\x07"),
-                    raw_tag(4, "A\u061cb\u200b", name="\ufeffb\u200d"),
-                    raw_tag(3, "\u202e\u2069")])  # nothing visible: kept, with empty text
-    assert [(t.path, t.name) for t in tags] == [
-        ("", ""), ("Ab", "b"), ("Family", "Family"), ("Zoo", "Zoo")]
-    assert tags[0].tag_ref == str(UUID(int=3))
-
-
-@pytest.mark.parametrize("rows", [
-    [raw_tag(n, f"t{n}") for n in range(1, 5002)],
-    [raw_tag(1, "x" * 1025)],
-])
-def test_over_the_caps_is_tag_limit_never_a_cut_list(rows):
-    with pytest.raises(MediaError) as caught:
-        _listed(rows)
-    assert caught.value.code == "tag_limit"
 
 
 # -- the GET (DB): roadmap 4 serves it from the photo library store's lists ----------------------
@@ -104,9 +62,9 @@ def test_the_tag_get_serves_ids_paths_and_names_only(client):
     response = _get(test_client)
     answer = response.json()
     assert response.status_code == 200 and answer["status"] == "ok"
-    assert answer["tags"] == answer["items"]   # the pre-4 key, until the integrate slice
+    assert "tags" not in answer   # the one list shape: `items`
     assert all(set(item) == set(TAG_FIELDS) for item in answer["items"])
-    for private in (SECRET, "immich", "http", "api_key", "owner", str(UUID(int=1)) + "/"):
+    for private in ("immich", "http", "api_key", "owner", str(UUID(int=1)) + "/"):
         assert private not in response.text
 
 
@@ -160,7 +118,7 @@ def test_ids_answer_the_named_tags_and_the_absent_from_an_ok_list(client):
     assert response.status_code == 200 and answer["status"] == "ok"
     assert [t["path"] for t in answer["items"]] == ["Work"] and answer["absent"] == [missing]
     assert all(set(item) == set(TAG_FIELDS) for item in answer["items"])
-    for private in (SECRET, "immich", "http", "api_key", "owner"):
+    for private in ("immich", "http", "api_key", "owner"):
         assert private not in response.text
 
 

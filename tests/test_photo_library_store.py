@@ -7,12 +7,11 @@ Driven through the store's protocol methods only, the worker side fed by hand-ma
 
 from __future__ import annotations
 
-from hashlib import sha256
-from pathlib import Path
 from uuid import UUID
 
 import pytest
 from psycopg.types.json import Jsonb
+from support.migrations import migrate_before
 
 from central.db import Database, DatabaseTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
@@ -31,9 +30,7 @@ from central.photo_library.model import (
     TakenBetween,
 )
 from central.photo_library.views import ConnectionWrite
-from media.models import SourceSpec
 
-MIGRATIONS = Path(__file__).parents[1] / "central/migrations"
 ANNA = ImmichUser(user_ref=str(UUID(int=1)), name="Anna", email="anna@example.test")
 BEN = ImmichUser(user_ref=str(UUID(int=2)), name="Ben", email="ben@example.test")
 COUNTS = LibraryCounts(photos=41203, videos=310, albums=212, people=96)
@@ -204,38 +201,26 @@ def test_reads_of_an_unknown_connection_are_refused(store):
 # -- migration 080 on a pre-4 database (C12) -----------------------------------------------------
 
 
-def _migrate_before(db, stop):
-    with db.transaction() as conn:
-        conn.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,"
-                     " applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name >= stop:
-                break
-            text = path.read_text()
-            conn.execute(text)
-            conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
-                         (path.name, sha256(text.encode()).hexdigest()))
-
-
 def test_migration_080_converts_pre_4_sources_and_makes_cut_over_rows(empty_database):
     """Case 11. Mutation probe: map `favorites: false` to `favourites_only: true`."""
     db = Database(empty_database)
     try:
-        _migrate_before(db, "080")
+        migrate_before(db, "080")
         tag = str(UUID(int=9))
-        specs = {
-            "favourites:1": SourceSpec(source_ref="favourites:1", connection_ref="family-library",
-                                       favorites=True, media_types=("image",)),
-            "window:1": SourceSpec(source_ref="window:1", connection_ref="family-library",
-                                   favorites=False, captured_from=100.0, captured_until=200.0),
-            "tagged:1": SourceSpec(source_ref="tagged:1", connection_ref="family-library",
-                                   tags=(tag,)),
+        pre_4 = {"schema": 1, "connection_ref": "family-library", "favorites": None,
+                 "captured_from": None, "captured_until": None, "media_types": ["image", "video"]}
+        specs = {   # as a pre-4 Central stored them (SourceSpec's JSON form)
+            "favourites:1": {**pre_4, "source_ref": "favourites:1", "favorites": True,
+                             "media_types": ["image"]},
+            "window:1": {**pre_4, "source_ref": "window:1", "favorites": False,
+                         "captured_from": 100.0, "captured_until": 200.0},
+            "tagged:1": {**pre_4, "source_ref": "tagged:1", "tags": [tag]},
         }
         with db.transaction() as conn:
             for ref, spec in specs.items():
                 conn.execute("INSERT INTO media_sources(source_ref,spec) VALUES(%s,%s)",
-                             (ref, Jsonb(spec.model_dump(mode="json", by_alias=True))))
-        db.migrate()
+                             (ref, Jsonb(spec)))
+        migrate_before(db, "081")   # 081 drops `spec`, which this case reads back
         with db.transaction() as conn:
             rows = {row["source_ref"]: row for row in conn.execute(
                 "SELECT source_ref,spec,query,pool_key FROM media_sources").fetchall()}
@@ -256,4 +241,4 @@ def test_migration_080_converts_pre_4_sources_and_makes_cut_over_rows(empty_data
         assert rows[ref]["query"] == query.model_dump(mode="json"), ref
         assert SourceQuery.model_validate(rows[ref]["query"]) == query
         assert rows[ref]["pool_key"] is None
-        assert rows[ref]["spec"] == specs[ref].model_dump(mode="json", by_alias=True)
+        assert rows[ref]["spec"] == specs[ref]

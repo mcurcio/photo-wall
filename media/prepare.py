@@ -29,9 +29,8 @@ from central.photo_library.model import LibraryAsset
 from contracts.models import Digest, Model, Positive, Variant
 from contracts.time import Clock, SystemClock
 from media.library_client import FetchedRendition
-from media.models import MediaError, MediaLimits, OriginalAsset
+from media.models import MediaError
 
-_SOURCE_LIMITS = MediaLimits()
 _TRANSFORMS = {
     1: (), 2: ("hflip",), 3: ("hflip", "vflip"), 4: ("vflip",),
     5: ("transpose=clock", "hflip"), 6: ("transpose=clock",),
@@ -58,10 +57,13 @@ class PreparationRecipe(Model):
 
 
 class PreparationLimits(Model):
-    max_original_bytes: int = Field(default=_SOURCE_LIMITS.max_original_bytes, ge=1, strict=True)
-    max_pixels: int = Field(default=_SOURCE_LIMITS.max_pixels, ge=1, strict=True)
-    max_dimension: int = Field(default=_SOURCE_LIMITS.max_dimension, ge=1, strict=True)
-    max_video_seconds: Positive = _SOURCE_LIMITS.max_video_seconds
+    """What preparation accepts; the home of the size bounds the Immich client's fetch also
+    checks (media.immich.LibraryLimits reads its defaults from here)."""
+
+    max_original_bytes: int = Field(default=256 * 1024**2, ge=1, strict=True)
+    max_pixels: int = Field(default=64_000_000, ge=1, strict=True)
+    max_dimension: int = Field(default=16384, ge=1, strict=True)
+    max_video_seconds: Positive = 300
     max_image_bytes: int = Field(default=16 * 1024**2, ge=1, strict=True)
     max_video_bytes: int = Field(default=256 * 1024**2, ge=1, strict=True)
     max_staging_bytes: int = Field(default=512 * 1024**2, ge=1, strict=True)
@@ -542,17 +544,6 @@ class Preparer:
             raise MediaError("unsupported_media", "incompatible")
         return result
 
-    async def prepare(self, asset: OriginalAsset, original: Path, destination: Path) -> PreparedMedia:
-        """A refreshed original (until the integrate slice): its SHA-1, size and raw geometry
-        are the library's metadata, checked against the file."""
-        def verify(size: int, sha1: str, sha256: str) -> None:
-            if sha1 != asset.original_sha1 or (asset.file_size is not None
-                                               and size != asset.file_size):
-                raise MediaError("asset_integrity")
-        return await self._prepare(original, destination, video=asset.kind == "video",
-                                   verify=verify, duration=asset.duration,
-                                   geometry=(asset.raw_width, asset.raw_height, asset.orientation))
-
     async def prepare_rendition(self, asset: LibraryAsset, rendition: FetchedRendition,
                                 destination: Path) -> PreparedMedia:
         """The photo as Immich shows it (C10): a JPEG, PNG or WEBP preview or full-size copy, or a
@@ -562,11 +553,10 @@ class Preparer:
             if sha256 != rendition.sha256 or size != rendition.size:
                 raise MediaError("asset_integrity")
         return await self._prepare(rendition.path, destination, video=asset.kind == "video",
-                                   verify=verify, duration=asset.duration, geometry=None)
+                                   verify=verify, duration=asset.duration)
 
     async def _prepare(self, original: Path, destination: Path, *, video: bool,
-                       verify, duration: float | None,
-                       geometry: tuple[int, int, int] | None) -> PreparedMedia:
+                       verify, duration: float | None) -> PreparedMedia:
         original, destination = Path(original).absolute(), Path(destination).absolute()
         start = self.clock.monotonic()
         if not math.isfinite(start):
@@ -587,10 +577,8 @@ class Preparer:
                         raise MediaError("metadata_mismatch", "incompatible")
                 else:
                     facts = await self._json(dict(operation="inspect", path=str(original)), deadline)
-                raw = (facts["width"], facts["height"], facts["orientation"])
-                if geometry is not None and raw != geometry:
-                    raise MediaError("metadata_mismatch", "incompatible")
-                raw_width, raw_height, orientation = raw
+                raw_width, raw_height, orientation = (facts["width"], facts["height"],
+                                                      facts["orientation"])
                 width, height = self._size(raw_width, raw_height, video=video,
                                            sar=facts.get("sar", 1), orientation=orientation)
                 try:

@@ -33,7 +33,7 @@ from central.photo_library.model import (
     TakenBetween,
 )
 from central.photo_library.policy import REQUIRED_PERMISSIONS
-from media.immich import ImmichClient, LibraryLimits, edits_fingerprint
+from media.immich import THUMBNAIL_EDGE, ImmichClient, LibraryLimits, edits_fingerprint
 from media.library_client import (
     ChosenItemGone,
     ExclusionQuery,
@@ -607,3 +607,66 @@ def test_no_new_method_sends_a_page_beyond_one_or_refuses_a_count():
     seen, _ = run(walk(library.client(page_size=1000), query()))
     assert len(seen) == 2500
     assert all(body["page"] == 1 for body in library.searches)
+
+
+# 10. a pool row's thumbnail (moved from the retired pre-4 client tests) -----------------------
+
+
+def _thumbnailed(row: dict, response) -> Library:
+    library = Library([row])
+    library.routes[f"/api/assets/{row['id']}/thumbnail"] = response
+    return library
+
+
+def _jpeg_answer() -> httpx.Response:
+    return httpx.Response(200, content=jpeg(800, 600), headers={"content-type": "image/jpeg"})
+
+
+def test_the_thumbnail_rechecks_the_item_then_returns_photo_walls_encoding_of_the_edited_one():
+    library = _thumbnailed(asset(7), _jpeg_answer())
+    data = run(library.client().thumbnail(ref(7), CHECKSUM))
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.format == "JPEG" and max(image.size) <= THUMBNAIL_EDGE
+    paths = [request.url.path for request in library.requests]
+    assert paths[-2:] == [f"/api/assets/{ref(7)}", f"/api/assets/{ref(7)}/thumbnail"]
+    assert dict(library.requests[-1].url.params) == {"size": "thumbnail", "edited": "true"}
+
+
+def test_an_edited_photos_thumbnail_is_fetched_at_its_edit_revision():
+    edits = [{"action": "crop", "parameters": {"x": 0, "y": 0, "width": 40, "height": 30}}]
+    library = _thumbnailed(asset(12, isEdited=True), _jpeg_answer())
+    library.routes[f"/api/assets/{ref(12)}/edits"] = library.json({"assetId": ref(12),
+                                                                   "edits": edits})
+    assert run(library.client().thumbnail(ref(12), f"{CHECKSUM}-{edits_fingerprint(edits)}"))
+    with pytest.raises(MediaError) as caught:   # the unedited revision is no longer shown
+        run(library.client().thumbnail(ref(12), CHECKSUM))
+    assert caught.value.code == "asset_changed"
+
+
+@pytest.mark.parametrize(("change", "response", "code"), [
+    ({"isTrashed": True}, None, "asset_changed"),
+    ({"checksum": "AAAAAAAAAAAAAAAAAAAAAAAAAAA="}, None, "asset_changed"),
+    ({}, httpx.Response(404), "thumbnail_not_ready"),
+    ({}, httpx.Response(200, content=b"<svg/>", headers={"content-type": "image/svg+xml"}),
+     "thumbnail_unsupported"),
+])
+def test_a_changed_item_or_an_unusable_thumbnail_is_refused(change, response, code):
+    library = _thumbnailed(asset(8, **change), response or _jpeg_answer())
+    with pytest.raises(MediaError) as caught:
+        run(library.client().thumbnail(ref(8), CHECKSUM))
+    assert caught.value.code == code
+
+
+def test_listed_tags_are_stripped_of_control_and_bidi_characters_and_sorted():
+    def row(number, value, name=None):
+        return {"id": ref(number), "name": name or value.rsplit("/", 1)[-1], "value": value,
+                "parentId": None}
+    library = Library()
+    library.routes["/api/tags"] = library.json([
+        row(2, "Zoo"), row(1, "Fam‮ily⁦", name="Fam‮ily\x07"),
+        row(4, "A؜b​", name="﻿b‍"),
+        row(3, "‮⁩")])   # nothing visible: kept, with empty text
+    tags = run(library.client().tags())
+    assert [(t.path, t.name) for t in tags] == [("", ""), ("Ab", "b"), ("Family", "Family"),
+                                                ("Zoo", "Zoo")]
+    assert tags[0].tag_ref == ref(3)

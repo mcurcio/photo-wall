@@ -119,7 +119,7 @@ def build_content_services(db: Database, clock: Clock, *, cache_root: Path,
                            ) -> ContentServices:
     """The Central process's content services; the caller starts and stops `feed`.
 
-    `servable_thumbnail` reads current data (`MediaRepository.servable_thumbnail`); without it
+    `servable_thumbnail` reads current data (`PgPhotoLibrary.pool_thumbnail`); without it
     no thumbnail is servable, so the route answers 404 and queues nothing.
     """
     core = _core(db, clock, cache_root=cache_root, feed_wanted=True)

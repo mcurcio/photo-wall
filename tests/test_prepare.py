@@ -19,8 +19,9 @@ from uuid import UUID
 
 import pytest
 
+from central.photo_library.model import LibraryAsset
 from contracts.time import ManualClock
-from media.models import MediaError, OriginalAsset
+from media.models import MediaError
 from media.prepare import PreparationLimits, PreparationRecipe, Preparer
 
 try:
@@ -57,13 +58,19 @@ def probe(path, tools):
 
 
 def original_asset(path, *, width=96, height=64, orientation=1, kind="image", duration=None):
-    data = path.read_bytes()
-    return OriginalAsset(
-        connection_id="fixture", upstream_id=str(UUID(int=1)),
-        original_sha1=hashlib.sha1(data).hexdigest(), kind=kind,
-        raw_width=width, raw_height=height, orientation=orientation,
-        captured_at=1767225600, file_size=len(data), duration=duration,
-    )
+    """The pool photo whose fetched file is `path` (its size as Immich shows it: upright)."""
+    upright = (height, width) if orientation >= 5 else (width, height)
+    return LibraryAsset(connection_ref="fixture", upstream_id=str(UUID(int=1)),
+                        revision=hashlib.sha1(path.read_bytes()).hexdigest(), kind=kind,
+                        taken_at=1767225600, width=upright[0], height=upright[1],
+                        duration=duration)
+
+
+def fetched(asset, path):
+    """The rendition preparation reads: `path` as the worker fetched it for `asset`."""
+    return rendition_of(path, rendition="original" if asset.kind == "video" else "preview",
+                        media_type="video/mp4" if asset.kind == "video" else "image/jpeg",
+                        width=asset.width, height=asset.height)
 
 
 def preparer(tools, **changes):
@@ -71,7 +78,8 @@ def preparer(tools, **changes):
 
 
 def prepare(tools, asset, original, destination, **changes):
-    return asyncio.run(preparer(tools, **changes).prepare(asset, original, destination))
+    return asyncio.run(preparer(tools, **changes).prepare_rendition(
+        asset, fetched(asset, original), destination))
 
 
 def corners(size=(96, 64)):
@@ -156,24 +164,6 @@ def test_recipe_identity_is_stable_for_same_build_and_changes_with_quality(tmp_p
     assert first.recipe_id == same.recipe_id
     assert first.build == same.build
     assert first.recipe_id != changed.recipe_id
-
-
-@pytest.mark.parametrize("fault", ["sha1", "size", "width", "height", "orientation"])
-def test_original_revision_and_metadata_mismatch_fail_before_publication(tmp_path, native_tools, fault):
-    source = tmp_path / "original.jpg"
-    destination = tmp_path / "variant.jpg"
-    asset = save_jpeg(source)
-    replacement = {
-        "sha1": {"original_sha1": "0" * 40}, "size": {"file_size": asset.file_size + 1},
-        "width": {"raw_width": 97}, "height": {"raw_height": 65}, "orientation": {"orientation": 6},
-    }[fault]
-    with pytest.raises(MediaError) as error:
-        prepare(native_tools, asset.model_copy(update=replacement), source, destination)
-    assert not destination.exists()
-    if fault == "sha1":
-        assert error.value.code == "asset_integrity"
-    if fault in {"width", "height", "orientation"}:
-        assert error.value.code == "metadata_mismatch"
 
 
 def png_chunk(kind, data):
@@ -340,7 +330,8 @@ def test_describe_recipe_matches_prepared_result_and_reuses_unchanged_build(tmp_
         instance = preparer((wrapper, native_tools[1]))
         recipe_id, build = await instance.describe_recipe()
         assert await instance.describe_recipe() == (recipe_id, build)
-        result = await instance.prepare(asset, source, tmp_path / "variant.jpg")
+        result = await instance.prepare_rendition(asset, fetched(asset, source),
+                                                  tmp_path / "variant.jpg")
         assert (result.recipe_id, result.build) == (recipe_id, build)
         assert build.preparation_sha256
 
@@ -440,7 +431,8 @@ def test_cancellation_reaps_active_native_process_and_cleans_destination(tmp_pat
                            "    time.sleep(30)")
 
     async def perform():
-        task = asyncio.create_task(preparer((wrapper, native_tools[1])).prepare(asset, source, destination))
+        task = asyncio.create_task(preparer((wrapper, native_tools[1])).prepare_rendition(
+            asset, fetched(asset, source), destination))
         try:
             # Generous: this asserts reaping, not start-up speed under a loaded -n auto runner.
             async with asyncio.timeout(30):
@@ -609,7 +601,6 @@ def rendition_of(path, *, rendition="preview", media_type="image/jpeg", size=Non
 
 
 def pool_asset(*, width=96, height=64):
-    from central.photo_library.model import LibraryAsset
     return LibraryAsset(connection_ref="fixture", upstream_id=str(UUID(int=1)),
                         revision="a" * 40, kind="image", taken_at=1767225600,
                         width=width, height=height)

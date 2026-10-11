@@ -60,12 +60,11 @@ _RUNTIME_EXITS: Final = frozenset({WORKER_EXITED, COMPLETION_NOT_RECORDED})
 _PERMANENT = frozenset({
     "asset_integrity", "asset_oversize", "unsupported_media", "unsupported_color",
     "metadata_invalid", "item_over_limits", "metadata_mismatch", "preparation_limit", "preparation_invalid",
-    "media_original_mismatch", "media_result_mismatch", "media_journal_invalid", "asset_superseded",
+    "media_original_mismatch", "media_result_mismatch", "media_journal_invalid",
 })
 
 
 class WorkerLimits(Model):
-    refresh_seconds: Positive = Field(default=65, le=65)
     job_seconds: Positive = Field(default=330, le=330)
     close_seconds: Positive = Field(default=5, le=10)
 
@@ -191,9 +190,6 @@ class MediaWorker:
                 raise RetryableMediaTask("media_job_unavailable")
         try:
             async with asyncio.timeout(self.limits.job_seconds):
-                if not isinstance(lease.asset, LibraryAsset):
-                    # A refreshed original from before roadmap 4: its pool row supersedes it.
-                    raise MediaError("asset_superseded", "incompatible")
                 paths = await _blocking(self.store.staging, lease)
                 client = await self._client(lease.asset.connection_ref)
                 edge = await _blocking(self.library.largest_frame_edge)

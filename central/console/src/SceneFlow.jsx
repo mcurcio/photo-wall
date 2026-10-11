@@ -530,11 +530,9 @@ const REPLACE_CHANGED =
   "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload.";
 
 // Refusals in plain words (slice 3 §13): media_repository.py `author_candidates_in`
-// answers the first two (authored route) with 409; runtime.py `set_scene` the last
+// answers the first (authored route) with 409; runtime.py `set_scene` the last
 // (both routes) when another save of this id landed first.
 const SAVE_REFUSALS = {
-  source_not_fresh:
-    "The Source's last refresh failed; authored choices can be saved once it succeeds.",
   authored_asset_not_member: "That item is no longer in the Source; choose again.",
   scene_revision_conflict: "A Scene with this id was saved meanwhile; nothing was replaced.",
 };

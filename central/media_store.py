@@ -24,7 +24,6 @@ from central.installation_repository import PostgresInstallationRepository
 from central.media_repository import JobLease, MediaRepository, lease_asset_of
 from central.registry import RegistryError
 from contracts.models import PlayerConfiguration, Variant
-from media.models import OriginalAsset
 from media.prepare import PreparedMedia
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -327,18 +326,6 @@ class MediaStore:
         else:
             self._unlink(path)
 
-    def _refresh(self, conn, digest: str):
-        sources = conn.execute(
-            "SELECT DISTINCT s.source_ref,s.status FROM media_sources s "
-            "JOIN source_members m ON m.source_ref=s.source_ref JOIN media_jobs j "
-            "ON j.asset_id=m.asset_id WHERE j.variant_sha=%s",
-            (digest,),
-        ).fetchall()
-        for source in sources:
-            self.repository.refresh_catalog_in(
-                conn, source["source_ref"], self.repository.times.now_in(conn), source["status"]
-            )
-
     def _mark_corrupt(self, digest: str):
         # Corruption may have enlarged the file. Preserve the larger measured charge.
         size = self._tree_size(self._blob(digest))
@@ -348,7 +335,6 @@ class MediaStore:
                 "WHERE digest=%s AND state<>'deleting'",
                 (size, digest),
             )
-            self._refresh(conn, digest)
 
     def _checked(self, conn, lease):
         row = conn.execute(
@@ -383,21 +369,12 @@ class MediaStore:
             try:
                 fd = self._open(paths.original)
                 try:
-                    original_size, sha1, sha256 = self._hash(
+                    original_size, _, sha256 = self._hash(
                         fd, self.repository.limits.max_original_bytes
                     )
                 finally:
                     os.close(fd)
-                if sha256 != prepared.original_sha256 or (
-                    isinstance(lease.asset, OriginalAsset)  # pre-4 leases, until I1
-                    and (
-                        sha1 != lease.asset.original_sha1
-                        or (
-                            lease.asset.file_size is not None
-                            and original_size != lease.asset.file_size
-                        )
-                    )
-                ):
+                if sha256 != prepared.original_sha256:
                     raise MediaStoreError("media_original_mismatch")
                 self._verify(paths.variant, variant)
                 with self.repository.transaction() as conn:
@@ -530,8 +507,6 @@ class MediaStore:
                 "updated_at=%s WHERE id=%s",
                 (target, self.repository.times.now_in(conn), row["id"]),
             )
-            if current["variant_sha"]:
-                self._refresh(conn, current["variant_sha"])
 
     def fail(self, lease: JobLease, code: str, *, retry: bool = False):
         if not isinstance(code, str) or not _CODE.fullmatch(code):
@@ -758,7 +733,6 @@ class MediaStore:
                     ).fetchone()
                     if not changed:
                         continue
-                    self._refresh(conn, row["digest"])
                 try:
                     self._remove(self._blob(row["digest"]))
                     self._fsync_directory(self.root / "blobs")

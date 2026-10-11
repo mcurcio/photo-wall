@@ -23,12 +23,6 @@ import { captureDay, clockTime, countWords } from "./timeWords.js";
 // The worker's maintenance runs every 5 min (media/task_queue.py MAINTENANCE_CRON)
 // and each run records that it checked in (media_settings.worker_seen).
 export const WORKER_CHECK_IN_SECONDS = 300;
-// The worker's refresh task runs every 30 s (media/task_queue.py REFRESH_CRON) and may run
-// this long (media/worker.py WorkerLimits.refresh_seconds). Roadmap 4: no Source state reads
-// them (a Source's state is its check's); tests/test_media_queue.py still pins them to the
-// worker's schedule until the integrate slice retires the refresh.
-export const SOURCE_REFRESH_SECONDS = 30;
-export const REFRESH_RUN_SECONDS = 65;
 // Past this, a missed beat is not jitter: two intervals plus slack. A pytest pins it to the
 // worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
 export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
@@ -163,18 +157,19 @@ export function candidateLabels(candidates) {
 
 /**
  * "Check this frame" (§14 step 5): a tally of the served standings of the
- * frame's items across the Scene's Sources. A Source whose last refresh
- * failed is left out, as planning leaves it out (central/planner.py `_pool`),
- * and an item several Sources share counts once: its standing is the same
- * from each, since Central reads it per item, not per Source.
+ * frame's items across the Scene's Sources, as planning pools them
+ * (central/planner.py `_pool`): every Source's pool counts, whether or not its
+ * latest check completed (C7), and an item several Sources share counts once:
+ * its standing is the same from each, since Central reads it per item, not per
+ * Source.
  *
- * @param {Array<{status: string, candidates: Array<object>}>} reads one
- *   `readCandidates` result per Source
+ * @param {Array<{candidates: Array<object>}>} reads one `readCandidates`
+ *   result per Source
  * @returns {Record<"usable"|"preparing"|"failed_to_prepare"|"no_compatible_variant", number>}
  */
 export function checkCounts(reads) {
   const standings = new Map();
-  for (const read of reads.filter((entry) => entry.status === "ok")) {
+  for (const read of reads) {
     for (const candidate of read.candidates) {
       standings.set(candidate.asset_id, candidate.standing);
     }

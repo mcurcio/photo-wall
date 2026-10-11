@@ -51,12 +51,8 @@ from test_operator_showrunner_browser import (
 )
 from test_registry import ADMIN
 
-from central.catalog import CatalogSnapshot
-from central.db import ProcessTransactionClock
-from central.media_repository import MediaRepository
-from central.photo_library.model import SourceQuery
+from central.photo_library.model import InPool, SourceQuery
 from central.photo_library.ports import CheckFailed
-from media.models import RefreshResult
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -160,16 +156,13 @@ def test_check_now_from_scene_photos_preserves_draft_and_reports_request(page, r
 
 def test_a_completed_check_reloads_authored_candidates_once(page, registry):
     """A hand-picked Scene's candidates are read again, once, when its Source's check moves
-    on (useCandidates' key is the served check, never a refresh revision). The candidates
-    themselves still come from the Source's catalog until the integrate slice moves it."""
+    on (useCandidates' key is the served check, never a refresh revision); they are the
+    Source's pool."""
     _seed(registry)
     first, second, incompatible = _authored_photos(registry)
     queue = _seed_source(registry, (first,))
     library = library_of(registry)
-    ref = connected(library)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE media_sources SET query=%s WHERE source_ref=%s",
-                     (Jsonb(SourceQuery(connection_ref=ref).model_dump(mode="json")), SOURCE))
         key = library.pool_key_of_source_in(conn, SOURCE)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
@@ -187,17 +180,9 @@ def test_a_completed_check_reloads_authored_candidates_once(page, registry):
         chooser.select_option(selected_before)
         assert len(candidate_responses) == 1
 
-        repository = MediaRepository(registry.db, registry.clock, queue=queue,
-                                     times=ProcessTransactionClock(registry.clock))
-        repository.request_refresh(SOURCE)
-        lease = repository.begin_requested_refresh(SOURCE)
-        assert lease is not None
-        assert repository.publish_refresh(lease, RefreshResult(
-            snapshot=CatalogSnapshot(
-                source_ref=SOURCE, refreshed_at=registry.clock.utc(),
-                candidates=tuple(photo.asset.candidate for photo in (first, second, incompatible))),
-            assets=tuple(photo.asset for photo in (first, second, incompatible))))
-        filled(library, key, [])   # the Source's check completes: the served check moves on
+        # The Source's next check completes with three photos: the served check moves on.
+        filled(library, key, [InPool(asset=photo.asset)
+                              for photo in (first, second, incompatible)])
 
         with page.expect_response(
             lambda item: "/candidates?" in item.url and f"frame_id={VALID_FRAME}" in item.url

@@ -16,7 +16,6 @@ from central.photo_library.model import LibraryAsset
 from central.planner import AcquisitionRequest
 from central.runtime import Contribution, Runtime, Scene
 from contracts.models import Variant
-from media.models import SourceSpec
 from media.prepare import BuildIdentity, PreparedMedia
 
 ADMIN = "test-operator-" + "x" * 40
@@ -81,34 +80,6 @@ def test_authored_api_distinguishes_unknown_and_nonmember(registry):
         body["asset_ids"] = ["asset-never-seen"]
         assert client.post("/v1/operator/authored-candidates", headers=headers, json=body).json() == {
             "error": "authored_asset_not_found"}
-
-
-def test_operator_can_request_exact_asynchronous_source_refresh(registry):
-    spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
-    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
-                    times=ProcessTransactionClock(registry.clock)).configure_source(spec)
-    path = f"/v1/operator/sources/{spec.source_ref}/refresh"
-    with client_for(registry) as client:
-        assert client.post(path).status_code == 401
-        headers = {"Authorization": "Bearer " + ADMIN}
-        first = client.post(path, headers=headers)
-        second = client.post(path, headers=headers)
-        missing = client.post("/v1/operator/sources/missing:1/refresh", headers=headers)
-
-    assert first.status_code == second.status_code == 202
-    assert first.json() == {
-        "source_ref": spec.source_ref,
-        "requested_revision": 1,
-        "completed_revision": 0,
-        "coalesced": False,
-    }
-    assert second.json() == {
-        "source_ref": spec.source_ref,
-        "requested_revision": 2,
-        "completed_revision": 0,
-        "coalesced": True,
-    }
-    assert missing.status_code == 404 and missing.json() == {"error": "source_not_found"}
 
 
 def test_a_pool_member_authors_while_its_check_has_not_completed(registry):

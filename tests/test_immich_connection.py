@@ -111,9 +111,6 @@ def system(module_registry, immich_library, tmp_path_factory):
     dsn = module_registry.db.dsn
     apply_procrastinate_schema(dsn)
     env = worker_env(root, dsn, PHOTO_WALL_RELEASE_REPO="example.invalid/none")
-    # No connections file (roadmap 4): the worker learns every connection from the store.
-    env.pop("PHOTO_WALL_CONNECTIONS_FILE", None)
-    (root / "connections.json").unlink(missing_ok=True)
     with (root / "worker.out").open("w") as out, (root / "worker.err").open("w") as err:
         worker = subprocess.Popen([sys.executable, "-m", "media.worker"], cwd=ROOT, env=env,
                                   stdout=out, stderr=err, text=True)

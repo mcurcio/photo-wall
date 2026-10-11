@@ -77,7 +77,7 @@ def visible_text(value: object) -> object:
 
 # Empty when nothing visible is left once stripped: the tag still exists in the library, so
 # the stored list keeps its id (a by-id lookup must never call it gone); only the search
-# hides it (`central/media_repository.py` `matching_tags`).
+# hides it (the store's search, `central/infra/photo_library_store.py`).
 TagText = Annotated[str, BeforeValidator(visible_text), Field(max_length=MAX_TAG_TEXT)]
 
 
@@ -392,7 +392,7 @@ class LibraryAsset(Model):
     """One photo or video as Immich shows it now (edited), as the worker fetches and prepares it.
 
     `width` and `height` are upright (EXIF applied) and edited: the largest copy Photo Wall can
-    fetch (C10). Replaces media.models.OriginalAsset in the integrate slice.
+    fetch (C10).
     Invariant (validator): `duration` is set exactly for videos.
     """
 

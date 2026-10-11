@@ -22,7 +22,6 @@ from central.media_store import MediaStore, MediaStoreError
 from central.photo_library.model import LibraryAsset
 from central.registry import RegistryError
 from contracts.models import Layer, Plan, Variant
-from media.models import OriginalAsset
 from media.prepare import BuildIdentity, PreparedMedia
 
 RECIPE = "e" * 64
@@ -43,31 +42,21 @@ def storage(registry, tmp_path):
     )
 
 
-def queued(storage, number=1, *, original=ORIGINAL, pre_4=False):
+def queued(storage, number=1, *, original=ORIGINAL):
     """A queued job for one photo of Source `library:1`'s pool (found by its running check,
-    through the store's worker side), whose unedited checksum is `original`'s; `pre_4`: a
-    refreshed original's row instead (OriginalAsset, until the integrate slice)."""
-    if pre_4:
-        asset = OriginalAsset(connection_id="fixture", upstream_id=str(UUID(int=number)),
-                              original_sha1=hashlib.sha1(original).hexdigest(), kind="image",
-                              raw_width=1080, raw_height=1920, orientation=1, captured_at=1000,
-                              file_size=len(original))
-        with storage.repository.transaction() as conn:
-            conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,1000,1000)",
-                         (asset.asset_id, Jsonb(asset.model_dump(mode="json"))))
-    else:
-        asset = LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(UUID(int=number)),
-                             revision=hashlib.sha1(original).hexdigest(), kind="image",
-                             taken_at=1000, width=1080, height=1920)
-        seed_pool(storage, "library:1", (asset,), complete=False)
+    through the store's worker side), whose unedited checksum is `original`'s."""
+    asset = LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(UUID(int=number)),
+                         revision=hashlib.sha1(original).hexdigest(), kind="image",
+                         taken_at=1000, width=1080, height=1920)
+    seed_pool(storage, "library:1", (asset,), complete=False)
     with storage.repository.transaction() as conn:
         conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,updated_at) "
                      "VALUES(%s,%s,%s,'queued',1000,1000)", (f"job-{number}", asset.asset_id, RECIPE))
     return asset
 
 
-def staged(storage, number=1, *, original=ORIGINAL, derivative=VARIANT, pre_4=False):
-    queued(storage, number, original=original, pre_4=pre_4)
+def staged(storage, number=1, *, original=ORIGINAL, derivative=VARIANT):
+    queued(storage, number, original=original)
     lease = storage.repository.claim_job()
     assert lease is not None
     paths = storage.staging(lease)
@@ -164,21 +153,6 @@ def test_publish_durable_bytes_exact_journal_and_catalog(storage):
         with storage.db.transaction() as conn:
             pool = storage.repository.source_pools_in(conn, {"library:1"})["library:1"]
         assert [c.variant for c in pool.candidates] == [prepared.variant]
-
-
-def test_a_pre_4_original_lease_still_checks_its_sha1(storage):
-    """P2 case 4 (until I1): an OriginalAsset lease's staged original must have its sha1, even
-    when the preparation's sha256 matches the staged bytes."""
-    with storage.worker_lock():
-        lease, paths, prepared = staged(storage, pre_4=True)
-        assert isinstance(lease.asset, OriginalAsset)
-        changed = ORIGINAL[:-1] + b"!"
-        paths.original.write_bytes(changed)
-        prepared = prepared.model_copy(update={"original_sha256": hashlib.sha256(changed).hexdigest()})
-        with pytest.raises(MediaStoreError, match="media_original_mismatch"):
-            storage.publish(lease, prepared)
-        with storage.db.transaction() as conn:
-            assert conn.execute("SELECT count(*) AS n FROM media_blobs").fetchone()["n"] == 0
 
 
 def test_duplicate_digest_is_verified_and_counted_once(storage):

@@ -12,14 +12,14 @@ from dataclasses import dataclass
 from PIL import Image
 
 from central.media_store import MediaStore
+from central.photo_library.model import LibraryAsset
 from contracts.models import Variant
-from media.models import OriginalAsset
 from media.prepare import BuildIdentity, PreparedMedia
 
 
 @dataclass(frozen=True)
 class PublicPhoto:
-    asset: OriginalAsset
+    asset: LibraryAsset
     original: bytes
     derivative: bytes
 
@@ -36,9 +36,9 @@ def public_photo(*, connection_id="fixture-library", number=1,
             buffer, format="JPEG", quality=quality,
         )
     original, derivative = (buffer.getvalue() for buffer in buffers)
-    asset = OriginalAsset(connection_id=connection_id, upstream_id=str(uuid.UUID(int=number)),
-        original_sha1=hashlib.sha1(original).hexdigest(), kind="image", raw_width=width,
-        raw_height=height, orientation=1, captured_at=captured_at, file_size=len(original))
+    asset = LibraryAsset(connection_ref=connection_id, upstream_id=str(uuid.UUID(int=number)),
+        revision=hashlib.sha1(original).hexdigest(), kind="image", width=width, height=height,
+        taken_at=captured_at)
     return PublicPhoto(asset, original, derivative)
 
 
@@ -52,7 +52,7 @@ def publish_photo(storage: MediaStore, photo: PublicPhoto) -> Variant:
         paths.variant.write_bytes(photo.derivative)
         variant = Variant(sha256=hashlib.sha256(photo.derivative).hexdigest(),
             size=len(photo.derivative), media_type="image/jpeg",
-            width=photo.asset.raw_width, height=photo.asset.raw_height)
+            width=photo.asset.width, height=photo.asset.height)
         build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
             python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",

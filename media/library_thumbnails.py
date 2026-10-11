@@ -10,7 +10,6 @@ edited thumbnail Immich shows and re-encodes it without metadata.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Protocol
 from central.kernel.handling import OriginUnavailable, TerminalFailure
 from central.kernel.ports import THUMBNAIL_UNKNOWN
 from central.photo_library.model import AssetRevision, ConnectionSecret, PoolThumbnail
+from media.library_clients import LibraryClients
 from media.models import MediaError
 
 
@@ -39,6 +39,10 @@ def _write_new(path: Path, data: bytes) -> None:
         raise
 
 
+async def _close(client: ThumbnailClient) -> None:
+    await asyncio.gather(client.close(), return_exceptions=True)
+
+
 class LibraryThumbnailOrigin:
     """Implements `central.kernel.ports.ThumbnailOrigin`; `aclose` at worker exit."""
 
@@ -47,18 +51,7 @@ class LibraryThumbnailOrigin:
                  client_factory: Callable[[ConnectionSecret], ThumbnailClient]) -> None:
         self._servable = servable
         self._secret_of = secret_of
-        self._factory = client_factory
-        self._clients: dict[str, tuple[str, ThumbnailClient]] = {}
-
-    async def _client(self, secret: ConnectionSecret) -> ThumbnailClient:
-        """One client per connection and key: a new key gets a new client."""
-        key = hashlib.sha256(secret.api_key.get_secret_value().encode()).hexdigest()
-        held = self._clients.get(secret.connection_ref)
-        if held is None or held[0] != key:
-            if held is not None:
-                await asyncio.gather(held[1].close(), return_exceptions=True)
-            held = self._clients[secret.connection_ref] = (key, self._factory(secret))
-        return held[1]
+        self._clients: LibraryClients[ThumbnailClient] = LibraryClients(client_factory, _close)
 
     async def thumbnail(self, asset_id: str, into: Path) -> None:
         servable = await asyncio.to_thread(self._servable, asset_id)
@@ -67,7 +60,7 @@ class LibraryThumbnailOrigin:
         secret = await asyncio.to_thread(self._secret_of, servable.connection_ref)
         if secret is None:
             raise TerminalFailure("connection_unknown")
-        client = await self._client(secret)
+        client = await self._clients.for_secret(secret)
         try:
             data = await client.thumbnail(servable.upstream_id, servable.revision)
         except MediaError as error:
@@ -80,5 +73,4 @@ class LibraryThumbnailOrigin:
             raise OriginUnavailable("previews_io") from None
 
     async def aclose(self) -> None:
-        clients, self._clients = [held[1] for held in self._clients.values()], {}
-        await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
+        await self._clients.close()

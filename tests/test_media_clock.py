@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
-from test_media_repository import asset, result
 from test_operator_frames import ADMIN, AUTH
 
 from central.app import create_app
@@ -21,7 +20,6 @@ from central.db import DatabaseTransactionClock, ProcessTransactionClock
 from central.media_repository import MediaRepository
 from contracts.time import ManualClock
 from media import healthcheck
-from media.models import SourcePreview, SourcePreviewQuery, SourcePreviewResult, SourceSpec
 
 ROOT = Path(__file__).resolve().parents[1]
 HOUR = 3600
@@ -81,89 +79,12 @@ def test_no_media_module_reads_a_database_clock_outside_the_held_connection_port
 
 def test_worker_check_in_ages_against_the_media_read_on_one_clock(registry):
     central, worker = _processes(registry)
-    worker.worker_status(None, ("fixture",))
+    worker.worker_status(None)
     read = central.media_read()
     assert 0 <= read["read_at"] - read["health"]["worker_seen"] < 5
     worker.set_recipe("a" * 64)
     read = central.media_read()
     assert 0 <= read["read_at"] - read["health"]["worker_seen"] < 5
-
-
-def test_a_preview_neither_expires_early_nor_outlives_600_seconds_across_skewed_processes(registry):
-    central, ahead = _processes(registry)
-    behind = MediaRepository(registry.db, ManualClock(_db_now(registry) - 2 * HOUR),
-                             queue=central.queue, times=DatabaseTransactionClock())
-    ahead.worker_status(None, ("fixture",))
-    request_id = central.request_source_preview(SourcePreviewQuery(connection_ref="fixture")).request_id
-    with registry.db.transaction() as conn:
-        row = conn.execute("SELECT created_at,expires_at FROM source_previews WHERE request_id=%s",
-                           (request_id,)).fetchone()
-    assert row["expires_at"] - row["created_at"] == 600
-    assert 0 <= _db_now(registry) - row["created_at"] < 5
-
-    # Not early: a worker an hour ahead by its own clock still takes and answers it.
-    assert ahead.begin_source_preview(request_id) is not None
-    assert central.source_preview(request_id)["status"] == "pending"
-
-    # Not past 600 s: once the database's time passes expiry, a worker an hour behind refuses it.
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE source_previews SET created_at=created_at-601,expires_at=expires_at-601 "
-                     "WHERE request_id=%s", (request_id,))
-    assert behind.begin_source_preview(request_id) is None
-    preview = SourcePreview(result=SourcePreviewResult(count=0, image_count=0, video_count=0), members=())
-    assert not behind.finish_source_preview(request_id, preview)
-    before = _db_now(registry)
-    answer = central.source_preview(request_id)
-    assert answer["status"] == "failed" and answer["error"] == "preview_expired"
-    assert before <= answer["read_at"] <= _db_now(registry)
-
-
-def test_a_completed_preview_is_observed_and_read_on_one_clock(registry):
-    central, worker = _processes(registry)
-    worker.worker_status(None, ("fixture",))
-    request_id = central.request_source_preview(SourcePreviewQuery(connection_ref="fixture")).request_id
-    preview = SourcePreview(result=SourcePreviewResult(count=0, image_count=0, video_count=0), members=())
-    assert worker.finish_source_preview(request_id, preview)
-    answer = central.source_preview(request_id)
-    assert answer["status"] == "complete" and 0 <= answer["read_at"] - answer["observed_at"] < 5
-
-
-def test_refresh_ages_and_the_refresh_lease_follow_the_database_clock(registry):
-    central, worker = _processes(registry)
-    other = MediaRepository(registry.db, ManualClock(_db_now(registry) - 2 * HOUR),
-                            queue=central.queue, times=DatabaseTransactionClock())
-    spec = SourceSpec(source_ref="source:1", connection_ref="fixture")
-    central.configure_source(spec)
-    lease = worker.begin_scheduled_refresh()
-    assert lease is not None and 0 <= _db_now(registry) - lease.started_at < 5
-
-    # The lease holds for its 90 s on the database's clock, whichever process asks.
-    assert other.begin_scheduled_refresh() is None
-    assert worker.publish_refresh(lease, result(spec, asset(1)))
-
-    read = central.media_read()
-    source = next(row for row in read["sources"] if row["source_ref"] == spec.source_ref)
-    assert 0 <= read["read_at"] - source["last_success"] < 5
-    assert 0 < source["next_refresh"] - read["read_at"] <= central.limits.refresh_seconds
-    with registry.db.transaction() as conn:
-        snapshot = conn.execute("SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
-                                (spec.source_ref,)).fetchone()["snapshot"]
-    # The client's own refreshed_at (1000 here) is never stored: the write's database time is.
-    assert 0 <= read["read_at"] - snapshot["refreshed_at"] < 5
-
-    # Not due before next_refresh, even for a worker an hour ahead; due once it passes.
-    assert worker.begin_scheduled_refresh() is None
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE media_sources SET next_refresh=next_refresh-%s WHERE source_ref=%s",
-                     (central.limits.refresh_seconds + 1, spec.source_ref))
-    assert other.begin_scheduled_refresh() is not None
-
-    # An abandoned lease is taken over once its 90 s pass on the database's clock.
-    assert worker.begin_scheduled_refresh() is None
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE media_sources SET refresh_lease_until=refresh_lease_until-91 "
-                     "WHERE source_ref=%s", (spec.source_ref,))
-    assert worker.begin_scheduled_refresh() is not None
 
 
 def test_operator_reads_serve_media_read_at_on_the_database_clock(registry):
@@ -186,7 +107,7 @@ def test_the_worker_healthcheck_ages_the_check_in_on_the_database_clock(registry
     monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", registry.db.dsn)
     assert healthcheck.main() == 1  # no check-in yet
     _central, worker = _processes(registry)
-    worker.worker_status(None, ("fixture",))
+    worker.worker_status(None)
     assert healthcheck.main() == 0
     # The probing process's clock is never read: an hour (or decades) of skew changes nothing.
     for skew in (-HOUR, HOUR, -10**9):

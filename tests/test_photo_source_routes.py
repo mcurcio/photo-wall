@@ -51,7 +51,7 @@ def _save(test_client, draft, name):
 
 def _source_row(library, source_ref):
     with library.db.transaction() as conn:
-        return conn.execute("SELECT query,pool_key,spec FROM media_sources WHERE source_ref=%s",
+        return conn.execute("SELECT query,pool_key FROM media_sources WHERE source_ref=%s",
                             (source_ref,)).fetchone()
 
 
@@ -86,8 +86,7 @@ def test_saving_a_new_draft_makes_revision_one_with_its_pool(client):
     saved = _save(test_client, _draft(test_client, query), "family")
     assert (saved.status_code, saved.json()) == (200, {"source_ref": "family:1"})
     row = _source_row(library, "family:1")
-    assert (row["pool_key"], row["query"], row["spec"]) == (
-        query.pool_key(), query.model_dump(mode="json"), None)
+    assert (row["pool_key"], row["query"]) == (query.pool_key(), query.model_dump(mode="json"))
     with library.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM photo_drafts").fetchone()["n"] == 0
 

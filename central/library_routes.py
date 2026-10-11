@@ -2,9 +2,7 @@
 
 `GET /v1/operator/library/tags` reads the tag list the media worker stored (roadmap 4: the photo
 library store's lists, central/infra/photo_library_store.py): it publishes nothing, so pass A's
-GET rule holds (admin; no marker). It answers the one list shape (`ListAnswer`, `items`) plus a
-`tags` key carrying the same list for the pre-4 console picker (the integrate slice removes it).
-With `ids=` (one to MAX_CHOSEN tag ids, repeated, and never with `q`) it answers exactly those
+GET rule holds (admin; no marker). It answers the one list shape (`ListAnswer`, `items`). With `ids=` (one to MAX_CHOSEN tag ids, repeated, and never with `q`) it answers exactly those
 tags and `absent[]`, named only from an `ok` list (C5), so a saved tag is named however long the
 library's list is. `GET /v1/operator/library/thumbnails/{asset_id}`
 is loaded by `<img>`, which cannot send the marker, so it carries PR 37's gate instead: the admin
@@ -85,16 +83,12 @@ def mount_library_routes(app: FastAPI, *, admin: Any, library: PhotoLibraryQueri
     add_prefix_headers(app, LIBRARY_PREFIX, _CORP)
 
     @app.get(LIBRARY_PREFIX + "tags", dependencies=[Depends(admin)])
-    def library_tags(connection: Identifier,
-                     q: str = Query("", max_length=MAX_LIST_QUERY),
-                     limit: int = Query(MAX_LIST_RESULTS, ge=1, le=MAX_LIST_RESULTS),
-                     ids: list[TagRef] | None = Query(None, min_length=1, max_length=MAX_CHOSEN)):
-        answer = list_query(connection, q, ids, search=library.tags, by_id=library.tags_by_id,
-                            limit=limit)
-        if isinstance(answer, Response):
-            return answer
-        listed = answer.model_dump(mode="json")
-        return {**listed, "tags": listed["items"]}
+    def tag_list(connection: Identifier,
+                 q: str = Query("", max_length=MAX_LIST_QUERY),
+                 limit: int = Query(MAX_LIST_RESULTS, ge=1, le=MAX_LIST_RESULTS),
+                 ids: list[TagRef] | None = Query(None, min_length=1, max_length=MAX_CHOSEN)):
+        return list_query(connection, q, ids, search=library.tags, by_id=library.tags_by_id,
+                          limit=limit)
 
     @app.get(LIBRARY_PREFIX + "thumbnails/{asset_id}", dependencies=[Depends(admin)])
     async def library_thumbnail(request: Request, asset_id: str) -> Response:

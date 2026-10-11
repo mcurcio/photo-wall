@@ -55,23 +55,21 @@ from operator_harness import (
 )
 from photo_seed import begin, connected, filled, in_pool, library_of, saved_source, step
 from playwright.sync_api import expect
-from psycopg.types.json import Jsonb
 from public_media import public_photo, publish_photo
+from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
 from test_registry import ADMIN, enroll
 
-from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
-from central.photo_library.model import SourceQuery, TakenBetween
+from central.photo_library.model import InPool, LibraryAsset, SourceQuery, TakenBetween
 from central.photo_library.ports import CheckFailed
 from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import FrameProfile
-from media.models import RefreshResult, SourceSpec
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -105,33 +103,35 @@ def _scene(scene_id, frame=VALID_FRAME, **fields):
 
 
 def _seed_source(registry, photos=()):
-    """Configure ONE saved live query through the shared DB so the console's
-    /v1/operator/media renders it, wiring a RecordingMediaQueue so the Refresh
-    POST is accepted (202). No worker, upstream, or renderer runs.
+    """ONE saved Source, SOURCE, so the console's /v1/operator/media renders it, and the
+    RecordingMediaQueue to hand to operator_server (no worker, upstream or renderer runs).
 
-    When `photos` are supplied, publish ONE successful refresh so the source is
-    `ok` and its candidate membership is populated — this is what the authored
-    candidates route (`GET …/sources/{ref}/candidates?frame_id=`) reads and
-    hard-filters by profile. No variants are prepared: an authored save needs
-    only source membership + asset metadata, and unprepared candidates are still
-    offered (they render "Awaiting preparation" in the legacy page).
-
-    Returns the queue to hand to operator_server so the app's own media
-    repository (built in create_app) shares it and accepts the refresh.
+    When `photos` are supplied, one complete check of its pool finds them (through the photo
+    library store's worker side): this is what the candidates route
+    (`GET …/sources/{ref}/candidates?frame_id=`) reads and hard-filters by profile. No variants
+    are prepared: an authored save needs only pool membership, and unprepared candidates are
+    still offered (they render "preparing").
     """
     queue = RecordingMediaQueue()
-    repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-    repository.configure_source(
-        SourceSpec(source_ref=SOURCE, connection_ref="fixture-library"))
+    library = _photo_library(registry)
+    query = SourceQuery(connection_ref=FIXTURE_CONNECTION)
+    saved_source(registry, library, SOURCE.rsplit(":", 1)[0], query)
     if photos:
-        lease = repository.begin_scheduled_refresh()
-        assert lease is not None and lease.source.source_ref == SOURCE
-        assert repository.publish_refresh(lease, RefreshResult(
-            snapshot=CatalogSnapshot(
-                source_ref=SOURCE, refreshed_at=registry.clock.utc(),
-                candidates=tuple(photo.asset.candidate for photo in photos)),
-            assets=tuple(photo.asset for photo in photos)))
+        filled(library, query.pool_key(), [InPool(asset=photo.asset) for photo in photos])
     return queue
+
+
+def _photo_library(registry):
+    """The photo library store over the test database, with the keyed connection the public
+    photos name (`support.photo_pools.FIXTURE_CONNECTION`)."""
+    fixture_connection(registry)
+    return library_of(registry)
+
+
+def _pool_key(registry, source_ref):
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
+                            (source_ref,)).fetchone()["pool_key"]
 
 
 def _authored_photos(registry):
@@ -1082,8 +1082,8 @@ LONG_ID = "reception" + "northwallleftofthemainentrance" * 3  # no break opportu
 
 def _seed_long_ids(registry):
     """A Source, Scene, Program and live Run whose ids are long unbroken strings."""
-    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock)).configure_source(
-        SourceSpec(source_ref=LONG_ID + ":1", connection_ref="fixture-library"))
+    saved_source(registry, _photo_library(registry), LONG_ID,
+                 SourceQuery(connection_ref=FIXTURE_CONNECTION, favourites_only=True))
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(
         scene_id=LONG_ID, loop=True,
@@ -1857,11 +1857,16 @@ def _put_authored(page, origin, scene_id, choices):
     assert response.status == 200, response.text()
 
 
-def _drop_member(registry, asset_id):
-    """The upstream library no longer holds this item (a later refresh dropped it)."""
+def _drop_member(registry, asset_id, source_ref=SOURCE):
+    """The library no longer holds this item: the Source's next complete check finds the rest
+    of its pool and not it, so the sweep removes it."""
+    key = _pool_key(registry, source_ref)
     with registry.db.transaction() as conn:
-        conn.execute("DELETE FROM source_members WHERE source_ref=%s AND asset_id=%s",
-                     (SOURCE, asset_id))
+        kept = [LibraryAsset.model_validate(row["metadata"]) for row in conn.execute(
+            "SELECT a.metadata FROM photo_pool_rows r JOIN asset_revisions a USING (asset_id) "
+            "WHERE r.pool_key=%s AND r.outcome='in_pool' AND r.asset_id<>%s",
+            (key, asset_id)).fetchall()]
+    filled(_photo_library(registry), key, [InPool(asset=asset) for asset in kept])
 
 
 def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidates(page, registry):
@@ -1909,32 +1914,15 @@ def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidate
 
 
 def test_authored_save_refusals_are_said_in_plain_words(page, registry):
-    """§13: the authored PUT's two 409s, each as its sentence."""
+    """§13: the authored PUT's 409 for an item that left the Source, as its sentence."""
     _seed(registry)
     portrait_a, portrait_b, landscape = _authored_photos(registry)
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
-    a, b = portrait_a.asset.asset_id, portrait_b.asset.asset_id
+    b = portrait_b.asset.asset_id
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
-
-        with registry.db.transaction() as conn:  # the last refresh failed
-            conn.execute("UPDATE media_sources SET status='unavailable' WHERE source_ref=%s",
-                         (SOURCE,))
-        form = author_scene(page, AUTHORED_SCENE_ID, SOURCE, {VALID_FRAME: a}, submit=False)
-        with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
-            form.get_by_role("button", name="Save Scene", exact=True).click()
-        assert (info.value.status, info.value.json()["error"]) == (409, "source_not_fresh")
-        expect(scenes).to_contain_text(
-            "Could not save Scene. The Source's last refresh failed; authored choices can be "
-            "saved once it succeeds.")
-
-        with registry.db.transaction() as conn:
-            conn.execute("UPDATE media_sources SET status='ok' WHERE source_ref=%s", (SOURCE,))
-        # Bead 2: the chooser is on the Media per frame step; Continue returns to Review.
-        form.get_by_role("button", name="Change Media per frame", exact=True).click()
-        form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True).select_option(b)
-        scene_continue(page, "Review")
+        form = author_scene(page, AUTHORED_SCENE_ID, SOURCE, {VALID_FRAME: b}, submit=False)
         _drop_member(registry, b)
         with page.expect_response(lambda r: r.url.endswith("/authored")) as info:
             form.get_by_role("button", name="Save Scene", exact=True).click()
@@ -1992,20 +1980,6 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
 
 
 # Pass 2 slice 3B (§14): the media pipeline and "why nothing new?".
-
-
-def _set_source(registry, ref, **columns):
-    """A configured Source whose served refresh columns are set directly: the facts a
-    worker's refreshes would have left (no worker runs in these checks)."""
-    spec = columns.pop("spec", {})
-    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock)).configure_source(
-        SourceSpec(source_ref=ref, connection_ref="fixture-library", **spec))
-    if columns:
-        assignments = ",".join(f"{name}=%s" for name in columns)
-        values = [Jsonb(v) if isinstance(v, (dict, list)) else v for v in columns.values()]
-        with registry.db.transaction() as conn:
-            conn.execute(f"UPDATE media_sources SET {assignments} WHERE source_ref=%s",
-                         (*values, ref))
 
 
 def _utc(year):
@@ -2204,18 +2178,6 @@ def test_why_nothing_new_judges_the_scenes_pools_not_their_checks(page, registry
             expect(_stop(chain)).to_contain_text(text)
 
 
-def _pooled(registry, source_ref, photos=1):
-    """`source_ref` (a pre-4 Source seeded through the old refresh) given a query and a pool of
-    `photos` photos, as the cut-over converts one: step 4 of "Why nothing new?" reads pools."""
-    library = library_of(registry)
-    ref = connected(library, name=f"pool-of-{source_ref.replace(':', '-')}")
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE media_sources SET query=%s WHERE source_ref=%s",
-                     (Jsonb(SourceQuery(connection_ref=ref).model_dump(mode="json")), source_ref))
-        key = library.pool_key_of_source_in(conn, source_ref)
-    filled(library, key, in_pool(ref, range(1, photos + 1)))
-
-
 def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
     """§14 step 5: the frame's candidates tallied by the standing Central serves —
     usable, still preparing, failed to prepare. The candidates route's count includes a
@@ -2224,7 +2186,6 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
     portrait_a, portrait_b, landscape = _authored_photos(registry)
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
     now = registry.clock.utc()
-    _pooled(registry, SOURCE, photos=3)
     _run_now(registry, _console_scene(SCENE_ID))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now", paused_at=now)
@@ -2259,23 +2220,21 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
         expect(_stop(chain)).to_contain_text("Frame health")
 
 
-def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(page, registry):
+def test_check_this_frame_counts_every_sources_pool_and_a_shared_item_once(page, registry):
     """§14 step 5 across a Scene's Sources, as planning pools them (planner.py `_pool`):
-    a Source whose last refresh failed contributes nothing, and an item two Sources
-    share counts once. Mutation probes: keep the failing Source; count per Source."""
+    every Source's pool counts, a Source whose latest check failed too (C7: its last pool keeps
+    playing), and an item two Sources share counts once. Mutation probes: leave out the failed
+    Source; count per Source."""
     _seed(registry)
     portrait_a, portrait_b, _landscape = _authored_photos(registry)
-    queue = _seed_source(registry, (portrait_a, portrait_b))
-    a, b = portrait_a.asset.asset_id, portrait_b.asset.asset_id
+    queue = _seed_source(registry, (portrait_a,))
     now = registry.clock.utc()
-    _drop_member(registry, b)  # SOURCE holds a
-    fresh = dict(next_refresh=now + 30, last_success=now, counts={"valid": 1})
-    _set_source(registry, "shared:1", status="ok", **fresh)
-    _set_source(registry, "down:1", status="unavailable", **fresh)
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO source_members VALUES(%s,%s),(%s,%s)",
-                     ("shared:1", a, "down:1", b))
-    _pooled(registry, SOURCE)
+    library = _photo_library(registry)
+    for name, photo in (("shared", portrait_a), ("down", portrait_b)):
+        query = SourceQuery(connection_ref=FIXTURE_CONNECTION, albums=(str(UUID(int=len(name))),))
+        saved_source(registry, library, name, query)
+        filled(library, query.pool_key(), [InPool(asset=photo.asset)])
+    filled(library, _pool_key(registry, "down:1"), [], CheckFailed(problem="connection"))
     _run_now(registry, Scene(scene_id=SCENE_ID, loop=True, contributions=(Contribution(
         target=f"frame:{VALID_FRAME}", source_refs=(SOURCE, "shared:1", "down:1")),)))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
@@ -2283,7 +2242,7 @@ def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(p
         chain = _why_chain(page)
         chain.get_by_role("button", name="Check this frame", exact=True).click()
         expect(_stop(chain)).to_contain_text(
-            "Check this frame Nothing usable yet: 1 still preparing.")
+            "Check this frame Nothing usable yet: 2 still preparing.")
 
 
 @pytest.mark.browser_context_args(timezone_id="Europe/London")
