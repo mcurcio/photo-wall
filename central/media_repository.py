@@ -18,6 +18,7 @@ from pydantic import Field
 
 from central.catalog import Candidate, SourcePool
 from central.db import MEDIA_LOCK, Database, TransactionClock
+from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset, PoolMember
@@ -82,6 +83,9 @@ class MediaRepository:
                  *, times: TransactionClock, queue: MediaTaskQueue | None = None):
         self.db, self.clock, self.limits = db, clock, limits or StoreLimits()
         self.times, self.queue = times, queue
+        # Roadmap 5a (slice M1): key content, hydrated onto every candidate and requested by the
+        # scheduler (`request_measurements`).
+        self.key_content = PgKeyContent(db, times=times, queue=queue)
 
     @contextmanager
     def transaction(self):
@@ -124,11 +128,10 @@ class MediaRepository:
         conn.execute("UPDATE media_sources SET refresh_active=(source_ref=ANY(%s)) "
                      "WHERE refresh_active<>(source_ref=ANY(%s))", (needed, needed))
 
-    @staticmethod
-    def _hydrate_candidates(conn, candidates, now):
-        """Apply current recipe state to every pool and authored candidate.
+    def _hydrate_candidates(self, conn, candidates, now):
+        """Apply current recipe state and key content to every pool and authored candidate.
 
-        Variants and failures are worker state, so they are deliberately
+        Variants, failures and key content are worker state, so they are deliberately
         hydrated at read time.  This also clears a variant after eviction.
         """
         candidates = tuple(candidates)
@@ -141,6 +144,7 @@ class MediaRepository:
                 "WHERE j.asset_id=ANY(%s) AND j.recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
                 "AND j.state='ready' AND b.state='ready'", (asset_ids,)).fetchall():
             variants[row["asset_id"]] = Variant.model_validate(row["variant"])
+        analyses = self.key_content.analyses_in(conn, asset_ids, now=now)
         failed = {row["asset_id"]: row["failure_code"] or "preparation_failed" for row in conn.execute(
             "SELECT asset_id,failure_code FROM media_jobs WHERE asset_id=ANY(%s) "
             "AND recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
@@ -151,6 +155,7 @@ class MediaRepository:
             hydrated.append(candidate.model_copy(update={
                 "variant": variant,
                 "preparation_failure": failed.get(candidate.asset_id) if variant is None else None,
+                "analysis": analyses.get(candidate.asset_id),
             }))
         return tuple(hydrated)
 
@@ -218,7 +223,7 @@ class MediaRepository:
             old = existing.get(asset_id)
             if old:
                 prior = Candidate.model_validate(old["candidate"]).model_copy(
-                    update={"variant": None, "preparation_failure": None})
+                    update={"variant": None, "preparation_failure": None, "analysis": None})
                 if prior != candidate:
                     raise RegistryError("authored_candidate_immutable", 409)
         new = [asset_id for asset_id in asset_ids if asset_id not in existing]
@@ -320,7 +325,11 @@ class MediaRepository:
         has none current (central.wall_plan.ports.KeyContentReader.request_in), in one
         transaction; returns how many were queued. The scheduler calls it after every advance,
         beside `request_acquisitions`."""
-        raise NotImplementedError
+        if not requests:
+            return 0
+        with self.transaction() as conn:
+            return self.key_content.request_in(conn, [request.asset_id for request in requests],
+                                               now=self.times.now_in(conn))
 
     @staticmethod
     def _active_jobs(conn) -> int:

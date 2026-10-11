@@ -220,6 +220,9 @@ def create_app(
                     await asyncio.to_thread(
                         media_application.request_acquisitions, projection.acquisitions
                     )
+                    await asyncio.to_thread(
+                        media_application.request_measurements, projection.measurements
+                    )
                     scheduler_health.update(
                         last_tick=clock.utc(),
                         last_tick_monotonic=clock.monotonic(),

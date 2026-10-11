@@ -12,8 +12,10 @@ import pytest
 from central.media_queue import (
     CHECK_CONNECTION_TASK,
     CHECK_POOL_TASK,
+    KEY_CONTENT_QUEUE_PREFIX,
     LIBRARY_CONNECTION_LOCK_PREFIX,
     LIBRARY_POOL_LOCK_PREFIX,
+    MEASURE_KEY_CONTENT_TASK,
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
     PREPARE_MEDIA_TASK,
@@ -100,6 +102,24 @@ def test_library_checks_are_locked_per_connection_or_pool_and_coalesce(enqueue, 
     assert getattr(queue, enqueue)(connection, "library-0123456789ab").coalesced
 
 
+def test_a_measurement_is_queued_once_per_photo_and_takes_no_lock():
+    """Roadmap 5a (M1): measurements run beside preparation and the checks; one waits per
+    photo."""
+    queue = object.__new__(ProcrastinateMediaQueue)
+    queue.app = App()
+    connection = SimpleNamespace(transaction=nullcontext)
+
+    assert not queue.enqueue_measure_in(connection, "asset-1").coalesced
+    assert queue.app.configured == {
+        "name": MEASURE_KEY_CONTENT_TASK,
+        "queue": MEDIA_QUEUE,
+        "lock": None,
+        "queueing_lock": KEY_CONTENT_QUEUE_PREFIX + "asset-1",
+        "connection": connection,
+        "payload": {"asset_id": "asset-1"},
+    }
+
+
 def test_a_queued_connection_check_coalesces_in_procrastinate(registry):
     ProcrastinateMediaQueue.apply_schema(registry.db.dsn)
     queue = ProcrastinateMediaQueue(registry.db.dsn)
@@ -159,12 +179,15 @@ def test_worker_app_registers_only_domain_work_and_maintenance_tasks():
         CHECK_POOL_TASK,
         "photo_wall.media.maintenance",
         RESCUE_TASK,
+        MEASURE_KEY_CONTENT_TASK,
     }
     assert isinstance(
         app.tasks[PREPARE_MEDIA_TASK].retry_strategy,
         procrastinate.BaseRetryStrategy,
     )
     assert app.tasks["photo_wall.media.refresh"].lock is None
+    assert app.tasks[MEASURE_KEY_CONTENT_TASK].lock is None
+    assert isinstance(app.tasks[MEASURE_KEY_CONTENT_TASK].retry_strategy, MediaRetryStrategy)
     # A dead worker's row holding MEDIA_STORAGE_LOCK must never block its own rescue.
     assert app.tasks[RESCUE_TASK].lock is None
     assert app.tasks[RESCUE_TASK].queueing_lock == "media-rescue"

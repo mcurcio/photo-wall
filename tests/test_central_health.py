@@ -30,6 +30,9 @@ class FakeMedia:
         if self.fail:
             raise RuntimeError("private worker failure")
 
+    def request_measurements(self, _requests):
+        return 0
+
 
 class FakeCoordinator:
     def __init__(self):
@@ -51,7 +54,7 @@ class FakeCoordinator:
         if self.block_first or (self.block_after_first and self.calls > 1):
             self.blocked.set()
             self.release.wait(10)
-        return type("Projection", (), {"acquisitions": ()})()
+        return type("Projection", (), {"acquisitions": (), "measurements": ()})()
 
 
 class NoReconciliation:
