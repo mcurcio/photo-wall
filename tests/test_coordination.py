@@ -12,6 +12,7 @@ from central.coordination import CoordinationError, CoordinationLimits, Coordina
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
+from central.wall_plan.selection import SceneSelection
 from contracts.models import Failure, Readiness, Variant
 
 
@@ -647,3 +648,32 @@ def test_orphaned_pending_cues_are_superseded_not_skipped_as_not_ready(registry)
     registry.clock.advance(150)
     coordinator.advance()
     assert "not_ready" not in skip_codes(registry).values()
+
+
+# Roadmap 5a (slice O1): a hand-placed photo is checked at its Scene's own crop limit. A square
+# photo on a 9:16 Frame crops 43.75 % of its area: it passes at 50 % and is refused at 35 %.
+
+def square_photo_scene(registry, crop_limit=None):
+    frame(registry, "portrait")
+    square = photo("square", taken_at=900, width=2000, height=2000)
+    seed_pool(registry, "square:1", (square,))
+    selection = {} if crop_limit is None else {"selection": SceneSelection(crop_limit=crop_limit)}
+    scene = Scene(scene_id="hand-placed", contributions=(
+        Contribution(target="frame:portrait", asset_refs=(square.asset_id,)),), **selection)
+    return scene, square
+
+
+def test_a_hand_placed_photo_is_authored_at_its_scenes_crop_limit(registry):
+    scene, square = square_photo_scene(registry, crop_limit=0.5)
+    coordinator = Coordinator(registry.db, registry.clock)
+    result = coordinator.configure_authored_scene(scene, "square:1", (square.asset_id,))
+    assert result["status"] == "configured" and result["created"] == 1
+
+
+@pytest.mark.xfail(strict=True, reason="eligible() judges the crop limit from slice W1 "
+                   "(run ledger photo-5a.md, E-P5A-order-1); W1 removes this marker")
+def test_a_hand_placed_photo_beyond_the_default_crop_limit_is_refused(registry):
+    scene, square = square_photo_scene(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    with pytest.raises(RegistryError, match="authored_incompatible"):
+        coordinator.configure_authored_scene(scene, "square:1", (square.asset_id,))
