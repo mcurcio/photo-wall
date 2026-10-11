@@ -1,7 +1,8 @@
 """Migration 081 on a database a pre-4 Central left (roadmap 4, run ledger slice I1; F-15).
 
 A photo placed by hand before 4 (an authored candidate, or one a transfer pin holds through its
-job's variant) keeps its identity as a LibraryAsset record with its upright size; every other
+job's variant) keeps its identity as a revision of a `library_assets` parent (follow-ups slice A2)
+with its upright size; every other
 pre-4 record goes, with the jobs, the snapshot, preview and tag tables and the refresh columns.
 """
 
@@ -13,7 +14,8 @@ from psycopg.types.json import Jsonb
 from support.migrations import migrate_before
 
 from central.db import Database
-from central.photo_library.model import LibraryAsset, asset_identity
+from central.infra.photo_library_store import library_assets_in
+from central.photo_library.model import asset_identity
 
 CONNECTION = "family-library"
 
@@ -64,30 +66,35 @@ def test_081_keeps_hand_placed_photos_as_library_assets_and_retires_the_rest(emp
                               "queued" if variant is None else "ready", variant))
         db.migrate()
         with db.transaction() as conn:
-            records = {row["asset_id"]: row for row in conn.execute(
-                "SELECT asset_id,metadata,connection_ref,upstream_id::text AS upstream_id "
-                "FROM asset_revisions").fetchall()}
+            kept = [row["asset_id"] for row in conn.execute(
+                "SELECT asset_id FROM asset_revisions").fetchall()]
+            records = library_assets_in(conn, kept)
+            parents = {(row["connection_ref"], row["upstream_id"]) for row in conn.execute(
+                "SELECT connection_ref,upstream_id::text AS upstream_id FROM library_assets"
+                ).fetchall()}
             jobs = conn.execute("SELECT count(*) AS n FROM media_jobs").fetchone()["n"]
             tables = {row["name"] for row in conn.execute(
                 "SELECT table_name AS name FROM information_schema.tables "
                 "WHERE table_schema='public'").fetchall()}
             columns = {table: {row["name"] for row in conn.execute(
                 "SELECT column_name AS name FROM information_schema.columns WHERE table_name=%s",
-                (table,)).fetchall()} for table in ("media_sources", "media_settings")}
+                (table,)).fetchall()} for table in ("media_sources", "media_settings",
+                                                     "asset_revisions")}
     finally:
         db.close()
 
-    assert set(records) == {_identity(authored), _identity(pinned)}
-    photo = LibraryAsset.model_validate(records[_identity(authored)]["metadata"])
+    assert set(kept) == set(records) == {_identity(authored), _identity(pinned)}
+    photo = records[_identity(authored)]
     assert photo.asset_id == _identity(authored)            # the pre-4 identity (T0 case 8)
     assert (photo.width, photo.height) == (3000, 4000)      # orientation 6: upright
     assert (photo.kind, photo.taken_at, photo.duration) == ("image", authored["captured_at"], None)
-    video = LibraryAsset.model_validate(records[_identity(pinned)]["metadata"])
+    assert photo.original is None                           # until a check reads it
+    video = records[_identity(pinned)]
     assert video.asset_id == _identity(pinned)
     assert (video.width, video.height, video.duration) == (4000, 3000, 7.5)
-    for asset_id, record in records.items():
-        assert (record["connection_ref"], record["upstream_id"]) == (
-            CONNECTION, LibraryAsset.model_validate(record["metadata"]).upstream_id), asset_id
+    # Slice A2: a parent row per kept revision, and no JSON copy of its facts left.
+    assert parents == {(CONNECTION, record.upstream_id) for record in records.values()}
+    assert "metadata" not in columns["asset_revisions"]
     assert jobs == 0
     assert not {"catalog_snapshots", "source_members", "source_previews", "library_tags"} & tables
     assert columns["media_sources"] == {"source_ref", "query", "pool_key", "refresh_active"}

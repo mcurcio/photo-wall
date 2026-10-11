@@ -1,7 +1,8 @@
 """The photo library store over PostgreSQL (roadmap 4; run ledger .claude/runs/photo-4.md).
 
 `PgPhotoLibrary` is the one home of migration 080's tables (library_connections, library_lists,
-library_list_items, photo_pools, photo_pool_rows, photo_check_marks, photo_drafts) and the only
+library_list_items, photo_pools, photo_pool_rows, photo_check_marks, photo_drafts, library_assets,
+asset_copies, and asset_revisions' columns) and the only
 code that reads `library_connections.api_key` (for the media worker: `begin_contact`,
 `connection_secret`, `begin_check`). It implements central.photo_library.ports'
 PhotoLibraryQueries and PhotoLibraryCommands (slice C1), PhotoSourceQueries and the store half of
@@ -13,6 +14,13 @@ database hands out (contact numbers, check numbers), never clock comparisons acr
 A pool is **wanted** while a draft points at it, or while a Source revision Runtime or a name
 needs (`media_sources.refresh_active`, computed by MediaRepository.reconcile_source_activity_in)
 names it. Only wanted pools are checked, served as thumbnails, or kept by maintenance.
+
+Photos are normalized (follow-ups 2026-10-11, owner item 6; slice A2): one `library_assets` row
+per Immich asset (kind, taken time, the original file's facts), its revisions (`asset_revisions`:
+upright size, duration, Immich's `updatedAt`) and each revision's measured Immich copies
+(`asset_copies`) as children. A pool row names a revision (`asset_id`) and copies none of its
+facts, so every pool read joins the revision and its parent; `library_assets_in` is the one place
+a stored asset becomes a LibraryAsset.
 """
 
 from __future__ import annotations
@@ -26,6 +34,8 @@ from psycopg.types.json import Jsonb
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from central.db import Database, TransactionClock
+from central.infra.display_store import frame_outputs_in
+from central.installation_models import FrameOutput
 from central.media_queue import MediaTaskQueue
 from central.photo_library import policy
 from central.photo_library.model import (
@@ -38,6 +48,7 @@ from central.photo_library.model import (
     ContactAnswer,
     ContactResult,
     ContactTicket,
+    CopySize,
     DraftRef,
     Failed,
     HealthOk,
@@ -52,7 +63,10 @@ from central.photo_library.model import (
     LibraryRef,
     LibraryTag,
     ListKind,
+    MeasurableCopy,
+    MeasuredCopy,
     NeverChecked,
+    OriginalFile,
     PersonRef,
     Place,
     PoolCursor,
@@ -99,6 +113,11 @@ _ITEM_TYPES: dict[str, type] = {"albums": LibraryAlbum, "people": LibraryPerson,
 # A pool is wanted (module docstring); `p` names the photo_pools row.
 _WANTED = ("(EXISTS (SELECT 1 FROM photo_drafts d WHERE d.pool_key=p.pool_key) OR EXISTS "
            "(SELECT 1 FROM media_sources s WHERE s.pool_key=p.pool_key AND s.refresh_active))")
+# An in-pool row `r` joined to its revision `a` and the revision's Immich asset `l` (owner item 6:
+# the facts live once, on the revision and its parent), and the columns of a PoolMember.
+_REVISION_JOIN = ("JOIN asset_revisions a USING (asset_id) JOIN library_assets l "
+                  "ON l.connection_ref=a.connection_ref AND l.upstream_id=a.upstream_id")
+_MEMBER_COLUMNS = "r.asset_id,a.revision,l.kind,l.taken_at,a.width,a.height"
 
 
 def _fold(text: str) -> str:
@@ -138,7 +157,41 @@ def library_assets_in(conn: Any, asset_ids: Iterable[str]) -> dict[str, LibraryA
     absent. The one place a stored asset becomes a LibraryAsset: job leases
     (`central.media_repository`, `central.media_store`) and the key content measurement
     (roadmap 5a, `central.infra.key_content_store`) all read here."""
-    raise NotImplementedError
+    ids = list(set(asset_ids))
+    if not ids:
+        return {}
+    rows = conn.execute(
+        "SELECT r.asset_id,r.revision,r.width,r.height,r.duration,l.connection_ref,"
+        "l.upstream_id::text AS upstream_id,l.kind,l.taken_at,l.original_media_type,"
+        "l.original_width,l.original_height,l.original_orientation,l.original_bytes "
+        "FROM asset_revisions r JOIN library_assets l USING (connection_ref,upstream_id) "
+        "WHERE r.asset_id=ANY(%s)", (ids,)).fetchall()
+    return {row["asset_id"]: LibraryAsset(
+        connection_ref=row["connection_ref"], upstream_id=row["upstream_id"],
+        revision=row["revision"], kind=row["kind"], taken_at=row["taken_at"],
+        width=row["width"], height=row["height"], duration=row["duration"],
+        original=_original_of(row)) for row in rows}
+
+
+_ORIGINAL_COLUMNS = ("original_media_type", "original_width", "original_height",
+                     "original_orientation", "original_bytes")
+
+
+def _original_of(row: dict) -> OriginalFile | None:
+    """A `library_assets` row's original file; None when Immich has said nothing of it."""
+    if all(row[column] is None for column in _ORIGINAL_COLUMNS):
+        return None
+    return OriginalFile(media_type=row["original_media_type"], width=row["original_width"],
+                        height=row["original_height"], orientation=row["original_orientation"],
+                        size_bytes=row["original_bytes"])
+
+
+def _original_values(original: OriginalFile | None) -> tuple:
+    """The five `original_*` column values of `original` (None: five NULLs)."""
+    if original is None:
+        return (None,) * 5
+    return (original.media_type, original.width, original.height, original.orientation,
+            original.size_bytes)
 
 
 class DraftForSave(NamedTuple):
@@ -380,12 +433,15 @@ class PgPhotoLibrary:
                 bound = result.user  # the first passing contact binds (C1)
             counts = (result.counts if isinstance(health, HealthOk) and isinstance(
                 result, ContactAnswer) and result.counts is not None else None)
+            answered = isinstance(result, ContactAnswer)   # a refusal says nothing of copies
             conn.execute(
                 "UPDATE library_connections SET applied_contact=%s,health=%s,immich_user=%s,"
-                "counts=COALESCE(%s,counts) WHERE connection_ref=%s",
+                "counts=COALESCE(%s,counts),full_size_copies=CASE WHEN %s THEN %s "
+                "ELSE full_size_copies END WHERE connection_ref=%s",
                 (ticket.contact_number, Jsonb(_HEALTH.dump_python(health, mode="json")),
                  None if bound is None else Jsonb(bound.model_dump(mode="json")),
                  None if counts is None else Jsonb(counts.model_dump(mode="json")),
+                 answered, result.full_size_copies if answered else None,
                  ticket.connection.connection_ref))
             return True
 
@@ -487,9 +543,9 @@ class PgPhotoLibrary:
             (list(set(keys.values())),)).fetchall()}
         members: dict[str, list[PoolMember]] = {key: [] for key in ready}
         rows = conn.execute(
-            "SELECT pool_key,asset_id,revision,kind,taken_at,width,height FROM photo_pool_rows "
-            "WHERE pool_key=ANY(%s) AND outcome='in_pool' ORDER BY pool_key,taken_at DESC,"
-            "asset_id DESC", (list(ready),))
+            f"SELECT r.pool_key,{_MEMBER_COLUMNS} FROM photo_pool_rows r {_REVISION_JOIN} "
+            "WHERE r.pool_key=ANY(%s) AND r.outcome='in_pool' ORDER BY r.pool_key,"
+            "l.taken_at DESC,r.asset_id DESC", (list(ready),))
         for row in rows:
             members[row["pool_key"]].append(PoolMember(
                 asset_id=row["asset_id"], revision=row["revision"], kind=row["kind"],
@@ -613,14 +669,18 @@ class PgPhotoLibrary:
                       after: PoolCursor | None) -> SourcePoolView:
         pool = None if pool_key is None else conn.execute(
             "SELECT * FROM photo_pools WHERE pool_key=%s", (pool_key,)).fetchone()
+        # Kind by the Immich asset's parent row, through the pool's connection: a Waiting or
+        # LeftOut row has no revision, and a LeftOut row with no parent counts with kind unknown.
         counts = [] if pool is None else conn.execute(
-            "SELECT outcome,reason,kind,count(*) AS n FROM photo_pool_rows WHERE pool_key=%s "
-            "GROUP BY outcome,reason,kind", (pool_key,)).fetchall()
+            "SELECT r.outcome,r.reason,l.kind,count(*) AS n FROM photo_pool_rows r "
+            "LEFT JOIN library_assets l ON l.connection_ref=%s AND l.upstream_id=r.upstream_id "
+            "WHERE r.pool_key=%s GROUP BY r.outcome,r.reason,l.kind",
+            (pool["connection_ref"], pool_key)).fetchall()
         rows = [] if pool is None else conn.execute(
-            "SELECT asset_id,kind,taken_at,width,height FROM photo_pool_rows WHERE pool_key=%s "
-            "AND outcome='in_pool' AND (%s::double precision IS NULL OR "
-            "(taken_at,asset_id) < (%s::double precision,%s::text)) "
-            "ORDER BY taken_at DESC,asset_id DESC LIMIT %s",
+            f"SELECT {_MEMBER_COLUMNS} FROM photo_pool_rows r {_REVISION_JOIN} "
+            "WHERE r.pool_key=%s AND r.outcome='in_pool' AND (%s::double precision IS NULL OR "
+            "(l.taken_at,r.asset_id) < (%s::double precision,%s::text)) "
+            "ORDER BY l.taken_at DESC,r.asset_id DESC LIMIT %s",
             (pool_key, None if after is None else after.taken_at,
              None if after is None else after.taken_at, None if after is None else after.asset_id,
              policy.POOL_PAGE_SIZE + 1)).fetchall()
@@ -699,7 +759,7 @@ class PgPhotoLibrary:
         with self.db.transaction() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT ON (upstream_id) upstream_id::text AS upstream_id,updated_at,"
-                "metadata->>'revision' AS revision FROM asset_revisions WHERE connection_ref=%s "
+                "revision FROM asset_revisions WHERE connection_ref=%s "
                 "AND upstream_id=ANY(%s::uuid[]) AND updated_at IS NOT NULL "
                 "ORDER BY upstream_id,last_seen DESC", (connection_ref, list(upstream_ids))).fetchall()
         return {row["upstream_id"]: KnownRevision(updated_at=row["updated_at"],
@@ -726,27 +786,16 @@ class PgPhotoLibrary:
                         [(lease.pool_key, lease.check_number, mark.upstream_id, mark.mark)
                          for mark in step.marks])
                 marked = self._marked_in(conn, lease, (self._upstream(e) for e in step.entries))
-                entries = [e for e in step.entries if self._upstream(e) not in marked]
-                assets = {e.asset.asset_id: e for e in entries if isinstance(e, InPool)}
-                if assets:
-                    cursor.executemany(
-                        "INSERT INTO asset_revisions(asset_id,metadata,first_seen,last_seen,"
-                        "connection_ref,upstream_id,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s) "
-                        "ON CONFLICT(asset_id) DO UPDATE SET metadata=EXCLUDED.metadata,"
-                        "last_seen=EXCLUDED.last_seen,connection_ref=EXCLUDED.connection_ref,"
-                        "upstream_id=EXCLUDED.upstream_id,updated_at=EXCLUDED.updated_at",
-                        [(entry.asset.asset_id, Jsonb(entry.asset.model_dump(mode="json")), now,
-                          now, entry.asset.connection_ref, entry.asset.upstream_id,
-                          entry.updated_at) for entry in assets.values()])
+                # Sorted by Immich id, so two pools' steps lock shared parent rows in one order.
+                entries = sorted((e for e in step.entries if self._upstream(e) not in marked),
+                                 key=self._upstream)
+                self._record_assets_in(cursor, lease.query.connection_ref, entries, now)
                 if entries:
                     cursor.executemany(
                         "INSERT INTO photo_pool_rows(pool_key,upstream_id,outcome,reason,asset_id,"
-                        "revision,kind,taken_at,width,height,seen_check) "
-                        "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(pool_key,upstream_id) "
+                        "seen_check) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(pool_key,upstream_id) "
                         "DO UPDATE SET outcome=EXCLUDED.outcome,reason=EXCLUDED.reason,"
-                        "asset_id=EXCLUDED.asset_id,revision=EXCLUDED.revision,kind=EXCLUDED.kind,"
-                        "taken_at=EXCLUDED.taken_at,width=EXCLUDED.width,height=EXCLUDED.height,"
-                        "seen_check=EXCLUDED.seen_check",
+                        "asset_id=EXCLUDED.asset_id,seen_check=EXCLUDED.seen_check",
                         [(lease.pool_key, *self._row(entry), lease.check_number)
                          for entry in entries])
             conn.execute("UPDATE photo_pools SET progress=%s,seen_so_far=%s,"
@@ -773,17 +822,54 @@ class PgPhotoLibrary:
             (lease.pool_key, lease.check_number, ids)).fetchall()}
 
     @staticmethod
+    def _record_assets_in(cursor: Any, connection_ref: str,
+                          entries: Sequence[InPool | Waiting | LeftOut], now: float) -> None:
+        """The facts a step read, each in its one home: every entry naming a kind and taken time
+        upserts its Immich asset's `library_assets` row (first_seen kept, last_seen now; kind and
+        taken time rewritten; the original's facts rewritten by an InPool, None writing NULLs,
+        and kept by a Waiting or LeftOut, which did not read them); then each InPool's revision
+        upserts its `asset_revisions` row."""
+        in_pool = [e for e in entries if isinstance(e, InPool)]
+        if in_pool:
+            cursor.executemany(
+                "INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,"
+                "original_media_type,original_width,original_height,original_orientation,"
+                "original_bytes,first_seen,last_seen) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(connection_ref,upstream_id) DO UPDATE SET kind=EXCLUDED.kind,"
+                "taken_at=EXCLUDED.taken_at,original_media_type=EXCLUDED.original_media_type,"
+                "original_width=EXCLUDED.original_width,original_height=EXCLUDED.original_height,"
+                "original_orientation=EXCLUDED.original_orientation,"
+                "original_bytes=EXCLUDED.original_bytes,last_seen=EXCLUDED.last_seen",
+                [(e.asset.connection_ref, e.asset.upstream_id, e.asset.kind, e.asset.taken_at,
+                  *_original_values(e.asset.original), now, now) for e in in_pool])
+        others = [e for e in entries if not isinstance(e, InPool)
+                  and e.kind is not None and e.taken_at is not None]
+        if others:
+            cursor.executemany(
+                "INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,first_seen,"
+                "last_seen) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(connection_ref,upstream_id) "
+                "DO UPDATE SET kind=EXCLUDED.kind,taken_at=EXCLUDED.taken_at,"
+                "last_seen=EXCLUDED.last_seen",
+                [(connection_ref, e.upstream_id, e.kind, e.taken_at, now, now) for e in others])
+        if in_pool:
+            cursor.executemany(
+                "INSERT INTO asset_revisions(asset_id,connection_ref,upstream_id,revision,width,"
+                "height,duration,updated_at,first_seen,last_seen) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(asset_id) DO UPDATE SET "
+                "width=EXCLUDED.width,height=EXCLUDED.height,duration=EXCLUDED.duration,"
+                "updated_at=EXCLUDED.updated_at,last_seen=EXCLUDED.last_seen",
+                [(e.asset.asset_id, e.asset.connection_ref, e.asset.upstream_id, e.asset.revision,
+                  e.asset.width, e.asset.height, e.asset.duration, e.updated_at, now, now)
+                 for e in in_pool])
+
+    @staticmethod
     def _row(entry: InPool | Waiting | LeftOut) -> tuple:
-        """(upstream_id, outcome, reason, asset_id, revision, kind, taken_at, width, height)."""
+        """(upstream_id, outcome, reason, asset_id): a pool row copies no fact of its photo."""
         if isinstance(entry, InPool):
-            asset: LibraryAsset = entry.asset
-            return (asset.upstream_id, "in_pool", None, asset.asset_id, asset.revision, asset.kind,
-                    asset.taken_at, asset.width, asset.height)
+            return (entry.asset.upstream_id, "in_pool", None, entry.asset.asset_id)
         if isinstance(entry, Waiting):
-            return (entry.upstream_id, "waiting", None, None, None, entry.kind, entry.taken_at,
-                    None, None)
-        return (entry.upstream_id, "left_out", entry.reason, None, None, entry.kind,
-                entry.taken_at, None, None)
+            return (entry.upstream_id, "waiting", None, None)
+        return (entry.upstream_id, "left_out", entry.reason, None)
 
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
         with self.db.transaction() as conn:
@@ -820,11 +906,43 @@ class PgPhotoLibrary:
                 "AS edge FROM frames").fetchone()
         return row["edge"]
 
+    def frame_outputs(self) -> tuple[FrameOutput, ...]:
+        with self.db.transaction() as conn:
+            return frame_outputs_in(conn)
+
+    def copy_sizes(self, asset_id: str) -> dict[MeasurableCopy, CopySize]:
+        with self.db.transaction() as conn:
+            rows = conn.execute("SELECT copy,media_type,width,height,measured_at FROM asset_copies "
+                                "WHERE asset_id=%s", (asset_id,)).fetchall()
+        return {row["copy"]: CopySize(name=row["copy"], media_type=row["media_type"],
+                                      width=row["width"], height=row["height"],
+                                      measured_at=row["measured_at"]) for row in rows}
+
+    def record_copies(self, asset_id: str, measured: Sequence[MeasuredCopy]) -> None:
+        if not measured:
+            return
+        with self.db.transaction() as conn:
+            # The revision held while its copies are written: one deleted meanwhile writes none.
+            if conn.execute("SELECT 1 FROM asset_revisions WHERE asset_id=%s FOR SHARE",
+                            (asset_id,)).fetchone() is None:
+                return
+            now = self.times.now_in(conn)
+            latest = {copy.name: copy for copy in measured}   # the later measurement wins
+            with conn.cursor() as cursor:
+                cursor.executemany(
+                    "INSERT INTO asset_copies(asset_id,copy,media_type,width,height,measured_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(asset_id,copy) DO UPDATE SET "
+                    "media_type=EXCLUDED.media_type,width=EXCLUDED.width,"
+                    "height=EXCLUDED.height,measured_at=EXCLUDED.measured_at",
+                    [(asset_id, name, copy.media_type, copy.width, copy.height, now)
+                     for name, copy in sorted(latest.items())])
+
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         with self.db.transaction() as conn:
             row = conn.execute(
-                "SELECT p.connection_ref,r.upstream_id::text AS upstream_id,r.revision "
-                f"FROM photo_pool_rows r JOIN photo_pools p USING (pool_key) WHERE r.asset_id=%s "
+                "SELECT p.connection_ref,r.upstream_id::text AS upstream_id,a.revision "
+                "FROM photo_pool_rows r JOIN photo_pools p USING (pool_key) "
+                f"JOIN asset_revisions a USING (asset_id) WHERE r.asset_id=%s "
                 f"AND r.outcome='in_pool' AND {_WANTED} LIMIT 1", (asset_id,)).fetchone()
         if row is None:
             return None

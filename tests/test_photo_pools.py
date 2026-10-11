@@ -13,6 +13,7 @@ import pytest
 from psycopg.types.json import Jsonb
 from test_photo_library_store import RecordingLibraryQueue, store_of
 
+from central.infra.photo_library_store import library_assets_in
 from central.photo_library.model import (
     CheckMark,
     InPool,
@@ -142,13 +143,14 @@ def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_trans
     assert {row["seen_check"] for row in rows.values()} == {lease.check_number}
     assert rows[str(UUID(int=5))]["reason"] == "unreadable_answer"
     with store.db.transaction() as conn:
-        stored = conn.execute("SELECT connection_ref,upstream_id::text AS upstream_id,metadata,"
+        stored = conn.execute("SELECT connection_ref,upstream_id::text AS upstream_id,"
                               "updated_at FROM asset_revisions WHERE asset_id=%s",
                               (asset(ref, 1, 100.0).asset_id,)).fetchone()
+        leased = library_assets_in(conn, [asset(ref, 1, 100.0).asset_id])
         marks = conn.execute("SELECT upstream_id::text AS id,mark FROM photo_check_marks "
                              "ORDER BY mark").fetchall()
     assert (stored["connection_ref"], stored["upstream_id"]) == (ref, str(UUID(int=1)))
-    assert LibraryAsset.model_validate(stored["metadata"]) == asset(ref, 1, 100.0)
+    assert leased == {asset(ref, 1, 100.0).asset_id: asset(ref, 1, 100.0)}
     assert stored["updated_at"] == edited_at
     assert store.known_revisions(ref, [str(UUID(int=1)), str(UUID(int=2))]) == {
         str(UUID(int=1)): KnownRevision(updated_at=edited_at, revision=f"{1:040x}")}

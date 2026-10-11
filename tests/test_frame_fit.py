@@ -1,5 +1,7 @@
 """The cover rectangle and the corner rule (roadmap 1c, slice T0; contracts/frame_fit.py; the
-rectangle has the Frame profile's aspect at every angle, owner 2026-10-11).
+rectangle has the Frame profile's aspect at every angle, owner 2026-10-11), and the Frame output
+with its one test, `window_holds` (follow-ups 2026-10-11, slice A1; owner: compatibility
+"measuring against the Frame output and not the Display").
 
 The vectors in tests/support/frame_fit_vectors.json are the one set of test vectors for the corner
 rule and the cover rectangle: the console's convex.js check reads them too.
@@ -12,7 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from contracts.frame_fit import FULL_SCREEN, CoverRectangle, convex_clockwise, cover_rectangle
+from contracts.frame_fit import (
+    FULL_SCREEN,
+    CoverRectangle,
+    convex_clockwise,
+    cover_rectangle,
+    picture_size,
+    window_holds,
+)
 
 VECTORS = json.loads((Path(__file__).parent / "support" / "frame_fit_vectors.json").read_text())
 OUTPUT = tuple(VECTORS["output"])
@@ -127,3 +136,77 @@ def test_an_empty_output_refuses(output):
 def test_an_aspect_that_is_not_a_positive_number_refuses(aspect):
     with pytest.raises(ValueError, match="^cover_aspect$"):
         cover_rectangle(FULL_SCREEN, 0, OUTPUT, aspect)
+
+
+# --- The Frame output (slice A1) -------------------------------------------------------------
+
+UHD = (3840, 2160)
+OPENING = ((0.3, 0.3), (0.7, 0.3), (0.7, 0.7), (0.3, 0.7))   # a 40 % x 40 % mat opening
+
+
+def test_cover_on_the_whole_screen_is_the_whole_output():
+    """(1)"""
+    assert picture_size("cover", FULL_SCREEN, 0, UHD, 16 / 9) == (3840, 2160)
+
+
+def test_cover_inside_a_mat_opening_needs_only_the_openings_pixels():
+    """(2) The Frame output, not the Display: a mat opening needs fewer pixels than the Output."""
+    assert picture_size("cover", OPENING, 0, UHD, 16 / 9) == (1536, 864)
+
+
+def test_cover_turned_inside_the_opening_needs_more_than_the_opening():
+    """(3) The rectangle holds every corner, so an off-axis turn is larger on both sides."""
+    width, height = picture_size("cover", OPENING, 10, UHD, 16 / 9)
+    assert width > 1536 and height > 864
+
+
+@pytest.mark.parametrize(("rotation", "expected"), [(0, (1920, 1080)), (90, (1080, 1920)),
+                                                    (180, (1920, 1080)), (270, (1080, 1920))])
+def test_corners_take_the_longer_edge_of_each_pair_and_a_quarter_turn_swaps_them(rotation, expected):
+    """(4) Mutation probe: drop the quarter-turn swap -> the 90 and 270 cases fail."""
+    assert picture_size("corners", FULL_SCREEN, rotation, (1920, 1080), 16 / 9) == expected
+
+
+def test_corners_on_a_skewed_quad_take_the_longer_edge_of_each_pair():
+    skewed = ((0.0, 0.0), (0.5, 0.0), (1.0, 1.0), (0.0, 1.0))   # top 960 px, bottom 1,920 px
+    assert picture_size("corners", skewed, 0, (1920, 1080), 16 / 9) == (1920, math.ceil(
+        math.hypot(960, 1080)))
+
+
+def test_corners_refuse_a_turn_that_is_not_a_quarter_turn():
+    with pytest.raises(ValueError, match="^corners_rotation$"):
+        picture_size("corners", FULL_SCREEN, 45, (1920, 1080), 16 / 9)
+
+
+def test_a_side_just_over_an_integer_is_that_integer():
+    """Float noise never asks for one pixel more."""
+    assert picture_size("cover", ((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)), 0,
+                        (1000, 1000), 1.0) == (800, 800)
+
+
+@pytest.mark.parametrize(("need", "holds"), [
+    ((3840, 2160), True),
+    ((4032, 2268), True),     # exactly the largest 16:9 window of a 4,032 x 3,024 photo
+    ((4033, 2268), False),
+    ((4100, 2000), False),    # a smaller area, but a wider side: both axes must hold
+    ((2268, 4032), False),    # the same pixels the other way round
+])
+def test_a_photo_holds_the_frame_output_only_when_its_window_holds_both_sides(need, holds):
+    """(5) Mutation probe: compare areas instead of both axes -> (4100, 2000) holds and this fails."""
+    assert window_holds(4032, 3024, 16 / 9, need) is holds
+
+
+def test_a_wide_photo_is_cut_along_its_height():
+    """A 4:1 panorama's 16:9 window spans its whole height."""
+    assert window_holds(8000, 2000, 16 / 9, (3555, 2000)) is True
+    assert window_holds(8000, 2000, 16 / 9, (3556, 2001)) is False
+
+
+@pytest.mark.parametrize(("width", "height", "aspect", "need"), [
+    (0, 3024, 16 / 9, (1, 1)), (4032, -1, 16 / 9, (1, 1)), (4032, 3024, 0, (1, 1)),
+    (4032, 3024, float("nan"), (1, 1)), (4032, 3024, 16 / 9, (0, 1)), (4032, 3024, 16 / 9, (1, 0)),
+    (4032.0, 3024, 16 / 9, (1, 1)),
+])
+def test_a_size_that_is_not_positive_refuses(width, height, aspect, need):
+    with pytest.raises(ValueError, match="^window_size$"):
+        window_holds(width, height, aspect, need)

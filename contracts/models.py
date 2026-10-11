@@ -6,7 +6,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-from contracts.frame_fit import FULL_SCREEN, OutputSize, PictureSize, convex_clockwise
+from contracts.frame_fit import FULL_SCREEN, OutputSize, PictureSize, convex_clockwise, picture_size
 
 # The API identifier rule (path parameters, Scene/Program/Source ids). The console's
 # IDENTIFIER_PATTERN (authoring.js) is pinned equal to it by a test.
@@ -98,7 +98,11 @@ def frame_output(profile: FrameProfile, calibration: Calibration,
     at the profile's aspect width_px / height_px). None when `output` is None or has a side
     below 1 (its Pi has not reported the Output's size). Pure; the one place a Frame's
     calibration and profile become its Frame output (follow-ups 2026-10-11, slice A1)."""
-    raise NotImplementedError
+    if output is None or output[0] < 1 or output[1] < 1:
+        return None
+    fit = calibration.fit
+    return picture_size(fit.mode, fit.corners, fit.rotation, output,
+                        profile.width_px / profile.height_px)
 
 
 class IdentifyOutput(Model):
