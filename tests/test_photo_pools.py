@@ -28,6 +28,7 @@ from central.photo_library.ports import (
     CheckFailed,
     CheckIncomplete,
     CheckStep,
+    KnownRevision,
     LibraryRefused,
 )
 from central.photo_library.views import ConnectionWrite
@@ -119,7 +120,7 @@ def test_a_superseded_lease_writes_nothing(pools):
 
 
 def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_transaction(pools):
-    """Case 3. Mutation probe: let a marked entry in."""
+    """Case 3. Mutation probes: let a marked entry in; drop `updated_at` from the upsert."""
     store, queue, ref = pools
     key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
     lease = store.begin_check(key)
@@ -127,8 +128,9 @@ def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_trans
     queued = len(queue.pools)
     assert store.record_step(lease, step(marks=(CheckMark(upstream_id=excluded, mark="excluded"),),
                                          seen=0, up_to=10)) is True
+    edited_at = "2026-10-01T12:00:00.000Z"
     assert store.record_step(lease, step(
-        InPool(asset=asset(ref, 1, 100.0)),
+        InPool(asset=asset(ref, 1, 100.0), updated_at=edited_at),
         Waiting(upstream_id=str(UUID(int=2)), kind="image", taken_at=90.0),
         InPool(asset=asset(ref, 3, 80.0)),                          # marked by an earlier step
         InPool(asset=asset(ref, 4, 70.0)),                          # marked in this step
@@ -140,13 +142,20 @@ def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_trans
     assert {row["seen_check"] for row in rows.values()} == {lease.check_number}
     assert rows[str(UUID(int=5))]["reason"] == "unreadable_answer"
     with store.db.transaction() as conn:
-        stored = conn.execute("SELECT connection_ref,upstream_id::text AS upstream_id,metadata "
-                              "FROM asset_revisions WHERE asset_id=%s",
+        stored = conn.execute("SELECT connection_ref,upstream_id::text AS upstream_id,metadata,"
+                              "updated_at FROM asset_revisions WHERE asset_id=%s",
                               (asset(ref, 1, 100.0).asset_id,)).fetchone()
         marks = conn.execute("SELECT upstream_id::text AS id,mark FROM photo_check_marks "
                              "ORDER BY mark").fetchall()
     assert (stored["connection_ref"], stored["upstream_id"]) == (ref, str(UUID(int=1)))
     assert LibraryAsset.model_validate(stored["metadata"]) == asset(ref, 1, 100.0)
+    assert stored["updated_at"] == edited_at
+    assert store.known_revisions(ref, [str(UUID(int=1)), str(UUID(int=2))]) == {
+        str(UUID(int=1)): KnownRevision(updated_at=edited_at, revision=f"{1:040x}")}
+    moved_at = "2026-10-02T12:00:00.000Z"   # a later read of the same revision moves it
+    assert store.record_step(lease, step(InPool(asset=asset(ref, 1, 100.0), updated_at=moved_at),
+                                         seen=5)) is True
+    assert store.known_revisions(ref, [str(UUID(int=1))])[str(UUID(int=1))].updated_at == moved_at
     assert [(m["id"], m["mark"]) for m in marks] == [(excluded, "excluded"), (copy, "stacked_copy")]
     pool = _pool(store, key)
     assert (pool["seen_so_far"], pool["immich_up_to"], pool["progress"]) == (5, 10, {"page": 5})
@@ -296,12 +305,21 @@ def test_retirement_keeps_wanted_pools_and_their_thumbnails_only(pools):
 
 
 def test_due_pools_by_the_database_clock(pools):
-    """Case 9."""
+    """Case 9 (run 2: the staleness rule). Mutation probe: skip every checking pool again."""
     store, _, ref = pools
     key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
     assert store.due_pools() == (key,)                            # requested
     lease = store.begin_check(key)
-    assert store.due_pools() == ()                                # checking: never due
+    assert store.due_pools() == ()                                # its step just began
+    assert store.record_step(lease, step(InPool(asset=asset(ref, 1, 100.0)), seen=1)) is True
+    _age(store, "photo_pools", "step_at", "pool_key", key, 899)
+    assert store.due_pools() == ()
+    _age(store, "photo_pools", "step_at", "pool_key", key, 900)   # its step was lost
+    assert store.due_pools() == (key,)
+    resumed = store.begin_check(key)
+    assert (resumed.check_number, resumed.progress) == (lease.check_number, {"page": 1})
+    assert store.due_pools() == ()                                # step_at moved
+    lease = resumed
     store.finish_check(lease, CheckComplete())
     _age(store, "photo_pools", "check_finished_at", "pool_key", key, 899)
     assert store.due_pools() == ()

@@ -54,8 +54,8 @@ from contracts.models import Instant, Model
 class LibraryRefused(Exception):
     """A refusal the routes answer as {"error": code} with `status`:
     connection_unknown 404, sources_use_connection 409, invalid_url 422, key_required 422,
-    draft_unknown 404, source_unknown 404, cursor_invalid 422, source_name_exists 409,
-    source_revision_conflict 409, invalid_source_name 422."""
+    connection_name_exists 409, draft_unknown 404, source_unknown 404, cursor_invalid 422,
+    source_name_exists 409, source_revision_conflict 409, invalid_source_name 422."""
 
     def __init__(self, code: str, status: int) -> None:
         super().__init__(code)
@@ -242,11 +242,14 @@ class LibraryWorkerStore(Protocol):
     def due_pools(self) -> tuple[PoolKey, ...]:
         """Wanted pools (a live draft, or a Source revision Runtime or a name needs) with no check
         running whose last check finished CHECK_EVERY_SECONDS ago or more, or never ran, or
-        that a Check now asked for."""
+        that a Check now asked for; and wanted pools whose connection has a key with a check
+        running whose latest step began STALE_CHECK_SECONDS ago or more (database time), so a
+        step lost with its worker never leaves a pool checking."""
         ...
 
     def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
-        """Resume the pool's running check, or start the next check number; None when the pool
+        """Resume the pool's running check from its stored progress, or start the next check
+        number; either way the latest step's start (`step_at`) becomes now. None when the pool
         is gone, unwanted, or its connection has no key."""
         ...
 

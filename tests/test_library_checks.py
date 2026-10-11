@@ -26,6 +26,7 @@ from central.photo_library.model import (
     SourceQuery,
     Unreachable,
 )
+from central.photo_library.policy import STALE_CHECK_SECONDS
 from central.photo_library.ports import CheckComplete, CheckFailed
 from contracts.time import ManualClock
 from media.library_checks import LibraryChecks
@@ -213,6 +214,69 @@ def test_an_edited_photo_gets_its_fingerprint_in_its_revision():
     assert store.rows(key)[ref(1)].asset.revision == SHA + "-" + "f" * 16
 
 
+class RecordingQueue:
+    def __init__(self):
+        self.queued = []
+
+    async def connection(self, ref):
+        self.queued.append(("connection", ref))
+
+    async def pool(self, key):
+        self.queued.append(("pool", key))
+
+
+def _pools_queued_by_tick(checks):
+    checks.queue = RecordingQueue()
+    asyncio.run(checks.tick())
+    return [key for kind, key in checks.queue.queued if kind == "pool"]
+
+
+def test_a_check_whose_step_was_lost_resumes_after_the_stale_window_and_removes_only_at_the_end():
+    """S1: the staleness rule (policy.STALE_CHECK_SECONDS) over the fake store."""
+    client = FakeClient([photo(n) for n in range(1, 6)])
+    store, key, checks, _ = setup(client)
+    asyncio.run(check_to_end(checks, store, key))
+    del client.photos[0]                               # ref(1) is gone from Immich
+    store.pools[key].requested = True                  # Check now
+    for _ in range(2):                                 # two steps, then the worker dies
+        asyncio.run(checks.check_pool(key))
+    progress = store.pools[key].progress
+    assert store.pools[key].checking and progress is not None
+    store.clock.advance(STALE_CHECK_SECONDS - 1)
+    assert _pools_queued_by_tick(checks) == []
+    store.clock.advance(1)
+    assert _pools_queued_by_tick(checks) == [key]
+    number = store.pools[key].check_number
+    client.calls.clear()
+    asyncio.run(checks.check_pool(key))                # resumed from its progress
+    assert store.pools[key].check_number == number and "up_to" not in client.calls
+    assert _pools_queued_by_tick(checks) == []         # its step began again just now
+    assert ref(1) in in_pool(store, key)
+    while store.pools[key].checking:
+        assert ref(1) in in_pool(store, key)           # nothing removed before the finish
+        asyncio.run(checks.check_pool(key))
+    assert isinstance(store.pools[key].outcome, CheckComplete)
+    assert in_pool(store, key) == [ref(n) for n in range(2, 6)]
+
+
+def test_a_second_check_reuses_a_known_revision_while_updated_at_holds():
+    """S1 (E-P4-C2-1): no edits_fingerprint call for an edited photo whose updatedAt did not
+    move; a moved updatedAt reads the edit list again."""
+    client = FakeClient([photo(1, is_edited=True, updated_at="2026-01-15T00:00:00.000Z")])
+    store, key, checks, _ = setup(client)
+    asyncio.run(check_to_end(checks, store, key))
+    assert client.calls.count("edits") == 1
+    store.pools[key].requested = True
+    client.calls.clear()
+    asyncio.run(check_to_end(checks, store, key))
+    assert "edits" not in client.calls
+    assert store.rows(key)[ref(1)].asset.revision == SHA + "-" + "f" * 16
+    client.photos = [photo(1, is_edited=True, updated_at="2026-02-01T00:00:00.000Z")]
+    store.pools[key].requested = True
+    asyncio.run(check_to_end(checks, store, key))
+    assert client.calls.count("edits") == 1
+
+
 def test_a_contact_lands_and_the_lists_follow():
     client = FakeClient()
     store, _, checks, _ = setup(client)
@@ -258,19 +322,9 @@ def test_a_new_key_gets_a_new_client():
 
 
 def test_tick_queues_due_contacts_and_due_pools():
-    class Queue:
-        def __init__(self):
-            self.queued = []
-
-        async def connection(self, ref):
-            self.queued.append(("connection", ref))
-
-        async def pool(self, key):
-            self.queued.append(("pool", key))
-
     client = FakeClient()
     store, key, checks, _ = setup(client)
-    checks.queue = Queue()
+    checks.queue = RecordingQueue()
     asyncio.run(checks.tick())
     assert checks.queue.queued == [("connection", "main"), ("pool", key)]
 

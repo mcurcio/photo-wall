@@ -651,9 +651,10 @@ class PgPhotoLibrary:
             rows = conn.execute(
                 "SELECT p.pool_key FROM photo_pools p JOIN library_connections c USING "
                 f"(connection_ref) WHERE c.api_key IS NOT NULL AND {_WANTED} AND "
-                "p.check_state<>'checking' AND (p.check_requested OR p.check_finished_at IS NULL "
-                "OR p.check_finished_at<=%s) ORDER BY p.pool_key",
-                (now - policy.CHECK_EVERY_SECONDS,)).fetchall()
+                "CASE WHEN p.check_state='checking' THEN p.step_at IS NULL OR p.step_at<=%s "
+                "ELSE p.check_requested OR p.check_finished_at IS NULL OR p.check_finished_at<=%s "
+                "END ORDER BY p.pool_key",
+                (now - policy.STALE_CHECK_SECONDS, now - policy.CHECK_EVERY_SECONDS)).fetchall()
         return tuple(row["pool_key"] for row in rows)
 
     def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
@@ -664,15 +665,19 @@ class PgPhotoLibrary:
                 "FOR UPDATE OF p", (pool_key,)).fetchone()
             if row is None or not row["wanted"] or row["api_key"] is None:
                 return None
+            now = self.times.now_in(conn)
             if row["check_state"] != "checking":
                 row = conn.execute(
                     "UPDATE photo_pools SET check_number=check_number+1,check_state='checking',"
-                    "check_started_at=%s,progress=NULL,seen_so_far=0,problem=NULL,"
+                    "check_started_at=%s,step_at=%s,progress=NULL,seen_so_far=0,problem=NULL,"
                     "incomplete_reason=NULL,check_requested=FALSE WHERE pool_key=%s "
                     "RETURNING check_number,check_started_at,progress",
-                    (self.times.now_in(conn), pool_key)).fetchone() | {
+                    (now, now, pool_key)).fetchone() | {
                         key: row[key] for key in ("connection_ref", "url", "api_key",
                                                   "immich_user", "query")}
+            else:
+                conn.execute("UPDATE photo_pools SET step_at=%s WHERE pool_key=%s",
+                             (now, pool_key))
         return CheckLease(pool_key=pool_key, query=SourceQuery.model_validate(row["query"]),
                           connection=self._secret(row), check_number=row["check_number"],
                           started_at=row["check_started_at"], progress=row["progress"])
@@ -712,16 +717,17 @@ class PgPhotoLibrary:
                          for mark in step.marks])
                 marked = self._marked_in(conn, lease, (self._upstream(e) for e in step.entries))
                 entries = [e for e in step.entries if self._upstream(e) not in marked]
-                assets = {e.asset.asset_id: e.asset for e in entries if isinstance(e, InPool)}
+                assets = {e.asset.asset_id: e for e in entries if isinstance(e, InPool)}
                 if assets:
                     cursor.executemany(
                         "INSERT INTO asset_revisions(asset_id,metadata,first_seen,last_seen,"
-                        "connection_ref,upstream_id) VALUES(%s,%s,%s,%s,%s,%s) "
+                        "connection_ref,upstream_id,updated_at) VALUES(%s,%s,%s,%s,%s,%s,%s) "
                         "ON CONFLICT(asset_id) DO UPDATE SET metadata=EXCLUDED.metadata,"
                         "last_seen=EXCLUDED.last_seen,connection_ref=EXCLUDED.connection_ref,"
-                        "upstream_id=EXCLUDED.upstream_id",
-                        [(asset.asset_id, Jsonb(asset.model_dump(mode="json")), now, now,
-                          asset.connection_ref, asset.upstream_id) for asset in assets.values()])
+                        "upstream_id=EXCLUDED.upstream_id,updated_at=EXCLUDED.updated_at",
+                        [(entry.asset.asset_id, Jsonb(entry.asset.model_dump(mode="json")), now,
+                          now, entry.asset.connection_ref, entry.asset.upstream_id,
+                          entry.updated_at) for entry in assets.values()])
                 if entries:
                     cursor.executemany(
                         "INSERT INTO photo_pool_rows(pool_key,upstream_id,outcome,reason,asset_id,"

@@ -86,6 +86,11 @@ def test_a_known_revision_is_reused_only_at_the_same_updated_at():
     assert fresh[0].asset.revision == SHA + "-" + "c" * 16
 
 
+def test_an_in_pool_entry_carries_immichs_updated_at_for_the_store():
+    found, _ = entries([item(1), item(2, updated_at=None)])
+    assert [entry.updated_at for entry in found] == ["2026-01-15T00:00:00.000Z", None]
+
+
 def test_an_unedited_photos_revision_is_its_checksum():
     found, _ = entries([item(1)])
     assert found[0].asset.revision == SHA
