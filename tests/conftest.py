@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from support.database import TestDatabases, server_dsn
+from support.immich_library import load_immich_library
 
 from central.db import Database
 from central.registry import Registry
@@ -19,6 +20,9 @@ _UNOWNED_SKIPS = pytest.StashKey[list]()
 # The fixture every database fixture builds on: a test whose fixture closure holds it is a `db`
 # test, however it reaches the database, so a new database fixture classifies itself.
 DATABASE_ROOT = "database_provisioner"
+# Likewise a test whose closure holds the real Immich fixture is an `immich` test (it may also be
+# `db`): CI's software-e2e.yml photo-sources job runs them against a published fixture.
+IMMICH_ROOT = "immich_library"
 BROWSER_TESTS = Path(__file__).parent / "browser"
 
 # A skip in CI (`CI` set) fails the run unless its reason starts with one of these: each is a
@@ -37,6 +41,7 @@ CI_SKIP_ALLOWLIST = (
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
     "set PHOTO_WALL_IMAGE_MOUNT_TESTS",  # node-components.yml mounts the images (docker, loop, sudo)
     "set PHOTO_WALL_LOCAL_REPO",  # node-components.yml's debs job proves the repo it builds
+    "set PHOTO_WALL_IMMICH_FIXTURE",  # software-e2e.yml photo-sources runs the named Immich tests
 )
 
 
@@ -46,12 +51,17 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "db: needs PostgreSQL (derived from its fixtures)")
     config.addinivalue_line("markers", "browser: drives the console in a browser (tests/browser)")
     config.addinivalue_line("markers", "node_pid1: the node under real systemd (node-pid1.yml)")
+    config.addinivalue_line("markers", "immich: needs the published Immich fixture (derived from "
+                            "its fixtures; software-e2e.yml photo-sources)")
 
 
 @pytest.hookimpl(tryfirst=True)  # before `-m` deselects and xdist reads the groups
 def pytest_collection_modifyitems(items):
-    """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit."""
+    """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit; and
+    `immich` by its fixtures, whatever its tier."""
     for item in items:
+        if IMMICH_ROOT in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.immich)
         if BROWSER_TESTS in item.path.parents:
             item.add_marker(pytest.mark.browser)
         elif DATABASE_ROOT in getattr(item, "fixturenames", ()):
@@ -118,6 +128,16 @@ def pytest_runtest_makereport(item, call):
     if log:
         with open(log, "a", encoding="utf-8") as handle:
             handle.write(json.dumps({**readings, "exception": str(report.longrepr)}) + "\n")
+
+
+@pytest.fixture(scope="session")
+def immich_library():
+    """The published real Immich fixture (support/immich_library.py); skips without
+    PHOTO_WALL_IMMICH_FIXTURE."""
+    try:
+        return load_immich_library()
+    except LookupError as unset:
+        pytest.skip(str(unset))
 
 
 @pytest.fixture

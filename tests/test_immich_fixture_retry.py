@@ -249,33 +249,80 @@ class _RecordingHost:
     def probe(self, upstream_ip):
         return {}
 
-    def role(self, role, action, *, page_size):
+    def role(self, role, action):
         self.roles.append((role, action))
         return {}
 
     def export_runtime(self):
-        pass
+        self.composed.append(("cp", "runtime"))
+
+    def publish(self):
+        self.composed.append(("publish",))
+        return {"base_url": "http://127.0.0.1:1/api"}
 
     def cleanup(self):
         pass
 
 
 @pytest.mark.parametrize("setup_only", [False, True])
-def test_setup_only_stops_after_the_setup_and_the_full_run_checks_every_role(
-        tmp_path, monkeypatch, setup_only):
+@pytest.mark.parametrize("publish", [False, True])
+def test_every_run_sets_up_the_content_set_and_only_publish_hands_it_to_this_host(
+        tmp_path, monkeypatch, setup_only, publish):
     import scripts.immich_fixture as fixture
 
     hosts = []
     monkeypatch.setattr(fixture.FixtureHost, "create",
-                        classmethod(lambda cls, state: hosts.append(_RecordingHost(state))
-                                    or hosts[-1]))
-    result = fixture.run_fixture(tmp_path / "state", True, setup_only=setup_only)
-    assert result["result"] == "passed"
+                        classmethod(lambda cls, state, publish: hosts.append(
+                            _RecordingHost(state)) or hosts[-1]))
+    result = fixture.run_fixture(tmp_path / "state", True, setup_only=setup_only,
+                                 publish=publish)
+    assert result["result"] == "passed" and result["published"] is publish
     (host,) = hosts
-    if setup_only:
-        assert host.roles == [("setup", "initialize")]
-        assert ("stop", "immich") not in host.composed
-    else:
-        assert host.roles == [*fixture.SETUP_ROLES, *fixture.ADAPTER_ROLES,
-                              ("central", "outage"), ("central", "recovered")]
-        assert ("stop", "immich") in host.composed
+    assert host.roles == [("setup", "initialize")]
+    assert ("stop", "immich") not in host.composed
+    assert (("publish",) in host.composed) is publish
+    if publish:  # the runtime state is on this host before the admin session joins it
+        assert host.composed.index(("cp", "runtime")) < host.composed.index(("publish",))
+    assert not hasattr(fixture, "ADAPTER_ROLES")
+
+
+def test_the_published_topology_allows_exactly_one_loopback_binding(tmp_path, monkeypatch):
+    """Under --publish only Immich may bind, on 127.0.0.1 and nowhere else."""
+    import json as _json
+    import subprocess as _subprocess
+
+    import scripts.immich_fixture as fixture
+
+    def inspected(host_ip):
+        def container(service, networks, bindings):
+            return {"Config": {"Labels": {"com.docker.compose.service": service}},
+                    "NetworkSettings": {"Networks": {
+                        f"{project}_{name}": {"IPAddress": "192.0.2.7"} for name in networks}},
+                    "HostConfig": {"PortBindings": bindings,
+                                   "Sysctls": {"net.ipv4.ip_forward": "0"}},
+                    "Image": "sha256:" + "a" * 64}
+        return [container("immich", ["upstream_net", "published_net"],
+                          {"2283/tcp": [{"HostIp": host_ip, "HostPort": ""}]}),
+                container("central-probe", ["upstream_net", "wall_net"], None)]
+
+    host = FixtureHost.create(tmp_path / "state", publish=True)
+    project = host.project
+    assert str(fixture.PUBLISHED_COMPOSE_FILE) in host.base
+    for host_ip, passes in (("127.0.0.1", True), ("0.0.0.0", False)):
+        def run(args, **_):
+            output = (_json.dumps(inspected(host_ip)) if args[:2] == ["docker", "inspect"]
+                      else _json.dumps([{"Id": "sha256:" + "a" * 64, "Os": "linux",
+                                         "Architecture": "arm64"}]))
+            return _subprocess.CompletedProcess(args, 0, stdout=output)
+
+        monkeypatch.setattr(host, "compose", lambda *args, **_: "c1 c2")
+        monkeypatch.setattr(fixture.subprocess, "run", run)
+        if passes:
+            inventory, address = host.topology()
+            assert inventory["immich"]["networks"] == ["published_net", "upstream_net"]
+            assert address == "192.0.2.7"
+        else:
+            with pytest.raises(HarnessError, match="upstream_host_port_exposed"):
+                host.topology()
+    unpublished = FixtureHost.create(tmp_path / "plain")
+    assert str(fixture.PUBLISHED_COMPOSE_FILE) not in unpublished.base

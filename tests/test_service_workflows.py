@@ -49,7 +49,7 @@ def test_shared_producer_queues_all_callers_and_requires_published_output():
 
 def test_existing_required_jobs_fail_if_shared_preparation_fails():
     for name, jobs in [('checks.yml', ['image-smoke', 'linux-media']),
-                       ('software-e2e.yml', ['two-players-three-outputs', 'immich-adapter'])]:
+                       ('software-e2e.yml', ['two-players-three-outputs', 'photo-sources'])]:
         workflow = (WORKFLOWS / name).read_text()
         for job in jobs:
             body = re.split(r'^  [\w-]+:\n', workflow.split(f'  {job}:\n')[1],
@@ -99,7 +99,8 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
         in workflow
     selections = {job: _job(workflow, job) for job in ('unit', 'db', 'browser')}
     assert '-m "not db and not browser" -n 4 --dist worksteal' in selections['unit']
-    assert '-m db -n 4 --dist loadgroup' in selections['db']
+    # The db leg leaves the real-Immich tests to software-e2e.yml's photo-sources job.
+    assert '-m "db and not immich" -n 4 --dist loadgroup' in selections['db']
     assert ' tests/browser -n 4 --browser chromium' in selections['browser']
     assert '["status"] != "passed")' in selections['browser']
     for job, body in selections.items():
@@ -127,14 +128,30 @@ def test_the_console_catalog_walk_is_its_own_leg_in_the_browser_image_the_script
     assert re.search(r'timeout-minutes: [1-8]\n', walk)
 
 
-def test_the_wall_scenario_keeps_every_immich_adapter_check_in_a_parallel_job():
-    """The scenario jobs start a set-up fixture only; the full adapter run is its own job."""
+def test_the_named_immich_tests_run_in_their_own_job_against_one_published_fixture():
+    """photo-sources starts one fixture, published on the runner's loopback, and runs every
+    `immich` test against it (with the test database); the wall scenario's fixture stays
+    unpublished, and the retired adapter job is gone."""
     workflow = (WORKFLOWS / 'software-e2e.yml').read_text()
+    assert '\n  immich-adapter:\n' not in workflow and 'immich_runtime verify' not in workflow
     scenario = _job(workflow, 'two-players-three-outputs')
-    adapter = _job(workflow, 'immich-adapter')
-    assert '--keep --setup-only' in scenario
-    assert 'scripts.immich_fixture run' in adapter
-    assert '--setup-only' not in adapter and '--keep' not in adapter
+    photos = _job(workflow, 'photo-sources')
+    assert '--keep --setup-only' in scenario and '--publish' not in scenario
+    assert photos.count('scripts.immich_fixture run') == 1
+    assert '--keep --setup-only --publish' in photos
+    assert '--base-image "$WORKER_IMAGE"' in photos
+    assert 'runs-on: ubuntu-24.04-arm\n' in photos and 'timeout-minutes: 20\n' in photos
+    run = photos.split('name: Run the named Immich tests', 1)[1].split('\n      - ', 1)[0]
+    assert 'PHOTO_WALL_IMMICH_FIXTURE: ${{ runner.temp }}/immich-fixture' in run
+    assert "PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'" in run
+    assert 'scripts/test_local.py' in run and '-m immich -n 4 --dist loadgroup' in run
+    order = [photos.index(step) for step in (
+        'software-e2e-setup', 'apt-get install -y --no-install-recommends ffmpeg',
+        'compose.test-database.yml up -d --wait', 'scripts.immich_fixture run',
+        'name: Run the named Immich tests', 'scripts.immich_fixture cleanup')]
+    assert order == sorted(order)
+    cleanup = photos.split('name: Remove the disposable Immich fixture', 1)[1]
+    assert cleanup.startswith('\n        if: always()')
     setup = (ACTIONS / 'software-e2e-setup/action.yml').read_text()
     # One signed-in, retrying pull of the fixture images per job, overlapping the image builds.
     prefetch = setup.index('Prefetch the Immich fixture images')
@@ -154,7 +171,7 @@ def test_the_wall_scenario_jobs_run_every_fault_segment_exactly_once():
     covered = [segment for part in parts for segment in SCENARIOS[part]]
     assert sorted(covered) == sorted(set(covered)) == sorted(SCENARIOS['full'])
     assert SCENARIOS['full'] == tuple(FAULT_SEGMENTS)
-    for job in ('two-players-three-outputs', 'immich-adapter'):
+    for job in ('two-players-three-outputs', 'photo-sources'):
         body = _job(workflow, job)
         assert body.count(E2E_SETUP) == 1, job
         for repeated in ('uv sync', 'docker login', 'setup-buildx-action', 'service-image'):

@@ -6,7 +6,8 @@ name: MVP checks
 #
 # The suite runs as three tiers in parallel jobs, each test in exactly one: tests/conftest.py
 # derives `browser` from the path (tests/browser) and `db` from the fixtures, and everything
-# else is `unit` (the runbook's test section). Each tier job's timeout is about twice its budget, and prints
+# else is `unit` (the runbook's test section); the db leg leaves the `immich` tests (real Immich,
+# derived from their fixtures) to software-e2e.yml's photo-sources job. Each tier job's timeout is about twice its budget, and prints
 # its 25 slowest phases. In every job a test that reaches a database where none is provided
 # fails, and a skip no allowlist owns fails the run (tests/conftest.py).
 on:
@@ -133,7 +134,7 @@ jobs:
           PHOTO_WALL_RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
-            -m db -n 4 --dist loadgroup
+            -m "db and not immich" -n 4 --dist loadgroup
 
   browser:
     runs-on: ubuntu-24.04
