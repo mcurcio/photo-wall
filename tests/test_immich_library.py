@@ -38,6 +38,7 @@ from media.immich import THUMBNAIL_EDGE, ImmichClient, LibraryLimits, edits_fing
 from media.library_client import (
     ChosenItemGone,
     ExclusionQuery,
+    FrameNeed,
     LibraryUnavailable,
     TakenWindow,
 )
@@ -465,7 +466,7 @@ def test_an_edited_photos_revision_carries_its_edit_fingerprint():
     assert run(client.edits_fingerprint(ref(1))) == edits_fingerprint(edits)
 
 
-# 9. fetching the photo Immich shows -----------------------------------------------------------
+# 9. fetching the copy that holds every Frame output (follow-ups 2026-10-11, slice A4) ---------
 
 
 def library_asset(number=1, kind="image", **changes) -> LibraryAsset:
@@ -476,13 +477,19 @@ def library_asset(number=1, kind="image", **changes) -> LibraryAsset:
     return LibraryAsset(**values)
 
 
-def renditions(library: Library, number=1, *, preview=(2048, 1536), fullsize=None,
-               fullsize_redirect=None):
-    path = f"/api/assets/{ref(number)}/thumbnail"
+SMALL = (FrameNeed(aspect=4 / 3, width=1280, height=960),)     # below a 1,440 preview
+LARGE = (FrameNeed(aspect=4 / 3, width=1920, height=1440),)    # above it
+
+
+def copies(library: Library, number=1, *, preview=(1440, 1080), fullsize=None,
+           fullsize_redirect=None, original=(4000, 3000), original_orientation=None):
+    """Immich's copies of one photo: the preview, a full-size copy (or a redirect where Immich
+    keeps none) and the original. `edited` is recorded on each request (`library.edited`)."""
+    library.edited = []
 
     def thumbnail(request):
         size = request.url.params["size"]
-        assert request.url.params["edited"] == "true"
+        library.edited.append((size, request.url.params["edited"]))
         if size == "preview":
             return httpx.Response(200, content=jpeg(*preview), headers={
                 "content-type": "image/jpeg"})
@@ -491,91 +498,125 @@ def renditions(library: Library, number=1, *, preview=(2048, 1536), fullsize=Non
             return httpx.Response(302, headers={"location": fullsize_redirect})
         return httpx.Response(200, content=jpeg(*fullsize), headers={
             "content-type": "image/jpeg"})
-    library.routes[path] = thumbnail
+
+    def original_file(request):
+        library.edited.append(("original", request.url.params.get("edited")))
+        return httpx.Response(200, content=jpeg(*original, orientation=original_orientation),
+                              headers={"content-type": "image/jpeg"})
+    library.routes[f"/api/assets/{ref(number)}/thumbnail"] = thumbnail
+    library.routes[f"/api/assets/{ref(number)}/original"] = original_file
 
 
-def test_a_preview_that_covers_the_frame_is_kept(tmp_path):
+def fetch(library, tmp_path, plan, needs, asset=None, name="kept"):
+    return run(library.client().fetch_rendition(asset or library_asset(), plan=plan, needs=needs,
+                                                destination=tmp_path / name))
+
+
+def sizes(fetched):
+    return [(copy.name, copy.width, copy.height) for copy in fetched.measured]
+
+
+def test_a_preview_that_holds_the_frame_output_is_kept(tmp_path):
     library = Library([asset(1)])
-    renditions(library, preview=(2048, 1536))
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                                   destination=tmp_path / "original"))
-    assert (fetched.rendition, fetched.width, fetched.height) == ("preview", 2048, 1536)
-    data = (tmp_path / "original").read_bytes()
+    copies(library)
+    fetched = fetch(library, tmp_path, ("preview", "original"), SMALL)
+    assert (fetched.rendition, fetched.width, fetched.height) == ("preview", 1440, 1080)
+    data = (tmp_path / "kept").read_bytes()
     assert fetched.sha256 == hashlib.sha256(data).hexdigest() and fetched.size == len(data)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["original"]
+    assert sizes(fetched) == [("preview", 1440, 1080)]
+    assert library.edited == [("preview", "true")]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kept"]
 
 
-def test_a_preview_smaller_than_the_frame_takes_the_full_size_copy(tmp_path):
+def test_an_unedited_photo_larger_than_the_preview_is_fetched_as_its_original(tmp_path):
+    """A4 case 3: the preview, then `/original?edited=false`; the original is kept and the
+    preview's size is measured. Mutation probes: keep the first step always and the preview is
+    kept; send `edited=true` and the request record differs."""
     library = Library([asset(1)])
-    renditions(library, preview=(1440, 1080), fullsize=(4000, 3000))
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                                   destination=tmp_path / "original"))
-    assert (fetched.rendition, fetched.width, fetched.height) == ("fullsize", 4000, 3000)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["original"]
+    copies(library)
+    fetched = fetch(library, tmp_path, ("preview", "original"), LARGE)
+    assert (fetched.rendition, fetched.width, fetched.height) == ("original", 4000, 3000)
+    assert library.edited == [("preview", "true"), ("original", "false")]
+    assert sizes(fetched) == [("preview", 1440, 1080)]          # never the original
+    assert hashlib.sha256((tmp_path / "kept").read_bytes()).hexdigest() == fetched.sha256
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kept"]
 
 
-def test_a_full_size_copy_carrying_exif_orientation_is_measured_upright(tmp_path):
+def test_an_edited_photo_is_fetched_as_its_edited_full_size_copy(tmp_path):
+    library = Library([asset(1, isEdited=True)])
+    library.routes[f"/api/assets/{ref(1)}/edits"] = library.json({"assetId": ref(1), "edits": []})
+    copies(library, fullsize=(3000, 2250))
+    edited = library_asset(revision=CHECKSUM + "-" + edits_fingerprint([]))
+    fetched = fetch(library, tmp_path, ("preview", "fullsize"), LARGE, asset=edited)
+    assert (fetched.rendition, fetched.width) == ("fullsize", 3000)
+    assert library.edited == [("preview", "true"), ("fullsize", "true")]
+    assert sizes(fetched) == [("preview", 1440, 1080), ("fullsize", 3000, 2250)]
+
+
+def test_with_no_full_size_copy_the_preview_held_is_kept_once(tmp_path):
+    """An unedited photo Photo Wall cannot read (HEIC, RAW) and full-size copies off: Immich
+    redirects `size=fullsize` to the preview, which is not downloaded again."""
     library = Library([asset(1)])
-    renditions(library, preview=(720, 540), fullsize=None)
-    library.routes[f"/api/assets/{ref(1)}/original"] = lambda request: httpx.Response(
-        200, content=jpeg(400, 300, orientation=6), headers={"content-type": "image/jpeg"})
-    renditions(library, preview=(720, 540),
-               fullsize_redirect=f"/api/assets/{ref(1)}/original?edited=true")
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                                   destination=tmp_path / "original"))
-    assert (fetched.rendition, fetched.width, fetched.height) == ("fullsize", 300, 400)
+    copies(library, fullsize_redirect=f"/api/assets/{ref(1)}/thumbnail?size=preview&edited=false")
+    fetched = fetch(library, tmp_path, ("preview", "fullsize"), LARGE)
+    assert (fetched.rendition, fetched.width) == ("preview", 1440)
+    assert library.edited == [("preview", "true"), ("fullsize", "false")]
+    assert sizes(fetched) == [("preview", 1440, 1080)]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kept"]
+
+
+def test_a_redirected_full_size_request_names_the_copy_immich_served(tmp_path):
+    """Without a preview held, a redirect to the preview downloads it, measured as the preview;
+    a web original's redirect to its original is the original, never measured."""
+    library = Library([asset(1)])
+    copies(library, fullsize_redirect=f"/api/assets/{ref(1)}/thumbnail?size=preview&edited=false")
+    fetched = fetch(library, tmp_path, ("fullsize",), LARGE, name="a")
+    assert (fetched.rendition, sizes(fetched)) == ("preview", [("preview", 1440, 1080)])
+    copies(library, fullsize_redirect=f"/api/assets/{ref(1)}/original?edited=false")
+    fetched = fetch(library, tmp_path, ("fullsize",), LARGE, name="b")
+    assert (fetched.rendition, fetched.width, sizes(fetched)) == ("original", 4000, [])
+
+
+def test_an_original_carrying_exif_orientation_is_measured_upright(tmp_path):
+    library = Library([asset(1)])
+    copies(library, original=(400, 300), original_orientation=6)
+    fetched = fetch(library, tmp_path, ("original",), LARGE)
+    assert (fetched.rendition, fetched.width, fetched.height) == ("original", 300, 400)
 
 
 def test_a_same_origin_redirect_is_followed_and_another_origin_refused(tmp_path):
     library = Library([asset(1)])
-    library.routes[f"/api/assets/{ref(1)}/original"] = lambda request: httpx.Response(
-        200, content=jpeg(4000, 3000), headers={"content-type": "image/jpeg"})
-    renditions(library, preview=(1440, 1080),
-               fullsize_redirect=f"/api/assets/{ref(1)}/original?edited=true")
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                                   destination=tmp_path / "a"))
-    assert fetched.rendition == "fullsize" and fetched.width == 4000
+    copies(library, fullsize_redirect=f"/api/assets/{ref(1)}/original?edited=false")
+    fetched = fetch(library, tmp_path, ("preview", "fullsize"), LARGE, name="a")
+    assert fetched.rendition == "original" and fetched.width == 4000
 
-    renditions(library, preview=(1440, 1080),
-               fullsize_redirect="http://elsewhere.test/api/assets/x/original")
+    copies(library, fullsize_redirect="http://elsewhere.test/api/assets/x/original")
     with pytest.raises(MediaError) as caught:
-        run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                             destination=tmp_path / "b"))
+        fetch(library, tmp_path, ("preview", "fullsize"), LARGE, name="b")
     assert caught.value.code == "upstream_redirect"
-    assert not (tmp_path / "b").exists() and not (tmp_path / "b.fullsize").exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a"]   # nothing of "b" is left
     assert not any(r.url.host == "elsewhere.test" for r in library.requests)
-
-
-def test_with_full_size_copies_off_the_preview_is_kept(tmp_path):
-    library = Library([asset(1)])
-    renditions(library, preview=(1440, 1080),
-               fullsize_redirect=f"/api/assets/{ref(1)}/thumbnail?size=preview&edited=true")
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                                   destination=tmp_path / "original"))
-    assert (fetched.rendition, fetched.width) == ("preview", 1440)
 
 
 def test_a_video_is_fetched_as_its_original(tmp_path):
     library = Library([asset(1, kind="VIDEO")])
     library.routes[f"/api/assets/{ref(1)}/original"] = lambda request: httpx.Response(
         200, content=b"synthetic mp4", headers={"content-type": "video/mp4"})
-    fetched = run(library.client().fetch_rendition(library_asset(kind="video"),
-                                                   frame_long_edge=1920,
-                                                   destination=tmp_path / "original"))
+    fetched = fetch(library, tmp_path, ("original",), LARGE, asset=library_asset(kind="video"))
     assert (fetched.rendition, fetched.media_type, fetched.size) == ("original", "video/mp4", 13)
-    assert "edited" not in next(r for r in library.requests
-                                if r.url.path.endswith("/original")).url.params
+    assert (fetched.width, fetched.height, fetched.measured) == (4000, 3000, ())
+    assert next(r for r in library.requests
+                if r.url.path.endswith("/original")).url.params["edited"] == "false"
 
 
 def test_an_existing_destination_is_refused_and_kept(tmp_path):
     library = Library([asset(1)])
-    renditions(library)
-    (tmp_path / "original").write_bytes(b"keep")
+    copies(library)
+    (tmp_path / "kept").write_bytes(b"keep")
     with pytest.raises(MediaError) as caught:
-        run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                             destination=tmp_path / "original"))
+        fetch(library, tmp_path, ("preview", "original"), LARGE)
     assert caught.value.code == "destination_exists"
-    assert (tmp_path / "original").read_bytes() == b"keep"
+    assert (tmp_path / "kept").read_bytes() == b"keep"
 
 
 def test_a_photo_whose_revision_moved_is_not_fetched(tmp_path):
@@ -583,9 +624,14 @@ def test_a_photo_whose_revision_moved_is_not_fetched(tmp_path):
     library.routes[f"/api/assets/{ref(1)}/edits"] = library.json({"assetId": ref(1), "edits": [
         {"action": "mirror", "parameters": {"axis": "horizontal"}}]})
     with pytest.raises(MediaError) as caught:
-        run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
-                                             destination=tmp_path / "original"))
-    assert caught.value.code == "asset_changed" and not (tmp_path / "original").exists()
+        fetch(library, tmp_path, ("preview", "original"), LARGE)
+    assert caught.value.code == "asset_changed" and not (tmp_path / "kept").exists()
+
+
+def test_an_empty_plan_is_refused(tmp_path):
+    with pytest.raises(MediaError) as caught:
+        fetch(Library([asset(1)]), tmp_path, (), LARGE)
+    assert caught.value.code == "rendition_plan"
 
 
 # lists and stacks -----------------------------------------------------------------------------

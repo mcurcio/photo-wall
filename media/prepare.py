@@ -28,7 +28,7 @@ from pydantic import Field
 from central.photo_library.model import LibraryAsset
 from contracts.models import Digest, Model, Positive, Variant
 from contracts.time import Clock, SystemClock
-from media.library_client import FetchedRendition
+from media.library_client import FetchedRendition, FetchStep
 from media.models import MediaError
 
 _TRANSFORMS = {
@@ -104,8 +104,8 @@ class PreparedMedia(Model):
     build: BuildIdentity
     # Which of Immich's copies this was made from (`FetchedRendition.rendition`; follow-ups
     # 2026-10-11, owner item 6): MediaStore.publish writes it to `media_jobs.made_from`, the
-    # prepared copy's own row. Slice A4 sets it on every preparation and drops the default.
-    made_from: Literal["preview", "fullsize", "original"] | None = None
+    # prepared copy's own row.
+    made_from: FetchStep
 
 
 @dataclass
@@ -563,10 +563,11 @@ class Preparer:
             if sha256 != rendition.sha256 or size != rendition.size:
                 raise MediaError("asset_integrity")
         return await self._prepare(rendition.path, destination, video=asset.kind == "video",
-                                   verify=verify, duration=asset.duration)
+                                   verify=verify, duration=asset.duration,
+                                   made_from=rendition.rendition)
 
     async def _prepare(self, original: Path, destination: Path, *, video: bool,
-                       verify, duration: float | None) -> PreparedMedia:
+                       verify, duration: float | None, made_from: FetchStep) -> PreparedMedia:
         original, destination = Path(original).absolute(), Path(destination).absolute()
         start = self.clock.monotonic()
         if not math.isfinite(start):
@@ -645,6 +646,7 @@ class Preparer:
                     raise MediaError("preparation_build_changed")
                 return PreparedMedia(
                     path=destination, original_sha256=original_sha256, recipe_id=recipe_id, build=build,
+                    made_from=made_from,
                     variant=Variant(sha256=digest, size=output_size, width=width, height=height,
                                     media_type="video/mp4" if video else "image/jpeg",
                                     duration=verified["duration"] if video else None),

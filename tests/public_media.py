@@ -59,6 +59,7 @@ def publish_photo(storage: MediaStore, photo: PublicPhoto) -> Variant:
             jpeg_version="synthetic", zlib_version="synthetic", platform="synthetic",
             memory_limit_enforced=False)
         prepared = PreparedMedia(path=paths.variant, variant=variant,
-            original_sha256=photo.original_sha256, recipe_id=lease.recipe_id, build=build)
+            original_sha256=photo.original_sha256, recipe_id=lease.recipe_id, build=build,
+            made_from="preview")
         assert storage.publish(lease, prepared) == variant
         return variant

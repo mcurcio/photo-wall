@@ -7,16 +7,18 @@ import json
 
 import pytest
 from media_queue import RecordingMediaQueue
-from support.library_store_fake import FakeLibraryStore
+from support.library_store_fake import FakeLibraryStore, RevisionRecord
 from test_media_store import ORIGINAL, RECIPE, VARIANT, grant, queued, ready, row
 
 from central.db import ProcessTransactionClock
+from central.installation_models import FrameOutput
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import LibraryAsset, MeasuredCopy
 from central.planner import AcquisitionRequest
 from central.registry import RegistryError
+from contracts.models import FrameProfile
 from media.library_client import FetchedRendition
 from media.models import MediaError
 from media.prepare import BuildIdentity, PreparedMedia
@@ -29,6 +31,8 @@ from media.task_queue import (
 from media.worker import MediaWorker, WorkerLimits, _media_writer
 
 SECRET = "PUBLIC_SYNTHETIC_PRIVATE_KEY"
+PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
+PREVIEW = MeasuredCopy(name="preview", media_type="image/jpeg", width=810, height=1440)
 
 
 def test_no_environment_variable_names_a_connections_file(worker_storage):
@@ -49,15 +53,15 @@ class FakeLibrary:
     def __init__(self, clock):
         self.clock = clock
         self.downloads, self.closed = 0, False
-        self.edges = []
+        self.fetches = []   # (plan, needs) of each fetch
         self.fault = None
         self.gate = None
         self.entered = asyncio.Event()
         self.cancelled = False
 
-    async def fetch_rendition(self, asset, *, frame_long_edge, destination):
+    async def fetch_rendition(self, asset, *, plan, needs, destination):
         self.downloads += 1
-        self.edges.append(frame_long_edge)
+        self.fetches.append((plan, needs))
         destination.write_bytes(b"partial public original")
         self.entered.set()
         try:
@@ -69,9 +73,9 @@ class FakeLibrary:
         if self.fault:
             raise self.fault
         destination.write_bytes(ORIGINAL)
-        return FetchedRendition(path=destination, rendition="preview", media_type="image/jpeg",
+        return FetchedRendition(path=destination, rendition="original", media_type="image/jpeg",
                                 size=len(ORIGINAL), sha256=hashlib.sha256(ORIGINAL).hexdigest(),
-                                width=1080, height=1920)
+                                width=1080, height=1920, measured=(PREVIEW,))
 
     async def close(self):
         self.closed = True
@@ -109,7 +113,8 @@ class FakePreparer:
         if self.fault:
             raise self.fault
         return PreparedMedia(path=destination, variant=self.variant, recipe_id=self.recipe,
-            build=self.build, original_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
+            build=self.build, original_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            made_from=rendition.rendition)
 
 
 @pytest.fixture
@@ -124,7 +129,10 @@ def worker_storage(registry, tmp_path):
 def library_store(clock):
     library = FakeLibraryStore(clock)
     library.add_connection("fixture", "https://immich.invalid/api", SECRET)
-    library.frame_edge = 2160
+    library.outputs = (
+        FrameOutput(frame_id="hall", profile=PORTRAIT, output_px=(1080, 1920),
+                    display_px=(1080, 1920)),
+        FrameOutput(frame_id="lounge", profile=PORTRAIT, output_px=None, display_px=None))
     return library
 
 
@@ -428,11 +436,18 @@ def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(wo
     assert sorted(checks.calls) == [("connection", "main"), ("pool", "a" * 64)]
 
 
-def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(worker_storage):
-    queued(worker_storage)
+def test_a_pool_photo_is_fetched_for_every_frame_output_prepared_and_published(worker_storage):
+    """Follow-ups 2026-10-11, slice A4 case 4: the plan holds every Frame output (two Frames of
+    one shape are one need); the copies the fetch measured are recorded, and the copy the
+    prepared one was made from reaches `media_jobs.made_from`."""
+    asset = queued(worker_storage)
     source = FakeLibrary(worker_storage.clock)
     preparer = FakePreparer()
     instance = worker(worker_storage, source, preparer)
+    # The worker's store knows the revision (the PostgreSQL pool seeded above is the job's).
+    instance.library.revisions[asset.asset_id] = RevisionRecord(
+        asset.connection_ref, asset.upstream_id, asset.revision, asset.width, asset.height,
+        None, None, 0.0)
 
     async def exercise():
         try:
@@ -441,9 +456,14 @@ def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(wo
         finally:
             await close(instance)
     asyncio.run(exercise())
-    assert source.edges == [2160]
+    [(plan, needs)] = source.fetches
+    assert [(need.width, need.height) for need in needs] == [(1080, 1920)]
+    assert plan == ("preview", "fullsize")   # the stored asset's original type is not known
     assert isinstance(preparer.prepared[0], LibraryAsset)
-    assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "ready"
+    assert [(copy.name, copy.width) for copy in
+            instance.library.copy_sizes(asset.asset_id).values()] == [("preview", 810)]
+    job = row(worker_storage, "media_jobs", "id", "job-1")
+    assert (job["state"], job["made_from"]) == ("ready", "original")
 
 
 def test_a_new_key_or_address_gets_a_new_client(worker_storage):

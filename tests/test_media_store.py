@@ -69,7 +69,7 @@ def staged(storage, number=1, *, original=ORIGINAL, derivative=VARIANT):
                           pillow_version="synthetic", littlecms_version="synthetic", jpeg_version="synthetic",
                           zlib_version="synthetic", platform="synthetic", memory_limit_enforced=False)
     prepared = PreparedMedia(path=paths.variant, variant=variant, original_sha256=hashlib.sha256(original).hexdigest(),
-                             recipe_id=RECIPE, build=build)
+                             recipe_id=RECIPE, build=build, made_from="preview")
     return lease, paths, prepared
 
 

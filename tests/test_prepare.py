@@ -597,7 +597,8 @@ def rendition_of(path, *, rendition="preview", media_type="image/jpeg", size=Non
     data = path.read_bytes()
     return FetchedRendition(path=path, rendition=rendition, media_type=media_type,
                             size=len(data) if size is None else size,
-                            sha256=hashlib.sha256(data).hexdigest(), width=width, height=height)
+                            sha256=hashlib.sha256(data).hexdigest(), width=width, height=height,
+                            measured=())
 
 
 def pool_asset(*, width=96, height=64):

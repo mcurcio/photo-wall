@@ -910,13 +910,6 @@ class PgPhotoLibrary:
                              (finish.problem, now, lease.pool_key))
             return True
 
-    def largest_frame_edge(self) -> int | None:
-        with self.db.transaction() as conn:
-            row = conn.execute(
-                "SELECT max(GREATEST((profile->>'width_px')::int,(profile->>'height_px')::int)) "
-                "AS edge FROM frames").fetchone()
-        return row["edge"]
-
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         with self.db.transaction() as conn:
             return frame_outputs_in(conn)
