@@ -222,12 +222,13 @@ def test_the_accessor_reads_what_the_setup_records(tmp_path):
         {"base_url": "http://127.0.0.1:9/api"}))
     (tmp_path / "runtime/admin.json").write_text(json.dumps({"token": "admin-token-x"}))
     (tmp_path / "runtime/library.json").write_text(json.dumps({
-        "schema": 1, "api_key": "runtime-key-x", "partner_api_key": "partner-key-x",
+        "schema": 2, "api_key": "runtime-key-x", "partner_api_key": "partner-key-x",
         "permissions": sorted(PERMISSIONS),
         "owner": {"ref": "owner-id", "name": "Fixture Owner"},
         "partner": {"ref": "partner-id", "name": "Fixture Partner"},
         "assets": assets, "albums": {"Garden": "g"}, "people": {"Anna": "a", "Ben": "b"},
         "tags": {"Family": "t"}, "counts": {"photos": 1, "videos": 1, "albums": 1, "people": 2},
+        "shared_albums": {"Partner's trip": "s"}, "hidden_people": {"Hidden Hal": "h"},
     }))
     library = library_from_state(tmp_path)
     assert set(library.assets) == {item.label for item in images}

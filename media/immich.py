@@ -303,8 +303,7 @@ class ImmichClient:
         return LibraryCounts(
             photos=_count(assets.get("images"), "statistics"),
             videos=_count(assets.get("videos"), "statistics"),
-            albums=_count(albums.get("owned"), "statistics")
-            + _count(albums.get("shared"), "statistics"),
+            albums=_count(albums.get("owned"), "statistics"),
             people=max(0, _count(people.get("total"), "people")
                        - _count(people.get("hidden"), "people")))
 
@@ -343,15 +342,21 @@ class ImmichClient:
     # lists -----------------------------------------------------------------------------------
 
     async def albums(self) -> tuple[LibraryAlbum, ...]:
+        """The albums the key's user owns. An album another user shares with them is not
+        offered: Immich 2.5.6's search (`search/metadata` with `albumIds`) returns only the
+        user's own and their partners' photos, so a Source on someone else's album would show
+        none of its owner's photos (probed against the fixture, 2026-10-11)."""
         async def read():
+            me = _ref(_mapping(await self._answer("GET", "users/me"), "user").get("id"), "user")
             found: dict[str, LibraryAlbum] = {}
-            for params in (None, {"shared": "true"}):
-                for row in _array(await self._answer("GET", "albums", params=params), "albums"):
-                    row = _mapping(row, "albums")
-                    album = _parsed(LibraryAlbum, "albums", album_ref=_ref(row.get("id"), "albums"),
-                                    name=_plain(row.get("albumName"), "albums"),
-                                    photos=_count(row.get("assetCount"), "albums"))
-                    found[album.album_ref] = album
+            for row in _array(await self._answer("GET", "albums"), "albums"):
+                row = _mapping(row, "albums")
+                if _ref(row.get("ownerId"), "albums") != me:
+                    continue
+                album = _parsed(LibraryAlbum, "albums", album_ref=_ref(row.get("id"), "albums"),
+                                name=_plain(row.get("albumName"), "albums"),
+                                photos=_count(row.get("assetCount"), "albums"))
+                found[album.album_ref] = album
             return tuple(sorted(found.values(), key=lambda a: (a.name.casefold(), a.album_ref)))
         return await self._step(read())
 
