@@ -22,7 +22,7 @@ from collections.abc import Iterable, Sequence
 
 from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.models import CornersFit, CoverFit
-from contracts.node_frame import PictureOperations
+from contracts.node_frame import PictureOperations, srgb_to_linear
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
@@ -90,10 +90,10 @@ def multiply(left: Matrix, right: Matrix) -> Matrix:
 
 
 def decode_channel(value: float, video: bool = False) -> float:
+    if not video:
+        return srgb_to_linear(value)
     value = min(1.0, max(0.0, value))
-    if video:
-        return value / 4.5 if value < .081 else ((value + .099) / 1.099) ** (1/.45)
-    return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+    return value / 4.5 if value < .081 else ((value + .099) / 1.099) ** (1/.45)
 
 
 def encode_srgb(value: float) -> float:

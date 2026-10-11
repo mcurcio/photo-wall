@@ -25,7 +25,7 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
-from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME
+from appliance.kernel.display_paths import CONTROLLER_STATE, DISPLAY_UNIT, RUNTIME
 from appliance.kernel.unix_credentials import receive_credential_packet
 from contracts.node_output import (
     OUTPUT_IDS,
@@ -43,7 +43,7 @@ from .domain import OutputState
 from .edid import parse_edid, read_edid
 from .output_power import OutputPowerController, ReportSink
 from .output_report import OutputReports
-from .picture import DdcPictureAdapter, PictureController
+from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
@@ -217,10 +217,14 @@ def power_controller(backend: WestonBackend, sink: ReportSink,
     return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, time), cec
 
 
-def picture_controller(backend: WestonBackend, reports: OutputReports, ddc: DdcChannel) -> PictureController:
+def picture_controller(backend: WestonBackend, reports: OutputReports, ddc: DdcChannel,
+                       applied: Path = CONTROLLER_STATE) -> PictureController:
     """The picture controller on the port's DDC/CI channel (the one the power controller uses) and
-    the shell; it hears the shell's `presented` and `output` events through the backend."""
-    picture = PictureController(DdcPictureAdapter(ddc), backend, reports, time.monotonic)
+    the shell, remembering each display's applied picture change in `applied` (the controller's
+    preserved runtime directory); it hears the shell's `presented` and `output` events through the
+    backend."""
+    picture = PictureController(DdcPictureAdapter(ddc), backend, reports, FileAppliedPictures(applied),
+                                time.monotonic)
     backend.picture_events = picture
     return picture
 

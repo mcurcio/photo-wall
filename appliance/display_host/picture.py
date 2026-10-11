@@ -2,9 +2,11 @@
 (roadmap 1c; run ledger .claude/runs/display-1c.md, slice P1; design rule 1).
 
 Pure core, effects at the edges. `operations_for`, `kelvin_multipliers`, `vcp_for` and
-`percent_of` are pure. `PictureController` applies them through three ports: `PictureDdc`
+`percent_of` are pure. `PictureController` applies them through four ports: `PictureDdc`
 (VCP 0x10 and 0x12 over the port's DDC/CI channel), `PictureShell` (the shell's `picture` control
-op; weston.WestonBackend) and `PictureReports` (output_report.OutputReports).
+op; weston.WestonBackend), `PictureReports` (output_report.OutputReports) and `AppliedPictures`
+(which picture change each display last had, kept across controller restarts;
+`FileAppliedPictures`).
 
 Rules this module owns (one home each):
 - **Where it acts is the document's:** a setting acting on the display is written over DDC/CI
@@ -17,11 +19,17 @@ Rules this module owns (one home each):
   identity; then read back, and the read-back judges it (`taken` when it equals the value
   written). Never between those: a person on the display's buttons is not fought; a re-read
   that differs (at each appearance, and every REREAD_SECONDS while a value is set) is reported
-  as `read`, left alone until the next change.
+  as `read`, left alone until the next change. A picture change already carried out on the same
+  display is never written again, even by a restarted controller (a Weston restart restarts it):
+  `AppliedPictures` remembers it, and the controller then only reads.
+- **At most two writes a second per display** (WRITE_GAP_SECONDS): some displays save each write
+  to memory that wears, so the worker waits out the gap before a write, whoever drives the
+  changes (the console's own throttle only shapes what the operator sees).
 - **Newest wins:** each Output has one picture worker; a document that arrives while it writes
   replaces the one waiting, so a dragged slider's writes never queue.
 - **Operations from settings:** white balance from colour temperature (`kelvin_multipliers`,
-  normalised so KELVIN_NEUTRAL is exactly (1, 1, 1) and the largest is 1); light factor =
+  in linear light, normalised so KELVIN_NEUTRAL is exactly (1, 1, 1) and the largest is 1);
+  light factor =
   brightness / 50 and contrast slope = contrast / 50 when they act as picture adjustment and are
   set, else 1; gamma exponent = gamma_tenths / GAMMA_TENTHS_NEUTRAL.
 - **Re-sent at start:** the controller restarts with Weston, and sends every Output's operations
@@ -35,15 +43,18 @@ Rules this module owns (one home each):
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Protocol
 
-from contracts.node_frame import PictureOperations
+from contracts.node_frame import PictureOperations, srgb_to_linear
 from contracts.node_output import (
     AS_THE_DISPLAY_HAS_IT,
     GAMMA_TENTHS_NEUTRAL,
@@ -64,6 +75,7 @@ BRIGHTNESS_CODE: Final = "10"       # VESA MCCS luminance
 CONTRAST_CODE: Final = "12"         # VESA MCCS contrast
 READ_SECONDS: Final = 5.0           # one VCP read
 WRITE_SECONDS: Final = 10.0         # one VCP write with its read-back
+WRITE_GAP_SECONDS: Final = 0.5      # the least time between two writes to one display
 REREAD_SECONDS: Final = 60.0        # how often a set value is read again (buttons on the display)
 NEUTRAL_PERCENT: Final = 50         # brightness or contrast as picture adjustment: 50 % changes nothing
 SHELL_SECONDS: Final = 2.0          # one `picture` control op
@@ -102,13 +114,15 @@ _CHARITY: Final[Mapping[int, tuple[float, float, float]]] = MappingProxyType({
 
 
 def kelvin_multipliers(kelvin: int) -> tuple[float, float, float]:
-    """White balance for `kelvin` (KELVIN_MIN..KELVIN_MAX in KELVIN_STEP): Mitchell Charity's
-    blackbody table (vendian.org, CIE 1931 2-degree, D65 white) divided by its KELVIN_NEUTRAL
-    entry and scaled so the largest is 1. Pure. ValueError("kelvin") outside the range or step."""
+    """White balance for `kelvin` (KELVIN_MIN..KELVIN_MAX in KELVIN_STEP), in linear light as the
+    Player applies it: Mitchell Charity's blackbody table (vendian.org, CIE 1931 2-degree, D65
+    white; its R G B are gamma-encoded sRGB) taken to linear light (`srgb_to_linear`), divided by
+    its linear KELVIN_NEUTRAL entry and scaled so the largest is 1, so white shows as the table's
+    colour. Pure. ValueError("kelvin") outside the range or step."""
     if type(kelvin) is not int or kelvin not in _CHARITY:
         raise ValueError("kelvin")
-    red, green, blue = (value / neutral for value, neutral in zip(_CHARITY[kelvin], _CHARITY[KELVIN_NEUTRAL],
-                                                                    strict=True))
+    red, green, blue = (srgb_to_linear(value) / srgb_to_linear(neutral)
+                        for value, neutral in zip(_CHARITY[kelvin], _CHARITY[KELVIN_NEUTRAL], strict=True))
     largest = max(red, green, blue)
     return red / largest, green / largest, blue / largest
 
@@ -176,6 +190,47 @@ class PictureReports(Protocol):
     def put_picture(self, output_id: str, picture: PictureReport | None) -> None: ...   # never blocks
 
 
+class AppliedPictures(Protocol):
+    """Which picture change each Output's display last had written, and on which display, kept
+    across controller restarts."""
+
+    def last(self, output_id: str) -> tuple[int, DisplayIdentity | None] | None: ...   # None: none known
+
+    def record(self, output_id: str, picture_change: int, identity: DisplayIdentity | None) -> None: ...
+
+
+class FileAppliedPictures:
+    """`AppliedPictures` as one small JSON file per Output in `directory` (the controller's
+    preserved runtime directory: it outlives the controller's restarts with Weston, not a reboot).
+    A file that is missing or does not read is "none known"; a failed write is logged."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+
+    def _path(self, output_id: str) -> Path:
+        return self._directory / f"picture-{output_id}.json"
+
+    def last(self, output_id: str) -> tuple[int, DisplayIdentity | None] | None:
+        try:
+            value = json.loads(self._path(output_id).read_text())
+            change, identity = value["picture_change"], value["identity"]
+            if type(change) is not int:
+                return None
+            return change, None if identity is None else DisplayIdentity(**identity)
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def record(self, output_id: str, picture_change: int, identity: DisplayIdentity | None) -> None:
+        path = self._path(output_id)
+        partial = path.with_suffix(".partial")
+        try:
+            partial.write_text(json.dumps({"picture_change": picture_change,
+                                           "identity": None if identity is None else asdict(identity)}))
+            os.replace(partial, path)
+        except OSError:
+            log.warning("picture: could not record %s's applied change", output_id, exc_info=True)
+
+
 class DdcPictureAdapter:
     """`PictureDdc` over the port's DDC/CI channel (ddc.DdcChannel)."""
 
@@ -233,6 +288,7 @@ class _Port:
     want_apply: bool = False
     want_send: bool = False
     next_reread: float | None = None
+    last_write: float | None = None                 # time.monotonic() at the end of the last write
     worker: threading.Thread | None = None
 
 
@@ -240,9 +296,10 @@ class PictureController:
     """Every Output's picture, from its document, through DDC/CI and the shell, to the report."""
 
     def __init__(self, ddc: PictureDdc, shell: PictureShell, reports: PictureReports,
-                 clock: Callable[[], float]) -> None:
-        """`clock` is the Pi's monotonic seconds, never compared elsewhere."""
+                 applied: AppliedPictures, clock: Callable[[], float]) -> None:
+        """`clock` is the Pi's monotonic seconds for re-reads, never compared elsewhere."""
         self._ddc, self._shell, self._reports, self._clock = ddc, shell, reports, clock
+        self._applied = applied
         self._ports: dict[str, _Port] = {}
         self._wake = threading.Condition()
         self._started = False
@@ -372,7 +429,8 @@ class PictureController:
 
     def _apply(self, output_id: str, port: _Port) -> None:
         """Carry out the latest document: operations to the shell, then each setting on the display
-        written and read back (read first: a display that already has the value is not written)."""
+        written and read back (read first: a display that already has the value is not written).
+        A change this display already had (`AppliedPictures`, e.g. before a restart) is only read."""
         with self._wake:
             document, identity, connected = port.document, port.identity, port.connected
         if document is None:
@@ -381,9 +439,13 @@ class PictureController:
         results: dict[str, WriteResult | None] = dict.fromkeys(_CODES)
         reads: dict[str, int | None] = {}
         if connected:
+            carried_out = self._applied.last(output_id) == (document.picture_change, identity)
             for code, setting in _settings(document.picture).items():
                 if _on_the_display(setting):
-                    results[code], reads[code] = self._write(output_id, code, setting.value)
+                    results[code], reads[code] = (self._kept(output_id, code) if carried_out
+                                                  else self._write(output_id, port, code, setting.value))
+            if not carried_out:
+                self._applied.record(output_id, document.picture_change, identity)
         with self._wake:
             port.applied, port.applied_identity = document, identity
             port.results = results
@@ -393,16 +455,26 @@ class PictureController:
             self._report(output_id, port)
         self._send(output_id, port, force=False, document=document)   # the line after the result
 
-    def _write(self, output_id: str, code: str, percent: int) -> tuple[WriteResult | None, int | None]:
+    def _kept(self, output_id: str, code: str) -> tuple[None, int | None]:
+        """One setting the display already had written: nothing written; the percent it reads."""
+        reading = self._ddc.read(output_id, code, timeout=READ_SECONDS)
+        return None, None if reading is None else percent_of(reading)
+
+    def _write(self, output_id: str, port: _Port, code: str, percent: int) -> tuple[WriteResult | None, int | None]:
         """One setting on the display: (the write's result, None when nothing was written; the
-        percent the display reads)."""
+        percent the display reads). A write waits out WRITE_GAP_SECONDS after the port's last."""
         reading = self._ddc.read(output_id, code, timeout=READ_SECONDS)
         if reading is None:
             return WriteResult.NO_ANSWER, None
         wanted = vcp_for(percent, reading.maximum)
         if reading.current == wanted:
             return None, percent_of(reading)
-        result = self._ddc.write(output_id, code, percent, maximum=reading.maximum, timeout=WRITE_SECONDS)
+        if port.last_write is not None:
+            time.sleep(max(0.0, port.last_write + WRITE_GAP_SECONDS - time.monotonic()))
+        try:
+            result = self._ddc.write(output_id, code, percent, maximum=reading.maximum, timeout=WRITE_SECONDS)
+        finally:
+            port.last_write = time.monotonic()
         if result is WriteResult.TAKEN:
             return result, percent_of(VcpReading(wanted, reading.maximum))
         after = self._ddc.read(output_id, code, timeout=READ_SECONDS) if result is WriteResult.NOT_TAKEN else None
@@ -459,6 +531,6 @@ class PictureController:
 
 
 __all__ = ["BRIGHTNESS_CODE", "CONTRAST_CODE", "NEUTRAL_PERCENT", "READ_SECONDS", "REREAD_SECONDS",
-           "SHELL_SECONDS", "TICK_SECONDS", "WRITE_SECONDS", "DdcPictureAdapter", "PictureController",
-           "PictureDdc", "PictureReports", "PictureShell", "brightness_line", "kelvin_multipliers",
-           "operations_for", "percent_of", "vcp_for"]
+           "SHELL_SECONDS", "TICK_SECONDS", "WRITE_GAP_SECONDS", "WRITE_SECONDS", "AppliedPictures",
+           "DdcPictureAdapter", "FileAppliedPictures", "PictureController", "PictureDdc", "PictureReports",
+           "PictureShell", "brightness_line", "kelvin_multipliers", "operations_for", "percent_of", "vcp_for"]

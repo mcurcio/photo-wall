@@ -332,6 +332,7 @@ def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare():
     controller = (units / "photo-wall-display-controller.service").read_text().splitlines()
     assert f"BindsTo={paths.DISPLAY_UNIT}" in controller
     assert f"After={paths.DISPLAY_UNIT}" in controller
+    assert {f"RuntimeDirectory={paths.CONTROLLER_STATE.name}", "RuntimeDirectoryPreserve=yes"} <= set(controller)
 
 
 # -- power (1b D2) ----------------------------------------------------------------------------

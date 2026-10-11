@@ -24,7 +24,9 @@ from appliance.display_host.ddc import DdcChannel, VcpReading
 from appliance.display_host.output_report import OutputReports
 from appliance.display_host.picture import (
     REREAD_SECONDS,
+    WRITE_GAP_SECONDS,
     DdcPictureAdapter,
+    FileAppliedPictures,
     PictureController,
     brightness_line,
     kelvin_multipliers,
@@ -50,6 +52,7 @@ from contracts.node_output import (
     SettingReport,
     WriteResult,
 )
+from player.geometry import final_pixel
 
 OUTPUT = "HDMI-A-1"
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)   # the spike's monitor
@@ -215,8 +218,10 @@ class Running:
         self.shell = Shell()
         self.reports = Reports()
         self.clock = Clock()
+        applied = display.root / "applied"       # the controller's preserved runtime directory
+        applied.mkdir(exist_ok=True)
         self.controller = PictureController(DdcPictureAdapter(display.channel), self.shell, self.reports,
-                                            self.clock)
+                                            FileAppliedPictures(applied), self.clock)
 
     def connect(self, output_id: str = OUTPUT) -> None:
         self.controller.output(output_id, connected=True, identity=IDENTITY)
@@ -319,14 +324,30 @@ def test_picture_adjustment_writes_nothing_and_becomes_operations(display, runni
     assert report.brightness == report.contrast == SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, None)
 
 
+def _linear(encoded: float) -> float:
+    """IEC 61966-2-1, written out here so the test does not lean on the code it checks."""
+    return encoded / 12.92 if encoded <= 0.04045 else ((encoded + 0.055) / 1.055) ** 2.4
+
+
+def _encoded(linear: float) -> float:
+    return 12.92 * linear if linear <= 0.0031308 else 1.055 * linear ** (1 / 2.4) - 0.055
+
+
 @pytest.mark.parametrize("kelvin", [3000, 9300])
-def test_colour_temperature_matches_charitys_table(kelvin):
-    ratio = [value / neutral for value, neutral in zip(CHARITY[kelvin], CHARITY[6500], strict=True)]
+def test_colour_temperature_shows_white_as_charitys_table(kelvin):
+    """Charity's R G B are gamma-encoded sRGB; the Player multiplies linear light. So the
+    multipliers are the table's rows in linear light, relative to 6500 K, and white comes out of
+    the final pass as the table's colour (relative to 6500 K, largest 1). Mutation probe: divide
+    the encoded rows -> 3000 K white shows green 0.75 where the table's is 0.53."""
+    ratio = [_linear(value) / _linear(neutral) for value, neutral in zip(CHARITY[kelvin], CHARITY[6500], strict=True)]
     expected = [value / max(ratio) for value in ratio]
     multipliers = kelvin_multipliers(kelvin)
     assert multipliers == pytest.approx(expected, abs=1e-3)
     assert max(multipliers) == 1.0
-    assert operations_for(OUTPUT, 1, picture(kelvin=kelvin)).rgb_multipliers == multipliers
+    operations = operations_for(OUTPUT, 1, picture(kelvin=kelvin))
+    assert operations.rgb_multipliers == multipliers
+    white = final_pixel((1.0, 1.0, 1.0), operations, inside=True)[:3]
+    assert white == pytest.approx([_encoded(value) for value in expected], abs=2e-3)
 
 
 def test_the_neutral_values_change_nothing_and_the_ranges_hold():
@@ -489,14 +510,49 @@ def test_presented_follows_the_shells_echo_and_equal_operations_count_at_once(di
 # 10 --------------------------------------------------------------------------------------------
 
 def test_a_power_change_alone_or_an_older_picture_writes_nothing(display, running):
+    """Mutation probe: act on a document whose picture_change did not rise -> the power-only
+    document writes 60 over the 35 set on the display's buttons."""
     run = running()
     run.controller.document(OUTPUT, document(3, picture(on_display(60)), change=1))
     run.reported(3)
     sent = len(run.shell.sent)
+    display.vcp("10", 35, 100)                          # someone on the display's buttons
     run.controller.document(OUTPUT, document(3, picture(on_display(60)), change=2))   # power change only
     run.controller.document(OUTPUT, document(2, picture(on_display(10)), change=3))   # an older picture
     time.sleep(0.5)
     assert display.writes() == [["10", "60"]] and len(run.shell.sent) == sent
+
+
+def test_a_restarted_controller_does_not_write_a_change_the_display_already_had(display, running):
+    """A Weston restart restarts the controller, which replays the stored document: the change it
+    already carried out on this display is only read, so a value set on the display's buttons
+    since is left alone until the next picture change. Mutation probe: forget the applied change
+    (no `AppliedPictures` check) -> the restart writes 60 over the 35."""
+    first = running()
+    first.controller.document(OUTPUT, document(3, picture(on_display(60))))
+    first.reported(3)
+    first.controller.stop()
+    display.vcp("10", 35, 100)                          # someone on the display's buttons
+    again = running()
+    again.controller.document(OUTPUT, document(3, picture(on_display(60))))
+    report = again.reported(3)
+    assert display.writes() == [["10", "60"]]
+    assert report.brightness == SettingReport(ActsOn.DISPLAY, 35, None)
+    again.controller.document(OUTPUT, document(4, picture(on_display(70))))
+    until(lambda: display.writes() == [["10", "60"], ["10", "70"]])
+
+
+def test_writes_to_one_display_are_at_least_the_gap_apart(display, running):
+    """At most two writes a second per display, however fast the changes come (some displays
+    wear with each write). Mutation probe: drop the wait -> two setvcp start closer than the gap."""
+    run = running()
+    for change, value in enumerate((60, 61, 62, 63), start=1):
+        run.controller.document(OUTPUT, document(change, picture(on_display(value), on_display(value - 20))))
+        run.reported(change)
+    starts = sorted(call["time"] for call in display.calls()
+                    if call["at"] == "start" and call["args"][0] == "setvcp")
+    assert len(starts) == 8
+    assert min(later - earlier for earlier, later in zip(starts, starts[1:])) >= WRITE_GAP_SECONDS - 0.01
 
 
 def test_another_display_on_the_port_re_applies_and_a_disconnected_port_is_not_written(display, running):

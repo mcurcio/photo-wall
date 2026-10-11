@@ -257,7 +257,12 @@ def never_answers(argv, _timeout):
 def main() -> None:
     protocols()
     from appliance.display_host.ddc import DdcChannel
-    from appliance.display_host.picture import DdcPictureAdapter, PictureController, operations_for
+    from appliance.display_host.picture import (
+        DdcPictureAdapter,
+        FileAppliedPictures,
+        PictureController,
+        operations_for,
+    )
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
@@ -357,8 +362,10 @@ def main() -> None:
         assert inside > 300 and outside > 1000, (inside, outside)
 
         reports = Reports()
+        applied = pathlib.Path("/tmp/pw-picture-e2e-applied")
+        applied.mkdir(exist_ok=True)
         controller = PictureController(DdcPictureAdapter(DdcChannel(never_answers, drm_root=fake_drm())),
-                                       backend, reports, time.monotonic)
+                                       backend, reports, FileAppliedPictures(applied), time.monotonic)
         backend.picture_events = controller
         controller.output(OUTPUT, connected=True, identity=None)
         controller.start()

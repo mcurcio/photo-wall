@@ -38,6 +38,13 @@ GAMMA_EXPONENT_MAX: Final = 2.0
 NO_PICTURE_CHANGE: Final = "0"            # tag_picture's text before any picture event reached the Player
 
 
+def srgb_to_linear(value: float) -> float:
+    """An sRGB-encoded channel (0..1, clamped) in linear light (IEC 61966-2-1): the one home of the
+    curve the Player's final pass decodes with and the Pi's white balance is worked in. Pure."""
+    value = min(1.0, max(0.0, value))
+    return value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+
+
 @dataclass(frozen=True)
 class PictureOperations:
     """What the Player's final pass does to one Output's picture, in this order (1c design, Final
