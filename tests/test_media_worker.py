@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-from uuid import UUID
 
 import pytest
 from media_queue import RecordingMediaQueue
@@ -19,7 +18,7 @@ from central.photo_library.model import LibraryAsset
 from central.planner import AcquisitionRequest
 from central.registry import RegistryError
 from media.library_client import FetchedRendition
-from media.models import MediaError, OriginalAsset
+from media.models import MediaError
 from media.prepare import BuildIdentity, PreparedMedia
 from media.task_queue import (
     MediaTaskFailed,
@@ -42,12 +41,6 @@ def test_no_environment_variable_names_a_connections_file(worker_storage):
     instance.store.recover = lambda: None
     asyncio.run(instance.maintain())
     assert worker_storage.repository.health()["connection_ids"] is None
-
-
-def original():
-    return OriginalAsset(connection_id="fixture", upstream_id=str(UUID(int=1)),
-        original_sha1=hashlib.sha1(ORIGINAL).hexdigest(), kind="image", raw_width=1080,
-        raw_height=1920, orientation=1, captured_at=1000, file_size=len(ORIGINAL))
 
 
 class FakeLibrary:
@@ -125,34 +118,7 @@ def worker_storage(registry, tmp_path):
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000,
         max_video_bytes=2000), queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
     repository.set_recipe(RECIPE)
-    store = MediaStore(repository, tmp_path / "media")
-    # Until the planner slice (P1) claims pool rows as LibraryAsset leases, a claimed job's
-    # OriginalAsset becomes the same photo as the pool knows it: an unedited photo's revision is
-    # its checksum, so the asset id (and the job row) is the same.
-    claim = repository.claim_job
-    originals = {}
-
-    def claim_pool_asset(job_id=None):
-        lease = claim(job_id)
-        if lease is None or not isinstance(lease.asset, OriginalAsset):
-            return lease
-        asset = lease.asset
-        pool_asset = LibraryAsset(connection_ref=asset.connection_id,
-                                  upstream_id=asset.upstream_id, revision=asset.original_sha1,
-                                  kind=asset.kind, taken_at=asset.captured_at,
-                                  width=asset.original_width, height=asset.original_height,
-                                  duration=asset.duration)
-        assert pool_asset.asset_id == asset.asset_id
-        originals[lease.job_id] = lease
-        return lease.model_copy(update={"asset": pool_asset})
-    repository.claim_job = claim_pool_asset
-    # MediaStore.publish still reads OriginalAsset fields (erratum E-P4-M3-1): the publication
-    # under test is handed the claimed original lease of the same job and attempt.
-    publish = store.publish
-    store.publish = lambda lease, prepared: publish(
-        originals[lease.job_id].model_copy(update={"attempt_token": lease.attempt_token}),
-        prepared)
-    return store
+    return MediaStore(repository, tmp_path / "media")
 
 
 def library_store(clock):
@@ -481,9 +447,7 @@ def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(wo
 
 
 def test_a_refreshed_original_lease_is_superseded_and_not_retried(worker_storage):
-    queued(worker_storage)
-    worker_storage.repository.claim_job = lambda job_id=None: MediaRepository.claim_job(
-        worker_storage.repository, job_id)
+    queued(worker_storage, pre_4=True)
     source = FakeLibrary(worker_storage.clock)
     instance = worker(worker_storage, source)
     with worker_storage.worker_lock(), pytest.raises(MediaTaskFailed, match="asset_superseded"):

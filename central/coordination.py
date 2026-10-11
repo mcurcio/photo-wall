@@ -266,9 +266,6 @@ class Coordinator:
             result[layer.assignment_id] = layer
         return result
 
-    def _catalog(self, conn, runtime):
-        return self.media.catalog_in(conn, runtime.planning_source_refs())
-
     def _groups(self, conn, runtime, now, horizon_end, configurations) -> dict[str, str]:
         owners = {
             f"frame:{b.frame_id}": (p, c.authority_epoch, b.output_id, b.generation)
@@ -447,7 +444,8 @@ class Coordinator:
             }
             offers = self._offers(conn, configurations)
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
-            snapshots, authored = self._catalog(conn, runtime)
+            pools = self.media.source_pools_in(conn, runtime.planning_source_refs())
+            authored = self.media.authored_in(conn)
             locks = self._locks(conn, configurations, offers)
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
@@ -459,7 +457,7 @@ class Coordinator:
                     p: tuple(b for b in config.bindings if b.output_id in config.enabled_outputs)
                     for p, config in configurations.items()
                 },
-                catalog_snapshots=snapshots,
+                source_pools=pools,
                 authored_candidates=authored,
                 locked_assignments=locks,
                 horizon_seconds=horizon_end - now,

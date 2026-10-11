@@ -2,48 +2,48 @@
 
 import hashlib
 import uuid
+from typing import NamedTuple
 
-import pytest
 from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
+from support.photo_pools import FIXTURE_CONNECTION, seed_pool
 
 from central.app import create_app
-from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
-from central.media_repository import MediaRepository, StoreLimits
+from central.media_repository import MediaRepository
+from central.photo_library.model import LibraryAsset
 from central.planner import AcquisitionRequest
 from central.runtime import Contribution, Runtime, Scene
 from contracts.models import Variant
-from media.models import OriginalAsset, RefreshResult, SourceSpec
+from media.models import SourceSpec
 from media.prepare import BuildIdentity, PreparedMedia
 
 ADMIN = "test-operator-" + "x" * 40
 RECIPE = "a" * 64
 
 
-def asset(number=1, *, width=30, height=50, original_bytes=None):
-    original_sha1 = hashlib.sha1(original_bytes).hexdigest() if original_bytes is not None else f"{number:040x}"
-    return OriginalAsset(connection_id="fixture", upstream_id=str(uuid.UUID(int=number)),
-                         original_sha1=original_sha1, kind="image", raw_width=width,
-                         raw_height=height, orientation=1, captured_at=900 + number,
-                         file_size=len(original_bytes) if original_bytes is not None else 10)
+class SavedSource(NamedTuple):
+    source_ref: str
 
 
-def refresh(spec, *assets):
-    return RefreshResult(snapshot=CatalogSnapshot(source_ref=spec.source_ref, refreshed_at=1000,
-        status="ok", candidates=tuple(item.candidate for item in assets)), assets=assets)
+def asset(number=1, *, width=30, height=50, original_bytes=None, kind="image"):
+    """A pool photo; with `original_bytes`, the unedited photo whose checksum is theirs."""
+    revision = (hashlib.sha1(original_bytes).hexdigest() if original_bytes is not None
+                else f"{number:040x}")
+    return LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(uuid.UUID(int=number)),
+                        revision=revision, kind=kind, taken_at=900 + number, width=width,
+                        height=height, duration=10.0 if kind == "video" else None)
 
 
-def setup_source(registry, count=1, *, limits=None, assets=None):
+def setup_source(registry, count=1, *, limits=None, assets=None, complete=True):
+    """Saved Source `source:1` whose pool holds `assets` (or `count` photos), seeded through the
+    photo library store's worker side."""
     repo = MediaRepository(registry.db, registry.clock, limits, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
-    repo.configure_source(spec)
-    lease = repo.begin_scheduled_refresh()
     originals = tuple(assets) if assets is not None else tuple(asset(i + 1) for i in range(count))
-    repo.publish_refresh(lease, refresh(spec, *originals))
+    seed_pool(registry, "source:1", originals, complete=complete)
     repo.set_recipe(RECIPE)
-    return repo, spec, originals
+    return repo, SavedSource("source:1"), originals
 
 
 def client_for(registry):
@@ -72,10 +72,7 @@ def test_authored_api_is_neutral_idempotent_and_membership_bound(registry):
 
 def test_authored_api_distinguishes_unknown_and_nonmember(registry):
     repo, spec, originals = setup_source(registry)
-    with repo.transaction() as conn:
-        other = asset(2)
-        conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,1000,1000)",
-                     (other.asset_id, Jsonb(other.model_dump(mode="json"))))
+    seed_pool(registry, "other:1", (asset(2),))   # a known photo, in another Source's pool
     with client_for(registry) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
         body = {"source_ref": spec.source_ref, "asset_ids": [asset(2).asset_id]}
@@ -87,7 +84,9 @@ def test_authored_api_distinguishes_unknown_and_nonmember(registry):
 
 
 def test_operator_can_request_exact_asynchronous_source_refresh(registry):
-    _, spec, _ = setup_source(registry)
+    spec = SourceSpec(source_ref="source:1", connection_ref="fixture", favorites=True)
+    MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
+                    times=ProcessTransactionClock(registry.clock)).configure_source(spec)
     path = f"/v1/operator/sources/{spec.source_ref}/refresh"
     with client_for(registry) as client:
         assert client.post(path).status_code == 401
@@ -112,41 +111,28 @@ def test_operator_can_request_exact_asynchronous_source_refresh(registry):
     assert missing.status_code == 404 and missing.json() == {"error": "source_not_found"}
 
 
-@pytest.mark.parametrize("status", ["unavailable", "permission", "incompatible"])
-def test_authored_api_requires_current_successful_refresh(registry, status):
-    repo, spec, originals = setup_source(registry)
-    with repo.transaction() as conn:
-        conn.execute("UPDATE media_sources SET status=%s WHERE source_ref=%s", (status, spec.source_ref))
+def test_a_pool_member_authors_while_its_check_has_not_completed(registry):
+    """C7: pool rows are photos a check confirmed, so a pool whose latest check stopped part-way
+    (Immich down, the key rejected) still authors from what it holds."""
+    repo, spec, originals = setup_source(registry, complete=False)
     with client_for(registry) as client:
         response = client.post("/v1/operator/authored-candidates",
                                headers={"Authorization": "Bearer " + ADMIN},
                                json={"source_ref": spec.source_ref,
                                      "asset_ids": [originals[0].asset_id]})
-        assert response.status_code == 409
-        assert response.json() == {"error": "source_not_fresh"}
-    with repo.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"] == 0
+        assert response.status_code == 200 and response.json()["created"] == 1
 
 
-def test_authored_limit_and_immutable_snapshot(registry):
-    limits = StoreLimits(max_authored_candidates=2)
-    repo, spec, originals = setup_source(registry, limits=limits)
+def test_authored_snapshot_is_immutable_with_no_count_limit(registry):
+    repo, spec, originals = setup_source(registry, count=3)
     with client_for(registry) as client:
-        client.app.state.coordinator.media.limits = limits
         headers = {"Authorization": "Bearer " + ADMIN}
-        assert client.post("/v1/operator/authored-candidates", headers=headers,
-                           json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id]}).status_code == 200
-        second = asset(2)
+        assert client.post("/v1/operator/authored-candidates", headers=headers, json={
+            "source_ref": spec.source_ref,
+            "asset_ids": [original.asset_id for original in originals]}).json()["created"] == 3
         with repo.transaction() as conn:
-            conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,1000,1000)",
-                         (second.asset_id, Jsonb(second.model_dump(mode="json"))))
-            conn.execute("INSERT INTO source_members VALUES(%s,%s)", (spec.source_ref, second.asset_id))
-            repo.refresh_catalog_in(conn, spec.source_ref, 1000, "ok")
-        assert client.post("/v1/operator/authored-candidates", headers=headers,
-                           json={"source_ref": spec.source_ref, "asset_ids": [second.asset_id]}).json() == {
-            "error": "authored_candidate_limit"}
-        changed = originals[0].candidate.model_copy(update={"captured_at": 1})
-        with repo.transaction() as conn:
+            changed = repo.authored_candidates_in(conn, (originals[0].asset_id,))[
+                originals[0].asset_id].model_copy(update={"captured_at": 1})
             conn.execute("UPDATE authored_candidates SET candidate=%s WHERE asset_id=%s",
                          (Jsonb(changed.model_dump(mode="json")), originals[0].asset_id))
         assert client.post("/v1/operator/authored-candidates", headers=headers,
@@ -180,18 +166,18 @@ def test_worker_publication_eviction_and_failure_cooldown_hydrate_authored_refs(
             original_sha256=hashlib.sha256(original_bytes).hexdigest(), recipe_id=RECIPE, build=build)
         store.publish(lease, prepared)
     with repo.db.transaction() as conn:
-        assert repo.catalog_in(conn)[1][originals[0].asset_id].variant == variant
+        assert repo.authored_in(conn)[originals[0].asset_id].variant == variant
     with store.worker_lock():
         store.collect(target_bytes=0)
     with repo.db.transaction() as conn:
-        hydrated = repo.catalog_in(conn)[1][originals[0].asset_id]
+        hydrated = repo.authored_in(conn)[originals[0].asset_id]
         assert hydrated.variant is None
         conn.execute("UPDATE media_jobs SET state='retry',retry_at=1010,failure_code='asset_missing',"
                      "variant_sha=NULL WHERE asset_id=%s", (originals[0].asset_id,))
         registry.clock.wall = 1000  # the repository's media times follow this clock
-        assert repo.catalog_in(conn)[1][originals[0].asset_id].preparation_failure == "asset_missing"
+        assert repo.authored_in(conn)[originals[0].asset_id].preparation_failure == "asset_missing"
         registry.clock.advance(11)
-        assert repo.catalog_in(conn)[1][originals[0].asset_id].preparation_failure is None
+        assert repo.authored_in(conn)[originals[0].asset_id].preparation_failure is None
 
 
 def test_scene_asset_refs_are_per_frame_and_admitted_runs_are_immutable():
