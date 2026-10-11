@@ -44,6 +44,7 @@ from operator_harness import (
     sign_in,
     submit_sign_in,
 )
+from photo_seed import connected, library_of
 from playwright.sync_api import expect
 from support.position import save_position
 from test_operator_showrunner_browser import (
@@ -358,9 +359,10 @@ def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page
 
 def test_hidden_show_pages_announce_no_status(page, registry):
     _frame(registry, "first")
+    connected(library_of(registry))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        add_source(page, "spring", "fixture-library")
+        add_source(page, "spring")
         saved = "Saved Source spring."
         expect(page.get_by_role("status").filter(has_text=saved)).to_be_visible()
 

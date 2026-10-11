@@ -361,11 +361,8 @@ def test_flow_kit_and_scene_flow_shape():
         ["endingSeconds", "Ending length must be at least half of Fade between photos."]]
 
 
-SOURCE_SCRIPT = r"""
+HAND_OFF_SCRIPT = r"""
 const hand = await import(process.argv[1]);
-const source = await import(process.argv[2]);
-const steps = await import(process.argv[3]);
-const authoring = await import(process.argv[4]);
 const out = {};
 
 // --- Inline hand-offs (flow/handOff.js).
@@ -384,57 +381,17 @@ const stale = hand.settleHandOff(first, 2);
 out.stale = { same: stale.next === first, settled: stale.settled };
 out.settled = hand.settleHandOff(first, 1);
 out.none = hand.settleHandOff(null, 1);
-
-// --- The Source flow's shape (sourceFlowModel.js).
-out.steps = source.SOURCE_STEPS.map((step) => [step.id, step.label]);
-const several = source.connectionRule(["a", "b"], []);
-const one = source.connectionRule(["a"], []);
-out.oneSteps = source.sourceSteps(one).map((step) => step.id);
-out.fieldSteps = ["connection", "tags", "type", "favorites", "from", "until", "ref"]
-  .map((field) => steps.stepOfField(source.sourceFieldStep(several), field));
-out.oneConnectionStep = steps.stepOfField(source.sourceFieldStep(one), "connection");
-out.oneFirst = source.sourceKeys(one).firstStep("new");
-const K = source.sourceKeys(several);
-out.keys = [K.fromRoute({ section: "sources", flow: "new", step: "name" }),
-            K.fromRoute({ section: "sources", id: "spring", flow: "edit", step: "review" }),
-            K.fromRoute({ section: "sources" }),
-            K.fromRoute({ section: "scenes", flow: "new", step: "kind" })];
-out.route = K.toRoute("new", K.firstStep("new"));
-out.describe = K.describe("new");
-out.editRoute = K.toRoute("edit/spring", K.firstStep("edit/spring"));
-const spec = (ref) => ({ source_ref: "x", spec: ref === undefined ? {} : { connection_ref: ref } });
-out.rules = [
-  source.connectionRule(null, []),
-  source.connectionRule(null, [spec("home"), spec("home"), spec(undefined)]),
-  source.connectionRule(null, [spec("work"), spec("home")]),
-  source.connectionRule([], []),
-  source.connectionRule(["home"], [], "removed"),
-];
-out.advanced = [[], [spec("home")], [spec("a"), spec("b")]]
-  .map((sources) => [...source.sourceAdvancedFields(source.connectionRule(null, sources))]);
-out.seeds = [source.seedSource([], null)("new"), source.seedSource([spec("home")], null)("new").connectionRef,
-             source.seedSource([spec("a"), spec("b")])("new").connectionRef];
-out.seedEdit = source.seedSource([{ name: "spring", revision: 3, source_ref: "spring:3",
-  spec: { connection_ref: "home", media_types: ["image"], favorites: true, tags: ["tag-1"] } }])("edit/spring");
-out.answers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, favorites: "only",
-                                     capturedFrom: "2024-01-01", sourceName: " spring " });
-out.oneAnswers = source.sourceAnswers({ ...source.NEW_SOURCE_DRAFT, tags: ["t1", "t2"], connectionRef: "a" },
-                                      one, { t1: "Family", t2: null }).map((row) => [row.field, row.value]);
-out.problems = authoring.sourceProblems(source.NEW_SOURCE_DRAFT).map((p) => p.field);
-out.spec = source.buildSourceSpec({ expectedRevision: 2, connectionRef: "home",
-                                    mediaType: "image", favorites: "not" });
-out.specBoth = source.buildSourceSpec({ connectionRef: "h", mediaType: "both" });
-out.specTagged = source.buildSourceSpec({ connectionRef: "h", mediaType: "image", tags: out.seedEdit.tags });
 console.log(JSON.stringify(out));
 """
 
 
-def test_hand_offs_and_source_flow_shape():
+def test_hand_offs():
+    # Roadmap 4 (K2): the Source flow's steps are gone; the Photo source editor is one page
+    # (tests/test_console_sources.py, tests/browser/test_source_flow_browser.py). The hand-off
+    # from the Scene editor stays.
     _require_node()
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", SOURCE_SCRIPT, "--",
-         (SRC / "flow/handOff.js").as_uri(), (SRC / "sourceFlowModel.js").as_uri(),
-         (SRC / "flow/steps.js").as_uri(), (SRC / "authoring.js").as_uri()],
+        ["node", "--input-type=module", "-e", HAND_OFF_SCRIPT, "--", (SRC / "flow/handOff.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
 
@@ -447,98 +404,6 @@ def test_hand_offs_and_source_flow_shape():
     assert out["stale"] == {"same": True, "settled": False}
     assert out["settled"] == {"next": None, "settled": True}
     assert out["none"] == {"next": None, "settled": False}
-
-    assert out["steps"] == [["library", "Library"], ["tags", "Tags"], ["narrow", "Narrow"],
-                            ["name", "Name"], ["review", "Review"]]
-    # One known connection: no connection step; it sits under Name's Advanced, and a new
-    # Source opens on Choose tags.
-    assert out["oneSteps"] == ["tags", "narrow", "name", "review"]
-    assert out["fieldSteps"] == ["library", "tags", "narrow", "narrow", "narrow", "narrow", "name"]
-    assert out["oneConnectionStep"] == "name"
-    assert out["oneFirst"] == "tags"
-    assert out["keys"] == ["new", "edit/spring", None, None]
-    assert out["route"] == {"section": "sources", "flow": "new", "step": "library"}
-    assert out["editRoute"] == {"section": "sources", "id": "spring", "flow": "edit", "step": "review"}
-    assert out["describe"] == "a new Source"
-    # The legacy connection rule keeps manual entry until the worker reports. Explicit
-    # empty and removed saved connections are represented separately from unknown.
-    assert out["rules"] == [
-        {"shown": "field", "values": [], "prefill": "", "reported": False, "selectedUnavailable": False},
-        {"shown": "advanced", "values": ["home"], "prefill": "home", "reported": False, "selectedUnavailable": False},
-        {"shown": "chooser", "values": ["home", "work"], "prefill": "", "reported": False, "selectedUnavailable": False},
-        {"shown": "blocked", "values": [], "prefill": "", "reported": True, "selectedUnavailable": False},
-        {"shown": "chooser", "values": ["home"], "prefill": "", "reported": True, "selectedUnavailable": True}]
-    assert out["advanced"] == [[], ["connection"], []]
-    assert out["seeds"] == [
-        {"mediaType": "both", "favorites": "any", "capturedFrom": "", "capturedUntil": "",
-         "sourceName": "", "connectionRef": "", "newConnection": False, "tags": []}, "home", ""]
-    assert out["seedEdit"] == {
-        "mediaType": "image", "favorites": "only", "capturedFrom": "", "capturedUntil": "",
-        "sourceName": "spring", "connectionRef": "home", "newConnection": False, "tags": ["tag-1"],
-        "revision": 3}
-    assert out["answers"] == [
-        {"label": "Connection name", "field": "connection", "value": None},
-        {"label": "Tags in your library", "field": "tags", "value": "No tags: everything on your library's timeline only (not archived, hidden or other users' media)"},
-        {"label": "Media type", "field": "type", "value": "Photos and videos"},
-        {"label": "Favourites", "field": "favorites", "value": "Only favourites"},
-        {"label": "Dated from", "field": "from", "value": "2024-01-01"},
-        {"label": "Dated until", "field": "until", "value": "No limit"},
-        {"label": "Source name", "field": "ref", "value": "spring"}]
-    # The one connection is answered last (under Name's Advanced); a gone tag says so.
-    assert out["oneAnswers"][0] == ["tags", "Family and a tag that no longer exists in your library"]
-    assert out["oneAnswers"][-1] == ["connection", "a"]
-    assert out["problems"] == ["ref", "connection"]
-    assert out["spec"] == {"expected_revision": 2, "connection_ref": "home",
-                           "media_types": ["image"], "favorites": False}
-    assert out["specBoth"]["media_types"] == ["image", "video"]
-    assert "favorites" not in out["specBoth"] and "captured_from" not in out["specBoth"]
-    # A saved Source's tags travel through its draft to the write; an untagged one sends none.
-    assert out["specTagged"]["tags"] == ["tag-1"] and "tags" not in out["spec"]
-
-
-def test_source_health_separates_unattempted_from_failed_first_refresh():
-    _require_node()
-    script = r"""
-const health = await import(process.argv[1]);
-const base = { spec: {}, next_refresh: 0, last_success: null };
-console.log(JSON.stringify([
-  health.sourceState({ ...base, status: "unavailable", refresh_completed_revision: 0 }, 1000, false),
-  health.sourceState({ ...base, status: "incompatible", refresh_completed_revision: 1 }, 1000, false),
-]));
-"""
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, "--", (SRC / "mediaHealth.js").as_uri()],
-        capture_output=True, text=True, timeout=30, check=True)
-    states = json.loads(result.stdout)
-    assert states[0]["state"] == "never-refreshed"
-    assert states[0]["label"] == "Awaiting refresh"
-    assert states[1]["state"] == "failing"
-    # No code: the status alone names no owner, so it reads neutrally (§39 R21).
-    assert states[1]["label"] == "Refresh failed (incompatible) · never refreshed successfully"
-
-
-def test_source_health_qualifies_partial_refresh_without_marking_it_failed():
-    _require_node()
-    script = r"""
-const health = await import(process.argv[1]);
-const base = { spec: {}, next_refresh: 1100, last_success: 940,
-  status: "ok", refresh_completed_revision: 1 };
-console.log(JSON.stringify([
-  health.sourceState({ ...base, counts: { valid: 3, pending: 2, rejected: 1 },
-    diagnostics: [{ code: "metadata_invalid" }, { code: "metadata_pending_or_changed" }] }, 1000, false),
-  health.sourceState({ ...base, counts: { valid: 3, pending: 0, rejected: 0 }, diagnostics: [] }, 1000, false),
-]));
-"""
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script, "--", (SRC / "mediaHealth.js").as_uri()],
-        capture_output=True, text=True, timeout=30, check=True)
-    partial, healthy = json.loads(result.stdout)
-    assert partial["state"] == "ok"
-    assert partial["severity"] == "ok"
-    assert partial["label"] == ("Your photo library last reported 1 min ago · the media worker accepted 3 "
-                                "in that refresh · 3 items pending or rejected")
-    assert healthy["state"] == "ok"
-    assert healthy["label"] == "Your photo library last reported 1 min ago · the media worker accepted 3 in that refresh"
 
 
 def test_program_edit_retains_later_repeated_hour_occurrence():

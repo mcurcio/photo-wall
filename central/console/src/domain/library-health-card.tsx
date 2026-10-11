@@ -1,7 +1,7 @@
 import type { Verdict } from "../patterns/health-badge";
 import { ProblemCard, type ProblemAction } from "../patterns/problem-card";
 import { Note } from "../patterns/fact-row";
-import { dateTime } from "../timeWords.js";
+import { countWords, dateTime } from "../timeWords.js";
 
 /*
  * A photo library connection as Central serves it (central/photo_library/views.py
@@ -42,11 +42,6 @@ export interface LibraryConnectionView {
 
 /** The one thing to do about a problem: paste a new key, or ask Photo Wall to check again. */
 export type LibraryFix = "paste_key" | "check_again";
-
-/** "41,203 photos": a count in the house's number words, its noun singular for one. */
-export function countWords(count: number, noun: string, plural = `${noun}s`): string {
-  return `${count.toLocaleString()} ${count === 1 ? noun : plural}`;
-}
 
 /** "41,203 photos · 2,110 videos · 212 albums · 96 people": Immich's own counts. */
 export function libraryCountsWords(counts: LibraryCounts): string {

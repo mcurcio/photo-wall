@@ -37,7 +37,6 @@ from console_tasks import (
     schedule_program,
     show_advanced,
     show_now,
-    source_continue,
     start_scene,
     start_schedule,
     start_source,
@@ -53,6 +52,7 @@ from operator_harness import (
     report_readiness,
     tile_health,
 )
+from photo_seed import connected, library_of, saved_source
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import public_photo, publish_photo
@@ -63,6 +63,7 @@ from central.catalog import CatalogSnapshot
 from central.db import ProcessTransactionClock
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
+from central.photo_library.model import SourceQuery, TakenBetween
 from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Program, Scene
@@ -287,49 +288,6 @@ def test_sources_render_name_rev_with_refresh(page, registry):
         expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
 
 
-def test_sources_have_no_immich_or_album_language(page, registry):
-    """Immich boundary (design D-e): a Source is a saved live query, never a
-    downloaded album, and no UI element may imply a Player browses or links to
-    Immich. The Sources region carries NO "Immich" / "album" / "open in" copy.
-    """
-    _seed(registry)
-    queue = _seed_source(registry)
-    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
-        connect(page, origin, "sources")
-
-        sources = page.get_by_role("region", name="Sources", exact=True)
-        expect(sources).to_be_visible()
-        # The Source must be present, so this is not vacuously true.
-        expect(sources.get_by_text("holiday", exact=True)).to_be_visible()
-
-        # The intro says what a Source is, in neutral library words (flow design §2 req 4).
-        expect(sources.get_by_text(
-            "Photo Wall selects media that lives in your photo library. It never uploads, "
-            "edits or deletes anything there.", exact=True)).to_be_visible()
-        _assert_neutral(sources)
-
-        # Every step of the Source flow, Advanced open, says the same (one connection is
-        # known, so the flow opens on Tags).
-        form = start_source(page)
-        _assert_neutral(sources)
-        source_continue(page, "Narrow")
-        _assert_neutral(sources)
-        source_continue(page, "Name")
-        form.get_by_role("button", name="Advanced", exact=True).click()
-        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
-        _assert_neutral(sources)
-        source_continue(page, "Review")
-        _assert_neutral(sources)
-
-
-def _assert_neutral(region):
-    """No vendor, album or "open in" words, and no noun but Source, in what `region` shows
-    (design D-e; console DDD §37)."""
-    copy = region.inner_text().lower()
-    for retired in ("immich", "album", "open in", "photo source", "match preview"):
-        assert retired not in copy, retired
-
-
 # Bead G2 — SR-source-config: CREATE a Source from the console (content-parity
 # GAP 2). A distinct name:rev the seeded SOURCE does not use, so its appearance
 # below is caused by THIS create, not the fixture.
@@ -337,46 +295,34 @@ NEW_SOURCE = "spring"
 
 
 def test_source_configuration_creates_source_awaiting_refresh(page, registry):
-    """Bead G2: an operator CONFIGURES a new Source from the console — the create
-    the legacy page had and Bead 13's list+Refresh lacked (content-parity GAP 2).
+    """Roadmap 4 (K2): an operator makes a Photo source from the console. New Source opens an
+    unsaved Source of every photo (the draft POST), Save Source saves it under its name, and the
+    new Source is listed by name, not yet checked (no worker runs here).
 
-    Filling the source-config form and submitting PUTs the stored SourceSpec to
-    `/v1/operator/sources/{ref}` (ref = `name:rev`, path-encoded); the server
-    answers with a SourceConfigurationReceipt ({source_ref, created}); and after
-    the useMutate() refresh the new Source appears in the Sources list by its
-    `name:rev` identity, awaiting its first refresh (design D-e / J4).
-
-    This is the invariant the mutation probe attacks: break the create (omit the
-    required source_ref from the body) and the Source is never stored, so the
-    "appears awaiting refresh" assertion goes red.
-    """
+    Mutation probe: break the save (send no name) and the Source is never stored, so the
+    "listed, not checked yet" assertion goes red."""
     _seed(registry)
+    ref = connected(library_of(registry))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")
 
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_be_visible()
-        # Not vacuously true: the new Source does not exist before the create.
-        expect(sources.get_by_text(NEW_SOURCE, exact=True)).to_have_count(0)
+        # Not vacuously true: the new Source does not exist before the save.
+        expect(sources.get_by_role("article", name=NEW_SOURCE, exact=True)).to_have_count(0)
 
-        response = add_source(page, NEW_SOURCE, "fixture-library", media_type="image")
+        response = add_source(page, NEW_SOURCE)
         assert response.status == 200
-        # The saved query carries its identity, connection and chosen kind.
-        body = response.request.post_data_json
-        assert body["expected_revision"] is None
-        assert body["connection_ref"] == "fixture-library"
-        assert body["media_types"] == ["image"]
-        # The server reports the Source as CREATED.
-        receipt = response.json()
-        assert receipt["name"] == NEW_SOURCE and receipt["source_ref"] == NEW_SOURCE + ":1"
-        assert receipt["created"] is True
+        assert response.request.post_data_json == {"name": NEW_SOURCE}
+        assert response.json() == {"source_ref": NEW_SOURCE + ":1"}
+        [drafted] = [row for row in _queries(registry) if row["source_ref"] == NEW_SOURCE + ":1"]
+        assert drafted["query"]["connection_ref"] == ref
+        assert drafted["query"]["exclude"]["screenshots"] is True
 
-        # After the useMutate() refresh the new Source is listed by name:rev, and
-        # — never having been refreshed — shows the honest "Awaiting refresh".
-        row = sources.get_by_role("listitem").filter(has_text=NEW_SOURCE)
-        expect(row).to_be_visible()
-        expect(row.get_by_text(NEW_SOURCE, exact=True)).to_be_visible()
-        expect(row.get_by_text("Awaiting refresh", exact=True)).to_be_visible()
+        card = sources.get_by_role("article", name=NEW_SOURCE, exact=True)
+        expect(card).to_be_visible()
+        expect(card.get_by_text("Not checked yet", exact=True)).to_be_visible()
+        expect(card.get_by_text("Every photo · no screenshots", exact=True)).to_be_visible()
 
 
 def test_author_live_source_scene_saves_and_appears_by_id(page, registry):
@@ -972,6 +918,12 @@ def test_why_panel_ranks_contributions_by_precedence(page, registry):
 
 def _scenes_form(page):
     return scene_form(page)
+
+
+def _queries(registry):
+    """Every saved Source revision's query."""
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT source_ref,query FROM media_sources ORDER BY source_ref").fetchall()
 
 
 def _epoch(page, local):
@@ -1710,34 +1662,33 @@ def test_an_invalid_window_count_gives_a_reason_and_is_never_reset(page, registr
 
 def test_the_source_form_sends_favourites_and_a_capture_window(page, registry):
     _seed(registry)
+    connected(library_of(registry))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        # Pass 5: the connection is its own step (no Source yet, nothing reported), and the
-        # filters are "Narrow it down".
-        form = start_source(page)
-        form.get_by_label("Connection name", exact=True).fill("fixture-library")
-        source_continue(page, "Tags")
-        source_continue(page, "Narrow")
-        form.get_by_label("Favourites", exact=True).select_option("only")
-        until = form.get_by_label("Dated until", exact=True)
-        form.get_by_label("Dated from", exact=True).fill("2024-01-01")
-        until.fill("2023-06-01")
-        expect(until).to_have_accessible_description(
-            re.compile("'Dated until' must be after 'Dated from'."))
-        until.fill("2025-01-01")
-        source_continue(page, "Name")
-        form.get_by_label("Source name", exact=True).fill(NEW_SOURCE)
-        source_continue(page, "Review")
-        with page.expect_response(
-            lambda r: r.url.endswith("/v1/operator/source-names/" + quote(NEW_SOURCE, safe=""))
-            and r.request.method == "PUT"
-        ) as info:
-            form.get_by_role("button", name="Save Source", exact=True).click()
+        editor = start_source(page)
+        sent = []
+        page.on("request", lambda r: sent.append(r.post_data_json)
+                if r.url.endswith("/query") and r.method == "PUT" else None)
+        editor.get_by_role("switch", name="Favourites only", exact=True).click()
+        editor.get_by_role("radio", name="Between", exact=True).click()
+        start, end = editor.get_by_label("From", exact=True), editor.get_by_label("To", exact=True)
+        start.fill("2024-01-01")
+        end.fill("2023-06-01")
+        expect(start).to_have_accessible_description(
+            re.compile("The first day must be on or before the last."))
+        end.fill("2024-12-31")
+        editor.get_by_label("Name", exact=True).fill(NEW_SOURCE)
+        with page.expect_response(lambda r: r.url.endswith("/save") and r.request.method == "POST") as info:
+            editor.get_by_role("button", name="Save Source", exact=True).click()
         assert info.value.status == 200
-        body = info.value.request.post_data_json
-        assert body["favorites"] is True
-        assert body["captured_from"] == _epoch(page, "2024-01-01T00:00")
-        assert body["captured_until"] == _epoch(page, "2025-01-01T00:00")
+        query = sent[-1]["query"]
+        assert query["favourites_only"] is True
+        assert query["taken"] == {"kind": "between", "start": _epoch(page, "2024-01-01T00:00"),
+                                  "end": _epoch(page, "2025-01-01T00:00")}
+        # An invalid window is never sent.
+        assert all(q["query"]["taken"] is None or q["query"]["taken"].get("end") is None
+                   or q["query"]["taken"]["start"] is None
+                   or q["query"]["taken"]["start"] < q["query"]["taken"]["end"] for q in sent)
 
 
 def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(page, registry):
@@ -2299,17 +2250,22 @@ def test_check_this_frame_skips_a_failing_source_and_counts_a_shared_item_once(p
 
 @pytest.mark.browser_context_args(timezone_id="Europe/London")
 def test_a_capture_window_across_a_dst_change_names_its_last_whole_day(page, registry):
-    """§7 "dated until" is exclusive: a window ending at local midnight on 1 April
-    names 31 March, though that day was 23 h long (mutation probe: until - 86400)."""
+    """A window's end is exclusive: one ending at local midnight on 1 April names 31 March,
+    though that day was 23 h long (mutation probe: end - 86400)."""
     _seed(registry)
+    library = library_of(registry)
+    ref = connected(library)
     london = ZoneInfo("Europe/London")
     start = datetime(2024, 3, 1, tzinfo=london).timestamp()
     until = datetime(2024, 4, 1, tzinfo=london).timestamp()
-    _set_source(registry, "spring:1", spec={"captured_from": start, "captured_until": until})
+    saved_source(registry, library, "spring", SourceQuery(
+        connection_ref=ref, taken=TakenBetween(start=start, end=until)))
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "now")
-        expect(_pipeline(page).get_by_label("Refresh of spring", exact=True)).to_contain_text(
-            re.compile(r"dated (1 Mar 2024 to 31 Mar 2024|Mar 1, 2024 to Mar 31, 2024)\b"))
+        connect(page, origin, "sources")
+        card = page.get_by_role("region", name="Sources", exact=True).get_by_role(
+            "article", name="spring", exact=True)
+        expect(card).to_contain_text(
+            re.compile(r"between (1 Mar 2024 and 31 Mar 2024|Mar 1, 2024 and Mar 31, 2024)\b"))
 
 
 def test_the_chooser_says_dated_and_readiness_and_waits_while_loading(page, registry):

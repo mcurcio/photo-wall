@@ -3,9 +3,7 @@ import { fact, factText, plannedNothing, words } from "./facts.js";
 import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
 import { cycleWording, runScene } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
-import {
-  datedWords, favouritesWords, kindsWords, refreshFact, refusalState, tagCountWords,
-} from "./sourceWords.js";
+import { checkWords } from "./sourceWords.js";
 import { captureDay, clockTime } from "./timeWords.js";
 
 /**
@@ -18,23 +16,22 @@ import { captureDay, clockTime } from "./timeWords.js";
  * receive it only from Central (requirements: Players are library-unaware).
  * Nothing here says a panel shows anything (R2).
  *
- * @typedef {"ok"|"todo"|"alarm"} Severity
+ * @typedef {"ok"|"todo"|"notice"|"alarm"|"unknown"} Severity
  * @typedef {{state: string, severity: Severity, label: string}} Classified
  */
 
 // The worker's maintenance runs every 5 min (media/task_queue.py MAINTENANCE_CRON)
 // and each run records that it checked in (media_settings.worker_seen).
 export const WORKER_CHECK_IN_SECONDS = 300;
-// Sources are refreshed every 30 s (media/task_queue.py REFRESH_CRON;
-// central/media_repository.py StoreLimits.refresh_seconds sets next_refresh).
+// The worker's refresh task runs every 30 s (media/task_queue.py REFRESH_CRON) and may run
+// this long (media/worker.py WorkerLimits.refresh_seconds). Roadmap 4: no Source state reads
+// them (a Source's state is its check's); tests/test_media_queue.py still pins them to the
+// worker's schedule until the integrate slice retires the refresh.
 export const SOURCE_REFRESH_SECONDS = 30;
-// One refresh may run this long (media/worker.py WorkerLimits.refresh_seconds).
 export const REFRESH_RUN_SECONDS = 65;
-// Past these, a missed beat is not jitter: two intervals plus slack. A pytest
-// pins the three constants above to the worker's schedule, and WORKER_QUIET_AFTER
-// to the worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
+// Past this, a missed beat is not jitter: two intervals plus slack. A pytest pins it to the
+// worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
 export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
-export const REFRESH_OVERDUE_AFTER = 2 * SOURCE_REFRESH_SECONDS + REFRESH_RUN_SECONDS;
 
 /**
  * The read time media ages are taken against: `media.read_at`, the database's
@@ -119,83 +116,17 @@ export function workerState(health, now) {
 const day = captureDay;
 
 /**
- * A Source's filters in words (§7, §14, §39), from the one home of a Source's selection
- * words (sourceWords.js), in `selectionWords`' order: its tags ("2 tags", or their paths
- * when every one is given in `tagPaths`), favourites, a single kind and its dated window.
- * "2 tags · favourites only · photos only · dated 2024". Empty when it takes everything.
- *
- * @param {object|null} spec the stored SourceSpec
- * @param {Readonly<Record<string, string|null>>|null} [tagPaths] id -> path, when loaded
- * @returns {string[]}
- */
-export function sourceFilters(spec, tagPaths = null) {
-  const kinds = spec?.media_types ?? ["image", "video"];
-  return [
-    tagCountWords(spec?.tags, tagPaths),
-    favouritesWords(spec?.favorites),
-    kinds.length === 1 ? kindsWords(kinds) : null,
-    datedWords(spec?.captured_from, spec?.captured_until),
-  ].filter((part) => part !== null);
-}
-
-/**
- * One Source's state, first match (§14): awaiting its first refresh
- * (`next_refresh = 0`, 005_media_jobs.sql), failing, overdue past
- * {@link REFRESH_OVERDUE_AFTER}, nothing valid in its last refresh, ok. "Valid"
- * is the refresh's own count (`counts.valid`): items it found and accepted,
- * not items ready for any frame. The label carries the Source's filters.
+ * One Source's state in words (roadmap 4, run 2: one home): read from its `check` alone
+ * (central/photo_library/model.py `CheckState`, served on each `/v1/operator/media` `sources`
+ * row), in sourceWords.js `checkWords`' words. A failed check is `notice` and says "Photos keep
+ * playing" (C7): the last pool plays on, so nothing reads as emptied.
  *
  * @param {object} source a `/v1/operator/media` `sources` row
- * @param {number} now `media.read_at`, the database's clock (G11)
+ * @param {number} now `media.read_at`, the database's clock (G11), for the check's times
  * @returns {Classified}
  */
-export function sourceState(source, now, includeFilters = true, connections = []) {
-  const filters = sourceFilters(source.spec);
-  const said = (state, severity, label) => ({
-    state,
-    severity,
-    label: includeFilters ? [label, ...filters].join(" · ") : label,
-  });
-  // A newly configured Source starts as unavailable before any refresh attempt.
-  // A failed periodic refresh can leave the explicit request revision at zero, so
-  // an absent next_refresh is the reliable signal that no attempt has run yet.
-  if (!source.next_refresh && Number(source.refresh_completed_revision ?? 0) === 0 &&
-      !source.diagnostics?.length) {
-    return said("never-refreshed", "todo", "Awaiting refresh");
-  }
-  if (source.status !== "ok") {
-    const good = source.last_success == null
-      ? "never refreshed successfully"
-      : `last good refresh ${age(ageAt(now, source.last_success))} ago`;
-    // One closed table names each refusal's owner and words (sourceWords.js
-    // SOURCE_REFUSALS, §39 R21): Photo Wall's own refusals never read as the library's
-    // fault, and a code it does not hold reads neutrally. A failed refresh records one
-    // Source-level code; per-item codes carry an asset id.
-    const diagnostics = source.diagnostics ?? [];
-    const code = (diagnostics.find((entry) => entry?.code && !entry.asset_id) ?? diagnostics[0])?.code;
-    const failure = refusalState(code, source.status);
-    return said("failing", "alarm", `${failure} · ${good}`);
-  }
-  if (!source.next_refresh) {
-    return said("never-refreshed", "todo", "Awaiting refresh");
-  }
-  const late = ageAt(now, source.next_refresh);
-  if (!(late <= REFRESH_OVERDUE_AFTER)) {
-    return said("overdue", "alarm", `Refresh overdue by ${age(late)}`);
-  }
-  const valid = Number(source.counts?.valid ?? 0);
-  const pending = Number(source.counts?.pending ?? 0);
-  const rejected = Number(source.counts?.rejected ?? 0);
-  const partialCount = Math.max(0, pending) + Math.max(0, rejected);
-  if (!(valid > 0)) {
-    return said("empty", "todo", "nothing valid in the last refresh");
-  }
-  const qualifier = partialCount > 0
-    ? ` · ${partialCount} item${partialCount === 1 ? "" : "s"} pending or rejected`
-    : "";
-  // The refresh's one home (sourceWords.js `refreshFact`), so a Source card that shows this
-  // label states its refresh once, as the library's `reported` fact.
-  return said("ok", "ok", `${factText(refreshFact(source, now, connections))}${qualifier}`);
+export function sourceState(source, now) {
+  return checkWords(source?.check, now);
 }
 
 // --- One candidate's standing for a frame, as Central serves it.

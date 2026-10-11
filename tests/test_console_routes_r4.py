@@ -790,6 +790,9 @@ FRAME_PAGE_IMPORTS = {
 # (libraryApi.js, photoSourcesApi.js) and hooks.
 PHOTO_PAGE_IMPORTS = {
     "photo-library-page.tsx": {"libraryApi.js"},
+    "photo-source-page.tsx": {"libraryApi.js", "photoSourcesApi.js", "useDraftPool.js", "useSourceCheck.js"},
+    # A Source's words have one home (sourceWords.js), which the Show side's models read too.
+    "source-pool-view.tsx": {"sourceWords.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 
