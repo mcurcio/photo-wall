@@ -21,6 +21,7 @@ from central import cache_layout
 from central.assets.layout import TEMP_PREFIX, CacheLayout
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.infra.key_content_store import PgKeyContent
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.runtime import (
     COMPLETION_NOT_RECORDED,
@@ -40,8 +41,10 @@ from central.wall_plan.ports import KeyContentWriter
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient, LibraryLimits
+from media.key_content import MeasureError
+from media.key_content import measure as measure_key_content
 from media.library_checks import LibraryChecks
-from media.library_client import FetchedRendition, LibraryClient
+from media.library_client import FetchedRendition, LibraryClient, LibraryUnavailable
 from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import MediaError
@@ -232,8 +235,36 @@ class MediaWorker:
         `thumbnail` at its revision, `media.key_content.measure` them off the event loop, and
         record the result. A decode failure, or the whole step running past
         `WorkerLimits.measure_seconds`, is recorded as failed (its retry is the store's); a
-        library or asset-changed failure raises RetryableMediaTask (Procrastinate retries)."""
-        raise NotImplementedError
+        library or asset-changed failure raises RetryableMediaTask (Procrastinate retries).
+
+        Any other bounded thumbnail failure: one whose status is `unavailable` (Immich busy or
+        not ready) is retried the same way; one that is not (an oversize or unsupported
+        thumbnail) cannot be measured at this revision and is recorded as `decode`."""
+        if self.key_content is None:
+            raise MediaError("media_config", "incompatible")
+        asset = await _blocking(self.key_content.asset_to_measure, asset_id)
+        if asset is None:
+            return
+        try:
+            async with asyncio.timeout(self.limits.measure_seconds):
+                client = await self._client(asset.connection_ref)
+                boxes = await client.faces(asset.upstream_id)
+                thumbnail = await client.thumbnail(asset.upstream_id, asset.revision)
+                key = await _blocking(measure_key_content, boxes, thumbnail)
+        except MeasureError as error:
+            await _blocking(self.key_content.record_failed, asset_id, error.reason)
+            return
+        except TimeoutError:
+            await _blocking(self.key_content.record_failed, asset_id, "timeout")
+            return
+        except LibraryUnavailable as error:
+            raise RetryableMediaTask(error.problem.kind) from None
+        except MediaError as error:
+            if error.code != "asset_changed" and error.status != "unavailable":
+                await _blocking(self.key_content.record_failed, asset_id, "decode")
+                return
+            raise RetryableMediaTask(error.code) from None
+        await _blocking(self.key_content.record_measured, asset_id, key)
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)
@@ -370,7 +401,8 @@ async def _entry():
     cache_root = cache_layout.cache_root()
     previews = ensure_previews_directory(cache_root)
     worker = MediaWorker(repository, MediaStore(repository, Path(root)), library,
-                         previews=previews)
+                         previews=previews,
+                         key_content=PgKeyContent(db, times=DatabaseTransactionClock()))
     # The library half of the thumbnail fetch (R22): only this package holds the key.
     thumbnails = LibraryThumbnailOrigin(
         library.pool_thumbnail, library.connection_secret,
