@@ -475,6 +475,13 @@ class Runtime:
             refs.update(self._scene_source_refs(queued.scene))
         return refs
 
+    def planning_selections(self) -> dict[str, SceneSelection]:
+        """Roadmap 5a (slice O1): the selection of every Scene that can contribute to a current
+        or future Run projection (configured Scenes, active Runs' and queued Scenes, each with
+        its children), by scene id; a Run's admitted snapshot wins over the configured Scene of
+        the same id. Coordination reads the shown history for these Scenes."""
+        raise NotImplementedError
+
     def revise_source_refs(self, old_refs: set[str], new_ref: str) -> tuple[str, ...]:
         """Revise future Scene definitions; admitted and queued snapshots stay intact."""
         def revise(scene: Scene) -> Scene:
