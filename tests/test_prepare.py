@@ -198,7 +198,7 @@ def nonidentity_rgb_profile():
 
 
 @pytest.mark.parametrize("profile", [
-    "alpha", "animated", "rgb16", "cmyk", "nonidentity_icc", "hdr_png", "conflicting_gamma",
+    "alpha", "animated", "rgb16", "cmyk", "hdr_png", "conflicting_gamma",
 ])
 def test_unsupported_still_formats_and_color_are_rejected(tmp_path, native_tools, profile):
     source = tmp_path / "original"
@@ -214,8 +214,6 @@ def test_unsupported_still_formats_and_color_are_rejected(tmp_path, native_tools
             assert decoded.mode == "RGB"
     elif profile == "cmyk":
         corners().convert("CMYK").save(source, "JPEG")
-    elif profile == "nonidentity_icc":
-        corners().save(source, "JPEG", icc_profile=nonidentity_rgb_profile())
     else:
         corners().save(source, "PNG")
         raw = source.read_bytes()
@@ -646,3 +644,158 @@ def test_a_rendition_whose_size_differs_from_the_fetch_is_an_integrity_failure(
                           tmp_path / "variant")
     assert caught.value.code == "asset_integrity"
     assert not (tmp_path / "variant").exists()
+
+
+# -- follow-ups 2026-10-11 (slice A5): the originals Immich keeps -----------------------------
+# Owner, 2026-10-11: "I would rather lean on strong foundational libraries than reinvent the
+# wheel": HEIC through libheif (pillow-heif), AVIF through Pillow's libavif, colour through
+# LittleCMS (Pillow's ImageCms).
+
+
+def s15(value):
+    return struct.pack(">i", round(value * 65536))
+
+
+def icc_tag(kind, body):
+    data = kind + b"\0\0\0\0" + body
+    return data + b"\0" * (-len(data) % 4)
+
+
+def mluc(text):
+    encoded = text.encode("utf-16-be")
+    return icc_tag(b"mluc", struct.pack(">II2s2sII", 1, 12, b"en", b"US", len(encoded), 28)
+                   + encoded)
+
+
+def display_p3_profile():
+    """A Display P3 matrix/TRC ICC v4 profile: Apple's D50-adapted P3 colorants and the sRGB
+    tone curve (a parametric curve of type 3)."""
+    xyz = {name: icc_tag(b"XYZ ", b"".join(s15(v) for v in values)) for name, values in {
+        b"wtpt": (0.964203, 1.0, 0.824905), b"rXYZ": (0.515102, 0.241182, -0.001050),
+        b"gXYZ": (0.291965, 0.692236, 0.041882), b"bXYZ": (0.157153, 0.066582, 0.784186),
+    }.items()}
+    curve = icc_tag(b"para", struct.pack(">HH", 3, 0) + b"".join(
+        s15(v) for v in (2.4, 1 / 1.055, 0.055 / 1.055, 1 / 12.92, 0.04045)))
+    tags = [(b"desc", mluc("Display P3 (test)")), (b"cprt", mluc("Public domain")), *xyz.items(),
+            (b"rTRC", curve), (b"gTRC", curve), (b"bTRC", curve)]
+    table, data = b"", b""
+    start = 128 + 4 + 12 * len(tags)
+    for name, body in tags:
+        table += struct.pack(">4sII", name, start + len(data), len(body))
+        data += body
+    size = start + len(data)
+    header = (struct.pack(">I4sI4s4s4s", size, b"\0\0\0\0", 0x04300000, b"mntr", b"RGB ",
+                          b"XYZ ") + b"\0" * 12 + b"acsp" + b"\0" * 24 + struct.pack(">I", 0)
+              + s15(0.9642) + s15(1.0) + s15(0.8249) + b"\0" * 48)
+    assert len(header) == 128
+    return header + struct.pack(">I", len(tags)) + table + data
+
+
+def p3_to_srgb(colour):
+    """The Display P3 colour as sRGB (both D65, linear-light matrix; the colour is in gamut)."""
+    def linear(value):
+        value /= 255
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    def encoded(value):
+        value = 12.92 * value if value <= 0.0031308 else 1.055 * value ** (1 / 2.4) - 0.055
+        return round(255 * value)
+    red, green, blue = (linear(value) for value in colour)
+    matrix = ((1.2249401, -0.2249404, 0.0), (-0.0420569, 1.0420571, 0.0),
+              (-0.0196376, -0.0786361, 1.0982735))
+    return tuple(encoded(row[0] * red + row[1] * green + row[2] * blue) for row in matrix)
+
+
+def heif_file(path, image, **options):
+    import pillow_heif
+    pillow_heif.from_pillow(image).save(path, quality=95, **options)
+
+
+def test_a_heic_prepares_to_a_jpeg_of_the_recipes_size_upright(tmp_path, native_tools):
+    """A5 case 1. Mutation probe: drop `register_heif_opener` and the inspector cannot open it."""
+    source = tmp_path / "original"
+    heif_file(source, corners((400, 300)))
+    result = prepare_rendition(native_tools, pool_asset(width=400, height=300),
+                               rendition_of(source, rendition="original", width=400,
+                                            height=300, media_type="image/heic"),
+                               tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
+    assert (result.variant.media_type, result.variant.width, result.variant.height) == (
+        "image/jpeg", 200, 150)
+    assert result.made_from == "original"
+    with Image.open(tmp_path / "variant") as image:
+        assert image.format == "JPEG"
+        assert_same_pixels(image, corners((400, 300)).resize((200, 150)))
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["original", "variant"]
+
+
+def test_a_display_p3_jpeg_prepares_to_its_srgb_colour(tmp_path, native_tools):
+    """A5 case 2: LittleCMS converts it (perceptual), and no profile is left. Mutation probe:
+    skip the conversion and the P3 values pass through, about 10 off in red."""
+    colour = (170, 110, 90)
+    source = tmp_path / "original"
+    Image.new("RGB", (64, 48), colour).save(source, "JPEG", quality=100, subsampling=0,
+                                            icc_profile=display_p3_profile())
+    result = prepare_rendition(native_tools, pool_asset(width=64, height=48),
+                               rendition_of(source, width=64, height=48), tmp_path / "variant")
+    expected = p3_to_srgb(colour)
+    assert max(abs(a - b) for a, b in zip(expected, colour, strict=True)) > 5
+    with Image.open(result.path) as image:
+        assert "icc_profile" not in image.info
+        mean = ImageStat.Stat(image.convert("RGB")).mean
+    assert all(abs(a - b) <= 2 for a, b in zip(mean, expected, strict=True)), (mean, expected)
+
+
+def test_another_rgb_profile_is_converted_too(tmp_path, native_tools):
+    """An RGB profile that is not sRGB was refused before A5 (unsupported_color)."""
+    source = tmp_path / "original"
+    corners().save(source, "JPEG", quality=96, icc_profile=nonidentity_rgb_profile())
+    result = prepare(native_tools, original_asset(source), source, tmp_path / "variant.jpg")
+    assert (result.variant.width, result.variant.height) == (96, 64)
+
+
+def test_an_avif_prepares(tmp_path, native_tools):
+    """A5 case 3."""
+    source = tmp_path / "original"
+    corners((96, 64)).save(source, "AVIF", quality=90)
+    result = prepare_rendition(native_tools, pool_asset(),
+                               rendition_of(source, rendition="original",
+                                            media_type="image/avif"),
+                               tmp_path / "variant")
+    assert (result.variant.width, result.variant.height) == (96, 64)
+    with Image.open(result.path) as image:
+        assert_same_pixels(image, corners((96, 64)))
+
+
+@pytest.mark.parametrize("transfer", [16, 18])
+def test_a_pq_or_hlg_still_is_refused(tmp_path, native_tools, transfer):
+    """A5 case 4: Photo Wall does not tone-map HDR stills."""
+    source = tmp_path / "original"
+    heif_file(source, corners(), color_primaries=9, transfer_characteristics=transfer,
+              matrix_coefficients=9)
+    with pytest.raises(MediaError) as caught:
+        prepare_rendition(native_tools, pool_asset(),
+                          rendition_of(source, rendition="original", media_type="image/heic"),
+                          tmp_path / "variant")
+    assert caught.value.code == "unsupported_color"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["original"]
+
+
+def test_a_gain_map_photo_prepares_from_its_base_image(tmp_path, native_tools):
+    """An Ultra HDR or Apple adaptive HDR JPEG names its gain map in XMP; its base image is an
+    ordinary SDR photo (refused before A5)."""
+    source = tmp_path / "original"
+    xmp = (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/'
+           b'02/22-rdf-syntax-ns#"><rdf:Description xmlns:hdrgm="http://ns.adobe.com/hdr-gain-'
+           b'map/1.0/" hdrgm:Version="1.0"/></rdf:RDF></x:xmpmeta>')
+    corners().save(source, "JPEG", quality=96, xmp=xmp)
+    result = prepare(native_tools, original_asset(source), source, tmp_path / "variant.jpg")
+    with Image.open(result.path) as image:
+        assert_same_pixels(image, corners())
+
+
+def test_recipe_three_has_its_own_id(native_tools):
+    """A5 case 5: every photo is prepared again once (F-FU-3)."""
+    two = PreparationRecipe.model_construct(**{**PreparationRecipe().model_dump(), "version": 2})
+    ids = [asyncio.run(preparer(native_tools, recipe=recipe).describe_recipe())[0]
+           for recipe in (PreparationRecipe(), two)]
+    assert PreparationRecipe().version == 3 and ids[0] != ids[1]

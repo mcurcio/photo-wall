@@ -32,6 +32,7 @@ from central.photo_library.model import (
     LibraryTag,
     MeasurableCopy,
     MeasuredCopy,
+    MediaTypeName,
     OriginalFile,
     Place,
     SourceQuery,
@@ -198,8 +199,9 @@ class FetchedRendition(Model):
 
     path: Path
     rendition: FetchStep
-    media_type: Literal["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime",
-                        "video/webm", "video/x-matroska"]
+    # One of the types the client downloads: `media.prepare.STILL_MEDIA_TYPES` or a video's
+    # (`media.immich` refuses any other before writing a byte).
+    media_type: MediaTypeName
     size: int = Field(gt=0)
     sha256: Digest
     width: int = Field(gt=0)

@@ -131,6 +131,7 @@ def test_worker_publication_eviction_and_failure_cooldown_hydrate_authored_refs(
         build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="fixture", ffprobe_version="fixture",
             python_version="fixture", pillow_version="fixture", littlecms_version="fixture",
+            libheif_version="fixture",
             jpeg_version="fixture", zlib_version="fixture", platform="fixture",
             memory_limit_enforced=False)
         prepared = PreparedMedia(path=staged.variant, variant=variant,

@@ -49,7 +49,7 @@ from central.photo_library.model import (
     visible_text,
 )
 from central.photo_library.model import SourceQuery as LibraryQuery
-from central.photo_library.policy import REQUIRED_PERMISSIONS
+from central.photo_library.policy import IMMICH_WEB_TYPES, REQUIRED_PERMISSIONS
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.library_client import (
@@ -68,7 +68,7 @@ from media.library_client import (
     covers,
 )
 from media.models import MediaError
-from media.prepare import PreparationLimits
+from media.prepare import STILL_FORMATS, STILL_MEDIA_TYPES, PreparationLimits
 
 # Library thumbnails (PR 37 §7): bounded bytes and pixels, three decoders, one re-encoding.
 THUMBNAIL_BYTES = 1024**2
@@ -328,7 +328,7 @@ class ImmichClient:
         rows = _array(_mapping(answer.get("assets"), "search").get("items"), "search")
         probe = next((row for row in rows if isinstance(row, dict)
                       and isinstance(row.get("originalMimeType"), str)
-                      and row["originalMimeType"].lower() not in _WEB_IMAGES), None)
+                      and row["originalMimeType"].lower() not in IMMICH_WEB_TYPES), None)
         if probe is None:
             return None
         upstream_id = _ref(probe.get("id"), "search")
@@ -773,10 +773,10 @@ class ImmichClient:
 
 # --- The LibraryClient surface's helpers ---------------------------------------------------------
 
-_WEB_IMAGES = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
-                         "image/avif", "image/svg+xml", "image/bmp"})
-_RENDITION_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "video/mp4",
-                              "video/quicktime", "video/webm", "video/x-matroska"})
+# What a fetch downloads: a still preparation reads (follow-ups 2026-10-11, slice A5), or a
+# video; any other type is refused before a byte is written.
+_RENDITION_TYPES = STILL_MEDIA_TYPES | frozenset({
+    "video/mp4", "video/quicktime", "video/webm", "video/x-matroska"})
 _MAX_REDIRECTS = 3
 _MEDIA_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
 _ORIENTATIONS = frozenset("12345678")
@@ -973,9 +973,10 @@ def _lands_on_preview(location: str) -> bool:
 
 
 def _measure(path: Path, limits: LibraryLimits) -> tuple[int, int]:
-    """A fetched image's upright size, from its header and EXIF orientation."""
+    """A fetched image's upright size, from its header and EXIF orientation (libheif applies a
+    HEIC's own turn on decode and reports orientation 1)."""
     try:
-        with Image.open(path, formats=_THUMBNAIL_FORMATS) as image:
+        with Image.open(path, formats=STILL_FORMATS) as image:
             width, height = image.size
             orientation = image.getexif().get(0x0112, 1)
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):

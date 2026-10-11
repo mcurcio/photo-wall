@@ -56,6 +56,7 @@ def publish_photo(storage: MediaStore, photo: PublicPhoto) -> Variant:
         build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
             python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",
+            libheif_version="synthetic",
             jpeg_version="synthetic", zlib_version="synthetic", platform="synthetic",
             memory_limit_enforced=False)
         prepared = PreparedMedia(path=paths.variant, variant=variant,
