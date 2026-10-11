@@ -3,7 +3,16 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from contracts.models import Calibration, Layer, OutputBinding, Plan, Readiness, Variant
+from contracts.models import (
+    Calibration,
+    Layer,
+    OutputBinding,
+    PhotoCrop,
+    Plan,
+    Readiness,
+    Variant,
+)
+from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock, TimeMapping
 
 
@@ -37,7 +46,7 @@ def test_clock_uncertainty_is_not_pipeline_position():
     layer = Layer(assignment_id="a", run_id="run", output_id="hdmi-1", frame_id="f",
                   binding_generation=1, start=1000, end=1100, media_origin=988,
                   variant=Variant(sha256="a" * 64, size=20, media_type="video/mp4",
-                                  width=1920, height=1080, duration=60))
+                                  width=1920, height=1080, duration=60), crop=CENTRED)
     assert layer.position(clock.utc()) == 32
 
 
@@ -97,6 +106,19 @@ def test_plan_rejects_old_binding_generation_and_outside_validity():
     layer = layer.model_copy(update={"binding_generation": 2, "end": 401})
     with pytest.raises(ValidationError):
         Plan(**common, layers=(layer,))
+
+
+def test_a_media_layer_names_its_crop_and_a_black_layer_names_none():
+    """Roadmap 5a: the Player draws the window a media layer's crop names; a black layer draws
+    no photo. Owner, 2026-10-11: "crop happens directly on the Player"."""
+    common = dict(assignment_id="a", run_id="run", output_id="out", frame_id="frame",
+                  binding_generation=1, start=100, end=110, media_origin=100)
+    still = Variant(sha256="a" * 64, size=20, media_type="image/jpeg", width=30, height=20)
+    assert Layer(**common, variant=still, crop=PhotoCrop(offset=0)).crop.offset == 0
+    with pytest.raises(ValidationError, match="its crop"):
+        Layer(**common, variant=still)
+    with pytest.raises(ValidationError, match="cannot carry media"):
+        Layer(**common, presentation="black", crop=CENTRED)
 
 
 def test_node_app_link_result_is_one_of_three_statuses():

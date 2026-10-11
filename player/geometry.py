@@ -158,16 +158,16 @@ def inside_opening(corners: Corners, x: float, y: float) -> bool:
 
 
 def photo_rect(frame_aspect: float, source_width: int, source_height: int,
-               crop: PhotoCrop | None = None) -> tuple[float, float, float, float]:
+               crop: PhotoCrop) -> tuple[float, float, float, float]:
     """The photo's source UV rectangle (left, top, right, bottom): the window `crop` names for
-    `frame_aspect` (contracts/photo_crop.py `crop_window`), centred when `crop` is None. Pure;
-    ValueError for a non-positive or non-finite aspect or size."""
-    return crop_window(crop or CENTRED, source_width, source_height, frame_aspect)
+    `frame_aspect` (contracts/photo_crop.py `crop_window`). Pure; ValueError for a non-positive
+    or non-finite aspect or size."""
+    return crop_window(crop, source_width, source_height, frame_aspect)
 
 
 def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, profile_aspect: float,
                       source_width: int, source_height: int,
-                      crop: PhotoCrop | None = None) -> tuple[float, float] | None:
+                      crop: PhotoCrop) -> tuple[float, float] | None:
     """The source UV one Frame samples at output point (x, y); None outside its opening or its
     picture. The per-Frame mask (the opening) comes first, so a Frame never
     draws over its neighbour, then the picture's unit square. The photo is cropped to the Frame
@@ -207,7 +207,7 @@ def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFi
     decides what a Frame paints; the per-Output mask is the union of the openings."""
     colour: Linear = (0.0, 0.0, 0.0)
     for fit, aspect, flat in frames:
-        if picture_source_uv(x, y, fit, output, aspect, 1, 1) is not None:
+        if picture_source_uv(x, y, fit, output, aspect, 1, 1, CENTRED) is not None:
             colour = flat
     inside = any(inside_opening(fit.corners, x, y) for fit, _, _ in frames)
     return final_pixel(colour, operations, inside=inside)

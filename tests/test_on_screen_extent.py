@@ -8,6 +8,7 @@ import pytest
 
 from contracts.models import AfterEnd, Layer, Variant
 from contracts.on_screen import Extent, kept_from, on_screen_extent
+from contracts.photo_crop import CENTRED
 
 STILL = Variant(sha256="a" * 64, size=1, media_type="image/jpeg", width=4000, height=3000)
 
@@ -16,7 +17,7 @@ def _layer(start: float, end: float, after_end: AfterEnd = "leave_as_is", *,
            fade_in: float = 0) -> Layer:
     return Layer(assignment_id="a", run_id="r", output_id="o", frame_id="f",
                  binding_generation=1, start=start, end=end, media_origin=start, variant=STILL,
-                 fade_in=fade_in, after_end=after_end)
+                 crop=CENTRED, fade_in=fade_in, after_end=after_end)
 
 
 def test_a_layer_left_as_is_spans_its_interval_widened_by_twice_the_uncertainty() -> None:

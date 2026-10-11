@@ -22,6 +22,7 @@ from central.media_store import MediaStore, MediaStoreError
 from central.photo_library.model import LibraryAsset
 from central.registry import RegistryError
 from contracts.models import Layer, Plan, Variant
+from contracts.photo_crop import CENTRED
 from media.prepare import BuildIdentity, PreparedMedia
 
 RECIPE = "e" * 64
@@ -93,7 +94,8 @@ def grant(storage, registry, variant, *, secured=False):
     binding = registry.bindings_for(player["player_id"], 1)[0]
     layer = Layer(assignment_id="assignment", run_id="run", output_id=binding.output_id,
                   frame_id=binding.frame_id, binding_generation=binding.generation,
-                  start=1000, end=1200, media_origin=1000, variant=variant)
+                  start=1000, end=1200, media_origin=1000, variant=variant,
+                  crop=CENTRED)
     plan = Plan(plan_id="plan", revision=1, player_id=player["player_id"], authority_epoch=1,
                 issued_at=1000, valid_from=1000, valid_until=1200, bindings=(binding,), layers=(layer,))
     with storage.repository.transaction() as conn:

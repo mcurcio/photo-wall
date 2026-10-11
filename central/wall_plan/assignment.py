@@ -180,8 +180,8 @@ def layer_after_end(after_end: AfterEnd, kind: MediaKind) -> AfterEnd:
 
 def variant_usable(candidate: Candidate, profile: FrameProfile) -> bool:
     """Whether the candidate's prepared copy can be drawn on a Frame of `profile`: its media type
-    and duration, and requirements :186's floor for a video on a large Frame. Orientation is
-    not a test (the fit rule judges the original's ratio; owner 2026-10-11, "It's about the
+    and duration, and requirements :186's floor for a video on a large Frame. Landscape or
+    portrait is not a test (the fit rule judges the original's ratio; owner 2026-10-11, "It's about the
     ratio, not strict labels")."""
     variant = candidate.variant
     if variant is None:

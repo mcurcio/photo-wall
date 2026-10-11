@@ -24,6 +24,7 @@ from central.installation_repository import PostgresInstallationRepository
 from central.media_ports import CoordinationMedia, MediaPin
 from central.media_repository import MediaRepository
 from central.planner import (
+    PLAN_SECONDS,
     PlannerLimits,
     Projection,
     assignment_id,
@@ -64,7 +65,7 @@ class CoordinationLimits(Model):
     max_offers: int = Field(default=64, ge=1, le=256)
     # Roadmap 5a (slice W1): how far ahead the wall plan reaches, every Frame together; layers
     # are still offered only inside `horizon_seconds`.
-    plan_seconds: float = Field(default=3600, gt=0, le=3600)
+    plan_seconds: float = Field(default=PLAN_SECONDS, gt=0, le=PLAN_SECONDS)
 
 
 @dataclass(frozen=True, slots=True)

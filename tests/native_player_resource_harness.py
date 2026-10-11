@@ -47,6 +47,7 @@ gi.require_version("Gst", "1.0")
 from gi.repository import GLib, Gst  # noqa: E402
 
 from contracts.models import FrameProfile, Layer, OutputBinding, Variant  # noqa: E402
+from contracts.photo_crop import CENTRED  # noqa: E402
 from player.native import NativeOutput, NativeRenderer  # noqa: E402
 from player.rendering import LocalLayer, OutputComposition  # noqa: E402
 
@@ -75,7 +76,7 @@ def jpeg_fixture() -> Variant:
 def slide(assignment_id: str, variant: Variant) -> OutputComposition:
     layer = Layer(assignment_id=assignment_id, run_id="run", output_id="headless",
                   frame_id="frame", binding_generation=1, start=0, end=10**9,
-                  media_origin=0, variant=variant)
+                  media_origin=0, variant=variant, crop=CENTRED)
     return OutputComposition(BINDING, BINDING.calibration, (LocalLayer(layer, PHOTO, 0.0, 1.0),))
 
 

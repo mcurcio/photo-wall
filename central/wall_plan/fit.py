@@ -5,7 +5,7 @@ the Player only draws.
 
 Owner, 2026-10-11: "a photo either fills the frame or it doesn't show (it's incompatible with that
 frame)"; "It's about the ratio, not strict labels"; "Smart crop sounds reasonable". So there are
-no orientation labels, no mats and no pairs: a photo fits a Frame when some window with the
+no landscape or portrait labels, no mats and no pairs: a photo fits a Frame when some window with the
 Frame profile's aspect, slid along the photo's free axis (contracts/photo_crop.py):
 1. removes no more than the crop limit of the photo's area (`crop_share`; the backstop),
 2. has at least the Frame's pixels in the original (`profile.width_px` x `profile.height_px`),

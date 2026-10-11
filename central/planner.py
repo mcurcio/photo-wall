@@ -36,7 +36,7 @@ from central.wall_plan.assignment import (
     plan_wall,
     variant_usable,
 )
-from central.wall_plan.fit import DEFAULT_CROP_LIMIT, shape_fit
+from central.wall_plan.fit import shape_fit
 from central.wall_plan.order import (
     SceneLine,
     ScenePass,
@@ -78,8 +78,14 @@ def handle_execution_outcome(outcome: ExecutionOutcome) -> str:
     }[outcome.kind]
 
 
+# Roadmap 5a: how far ahead the wall plan reaches, every Frame together (owner, 2026-10-11: "an
+# algorithm that computes all frame+photo assignments well in advance"; the plan horizon's 1 h
+# default confirmed on the r2 gate page). Coordination's `plan_seconds` defaults to it.
+PLAN_SECONDS = 3600.0
+
+
 class PlannerLimits(Model):
-    max_horizon_seconds: float = Field(default=3600, gt=0)
+    max_horizon_seconds: float = Field(default=PLAN_SECONDS, gt=0)
     max_cycle_seconds: float = Field(default=300, gt=0, le=300)
     max_events: int = Field(default=10000, ge=1)
     max_assignments: int = Field(default=4096, ge=1)
@@ -161,8 +167,7 @@ class Projection(Model):
         return next((player for player in self.players if player.player_id == player_id), None)
 
 
-def eligible(candidate: Candidate, profile: FrameProfile,
-             crop_limit: float = DEFAULT_CROP_LIMIT) -> bool:
+def eligible(candidate: Candidate, profile: FrameProfile, crop_limit: float) -> bool:
     """Hard original-media policy, also applied to every authored alternative: the photo fit
     rule's size-only part (central/wall_plan/fit.py `shape_fit` is None) at `crop_limit`.
     Key content is judged by the wall assignment once measured."""
@@ -546,17 +551,17 @@ def project(
     source_pools: Mapping[str, SourcePool],
     authored_candidates: Mapping[str, Candidate],
     locked_assignments: Mapping[str, Layer],
-    history: WallHistory = WallHistory(),
+    history: WallHistory,
     horizon_seconds: float = 300,
-    plan_seconds: float | None = None,
+    plan_seconds: float = PLAN_SECONDS,
     max_clock_uncertainty: float = 0.1,
     limits: PlannerLimits = PlannerLimits(),
 ) -> Projection:
     """Build complete-cycle proposals without changing any supplied state.
 
-    Roadmap 5a (slice W1): the wall plan covers `plan_seconds` (None: `horizon_seconds`; never
-    less than it, at most `limits.max_horizon_seconds`) from `now`, every Frame together; layers
-    are proposed only for slots starting before now + `horizon_seconds` (the preparation
+    Roadmap 5a (slice W1): the wall plan covers `plan_seconds` (never less than
+    `horizon_seconds`, at most `limits.max_horizon_seconds`) from `now`, every Frame together;
+    layers are proposed only for slots starting before now + `horizon_seconds` (the preparation
     horizon). `history` is the shown history and the locks' photos
     (central/infra/shown_history_store.py); `max_clock_uncertainty` sets the on-screen extents'
     guard (contracts/on_screen.py)."""
@@ -564,7 +569,7 @@ def project(
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:
         raise PlanningError("horizon_seconds must be positive")
-    plan_span = horizon_seconds if plan_seconds is None else _finite(plan_seconds, "plan_seconds")
+    plan_span = _finite(plan_seconds, "plan_seconds")
     if plan_span <= 0:
         raise PlanningError("plan_seconds must be positive")
     plan_span = max(plan_span, horizon_seconds)

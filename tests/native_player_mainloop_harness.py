@@ -103,6 +103,7 @@ def static_photo_render_rate(seconds=6.0):
     from native_display_media import image_fixture
 
     from contracts.models import FrameProfile, Layer, OutputBinding
+    from contracts.photo_crop import CENTRED
     from player.native import NativeOutput, NativeRenderer
     from player.rendering import LocalLayer, OutputComposition
 
@@ -135,7 +136,7 @@ def static_photo_render_rate(seconds=6.0):
                                                      diagonal_inches=10))
         layer = Layer(assignment_id="photo", run_id="run", output_id="headless",
                       frame_id="frame", binding_generation=1, start=0, end=10**9,
-                      media_origin=0, variant=variant)
+                      media_origin=0, variant=variant, crop=CENTRED)
         composition = OutputComposition(binding, binding.calibration,
                                         (LocalLayer(layer, photo, 0.0, 1.0),))
         loop = GLib.MainLoop()

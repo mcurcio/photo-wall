@@ -20,6 +20,7 @@ from contracts.models import (
     Revocation,
     Variant,
 )
+from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
@@ -206,8 +207,10 @@ def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
           data: bytes = b"picture", video: bool = False, **kwargs) -> Layer:
     fields = dict(assignment_id=key, run_id="run", output_id=output, frame_id=frame,
                   binding_generation=1, start=100, end=200, media_origin=100,
-                  variant=media(data, video))
+                  variant=media(data, video), crop=CENTRED)
     fields.update(kwargs)
+    if fields.get("presentation") == "black":
+        fields["crop"] = None
     return Layer(**fields)
 
 

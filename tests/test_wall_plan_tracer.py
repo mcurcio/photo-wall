@@ -38,6 +38,7 @@ from central.planner import Projection, project
 from central.registry import FrameCreate
 from central.runtime import Contribution, Program, Runtime, Scene
 from central.wall_plan.fit import Fits, judge
+from central.wall_plan.order import WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import CornersFit, FrameProfile, Observation, OutputBinding, Variant
 from player.geometry import picture_source_uv
@@ -83,7 +84,8 @@ def an_hour(instance: Runtime, photos) -> Projection:
                           profile=PROFILES[frame]) for frame in FRAMES)},
         source_pools={POOL: SourcePool(source_ref=POOL, ready=True,
                                        candidates=tuple(photos.values()))},
-        authored_candidates={}, locked_assignments={}, horizon_seconds=300, plan_seconds=3600,
+        authored_candidates={}, locked_assignments={}, history=WallHistory(),
+        horizon_seconds=300, plan_seconds=3600,
         max_clock_uncertainty=UNCERTAINTY)
 
 

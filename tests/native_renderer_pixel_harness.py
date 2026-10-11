@@ -65,6 +65,7 @@ from contracts.models import (  # noqa: E402
     Variant,
 )
 from contracts.node_frame import PictureOperations  # noqa: E402
+from contracts.photo_crop import CENTRED  # noqa: E402
 from player.geometry import (  # noqa: E402
     compose_pixel,
     decode_channel,
@@ -113,12 +114,13 @@ def variant_of(path: pathlib.Path) -> Variant:
 
 
 def layer(assignment_id: str, path: pathlib.Path | None, variant: Variant | None,
-          alpha: float = 1.0, crop: PhotoCrop | None = None) -> LocalLayer:
+          alpha: float = 1.0, crop: PhotoCrop = CENTRED) -> LocalLayer:
     """A picture layer, or with no variant a black one."""
     return LocalLayer(Layer(assignment_id=assignment_id, run_id="run", output_id="headless",
                             frame_id="frame", binding_generation=1, start=0, end=10**9,
                             media_origin=0, variant=variant,
-                            presentation="media" if variant else "black", crop=crop),
+                            presentation="media" if variant else "black",
+                            crop=crop if variant else None),
                       path, 0.0, alpha)
 
 
@@ -238,7 +240,7 @@ def close(actual, expected) -> bool:
 
 
 def check_fit(native: CapturingRenderer, fit, operations: PictureOperations | None, *,
-              profile: FrameProfile = PROFILE, crop: PhotoCrop | None = None) -> tuple[int, int]:
+              profile: FrameProfile = PROFILE, crop: PhotoCrop = CENTRED) -> tuple[int, int]:
     """Every sample equals the reference: inside, the picture through `final_pixel`; outside,
     opaque black. The (inside, outside) sample counts."""
     width, height, _ = native.captured
@@ -298,7 +300,8 @@ def corners_fit_matches_the_reference(native, frames, variant) -> None:
     width, height, _ = native.captured
     compared = 0
     for i, j, x, y in samples(native, SKEWED):
-        uv = picture_source_uv(x, y, fit, (width, height), PROFILE.width_px / PROFILE.height_px, WIDTH, HEIGHT)
+        uv = picture_source_uv(x, y, fit, (width, height), PROFILE.width_px / PROFILE.height_px, WIDTH, HEIGHT,
+                               CENTRED)
         if uv is None:
             expected = compose_pixel([])
         else:

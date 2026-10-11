@@ -6,6 +6,8 @@ from support.key_content_builders import measured
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
+from central.wall_plan.fit import DEFAULT_CROP_LIMIT
+from central.wall_plan.order import WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Plan, Variant
 
@@ -58,7 +60,7 @@ def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=No
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         },
         authored_candidates=authored or {}, locked_assignments=locks or {},
-        horizon_seconds=horizon,
+        history=WallHistory(), horizon_seconds=horizon, plan_seconds=horizon,
     )
     if limits:
         options["limits"] = limits
@@ -105,7 +107,7 @@ def test_original_eligibility_precedes_derivative_dimensions(kind, width, height
     asset = candidate(kind=kind, width=width, height=height,
                       variant_width=3840, variant_height=2160)
     profile = binding(diagonal=diagonal, video=video).profile
-    assert eligible(asset, profile) is expected
+    assert eligible(asset, profile, DEFAULT_CROP_LIMIT) is expected
     assert eligible(asset, profile, 0.5) is (expected or (width, height) == (2000, 2000))
 
 
@@ -187,7 +189,7 @@ def test_a_pool_of_fifty_thousand_photos_on_four_frames_plans_an_hour_with_no_bu
         instance, 0, bindings_by_player={"player-one": tuple(
             binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))},
         source_pools={"holiday:1": pool("holiday:1", *photos)}, authored_candidates={},
-        locked_assignments={}, horizon_seconds=300, plan_seconds=3600)
+        locked_assignments={}, history=WallHistory(), horizon_seconds=300, plan_seconds=3600)
     assert layers(result) == ()
     assert {r.asset_id for r in result.acquisitions} >= {f"photo-{49_999 - n}" for n in range(4)}
     assert len(result.plan) == 4 * 120

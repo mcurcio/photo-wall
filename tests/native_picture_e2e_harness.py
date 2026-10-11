@@ -73,6 +73,7 @@ def player() -> None:
     from gi.repository import GLib
 
     from contracts.models import Calibration, CoverFit, FrameProfile, Layer, OutputBinding, Variant
+    from contracts.photo_crop import CENTRED
     from player.native import NativeOutput, NativeRenderer
     from player.rendering import LocalLayer, OutputComposition
 
@@ -82,7 +83,8 @@ def player() -> None:
     binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1,
                             profile=FrameProfile(width_px=1600, height_px=900, diagonal_inches=10))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
-                             binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant),
+                             binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
+                             crop=CENTRED),
                        PHOTO, 0.0, 1.0)
     shown = OutputComposition(binding, Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION)), (layer,))
     native = NativeRenderer((NativeOutput(OUTPUT, "photo-wall-headless", WIDTH_PX, HEIGHT_PX),))
