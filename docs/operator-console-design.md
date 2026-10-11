@@ -433,7 +433,7 @@ Recommendations only; none changes a requirement. Rows marked **owner** need his
 - Sensors and triggers arrive through Home Assistant rather than being built into Photo Wall; native auto-dim waits.
 - Hardware brightness and power depend on each display: many TVs take power commands but not brightness, and some panels take neither.
 - Cover never skews the picture, so a display hung at an angle shows its picture turned rather than stretched onto its corners (Corners stays for that). The picture is cut to the four corners, so corners set inside the visible area leave a black edge. With Trim edges gone, the corners are the only way to trim a Frame.
-- One Frame per display today: Central binds one Frame to each HDMI port. The renderer already keeps each Frame inside its own corners and the rest of the display black, so two Frames on one display is a binding change, not a drawing one.
+- One Frame per display today: Central binds one Frame to each HDMI port. The renderer keeps each Frame inside its own corners and the rest of the display black, but its final pass masks with that one Frame's corners, so two Frames on one display also needs the renderer to mask with every Frame's corners and draw each Frame's picture (proven so far only on the reference drawing; [architecture › Player and rendering](architecture.md#player-and-rendering)).
 - What is deferred, and what that costs, is the [roadmap's deferred list](roadmap.md#deferred-and-what-that-costs).
 
 ## 14. What it supersedes
