@@ -90,10 +90,12 @@ from central.photo_library.ports import (
 )
 from central.photo_library.views import (
     ConnectionWrite,
+    CopyView,
     KindCounts,
     LeftOutCount,
     LibraryConnectionView,
     ListAnswer,
+    PhotoFacts,
     PoolItem,
     SourcePoolView,
 )
@@ -184,6 +186,15 @@ def _original_of(row: dict) -> OriginalFile | None:
     return OriginalFile(media_type=row["original_media_type"], width=row["original_width"],
                         height=row["original_height"], orientation=row["original_orientation"],
                         size_bytes=row["original_bytes"])
+
+
+def _copy_sizes_in(conn: Any, asset_id: str) -> dict[MeasurableCopy, CopySize]:
+    """A revision's measured Immich copies (its `asset_copies` rows)."""
+    rows = conn.execute("SELECT copy,media_type,width,height,measured_at FROM asset_copies "
+                        "WHERE asset_id=%s", (asset_id,)).fetchall()
+    return {row["copy"]: CopySize(name=row["copy"], media_type=row["media_type"],
+                                  width=row["width"], height=row["height"],
+                                  measured_at=row["measured_at"]) for row in rows}
 
 
 def _original_values(original: OriginalFile | None) -> tuple:
@@ -899,25 +910,13 @@ class PgPhotoLibrary:
                              (finish.problem, now, lease.pool_key))
             return True
 
-    def frame_sizes(self) -> tuple[tuple[int, int], ...]:
-        with self.db.transaction() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT (profile->>'width_px')::int AS width,"
-                "(profile->>'height_px')::int AS height FROM frames "
-                "ORDER BY width, height").fetchall()
-        return tuple((row["width"], row["height"]) for row in rows)
-
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         with self.db.transaction() as conn:
             return frame_outputs_in(conn)
 
     def copy_sizes(self, asset_id: str) -> dict[MeasurableCopy, CopySize]:
         with self.db.transaction() as conn:
-            rows = conn.execute("SELECT copy,media_type,width,height,measured_at FROM asset_copies "
-                                "WHERE asset_id=%s", (asset_id,)).fetchall()
-        return {row["copy"]: CopySize(name=row["copy"], media_type=row["media_type"],
-                                      width=row["width"], height=row["height"],
-                                      measured_at=row["measured_at"]) for row in rows}
+            return _copy_sizes_in(conn, asset_id)
 
     def record_copies(self, asset_id: str, measured: Sequence[MeasuredCopy]) -> None:
         if not measured:
@@ -937,6 +936,31 @@ class PgPhotoLibrary:
                     "height=EXCLUDED.height,measured_at=EXCLUDED.measured_at",
                     [(asset_id, name, copy.media_type, copy.width, copy.height, now)
                      for name, copy in sorted(latest.items())])
+
+    def photo_facts(self, asset_id: str) -> PhotoFacts:
+        with self.db.transaction() as conn:
+            row = conn.execute(
+                "SELECT c.full_size_copies,(SELECT j.made_from FROM media_jobs j WHERE "
+                "j.asset_id=a.asset_id AND j.state='ready' AND j.recipe_id=(SELECT recipe_id "
+                "FROM media_settings WHERE singleton)) AS made_from FROM asset_revisions a "
+                "LEFT JOIN library_connections c USING (connection_ref) WHERE a.asset_id=%s "
+                "AND EXISTS (SELECT 1 FROM photo_pool_rows r JOIN photo_pools p USING (pool_key) "
+                f"WHERE r.asset_id=a.asset_id AND r.outcome='in_pool' AND {_WANTED})",
+                (asset_id,)).fetchone()
+            if row is None:
+                raise LibraryRefused("photo_not_found", 404)
+            asset = library_assets_in(conn, (asset_id,))[asset_id]
+            measured = _copy_sizes_in(conn, asset_id)
+        original = asset.original
+        kept = policy.copies_in_immich(asset.kind, asset.edited,
+                                       None if original is None else original.media_type,
+                                       row["full_size_copies"])
+        return PhotoFacts(
+            asset_id=asset_id, kind=asset.kind, taken_at=asset.taken_at, width=asset.width,
+            height=asset.height, edited=asset.edited, original=original,
+            copies=tuple(CopyView(name=name, in_immich=in_immich, measured=measured.get(name))
+                         for name, in_immich in kept.items()),
+            prepared_from=row["made_from"])
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         with self.db.transaction() as conn:

@@ -7,6 +7,7 @@ FastAPI's TestClient over create_app with a real database and Procrastinate's re
 from __future__ import annotations
 
 import logging
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,13 +16,21 @@ from runtime_fakes import apply_procrastinate_schema
 
 from central.app import create_app
 from central.media_queue import CHECK_CONNECTION_TASK
-from central.photo_library.model import SourceQuery
+from central.photo_library.model import (
+    InPool,
+    LibraryAsset,
+    MeasuredCopy,
+    OriginalFile,
+    SourceQuery,
+)
 from central.photo_library.policy import REQUIRED_PERMISSIONS
+from central.photo_library.ports import CheckStep
 
 ADMIN = "photo-library-operator-" + "t" * 32
 AUTH = {"Authorization": "Bearer " + ADMIN}
 KEY = "PUBLIC-FIXTURE-KEY-1234"
 CONNECTIONS = "/v1/operator/library/connections"
+PHOTOS = "/v1/operator/library/photos/"
 
 
 @pytest.fixture
@@ -165,3 +174,58 @@ def test_a_connection_a_source_uses_is_not_removed(client):
         conn.execute("UPDATE media_sources SET refresh_active=FALSE")
     assert test_client.delete(f"{CONNECTIONS}/{ref}", headers=AUTH).status_code == 204
     assert test_client.get(CONNECTIONS, headers=AUTH).json() == []
+
+
+def test_a_pool_photos_facts_name_its_original_and_immichs_copies(client):
+    """Follow-ups 2026-10-11, slice A3 case 5: the original's facts from discovery, each of
+    Immich's copies in order with the size Photo Wall measured, and the copy the current
+    recipe's prepared copy was made from. An id no wanted pool holds is not found, and no
+    Immich id reaches the answer (R22)."""
+    test_client, library = client
+    ref = _add(test_client).json()["connection_ref"]
+    upstream = str(UUID(int=7))
+    shown = LibraryAsset(
+        connection_ref=ref, upstream_id=upstream, revision="b" * 40, kind="image",
+        taken_at=1_700_000_000.0, width=3024, height=4032,
+        original=OriginalFile(media_type="image/heic", width=4032, height=3024, orientation=6,
+                              size_bytes=2_000_000))
+    draft = library.create_draft(SourceQuery(connection_ref=ref), None)
+    with library.db.transaction() as conn:
+        pool_key = library.pool_of_draft_in(conn, draft)
+        conn.execute("UPDATE library_connections SET full_size_copies=FALSE")
+    library.record_step(library.begin_check(pool_key),
+                        CheckStep(progress={}, entries=(InPool(asset=shown),), seen_so_far=1))
+    library.record_copies(shown.asset_id, [MeasuredCopy(name="preview", media_type="image/jpeg",
+                                                        width=1080, height=1440)])
+    with library.db.transaction() as conn:
+        conn.execute("INSERT INTO media_settings(singleton,recipe_id,max_bytes) "
+                     "VALUES(TRUE,'current',1) ON CONFLICT (singleton) DO UPDATE "
+                     "SET recipe_id='current'")
+        for job, recipe, made_from in (("old", "earlier", "preview"),
+                                       ("now", "current", "original")):
+            conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,"
+                         "updated_at,made_from) VALUES(%s,%s,%s,'ready',0,0,%s)",
+                         (job, shown.asset_id, recipe, made_from))
+
+    answer = test_client.get(PHOTOS + shown.asset_id, headers=AUTH)
+    assert answer.status_code == 200
+    facts = answer.json()
+    assert (facts["width"], facts["height"], facts["edited"]) == (3024, 4032, False)
+    assert facts["original"] == {"media_type": "image/heic", "width": 4032, "height": 3024,
+                                 "orientation": 6, "size_bytes": 2_000_000}
+    assert [(c["name"], c["in_immich"]) for c in facts["copies"]] == [
+        ("thumbnail", True), ("preview", True), ("fullsize", False), ("original", True)]
+    measured = {c["name"]: c["measured"] for c in facts["copies"]}
+    assert (measured["preview"]["width"], measured["preview"]["height"]) == (1080, 1440)
+    assert measured["thumbnail"] is None and measured["original"] is None
+    assert facts["prepared_from"] == "original"
+    assert upstream not in answer.text and "immich.invalid" not in answer.text
+
+    for unknown in ("asset-" + "0" * 64, "anything"):
+        refused = test_client.get(PHOTOS + unknown, headers=AUTH)
+        assert (refused.status_code, refused.json()) == (404, {"error": "photo_not_found"})
+    with library.db.transaction() as conn:   # the pool is wanted only while its draft is
+        library.remove_draft_in(conn, draft)
+    refused = test_client.get(PHOTOS + shown.asset_id, headers=AUTH)
+    assert (refused.status_code, refused.json()) == (404, {"error": "photo_not_found"})
+    assert test_client.get(PHOTOS + shown.asset_id).status_code == 401
