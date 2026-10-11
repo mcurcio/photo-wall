@@ -24,11 +24,19 @@ from scripts.demo_wall import (
     DemoHost,
     OperationFailure,
     await_central,
+    await_connection_ok,
     baseline_checks,
+    check_finished,
+    checksum_revision,
     composition,
     configure_demo_source,
+    connect_demo_library,
     core_image_mapping,
     delete_secured_original,
+    demo_query,
+    expected_pool,
+    fault_holds,
+    fault_reported,
     journal_upstream_mutation,
     local_source_inventory,
     main,
@@ -36,14 +44,13 @@ from scripts.demo_wall import (
     outage_checks,
     preserved_locks,
     public_failure,
+    read_pool,
     rejoined_player_ready,
     retryable_operator_error,
     role_operation,
     run_demo,
     selected_secured_presentation,
     setup_operation,
-    source_configuration_receipt,
-    source_refresh_completed,
     validate_selected_revision,
     write_json,
 )
@@ -100,6 +107,15 @@ def test_role_topology_has_no_player_upstream_or_private_material(scenario, coun
     assert document["services"]["upstream-tools"]["volumes"][0]["read_only"]
     assert all(mount["volume"]["nocopy"] for name, service in document["services"].items()
                if name != "database" for mount in service.get("volumes", []))
+    # Roadmap 4: the worker reads no connections file; the key reaches Central through the
+    # operator's API request. Only the upstream role (which writes the handoff), the operator
+    # (which reads it) and the root-only, networkless volume initializer mount `private`.
+    assert "PHOTO_WALL_CONNECTIONS_FILE" not in json.dumps(document)
+    private = {name: mount["read_only"] for name, service in document["services"].items()
+               if name != "database"
+               for mount in service.get("volumes", []) if mount["source"] == "private"}
+    assert private == {"upstream-tools": False, "operator": True, "init": False}
+    assert document["services"]["init"]["network_mode"] == "none"
 
 
 def test_the_demo_shortens_plan_and_retry_timing_within_their_constraints():
@@ -211,8 +227,7 @@ def test_setup_operation_persists_typed_phase_failure_without_private_text():
 def test_setup_operation_preserves_bounded_domain_code_and_success_identity():
     evidence = {"phases": {}}
     with pytest.raises(OperationFailure) as caught:
-        setup_operation(evidence, lambda: None, "setup_refresh", "operator",
-                        "request_refresh",
+        setup_operation(evidence, lambda: None, "setup_connection", "operator", "connect",
                         lambda: (_ for _ in ()).throw(DemoError("operator_http_503")))
     assert caught.value.code == "operator_http_503"
 
@@ -222,18 +237,18 @@ def test_setup_operation_preserves_bounded_domain_code_and_success_identity():
     assert evidence["phases"]["setup_source"]["status"] == "passed"
 
 
-def test_source_configuration_uses_shared_api_receipt_and_phase_postcondition():
+def test_source_configuration_saves_a_draft_and_checks_its_receipt_in_the_setup_phase():
     class Host:
         def role(self, role, action):
             assert (role, action) == ("operator", "source")
-            return {"source_ref": "demo:1", "created": True}
+            return {"source_ref": "demo:1"}
 
     evidence = {"phases": {}}
     result = setup_operation(
         evidence, lambda: None, "setup_source", "operator", "configure_source",
         lambda: configure_demo_source(Host()),
     )
-    assert result == {"source_ref": "demo:1", "created": True}
+    assert result == {"source_ref": "demo:1"}
     phase = evidence["phases"]["setup_source"]
     assert (phase["status"], phase["role"], phase["action"]) == (
         "passed", "operator", "configure_source",
@@ -241,13 +256,12 @@ def test_source_configuration_uses_shared_api_receipt_and_phase_postcondition():
 
 
 @pytest.mark.parametrize("response", [
-    {"created": True},
-    {"source_ref": "demo:1"},
-    {"source_ref": "demo:1", "created": True, "extra": "value"},
-    {"source_ref": "demo:1", "created": 1},
-    {"source_ref": "other:1", "created": True},
-    {"source_ref": "demo:1", "created": False},
-    ["demo:1", True],
+    {},
+    {"source_ref": "demo:1", "extra": "value"},
+    {"source_ref": 1},
+    {"source_ref": "other:1"},
+    {"source_ref": "demo:2"},
+    ["demo:1"],
 ])
 def test_source_configuration_contract_failures_are_typed_in_setup_phase(response):
     class Host:
@@ -267,16 +281,22 @@ def test_source_configuration_contract_failures_are_typed_in_setup_phase(respons
     )
 
 
-def test_shared_source_configuration_receipt_rejects_wrong_types_and_extra_fields():
-    assert source_configuration_receipt({
-        "source_ref": "demo:1", "created": True,
-    }).model_dump(mode="json") == {"source_ref": "demo:1", "created": True}
-    for response in (
-        {"source_ref": "demo:1", "created": 1},
-        {"source_ref": "demo:1", "created": True, "extra": False},
-    ):
-        with pytest.raises(DemoError, match="^source_configuration_invalid$"):
-            source_configuration_receipt(response)
+@pytest.mark.parametrize("response,code", [
+    ({"connection_ref": "library-0123456789ab"}, None),
+    ({"connection_ref": "library-0123456789ab", "key": "secret"}, "connection_invalid"),
+    ({}, "connection_invalid"),
+])
+def test_the_connection_receipt_is_centrals_answer_and_nothing_else(response, code):
+    class Host:
+        def role(self, role, action):
+            assert (role, action) == ("operator", "connect")
+            return response
+
+    if code is None:
+        assert connect_demo_library(Host()) == response
+    else:
+        with pytest.raises(DemoError, match=f"^{code}$"):
+            connect_demo_library(Host())
 
 
 @pytest.mark.parametrize("output", ["not-json", "[]", '"scalar"', "null"])
@@ -325,7 +345,8 @@ def test_immich_runtime_provenance_is_derived_from_complete_bundle():
 
 
 INDIRECT_CODES = [
-    "active_before_outage_timeout", "central_recovery_timeout", "deleted_refresh_timeout",
+    "active_before_outage_timeout", "central_recovery_timeout", "deleted_check_timeout",
+    "check_pending", "connection_not_ok", "fault_pool_changed", "fault_presentation_stopped",
     "new_media_not_presented", "permission_not_reported", "permission_recovery_timeout",
     "player_rejoin_timeout", "upstream_outage_not_reported", "upstream_recovery_timeout",
     "fixture_http_400", "fixture_http_401", "fixture_http_403", "fixture_http_404",
@@ -684,9 +705,9 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
     class Host:
         def role(self, role, action):
             events.append(("role", role, action))
-            if action == "refresh":
-                return {"source_ref": "demo:1", "requested_revision": 2,
-                        "completed_revision": 1, "coalesced": False}
+            if action == "check":
+                return {"health": {"state": "ok", "checked_at": 90.0},
+                        "check": {"state": "complete", "at": 90.0}}
             return {"action": action, "assets": [{"label": "portrait", "deleted": True}]}
 
     def save():
@@ -702,9 +723,9 @@ def test_deleted_secured_audit_is_saved_before_mutation_and_survives_wait_failur
     assert events[0] == ("save",)
     assert events[1] == ("save",)
     assert events[2] == ("role", "upstream-tools", "delete")
-    assert events[3] == ("role", "operator", "refresh")
+    assert events[3] == ("role", "operator", "check")
     assert events[4] == ("save",)
-    assert receipt == evidence["phases"]["deleted_secured_delete"]["refresh"]
+    assert receipt == evidence["phases"]["deleted_secured_delete"]["check"]
     pre = saved[0]["phases"]["deleted_secured_pre_delete"]
     assert pre["central"] == before and pre["players"] == reports
     assert pre["future_portrait_locks"] == [before["locks"][0]]
@@ -818,9 +839,9 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
     class Host:
         def role(self, role, action):
             events.append(("role", role, action))
-            if action == "refresh":
-                return {"source_ref": "demo:1", "requested_revision": 3,
-                        "completed_revision": 2, "coalesced": False}
+            if action == "check":
+                return {"health": {"state": "ok", "checked_at": 90.0},
+                        "check": {"state": "complete", "at": 90.0}}
             return {"action": action, "assets": [{"label": "older-live", "sha1": "l", "deleted": False}]}
 
     def save():
@@ -838,9 +859,9 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
     assert events[0] == ("save",)
     assert events[1] == ("save",)
     assert events[2] == ("role", "upstream-tools", "evolve")
-    assert events[3] == ("role", "operator", "refresh")
+    assert events[3] == ("role", "operator", "check")
     assert events[4] == ("save",)
-    assert receipt == evidence["phases"]["evolved_change"]["refresh"]
+    assert receipt == evidence["phases"]["evolved_change"]["check"]
     pre = saved[0]["phases"]["evolved_pre_change"]
     assert pre["central"] == before and pre["players"] == reports
     assert pre["action"] == "evolve"
@@ -849,21 +870,6 @@ def test_evolved_audit_is_saved_before_upstream_mutation_and_survives_wait_failu
     save()
     assert saved[-1]["phases"]["evolved_pre_change"] == pre
     assert saved[-1]["phases"]["evolved_change"]["result"] == result
-
-
-def test_refresh_completion_matches_the_exact_accepted_revision():
-    receipt = {"source_ref": "demo:1", "requested_revision": 4,
-               "completed_revision": 3, "coalesced": True}
-    source = {"source_ref": "demo:1", "refresh_completed_revision": 4, "status": "ok"}
-    snapshot = {"media": {"sources": [source]}}
-
-    assert source_refresh_completed(snapshot, receipt, status="ok")
-    assert not source_refresh_completed(
-        {"media": {"sources": [dict(source, refresh_completed_revision=3)]}},
-        receipt,
-        status="ok",
-    )
-    assert not source_refresh_completed(snapshot, receipt, status="permission")
 
 
 def test_journaled_upstream_mutation_preserves_error_timepoint_and_result_fields():
@@ -917,7 +923,7 @@ def test_journaled_mutation_does_not_promote_code_shaped_unknown_exception():
     assert "lowercasesecrettoken" not in json.dumps(evidence)
 
 
-def test_journaled_mutation_records_refresh_request_failure_after_upstream_success():
+def test_journaled_mutation_records_check_request_failure_after_upstream_success():
     evidence = {"phases": {}}
 
     class Host:
@@ -938,7 +944,7 @@ def test_journaled_mutation_records_refresh_request_failure_after_upstream_succe
     assert change["completed_utc"] >= change["invoked_utc"]
     assert change["failed_utc"] >= change["completed_utc"]
     assert change["error"] == "operator_http_503"
-    assert "refresh" not in change
+    assert "check" not in change
 
 
 def test_plan_records_selected_revision_and_image_requirement(monkeypatch, capsys):
@@ -1073,3 +1079,229 @@ def test_source_audit_journals_validated_container_failure_stage_and_role():
     record = evidence["phases"]["source_audit"]
     assert record["provenance_role"] == "worker"
     assert record["provenance_failure"] == failure.model_dump(mode="json", by_alias=True)
+
+
+# --- Roadmap 4: the demo pastes its connection and builds its Source through the API ------------
+
+CONNECTION = "library-0123456789ab"
+CAPTURE = 700_000_000
+
+
+def test_the_demo_query_is_favourites_in_the_capture_window_photos_and_videos():
+    """Erratum E-P4-FX2-1's disposition: screenshots are not left out."""
+    from central.photo_library.model import Exclusions, SourceQuery, TakenBetween
+
+    assert SourceQuery.model_validate(demo_query(CONNECTION, CAPTURE)) == SourceQuery(
+        connection_ref=CONNECTION, favourites_only=True,
+        taken=TakenBetween(start=CAPTURE, end=CAPTURE + 60), media_types=("photo", "video"),
+        exclude=Exclusions(screenshots=False))
+
+
+class _Operator:
+    """Central's operator API as the demo's operator role meets it: records every request."""
+
+    def __init__(self, pages=None, health=None, check=None):
+        self.requests = []
+        self.pages = pages or [{"items": [], "next": None}]
+        self.health = health or {"state": "ok", "checked_at": 5.0}
+        self.check = check or {"state": "complete", "at": 5.0}
+
+    def __call__(self, request):
+        import httpx
+
+        body = json.loads(request.content) if request.content else None
+        self.requests.append((request.method, request.url.path,
+                              dict(request.url.params), body))
+        path = request.url.path
+        if path == "/v1/operator/library/connections" and request.method == "POST":
+            return httpx.Response(201, json={"connection_ref": CONNECTION})
+        if path == "/v1/operator/library/connections":
+            return httpx.Response(200, json=[{"connection_ref": CONNECTION, "name": "demo-library",
+                                              "key_hint": "…cret", "health": self.health}])
+        if path == "/v1/operator/photo-drafts":
+            return httpx.Response(201, json={"draft_ref": "0b9f4c4e-8f43-4c43-9d0e-6a2b0d3c1a11"})
+        if path.endswith("/save"):
+            return httpx.Response(200, json={"source_ref": "demo:1"})
+        if path.endswith("/checks"):
+            return httpx.Response(202)
+        if path == "/v1/operator/sources/demo:1/pool":
+            index = int(request.url.params.get("after", "0"))
+            page = self.pages[index]
+            return httpx.Response(200, json={
+                "check": self.check, "in_pool": {"photos": 0, "videos": 0}, "waiting": 0,
+                "left_out": [], "items": [{"asset_id": item} for item in page["items"]],
+                "next": page["next"]})
+        return httpx.Response(404)
+
+
+@pytest.fixture
+def operator(monkeypatch, tmp_path):
+    import httpx
+
+    client = httpx.Client
+    api = _Operator()
+    monkeypatch.setenv("DEMO_ADMIN_TOKEN", "synthetic-test-token")
+    monkeypatch.setenv("DEMO_CAPTURE_START", str(CAPTURE))
+    monkeypatch.setattr("scripts.demo_wall.CONNECTION_HANDOFF", tmp_path / "private/connection.json")
+    monkeypatch.setattr("scripts.demo_wall.CONNECTION_STATE", tmp_path / "control/connection.json")
+    (tmp_path / "private").mkdir()
+    (tmp_path / "control").mkdir()
+    write_json(tmp_path / "private/connection.json",
+               {"url": "http://immich:2283/api", "key": "synthetic-runtime-key"})
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(
+        **kwargs, transport=httpx.MockTransport(lambda request: api(request))))
+    return api, tmp_path
+
+
+def test_the_operator_pastes_the_handoff_through_the_api_and_keeps_only_the_ref(operator):
+    api, root = operator
+    result = operator_action("connect")
+    assert result == {"connection_ref": CONNECTION}
+    assert api.requests == [("POST", "/v1/operator/library/connections", {}, {
+        "name": "demo-library", "url": "http://immich:2283/api", "key": "synthetic-runtime-key"})]
+    assert json.loads((root / "control/connection.json").read_text()) == {
+        "connection_ref": CONNECTION}
+    assert stat.S_IMODE((root / "control/connection.json").stat().st_mode) == 0o600
+    # The key never leaves the request: not in the answer, not in what the operator keeps.
+    assert "synthetic-runtime-key" not in json.dumps(result)
+    assert "synthetic-runtime-key" not in (root / "control/connection.json").read_text()
+
+
+def test_the_connection_row_the_demo_records_carries_no_key_hint(operator):
+    api, _ = operator
+    write_json(operator[1] / "control/connection.json", {"connection_ref": CONNECTION})
+    assert operator_action("connection") == {
+        "connection_ref": CONNECTION, "health": {"state": "ok", "checked_at": 5.0}}
+
+
+def test_the_operator_builds_the_source_through_a_draft_and_saves_it_as_demo(operator):
+    api, root = operator
+    write_json(root / "control/connection.json", {"connection_ref": CONNECTION})
+    assert operator_action("source") == {"source_ref": "demo:1"}
+    assert api.requests == [
+        ("POST", "/v1/operator/photo-drafts", {}, {"query": demo_query(CONNECTION, CAPTURE)}),
+        ("POST", "/v1/operator/photo-drafts/0b9f4c4e-8f43-4c43-9d0e-6a2b0d3c1a11/save", {},
+         {"name": "demo"}),
+    ]
+
+
+def test_check_now_answers_what_the_connection_and_source_showed_just_before(operator):
+    api, root = operator
+    write_json(root / "control/connection.json", {"connection_ref": CONNECTION})
+    assert operator_action("check") == {"health": api.health, "check": api.check}
+    assert [(method, path) for method, path, _, _ in api.requests if method == "POST"] == [
+        ("POST", f"/v1/operator/library/connections/{CONNECTION}/checks"),
+        ("POST", "/v1/operator/sources/demo:1/checks"),
+    ]
+
+
+def test_the_pool_is_read_through_every_page():
+    pages = {None: {"check": {"state": "complete", "at": 1.0}, "in_pool": {}, "waiting": 0,
+                    "left_out": [], "items": [{"asset_id": "b"}], "next": "c1"},
+             "c1": {"check": {"state": "complete", "at": 1.0}, "in_pool": {}, "waiting": 1,
+                    "left_out": [], "items": [{"asset_id": "a"}], "next": None}}
+    assert read_pool(pages.__getitem__) == {
+        "check": {"state": "complete", "at": 1.0}, "in_pool": {}, "waiting": 1,
+        "left_out": [], "asset_ids": ["a", "b"]}
+    endless = {"check": {}, "in_pool": {}, "waiting": 0, "left_out": [], "items": [],
+               "next": "again"}
+    with pytest.raises(DemoError, match="^pool_page_bound$"):
+        read_pool(lambda after: endless)
+
+
+def test_expected_pool_ids_are_the_asset_identity_of_each_favourite_not_deleted():
+    import base64
+
+    from central.photo_library.model import asset_identity
+
+    digest = hashlib.sha1(b"landscape").digest()
+    revision = checksum_revision(base64.b64encode(digest).decode())
+    assert revision == digest.hex()
+    upstream = {"assets": [
+        dict(label="landscape", upstream_id="u1", revision=revision, favorite=True, deleted=False),
+        dict(label="portrait", upstream_id="u2", revision="b" * 40, favorite=True, deleted=True),
+        dict(label="other", upstream_id="u3", revision="c" * 40, favorite=False, deleted=False),
+    ]}
+    assert expected_pool(upstream, CONNECTION) == {asset_identity(CONNECTION, "u1", revision)}
+    for value in (None, "not base64!", base64.b64encode(b"short").decode()):
+        with pytest.raises(DemoError, match="^upstream_checksum_invalid$"):
+            checksum_revision(value)
+
+
+def _snapshot(check, health, asset_ids=("a", "b")):
+    return {"pool": {"check": check, "asset_ids": list(asset_ids)},
+            "connection": {"connection_ref": CONNECTION, "health": health}}
+
+
+OK = {"state": "ok", "checked_at": 5.0}
+DENIED = {"state": "needs_a_look", "problem": {"kind": "missing_permissions", "missing": ["x"]},
+          "since": 6.0, "checked_at": 6.0}
+DOWN = {"state": "needs_a_look", "problem": {"kind": "unreachable"}, "since": 7.0,
+        "checked_at": 7.0}
+COMPLETE = {"state": "complete", "at": 5.0}
+FAILED = {"state": "failed", "problem": "connection", "last_complete_at": 5.0}
+
+
+def test_a_check_finished_only_when_it_differs_from_the_one_read_before():
+    before = {"health": OK, "check": COMPLETE}
+    assert not check_finished(_snapshot(COMPLETE, OK), before, "ok")
+    assert not check_finished(_snapshot({"state": "checking", "seen_so_far": 0,
+                                         "started_at": 6.0}, OK), before, "ok")
+    assert check_finished(_snapshot({"state": "complete", "at": 6.0}, OK), before, "ok")
+    assert not check_finished(_snapshot({"state": "complete", "at": 6.0}, OK), before,
+                              "permission")
+    assert check_finished(_snapshot(FAILED, DENIED), before, "permission")
+    gone = dict(FAILED, problem="chosen_item_gone")
+    assert not check_finished(_snapshot(gone, DENIED), before, "permission")
+
+
+@pytest.mark.parametrize("before,snapshot,outcome,reported", [
+    ({"health": OK, "check": COMPLETE}, _snapshot(FAILED, DENIED), "permission", True),
+    ({"health": OK, "check": COMPLETE}, _snapshot(FAILED, DOWN), "permission", False),
+    ({"health": OK, "check": COMPLETE}, _snapshot(FAILED, DOWN), "unavailable", True),
+    ({"health": OK, "check": COMPLETE}, _snapshot(FAILED, OK), "unavailable", False),
+    ({"health": DENIED, "check": FAILED}, _snapshot(COMPLETE, OK), "ok", True),
+    ({"health": DENIED, "check": FAILED}, _snapshot(COMPLETE, DENIED), "ok", False),
+    ({"health": DOWN, "check": FAILED}, _snapshot(FAILED, OK), "ok", False),
+])
+def test_a_fault_is_reported_by_the_connections_health_and_the_sources_check(
+        before, snapshot, outcome, reported):
+    assert fault_reported(before, outcome)(snapshot, {}) is reported
+
+
+def _presenting(fallback=False, layers=({"sha256": "a" * 64},)):
+    return {"player-one": {"outputs": 1, "events": [
+        {"output_id": "HDMI-A-1", "layers": list(layers), "fallback": fallback}]}}
+
+
+def test_c7_the_last_pool_plays_on_through_a_fault():
+    fault_holds(_snapshot(FAILED, DENIED), _presenting(), ["a", "b"])
+    # Mutation probe: a fault that empties the pool, or stops a Player, fails the e2e.
+    with pytest.raises(DemoError, match="^fault_pool_changed$"):
+        fault_holds(_snapshot(FAILED, DENIED, asset_ids=()), _presenting(), ["a", "b"])
+    with pytest.raises(DemoError, match="^fault_presentation_stopped$"):
+        fault_holds(_snapshot(FAILED, DENIED), _presenting(fallback=True, layers=()), ["a", "b"])
+
+
+def test_setup_waits_for_the_pasted_connection_to_be_healthy(monkeypatch):
+    monkeypatch.setattr("scripts.demo_wall.time.sleep", lambda _: None)
+    answers = [{"connection_ref": CONNECTION, "health": {"state": "not_checked"}},
+               {"connection_ref": CONNECTION, "health": OK}]
+
+    class Host:
+        def role(self, role, action):
+            assert (role, action) == ("operator", "connection")
+            return answers.pop(0)
+
+    assert await_connection_ok(Host()) == {"connection_ref": CONNECTION, "health": OK}
+    answers[:] = [{"connection_ref": CONNECTION, "health": DENIED}]
+    with pytest.raises(DemoError, match="^connection_not_ok$"):
+        await_connection_ok(Host(), seconds=0)
+
+
+def test_no_image_or_service_names_a_connections_file():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("Dockerfile", "compose.yaml", "scripts/demo_wall.py", "scripts/service_base.py",
+                 "tests/support/workers.py"):
+        source = (root / name).read_text()
+        assert "PHOTO_WALL_CONNECTIONS_FILE" not in source and "connections.json" not in source

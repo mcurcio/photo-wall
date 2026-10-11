@@ -16,7 +16,7 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 \
     PHOTO_WALL_PGID=${PHOTO_WALL_PGID}
 RUN groupadd --gid "$PHOTO_WALL_PGID" wall \
     && useradd --system --uid "$PHOTO_WALL_PUID" --gid "$PHOTO_WALL_PGID" --create-home wall \
-    && install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 /etc/photo-wall/private
+    && install -d -m 0755 /etc/photo-wall
 
 FROM python-system AS media-os
 RUN rm -f /etc/apt/sources.list.d/debian.sources \
@@ -33,9 +33,6 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
        done \
     && dpkg-query -W -f='${Package}\t${Version}\t${Architecture}\n' > /etc/photo-wall/packages.tsv \
     && sha256sum /usr/bin/ffmpeg /usr/bin/ffprobe > /etc/photo-wall/conversion-binaries.sha256 \
-    && printf '%s\n' '{"schema":1,"connections":[]}' > /etc/photo-wall/private/connections.json \
-    && chown wall:wall /etc/photo-wall/private/connections.json \
-    && chmod 0600 /etc/photo-wall/private/connections.json \
     && ffmpeg -version > /dev/null && ffprobe -version > /dev/null \
     && gosu nobody true \
     && rm -rf /var/lib/apt/lists/*
@@ -127,7 +124,6 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0755 /var/lib/photo-wall/hub
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
-ENV PHOTO_WALL_CONNECTIONS_FILE="/etc/photo-wall/private/connections.json"
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "media.worker"]
 

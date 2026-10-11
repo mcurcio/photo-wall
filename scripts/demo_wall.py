@@ -42,6 +42,16 @@ DEMO_RENEWAL_SECONDS = 10
 SCENE_CYCLE_SECONDS = 8
 # The deletion step needs a secured assignment that starts at least this far ahead.
 SECURED_LEAD_SECONDS = 3
+# The library connection, pasted through Central's API (roadmap 4): the upstream role hands the
+# fixture's internal URL and the runtime key to the operator role in the private volume, and the
+# operator keeps the connection_ref Central answers in the control volume.
+UPSTREAM_URL = "http://immich:2283/api"
+CONNECTION_NAME = "demo-library"
+CONNECTION_HANDOFF = Path("/private/connection.json")
+CONNECTION_STATE = Path("/control/connection.json")
+SOURCE_NAME = "demo"
+SOURCE_REF = "demo:1"
+MAX_POOL_PAGES = 20
 
 # This is the ONLY benchmark application code copied into the Player image, which is the app
 # root (photo-wall-player, decision 0019) as built: the runner puts the PATH the Player's own
@@ -296,24 +306,44 @@ def public_failure(error: Exception) -> dict:
     return result
 
 
-def source_configuration_receipt(value: object):
-    """Validate the shared operator response without exposing validation details."""
+def demo_query(connection_ref: str, capture_start: int) -> dict:
+    """The demo Source's query (run ledger, erratum E-P4-FX2-1): favourites taken in the demo's
+    one-minute capture window, photos and videos. Screenshots are not left out: the demo proves
+    the wall path, not exclusions (tests/test_source_filters.py does), so the query does not
+    depend on its uploads' file types."""
+    from central.photo_library.model import Exclusions, SourceQuery, TakenBetween
+
+    return SourceQuery(connection_ref=connection_ref, favourites_only=True,
+                       taken=TakenBetween(start=capture_start, end=capture_start + 60),
+                       media_types=("photo", "video"),
+                       exclude=Exclusions(screenshots=False)).model_dump(mode="json")
+
+
+def operator_receipt(value: object, model: str, code: str) -> dict:
+    """Validate one operator API answer against Central's own view, without exposing
+    validation details."""
     from pydantic import ValidationError
 
-    from central.media_ports import SourceConfigurationReceipt
+    from central.photo_library import views
 
     try:
-        return SourceConfigurationReceipt.model_validate(value, strict=True)
+        return getattr(views, model).model_validate(value, strict=True).model_dump(mode="json")
     except ValidationError:
-        raise DemoError("source_configuration_invalid") from None
+        raise DemoError(code) from None
+
+
+def connect_demo_library(host):
+    """Paste the library's URL and key through the API; the answer is the connection_ref."""
+    return operator_receipt(host.role("operator", "connect"), "ConnectionSaved",
+                            "connection_invalid")
 
 
 def configure_demo_source(host):
-    """Configure and validate the demo source inside the setup phase."""
-    receipt = source_configuration_receipt(host.role("operator", "source"))
-    require(receipt.source_ref == "demo:1" and receipt.created,
-            "source_configuration_invalid")
-    return receipt.model_dump(mode="json")
+    """Build the demo Source through a draft and save it as `demo:1`."""
+    receipt = operator_receipt(host.role("operator", "source"), "DraftSaved",
+                               "source_configuration_invalid")
+    require(receipt["source_ref"] == SOURCE_REF, "source_configuration_invalid")
+    return receipt
 
 
 def setup_operation(evidence: dict, save, phase: str, role: str, action: str, function):
@@ -442,14 +472,15 @@ def composition(project: str, fixture_project: str, scenario: str) -> dict:
             PHOTO_WALL_RENEWAL_SECONDS=str(DEMO_RENEWAL_SECONDS)), volumes=["media:/var/cache/photo-wall/media:ro"], networks=["wall", "backend"],
             sysctls={"net.ipv4.ip_forward": "0"}, mem_limit="384m", depends_on={"database": {"condition": "service_healthy"}}),
         "worker": dict(common, image=project + "-worker:local", user="10001:10001",
-            environment=dict(PHOTO_WALL_DATABASE_URL=dsn, PHOTO_WALL_CACHE_ROOT="/var/cache/photo-wall",
-                             PHOTO_WALL_CONNECTIONS_FILE="/private/connections.json"),
-            volumes=["media:/var/cache/photo-wall/media", "private:/private:ro"], networks=["backend", "upstream"],
+            environment=dict(PHOTO_WALL_DATABASE_URL=dsn, PHOTO_WALL_CACHE_ROOT="/var/cache/photo-wall"),
+            volumes=["media:/var/cache/photo-wall/media"], networks=["backend", "upstream"],
             mem_limit="768m", cpus=1, stop_grace_period="40s"),
+        # The operator pastes the library's URL and key through Central's API, as a person does
+        # on Settings › Photo library: it alone reads the upstream role's handoff file.
         "operator": dict(app, profiles=["tools"], entrypoint=["python", "/harness/demo_wall.py", "operator"],
             environment=dict(PHOTO_WALL_DATABASE_URL=dsn, DEMO_ADMIN_TOKEN="${DEMO_ADMIN_TOKEN}",
                 DEMO_CAPTURE_START="${DEMO_CAPTURE_START}", DEMO_SCENARIO=scenario),
-            volumes=["control:/control"], networks=["backend"]),
+            volumes=["control:/control", "private:/private:ro"], networks=["backend"]),
         "upstream-tools": dict(common, image=project + "-worker:local", profiles=["tools"],
             entrypoint=["python", "/harness/demo_wall.py", "upstream"], user="10001:10001",
             environment=dict(DEMO_ID=project, DEMO_CAPTURE_START="${DEMO_CAPTURE_START}"),
@@ -744,14 +775,13 @@ def upstream_action(action: str):
     try:
         if action == "initialize":
             require(not path.exists(), "upstream_already_initialized")
-            owner = fixture.request("GET", "/users/me")
             key = fixture.request("POST", "/api-keys", (201,),
                                   json={"name": project, "permissions": PERMISSIONS})
             state["key_id"] = key["apiKey"]["id"]
             write_json(path, state)
-            write_json(Path("/private/connections.json"), {"schema": 1, "connections": [{
-                "connection_id": "demo-library", "base_url": "http://immich:2283/api",
-                "owner_id": owner["id"], "api_key": key["secret"], "allow_http": True}]})
+            # The handoff to the operator role, which pastes it through Central's API; the
+            # worker reads no file (roadmap 4). The key never enters a result or the evidence.
+            write_json(CONNECTION_HANDOFF, {"url": UPSTREAM_URL, "key": key["secret"]})
             image("landscape", (160, 96), 10)
             image("portrait", (96, 160), 20)
             video()
@@ -795,21 +825,59 @@ def upstream_action(action: str):
         while True:
             complete = True
             for item in state["assets"].values():
+                if item["deleted"]:
+                    continue
                 observed = fixture.request("GET", "/assets/" + item["upstream_id"])
                 exif = observed.get("exifInfo") or {}
                 observed_time = observed.get("fileCreatedAt")
                 expected_time = datetime.fromisoformat(item["captured"].replace("Z", "+00:00"))
                 complete = complete and bool(exif.get("exifImageWidth")) and observed_time is not None and (
                     datetime.fromisoformat(observed_time.replace("Z", "+00:00")) == expected_time)
+                # An unedited asset's revision is its checksum (central.photo_library.model).
+                item["revision"] = checksum_revision(observed.get("checksum"))
             if complete:
                 break
             require(time.monotonic() < deadline, "synthetic_metadata_convergence")
             time.sleep(1)
     write_json(path, state)
     fixture.client.close()
-    return {"action": action, "assets": [{key: item[key] for key in (
-        "label", "kind", "sha1", "sha256", "size", "captured", "favorite", "deleted")}
+    return {"action": action, "assets": [{key: item.get(key) for key in (
+        "label", "kind", "upstream_id", "revision", "sha1", "sha256", "size", "captured",
+        "favorite", "deleted")}
         for item in state["assets"].values()], "permissions": PERMISSIONS if action != "deny" else ["user.read"]}
+
+
+def checksum_revision(value: object) -> str:
+    """Immich's base64 SHA-1 checksum in the 40-hex form `media/immich.py` parses."""
+    import base64
+    import binascii
+
+    try:
+        decoded = base64.b64decode(value if isinstance(value, str) else "", validate=True)
+    except (ValueError, binascii.Error):
+        raise DemoError("upstream_checksum_invalid") from None
+    require(len(decoded) == 20, "upstream_checksum_invalid")
+    return decoded.hex()
+
+
+def asset_ids_of(upstream: dict, connection_ref: str, keep) -> set[str]:
+    """Photo Wall's asset ids of the uploads `keep` selects:
+    `asset_identity(connection, upstream id, revision)`, as the pool rows carry them."""
+    from central.photo_library.model import asset_identity
+
+    return {asset_identity(connection_ref, item["upstream_id"], item["revision"])
+            for item in upstream["assets"] if keep(item)}
+
+
+def expected_pool(upstream: dict, connection_ref: str) -> set[str]:
+    """The demo Source's pool: every favourite not deleted (every upload of the demo falls in
+    its capture window and is a photo or a video)."""
+    return asset_ids_of(upstream, connection_ref,
+                        lambda item: item["favorite"] and not item["deleted"])
+
+
+def labelled(*labels):
+    return lambda item: item["label"] in labels
 
 
 def operator_action(action: str):
@@ -824,29 +892,50 @@ def operator_action(action: str):
     from contracts.time import SystemClock
     client = httpx.Client(base_url="http://central:8000", trust_env=False, follow_redirects=False,
                          headers={"Authorization": "Bearer " + os.environ["DEMO_ADMIN_TOKEN"]}, timeout=15)
-    def request(method, path, body=None):
+    def request(method, path, body=None, params=None):
         try:
-            response = client.request(method, path, json=body)
+            response = client.request(method, path, json=body, params=params)
         except httpx.HTTPError:
             raise DemoError("operator_transport") from None
-        expected = 201 if method == "POST" and path == "/v1/operator/frames" else (
-            202 if method == "POST" and path.endswith("/refresh") else 200
-        )
-        require(response.status_code == expected,
+        require(response.status_code == operator_status(method, path),
                 "operator_http_" + str(response.status_code))
         require(len(response.content) <= MAX_EVIDENCE, "operator_body_bound")
-        return response.json()
+        return response.json() if response.content else None
+
+    def connection_ref():
+        return read_json(CONNECTION_STATE)["connection_ref"]
+
+    def pool():
+        return read_pool(lambda after: request(
+            "GET", f"/v1/operator/sources/{SOURCE_REF}/pool",
+            params=None if after is None else {"after": after}))
+
+    def connection():
+        return connection_health(request("GET", "/v1/operator/library/connections"),
+                                 connection_ref())
 
     if action == "health":
         return request("GET", "/healthz")
+    if action == "connect":
+        handoff = read_json(CONNECTION_HANDOFF)
+        saved = request("POST", "/v1/operator/library/connections",
+                        {"name": CONNECTION_NAME, "url": handoff["url"], "key": handoff["key"]})
+        write_json(CONNECTION_STATE, {"connection_ref": saved["connection_ref"]})
+        return {"connection_ref": saved["connection_ref"]}
+    if action == "connection":
+        return connection()
     if action == "source":
-        start = int(os.environ["DEMO_CAPTURE_START"])
-        result = request("PUT", "/v1/operator/sources/demo:1", {"schema": 1, "source_ref": "demo:1",
-            "connection_ref": "demo-library", "favorites": True, "captured_from": start,
-            "captured_until": start + 60, "media_types": ["image", "video"]})
-        return source_configuration_receipt(result).model_dump(mode="json")
-    if action == "refresh":
-        return request("POST", "/v1/operator/sources/demo:1/refresh")
+        draft = request("POST", "/v1/operator/photo-drafts", {"query": demo_query(
+            connection_ref(), int(os.environ["DEMO_CAPTURE_START"]))})
+        return request("POST", f"/v1/operator/photo-drafts/{draft['draft_ref']}/save",
+                       {"name": SOURCE_NAME})
+    if action == "check":
+        # Check now, for the connection and the Source; the answer is what each showed just
+        # before, so "finished" compares values Central served, never a host clock.
+        before = dict(health=connection()["health"], check=pool()["check"])
+        request("POST", f"/v1/operator/library/connections/{connection_ref()}/checks")
+        request("POST", f"/v1/operator/sources/{SOURCE_REF}/checks")
+        return before
     if action == "start":
         inventory = request("GET", "/v1/operator/inventory")
         outputs = sorted(inventory["outputs"], key=lambda output: (output["player_id"], output["output_id"]))
@@ -881,8 +970,7 @@ def operator_action(action: str):
         raise DemoError("unknown_operator_action")
     database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
     with database.transaction() as conn:
-        jobs = conn.execute("SELECT j.state,j.result,a.metadata FROM media_jobs j "
-                            "JOIN asset_revisions a ON a.asset_id=j.asset_id ORDER BY j.id LIMIT 100").fetchall()
+        jobs = conn.execute("SELECT state,result,asset_id FROM media_jobs ORDER BY id LIMIT 100").fetchall()
         locks = conn.execute("SELECT player_id,authority_epoch,assignment_id,layer,valid_until FROM assignment_locks "
                              "ORDER BY player_id,assignment_id LIMIT 256").fetchall()
         commits = conn.execute("SELECT player_id,authority_epoch,revision,assignment_id,group_id,"
@@ -891,13 +979,11 @@ def operator_action(action: str):
                                     "WHERE kind='observation' ORDER BY sequence DESC LIMIT 128").fetchall()
         faults = conn.execute("SELECT occurred_at,player_id,assignment_id,kind,detail FROM execution_events "
                               "WHERE kind IN ('readiness_lost','group_skipped') ORDER BY sequence DESC LIMIT 64").fetchall()
-        members = conn.execute("SELECT a.metadata FROM source_members m JOIN asset_revisions a "
-                               "ON a.asset_id=m.asset_id ORDER BY a.asset_id LIMIT 100").fetchall()
         offers = conn.execute("SELECT DISTINCT ON (player_id) player_id,manifest FROM plan_offers "
                               "ORDER BY player_id,authority_epoch DESC,revision DESC").fetchall()
         groups = conn.execute("SELECT id,members,status FROM coordination_groups ORDER BY starts_at DESC LIMIT 64").fetchall()
-    return dict(utc=time.time(), media=request("GET", "/v1/operator/media"),
-        jobs=[dict(state=job["state"], original_sha1=job["metadata"]["original_sha1"],
+    return dict(utc=time.time(), pool=pool(), connection=connection(),
+        jobs=[dict(state=job["state"], asset_id=job["asset_id"],
                    original_sha256=job["result"].get("original_sha256") if job["result"] else None,
                    variant=job["result"].get("variant") if job["result"] else None,
                    recipe_id=job["result"].get("recipe_id") if job["result"] else None,
@@ -907,8 +993,6 @@ def operator_action(action: str):
                     output_id=row["layer"]["output_id"],
                     start=row["layer"]["start"], end=row["layer"]["end"], valid_until=row["valid_until"], run_id=row["layer"]["run_id"]) for row in locks if row["layer"]["variant"]],
         commits=commits, observations=observations, groups=groups, faults=faults,
-        members=[dict(sha1=row["metadata"]["original_sha1"], captured_at=row["metadata"]["captured_at"],
-                      kind=row["metadata"]["kind"]) for row in members],
         offers=[dict(player_id=row["player_id"], plan=row["manifest"]) for row in offers])
 
 
@@ -978,13 +1062,78 @@ def rejoined_player_ready(old, report, rejoined_at):
                     for event in current_outputs(report)))
 
 
-def source_refresh_completed(snapshot, receipt, *, status=None):
-    """Match observed source state to the exact accepted refresh request."""
-    source = next((item for item in snapshot["media"]["sources"]
-                   if item["source_ref"] == receipt["source_ref"]), None)
-    return bool(source is not None
-                and source["refresh_completed_revision"] >= receipt["requested_revision"]
-                and (status is None or source["status"] == status))
+def operator_status(method: str, path: str) -> int:
+    """The status each operator request of the demo expects (central/photo_library_routes.py)."""
+    if method == "POST" and path in ("/v1/operator/frames", "/v1/operator/library/connections",
+                                     "/v1/operator/photo-drafts"):
+        return 201
+    if method == "POST" and path.endswith("/checks"):
+        return 202
+    return 200
+
+
+def read_pool(fetch) -> dict:
+    """A Source's whole pool through its pages: the check, the counts and every asset id.
+    `fetch(after)` answers one SourcePoolView page."""
+    page, after, ids = None, None, []
+    for _ in range(MAX_POOL_PAGES):
+        page = fetch(after)
+        ids.extend(item["asset_id"] for item in page["items"])
+        after = page["next"]
+        if after is None:
+            return dict(check=page["check"], in_pool=page["in_pool"], waiting=page["waiting"],
+                        left_out=page["left_out"], asset_ids=sorted(ids))
+    raise DemoError("pool_page_bound")
+
+
+def connection_health(views: list, connection_ref: str) -> dict:
+    """The demo connection's row of Settings › Photo library, without its key hint."""
+    row = next((view for view in views if view["connection_ref"] == connection_ref), None)
+    require(row is not None, "connection_missing")
+    return dict(connection_ref=connection_ref, health=row["health"])
+
+
+# What a fault turns the connection's health into, and the Source's check with it (C7: the
+# pool and the wall stay as they were).
+HEALTH_PROBLEMS = {"permission": "missing_permissions", "unavailable": "unreachable"}
+
+
+def health_is(snapshot, outcome: str) -> bool:
+    """The connection's health is `ok`, or Needs a look with the fault's problem."""
+    health = snapshot["connection"]["health"]
+    if outcome == "ok":
+        return health["state"] == "ok"
+    return (health["state"] == "needs_a_look"
+            and health["problem"]["kind"] == HEALTH_PROBLEMS[outcome])
+
+
+def check_finished(snapshot, before: dict, outcome: str) -> bool:
+    """The Source's check finished after the "check" action: it differs from the check read
+    just before (its state, `started_at` or `at`) and ended `complete`, or `failed` with the
+    connection when `outcome` is a fault. Only values Central served are compared."""
+    check = snapshot["pool"]["check"]
+    if check == before["check"]:
+        return False
+    if outcome == "ok":
+        return check["state"] == "complete"
+    return check["state"] == "failed" and check["problem"] == "connection"
+
+
+def fault_reported(before: dict, outcome: str):
+    """`await_state`'s predicate: the connection's health and the Source's check both show
+    `outcome` after the check that `before` answered."""
+    return lambda snapshot, _: (check_finished(snapshot, before, outcome)
+                                and health_is(snapshot, outcome)
+                                and snapshot["connection"]["health"] != before["health"])
+
+
+def fault_holds(snapshot, reports, pool_ids) -> None:
+    """C7: while Immich is down or the key lacks a permission, the last pool plays on: the pool
+    keeps every photo and every Player keeps presenting content on every output."""
+    require(snapshot["pool"]["asset_ids"] == pool_ids, "fault_pool_changed")
+    require(all(event["layers"] and not event["fallback"]
+                for report in reports.values() for event in current_outputs(report)),
+            "fault_presentation_stopped")
 
 
 def journal_upstream_mutation(host, evidence, save, before, reports, action, pre_key, change_key, pre=None):
@@ -1005,14 +1154,14 @@ def journal_upstream_mutation(host, evidence, save, before, reports, action, pre
         result = host.role("upstream-tools", action)
         change["completed_utc"] = time.time()
         change["result"] = result
-        change["refresh"] = host.role("operator", "refresh")
+        change["check"] = host.role("operator", "check")
     except Exception as error:
         change["failed_utc"] = time.time()
         change["error"] = failure_code(error)
         save()
         raise
     save()
-    return result, change["completed_utc"], change["refresh"]
+    return result, change["completed_utc"], change["check"]
 
 
 def delete_secured_original(host, evidence, save, before, reports, portrait_sha):
@@ -1080,6 +1229,18 @@ def await_central(host, seconds=90):
             time.sleep(1)
 
 
+def await_connection_ok(host, seconds=90):
+    """Wait until Settings › Photo library shows the pasted connection healthy (its first
+    check ran on the worker); the answer is that row, without its key hint."""
+    deadline = time.monotonic() + seconds
+    while True:
+        row = host.role("operator", "connection")
+        if row["health"]["state"] == "ok":
+            return row
+        require(time.monotonic() < deadline, "connection_not_ok")
+        time.sleep(1)
+
+
 class FaultRun:
     """Sampling, bounded waits and phase records shared by the fault segments of one wall."""
 
@@ -1112,32 +1273,52 @@ class FaultRun:
             require(time.monotonic() < deadline, code)
             time.sleep(2)
 
-    @staticmethod
-    def refresh_status(receipt, status):
-        return lambda snapshot, _: source_refresh_completed(snapshot, receipt, status=status)
-
     def record(self, name, snapshot, reports, **checks):
         self.phases[name] = dict(central=snapshot, players=reports, checks=checks)
         self.save()
+
+    def fault(self, name, mutation, outcome, code, seconds=75):
+        """Turn the library faulty (`mutation`), Check now, and wait until the connection's health
+        and the Source's check report `outcome`; C7 holds at every sample meanwhile."""
+        before, reports = self.sample()
+        pool_ids = before["pool"]["asset_ids"]
+        mutation()
+        checked = self.host.role("operator", "check")
+        reported = fault_reported(checked, outcome)
+
+        def holds(snapshot, reports):
+            fault_holds(snapshot, reports, pool_ids)
+            return reported(snapshot, reports)
+
+        snapshot, reports = self.await_state(holds, code, seconds)
+        self.record(name, snapshot, reports, kept_pool=len(pool_ids), check=checked)
+        return snapshot, reports
+
+    def recover(self, name, mutation, code, seconds=75):
+        mutation()
+        checked = self.host.role("operator", "check")
+        snapshot, reports = self.await_state(fault_reported(checked, "ok"), code, seconds)
+        self.record(name, snapshot, reports, check=checked)
+        return snapshot, reports
 
 
 def upstream_faults(run):
     """Live membership, deletion after security, permission loss and upstream outage."""
     host, evidence, save = run.host, run.evidence, run.save
-    sample, await_state, refresh_status, record = (
-        run.sample, run.await_state, run.refresh_status, run.record)
+    sample, await_state, record = run.sample, run.await_state, run.record
+    connection_ref = evidence["connection"]["connection_ref"]
 
     # One Run must survive membership edits; current locks freeze exact assignment bytes.
     before, reports = sample()
-    evolved, _, evolved_refresh = journal_upstream_mutation(
+    evolved, _, evolved_check = journal_upstream_mutation(
         host, evidence, save, before, reports, "evolve",
         pre_key="evolved_pre_change",
         change_key="evolved_change",
     )
-    expected = {item["sha1"] for item in evolved["assets"] if item["favorite"] and not item["deleted"]}
+    expected = sorted(expected_pool(evolved, connection_ref))
     snapshot, reports = await_state(
-        lambda snapshot, _: source_refresh_completed(snapshot, evolved_refresh, status="ok")
-        and {item["sha1"] for item in snapshot["members"]} == expected,
+        lambda snapshot, _: check_finished(snapshot, evolved_check, "ok")
+        and snapshot["pool"]["asset_ids"] == expected,
         "live_membership_timeout",
     )
     checked = preserved_locks(before, snapshot)
@@ -1145,26 +1326,27 @@ def upstream_faults(run):
     require({item["run_id"] for item in before["locks"]} == {item["run_id"] for item in snapshot["locks"]},
             "live_run_changed")
     record("evolved", snapshot, reports, preserved_live_locks=checked, upstream=evolved)
-    live_sha1 = {item["sha1"] for item in evolved["assets"] if item["label"] in ("older-live", "newer-live")}
+    live = asset_ids_of(evolved, connection_ref, labelled("older-live", "newer-live"))
     snapshot, reports = await_state(lambda snapshot, reports: all(any(
-        job["original_sha1"] == original and job["state"] == "ready" and any(
+        job["asset_id"] == asset_id and job["state"] == "ready" and any(
             layer["sha256"] == job["variant"]["sha256"] for report in reports.values()
             for event in report["events"] for layer in event["layers"])
-        for job in snapshot["jobs"]) for original in live_sha1), "new_media_not_presented", 120)
+        for job in snapshot["jobs"]) for asset_id in live), "new_media_not_presented", 120)
     record("live_presented", snapshot, reports)
 
-    # Select a future secured portrait assignment, then delete only that original.
-    portrait_sha1 = next(item["sha1"] for item in evolved["assets"] if item["label"] == "portrait")
+    # Select a future secured portrait assignment, then delete only that photo in Immich.
+    [portrait] = asset_ids_of(evolved, connection_ref, labelled("portrait"))
     portrait_sha = next(job["variant"]["sha256"] for job in snapshot["jobs"]
-                        if job["original_sha1"] == portrait_sha1 and job["state"] == "ready")
+                        if job["asset_id"] == portrait and job["state"] == "ready")
     before, reports = await_state(lambda snapshot, _: any(item["sha256"] == portrait_sha and
         item["start"] > snapshot["utc"] + SECURED_LEAD_SECONDS for item in snapshot["locks"]),
         "portrait_not_secured", 40)
-    deleted, deleted_at, deleted_refresh = delete_secured_original(
+    deleted, deleted_at, deleted_check = delete_secured_original(
         host, evidence, save, before, reports, portrait_sha
     )
     snapshot, reports = await_state(
-        refresh_status(deleted_refresh, "ok"), "deleted_refresh_timeout"
+        lambda snapshot, _: check_finished(snapshot, deleted_check, "ok")
+        and portrait not in snapshot["pool"]["asset_ids"], "deleted_check_timeout"
     )
     snapshot, reports = await_state(
         lambda snapshot, reports: selected_secured_presentation(
@@ -1176,39 +1358,21 @@ def upstream_faults(run):
            preserved_live_locks=preserved_locks(before, snapshot),
            selected_presentation=presentation, upstream=deleted)
 
-    host.role("upstream-tools", "deny")
-    denied_refresh = host.role("operator", "refresh")
-    snapshot, reports = await_state(
-        refresh_status(denied_refresh, "permission"), "permission_not_reported"
-    )
-    record("permission", snapshot, reports)
-    host.role("upstream-tools", "restore")
-    permission_recovery = host.role("operator", "refresh")
-    snapshot, reports = await_state(
-        refresh_status(permission_recovery, "ok"), "permission_recovery_timeout"
-    )
-    record("permission_recovered", snapshot, reports)
+    # C7: the key loses a permission, then Immich is out of reach; each time the connection
+    # needs a look and the Source's check fails with it, while the pool and the wall play on.
+    run.fault("permission", lambda: host.role("upstream-tools", "deny"), "permission",
+              "permission_not_reported")
+    run.recover("permission_recovered", lambda: host.role("upstream-tools", "restore"),
+                "permission_recovery_timeout")
 
     worker_id = host.compose("ps", "-q", "worker").strip()
     upstream = host.fixture.project + "_upstream_net"
     host.command(["docker", "network", "disconnect", upstream, worker_id], capture=False)
     try:
-        outage_refresh = host.role("operator", "refresh")
-        snapshot, reports = await_state(
-            refresh_status(outage_refresh, "unavailable"),
-            "upstream_outage_not_reported",
-            75,
-        )
-        record("upstream_outage", snapshot, reports)
+        run.fault("upstream_outage", lambda: None, "unavailable", "upstream_outage_not_reported")
     finally:
         host.command(["docker", "network", "connect", upstream, worker_id], capture=False)
-    network_recovery = host.role("operator", "refresh")
-    snapshot, reports = await_state(
-        refresh_status(network_recovery, "ok"), "upstream_recovery_timeout", 75
-    )
-    record("upstream_recovered", snapshot, reports)
-
-    return snapshot, reports
+    return run.recover("upstream_recovered", lambda: None, "upstream_recovery_timeout")
 
 
 def central_player_faults(run):
@@ -1318,23 +1482,28 @@ def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, k
                         lambda: host.compose("up", "-d", "database", "central",
                                              timeout=120, capture=False))
         await_central(host)
-        setup_operation(evidence, save, "setup_source", "operator", "configure_source",
-                        lambda: configure_demo_source(host))
-        initial_refresh = setup_operation(
-            evidence, save, "setup_refresh", "operator", "request_refresh",
-            lambda: host.role("operator", "refresh"),
-        )
+        evidence["connection"] = setup_operation(
+            evidence, save, "setup_connection", "operator", "connect",
+            lambda: connect_demo_library(host))
+        save()
         setup_operation(evidence, save, "setup_runtime", "docker-compose", "start_runtime",
                         lambda: host.compose("up", "-d", "worker", *host.players,
                                              timeout=120, capture=False))
+        setup_operation(evidence, save, "setup_health", "operator", "connection",
+                        lambda: await_connection_ok(host))
+        evidence["source"] = setup_operation(evidence, save, "setup_source", "operator",
+                                             "configure_source", lambda: configure_demo_source(host))
+        save()
+        initial_pool = sorted(expected_pool(evidence["upstream"],
+                                            evidence["connection"]["connection_ref"]))
         deadline = time.monotonic() + 120
         while True:
             try:
                 reports = {name: host.player_report(name) for name in host.players}
                 require(all(report["player_id"] for report in reports.values()), "enrollment_pending")
                 snapshot = host.role("operator", "snapshot")
-                require(source_refresh_completed(snapshot, initial_refresh, status="ok"),
-                        "refresh_pending")
+                require(snapshot["pool"]["check"]["state"] == "complete"
+                        and snapshot["pool"]["asset_ids"] == initial_pool, "check_pending")
                 break
             except Exception:
                 require(time.monotonic() < deadline, "source_or_player_startup_timeout")
@@ -1359,10 +1528,9 @@ def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, k
                 require(time.monotonic() < deadline, "baseline_timeout")
                 time.sleep(2)
         local_bytes = host.byte_audit()
-        originals = {item["sha1"]: item["sha256"] for item in evidence["upstream"]["assets"]}
+        # Preparation fetches Immich's rendition, not the original, so no original hash compares.
         for job in snapshot["jobs"]:
             if job["state"] == "ready":
-                require(job["original_sha256"] == originals[job["original_sha1"]], "original_hash_mismatch")
                 require(job["build"]["platform"].startswith("Linux-") and job["build"]["memory_limit_enforced"], "linux_conversion_missing")
         require(all(local_bytes.values()), "local_bytes_missing")
         evidence["phases"]["baseline"] = dict(checks=checks, local_bytes=local_bytes, seconds=round(time.monotonic()-started, 3),
