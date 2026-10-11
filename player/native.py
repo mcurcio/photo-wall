@@ -18,7 +18,8 @@ from typing import Any, Literal
 from uuid import UUID
 
 from contracts.models import AppliedCalibration
-from player.geometry import cover_rect, homography, inverse
+from contracts.node_frame import PictureOperations
+from player.geometry import fit_of, output_to_picture, photo_rect
 from player.mainloop import Tick, watch_bus
 from player.rendering import (
     PRESENTATION_FRESHNESS,
@@ -124,13 +125,43 @@ def _trial_key(frames, composition: OutputComposition, grant) -> object:
             candidate.candidate_sha256)
 
 
+def _drawn_fit(draw: _Draw):
+    """The fit a draw shows: its applied calibration (a trial's), else its composition's."""
+    return fit_of(draw.applied_calibration.calibration if draw.applied_calibration
+                  else draw.composition.calibration)
+
+
+def _final_uniforms(gl, program: int, operations: PictureOperations | None, opening) -> None:
+    """The final pass's operations (neutral when None) and the per-Output mask's opening."""
+    multipliers, light, contrast, gamma = _NEUTRAL if operations is None else (
+        operations.rgb_multipliers, operations.light_factor, operations.contrast_slope,
+        operations.gamma_exponent)
+    gl.glUniform3f(gl.glGetUniformLocation(program, "rgb_multipliers"), *multipliers)
+    gl.glUniform1f(gl.glGetUniformLocation(program, "light_factor"), light)
+    gl.glUniform1f(gl.glGetUniformLocation(program, "contrast_slope"), contrast)
+    gl.glUniform1f(gl.glGetUniformLocation(program, "gamma_exponent"), gamma)
+    _set_opening(gl, program, opening)
+
+
+def _picture_key(frames, composition: OutputComposition) -> object:
+    """The Output's newest picture operations, so a picture change is a change to redraw."""
+    if frames is None:
+        return None
+    try:
+        return frames.picture(composition.binding.output_id)
+    except Exception:
+        return object()     # unreadable here: always redraw, and _render reports it
+
+
 def _shown(composition: OutputComposition, generations: tuple, sample_serials: tuple,
            frames, grant) -> tuple:
     """Everything that changes a surface's pixels (G8 render on change, E-G8-3): layers,
-    decoder generations, alpha, each video's newest sample and the calibration trial."""
+    decoder generations, alpha, each video's newest sample, the calibration trial and the
+    Output's picture operations (1c)."""
     return (_fingerprint(composition), generations,
             tuple(local.alpha for local in composition.layers), sample_serials,
-            _trial_key(frames, composition, grant))
+            _trial_key(frames, composition, grant),
+            _picture_key(frames, composition))
 
 
 def _visible(composition: OutputComposition) -> tuple[LocalLayer, ...]:
@@ -243,6 +274,9 @@ class _Surface:
     size: tuple[int, int] = (0, 0)
     programs: tuple[int, int] | None = None
     vao: int = 0
+    # The Output's picture operations from the display host's shell (frame protocol v4), read
+    # each render; None: neutral (none received yet, or no display host).
+    operations: PictureOperations | None = None
 
     def fail(self, reason: str) -> None:
         self.failure, self.failed_episode = reason, self.episode
@@ -277,18 +311,34 @@ void main() {
     gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
 }
 """
+# The opening (the Frame's four corners, output fractions, origin top-left, clockwise): one GLSL
+# copy of player/geometry.py `inside_opening`, used by the position pass (the per-Frame mask) and
+# the final pass (the per-Output mask). Edges are inside.
+_OPENING = """
+uniform vec2 opening[4];
+bool inside_opening(vec2 point) {
+    for (int i = 0; i < 4; i++) {
+        vec2 a = opening[i];
+        vec2 b = opening[(i+1)%4];
+        if ((b.x-a.x)*(point.y-a.y)-(b.y-a.y)*(point.x-a.x) < 0.0) return false;
+    }
+    return true;
+}
+"""
+# The position pass (player/geometry.py `picture_source_uv`): the per-Frame mask first, then the
+# fit's one matrix onto the picture's unit square, then the photo's rectangle (Photo fit).
 _LAYER = """#version 300 es
 precision highp float;
 in vec2 uv;
 out vec4 color;
 uniform sampler2D media;
-uniform mat3 inverse_map;
-uniform vec4 cover;
-uniform int rotation;
+uniform mat3 output_to_picture;
+uniform vec4 photo;
 uniform int video;
 uniform int black;
 uniform int commissioning;
 uniform float opacity;
+""" + _OPENING + """
 vec3 linear_rgb(vec3 value) {
     if (video == 1) {
         return mix(pow((value+0.099)/1.099, vec3(1.0/0.45)), value/4.5,
@@ -298,38 +348,55 @@ vec3 linear_rgb(vec3 value) {
                lessThanEqual(value, vec3(0.04045)));
 }
 void main() {
-    vec3 q = inverse_map * vec3(uv, 1.0);
+    if (!inside_opening(uv)) discard;
+    vec3 q = output_to_picture * vec3(uv, 1.0);
     vec2 p = q.xy/q.z;
     if (any(lessThan(p, vec2(0.0))) || any(greaterThan(p, vec2(1.0)))) discard;
-    if (rotation == 90) p = vec2(p.y, 1.0-p.x);
-    else if (rotation == 180) p = vec2(1.0)-p;
-    else if (rotation == 270) p = vec2(1.0-p.y, p.x);
     if (commissioning == 1) {
-        vec2 grid = fract(mix(cover.xy, cover.zw, p)*10.0);
+        vec2 grid = fract(mix(photo.xy, photo.zw, p)*10.0);
         float line = float(grid.x < 0.035 || grid.y < 0.035);
         color = vec4(mix(vec3(0.2, 0.3, 0.45), vec3(0.9), line), 1.0);
         return;
     }
     if (black == 1) { color=vec4(0.0, 0.0, 0.0, opacity); return; }
-    vec4 sample_color = texture(media, mix(cover.xy, cover.zw, p));
+    vec4 sample_color = texture(media, mix(photo.xy, photo.zw, p));
     float alpha = sample_color.a * opacity;
     color = vec4(linear_rgb(sample_color.rgb)*alpha, alpha);
 }
 """
+# The final pass (player/geometry.py `final_pixel`): contracts/node_frame.py PictureOperations
+# in their order, then the per-Output mask LAST, so black stays black outside the opening
+# whatever the picture settings (owner 2026-10-10 q2).
 _FINAL = """#version 300 es
 precision highp float;
 in vec2 uv;
 out vec4 color;
 uniform sampler2D picture;
-uniform float gain;
+uniform vec3 rgb_multipliers;
+uniform float light_factor;
+uniform float contrast_slope;
+uniform float gamma_exponent;
+""" + _OPENING + """
 void main() {
     // Composition targets use OpenGL's lower-left orientation, unlike decoded bytes.
-    vec3 value = clamp(texture(picture, vec2(uv.x, 1.0-uv.y)).rgb*gain, 0.0, 1.0);
+    vec3 value = clamp(texture(picture, vec2(uv.x, 1.0-uv.y)).rgb*rgb_multipliers*light_factor,
+                       0.0, 1.0);
     vec3 encoded = mix(1.055*pow(value, vec3(1.0/2.4))-0.055, 12.92*value,
                        lessThanEqual(value, vec3(0.0031308)));
-    color=vec4(encoded, 1.0);
+    vec3 contrasted = (encoded-0.5)*contrast_slope+0.5;
+    vec3 adjusted = clamp(pow(max(contrasted, 0.0), vec3(gamma_exponent)), 0.0, 1.0);
+    if (!inside_opening(uv)) adjusted = vec3(0.0);
+    color=vec4(adjusted, 1.0);
 }
 """
+# No Frame drawn yet: an opening off the output, so the per-Output mask leaves it all black.
+_NO_OPENING = ((-2.0, -2.0), (-1.0, -2.0), (-1.0, -1.0), (-2.0, -1.0))
+_NEUTRAL = ((1.0, 1.0, 1.0), 1.0, 1.0, 1.0)     # multipliers, light, contrast, gamma: no change
+
+
+def _set_opening(gl, program: int, corners) -> None:
+    gl.glUniform2fv(gl.glGetUniformLocation(program, "opening"), 4,
+                    [value for point in corners for value in point])
 
 
 class NativeRenderer:
@@ -994,12 +1061,11 @@ class NativeRenderer:
         gl.glUseProgram(program)
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_ONE, gl.GL_ONE_MINUS_SRC_ALPHA)
-        calibration = (draw.applied_calibration.calibration if draw.applied_calibration
-                       else draw.composition.calibration)
-        matrix = inverse(homography(calibration.corners))
-        gl.glUniformMatrix3fv(gl.glGetUniformLocation(program, "inverse_map"), 1, False,
+        fit = _drawn_fit(draw)
+        matrix = output_to_picture(fit, surface.size)
+        gl.glUniformMatrix3fv(gl.glGetUniformLocation(program, "output_to_picture"), 1, False,
                               [matrix[row*3+column] for column in range(3) for row in range(3)])
-        gl.glUniform1i(gl.glGetUniformLocation(program, "rotation"), calibration.rotation)
+        _set_opening(gl, program, fit.corners)
         gl.glUniform1i(gl.glGetUniformLocation(program, "media"), 0)
         # An explicit Trial may render a procedural commissioning canvas when
         # no authorized media exists. It is never a Layer, Run or readiness fact.
@@ -1007,7 +1073,7 @@ class NativeRenderer:
                              and draw.composition.fallback and not draw.composition.layers)
         gl.glUniform1i(gl.glGetUniformLocation(program, "commissioning"), int(commissioning))
         if commissioning:
-            gl.glUniform4f(gl.glGetUniformLocation(program, "cover"), *calibration.crop)
+            gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), 0.0, 0.0, 1.0, 1.0)
             gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
         for local in _visible(draw.composition):
             variant = local.layer.variant
@@ -1016,9 +1082,9 @@ class NativeRenderer:
                 gl.glActiveTexture(gl.GL_TEXTURE0)
                 gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
                 profile = draw.composition.binding.profile
-                rectangle = cover_rect(calibration.crop, profile.width_px/profile.height_px,
+                rectangle = photo_rect(profile.width_px/profile.height_px,
                                        variant.width, variant.height)
-                gl.glUniform4f(gl.glGetUniformLocation(program, "cover"), *rectangle)
+                gl.glUniform4f(gl.glGetUniformLocation(program, "photo"), *rectangle)
             gl.glUniform1i(gl.glGetUniformLocation(program, "video"), int(bool(variant and variant.duration)))
             gl.glUniform1i(gl.glGetUniformLocation(program, "black"), int(variant is None))
             gl.glUniform1f(gl.glGetUniformLocation(program, "opacity"), local.alpha)
@@ -1041,6 +1107,9 @@ class NativeRenderer:
         frames = getattr(self, "_frames", None)
         grant = frames.grant(surface.output.output_id) if frames is not None else None
         _observe_grant(surface, grant)
+        # The Output's picture operations, read each render like the trial; a new value is
+        # drawn by this render's final pass and named in its tag.
+        surface.operations = frames.picture(surface.output.output_id) if frames is not None else None
         if frames is not None and (grant is None or not grant.admitted):
             # Before surface admission, show only a fixed synthetic handoff
             # colour. Authored layers remain in Executor under their own grant.
@@ -1104,10 +1173,9 @@ class NativeRenderer:
             gl.glActiveTexture(gl.GL_TEXTURE0)
             gl.glBindTexture(gl.GL_TEXTURE_2D, surface.targets[1 if candidate_ok else 0][1])
             gl.glUniform1i(gl.glGetUniformLocation(surface.programs[1], "picture"), 0)
-            calibration = draw if candidate_ok else surface.acknowledged
-            gain = ((calibration.applied_calibration.calibration if calibration.applied_calibration
-                     else calibration.composition.calibration).gain if calibration else 1)
-            gl.glUniform1f(gl.glGetUniformLocation(surface.programs[1], "gain"), gain)
+            shown = draw if candidate_ok else surface.acknowledged
+            _final_uniforms(gl, surface.programs[1], surface.operations,
+                            _drawn_fit(shown).corners if shown else _NO_OPENING)
             gl.glDrawArrays(gl.GL_TRIANGLES, 0, 3)
             gl.glFlush()
             if gl.glGetError() != gl.GL_NO_ERROR:
@@ -1139,8 +1207,10 @@ class NativeRenderer:
                 metadata = surface.acknowledged.applied_calibration
                 tag = ("trial-" + metadata.candidate_sha256 if metadata and metadata.trial_id
                        else composition_tag(actual, _visible(actual)))
+                operations = surface.operations
                 frames.tag_rendered_buffer(surface.window.get_window(), grant, tag,
-                                           surface.acknowledged.primitives)
+                                           surface.acknowledged.primitives,
+                                           picture_change=operations.picture_change if operations else None)
         except Exception as error:
             surface.pending = None
             surface.fail(type(error).__name__)
