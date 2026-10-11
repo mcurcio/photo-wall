@@ -21,10 +21,12 @@ from support.key_content_builders import face, measured
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene
+from central.wall_plan.key_content import MeasureFailed
 from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import AfterEnd, FrameProfile, Layer, OutputBinding, Variant
 from contracts.on_screen import Extent, on_screen_extent, replaces_kept_at
+from contracts.photo_crop import CENTRED
 
 PROFILES = {
     "wide": FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24),
@@ -183,6 +185,12 @@ def walls(draw):
     size = draw(st.integers(1, 8))
     photos = [photo(f"p{n}", draw(st.sampled_from(PHOTO_SHAPES)), captured=n,
                     prepared=draw(st.booleans()) or n == 0) for n in range(size)]
+    # Hand-placed Frames (F-13): some Frames show one of the pool's photos, by hand, so a
+    # hand-placed photo contends with the Scene lines' and with another hand-placed Frame's.
+    for name in [name for name in frames if draw(st.booleans()) and name != "frame-0"]:
+        frames[name] = FrameSetup(shape=frames[name].shape, fade_in=frames[name].fade_in,
+                                  after_end=frames[name].after_end, authored=(
+                                      draw(st.sampled_from([c.asset_id for c in photos])),))
     refreshed = [candidate for candidate in photos if draw(st.booleans())] + [
         photo(f"q{n}", draw(st.sampled_from(PHOTO_SHAPES)), captured=100 + n)
         for n in range(draw(st.integers(0, 3)))]
@@ -199,19 +207,22 @@ def walls(draw):
 @given(walls())
 def test_no_photo_is_on_two_frames_at_once_across_replans(case):
     """Case 2 (property): random pools, Frame shapes, fades and after-states, a kept still,
-    the first plan's offered layers locked into a re-plan after a pool refresh: no photo has
+    hand-placed Frames, the first plan's offered layers locked into a re-plan after a pool
+    refresh: no photo has
     overlapping extents on two Frames anywhere in either plan, locked layers and kept stills
     included, and the re-plan never changes a locked layer. Mutation probe: check extents only
     within one instant (forget earlier picks' extents)."""
     frames, photos, refreshed, kept, cycle, order, later = case
     instance = scene(frames, cycle=cycle, order=order)
     history = WallHistory(kept=kept)
-    first = plan(instance, frames, photos, horizon=60, plan_seconds=600, history=history)
+    first = plan(instance, frames, photos, horizon=60, plan_seconds=600, history=history,
+                 authored=photos)
     assert_never_on_two_frames(frames, first, kept=kept)
     locks = layers(first)
     selected = offered_history(first)
     second = plan(instance, frames, refreshed, now=later, horizon=60, plan_seconds=600,
-                  locks=locks, history=WallHistory(selected=selected, kept=kept))
+                  locks=locks, history=WallHistory(selected=selected, kept=kept),
+                  authored=photos)
     replanned = {layer.assignment_id: layer for layer in layers(second)}
     for lock in locks:
         if lock.end > later:
@@ -327,3 +338,129 @@ def test_the_layer_carries_the_crop_that_keeps_the_faces():
     projection = plan(scene(frames), frames, [portrait], plan_seconds=300)
     assert {layer.crop.offset for layer in layers(projection)} == {0.0}
     assert {entry.crop.offset for entry in projection.plan} == {0.0}
+
+
+def test_a_wall_past_the_slot_budget_plans_a_shorter_hour_and_fills_every_frame():
+    """Content first: 16 Frames at 5 s cycles hold 11,520 slots in the hour, past the wall
+    plan's 8,192. The tentative tail is cut at one instant (`plan_shortened`), and every slot of
+    the preparation horizon is still planned and filled. Mutation probe: refuse the plan
+    (PlanningBudgetExceeded) as before."""
+    frames = {f"f{n:02}": FrameSetup("wide") for n in range(16)}
+    photos = [photo(f"p{n:02}", "wide", captured=n) for n in range(24)]
+    projection = plan(scene(frames, cycle=5), frames, photos,
+                      limits=PlannerLimits(max_events=PlannerLimits().max_events * 11))
+    assert "plan_shortened" in {d.code for d in projection.diagnostics}
+    assert len(projection.plan) <= 8192
+    inside = [entry for entry in projection.plan if entry.start < 300]
+    assert len(inside) == 16 * 60
+    assert all(entry.asset_id is not None for entry in inside)
+    last = max(entry.start for entry in projection.plan)
+    assert 300 <= last < 3600
+    assert {frame: max(e.start for e in entries) for frame, entries in
+            by_frame(projection).items()} == {frame: last for frame in frames}
+
+
+def test_a_hand_placed_photo_is_never_on_two_frames_at_once():
+    """F-13 for hand-placed slots: two Frames hand-placed with the same photo show it one at a
+    time, and a hand-placed photo another Frame still keeps waits until that Frame lets it go.
+    Mutation probe: take a hand-placed photo without asking whether it is free."""
+    same = photo("same", "wide", captured=1)
+    both = {"left": FrameSetup("wide", authored=("same",)),
+            "right": FrameSetup("wide", authored=("same",))}
+    projection = plan(scene(both), both, [], authored=[same])
+    assert_never_on_two_frames(both, projection)
+    assert {entry.asset_id for entry in projection.plan} == {"same", None}
+    kept = (KeptStill(frame_id="keeper", asset_id="same", since=-10),)
+    frames = {"keeper": FrameSetup("wide", after_end="keep_this_photo"),
+              "placed": FrameSetup("wide", authored=("same",))}
+    projection = plan(scene(frames), frames, [photo("other", "wide")], authored=[same],
+                      history=WallHistory(kept=kept))
+    assert_never_on_two_frames(frames, projection, kept=kept)
+    # Hand-placed slots are decided first (step 1), while the keeper's still is open-ended.
+    assert {(entry.asset_id, entry.reason) for entry in by_frame(projection)["placed"]} == {
+        (None, "no_photo_free")}
+
+
+def test_no_repeat_only_ranks_a_photo_shown_yesterday_still_fills_every_slot():
+    """No-repeat only ranks (owner, 2026-10-11: it is "secondary to always ensuring that frames
+    have content"): every pool photo was shown yesterday and the Scene does not repeat within
+    7 days, yet every slot of the hour is filled. Mutation probe: leave the recently shown
+    photos out of the Scene's line."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"p{n}", "wide", captured=n) for n in range(4)]
+    yesterday = tuple(PhotoShowing(
+        assignment_id=f"old-{n}", asset_id=candidate.asset_id, frame_id="left",
+        scene_id="scene", pass_number=1, start=-86400 + 30 * n, end=-86400 + 30 * (n + 1),
+        fade_in=0, after_end="leave_as_is") for n, candidate in enumerate(photos))
+    projection = plan(scene(frames, no_repeat_days=7), frames, photos,
+                      history=WallHistory(shown=yesterday))
+    assert projection.plan and all(entry.state != "unfilled" for entry in projection.plan)
+    assert_never_on_two_frames(frames, projection)
+
+
+def test_failed_photos_are_neither_placed_nor_requested_again():
+    """A photo whose measurement failed is not measured again before its retry, and one whose
+    preparation failed is never placed, while a measured, prepared photo is there to show.
+    Mutation probe: ignore both failures in the slot's standing."""
+    frames = {"left": FrameSetup("wide")}
+    failed_measure = photo("measure-failed", "wide", captured=3, is_measured=False)
+    failed_measure = failed_measure.model_copy(
+        update={"analysis": MeasureFailed(reason="decode")})
+    failed_prepare = photo("prepare-failed", "wide", captured=2).model_copy(
+        update={"preparation_failure": "decode_failed"})
+    projection = plan(scene(frames), frames,
+                      [failed_measure, failed_prepare, photo("good", "wide", captured=1)])
+    assert {entry.asset_id for entry in projection.plan} == {"good"}
+    assert not projection.measurements and not projection.acquisitions
+
+
+def test_a_kept_scenes_video_keeps_nothing():
+    """Only a still is kept: a video's layer in a "keep this photo" Scene ends "leave as is".
+    Mutation probe: let a video keep its frame."""
+    frames = {"left": FrameSetup("wide", after_end="keep_this_photo")}
+    video = Candidate(asset_id="clip", kind="video", original_width=1920, original_height=1080,
+                      captured_at=5, variant=Variant(
+                          sha256=hashlib.sha256(b"clip").hexdigest(), size=10,
+                          media_type="video/mp4", width=1920, height=1080, duration=4))
+    projection = plan(scene(frames), frames, [video, photo("still", "wide", captured=1)],
+                      plan_seconds=300)
+    after = {layer.after_end for layer in layers(projection)
+             if layer.variant.sha256 == video.variant.sha256}
+    assert after == {"leave_as_is"}
+    assert {layer.after_end for layer in layers(projection)
+            if layer.variant.sha256 != video.variant.sha256} <= {"keep_this_photo"}
+
+
+def test_an_unmeasured_hand_placed_photo_is_asked_to_be_measured():
+    """Mutation probe: never request for a hand-placed slot."""
+    frames = {"left": FrameSetup("wide", authored=("raw",))}
+    raw = photo("raw", "wide", is_measured=False)
+    projection = plan(scene(frames), frames, [], authored=[raw], plan_seconds=300)
+    assert [m.asset_id for m in projection.measurements] == ["raw"]
+
+
+def test_prepared_photos_play_centred_while_none_is_measured():
+    """Content first (C7, owner 2026-10-11): with Immich out of reach, or a new analysis to run,
+    a pool of prepared photos none of which is measured still fills every Frame, centred and
+    never on two Frames at once, while the measurements are requested. Mutation probe: leave a
+    slot unfilled when nothing measured is free."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"p{n:02}", "wide", captured=n, is_measured=False) for n in range(30)]
+    projection = plan(scene(frames, order="shuffle"), frames, photos)
+    assert projection.plan and all(entry.state != "unfilled" for entry in projection.plan)
+    assert layers(projection) and {layer.crop for layer in layers(projection)} == {CENTRED}
+    assert projection.measurements
+    assert_never_on_two_frames(frames, projection)
+
+
+def test_a_lock_with_no_recorded_selection_still_holds_its_photo():
+    """A lock offered before 5a has no selection row, so the history does not name its photo:
+    the Planner finds it by the prepared copy the lock draws, and no other Frame takes that photo
+    while the lock shows it. Mutation probe: treat such a lock as showing no photo."""
+    one = {"left": FrameSetup("wide")}
+    four_three = photo("x", "four_three", captured=2)
+    first = plan(scene(one), one, [four_three], horizon=120, plan_seconds=120)
+    two = {"left": FrameSetup("wide"), "right": FrameSetup("four_three")}
+    second = plan(scene(two), two, [four_three, photo("y", "wide", captured=1)], now=10,
+                  horizon=120, plan_seconds=600, locks=layers(first), history=WallHistory())
+    assert_never_on_two_frames(two, second, fixed=offered_history(first))

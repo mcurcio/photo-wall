@@ -449,14 +449,49 @@ class _ProjectionBuilder:
                 today=today, pickable=pickable)
         return lines
 
+    def _fit_slot_budget(self, window: PlanWindow, budget: int) -> None:
+        """Content first (owner, 2026-10-11: "always ensuring that frames have content"): a
+        wall whose hour of slots exceeds the wall plan's slot budget is planned over a shorter
+        span, never refused. The slots inside the preparation horizon are always kept (more of
+        them than the budget is PlanningBudgetExceeded, as before 5a); the tentative tail is cut
+        at the start of the first slot past the budget, so every Frame's plan ends at one instant,
+        and the diagnostic `plan_shortened` says so."""
+        if len(self.pending) <= budget:
+            return
+        inside = sum(item.slot.start < window.preparation_end for item in self.pending)
+        _bound(inside, budget, "plan slot count")
+        ordered = sorted(self.pending, key=lambda item: (item.slot.start, item.slot.slot_id))
+        cutoff = ordered[budget].slot.start
+        self.pending = [item for item in self.pending if item.slot.start < cutoff]
+        self.diagnose("plan_shortened")
+
+    def _lock_photos(self, history: WallHistory,
+                     candidates: Mapping[str, Candidate]) -> dict[str, str]:
+        """Which photo each lock shows: its selection in the history, else (a lock offered
+        before 5a, whose selection was never recorded) the candidate whose prepared copy the lock
+        draws. A lock whose photo is no candidate cannot collide with any placement here."""
+        by_variant: dict[str, str] = {}
+        for candidate in candidates.values():
+            if candidate.variant is not None:
+                by_variant.setdefault(candidate.variant.sha256, candidate.asset_id)
+        selected = {showing.assignment_id: showing.asset_id for showing in history.selected}
+        for identity, lock in self.locks.items():
+            layer = self.used_locks.get(identity, lock)
+            if identity not in selected and layer.variant is not None:
+                found = by_variant.get(layer.variant.sha256)
+                if found is not None:
+                    selected[identity] = found
+        return selected
+
     def plan(self, window: PlanWindow, history: WallHistory, max_clock_uncertainty: float,
              ) -> tuple[list[PlannedPhoto], list[AcquisitionRequest], list[MeasureRequest]]:
         """The wall assignment over the window; its slots inside the preparation horizon become
         layers and selections."""
         wall_limits = WallLimits(max_measurements=self.limits.max_measurements,
                                  max_preparations=self.limits.max_acquisitions)
-        _bound(len(self.pending), wall_limits.max_slots, "plan slot count")
-        selected = {showing.assignment_id: showing.asset_id for showing in history.selected}
+        self._fit_slot_budget(window, wall_limits.max_slots)
+        candidates, pools = self._candidates()
+        selected = self._lock_photos(history, candidates)
         for identity, lock in self.locks.items():
             layer = self.used_locks.get(identity, lock)
             self.fixed.append(FixedShowing(
@@ -464,7 +499,6 @@ class _ProjectionBuilder:
                 asset_id=selected.get(identity) if layer.presentation == "media" else None,
                 start=layer.start, end=layer.end, fade_in=layer.fade_in,
                 after_end=layer.after_end))
-        candidates, pools = self._candidates()
         lines = self._lines(candidates, pools, history, window.now)
         current_pass = {scene_id: line.pass_number for scene_id, line in lines.items()}
         wall = plan_wall(tuple(item.slot for item in self.pending), tuple(self.fixed),

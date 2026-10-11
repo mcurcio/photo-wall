@@ -23,7 +23,12 @@ augmenting paths; Kuhn-Munkres for the placement):
    matching of the kept set; ties by slot id then asset id). Each placement is picked in its
    Scene's line, its crop is the fit rule's, and its extent is recorded.
 5. A slot left without a photo takes its Frame's previous photo again when that photo still fits
-   and is usable (a repeat on the same Frame never breaks rule 1); otherwise it is unfilled.
+   and is usable (a repeat on the same Frame never breaks rule 1). Failing that, content first
+   (owner, 2026-10-11: no-repeat and the like are "secondary to always ensuring that frames have
+   content"): the line's first photo of its pool whose key content is not known (not measured
+   yet, measured at no current analysis, or its measurement failed) that passes the size-only
+   part of the fit rule (`shape_fit`), is usable and is free, with the centred crop; inside the
+   preparation window an unprepared one is asked to be prepared instead. Otherwise unfilled.
 Rule 1 never relaxes: a photo whose extent on another Frame overlaps the slot's is never offered,
 including a hand-placed one. A kept still's extent stays open until a later FILLED slot on its
 Frame replaces what the Frame keeps (`contracts.on_screen.replaces_kept_at`).
@@ -46,6 +51,7 @@ from central.wall_plan.fit import (
     Fits,
     FitVerdict,
     MediaKind,
+    crop_share,
     judge,
     shape_fit,
 )
@@ -61,6 +67,7 @@ from contracts.models import (
     PhotoCrop,
 )
 from contracts.on_screen import Extent, on_screen_extent, replaces_kept_at
+from contracts.photo_crop import CENTRED
 
 
 class PlanWindow(Model):
@@ -104,8 +111,8 @@ class Slot(Model):
 
 class FixedShowing(Model):
     """A layer whose content is already decided (an offered or secured lock). `asset_id` None:
-    a lock whose photo the history does not name (a black layer, or a lock offered before 5a);
-    it still replaces what its Frame keeps."""
+    a black layer, or a lock whose photo neither the history nor any candidate's prepared copy
+    names (the Planner's `_lock_photos`); it still replaces what its Frame keeps."""
 
     slot_id: Identifier
     frame_id: Identifier
@@ -272,9 +279,15 @@ class _Wall:
     of_asset: dict[str, list[tuple[str, _Showing]]] = field(default_factory=dict)
     kept: dict[str, list[KeptStill]] = field(default_factory=dict)
     kept_on: dict[str, KeptStill] = field(default_factory=dict)
+    # Each decided showing's extent, by Frame and by the showing's identity: valid until the
+    # next showing on that Frame is decided (`add` drops the Frame's entries), since only a
+    # later showing on its own Frame changes an extent. Decided showings stay referenced in
+    # `on_frame`, so an identity is never reused while its entry exists.
+    _extents: dict[str, dict[int, Extent]] = field(default_factory=dict)
 
     def add(self, frame_id: str, showing: _Showing) -> None:
         self.on_frame.setdefault(frame_id, []).append(showing)
+        self._extents.pop(frame_id, None)
         if showing.asset_id is not None:
             self.of_asset.setdefault(showing.asset_id, []).append((frame_id, showing))
 
@@ -298,10 +311,25 @@ class _Wall:
         end = max(still.since, min(replaced)) + guard
         return Extent(start=start, end=end) if end > start else None
 
+    def decided_extent(self, frame_id: str, showing: _Showing) -> Extent:
+        """`extent` of a showing already decided on `frame_id` (memoised; see `_extents`)."""
+        memo = self._extents.setdefault(frame_id, {})
+        found = memo.get(id(showing))
+        if found is None:
+            found = memo[id(showing)] = self.extent(frame_id, showing)
+        return found
+
     def free(self, asset_id: str, frame_id: str, extent: Extent) -> bool:
         """Rule 1: no extent of `asset_id` on another Frame overlaps `extent`."""
+        guard = 2 * self.uncertainty
         for other, showing in self.of_asset.get(asset_id, ()):
-            if other != frame_id and self.extent(other, showing).overlaps(extent):
+            if other == frame_id:
+                continue
+            # Every extent starts at its showing's start less the guard: one that starts at or
+            # after `extent` ends cannot overlap it (a cheap test before the extent itself).
+            if extent.end is not None and showing.start - guard >= extent.end:
+                continue
+            if self.decided_extent(other, showing).overlaps(extent):
                 return False
         for still in self.kept.get(asset_id, ()):
             if still.frame_id != frame_id:
@@ -433,7 +461,7 @@ class _Walk:
 
     def _repeat_or_unfilled(self, slot: Slot, *, possible: bool) -> None:
         """Step 5, content first: the Frame's previous photo again, when it still fits this
-        slot, is usable and is free."""
+        slot, is usable and is free; else a photo whose key content is unknown (`_unjudged`)."""
         asset_id = self.wall.previous(slot.frame_id, slot.start)
         candidate = self.candidates.get(asset_id) if asset_id is not None else None
         if candidate is not None:
@@ -445,8 +473,41 @@ class _Walk:
                     pass_number = self.lines[slot.scene_id].pass_number
                 self._place(slot, candidate, verdict, pass_number=pass_number, repeat=True)
                 return
+        if self._unjudged(slot):
+            return
         self.unfilled[slot.slot_id] = Unfilled(
             slot_id=slot.slot_id, reason="no_photo_free" if possible else "no_photo_fits")
+
+    def _unjudged(self, slot: Slot) -> bool:
+        """Step 5's last resort: place the line's first photo of the slot's pool whose key
+        content is unknown, that passes `shape_fit`, is usable and is free, centred. Inside the
+        preparation window an unprepared one is requested (at most `depth`) and skipped."""
+        pool = self.pools.get(slot.pool, frozenset())
+        inside = slot.start < self.window.preparation_end
+        requested, depth = 0, 1 + self.limits.offer_extra
+        for asset_id in self._line_ranked(slot.scene_id):
+            candidate = self.candidates.get(asset_id)
+            if (asset_id not in pool or asset_id in self.reserved or candidate is None
+                    or candidate.kind != "image" or candidate.preparation_failure
+                    or isinstance(candidate.analysis, Measured)
+                    or shape_fit("image", candidate.original_width, candidate.original_height,
+                                 slot.profile, slot.crop_limit) is not None):
+                continue
+            if candidate.variant is not None and not variant_usable(candidate, slot.profile):
+                continue
+            if not self._free(candidate, slot):
+                continue
+            if inside and candidate.variant is None:
+                if requested < depth:
+                    self._request("prepare", asset_id, slot)
+                    requested += 1
+                continue
+            self._place(slot, candidate, Fits(
+                crop=CENTRED, crop_share=crop_share(candidate.original_width,
+                                                    candidate.original_height, slot.profile),
+                interest_kept=1.0), pass_number=self._pick(slot.scene_id, asset_id))
+            return True
+        return False
 
     def _slot_class(self, slot: Slot) -> int:
         number = self._class_of.get(slot.slot_id)
