@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Sequence
 
-from contracts.frame_fit import Corners, OutputSize
+from contracts.frame_fit import Corners, OutputSize, cover_rectangle
 from contracts.models import Calibration, CornersFit, CoverFit
 from contracts.node_frame import PictureOperations
 
@@ -73,17 +73,27 @@ def transform(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
             (matrix[3]*x + matrix[4]*y + matrix[5]) / divisor)
 
 
+# Undo a clockwise quarter turn of the picture, as a matrix on the unit square: the one home of
+# the quarter-turn rule (Corners folds it into its matrix; `inverse_rotation` reads it).
+UNDO_QUARTER_TURN: dict[int, Matrix] = {
+    0: (1, 0, 0, 0, 1, 0, 0, 0, 1),
+    90: (0, 1, 0, -1, 0, 1, 0, 0, 1),         # (u, v) -> (v, 1-u)
+    180: (-1, 0, 1, 0, -1, 1, 0, 0, 1),       # (u, v) -> (1-u, 1-v)
+    270: (0, -1, 1, 1, 0, 0, 0, 0, 1),        # (u, v) -> (1-v, u)
+}
+
+
+def multiply(left: Matrix, right: Matrix) -> Matrix:
+    """The 3x3 product left x right (row-major): apply `right`, then `left`."""
+    return tuple(sum(left[3*row + k]*right[3*k + column] for k in range(3))
+                 for row in range(3) for column in range(3))
+
+
 def inverse_rotation(x: float, y: float, rotation: int) -> tuple[float, float]:
     """Undo a clockwise image rotation in screen coordinates."""
-    if rotation == 0:
-        return x, y
-    if rotation == 90:
-        return y, 1-x
-    if rotation == 180:
-        return 1-x, 1-y
-    if rotation == 270:
-        return 1-y, x
-    raise ValueError("rotation must be a quarter-turn")
+    if rotation not in UNDO_QUARTER_TURN:
+        raise ValueError("rotation must be a quarter-turn")
+    return transform(UNDO_QUARTER_TURN[rotation], x, y)
 
 
 def cover_rect(crop: tuple[float, float, float, float], frame_aspect: float,
@@ -148,50 +158,109 @@ def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], flo
     return (*(encode_srgb(v*gain) for v in rgb), 1.0)
 
 
-# -- roadmap 1c, slice R1 (frozen; bodies land with R1) -----------------------------------------
+# -- roadmap 1c, slice R1 ------------------------------------------------------------------------
 
 def fit_of(calibration: Calibration) -> CornersFit | CoverFit:
     """The fit a Position draws: `calibration.fit`, or until INTEGRATE, a record without one read
     as CornersFit(corners, rotation) (exactly today's picture). INTEGRATE deletes the second arm."""
-    raise NotImplementedError
+    if calibration.fit is not None:
+        return calibration.fit
+    return CornersFit(corners=calibration.corners, rotation=calibration.rotation)
+
+
+def _cover_matrix(fit: CoverFit, output: OutputSize) -> Matrix:
+    """Output fractions -> picture unit square for Cover: the inverse of "rotate `rotation`
+    clockwise, scale to the cover rectangle's width and height, move to its centre", all in
+    output pixels. With the picture axes u = (cos r, sin r), v = (-sin r, cos r) (y down) and the
+    pixel point p = (x W, y H): u = (p - centre).u_axis / width + 1/2, likewise v with height."""
+    rectangle = cover_rectangle(fit.corners, fit.rotation, output)
+    if not (rectangle.width > 0 and rectangle.height > 0):
+        raise ValueError("singular homography")
+    width_px, height_px = output
+    turn = math.radians(rectangle.rotation)
+    cos, sin = math.cos(turn), math.sin(turn)
+    cx, cy = rectangle.centre_x, rectangle.centre_y
+    w, h = rectangle.width, rectangle.height
+    return (cos*width_px/w, sin*height_px/w, .5 - (cx*cos + cy*sin)/w,
+            -sin*width_px/h, cos*height_px/h, .5 + (cx*sin - cy*cos)/h,
+            0.0, 0.0, 1.0)
 
 
 def output_to_picture(fit: CornersFit | CoverFit, output: OutputSize) -> Matrix:
     """The one matrix of a fit: output fractions (x, y) -> the picture's unit square (u, v), origin
     top-left. Pure. ValueError("singular homography") for a degenerate fit."""
-    raise NotImplementedError
+    if isinstance(fit, CoverFit):
+        return _cover_matrix(fit, output)
+    return multiply(UNDO_QUARTER_TURN[fit.rotation], inverse(homography(fit.corners)))
 
 
 def inside_opening(corners: Corners, x: float, y: float) -> bool:
     """Whether output point (x, y) lies in the convex opening (edges included): the per-Frame mask,
-    by half-planes. Pure."""
-    raise NotImplementedError
+    by half-planes. Pure. The corners turn clockwise in y-down coordinates (convex_clockwise), so
+    a point is inside when it lies on the inner (non-negative cross product) side of every edge."""
+    for index, (ax, ay) in enumerate(corners):
+        bx, by = corners[(index + 1) % 4]
+        if (bx - ax)*(y - ay) - (by - ay)*(x - ax) < 0:
+            return False
+    return True
 
 
 def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tuple[float, float, float, float]:
     """The photo's source UV rectangle (left, top, right, bottom) for centred cover of
     `frame_aspect` (Photo fit). Pure; ValueError as `cover_rect` for bad sizes."""
-    raise NotImplementedError
+    if not math.isfinite(frame_aspect) or frame_aspect <= 0:
+        raise ValueError("positive finite Frame aspect required")
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("positive source dimensions required")
+    width = height = 1.0
+    aspect = source_width / source_height
+    if aspect > frame_aspect:
+        width = frame_aspect / aspect
+    else:
+        height = aspect / frame_aspect
+    return ((1-width)/2, (1-height)/2, (1+width)/2, (1+height)/2)
 
 
 def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, frame_aspect: float,
                       source_width: int, source_height: int) -> tuple[float, float] | None:
     """The source UV one Frame samples at output point (x, y); None outside its opening or its
-    picture. Replaces `source_uv`."""
-    raise NotImplementedError
+    picture. Replaces `source_uv`. The per-Frame mask (the opening) comes first, so a Frame never
+    draws over its neighbour, then the picture's unit square."""
+    if not inside_opening(fit.corners, x, y):
+        return None
+    u, v = transform(output_to_picture(fit, output), x, y)
+    if not (0 <= u <= 1 and 0 <= v <= 1):
+        return None
+    left, top, right, bottom = photo_rect(frame_aspect, source_width, source_height)
+    return left + u*(right-left), top + v*(bottom-top)
 
 
 def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool) -> tuple[float, float, float, float]:
     """One output pixel's final pass: white balance, light factor (linear light), clamp, sRGB
     encode, contrast about 0.5, gamma exponent, clamp, then the per-Output mask (opaque black when
-    not `inside` any Frame's opening). Pure."""
-    raise NotImplementedError
+    not `inside` any Frame's opening). Pure. A contrast result below 0 meets the exponent as 0
+    (a power of a negative number is undefined, in GLSL too); with the clamp after, this equals
+    clamping before the exponent."""
+    pixel = []
+    for value, multiplier in zip(linear, operations.rgb_multipliers, strict=True):
+        value = min(1.0, max(0.0, value*multiplier*operations.light_factor))
+        value = (encode_srgb(value) - .5)*operations.contrast_slope + .5
+        pixel.append(min(1.0, max(0.0, value) ** operations.gamma_exponent))
+    if not inside:
+        return (0.0, 0.0, 0.0, 1.0)
+    return (*pixel, 1.0)
 
 
 def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFit, Linear]],
                  operations: PictureOperations, output: OutputSize) -> tuple[float, float, float, float]:
     """The reference for one Output carrying several Frames, each drawn as one flat linear colour:
     the colour of the last Frame whose opening holds (x, y), black where none does, through
-    `final_pixel` with `inside` = some opening holds it. Pure; the two-Frames test's oracle."""
-    raise NotImplementedError
-
+    `final_pixel` with `inside` = some opening holds it. Pure; the two-Frames test's oracle. Each
+    Frame's coverage is where it samples its picture (`picture_source_uv`), so the per-Frame mask
+    decides what a Frame paints; the per-Output mask is the union of the openings."""
+    colour: Linear = (0.0, 0.0, 0.0)
+    for fit, flat in frames:
+        if picture_source_uv(x, y, fit, output, 1.0, 1, 1) is not None:
+            colour = flat
+    inside = any(inside_opening(fit.corners, x, y) for fit, _ in frames)
+    return final_pixel(colour, operations, inside=inside)

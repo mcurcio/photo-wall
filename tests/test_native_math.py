@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import random
 import threading
 import time
 from types import SimpleNamespace
@@ -8,15 +9,23 @@ from types import SimpleNamespace
 import pytest
 
 import player.native as native_module
-from contracts.models import Calibration
+from contracts.frame_fit import cover_rectangle
+from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.node_frame import PictureOperations
 from player.geometry import (
     compose_pixel,
     cover_rect,
     decode_channel,
     encode_srgb,
+    final_pixel,
+    fit_of,
     homography,
     inverse,
     inverse_rotation,
+    output_pixel,
+    output_to_picture,
+    photo_rect,
+    picture_source_uv,
     source_uv,
     transform,
 )
@@ -144,6 +153,163 @@ def test_aperture_clips_before_rotation():
     calibration = Calibration(corners=((.2, .2), (.8, .2), (.8, .8), (.2, .8)), rotation=90)
     assert source_uv(.1, .4, calibration, 1, 100, 100) is None
     assert source_uv(.5, .5, calibration, 1, 100, 100) == pytest.approx((.5, .5))
+
+
+# -- roadmap 1c R1: one matrix per Frame fit, masks per Frame and per Output, the final pass ------
+
+HD = (1920, 1080)
+CORNER_SETS = (
+    ((0, 0), (1, 0), (1, 1), (0, 1)),
+    ((.2, .2), (.8, .2), (.8, .8), (.2, .8)),
+    ((.15, .1), (.9, .2), (.8, .95), (.05, .7)),
+    ((.05, .05), (.95, .02), (.98, .97), (.03, .93)),
+    ((.3, .1), (.7, .1), (.95, .9), (.05, .9)),
+    ((.1, .4), (.6, .05), (.9, .6), (.4, .95)),
+)
+OPENING = ((.1, .12), (.85, .08), (.9, .9), (.12, .82))
+
+
+def _operations(rgb=(1.0, 1.0, 1.0), light=1.0, slope=1.0, exponent=1.0):
+    return PictureOperations("HDMI-A-1", 1, rgb, light, slope, exponent)
+
+
+@pytest.mark.parametrize("corners", CORNER_SETS)
+@pytest.mark.parametrize("rotation", (0, 90, 180, 270))
+def test_corners_fit_equals_todays_picture(corners, rotation):
+    """R1 case 1: Corners through the one matrix samples exactly what today's path samples."""
+    rng = random.Random(f"{corners}{rotation}")
+    fit = CornersFit(corners=corners, rotation=rotation)
+    today = Calibration(corners=corners, rotation=rotation)
+    assert fit_of(today) == fit
+    hits = 0
+    for _ in range(200):
+        x, y = rng.random(), rng.random()
+        old = source_uv(x, y, today, 1.6, 300, 200)
+        new = picture_source_uv(x, y, fit, HD, 1.6, 300, 200)
+        assert (old is None) == (new is None), (x, y)
+        if old is not None:
+            hits += 1
+            assert new == pytest.approx(old, abs=1e-9)
+    assert hits
+
+
+@pytest.mark.parametrize("rotation", (0, 7, 45, 90, 135))
+def test_cover_is_tight_and_unskewed(rotation):
+    """R1 case 2: in Cover every opening corner lands in the picture, the picture touches the
+    opening on every side, and the picture is turned and scaled evenly in output pixels."""
+    fit = CoverFit(corners=OPENING, rotation=rotation)
+    matrix = output_to_picture(fit, HD)
+    mapped = [transform(matrix, x, y) for x, y in OPENING]
+    for u, v in mapped:
+        assert -1e-9 <= u <= 1 + 1e-9 and -1e-9 <= v <= 1 + 1e-9
+    us, vs = [u for u, _ in mapped], [v for _, v in mapped]
+    assert min(us) == pytest.approx(0, abs=1e-9) and max(us) == pytest.approx(1, abs=1e-9)
+    assert min(vs) == pytest.approx(0, abs=1e-9) and max(vs) == pytest.approx(1, abs=1e-9)
+    # The linear part from output PIXELS to the picture, inverted: the picture's u and v edges in
+    # pixels. Orthogonal, and as long as the cover rectangle is wide and tall: no skew.
+    a, b = matrix[0] / HD[0], matrix[1] / HD[1]
+    c, d = matrix[3] / HD[0], matrix[4] / HD[1]
+    det = a*d - b*c
+    u_edge, v_edge = (d/det, -c/det), (-b/det, a/det)
+    rectangle = cover_rectangle(OPENING, rotation, HD)
+    assert u_edge[0]*v_edge[0] + u_edge[1]*v_edge[1] == pytest.approx(0, abs=1e-6)
+    assert math.hypot(*u_edge) == pytest.approx(rectangle.width, rel=1e-9)
+    assert math.hypot(*v_edge) == pytest.approx(rectangle.height, rel=1e-9)
+    turn = math.radians(rotation)
+    assert u_edge[0] / math.hypot(*u_edge) == pytest.approx(math.cos(turn), abs=1e-9)
+    assert u_edge[1] / math.hypot(*u_edge) == pytest.approx(math.sin(turn), abs=1e-9)
+
+
+def test_cover_at_a_quarter_turn_puts_the_picture_top_on_the_right():
+    """A clockwise quarter turn on the full screen: the picture's top-left is the output's
+    top-right, as Corners' quarter turn has it."""
+    matrix = output_to_picture(CoverFit(rotation=90), HD)
+    assert transform(matrix, 1, 0) == pytest.approx((0, 0))
+    assert transform(matrix, 1, 1) == pytest.approx((1, 0))
+    assert transform(matrix, 0, 0) == pytest.approx((0, 1))
+
+
+def test_a_frame_draws_nothing_outside_its_opening():
+    """R1 case 3: inside the cover rectangle but outside the opening, the Frame samples nothing."""
+    fit = CoverFit(corners=((.3, .3), (.7, .3), (.7, .7), (.3, .7)), rotation=30)
+    backward = inverse(output_to_picture(fit, HD))
+    x, y = transform(backward, .02, .02)        # near the picture's top-left, outside the opening
+    assert 0 <= x <= 1 and 0 <= y <= 1
+    assert 0 < transform(output_to_picture(fit, HD), x, y)[0] < 1
+    assert picture_source_uv(x, y, fit, HD, 1, 100, 100) is None
+    assert picture_source_uv(.5, .5, fit, HD, 1, 100, 100) is not None
+
+
+def test_two_frames_on_one_output_keep_to_their_openings():
+    """R1 case 4 (owner 2026-10-10 q2: outside a Frame is "someone else's territory"): Frame A red,
+    Frame B green on one output, contrast slope 0.5. Each paints only its own opening; between
+    and around them is exactly opaque black. B is turned 30 degrees, so its cover rectangle
+    reaches over A's opening and only the per-Frame mask keeps it out."""
+    a = ((.04, .1), (.46, .1), (.46, .9), (.04, .9))
+    b = ((.54, .15), (.95, .1), (.92, .9), (.58, .85))
+    frames = ((CoverFit(corners=a), (1.0, 0.0, 0.0)), (CoverFit(corners=b, rotation=30), (0.0, 1.0, 0.0)))
+    operations = _operations(slope=.5)
+    red, green, black = (.75, .25, .25, 1), (.25, .75, .25, 1), (0, 0, 0, 1)   # worked by hand
+    seen = set()
+    for i in range(97):
+        for j in range(61):
+            x, y = (i + .5) / 97, (j + .5) / 61
+            pixel = output_pixel(x, y, frames, operations, HD)
+            in_a = .04 < x < .46 and .1 < y < .9
+            in_b = transform(output_to_picture(CornersFit(corners=b), HD), x, y)
+            in_b = 0 < in_b[0] < 1 and 0 < in_b[1] < 1
+            expected = red if in_a else green if in_b else black
+            assert pixel == pytest.approx(expected, abs=1e-12), (x, y)
+            seen.add(expected)
+    assert seen == {red, green, black}
+
+
+# Linear grey inputs through operations (0.9, 0.95, 1), light 1.2, slope 0.8, exponent 24/22,
+# worked by hand from the sRGB encoding (IEC 61966-2-1): a = min(1, L*m*1.2); e = sRGB(a);
+# c = (e - 0.5)*0.8 + 0.5; out = c^(24/22). E.g. L = 0.5, m = 0.9: a = 0.54, e = 0.76111,
+# c = 0.70889, out = 0.68706.
+FINAL_PASS_TABLE = (
+    (0.0, (0.0811131, 0.0811131, 0.0811131)),
+    (0.18, (0.4516162, 0.4615475, 0.4711953)),
+    (0.5, (0.6870604, 0.7028032, 0.7180977)),
+    (1.0, (0.8914207, 0.8914207, 0.8914207)),
+)
+
+
+@pytest.mark.parametrize("grey, expected", FINAL_PASS_TABLE)
+def test_final_pass_order_matches_the_hand_worked_table(grey, expected):
+    """R1 case 5: white balance, light, clamp, encode, contrast, gamma, clamp, in that order."""
+    operations = _operations((.9, .95, 1.0), 1.2, .8, 24/22)
+    assert final_pixel((grey,)*3, operations, inside=True) == pytest.approx((*expected, 1), abs=1e-6)
+
+
+def test_the_output_mask_comes_after_the_contrast_lift():
+    """Black outside every opening stays black at low contrast: the mask is the last step."""
+    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=False) == (0, 0, 0, 1)
+    assert final_pixel((0, 0, 0), _operations(slope=.5), inside=True)[:3] == pytest.approx((.25,)*3)
+
+
+@pytest.mark.parametrize("encoded", ((0, 0, 0), (.2, .5, .9), (1, 1, 1), (.04, .7, .3)))
+def test_neutral_operations_change_nothing(encoded):
+    linear = tuple(decode_channel(v) for v in encoded)
+    assert final_pixel(linear, _operations(), inside=True) == pytest.approx(
+        compose_pixel([((*encoded, 1), 1, False)]), abs=1e-12)
+
+
+def test_photo_rect_is_centred_cover_without_trim():
+    assert photo_rect(1, 200, 100) == pytest.approx((.25, 0, .75, 1))
+    assert photo_rect(2, 200, 100) == pytest.approx((0, 0, 1, 1))
+    assert photo_rect(4, 200, 100) == pytest.approx((0, .25, 1, .75))
+    assert photo_rect(.5, 200, 100) == cover_rect((0, 0, 1, 1), .5, 200, 100)
+    with pytest.raises(ValueError):
+        photo_rect(0, 200, 100)
+    with pytest.raises(ValueError):
+        photo_rect(1, 0, 100)
+
+
+def test_fit_of_reads_the_new_fit_when_present():
+    fit = CoverFit(corners=OPENING, rotation=7)
+    assert fit_of(Calibration(fit=fit)) is fit
 
 
 def test_srgb_and_bt709_transfer_and_gain():
