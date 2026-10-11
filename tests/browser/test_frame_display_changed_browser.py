@@ -18,7 +18,7 @@ import pytest
 from console_tasks import connect, current_hash, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
-from support.calibrated_frame import calibrate_frame
+from support.position import save_position
 from test_display_identity import NO_SERIAL, SERIAL_DISPLAY, _bind, _frame, enroll_pi
 from test_display_identity import _report as _recorded
 
@@ -55,9 +55,8 @@ def _row(registry, frame_id: str):
 
 
 def _commit_position(registry, frame_id: str) -> None:
-    """The state the Position tab's Done (a calibration trial's Save) leaves: a saved
-    calibration and a Position commit (`support.calibrated_frame`)."""
-    calibrate_frame(registry.db, frame_id)
+    """The Position tab's Save (tests/support/position.py, the Save CAS)."""
+    save_position(registry, frame_id)
 
 
 def _display(frame):

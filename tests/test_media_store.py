@@ -10,7 +10,7 @@ from uuid import UUID
 import pytest
 from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
-from support.calibrated_frame import calibrate_frame
+from support.position import save_position
 from test_registry import enroll, frame
 
 from central.coordination import Coordinator
@@ -88,7 +88,7 @@ def grant(storage, registry, variant, *, secured=False):
     player, key, _ = enroll(registry)
     frame(registry, "portrait")
     registry.bind("portrait", player["player_id"], "HDMI-A-1", expected_generation=0)
-    calibrate_frame(registry.db, "portrait")
+    save_position(registry, "portrait")
     binding = registry.bindings_for(player["player_id"], 1)[0]
     layer = Layer(assignment_id="assignment", run_id="run", output_id=binding.output_id,
                   frame_id=binding.frame_id, binding_generation=binding.generation,

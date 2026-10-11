@@ -97,9 +97,11 @@ def reason_text(reason: str) -> str:
     return REASON_TEXT.get(reason, REASON_DEFAULT)
 
 
-def render_slate(name: str, width: int, height: int, reason: str, testing: bool) -> DrawList:
-    """The base page: background, then six lines laid out on a 1280-wide page scaled to the Output
-    (never below 0.35)."""
+def render_slate(name: str, width: int, height: int, reason: str, testing: bool,
+                 brightness: str = "") -> DrawList:
+    """The base page: background, then up to six lines laid out on a 1280-wide page scaled to the
+    Output (never below 0.35). The sixth is `brightness`, the display controller's line (where
+    brightness acts and its value, frame protocol v4 `brightness`), or nothing while it is empty."""
     alpha = TESTING_ALPHA if testing else OPAQUE_ALPHA
     scale = max(width / 1280.0, 0.35)
 
@@ -113,7 +115,7 @@ def render_slate(name: str, width: int, height: int, reason: str, testing: bool)
         line(48, 215, 20, f"Output {name}  |  {width} x {height} pixels"),
         line(48, 260, 20, "Frame binding unconfirmed"),
         line(48, 305, 18, "Base display service - app content is independently supervised"),
-        line(48, 345, 18, "Panel brightness unavailable"),
+        *((line(48, 345, 18, brightness),) if brightness else ()),
     )
 
 

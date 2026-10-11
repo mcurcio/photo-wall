@@ -96,7 +96,7 @@ out.answers = {
 };
 for (const code of ["node_qualification_control_stale", "node_qualification_control_unlinked",
   "node_qualification_readiness_stale", "node_qualification_readiness_unavailable", "node_qualification_plan_changed",
-  "node_qualification_handoff_unavailable", "node_qualification_preview_active", "node_qualification_base_unavailable",
+  "node_qualification_handoff_unavailable", "node_qualification_base_unavailable",
   "node_output_cohort_unavailable", "node_representative_media_evidence_required",
   "node_representative_single_media_required", "node_representative_frame_witness_mismatch",
   "node_qualification_unknown", "node_qualification_generation_changed", "node_qualification_base_abi_mismatch",
@@ -208,7 +208,7 @@ def test_sample_answers_are_classed_and_any_unlisted_code_is_terminal():
     assert answers["lost"] == answers["gateway"] == {"kind": "waiting",
                                                      "text": "Waiting: Central did not answer this sample"}
     waiting = [code for code, value in answers.items() if code.startswith("node_") and value["kind"] == "waiting"]
-    assert len(waiting) == 12 and all(answers[code]["text"].startswith("Waiting: ") for code in waiting)
+    assert len(waiting) == 11 and all(answers[code]["text"].startswith("Waiting: ") for code in waiting)
     assert answers["node_representative_single_media_required"]["text"] == (
         "Waiting: every bound Output must keep showing the same photo or video at full opacity for 30 s")
     terminal = [code for code, value in answers.items() if value["kind"] == "terminal"]

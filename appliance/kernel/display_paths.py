@@ -15,3 +15,7 @@ RUNTIME = Path("/run/photo-wall-display")
 # every Weston incarnation, so an app in group pw-display binds the directory, never the socket file.
 WAYLAND_DIRECTORY = Path("/run/photo-wall-display-wayland")
 WAYLAND_SOCKET = WAYLAND_DIRECTORY / "wayland-0"
+# The display controller's RuntimeDirectory (pw-display, 0700, preserved): what each display's
+# picture last had (appliance/display_host/picture.py `FileAppliedPictures`), so a controller
+# restarted with Weston does not write it again. It outlives the controller's restarts, not a reboot.
+CONTROLLER_STATE = Path("/run/photo-wall-display-controller")

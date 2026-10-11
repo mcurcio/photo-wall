@@ -61,7 +61,7 @@ def tick():
 
             config = PlayerConfiguration.model_validate_json(last_configuration)
             binding = config.bindings[0] if config.bindings else None
-            if binding and binding.calibration.gain == 0.5 and media_plan is None:
+            if binding and binding.calibration.fit.rotation == 180 and media_plan is None:
                 # Explicit fixture authority: genuine readiness/Commit path, no
                 # assertion that this local fixture is Central Run certification.
                 config = config.model_copy(update={"enabled_outputs": (binding.output_id,)})

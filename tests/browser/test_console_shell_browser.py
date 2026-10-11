@@ -45,7 +45,7 @@ from operator_harness import (
     submit_sign_in,
 )
 from playwright.sync_api import expect
-from support.calibrated_frame import calibrate_frame
+from support.position import save_position
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SOURCE,
@@ -106,7 +106,7 @@ def _bound_commissioned(registry, frame_id, *, x_mm=100, commissioned=True):
     _frame(registry, frame_id, x_mm=x_mm)
     registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
     if commissioned:
-        calibrate_frame(registry.db, frame_id)
+        save_position(registry, frame_id)
     report_readiness(registry, identity["player_id"])
 
 

@@ -9,6 +9,7 @@ Wayland peer PID/UID and /proc start time at each observed presentation.
 from __future__ import annotations
 
 import json
+import logging
 import select
 import socket
 import struct
@@ -16,15 +17,26 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Callable
+from typing import Callable, Protocol
 from uuid import UUID, uuid4
 
+from contracts.node_frame import PictureOperations, encode_picture_operations, parse_picture_change
 from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
 
 from .domain import DisplayHost, Surface
 
 MAX_PACKET = 16384
+
+log = logging.getLogger(__name__)
+
+
+class PictureEvents(Protocol):
+    """What the shell tells the picture controller (picture.PictureController), from `dispatch`."""
+
+    def presented(self, output_id: str, picture_change: int | None) -> None: ...   # never blocks
+
+    def shell_output(self, output_id: str) -> None: ...   # the shell (re)created the Output; never blocks
 
 
 def _pairs(pairs: list[tuple[str, object]]) -> dict:
@@ -154,6 +166,7 @@ class WestonBackend:
         self.incarnation_id: UUID | None = None
         self._channel_lock = threading.RLock()
         self._powered: dict[str, Power] = {}   # the compositor's own output power, per Output
+        self.picture_events: PictureEvents | None = None   # set by the runner (roadmap 1c)
 
     def _receive(self) -> dict:
         raw, _ancillary, flags, _address = self.channel.recvmsg(MAX_PACKET)
@@ -231,6 +244,21 @@ class WestonBackend:
         """The compositor's own output power for `output_id`; None while it has no such Output."""
         with self._channel_lock:
             return self._powered.get(output_id)
+
+    def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool:
+        """Hand one Output's picture operations and base page brightness line to the shell (control
+        op `picture`; frame protocol v4 forwards them to the Player and the overlay client); whether
+        the shell took them. Called from the picture controller's workers."""
+        try:
+            with self._channel_lock:
+                if self.host is None:
+                    return False
+                key = self.host.state(operations.output_id).key
+                self._request("picture", key, timeout=timeout,
+                              operations=encode_picture_operations(operations), brightness=brightness)
+                return True
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
 
     def allow(self, grant: SurfaceGrant) -> UUID:
         """Called by protected lifecycle/configuration ingress, never by Player IPC."""
@@ -357,6 +385,19 @@ class WestonBackend:
                 return None
             return self._dispatch(self._receive())
 
+    def _picture_presented(self, output_id: str, text: object) -> None:
+        """A v4 `presented` event's picture change to the picture controller (null: a v3 `tag`)."""
+        if self.picture_events is None or text is None:
+            return
+        try:
+            change = parse_picture_change(text) if isinstance(text, str) else None
+        except ValueError:
+            change = None
+        if change is None and text != "0":
+            log.warning("presented event with an invalid picture change on %s", output_id)
+            return
+        self.picture_events.presented(output_id, change)
+
     def _dispatch(self, value: dict):
         event = value["event"]
         if self._note_power(value):
@@ -379,6 +420,8 @@ class WestonBackend:
             self.revisions.pop(key.output_id, None)
             self.withdrawals.pop(key.output_id, None)
             self.trials.pop(key.output_id, None)
+            if value["connected"] and self.picture_events is not None:
+                self.picture_events.shell_output(key.output_id)
             return key
         if event == "overlay_presented":
             key = _output(value["output"])
@@ -438,6 +481,7 @@ class WestonBackend:
         fact = self.host.presented(
             surface, buffer_token=value["buffer_id"], now_ms=value["observed_monotonic_ms"]
         )
+        self._picture_presented(surface.output.output_id, value.get("picture_change"))
         return CompositorPresentation(
             fact, grant_id, value["frame_tag"], value["observed_monotonic_ms"]
         )

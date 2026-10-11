@@ -9,7 +9,7 @@ from test_node_runtime_reconciliation import rig
 from central.fleet.node_calibration import NodeCalibration
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
-from contracts.models import Calibration
+from contracts.models import Calibration, CornersFit, CoverFit
 from contracts.node_calibration import candidate_hash, canonical, parse_trial
 from contracts.node_display import (
     DisplayExchange,
@@ -20,6 +20,9 @@ from contracts.node_display import (
 )
 from player.calibration_trial import TrialState
 from player.rendering import OutputComposition
+
+SKEWED = CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1)))   # Corners, top-left moved in
+TURNED = CoverFit(rotation=7)                                      # Cover at a fine angle
 
 
 def setup_trial(registry):
@@ -51,7 +54,7 @@ def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
     trial_id = __import__("uuid").UUID(row["trial_id"])
     with pytest.raises(NodeControlError, match="latest_not_presented"):
         trials.operate("node-f0", trial_id, operation="save", expected_sequence=1)
-    edited = Calibration.model_validate(row["calibration"]).model_copy(update={"gain": 0})
+    edited = Calibration.model_validate(row["calibration"]).model_copy(update={"fit": SKEWED})
     row = trials.operate(
         "node-f0",
         trial_id,
@@ -90,7 +93,7 @@ def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
     )
     monkeypatch.setattr(registry, "commit_calibration_trial_in", original)
     saved = trials.operate("node-f0", trial_id, operation="save", expected_sequence=2)
-    assert saved["state"] == "saved" and saved["saved_calibration"]["gain"] == 0
+    assert saved["state"] == "saved" and Calibration.model_validate(saved["saved_calibration"]).fit == SKEWED
     assert saved["saved_calibration"]["revision"] == edited.revision + 1
     assert (
         trials.operate("node-f0", trial_id, operation="save", expected_sequence=2)["state"]
@@ -108,8 +111,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         config = binding(conn, row["player_id"], row["authority_epoch"])["bindings"][0]
     calibration = Calibration(
         revision=config.calibration.revision,
-        gain=0,
-        corners=((0.4, 0.1), (0.9, 0.3), (0.8, 0.9), (0.1, 0.8)),
+        fit=CornersFit(corners=((0.4, 0.1), (0.9, 0.3), (0.8, 0.9), (0.1, 0.8))),
     )
     raw = canonical(calibration.model_dump(mode="json"))
     candidate = replace(
@@ -125,8 +127,8 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
     applied = state.apply(
         encode_trial(candidate), OutputComposition(config, config.calibration), 1500
     )
-    assert applied.calibration.gain == 0
-    for observed, expected in zip(applied.primitives, calibration.corners, strict=True):
+    assert applied.calibration == calibration
+    for observed, expected in zip(applied.primitives, calibration.fit.corners, strict=True):
         assert observed == pytest.approx(expected)
     assert (
         state.apply(
@@ -254,11 +256,11 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     `begin`, and the trial stays as it was.
 
     Mutation: have `renew` begin the next trial at the saved calibration -> the Node is handed
-    gain 1 -> RED. Mutation: drop the base check in `_open` -> the stale draft is accepted -> RED."""
+    the saved fit -> RED. Mutation: drop the base check in `_open` -> the stale draft is accepted -> RED."""
     trials, request, exchange = setup_trial(registry)
     first = trials.begin("node-f0")
     first_id = __import__("uuid").UUID(first["trial_id"])
-    draft = Calibration.model_validate(first["calibration"]).model_copy(update={"gain": 0.5})
+    draft = Calibration.model_validate(first["calibration"]).model_copy(update={"fit": TURNED})
     trials.operate("node-f0", first_id, operation="edit", expected_sequence=1,
                    calibration=draft.model_dump(mode="json"))
     with pytest.raises(NodeControlError, match="trial_sequence_conflict"):
@@ -268,13 +270,13 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
                             calibration=draft.model_dump(mode="json"))
     assert second["state"] == "active" and second["trial_id"] != first["trial_id"]
     assert second["generation"] == first["generation"] + 1 and second["sequence"] == 1
-    assert second["calibration"]["gain"] == 0.5
+    assert Calibration.model_validate(second["calibration"]).fit == TURNED
     assert second["calibration_revision"] == first["calibration_revision"]
     assert second["hard_expires_at"] == registry.clock.utc() + trials.hard_seconds
     assert trials.operate("node-f0", first_id, operation="status", expected_sequence=2)["state"] == "ended"
     handed = parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial)
     assert str(handed.trial_id) == second["trial_id"] and handed.generation == second["generation"]
-    assert Calibration.model_validate_json(handed.calibration_json).gain == 0.5
+    assert Calibration.model_validate_json(handed.calibration_json).fit == TURNED
 
     second_id = __import__("uuid").UUID(second["trial_id"])
     stale = draft.model_copy(update={"revision": draft.revision + 1})
@@ -286,7 +288,7 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
         trials.begin("node-f0", stale.model_dump(mode="json"))
     third = trials.begin("node-f0", draft.model_dump(mode="json"))
-    assert third["state"] == "active" and third["calibration"]["gain"] == 0.5
+    assert third["state"] == "active" and Calibration.model_validate(third["calibration"]).fit == TURNED
 
 
 def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
@@ -302,7 +304,7 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
     trials, _request, _exchange = setup_trial(registry)
     saved = trials.begin("node-f0")
     trials.operate("node-f0", __import__("uuid").UUID(saved["trial_id"]), operation="end", expected_sequence=1)
-    draft = dict(saved["calibration"], gain=0.5)
+    draft = dict(saved["calibration"], fit=TURNED.model_dump(mode="json"))
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
                      node_control=NodeControlConfig("node-test"))
     path = "/v1/operator/frames/node-f0/calibration-trials"
@@ -313,7 +315,7 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         assert client.post(path, headers=headers, json={"draft": draft}).status_code == 422
         begun = client.post(path, headers=headers, json={"calibration": draft})
         assert begun.status_code == 200, begun.text
-        assert begun.json()["calibration"]["gain"] == 0.5
+        assert Calibration.model_validate(begun.json()["calibration"]).fit == TURNED
         renewed = client.post(f"{path}/{begun.json()['trial_id']}", headers=headers,
                               json={"operation": "renew", "expected_sequence": 1, "calibration": draft})
         assert renewed.status_code == 200, renewed.text
@@ -323,4 +325,4 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
                     json={"operation": "end", "expected_sequence": 1})
         plain = client.post(path, headers=headers)
         assert plain.status_code == 200, plain.text
-        assert plain.json()["calibration"]["gain"] == saved["calibration"]["gain"]
+        assert plain.json()["calibration"]["fit"] == saved["calibration"]["fit"]

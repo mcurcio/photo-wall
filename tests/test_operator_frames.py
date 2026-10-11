@@ -104,8 +104,8 @@ def _replacement_portrait_profile():
 
 def test_put_profile_preserves_frame_identity_geometry_and_invalidates_calibration(registry):
     _portrait(registry)
-    # Seed the persisted state to prove the operation clears calibration validity (its
-    # Position, now at a stale generation).
+    # Seed the persisted state to prove the operation clears calibration validity (its Position,
+    # now at a stale generation) and raises the calibration revision a Save names.
     with registry.db.transaction() as conn:
         conn.execute("UPDATE frames SET position_generation=generation WHERE id='portrait'")
     before = registry.inventory().frames[0]

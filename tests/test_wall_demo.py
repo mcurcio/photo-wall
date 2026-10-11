@@ -148,7 +148,7 @@ def test_wall_helper_bundle_is_import_closed_without_host_orchestration(tmp_path
     assert set(files) == {
         "demo_wall.py", "scripts/harness_failure.py", "scripts/immich_actions.py",
         "scripts/provenance_models.py", "scripts/runtime_provenance.py",
-        "support/calibrated_frame.py",
+        "support/position.py",
     }
     assert not (tmp_path / "scripts/immich_fixture.py").exists()
     assert not (tmp_path / "scripts/docker_diagnostics.py").exists()

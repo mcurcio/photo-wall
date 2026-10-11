@@ -25,7 +25,7 @@ import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
-from support.calibrated_frame import calibrate_frame
+from support.position import save_position
 from test_executor import binding, layer
 from uplink_fakes import FakeReply, FakeTransport, central, finding
 from websockets.datastructures import Headers
@@ -1932,7 +1932,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             assert service._plan is None
             frame(registry, "portrait")
             registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
-            calibrate_frame(registry.db, "portrait")
+            save_position(registry, "portrait")
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
             await service.poll_state()
             service._feedback()

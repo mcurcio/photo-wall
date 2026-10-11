@@ -65,7 +65,8 @@ MAX_PIXELS = 4096 * 2160
 MAX_MEMORY = 128 * 1024 * 1024
 MAX_BUFFERS = 2                     # per Output: one on screen, one being drawn
 MAX_NAME = 96
-MANAGER_VERSION = 3                 # v3: the health layer (get_health_layer)
+MANAGER_VERSION = 4                 # v3: the health layer (get_health_layer); v4: `brightness`
+MAX_BRIGHTNESS = 128                # the shell's bound on a `brightness` line
 OOM_SCORE_ADJ = 900                 # the first thing the kernel kills, never Weston (-500)
 WL_SHM_FORMAT_ARGB8888 = 0
 MAX_INSTRUCTION = 4096              # one judge packet (an encoded OverlayInstruction is far less)
@@ -98,6 +99,7 @@ class OutputState:
     height: int = 0
     serial: int = 0
     testing: bool = False
+    brightness: str = ""            # the base page's brightness line (manager v4); "" draws none
     overlay: bool = False
     points: tuple[Point, Point, Point, Point] = ((0.0, 0.0),) * 4
     dirty: bool = False
@@ -109,7 +111,8 @@ class OutputState:
     def draw_list(self) -> DrawList:
         if self.overlay:
             return render_trial(self.width, self.height, self.points)
-        return render_slate(self.name, self.width, self.height, self.reason, self.testing)
+        return render_slate(self.name, self.width, self.height, self.reason, self.testing,
+                            self.brightness)
 
 
 class OutputHook(Protocol):
@@ -131,9 +134,11 @@ class OverlayClient:
         self.hooks = tuple(hooks)
         self.painter = painter
         self.outputs: dict[str, OutputState] = {}
+        self.brightness: dict[str, str] = {}    # the latest line per Output, even before its configure
         self.memory = 0
         manager.dispatcher["output"] = self._output_configure
         manager.dispatcher["overlay"] = self._overlay_configure
+        manager.dispatcher["brightness"] = self._brightness
 
     def _output_configure(self, manager, name: str, width: int, height: int, serial: int,
                           reason: str, testing: int) -> None:
@@ -144,6 +149,7 @@ class OverlayClient:
             return
         output.reason, output.width, output.height = reason, width, height
         output.serial, output.testing = serial, bool(testing)
+        output.brightness = self.brightness.get(name, "")
         output.dirty, output.overlay = True, False
         if output.surface is None:
             output.surface = self.compositor.create_surface()
@@ -161,6 +167,21 @@ class OverlayClient:
         output.points, output.serial = points, serial
         output.overlay = output.dirty = True
         self.draw(output)
+
+    def _brightness(self, manager, name: str, text: str) -> None:
+        """The display controller's brightness line for `name`: kept, and the slate redrawn."""
+        if len(name) > MAX_NAME or len(text.encode()) > MAX_BRIGHTNESS or not text.isprintable():
+            return
+        if name not in self.brightness and len(self.brightness) >= MAX_OUTPUTS:
+            return
+        self.brightness[name] = text
+        output = self.outputs.get(name)
+        if output is None or output.brightness == text:
+            return
+        output.brightness = text
+        if not output.overlay:
+            output.dirty = True
+            self.draw(output)
 
     def draw(self, output: OutputState) -> None:
         """Paint the Output's current page into a fresh buffer and commit it, or wait: a buffer

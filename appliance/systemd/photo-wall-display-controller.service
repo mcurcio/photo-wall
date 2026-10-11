@@ -44,4 +44,9 @@ ProtectControlGroups=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
 ReadWritePaths=/run/photo-wall-display /run/photo-wall-display-feed
+# What each display's picture last had (display_paths.CONTROLLER_STATE): kept across the
+# controller's restarts with Weston, so a value set on the display's buttons is not written back.
+RuntimeDirectory=photo-wall-display-controller
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor

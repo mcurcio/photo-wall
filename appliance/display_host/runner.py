@@ -25,7 +25,7 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
-from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME
+from appliance.kernel.display_paths import CONTROLLER_STATE, DISPLAY_UNIT, RUNTIME
 from appliance.kernel.unix_credentials import receive_credential_packet
 from contracts.node_output import (
     OUTPUT_IDS,
@@ -38,9 +38,12 @@ from contracts.node_protocol import OutputKey
 from nodeapi.documents import Document
 
 from .bus import DISPLAY_SLICE, BusReportSink, display_session
+from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import parse_edid, read_edid
 from .output_power import OutputPowerController, ReportSink
+from .output_report import OutputReports
+from .picture import DdcPictureAdapter, FileAppliedPictures, PictureController
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
@@ -170,22 +173,27 @@ class OutputReporter:
 class PowerObservations:
     """`ReportSink` for the OutputReporter that hands what it saw (connection, EDID identity and
     modes) to the power controller, so the power controller is the one writer of each Output's
-    report and the report carries both halves (roadmap 1b, D2)."""
+    report and the report carries both halves (roadmap 1b, D2); and the connection and identity to
+    the picture controller (roadmap 1c, P1: an appearance reads 0x10 and 0x12, another identity
+    re-applies the picture)."""
 
-    def __init__(self, power: OutputPowerController) -> None:
+    def __init__(self, power: OutputPowerController, picture: PictureController) -> None:
         self._power = power
+        self._picture = picture
 
     def put_report(self, report: OutputReport) -> None:
         self._power.output(report.output_id, connected=report.connected, identity=report.identity,
                            modes=report.modes)
+        self._picture.output(report.output_id, connected=report.connected, identity=report.identity)
 
     def emit_attempt(self, attempt: PowerAttempt) -> None:
         raise TypeError("the OutputReporter makes no power attempt")
 
 
-def document_feed(power: OutputPowerController) -> Callable[[str, Document], None]:
-    """The desired view's callback: each Output document, decoded, to the power controller. A
-    document that does not decode, or sits under another Output's key, is logged and ignored."""
+def document_feed(power: OutputPowerController, picture: PictureController) -> Callable[[str, Document], None]:
+    """The desired view's callback: each Output document, decoded, to the power controller and the
+    picture controller (each acts on its own change number). A document that does not decode, or
+    sits under another Output's key, is logged and ignored."""
 
     def on_document(key: str, document: Document) -> None:
         try:
@@ -196,15 +204,29 @@ def document_feed(power: OutputPowerController) -> Callable[[str, Document], Non
             log.warning("output document under %s ignored: %s", key, error)
             return
         power.document(decoded.output_id, decoded)
+        picture.document(decoded.output_id, decoded)
 
     return on_document
 
 
-def power_controller(backend: WestonBackend, sink: ReportSink) -> tuple[OutputPowerController, HdmiCecAdapter]:
+def power_controller(backend: WestonBackend, sink: ReportSink,
+                     ddc: DdcChannel) -> tuple[OutputPowerController, HdmiCecAdapter]:
     """The three methods on this Pi's tools and compositor, and the controller over them."""
     cec = HdmiCecAdapter(run_tool)
-    adapters = (cec, DdcCiAdapter(run_tool), SignalOffAdapter(backend))
+    adapters = (cec, DdcCiAdapter(ddc), SignalOffAdapter(backend))
     return OutputPowerController({adapter.method: adapter for adapter in adapters}, sink, time), cec
+
+
+def picture_controller(backend: WestonBackend, reports: OutputReports, ddc: DdcChannel,
+                       applied: Path = CONTROLLER_STATE) -> PictureController:
+    """The picture controller on the port's DDC/CI channel (the one the power controller uses) and
+    the shell, remembering each display's applied picture change in `applied` (the controller's
+    preserved runtime directory); it hears the shell's `presented` and `output` events through the
+    backend."""
+    picture = PictureController(DdcPictureAdapter(ddc), backend, reports, FileAppliedPictures(applied),
+                                time.monotonic)
+    backend.picture_events = picture
+    return picture
 
 
 class Controller:
@@ -279,16 +301,17 @@ class Controller:
 
 
 class _stopping:
-    """Stops the power controller's worker and gives back the CEC addresses on the way out."""
+    """Stops the controllers' workers and gives back the CEC addresses on the way out."""
 
-    def __init__(self, power: OutputPowerController, cec: HdmiCecAdapter) -> None:
-        self._power, self._cec = power, cec
+    def __init__(self, power: OutputPowerController, picture: PictureController, cec: HdmiCecAdapter) -> None:
+        self._power, self._picture, self._cec = power, picture, cec
 
     def __enter__(self) -> None:
         return None
 
     def __exit__(self, *_exc: object) -> None:
         self._power.stop()
+        self._picture.stop()
         self._cec.close()
 
 
@@ -324,14 +347,20 @@ def main() -> None:
             compositor_pid=int(peer["MainPID"]),
             verify_process=verify_process,
         )
-        power, cec = power_controller(backend, BusReportSink(session))
+        # One DDC/CI channel per Pi (one command at a time per port), shared by power and picture;
+        # one report per Output, assembled from both controllers' halves.
+        ddc = DdcChannel(run_tool)
+        reports = OutputReports(BusReportSink(session))
+        power, cec = power_controller(backend, reports, ddc)
+        picture = picture_controller(backend, reports, ddc)
         power.start()
-        feed = document_feed(power)
+        picture.start()
+        feed = document_feed(power, picture)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
             if (present := session.desired.get(output_document_key(output_id))) is not None:
                 feed(output_document_key(output_id), present)
-        controller = Controller(backend, reports=OutputReporter(PowerObservations(power)))
+        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture)))
         if config:
             from .service import DisplayService
 
@@ -343,7 +372,7 @@ def main() -> None:
                 runtime=args.runtime,
             )
         with (
-            _stopping(power, cec),
+            _stopping(power, picture, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):

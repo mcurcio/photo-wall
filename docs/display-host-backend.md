@@ -32,7 +32,8 @@ proof of a readable error page. Actual diagnostic presentation is reported only
 from presentation feedback for the private client's committed page buffer.
 
 The page shows bounded predefined status text, the physical Output ID and actual
-pixel dimensions, `Frame binding unconfirmed`, and unavailable panel brightness.
+pixel dimensions, `Frame binding unconfirmed`, and, since 1c, brightness with where it
+acts (the controller's line, sent with the `picture` op below; nothing when it has none).
 Registry binding-name/freshness adoption and Identify/calibration overlays remain
 separate integration work. App pixels cannot set these diagnostic strings.
 
@@ -194,6 +195,33 @@ Primary implementation references: [Weston 14 shell APIs](https://gitlab.freedes
 [Wayland server protocol logger](https://gitlab.freedesktop.org/wayland/wayland/-/blob/1.23.1/src/wayland-server-core.h),
 and [presentation feedback protocol](https://gitlab.freedesktop.org/wayland/wayland-protocols/-/blob/main/stable/presentation-time/presentation-time.xml).
 
+## Picture operations (frame protocol v4)
+
+Since 1c the shell offers `pw_frame_manager_v1` and `pw_diagnostic_manager_v1` at
+version 4 ([`photo-wall-frame-v1.xml`](../appliance/display_host/native/photo-wall-frame-v1.xml)).
+Display Host carries a Display's picture settings and talks DDC/CI; the Player renderer
+is the only picture pipeline, so the shell forwards picture operations and never
+interprets them. The rules for what the operations are and when they are sent belong
+to the [Player architecture](player-architecture.md#picture-settings-1c).
+
+- **Control op `picture`** (base-only control socket): `output_id`, `output`, `operations`
+  (a string of at most 512 bytes) and `brightness` (the base page's line, at most 128).
+  The shell stores both per Output, sends `picture(output_id, operations)` to every
+  version-4 frame manager of that Output's app client and `brightness(output_id, text)`
+  to the diagnostic client. It sends the stored values again on a version-4 bind and
+  when it grants the Output, since a client binds before it is granted.
+- **Request `tag_picture`**: as `tag`, plus the picture change the buffer was drawn
+  with (digits only, at most 20 characters). The `presented` event carries it as
+  `"picture_change"`, or `null` for a buffer tagged with version-3 `tag`.
+- **The frame client** ([`frame-client.c`](../appliance/display_host/native/frame-client.c))
+  binds version 4 when offered and still refuses below 3; `pw_frame_client_picture`
+  returns the newest operations per Output and `pw_frame_client_tag_picture_next_commit`
+  tags the next commit. The Player reads them through `player/wayland_frames.py`.
+
+CI proves this in `tests/native_display_smoke.py` (node-pid1 `display-harness`):
+operations reach a late app verbatim, a 10-byte non-JSON operations text is not parsed,
+oversize operations and lines are refused, and `tag_picture` presents its change.
+
 ## The health layer's buffers
 
 The overlay client (`overlay/client.py`) keeps its health surface mapped over the whole
@@ -221,7 +249,8 @@ Frame-v3 grants include `frame_id` alongside process identity, local app epoch,
 OutputKey, binding generation, and configuration revision. Frame counters alone
 are not globally unique. The canonical Surface codec is shared by Central and
 DisplayHost; the native grant event carries the same Frame identity to Player.
-The app-private bridge requires protocol version 3. Historical facts without
+The app-private bridge requires protocol version 3 and binds 4 when offered
+(picture operations, above). Historical facts without
 Frame identity are not current authority.
 
 When a live Output moves to another Frame or process/binding identity, Central's

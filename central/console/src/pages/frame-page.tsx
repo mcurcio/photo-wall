@@ -16,6 +16,7 @@ import { EmptyState, EntityPage } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
 import { LeaveGuard } from "../patterns/leave-guard";
+import { usePictureSession } from "../pictureSession.js";
 import { playerPageHref } from "../players.js";
 import { formatRoute, routeIdName, type Tab } from "../routes.js";
 import { Tabs } from "../ui/tabs";
@@ -39,7 +40,6 @@ interface Frame {
   player_id?: string | null;
   output_id?: string | null;
   profile?: { width_px?: number; height_px?: number };
-  calibration?: { rotation?: number };
   readiness?: Readiness;
 }
 
@@ -51,56 +51,56 @@ const TABS = [
   { value: "hardware", label: "Hardware" },
 ] as const;
 
-// A Pi that reports no output size and a Frame with no profile: steps are still pixels of a
-// common output.
-const FALLBACK_SIZE: PixelSize = { width: 1920, height: 1080 };
-
-/** The output's size in pixels, as the Pi reported it, else the Frame profile's as mounted. */
-function outputSize(snapshot: object | null, frame: Frame): PixelSize {
+/**
+ * The output's size in pixels, as the Pi reported it; null when it reported none. Position's
+ * steps and corner pixels are pixels of the output, whatever way the picture is turned in it.
+ * Never the Frame profile: that is the Frame's shape, not the output's (a Frame may fill part
+ * of its output, or be hung turned in it).
+ */
+function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
   const reported = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
     ?.observation;
   if (reported?.connected === true && (reported.width_px ?? 0) > 0 && (reported.height_px ?? 0) > 0) {
     return { width: reported.width_px!, height: reported.height_px! };
   }
-  const { width_px: width = 0, height_px: height = 0 } = frame.profile ?? {};
-  if (width <= 0 || height <= 0) return FALLBACK_SIZE;
-  const rotation = frame.calibration?.rotation ?? 0;
-  return rotation === 90 || rotation === 270 ? { width: height, height: width } : { width, height };
+  return null;
 }
 
 /**
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why; Position is where the
- * picture sits on the Display (corners, nudges, trims, rotation); Picture is its brightness; Power
- * is how the Pi turns its display off and on, with Test: turn off and Turn on;
- * Hardware is which Pi and HDMI output feed it (bind, unbind, Identify), the Display the Pi reports
- * there (with the display-changed card) and its Frame profile.
+ * picture sits on the Display (its fit, corners, nudges, rotation); Picture is the brightness,
+ * contrast, colour temperature and gamma of the display that feeds it; Power is how the Pi turns
+ * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
+ * feed it (bind, unbind, Identify), the Display the Pi reports there (with the display-changed
+ * card) and its Frame profile.
  *
- * Position and Picture share one live adjustment (liveAdjustment.js): it runs while either tab
- * is shown, so moving between them keeps the change on the Display, and leaving them (another
- * tab, another page) ends it. Leaving them for another tab with changes not kept asks first
- * (LeaveGuard: Keep, Revert or Stay); leaving the page reverts them, and the page says so on
- * the next visit. Only the shown tab's content is mounted. The Frame's name is the page's
- * heading (the Wall route's `ownsHeading`).
+ * Position and Picture each have their own live session: Position's (liveAdjustment.js, kept on
+ * the Frame) and Picture's (pictureSession.js, kept on the display). Each runs while its tab is
+ * shown and ends when it is left. Leaving either tab with changes not kept asks first
+ * (LeaveGuard: Keep, Revert or Stay); leaving the page reverts them, and the tab says so on the
+ * next visit. Only the shown tab's content is mounted. The Frame's name is the page's heading
+ * (the Wall route's `ownsHeading`).
  */
 export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, focusRequest, onFocusDone }: FramePageProps) {
   const frames = ((snapshot as { inventory?: { frames?: Frame[] } } | null)?.inventory?.frames ?? []);
   const frame = frames.find((candidate) => candidate.id === frameId);
-  const live = tab === "position" || tab === "picture";
-  const adjustment = useFrameAdjustment({ frameId, frame, open: live });
+  const adjustment = useFrameAdjustment({ frameId, frame, open: tab === "position" });
+  const picture = usePictureSession({ frameId, open: tab === "picture" && frame !== undefined });
+  // The shown tab's live session, if it has one: the one a tab change would leave.
+  const guarded = tab === "position" ? adjustment : tab === "picture" ? picture : null;
   const headingRef = useRef<HTMLHeadingElement | null>(null);
-  // A tab change that would leave a live adjustment with changes not kept: asked first.
+  // A tab change that would leave a live session with changes not kept: asked first.
   const [leaving, setLeaving] = useState<Tab | null>(null);
   const choose = (next: Tab) => {
-    const stays = next === "position" || next === "picture";
-    if (live && !stays && adjustment.dirty) setLeaving(next);
+    if (guarded !== null && next !== tab && guarded.dirty) setLeaving(next);
     else onTab(next);
   };
   const leave = async (keep: boolean) => {
     const target = leaving;
-    if (target === null) return;
-    const left = keep ? await adjustment.done() : (await adjustment.revert(), true);
+    if (target === null || guarded === null) return;
+    const left = keep ? await guarded.done() : (await guarded.revert(), true);
     setLeaving(null);
     if (left) onTab(target);
   };
@@ -134,8 +134,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
     }>
       <LeaveGuard
         open={leaving !== null}
-        busy={adjustment.busy}
-        keepBlocked={adjustment.phase === "shown" ? null : "Keep is offered once the Pi presents your latest change."}
+        busy={guarded?.busy ?? false}
+        keepBlocked={guarded?.phase === "shown" ? null : "Keep is offered once the Pi presents your latest change."}
         onKeep={() => { void leave(true); }}
         onRevert={() => { void leave(false); }}
         onStay={() => setLeaving(null)}
@@ -143,9 +143,13 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
         {tab === "position" && (
-          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref} />
+          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
+            readiness={frame.readiness} />
         )}
-        {tab === "picture" && <FramePicture adjustment={adjustment} piHref={piHref} />}
+        {tab === "picture" && (
+          <FramePicture frameId={frameId} piHref={piHref} session={picture}
+            otherFrames={frames.filter((other) => other.id !== frameId).map((other) => other.id)} />
+        )}
         {tab === "power" && <FramePower key={`${frameId}:power`} frameId={frameId} />}
         {tab === "hardware" && (
           <>

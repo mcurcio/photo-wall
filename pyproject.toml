@@ -215,6 +215,14 @@ forbidden_modules = ["appliance.display_host", "appliance.health", "appliance.ap
                      "appliance.node_boot_handoff"]
 
 [[tool.importlinter.contracts]]
+# Roadmap 1c (run ledger .claude/runs/display-1c.md): the Player is the only picture pipeline; the
+# base never implements a second transform, so no base module reaches the Frame fit's geometry.
+name = "Display Host never computes a Frame's geometry"
+type = "forbidden"
+source_modules = ["appliance"]
+forbidden_modules = ["contracts.frame_fit"]
+
+[[tool.importlinter.contracts]]
 # The judge alone maps faults to household lines; Display draws the instruction it is given.
 name = "Display never reads the fault catalogue"
 type = "forbidden"

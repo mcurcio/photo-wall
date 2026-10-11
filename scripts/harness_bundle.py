@@ -73,7 +73,7 @@ WALL_HELPER_BUNDLE = HarnessBundle(files=(
     BundleFile("scripts/immich_actions.py", "scripts/immich_actions.py"),
     BundleFile("scripts/provenance_models.py", "scripts/provenance_models.py"),
     BundleFile("scripts/runtime_provenance.py", "scripts/runtime_provenance.py"),
-    BundleFile("tests/support/calibrated_frame.py", "support/calibrated_frame.py"),
+    BundleFile("tests/support/position.py", "support/position.py"),
 ))
 
 IMMICH_RUNTIME_BUNDLE = HarnessBundle(files=(

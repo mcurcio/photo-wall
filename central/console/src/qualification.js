@@ -177,7 +177,6 @@ const WAITING = Object.freeze({
   node_qualification_readiness_unavailable: "the Player app reports missing capacity or a failure",
   node_qualification_plan_changed: "this Player's plan or bindings changed",
   node_qualification_handoff_unavailable: "Display Host is not showing the Player app's current surface on every bound Output",
-  node_qualification_preview_active: "a preview is active on a bound Output",
   node_qualification_base_unavailable: "Central has no admitted boot for this Player",
   node_output_cohort_unavailable: "Display Host has not reported every Output connected in the last 10 s",
   node_representative_media_evidence_required: "every bound Output must be showing a prepared photo or video",

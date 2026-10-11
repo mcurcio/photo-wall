@@ -813,13 +813,15 @@ def upstream_action(action: str):
 
 
 def operator_action(action: str):
-    """Control through real operator HTTP; SQL is limited to evidence reads and one named
-    exception: the demo's Players have no Node, so Central offers their Frames no calibration
-    protocol, and `support.calibrated_frame` saves each Frame's calibration in its row (R7)."""
+    """Control through real operator HTTP; SQL is limited to evidence reads, and to Position Save
+    (`support.position.save_position`, the tests' helper through Registry's Save CAS), which has
+    no operator route without a Position trial: the demo's Players have no Node."""
     import httpx
-    from support.calibrated_frame import calibrate_frame
+    from support.position import save_position
 
     from central.db import Database
+    from central.registry import Registry
+    from contracts.time import SystemClock
     client = httpx.Client(base_url="http://central:8000", trust_env=False, follow_redirects=False,
                          headers={"Authorization": "Bearer " + os.environ["DEMO_ADMIN_TOKEN"]}, timeout=15)
     def request(method, path, body=None):
@@ -852,6 +854,7 @@ def operator_action(action: str):
         require(len(outputs) == expected, "players_not_registered")
         frames = []
         database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+        registry = Registry(database, SystemClock())
         try:
             for index, output in enumerate(outputs):
                 frame = "demo-frame-" + str(index + 1)
@@ -859,7 +862,7 @@ def operator_action(action: str):
                     "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
                 request("PUT", "/v1/operator/frames/" + frame + "/binding", {
                     "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
-                calibrate_frame(database, frame)
+                save_position(registry, frame)
                 frames.append(frame)
         finally:
             database.close()

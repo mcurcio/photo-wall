@@ -39,6 +39,7 @@ from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.models import (
     Calibration,
+    CoverFit,
     FrameProfile,
     Identifier,
     Model,
@@ -447,7 +448,7 @@ class Registry:
                              "profile,calibration) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                              (frame.id, frame.surface_id, frame.x_mm, frame.y_mm,
                               frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
-                              Jsonb(Calibration().model_dump())))
+                              Jsonb(Calibration(fit=CoverFit()).model_dump(mode="json"))))
                 self._audit(conn, "frame_created", frame.id)
         except UniqueViolation as exc:
             raise RegistryError("frame_exists") from exc
@@ -575,11 +576,10 @@ class Registry:
         calibration = Calibration.model_validate(frame["calibration"])
         invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
         row = conn.execute(
-            "UPDATE frames SET profile=%s,calibration=%s,"
-            "generation=generation+1,"
+            "UPDATE frames SET profile=%s,calibration=%s,generation=generation+1,"
             "configuration_revision=configuration_revision+1 WHERE id=%s "
             "RETURNING generation",
-            (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump()), frame_id),
+            (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump(mode="json")), frame_id),
         ).fetchone()
         self._audit(conn, "frame_profile_changed", frame_id,
                     {"profile": profile.model_dump(), **row})
@@ -704,8 +704,8 @@ class Registry:
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
         conn.execute("UPDATE frames SET calibration=%s,"
-                     "configuration_revision=configuration_revision+1 "
-                     "WHERE id=%s", (Jsonb(committed.model_dump(mode="json")), frame_id))
+                     "configuration_revision=configuration_revision+1 WHERE id=%s",
+                     (Jsonb(committed.model_dump(mode="json")), frame_id))
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
