@@ -294,4 +294,5 @@ def test_every_session_is_sent_the_after_state_and_this_player_reads_it():
     assert [layer["after_end"] for layer in layers] == [
         "keep_this_photo", "keep_nothing", "leave_as_is"]
     assert not any("retain_on_expiry" in layer for layer in layers)
-    assert PlayerService._state(state).plan == plan
+    sent = {**state, "delivery_id": "1" * 32, "delivery_sequence": 1}  # as finalize adds them
+    assert PlayerService._state(sent).plan == plan

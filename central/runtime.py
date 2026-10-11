@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
@@ -348,24 +347,6 @@ class RuntimeBudgetExceeded(RuntimeError):
     """A projection/current advance exceeded its explicit transition budget."""
 
 
-@dataclass(frozen=True, slots=True)
-class AdmissionPolicy:
-    """Current equipment barriers, supplied by the owner of Runtime state.
-
-    This is a read constraint derived from active drains, not part of an
-    authored or persisted Runtime snapshot. A Scene's participant set includes
-    all nested children and outro contributions.
-    """
-
-    blocked_targets: frozenset[str] = frozenset()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "blocked_targets", frozenset(self.blocked_targets))
-
-    def blocks(self, scene: Scene) -> bool:
-        return not self.blocked_targets.isdisjoint(scene.participants)
-
-
 class _TransitionBudget:
     def __init__(self, limit: int) -> None:
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -381,13 +362,8 @@ class _TransitionBudget:
 class Runtime:
     """Single-owner mutable domain state, with pure immutable observations."""
 
-    def __init__(self, admission_policy: AdmissionPolicy | None = None) -> None:
+    def __init__(self) -> None:
         self._state = _State()
-        self._admission_policy = admission_policy or AdmissionPolicy()
-
-    @property
-    def admission_policy(self) -> AdmissionPolicy:
-        return self._admission_policy
 
     def set_scene(self, scene: Scene) -> None:
         """Store a Scene; a save must move its revision past the stored one.
@@ -585,8 +561,8 @@ class Runtime:
         return state
 
     @classmethod
-    def restore(cls, state: dict, *, admission_policy: AdmissionPolicy | None = None) -> Runtime:
-        runtime = cls(admission_policy)
+    def restore(cls, state: dict) -> Runtime:
+        runtime = cls()
         runtime._state = _State.model_validate(state)
         # Early MVP v1 exports used only global descendant order. Adopt that
         # established ordering once, then allocate independently within a root.
@@ -602,7 +578,7 @@ class Runtime:
 
     def _copy(self) -> Runtime:
         """A detached copy, so a projection never touches the owned state."""
-        return self.restore(self.export_state(), admission_policy=self._admission_policy)
+        return self.restore(self.export_state())
 
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self._copy().advance(now, max_events=max_events)
@@ -665,12 +641,6 @@ class Runtime:
         if scene_id not in self._state.scenes:
             raise ValueError(f"unknown Scene: {scene_id}")
         scene = self._state.scenes[scene_id]
-        if self._admission_policy.blocks(scene):
-            result = Admission(
-                activation_id=activation_id, status="rejected", reason="equipment_draining"
-            )
-            self._state.admissions[activation_id] = result
-            return result
         matches = self._matching(scene_id)
         if matches and repeat == "ignore":
             result = Admission(
@@ -865,8 +835,7 @@ class Runtime:
         # A newly freed matching/protected predecessor can release queued work immediately.
         for item in self._state.queue:
             if (
-                not self._admission_policy.blocks(item.scene)
-                and not self._matching(item.scene.scene_id)
+                not self._matching(item.scene.scene_id)
                 and not self._protected_conflict(item.scene, item.priority, item.force)
             ):
                 releases = [r.ended_at for r in self._state.runs.values() if r.ended_at is not None]
@@ -944,8 +913,6 @@ class Runtime:
                 self._state.admissions[item.activation_id] = Admission(
                     activation_id=item.activation_id, status="expired"
                 )
-            elif self._admission_policy.blocks(item.scene):
-                continue
             elif self._matching(item.scene.scene_id) or self._protected_conflict(
                 item.scene, item.priority, item.force
             ):

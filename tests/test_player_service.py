@@ -6,15 +6,15 @@ import base64
 import contextlib
 import functools
 import hashlib
-import inspect
+import itertools
 import json
 import logging
 import math
 import re
-import stat
 import tempfile
 import threading
 import time
+import types
 import typing
 from concurrent.futures import Future
 from pathlib import Path
@@ -25,13 +25,13 @@ import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from media_queue import RecordingMediaQueue
 from pydantic import ValidationError
+from support.calibrated_frame import calibrate_frame
 from test_executor import binding, layer
 from uplink_fakes import FakeReply, FakeTransport, central, finding
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response as Http11Response
 
-import player.service as service_module
 from central.db import ProcessTransactionClock
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
@@ -45,7 +45,7 @@ from player.output_discovery import (
     output_app_id,
     weston_ini,
 )
-from player.rendering import CapacityResult, PrepareResult, PresentationResult, RecordingRenderer
+from player.rendering import PrepareResult, PresentationResult, RecordingRenderer
 from player.service import (
     MAX_JSON,
     BootContext,
@@ -94,7 +94,7 @@ TRUST = Trust.public(tls.write_bundle(_TRUST_DIR / "ca.pem", tls.CA))
 def boot_context() -> BootContext:
     return BootContext.model_validate({
         "device_id": "device-" + "b" * 64,
-        "boot_id": "12345678-1234-1234-1234-123456789abc",
+        "run_id": "12345678-1234-1234-1234-123456789abc",
     })
 
 
@@ -103,7 +103,7 @@ def test_identity_is_fresh_signed_and_never_written(tmp_path):
     first, second = load_identity(), load_identity()
     assert first.public_key != second.public_key
     context = boot_context()
-    fields = dict(device_id=context.device_id, boot_id=context.boot_id)
+    fields = dict(device_id=context.device_id, boot_id=context.run_id)
     proof = first.enrollment("f" * 64, (), **fields)
     Ed25519PublicKey.from_public_bytes(bytes.fromhex(first.public_key)).verify(
         base64.b64decode(proof.signature), enrollment_message(proof.nonce, (), **fields))
@@ -220,6 +220,15 @@ def test_numeric_hdmi_connector_suffix_remains_supported(tmp_path):
     assert found.outputs[0].output_id == "HDMI-A-3"
 
 
+_DELIVERIES = itertools.count(1)
+
+
+def delivered(**fields) -> State:
+    """A State as Central sends it: every delivery carries its id and its sequence."""
+    sequence = next(_DELIVERIES)
+    return State(delivery_id=f"{sequence:032x}", delivery_sequence=sequence, **fields)
+
+
 class Server:
     def __init__(self, clock):
         self.clock = clock
@@ -259,8 +268,6 @@ class Server:
             offer = json.loads(request.content)
             return httpx.Response(200, json={"authority_epoch": offer["authority_epoch"],
                                              "schema": 2, "capabilities": []})
-        if path == "/v1/player/boot-health":
-            return httpx.Response(200, json={"accepted": True, "release_id": "c" * 64})
         if path.startswith("/v1/media/"):
             return self.media_response or httpx.Response(200, content=self.data,
                 headers={"Content-Type": "image/png", "Content-Length": str(len(self.data))})
@@ -273,7 +280,7 @@ class Server:
             authority_epoch=self.epoch, issued_at=self.clock.utc(), valid_from=self.clock.utc(),
             valid_until=300, bindings=configuration.bindings,
             layers=(layer(data=self.data),) if layers is None else layers)
-        self.state = State(configuration=configuration, plan=None if absent else plan,
+        self.state = delivered(configuration=configuration, plan=None if absent else plan,
             commits=commits, revocations=revocations)
         return self.state
 
@@ -289,7 +296,7 @@ async def rig(tmp_path, *, server=None, negotiate=False):
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
         find_central=finding("http://central"), trust=TRUST, clock=clock,
         client=client, time_client=client,
-        websocket_connect=False, health_path=None, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context())
     await service.locate_central()
     await service.enroll()
     if negotiate:
@@ -298,6 +305,24 @@ async def rig(tmp_path, *, server=None, negotiate=False):
     server.offer()
     await service.poll_state()
     return service, server
+
+
+def test_an_unsequenced_state_is_refused_at_parse(tmp_path):
+    """Central sequences every delivery, so state without its id and sequence is a protocol
+    error the session names, never applied. Mutation probe: make the pair optional again."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            body = server.state.model_dump(mode="json")
+            del body["delivery_id"], body["delivery_sequence"]
+            server.state = types.SimpleNamespace(model_dump=lambda mode: body)
+            applied = service._highest_control_sequence
+            with pytest.raises(ValidationError):
+                await service.poll_state()
+            assert service._highest_control_sequence == applied
+        finally:
+            await close(service)
+    asyncio.run(check())
 
 
 def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
@@ -350,8 +375,9 @@ def test_an_identify_cue_the_session_did_not_select_is_never_shown(tmp_path):
                 configuration_revision=2, bindings=(), enabled_outputs=())
             cue = IdentifyOutput(request_id="old-central-cue", output_id="hdmi2",
                 authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
-            state = State(configuration=config, plan=None, commits=(), revocations=(),
-                          identify_output=cue)
+            state = delivered(configuration=config, plan=None, commits=(), revocations=(),
+                              identify_output=cue,
+                              identify_expires_at=service.clock.utc() + 10)
             assert service._apply_state(state) == "applied"
             assert service.renderer.identify_output is None
         finally:
@@ -386,9 +412,8 @@ async def _identify_output_scenario(tmp_path):
             configuration_revision=2, bindings=(), enabled_outputs=())
         cue = IdentifyOutput(request_id="identify-1", output_id="hdmi2",
             authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
-        state = State(configuration=config, plan=None, commits=(), revocations=(),
-                      identify_output=cue, identify_expires_at=service.clock.utc() + 10,
-                      delivery_id="1" * 32, delivery_sequence=1)
+        state = delivered(configuration=config, plan=None, commits=(), revocations=(),
+                          identify_output=cue, identify_expires_at=service.clock.utc() + 10)
         service._apply_state(state)
         renderer = service.renderer
         deadline = service._identify_deadline
@@ -410,21 +435,15 @@ async def _identify_output_scenario(tmp_path):
         assert renderer.identify_output is None
         assert service._identify_deadline is None
 
-        cleared = state.model_copy(update={"identify_output": None,
-                                           "identify_expires_at": None,
-                                           "delivery_id": "2" * 32,
-                                           "delivery_sequence": 2})
+        cleared = delivered(configuration=config, plan=None, commits=(), revocations=())
         service._apply_state(cleared)
         assert service._apply_state(state) == "superseded"
         assert renderer.identify_output is None
 
         new_cue = cue.model_copy(update={"request_id": "identify-2"})
-        service._apply_state(state.model_copy(update={
-            "identify_output": new_cue,
-            "identify_expires_at": service.clock.utc() + 5,
-            "delivery_id": "3" * 32,
-            "delivery_sequence": 3,
-        }))
+        service._apply_state(delivered(configuration=config, plan=None, commits=(),
+                                       revocations=(), identify_output=new_cue,
+                                       identify_expires_at=service.clock.utc() + 5))
         assert renderer.identify_output == "hdmi2"
 
         service._apply_identify_output(cue, ("hdmi2",), config.authority_epoch + 1)
@@ -453,7 +472,7 @@ async def finder_rig(find, handle=None):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle or server), trust_env=False)
     service = PlayerService(PlayerConfig(), load_identity(), (), RecordingRenderer(), immediate,
         find_central=find, trust=TRUST, clock=clock, client=client, time_client=client,
-        websocket_connect=False, health_path=None, boot_context=boot_context())
+        websocket_connect=False, boot_context=boot_context())
     return service, server
 
 
@@ -522,10 +541,10 @@ def test_the_websocket_url_comes_from_the_located_origin(tmp_path):
     asyncio.run(check())
 
 
-def test_a_run_reaches_a_sustained_session_and_never_reports_boot_health(
+def test_a_run_reaches_a_sustained_session(
         tmp_path, monkeypatch):
-    """Drive the control loop through run() and assert the session survives: no boot-health
-    endpoint is called, the websocket loop connects exactly once (never torn down and
+    """Drive the control loop through run() and assert the session survives: the websocket
+    loop connects exactly once (never torn down and
     reconnected by a crash restart), and the media loop completes a real download."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
 
@@ -534,12 +553,9 @@ def test_a_run_reaches_a_sustained_session_and_never_reports_boot_health(
         directory.mkdir(mode=0o700)
         clock = ManualClock(100)
         server = Server(clock)
-        boot_health_calls, media_calls, connect_calls = [], [], []
+        media_calls, connect_calls = [], []
 
         def handle(request):
-            if request.url.path == "/v1/player/boot-health":
-                boot_health_calls.append(request)
-                return httpx.Response(403, json={"error": "stale_boot_ticket"})
             if request.url.path.startswith("/v1/media/"):
                 media_calls.append(request)
             result = server(request)
@@ -572,7 +588,7 @@ def test_a_run_reaches_a_sustained_session_and_never_reports_boot_health(
 
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, websocket_connect=connect, health_path=None,
+            client=client, time_client=client, websocket_connect=connect,
             boot_context=boot_context())
         task = asyncio.create_task(service.run())
         try:
@@ -587,11 +603,9 @@ def test_a_run_reaches_a_sustained_session_and_never_reports_boot_health(
             await asyncio.wait_for(downloaded(), 3)
 
             # Give the control loop several more 0.5s cadences to prove it
-            # keeps running rather than looping the 403 into a task teardown
-            # and restart (m3-central-d0-enroll's crash-loop).
+            # keeps running rather than tearing its tasks down and restarting.
             await asyncio.sleep(.2)
             assert service.registration is not None
-            assert not boot_health_calls
             assert connect_calls == [True]
         finally:
             service.stop()
@@ -754,7 +768,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
              OutputReport(output_id="hdmi2", width_px=0, height_px=0, connected=False)),
             RecordingRenderer(), immediate, find_central=finding("http://central"),
             trust=TRUST, clock=clock, client=client, time_client=client,
-            websocket_connect=False, health_path=None, boot_context=boot_context(),
+            websocket_connect=False, boot_context=boot_context(),
         )
         try:
             assert service.central_link_state == service.renderer.central_link_state == "connecting"
@@ -769,7 +783,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
             unbound_plan = initial.plan.model_copy(update={
                 "bindings": (),
             })
-            server.state = State(configuration=unbound_config, plan=unbound_plan,
+            server.state = delivered(configuration=unbound_config, plan=unbound_plan,
                                  commits=(), revocations=())
             await service.poll_state()
             assert service.renderer.unbound_outputs == ("hdmi1",)
@@ -794,7 +808,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
                 "configuration_revision": 2,
             })
             rebound_plan = initial.plan.model_copy(update={"revision": 2})
-            server.state = State(configuration=rebound_config, plan=rebound_plan,
+            server.state = delivered(configuration=rebound_config, plan=rebound_plan,
                                  commits=(), revocations=())
             await service.poll_state()
             assert service.renderer.unbound_outputs == ()
@@ -802,7 +816,7 @@ def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
 
             unbound_config = unbound_config.model_copy(update={"configuration_revision": 3})
             unbound_plan = unbound_plan.model_copy(update={"revision": 3})
-            server.state = State(configuration=unbound_config, plan=unbound_plan,
+            server.state = delivered(configuration=unbound_config, plan=unbound_plan,
                                  commits=(), revocations=())
             await service.poll_state()
             assert service.renderer.unbound_outputs == ("hdmi1",)
@@ -1000,7 +1014,7 @@ def test_revocation_and_full_plan_omission_cancel_jobs_before_draw(tmp_path):
     asyncio.run(check())
 
 
-def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
+def test_bad_clock_measurement_withholds_preparation(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
         try:
@@ -1009,7 +1023,7 @@ def test_bad_clock_measurement_withholds_preparation_and_health(tmp_path):
             server.time_offset = 10
             assert not await service.probe_time()
             readiness, _ = service._feedback()
-            assert not readiness.prepared and not service._health()
+            assert not readiness.prepared
             assert service.mapping.diagnostics.status == "uncertainty"
             server.time_offset = 0
             assert await service.probe_time()
@@ -1193,7 +1207,6 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
     async def check():
         service, server = await rig(tmp_path)
         try:
-            service.health_path = tmp_path / "health.json"
             service.boot_id = "00000000-1111-2222-3333-444444444444"
             service._feedback()
             assert await service.download(service._jobs[0])
@@ -1220,7 +1233,6 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             assert readiness_posts(server)[posted:] == []   # readiness untouched
             assert len(StarvedGLib.callbacks) <= 4      # one abandoned post holds the line
             assert service.last_fault == "main_loop_late"
-            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
             # The loop runs again: nothing it missed runs late, and reporting resumes.
             ran = []
             monkeypatch.setattr(service, "_apply_state", lambda state: ran.append(state))
@@ -1232,25 +1244,22 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             recovered = (await turn(service, server, 1))[0]
             assert recovered["sequence"] == live["sequence"] + 1     # no gap, nothing in between
             assert recovered["failures"] == [] and recovered["secured"] == live["secured"]
-            assert json.loads(service.health_path.read_text())["health_reason"] == "healthy"
         finally:
             await close(service)
     asyncio.run(check())
 
 
-def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restart(
+def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
         tmp_path, monkeypatch):
     """E-G8-7, through run() with the time loop live and the production dispatcher: a GLib
     loop that stops running dispatches never turns into a dispatch_capacity refusal. The
     Player keeps raising main_loop_late (and posts no readiness) across many deadlines and
     across a session that ends meanwhile (its reconnect's cycle-start dispatches are late, not
-    fatal: it re-locates once and that session holds), and run() pets the watchdog not once until the loop runs again, so WatchdogSec
-    restarts a Player whose loop stays stuck."""
+    fatal: it re-locates once and that session holds), and reporting resumes once the loop runs
+    again. A loop that stays stuck is the broker's probe kill to end."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
-    pets = []
-    monkeypatch.setattr(service_module.watchdog, "pet", lambda: pets.append(True))
 
     class GLib:
         blocked, queued = False, []
@@ -1298,12 +1307,12 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
 
         task = asyncio.create_task(service.run())
         try:
-            await asyncio.wait_for(until(lambda: posts and pets), 5)
+            await asyncio.wait_for(until(lambda: posts), 5)
             GLib.blocked = True
             # Only the control loop posts, one exchange at a time, so its first late dispatch
             # means no readiness post is still in flight: count posts from there.
             await asyncio.wait_for(until(lambda: late_count() >= 1), 5)
-            blocked_at, petted = len(posts), len(pets)
+            blocked_at = len(posts)
             await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
             fail_state.append(False)        # the session ends while the loop is blocked
             await asyncio.wait_for(until(lambda: fail_state[0]), 5)
@@ -1315,14 +1324,13 @@ def test_a_blocked_main_loop_keeps_its_session_and_leaves_the_watchdog_to_restar
             assert service._located
             assert len(posts) == blocked_at         # no readiness while the loop is late
             assert "dispatch_capacity" not in faults
-            assert len(pets) == petted              # no pet while the loop is stuck
             assert len(GLib.queued) <= 4
-            # The loop runs again: the abandoned posts drain, reporting and petting resume.
+            # The loop runs again: the abandoned posts drain and reporting resumes.
             GLib.blocked = False
             for callback in GLib.queued:
                 callback()
             await asyncio.wait_for(
-                until(lambda: len(pets) > petted and len(posts) > blocked_at), 5)
+                until(lambda: len(posts) > blocked_at), 5)
             assert all(not report["failures"] for report in posts), posts
         finally:
             service.stop()
@@ -1370,7 +1378,6 @@ def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkey
     ServiceError, so without its own branch it would read as a clock_probe failure."""
     async def check():
         service, _ = await rig(tmp_path)
-        service.health_path = tmp_path / "health.json"
 
         async def late():
             service._stop.set()
@@ -1379,7 +1386,6 @@ def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkey
         try:
             await asyncio.wait_for(service._time_loop(), 5)
             assert service.last_fault == "main_loop_late"
-            assert json.loads(service.health_path.read_text())["health_reason"] == "main_loop_late"
         finally:
             await close(service)
     asyncio.run(check())
@@ -1475,115 +1481,6 @@ def test_every_player_failure_code_has_console_recovery_wording():
     assert codes - known == set()
 
 
-def test_health_has_boot_authority_and_no_secrets(tmp_path):
-    async def check():
-        service, server = await rig(tmp_path)
-        try:
-            service.health_path = tmp_path / "health.json"
-            service.boot_id = "00000000-1111-2222-3333-444444444444"
-            service._write_health(*service._health_status())
-            body = json.loads(service.health_path.read_text())
-            assert body["healthy"] and body["authority_epoch"] == 1
-            assert body["health_reason"] == "healthy"
-            assert body["sampled_monotonic"] == 0 and body["boot_id"] == service.boot_id
-            assert body["persistence"] == "volatile"
-            assert body["clock"]["status"] == "healthy"
-            assert "token" not in body and "public_key" not in body
-            assert stat.S_IMODE(service.health_path.stat().st_mode) == 0o600
-            service._write_health(False)
-            body = json.loads(service.health_path.read_text())
-            assert not body["healthy"] and body["health_reason"] == "disconnected"
-            service.boot_id = ""
-            service._write_health(True)
-            body = json.loads(service.health_path.read_text())
-            assert not body["healthy"] and body["health_reason"] == "identity"
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("reason", ["executor", "configuration", "clock",
-                                    "renderer_capacity", "healthy"])
-def test_health_reason_preserves_gate_order_and_single_evaluation(tmp_path, monkeypatch, reason):
-    async def check():
-        service, _ = await rig(tmp_path)
-        try:
-            calls = []
-            def clock():
-                calls.append("clock")
-                return reason != "clock"
-            def capacity(_):
-                calls.append("renderer_capacity")
-                return CapacityResult(reason == "healthy")
-            monkeypatch.setattr(service.mapping, "healthy", clock)
-            monkeypatch.setattr(service.renderer, "capacity", capacity)
-            if reason == "executor":
-                service.executor = None
-            if reason in {"executor", "configuration"}:
-                service._configuration = None
-            assert service._health_status() == (reason == "healthy", reason)
-            expected = ([] if reason in {"executor", "configuration"}
-                        else ["clock"] if reason == "clock" else ["clock", "renderer_capacity"])
-            assert calls == expected
-            calls.clear()
-            assert service._health() is (reason == "healthy")
-            assert calls == expected
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("healthy,reason", [(True, "clock"), (False, "healthy"),
-                                            (False, "private-error"), (False, "")])
-def test_health_writer_rejects_inconsistent_or_unbounded_reasons(tmp_path, healthy, reason):
-    async def check():
-        service, _ = await rig(tmp_path)
-        try:
-            service.health_path = tmp_path / "health.json"
-            service.boot_id = "00000000-1111-2222-3333-444444444444"
-            with pytest.raises(ValueError, match="inconsistent health reason"):
-                service._write_health(healthy, reason)
-            assert not service.health_path.exists()
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-@pytest.mark.parametrize("reason", ["healthy", "clock"])
-def test_control_writes_one_consistent_health_sample_with_clock_diagnostics(
-        tmp_path, monkeypatch, reason):
-    async def check():
-        service, _ = await rig(tmp_path)
-        try:
-            service.health_path = tmp_path / "health.json"
-            service.boot_id = "00000000-1111-2222-3333-444444444444"
-            calls = []
-            async def poll():
-                service._stop.set()
-            def status():
-                calls.append(reason)
-                return reason == "healthy", reason
-            monkeypatch.setattr(service, "poll_state", poll)
-            monkeypatch.setattr(service, "_feedback", lambda: (None, ()))
-            monkeypatch.setattr(service, "_health_status", status)
-            await service._control_loop()
-            assert calls == [reason]
-            value = json.loads(service.health_path.read_text())
-            assert value["health_reason"] == reason
-            assert value["healthy"] is (reason == "healthy")
-            assert value["persistence"] == "volatile"
-            assert value["clock"]["status"] == "healthy"
-            assert value["clock"]["accepted"] >= 1
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_health_default_is_player_private_path():
-    default = inspect.signature(PlayerService).parameters["health_path"].default
-    assert default == Path("/run/photo-wall/player/service-health.json")
-
-
 def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_path):
     async def check():
         directory = private_dir(tmp_path / "state")
@@ -1595,7 +1492,7 @@ def test_cache_initialization_failure_fails_session_without_local_fallback(tmp_p
         service = PlayerService(PlayerConfig(central_origin="http://central",
             cache_dir=str(directory)), load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, cache_factory=fail, health_path=None,
+            client=client, time_client=client, cache_factory=fail,
             boot_context=boot_context())
         try:
             await service.locate_central()
@@ -1807,7 +1704,7 @@ def test_the_default_websocket_connector_refuses_redirects(tmp_path, monkeypatch
         service = PlayerService(PlayerConfig(central_origin="http://central"),
             load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
-            client=client, time_client=client, health_path=None, boot_context=boot_context())
+            client=client, time_client=client, boot_context=boot_context())
         assert service.link.websocket_connect is None
         try:
             await service.locate_central()
@@ -1968,7 +1865,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     from central.media_repository import MediaRepository, StoreLimits
     from central.media_store import MediaStore
     from contracts.enrollment import OutputReport
-    from contracts.models import Calibration
     from media.models import SourceSpec
 
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
@@ -2014,7 +1910,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         cache_dir = private_dir(tmp_path / "player-cache")
         boot_id = "12345678-1234-1234-1234-123456789abc"
         device_id = "device-" + "d" * 64
-        context = BootContext(device_id=device_id, boot_id=boot_id)
+        context = BootContext(device_id=device_id, run_id=boot_id)
         client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
         # An http root needs no trust store; the fixture CA keeps the host's out of it.
         trust = Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
@@ -2024,8 +1920,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             RecordingRenderer(), immediate,
             find_central=functools.partial(find_central, Configured(Origin.parse_root(origin)),
                                            transport=transport),
-            trust=trust, clock=registry.clock, client=client, time_client=client,
-            health_path=None, boot_context=context)
+            trust=trust, clock=registry.clock, client=client, time_client=client, boot_context=context)
         socket_task = None
         try:
             assert (await service.locate_central()).origin == Origin.parse_root(origin)
@@ -2037,7 +1932,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             assert service._plan is None
             frame(registry, "portrait")
             registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
-            registry.calibrate("portrait", "commit", 1, Calibration(), expected_generation=1)
+            calibrate_frame(registry.db, "portrait")
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
             await service.poll_state()
             service._feedback()

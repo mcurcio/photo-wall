@@ -220,25 +220,6 @@ def test_closure_waits_for_transaction_scoped_admission(registry) -> None:
             gate.require_open_in(conn, expected_generation=1)
 
 
-def test_unresolved_drain_prevents_new_generation(registry) -> None:
-    gate, _ = _gate(registry)
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)",
-                     ("device-" + "e" * 64,))
-        conn.execute(
-            "INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,device_id) "
-            "VALUES('p-drained','key','hash',1,1,%s)", ("device-" + "e" * 64,),
-        )
-        conn.execute(
-            "INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,"
-            "phase,prepared_at,authorization_expires_at,snapshot) "
-            "VALUES('p-drained','attempt','boot',1,'prepared',1,2,'{}'::jsonb)"
-        )
-    with pytest.raises(RolloutGateError, match="rollout_barrier_unresolved"):
-        gate.open(expected_revision=0)
-    assert gate.status()["effective_state"] == "closed"
-
-
 def test_database_rejects_direct_nonmonotone_transition_and_delete(registry) -> None:
     with registry.db.transaction() as conn:
         with pytest.raises(psycopg.errors.CheckViolation):

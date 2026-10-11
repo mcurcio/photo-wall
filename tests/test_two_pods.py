@@ -11,7 +11,7 @@ coordination, with the REAL entry points.
 The read path is exercised through a node boot offer's artifact route
 (`/v2/node/boot-offers/{id}/artifacts/{role}`), the unauthenticated byte route a Node boots
 from: the pods run `central.app:create_app`, a node deployment whose manager environment is
-the fake release's blob (served where the `.deb` was) is written and selected as the release
+the fake release's environment blob is written and selected as the release
 sync's ingest does it, and one Node's offer names it. The base tarball answers 404, so the only
 download that can hold or throttle is the environment's.
 
@@ -42,7 +42,13 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from support.github_release import TARBALL_NAME, FakeGitHubOrigin, FakeRelease, make_release
+from support.github_release import (
+    ENVIRONMENT_NAME,
+    TARBALL_NAME,
+    FakeGitHubOrigin,
+    FakeRelease,
+    make_release,
+)
 from support.workers import (
     JOB_LOOPS,
     MEDIA_LOOP,
@@ -236,14 +242,14 @@ class TwoPods:
         operator route, whose Prefetch publishes the selected environment's fetch."""
         self.origin.releases[release.tag] = release
         url = f"{self.origin.api_base}/dl/{release.tag}"
-        manager = AppEnvironmentRefV2(deb_sha(release), len(release.deb), "e" * 64,
+        manager = AppEnvironmentRefV2(environment_sha(release), len(release.environment), "e" * 64,
                                       "photo-wall-app-manager", "1.0.0", "arm64", "f" * 64,
                                       "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1",
                                       "plugin-v1")
         base = NodeBaseRefV2(release.tag, release.tarball_sha, release.squashfs_sha,
                              SQUASHFS_BYTES, BASE_ABI, "graphics-v1", "plugin-v1")
         deployment = NodeDeployment(uuid4(), base, None, manager, None, {
-            manager.environment_sha256: f"{url}/{release.deb_filename}"})
+            manager.environment_sha256: f"{url}/{ENVIRONMENT_NAME}"})
         with self.db.transaction() as conn:
             write_deployment(conn, deployment, OriginLocator(
                 f"{url}/{TARBALL_NAME}", release.tarball_sha, len(release.tarball)),
@@ -261,8 +267,8 @@ class TwoPods:
         return f"/v2/node/boot-offers/{offer_id or self.offer_id}/artifacts/{ROLE}"
 
 
-def deb_sha(release: FakeRelease) -> str:
-    return hashlib.sha256(release.deb).hexdigest()
+def environment_sha(release: FakeRelease) -> str:
+    return hashlib.sha256(release.environment).hexdigest()
 
 
 def one_pending_copy_at_a_time(rows: list[dict]) -> bool:
@@ -332,7 +338,7 @@ def pods(module_registry, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def v1() -> FakeRelease:
-    release = make_release("v1.0.0", squashfs_bytes=SQUASHFS_BYTES, deb_bytes=4 * 1024 * 1024)
+    release = make_release("v1.0.0", squashfs_bytes=SQUASHFS_BYTES, environment_bytes=4 * 1024 * 1024)
     release.tarball_status = 404  # the base fails at once: only the environment downloads
     return release
 
@@ -349,11 +355,11 @@ def test_a4a_unknown_content_is_404_on_both_pods(pods):
 def test_a1a_misses_on_both_pods_merge_into_the_running_fetch(pods, v1):
     """Flow (c) with the fetch already running (the selection's Prefetch started it): 8 Nodes on
     both pods merge into ONE pending copy; the origin serves the environment once."""
-    sha = deb_sha(v1)
+    sha = environment_sha(v1)
     pods.origin.hold = threading.Event()
     try:
         pods.select_release(v1)
-        wait_for(lambda: pods.origin.count(v1.tag, "deb") == 1, seconds=60,
+        wait_for(lambda: pods.origin.count(v1.tag, "environment") == 1, seconds=60,
                  what="the selection's download")
         with ThreadPoolExecutor(1) as pool:
             future = pool.submit(concurrent_fetches, pods, sha, 8, retry_for=60)
@@ -369,14 +375,14 @@ def test_a1a_misses_on_both_pods_merge_into_the_running_fetch(pods, v1):
     assert {fetch.sha256 for fetch in fetches} == {sha}
     assert {fetch.pod for fetch in fetches} == set(PODS)
     wait_for(lambda: pods.fetches_settled(sha), seconds=30, what="the pending copy")
-    assert pods.origin.count(v1.tag, "deb") == 1  # the pending copy found it on disk
+    assert pods.origin.count(v1.tag, "environment") == 1  # the pending copy found it on disk
     assert pods.app_files() == [f"environment-{sha}.tar"]
 
 
 def test_a3_cache_wipe_keeps_readyz_green_and_prefetch_refills_once(pods, v1):
     """Flow (e): wipe the cache; readyz stays green; the next Prefetch refills the selected
     environment with no duplicate download, though both pods ask for it at once."""
-    before = pods.origin.count(v1.tag, "deb")
+    before = pods.origin.count(v1.tag, "environment")
     pods.wipe_cache()
     assert not any(pods.cache.iterdir())  # os-images/, apps/, media/ all gone
     for pod in PODS:
@@ -386,11 +392,11 @@ def test_a3_cache_wipe_keeps_readyz_green_and_prefetch_refills_once(pods, v1):
             lambda pod: pods.admin("POST", pod, "/v1/operator/app/releases/refresh").status_code,
             PODS))
     assert codes == [202, 202]
-    deb = f"environment-{deb_sha(v1)}.tar"
-    wait_for(lambda: (pods.cache / "apps" / deb).exists(), seconds=90,
+    blob = f"environment-{environment_sha(v1)}.tar"
+    wait_for(lambda: (pods.cache / "apps" / blob).exists(), seconds=90,
              what="the prefetch refill")
-    wait_for(lambda: pods.fetches_settled(deb_sha(v1)), seconds=30, what="any duplicate fetch")
-    assert pods.origin.count(v1.tag, "deb") == before + 1
+    wait_for(lambda: pods.fetches_settled(environment_sha(v1)), seconds=30, what="any duplicate fetch")
+    assert pods.origin.count(v1.tag, "environment") == before + 1
     for pod in PODS:
         assert httpx.get(pods.procs[pod].url + "/readyz", timeout=5).status_code == 200, pod
     assert pods._alive() and all(p.popen.poll() is None for p in pods.procs.values())
@@ -413,9 +419,9 @@ def test_a3_cache_wipe_leaves_exactly_one_media_writer(pods):
 def test_a1b_request_driven_miss_on_both_pods_downloads_once(pods, v1):
     """Flow (c) proper: nothing running; 8 Nodes on both pods miss at once. One download,
     and the queue never held two pending copies of the fetch."""
-    sha = deb_sha(v1)
+    sha = environment_sha(v1)
     shutil.rmtree(pods.cache / "apps")
-    before, after_id = pods.origin.count(v1.tag, "deb"), pods.last_fetch_id(sha)
+    before, after_id = pods.origin.count(v1.tag, "environment"), pods.last_fetch_id(sha)
     pods.origin.chunk_delay = 0.05  # ~3 s for the 4 MiB blob, so every request overlaps it
     try:
         fetches = concurrent_fetches(pods, sha, 8, retry_for=60)
@@ -430,7 +436,7 @@ def test_a1b_request_driven_miss_on_both_pods_downloads_once(pods, v1):
     wait_for(lambda: pods.fetches_settled(sha), seconds=30, what="the fetch copies")
     rows = pods.fetch_rows(sha, after=after_id)
     assert all(row["status"] == "succeeded" for row in rows), rows
-    assert pods.origin.count(v1.tag, "deb") - before == 1
+    assert pods.origin.count(v1.tag, "environment") - before == 1
     assert pods.app_files() == [f"environment-{sha}.tar"]
 
 
@@ -438,15 +444,15 @@ def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
     """Flow (d): kill -9 the downloading worker; rescue re-publishes; the other worker finishes
     and the waiting Node is served. The victim is known by construction: it is the only job
     runtime when the download starts; the survivor starts while the download is held."""
-    sha = deb_sha(v1)
+    sha = environment_sha(v1)
     shutil.rmtree(pods.cache / "apps")
-    before, after_id = pods.origin.count(v1.tag, "deb"), pods.last_fetch_id(sha)
+    before, after_id = pods.origin.count(v1.tag, "environment"), pods.last_fetch_id(sha)
     pods.stop_worker("worker-2")
     pods.origin.hold = threading.Event()
     try:
         with ThreadPoolExecutor(1) as pool:
             player = pool.submit(fetch_package, pods, "central-a", sha, retry_for=300)
-            wait_for(lambda: pods.origin.count(v1.tag, "deb") == before + 1, seconds=60,
+            wait_for(lambda: pods.origin.count(v1.tag, "environment") == before + 1, seconds=60,
                      what="worker-1's download to start")
             wait_for(lambda: any(f.startswith(".tmp-") for f in pods.app_files()), seconds=30,
                      what="the download's temp file")
@@ -464,7 +470,7 @@ def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
         pods.origin.hold = None
     wait_for(lambda: pods.fetches_settled(sha), seconds=30, what="the fetch copies")
     rows = pods.fetch_rows(sha, after=after_id)
-    assert pods.origin.count(v1.tag, "deb") == before + 2  # the killed attempt + one retry
+    assert pods.origin.count(v1.tag, "environment") == before + 2  # the killed attempt + one retry
     assert "rescuing stalled job" in pods.procs["worker-2"].log.read_text(errors="replace")
     statuses = [row["status"] for row in rows]
     assert "failed" in statuses and "succeeded" in statuses, rows  # rescue closed the dead copy

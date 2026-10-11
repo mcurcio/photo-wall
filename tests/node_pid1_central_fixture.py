@@ -40,7 +40,7 @@ from central.fleet.node_app_links import load_current_node_app_link_in
 from central.fleet.node_boot import NodeBootService, NodeDeployment
 from central.fleet.node_bus_hub import HUB_LISTENERS
 from central.fleet.node_lifecycle import OperatorAppStage
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError, command_eligibility_in
+from central.fleet.node_sessions import NodeControlConfig, NodeControlError
 from central.infra.asset_records import PgAssetRecords
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
@@ -435,10 +435,6 @@ def _central_fixture(
                 principal.grant.session_id == command.command_session_id
             )
             result["command_authority_epoch"] = row["authority_epoch"]
-            eligible, reason = command_eligibility_in(conn, principal.grant.offer_id)
-            result["boot_eligible"] = eligible
-            if not eligible:
-                result["boot_refusal"] = reason
             effects = conn.execute(
                 "SELECT payload FROM node_app_effects WHERE operation_id=%s ORDER BY sequence",
                 (operation,),
@@ -484,13 +480,11 @@ def _central_fixture(
             )
             result["control"] = dict(
                 status=control.status,
-                schema_version=control.schema_version,
                 issued_sequence=control.issued_sequence,
                 applied_sequence=control.applied_sequence,
                 receipt_sequence=receipt.delivery_sequence,
                 last_result_sequence=control.last_result_sequence,
                 negotiated=control.status == "negotiated",
-                schema_v2=control.schema_version == 2,
                 applied_at_present=control.applied_at is not None,
                 last_result_at_present=control.last_result_at is not None,
                 last_result_applied=control.last_result == "applied",
@@ -664,7 +658,7 @@ def assert_phase_completed(status, phase, target_reference):
     diagnostics = entry["effect_diagnostics"]
     for predicate in ("terminal_effect", "ordered_stop_before_terminal", "process_matches_event",
                       "app_epoch_matches_event", "environment_matches_event",
-                      "authority_advanced", "boot_eligible"):
+                      "authority_advanced"):
         assert diagnostics.get(predicate) is True, (predicate, status)
     # Nothing held: every effect report was accepted and no control delivery is pending.
     assert status["protocol_refusals"] == {}, status

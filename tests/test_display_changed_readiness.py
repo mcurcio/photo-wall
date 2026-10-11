@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from support.calibrated_frame import calibrate_frame
 from test_display_identity import (
     ADMIN,
     AUTH,
@@ -57,10 +58,9 @@ def _executing(registry, player_id: str) -> list[str]:
 
 
 def _commit_by_calibrate(registry, frame_id: str, player_id: str) -> None:
-    """The Position tab's commit on a Pi that previews (`Registry.calibrate`)."""
-    frame = _frame_row(registry, frame_id)
-    registry.calibrate(frame_id, "commit", frame.calibration.revision, Calibration(),
-                       expected_generation=frame.generation)
+    """The state a calibration Save leaves: a saved calibration and a Position commit
+    (`support.calibrated_frame`)."""
+    calibrate_frame(registry.db, frame_id)
 
 
 def _commit_by_trial(registry, frame_id: str, player_id: str) -> None:

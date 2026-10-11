@@ -80,10 +80,9 @@ class NodeLifecycle:
 
     @staticmethod
     def _boot_in(conn, principal):
+        """The session's boot offer: a session is enrolled only against an issued offer."""
         row = conn.execute("SELECT offer_payload FROM node_boot_offers WHERE offer_id=%s",
                            (principal.grant.offer_id,)).fetchone()
-        if row is None or row["offer_payload"] is None:
-            raise NodeControlError("node_v2_boot_required")
         return parse_node_boot_offer(bytes(row["offer_payload"]))
 
     @staticmethod
@@ -135,9 +134,6 @@ class NodeLifecycle:
             link = load_current_node_app_link_in(conn, principal)
             if link is None:
                 raise NodeControlError("node_app_current_process_unlinked")
-            if conn.execute("SELECT 1 FROM active_equipment_drains WHERE player_id=%s",
-                            (link.player_id,)).fetchone():
-                raise NodeControlError("node_app_existing_drain")
             boot = self._boot_in(conn, principal)
             publication = conn.execute("SELECT document FROM node_deployments WHERE deployment_id=%s",
                                        (request.deployment_id,)).fetchone()

@@ -166,9 +166,9 @@ def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path)
         assert present and not present & set(columns), (table, present & set(columns))
     assert _node_state(registry) == nodes  # every node record intact
     contexts = {row["offer_id"]: row for row in _rows(registry, "SELECT * FROM node_offer_contexts")}
-    assert contexts[V1_OFFER] == {"offer_id": V1_OFFER, "basis": "legacy_adoption",
-                                  "node_offer_id": None}  # history, without the V1 offer
-    assert contexts[offer.offer_id]["basis"] == "node_v2"
+    # 069 kept the adopted context as history; 076 then deleted it.
+    assert contexts == {offer.offer_id: {"offer_id": offer.offer_id, "basis": "node_v2",
+                                         "node_offer_id": offer.offer_id}}
     assert _rows(registry, "SELECT * FROM assets WHERE kind='player-payload'") == []
     assert _rows(registry, "SELECT * FROM asset_references WHERE kind='player-payload'") == []
     with pytest.raises(psycopg.errors.CheckViolation), registry.db.transaction() as conn:

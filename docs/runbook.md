@@ -533,7 +533,7 @@ A Frame whose Pi runs software without Display Host says "This Frame's Pi runs s
 
 **Hardware** holds the Pi and HDMI port feeding the Frame (**Connect Frame …** from a free port, **Disconnect from this Pi**, **Identify display** on a free port, and the Display the Pi reported when its photo app last started; Central's record, the Player app's last enrollment, is under **Details**) the **Display** the Pi reports on that port (make, model, serial or "Recognised by make and model on this Frame", and the modes it lists, read-only; with a **Display changed** card when it is not the one the Position was set against), and the **Frame profile** (pixel width and height, diagonal, video capable). The Frame profile is **operator-declared at Frame creation and persists across a Display swap**; **Edit Frame profile** works on a Frame with no Pi, or while its display has changed, and clears its position. When both resolutions are known, the Frame profile is compared with the resolution the Pi last reported, in the saved rotation when the position is set; a mismatch is a "Check the Display" card naming both values, with **Edit Frame profile** as its action and how to restart the photo app or change the profile under Details. The record may be stale; it never changes the profile.
 
-Frames whose Pi reports only the older preview path (`legacy_preview`) cannot be positioned from the console: they are told so and linked to their Pi's software page. That is the V2-only cost of this page. The `POST /v1/operator/frames/{id}/calibration` route stays for scripts (`scripts/demo_wall.py`) and tests.
+A Frame whose Pi did not start from Photo Wall (Central holds no node boot for it, `not_admitted`: a Compose or demo Player) cannot be positioned from the console: it is told so and linked to its Pi's page. Central has no other calibration path; the legacy preview and its `POST /v1/operator/frames/{id}/calibration` route were deleted in PR 45. The wall demo and the tests save a Frame's calibration in its row (`tests/support/calibrated_frame.py`).
 
 The page has no colour or hardware brightness controls yet ([roadmap 1c](roadmap.md#1c-brightness-contrast-and-colour)); power is on the Power tab.
 
@@ -961,50 +961,7 @@ Superseded images stay in the pool until the next reboot. A third distinct app i
 
 ### Optional read-only Kubernetes node verifier
 
-Central (`central.app:create_app`) reads `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
-read-only deployment-owned JSON file. Its exact keys are `identity_directory`,
-`namespace`, `ci_record`, `guard_record`, `ci_public_key`, `guard_public_key`, and
-`audience`. Public keys are distinct raw Ed25519 keys encoded as hex. The identity
-directory provides `namespace`, `pod_name`, `pod_uid`, `container_name`,
-`deployment_name`, and `deployment_uid`; populate Pod identity through the
-[Kubernetes downward API](https://kubernetes.io/docs/concepts/workloads/pods/downward-api/).
-The reader checks the actual Pod owner chain and registry-qualified
-[`status.containerStatuses.imageID`](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/).
-A mutable image tag or runtime config hash is insufficient.
-
-The service-account reader uses verified Kubernetes TLS and GET only. It needs
-complete Pod/ReplicaSet/Deployment, Service/EndpointSlice, Ingress/NetworkPolicy,
-API discovery and supported Gateway resource inventories, plus the two named
-public evidence ConfigMaps. It never reads Secrets. Unknown custom API groups,
-unsupported route resources, forbidden lists or incomplete pagination refuse
-certification. This conservative adapter needs extension and corresponding tests
-before using a cluster with other routing controllers.
-
-Each ConfigMap contains `data["evidence.json"]` with exact `payload` and hex
-`signature` fields. Sign canonical sorted compact JSON after the domain prefix
-`photo-wall-rollout-ci-v1` or `photo-wall-rollout-guard-v1`, each followed by a NUL
-byte. The source `SignedRolloutEvidence` defines the exact payload fields. Both
-records bind audience, record UID, increasing generation, active/revoked state,
-issue/expiry times (at most 300 seconds). CI binds all exact serving and rollback
-image digests plus immutable compatibility, fence and readiness evidence hashes.
-The guard binds Deployment UID/generation, complete endpoint/route hashes, CI
-payload hash, exact image sets, and an irrevocable `mutation_not_before` equal to
-its expiry. Revocation blocks new observation/admission but cannot shorten this
-promised no-mutation interval. The durable local watermark records revocation
-before returning refusal, and rejects earlier signed active records after restart.
-Key rotation or ConfigMap replacement fails closed and requires explicit operator
-reprovisioning; deleting replay floors is not a normal recovery action.
-
-**External implementation dependency:** the separate IaC owner must implement
-and deploy a controller that closes the durable effect gate before changing any
-certified direct Service/Pod/Gateway path, waits out outstanding signed holds,
-prevents uncertified rollback, and retains fenced images while any effect remains
-unreconciled even after certification expiry. It must produce truthful exact-image
-CI matrices and signed guard records from those enforcement results. The adapter
-and signatures do not implement that controller. No real such controller or
-qualification is established by the local tests. An unconfigured or uncertified
-Central therefore continues to serve observations with effects closed.
-
+Central reads no verifier configuration: PR 45 deleted the `PHOTO_WALL_NODE_VERIFIER_CONFIG` read, which no deployment set. The owner's answer to the effect-gate question (G-A, 2026-10-04) deletes the effect gate and its verifier chain, with operator authority admitting Reboot and Stage app (slice R9 in `.claude/v2-posture/slices.md`). Until R9 lands, nothing opens the gate on a real Central, so the console's Reboot and Stage app are refused with the gate closed.
 
 ## Reaching a Node over SSH
 

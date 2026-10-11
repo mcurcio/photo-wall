@@ -5,7 +5,7 @@ import { type Adjustment, LiveAdjustment } from "./live-adjustment";
 
 export interface FramePictureProps {
   adjustment: Adjustment;
-  softwareHref: string | null;
+  piHref: string | null;
 }
 
 /**
@@ -14,12 +14,12 @@ export interface FramePictureProps {
  * Display's own brightness and never claims to be (requirements: software gain is never
  * called measured panel brightness). Each change is sent to the Pi as it is made; Done keeps it.
  */
-export function FramePicture({ adjustment, softwareHref }: FramePictureProps) {
+export function FramePicture({ adjustment, piHref }: FramePictureProps) {
   const percent = Math.round(adjustment.draft.gain * 100);
   const set = (value: number) => adjustment.change({ gain: Math.round(value) / 100 });
   return (
     <Section title="Picture">
-      <LiveAdjustment adjustment={adjustment} noun="picture" softwareHref={softwareHref}>
+      <LiveAdjustment adjustment={adjustment} noun="picture" piHref={piHref}>
         <Field
           label="Brightness — Photo Wall picture adjustment"
           help="Photo Wall brightens or dims the picture it sends; the Display's own settings do not change. 100 % leaves it as it is. Each change is sent to the Pi as you make it; press Done to keep it."

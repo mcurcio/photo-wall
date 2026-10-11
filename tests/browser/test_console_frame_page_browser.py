@@ -22,9 +22,10 @@ import pytest
 from console_tasks import open_frame, visit
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
+from support.calibrated_frame import calibrate_frame
 from test_registry import enroll
 
-from central.registry import FrameCreate, RegistryError
+from central.registry import FrameCreate
 from contracts.models import Calibration, FrameProfile
 
 pytestmark = pytest.mark.skipif(
@@ -65,8 +66,7 @@ def _seed(registry, profile=LANDSCAPE, rotation=0):
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
-    registry.calibrate(FRAME, "commit", expected_revision=1,
-                       calibration=Calibration(gain=GAIN, rotation=rotation), expected_generation=1)
+    calibrate_frame(registry.db, FRAME, Calibration(gain=GAIN, rotation=rotation))
     return identity["player_id"]
 
 
@@ -76,8 +76,7 @@ def _saved(registry):
 
 def _save_elsewhere(registry, gain=1.2):
     """Another window saves the Frame's calibration (revision 2 -> 3)."""
-    registry.calibrate(FRAME, "commit", expected_revision=2, calibration=Calibration(gain=gain),
-                       expected_generation=1)
+    calibrate_frame(registry.db, FRAME, Calibration(gain=gain))
 
 
 class FakeSessions:
@@ -192,14 +191,11 @@ class FakeSessions:
             if self.row["presented_sequence"] != self.row["sequence"]:
                 route.fulfill(status=409, json={"error": "trial_latest_not_presented"})
                 return
-            calibration = Calibration.model_validate(self.row["calibration"])
-            try:  # Central's Save is a compare-and-set on the draft's base revision
-                self.registry.calibrate(
-                    FRAME, "commit", expected_revision=self.row["calibration_revision"],
-                    calibration=calibration, expected_generation=1)
-            except RegistryError as error:
-                route.fulfill(status=409, json={"error": error.code})
+            # Central's Save is a compare-and-set on the draft's base revision.
+            if _saved(self.registry).revision != self.row["calibration_revision"]:
+                route.fulfill(status=409, json={"error": "calibration_revision_conflict"})
                 return
+            calibrate_frame(self.registry.db, FRAME, Calibration.model_validate(self.row["calibration"]))
             self.row.update(state="saved", saved_calibration=self._saved())
         elif operation == "end":
             self.row["state"] = "ended"
@@ -342,15 +338,15 @@ def test_every_tab_speaks_plain_words(page, registry, sessions):
                 r"Surface|enrollment|Unbind", re.I))
 
 
-def test_a_pi_that_cannot_show_changes_live_says_so_and_offers_no_controls(page, registry):
-    """The real server: an enrolled Player without Display Host answers `legacy_preview`."""
+def test_a_pi_that_did_not_start_from_photo_wall_says_so_and_offers_no_controls(page, registry):
+    """The real server: an enrolled Player with no node admission answers `not_admitted`."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         expect(frame.get_by_role("status")).to_contain_text(
-            "This Frame's Pi runs software that cannot show changes live")
-        expect(frame.get_by_role("link", name="Open the Pi's software page", exact=True)).to_have_attribute(
+            "This Frame's Pi did not start from Photo Wall")
+        expect(frame.get_by_role("link", name="Open the Pi's page", exact=True)).to_have_attribute(
             "href", re.compile(r"^#/players/device-"))
         expect(frame.get_by_role("img", name="Picture position")).to_have_count(0)
         expect(frame.get_by_role("button", name="Done")).to_have_count(0)

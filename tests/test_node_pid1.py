@@ -403,30 +403,6 @@ class Node:
         else:
             raise AssertionError("real cold Player app-link absent: " + str(work))
         before = status["current"]
-        health_script = """import json,os,pathlib,stat,sys,time
-pid=int(sys.argv[1]);root=pathlib.Path('/proc')/str(pid)/'root'
-path=root/'run/photo-wall/player/service-health.json'
-for _ in range(100):
- if path.exists():break
- time.sleep(.1)
-info=path.stat();parent=path.parent.stat();value=json.loads(path.read_text())
-assert info.st_uid==10004 and stat.S_IMODE(info.st_mode)==0o600
-assert parent.st_uid==10004 and stat.S_IMODE(parent.st_mode)==0o700
-assert value['boot_id']==pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()
-assert value['player_id'] is not None and value['authority_epoch']==int(sys.argv[2])
-assert not pathlib.Path('/run/photo-wall/player/service-health.json').exists()
-fs=os.statvfs(path.parent);assert fs.f_blocks*fs.f_frsize<=1024*1024
-print(json.dumps({'health':value,'uid':info.st_uid,'mode':stat.S_IMODE(info.st_mode),'private_mount_bytes':fs.f_blocks*fs.f_frsize},sort_keys=True))"""
-        health = run(
-            "/usr/bin/python3",
-            "-c",
-            health_script,
-            str(before["process"]["pid"]),
-            str(before["authority_epoch"]),
-        )
-        if self.boot_id is not None:
-            assert json.loads(health)["health"]["boot_id"] == str(self.boot_id), health
-        (work / "cold-health.json").write_text(health)
         (work / "cold-current.json").write_text(json.dumps(before, sort_keys=True))
         print("COLD actual app-link observed", str(work), flush=True)
         return before

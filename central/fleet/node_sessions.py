@@ -51,8 +51,6 @@ class NodeControlConfig:
 
     def __post_init__(self) -> None:
         token(self.installation_audience, 256)
-        if self.installation_audience == "photo-wall-central-t0":
-            raise ValueError("node_command_audience_required")
         if type(self.session_seconds) is not int or not 60 <= self.session_seconds <= 86400:
             raise ValueError("node_session_duration_invalid")
 
@@ -90,15 +88,6 @@ def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
         raise NodeControlError("node_intake_capacity", 429)
     conn.execute("DELETE FROM node_intake_quotas WHERE device_id=%s AND day<%s",
                  (device_id, day - 1))
-
-
-def command_eligibility_in(conn, offer_id: UUID) -> tuple[bool, str]:
-    """Only a node boot offer's admission carries operator commands; an admission recorded by
-    the retired legacy adoption stays history and carries none."""
-    basis = conn.execute("SELECT basis FROM node_offer_contexts WHERE offer_id=%s", (offer_id,)).fetchone()
-    if basis is None or basis["basis"] != "node_v2":
-        return False, "legacy_observation_adoption"
-    return True, "boot_admitted_rollout_required"
 
 
 class NodeSessions:
@@ -172,8 +161,9 @@ class NodeSessions:
                             (grant.session_id, self.clock.utc())).fetchone()
         if live is None:
             return replace(grant, command_eligible=False, command_reason="node_session_unavailable")
-        eligible, reason = command_eligibility_in(conn, grant.offer_id)
-        return replace(grant, command_eligible=eligible, command_reason=reason)
+        # Every admission is a node boot offer's (076): a live session carries commands, which
+        # the rollout effect gate still has to admit.
+        return replace(grant, command_eligible=True, command_reason="boot_admitted_rollout_required")
 
     def enroll(self, claim: NodeSessionClaim) -> NodeSessionGrant:
         config = self.config

@@ -10,7 +10,7 @@ Every process start generates a new Ed25519 key in memory. The key, bearer token
 
 Cold boot requires reachable time, provisioning, release, enrollment, control, and media services. A running Player may preserve already authorized output while a connection is interrupted until its bounded authority lease expires. The Player makes no promise to reconstruct playback after a cold reboot without central connectivity.
 
-**V1 history.** The V1 `appliance/systemd/player.service` (`Type=notify`, `WatchdogSec=300`) was deleted with the V1 Pi runtime ([0019](decisions/0019-debian-packaging-with-debhelper.md)); the node Player is started by the broker as a transient unit with no `WatchdogSec` ([Player architecture](player-architecture.md#processes-and-supervision)), so the rest of this paragraph describes the watchdog protocol the V1 unit used (0014 M5). `main()` sends `READY=1` (`uplink.watchdog.ready()`) once the service starts, and the run loop sends `WATCHDOG=1` (`uplink.watchdog.pet()`) at the end of every run cycle and after each completed control-loop exchange. The 300 s bound leaves margin over the worst healthy gap (about 213 s: one backoff plus a full reconnect and locate cycle), and never gates the pet on renderer health — a Player with no display would otherwise crash-loop.
+**No watchdog.** The node Player is started by the broker as a transient `Type=exec` unit with no `WatchdogSec` ([Player architecture](player-architecture.md#processes-and-supervision)) and sends no `sd_notify` messages: the V1 unit's `READY=1` and watchdog pets (0014 M5) were deleted with it in PR 45. A Player whose GLib loop stops is ended by the broker's probe kill.
 
 The boot context is the Pi's serial-derived `device_id` (`contracts.equipment.equipment_device_id`, kind `pi`, the scheme Central's `device_id_for_serial` uses) and a fresh `boot_id` for this run (`hardware_boot_context`). There is no boot-context file and no boot ticket: the Player's unit mounts an empty `/run`, and every enrollment is ticketless, so Central enrolls an unknown Player unbound by serial. After enrollment the Player says hello on its control session (`/v1/player/hello`, control schema 2) before Central answers any state; a state request before hello is refused with 409 `control_negotiation_required` (the WebSocket closes 1008).
 
@@ -34,7 +34,7 @@ The existing readiness thresholds remain: uncertainty is `RTT/2 + abs(offset)` a
 
 ## Health and release trial
 
-After current configuration is reconciled, the service atomically writes `/run/photo-wall/player/service-health.json`. The public sample includes Linux boot ID, monotonic sample time, current player/session identity, a `persistence` field, health and reason, and clock diagnostics. It contains no key or token. The health sample's `persistence` field is always `volatile`; the boot context no longer carries one, and nothing on a Node reads the file (a V1 leftover flagged for a later pass). Healthy requires an Executor, reconciled configuration, a safe current clock mapping, and available renderer capacity; an unbound Player with healthy connected Outputs may be healthy.
+The Player writes no health file: the V1 `service-health.json` sample, which nothing on a Node read, was deleted in PR 45. A missed dispatch deadline is the `main_loop_late` fault.
 
 The service sends connected, unbound Output IDs and its local Central-link
 diagnostic state to the Renderer on the Player's owning thread. The state is

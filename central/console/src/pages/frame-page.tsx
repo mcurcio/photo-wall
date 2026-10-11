@@ -124,7 +124,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   }
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
   const health = frameHealth(snapshot, frameId) as { severity: "ok" | "todo" | "alarm"; label: string } | null;
-  const softwareHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
+  const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
       <EntityHeader title={`Frame ${frameId}`} level={1} headingRef={headingRef} back={back}>
@@ -143,9 +143,9 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />}
         {tab === "position" && (
-          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} softwareHref={softwareHref} />
+          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref} />
         )}
-        {tab === "picture" && <FramePicture adjustment={adjustment} softwareHref={softwareHref} />}
+        {tab === "picture" && <FramePicture adjustment={adjustment} piHref={piHref} />}
         {tab === "power" && <FramePower key={`${frameId}:power`} frameId={frameId} />}
         {tab === "hardware" && (
           <>

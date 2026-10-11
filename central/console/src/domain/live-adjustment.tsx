@@ -13,28 +13,28 @@ export type Adjustment = ReturnType<typeof useFrameAdjustment>;
 
 /** Whether the Frame's Pi can show changes live, so the controls are worth showing. */
 export function adjustable(adjustment: Adjustment): boolean {
-  return !["checking", "unsupported", "unavailable", "unbound"].includes(adjustment.phase);
+  return !["checking", "not_admitted", "unavailable", "unbound"].includes(adjustment.phase);
 }
 
 export interface LiveAdjustmentProps {
   adjustment: Adjustment;
   /** What is adjusted, for the words: "position", "picture". */
   noun: string;
-  /** The Frame's Pi's Software page, for a Pi that cannot show changes live. */
-  softwareHref: string | null;
+  /** The Frame's Pi's page, for a Pi that did not start from Photo Wall. */
+  piHref: string | null;
   /** The tab's controls. */
   children: React.ReactNode;
 }
 
-function unavailableWords(adjustment: Adjustment, noun: string, softwareHref: string | null): React.ReactNode | null {
+function unavailableWords(adjustment: Adjustment, noun: string, piHref: string | null): React.ReactNode | null {
   switch (adjustment.phase) {
     case "checking":
       return "Checking whether this Frame's Pi can show changes live…";
-    case "unsupported":
+    case "not_admitted":
       return (
         <>
-          {`This Frame's Pi runs software that cannot show changes live, so its ${noun} cannot be changed here. Update the Pi's software, then come back.`}
-          {softwareHref !== null && <>{" "}<Link href={softwareHref}>Open the Pi&apos;s software page</Link></>}
+          {`This Frame's Pi did not start from Photo Wall, so its ${noun} cannot be changed here. Restart the Pi so it starts from Photo Wall, then come back.`}
+          {piHref !== null && <>{" "}<Link href={piHref}>Open the Pi&apos;s page</Link></>}
         </>
       );
     case "unavailable":
@@ -62,8 +62,8 @@ function statusWords(adjustment: Adjustment): string {
  * refusals as an inline ProblemCard (its code under Details), and the bottom bar with the Pi's
  * acknowledgement (Central's time of it), **Done** and **Revert**.
  */
-export function LiveAdjustment({ adjustment, noun, softwareHref, children }: LiveAdjustmentProps) {
-  const reason = unavailableWords(adjustment, noun, softwareHref);
+export function LiveAdjustment({ adjustment, noun, piHref, children }: LiveAdjustmentProps) {
+  const reason = unavailableWords(adjustment, noun, piHref);
   const { error } = adjustment;
   const notes = [
     ...(adjustment.leftAt !== null

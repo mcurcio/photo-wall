@@ -18,7 +18,7 @@ def project_state(delivery: dict, selection: ControlSelection) -> dict:
     }
 
 
-def state_digest(state: dict, *, control_fence: dict | None = None) -> str:
+def state_digest(state: dict) -> str:
     """Bind an acknowledgment to semantic state, excluding the cue's live countdown.
 
     `remaining_seconds` is only a display deadline hint. It changes on every
@@ -34,7 +34,5 @@ def state_digest(state: dict, *, control_fence: dict | None = None) -> str:
     if cue is not None:
         semantic["identify_output"] = {key: value for key, value in cue.items()
                                        if key != "remaining_seconds"}
-    if control_fence is not None:
-        semantic["_control_fence"] = control_fence
     encoded = json.dumps(semantic, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode()).hexdigest()

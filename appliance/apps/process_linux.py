@@ -101,7 +101,7 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
         "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         f"MemoryMax={line('app').cap_bytes}", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
-        "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall/player:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
+        "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
         f"BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client {WAYLAND_DIRECTORY} /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         *grants,
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",

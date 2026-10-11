@@ -444,7 +444,7 @@ def test_a_cmdline_root_wins_over_any_malformed_saved_value(tmp_path, monkeypatc
 def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     """Runs main() with the cmdline naming Central and `saved` as central_origin, past every
     pre-GTK step, with GLib, outputs, the boot context and the service thread stubbed. Returns
-    the order in which main started the service, signalled readiness and ran the loop."""
+    the order in which main started the service and ran the loop."""
     events: list[str] = []
 
     class Loop:
@@ -469,7 +469,6 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     monkeypatch.setattr("player.service.discover_outputs",
                         lambda: types.SimpleNamespace(outputs=(), fault=None))
     monkeypatch.setattr(PlayerService, "start", lambda self: events.append("start"))
-    monkeypatch.setattr("uplink.watchdog.ready", lambda: events.append("ready") or True)
     cmdline = tmp_path / "cmdline"
     cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
     monkeypatch.setattr("player.service.KERNEL_COMMAND_LINE", cmdline)
@@ -485,65 +484,6 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
                          ids=["list", "long-root"])
 def test_main_goes_on_past_a_malformed_saved_value_when_the_cmdline_names_central(
         tmp_path, monkeypatch, saved):
-    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved) == ["start", "ready", "loop"]
+    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved) == ["start", "loop"]
 
 
-# --- M5: the Player's deadline owner ---------------------------------------------------------
-
-def test_main_signals_ready_once_the_service_has_started(tmp_path, monkeypatch):
-    """Type=notify: main() sends READY=1 after starting the service and before the GLib loop,
-    so WatchdogSec runs from a started Player. Without it systemd times the start out."""
-    events = _main_until_the_loop(tmp_path, monkeypatch, saved="http://192.0.2.20:8000")
-    assert events == ["start", "ready", "loop"]
-
-
-def test_a_steady_session_and_every_cycle_pet_the_watchdog(monkeypatch):
-    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
-    pets = []
-    monkeypatch.setattr("uplink.watchdog.pet", lambda: pets.append(1) or True)
-    failing = []
-
-    async def find():
-        failing.append(1)
-        raise UplinkError(Cause.CONFIGURATION, "absent", detail="not_discovered")
-
-    async def cycles():
-        service, _ = await finder_rig(find)
-        task = asyncio.create_task(service.run())
-        try:
-            async def cycled():
-                while len(failing) < 3:
-                    await asyncio.sleep(.01)
-            await asyncio.wait_for(cycled(), 5)
-        finally:
-            service.stop()
-            await asyncio.wait_for(task, 10)
-            await close(service)
-
-    asyncio.run(cycles())
-    assert len(pets) >= 2                         # at least one per completed (failed) cycle
-
-    pets.clear()
-    find_ok = finding("http://central")
-
-    async def steady_session():
-        service, server = await finder_rig(find_ok)
-        steady = asyncio.Event()
-        await service.link.client.aclose()
-        service.link.client = service.link.time_client = httpx.AsyncClient(
-            transport=httpx.MockTransport(_until_steady(server, steady)))
-        task = asyncio.create_task(service.run())
-        try:
-            await asyncio.wait_for(steady.wait(), 10)
-
-            async def petted():
-                while not pets:                   # no cycle has ended: the control loop pets
-                    await asyncio.sleep(.01)
-            await asyncio.wait_for(petted(), 5)
-            assert find_ok.calls == 1
-        finally:
-            service.stop()
-            await asyncio.wait_for(task, 10)
-            await close(service)
-
-    asyncio.run(steady_session())

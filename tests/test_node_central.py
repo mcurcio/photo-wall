@@ -437,9 +437,3 @@ def test_the_default_app_serves_node_routes_with_the_one_audience_and_keeps_gate
         assert "transport_enabled" not in status and status["installation_audience"] == NODE_AUDIENCE
     assert RolloutEffectGate(registry.db).status()["state"] == "closed"
 
-
-def test_the_default_app_reads_the_deployment_verifier_config(registry, monkeypatch, tmp_path):
-    """The deployment's verifier comes from PHOTO_WALL_NODE_VERIFIER_CONFIG on the one factory."""
-    monkeypatch.setenv("PHOTO_WALL_NODE_VERIFIER_CONFIG", str(tmp_path / "verifier.json"))
-    with pytest.raises(ValueError, match="configured and injected node verifier conflict"):
-        create_app(registry.db, registry.clock, ADMIN, node_serving_verifier=object())

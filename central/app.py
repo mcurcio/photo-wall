@@ -24,7 +24,6 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes
-from central.equipment_drain import control_fence_in
 from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
@@ -60,7 +59,6 @@ from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
-    Calibration,
     Identifier,
     Model,
     Observation,
@@ -93,13 +91,6 @@ class UnbindRequest(Model):
 class ProgramReplacementRequest(Model):
     expected: Program
     program: Program
-
-
-class CalibrationRequest(Model):
-    operation: Literal["preview", "commit", "revert"]
-    expected_revision: int = Field(ge=1)
-    expected_generation: int = Field(ge=1)
-    calibration: Calibration | None = None
 
 
 class ActivationRequest(Model):
@@ -150,13 +141,6 @@ def create_app(
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
-    # The deployment's serving-image verifier (rollout gate): configured, or injected by a test.
-    verifier_path = os.environ.get("PHOTO_WALL_NODE_VERIFIER_CONFIG")
-    if verifier_path:
-        if node_serving_verifier is not None:
-            raise ValueError("configured and injected node verifier conflict")
-        from central.fleet.kubernetes_verifier import configured_verifier
-        node_serving_verifier = configured_verifier(db, Path(verifier_path))
     registry = Registry(db, clock)
     media_queue = media_queue or (
         ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None
@@ -301,8 +285,7 @@ def create_app(
         return registry.authenticate(credentials.credentials)
 
     def control_state(identity: dict) -> dict:
-        # Projection, drain generation and challenge issuance share one Coordination
-        # transaction. A prepared drain cannot slip between projection and sequence.
+        # Projection and challenge issuance share one Coordination transaction.
         def finalize(conn, delivery: dict) -> dict:
             selection = registry.control_selection_in(
                 conn, identity["id"], identity["authority_epoch"]
@@ -312,9 +295,7 @@ def create_app(
             payload["identify_expires_at"] = (
                 clock.utc() + cue["remaining_seconds"] if cue else None
             )
-            digest = state_digest(
-                payload, control_fence=control_fence_in(conn, identity["id"])
-            )
+            digest = state_digest(payload)
             payload.update(registry.issue_control_delivery_record_in(
                 conn, identity["id"], identity["authority_epoch"], digest
             ))
@@ -646,16 +627,6 @@ def create_app(
     @app.delete("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def unbind(frame_id: Identifier, request: UnbindRequest):
         return registry.unbind(frame_id, expected_generation=request.expected_generation)
-
-    @app.post("/v1/operator/frames/{frame_id}/calibration", dependencies=[Depends(admin)])
-    def calibrate(frame_id: Identifier, request: CalibrationRequest):
-        return registry.calibrate(
-            frame_id,
-            request.operation,
-            request.expected_revision,
-            request.calibration,
-            expected_generation=request.expected_generation,
-        )
 
     @app.post("/v1/operator/players/{player_id}/retire", dependencies=[Depends(admin)])
     def retire(player_id: Identifier):

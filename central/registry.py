@@ -46,6 +46,7 @@ from contracts.models import (
     TargetIdentifier,
 )
 from contracts.player_control import (
+    SCHEMA,
     ControlAck,
     ControlAckResponse,
     ControlAppliedReceipt,
@@ -55,11 +56,6 @@ from contracts.player_control import (
     select_control,
 )
 from contracts.time import Clock
-
-# A calibration preview's lease. The preview answer serves it as a duration (`lease_seconds`)
-# beside Central's absolute `expires_at`, so a browser counts down on its own clock and never
-# compares Central's clock with its own (console DDD R10).
-CALIBRATION_LEASE_SECONDS = 30
 
 
 class RegistryError(Exception):
@@ -126,11 +122,6 @@ class Registry:
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
                      (self.clock.utc(), kind, subject, Jsonb(detail or {})))
-
-    def _expire_previews(self, conn):
-        conn.execute("UPDATE frames SET preview=NULL,preview_expires=NULL,"
-                     "configuration_revision=configuration_revision+1 "
-                     "WHERE preview_expires <= %s", (self.clock.utc(),))
 
     def challenge(self, public_key: str) -> dict:
         # Endpoint schema also validates; keep this boundary safe for non-HTTP callers.
@@ -238,7 +229,7 @@ class Registry:
         conn.execute(
             "INSERT INTO player_control_sessions(player_id,authority_epoch,status) "
             "VALUES(%s,%s,%s) ON CONFLICT(player_id) DO UPDATE SET "
-            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,schema_version=2,"
+            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,"
             "capabilities='[]',offered_schemas=NULL,offered_capabilities=NULL,"
             "issued_sequence=0,pending_id=NULL,pending_digest=NULL,pending_expires=NULL,"
             "applied_sequence=0,applied_at=NULL,applied_delivery_id=NULL,"
@@ -258,7 +249,7 @@ class Registry:
                         or row["offered_capabilities"] != list(request.capabilities)):
                     raise RegistryError("control_negotiation_conflict")
                 return ControlSelection(authority_epoch=request.authority_epoch,
-                                        schema=row["schema_version"],
+                                        schema=SCHEMA,
                                         capabilities=tuple(row["capabilities"]))
             selection = select_control(request)
             if selection is None:
@@ -267,10 +258,10 @@ class Registry:
                 # Enrollment opens each epoch's row; the epoch is current (checked above).
                 self._reset_control(conn, player_id, request.authority_epoch, "open")
             conn.execute(
-                "UPDATE player_control_sessions SET status='negotiated',schema_version=%s,"
+                "UPDATE player_control_sessions SET status='negotiated',"
                 "capabilities=%s,offered_schemas=%s,offered_capabilities=%s "
                 "WHERE player_id=%s",
-                (selection.schema_version, Jsonb(list(selection.capabilities)),
+                (Jsonb(list(selection.capabilities)),
                  Jsonb(list(request.schemas)),
                  Jsonb(list(request.capabilities)), player_id),
             )
@@ -288,7 +279,7 @@ class Registry:
                            (player_id,)).fetchone()
         if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
             raise RegistryError("control_negotiation_required")
-        return ControlSelection(authority_epoch=epoch, schema=row["schema_version"],
+        return ControlSelection(authority_epoch=epoch, schema=SCHEMA,
                                 capabilities=tuple(row["capabilities"]))
 
     def issue_control_delivery_record(self, player_id: str, epoch: int,
@@ -393,7 +384,7 @@ class Registry:
         """Read provenance-labelled app-control history without readiness inference."""
         with self.db.transaction() as conn:
             row = conn.execute(
-                "SELECT c.authority_epoch,c.schema_version,c.status,c.issued_sequence,"
+                "SELECT c.authority_epoch,c.status,c.issued_sequence,"
                 "c.pending_id,c.pending_digest,c.applied_sequence,c.applied_at,"
                 "c.applied_delivery_id,c.applied_digest,c.last_delivery_id,"
                 "c.last_result_sequence,c.last_result_digest,c.last_result,c.last_result_at "
@@ -410,9 +401,6 @@ class Registry:
         request_id = uuid.uuid4()
         expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
         with self._equipment_write() as conn:
-            from central.equipment_drain import require_unfenced_player_in
-
-            require_unfenced_player_in(conn, player_id)
             player = conn.execute(
                 "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL FOR UPDATE",
                 (player_id,),
@@ -484,13 +472,6 @@ class Registry:
     def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
         try:
             with self._equipment_write() as conn:
-                from central.equipment_drain import (
-                    require_unfenced_frame_in,
-                    require_unfenced_player_in,
-                )
-
-                require_unfenced_player_in(conn, player_id)
-                require_unfenced_frame_in(conn, frame_id)
                 # Common lock ordering for bind and retire avoids transferring retired equipment.
                 player = conn.execute("SELECT retired_at FROM players WHERE id=%s FOR UPDATE",
                                       (player_id,)).fetchone()
@@ -512,8 +493,8 @@ class Registry:
                 conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)", (frame_id, player_id, output_id))
                 resolve_output(conn, player_id, output_id)   # the display there, under this binding
                 row = conn.execute("UPDATE frames SET generation=generation+1,"
-                                   "configuration_revision=configuration_revision+1,"
-                                   "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",
+                                   "configuration_revision=configuration_revision+1 "
+                                   "WHERE id=%s RETURNING generation",
                                    (frame_id,)).fetchone()
                 self._audit(conn, "frame_bound", frame_id,
                             {"player_id": player_id, "output_id": output_id, **row})
@@ -525,9 +506,6 @@ class Registry:
         """Release a Frame's active binding, reversibly: unlike retire, the player record
         (and its ability to be re-bound, to this or another Frame) is untouched."""
         with self._equipment_write() as conn:
-            from central.equipment_drain import require_unfenced_frame_in
-
-            require_unfenced_frame_in(conn, frame_id)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:
                 raise RegistryError("unknown_frame", 404)
@@ -538,8 +516,8 @@ class Registry:
                 raise RegistryError("binding_generation_conflict")
             conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
             row = conn.execute("UPDATE frames SET generation=generation+1,"
-                               "configuration_revision=configuration_revision+1,"
-                               "preview=NULL,preview_expires=NULL WHERE id=%s RETURNING generation",
+                               "configuration_revision=configuration_revision+1 "
+                               "WHERE id=%s RETURNING generation",
                                (frame_id,)).fetchone()
             self._audit(conn, "frame_unbound", frame_id,
                         {"player_id": existing["player_id"], "output_id": existing["output_id"], **row})
@@ -550,9 +528,6 @@ class Registry:
         design §9a). FOR UPDATE makes the read-merge-write atomic; the row is still LWW.
         Bumps NO generation, NO configuration_revision; never touches calibration."""
         with self._equipment_write() as conn:
-            from central.equipment_drain import require_unfenced_frame_in
-
-            require_unfenced_frame_in(conn, frame_id)
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
                                  (frame_id,)).fetchone()
             if not frame:
@@ -575,13 +550,10 @@ class Registry:
         """Replace display dimensions after an optimistic generation check.
 
         The persistent Frame and its placement remain the same. A changed display
-        profile invalidates committed calibration and any outstanding preview.
+        profile invalidates committed calibration.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_runtime_snapshot_required", 500)
-        from central.equipment_drain import require_unfenced_frame_in
-
-        require_unfenced_frame_in(conn, frame_id)
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
@@ -604,7 +576,7 @@ class Registry:
         invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
         row = conn.execute(
             "UPDATE frames SET profile=%s,calibration=%s,"
-            "preview=NULL,preview_expires=NULL,generation=generation+1,"
+            "generation=generation+1,"
             "configuration_revision=configuration_revision+1 WHERE id=%s "
             "RETURNING generation",
             (Jsonb(profile.model_dump()), Jsonb(invalidated.model_dump()), frame_id),
@@ -631,9 +603,6 @@ class Registry:
         # writers are excluded on this same transaction connection.
         if not holds_runtime_locks_in(conn):
             raise RegistryError("frame_reference_snapshot_required", 500)
-        from central.equipment_drain import require_unfenced_frame_in
-
-        require_unfenced_frame_in(conn, frame_id)
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
@@ -658,9 +627,6 @@ class Registry:
         central/db.py sets no isolation) the check is a new statement after any lock
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
         with self._equipment_write() as conn:
-            from central.equipment_drain import require_unfenced_player_in
-
-            require_unfenced_player_in(conn, player_id)
             identity = conn.execute("SELECT device_id FROM players WHERE id=%s",
                                     (player_id,)).fetchone()
             if identity is None:
@@ -670,8 +636,8 @@ class Registry:
             # the device row. Use the same order for retirement.
             lock_fleet_assets_in(conn)
             now = self.clock.utc()
-            # Ticketless legacy Players may predate any PXE `devices` row.
-            # Operator retirement is allowed to create their canonical tombstone.
+            # A Player that never booted from a node offer (a Compose or demo Player) has no
+            # `devices` row; operator retirement creates its canonical tombstone.
             conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) "
                          "VALUES(%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
                          (device_id, now, now))
@@ -694,73 +660,23 @@ class Registry:
 
     @staticmethod
     def calibration_mode_in(conn, frame_id: str) -> str:
-        """Established V2 capability survives admission/generation revocation.
-
-        Missing current authority cannot downgrade a known V2 device to the
-        legacy write protocol. An explicit capability downgrade is not inferred.
-        """
+        """`native_trial` when the Frame's bound Player runs on a Node Central admitted (its
+        device holds a node boot admission, current or past); otherwise `not_admitted`: a Player
+        that never booted from a node offer (a Compose or demo Player) has no calibration
+        protocol. A revoked admission does not withdraw the capability."""
         row = conn.execute(
             "SELECT EXISTS(SELECT 1 FROM bindings b JOIN players p ON p.id=b.player_id "
             "JOIN node_boot_admissions a ON a.device_id=p.device_id "
-            "JOIN node_offer_contexts o ON o.offer_id=a.offer_id "
-            "WHERE b.frame_id=%s AND "
-            "(o.basis='node_v2' OR EXISTS(SELECT 1 FROM node_producers n "
-            "WHERE n.admission_id=a.admission_id AND n.owner='display_host'))) AS native",
+            "WHERE b.frame_id=%s) AS native",
             (frame_id,),
         ).fetchone()
-        return "native_trial" if row["native"] else "legacy_preview"
+        return "native_trial" if row["native"] else "not_admitted"
 
     def calibration_capability(self, frame_id: str) -> dict:
         with self.db.transaction() as conn:
             if not conn.execute("SELECT 1 FROM frames WHERE id=%s", (frame_id,)).fetchone():
                 raise RegistryError("unknown_frame", 404)
             return {"mode": self.calibration_mode_in(conn, frame_id)}
-
-    def calibrate(self, frame_id: str, operation: str, expected_revision: int,
-                  calibration: Calibration | None = None, *, expected_generation: int) -> dict:
-        now = self.clock.utc()
-        with self._equipment_write() as conn:
-            from central.equipment_drain import require_unfenced_frame_in
-
-            require_unfenced_frame_in(conn, frame_id)
-            if self.calibration_mode_in(conn, frame_id) == "native_trial":
-                raise RegistryError("calibration_trial_required", 409)
-            self._expire_previews(conn)
-            frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
-            if not frame:
-                raise RegistryError("unknown_frame", 404)
-            current = Calibration.model_validate(frame["calibration"])
-            if current.revision != expected_revision:
-                raise RegistryError("calibration_revision_conflict")
-            if frame["generation"] != expected_generation:
-                raise RegistryError("binding_generation_conflict")
-            if operation == "revert":
-                conn.execute("UPDATE frames SET preview=NULL,preview_expires=NULL WHERE id=%s", (frame_id,))
-                result = current.model_dump()
-            elif operation in ("preview", "commit"):
-                if not calibration:
-                    raise RegistryError("calibration_required", 422)
-                if not conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
-                    raise RegistryError("frame_unbound")
-                if operation == "preview":
-                    proposed = calibration.model_copy(update={"revision": current.revision})
-                    expires = now + CALIBRATION_LEASE_SECONDS
-                    conn.execute("UPDATE frames SET preview=%s,preview_expires=%s WHERE id=%s",
-                                 (Jsonb(proposed.model_dump()), expires, frame_id))
-                    result = {"calibration": proposed.model_dump(), "expires_at": expires,
-                              "lease_seconds": CALIBRATION_LEASE_SECONDS}
-                else:
-                    committed = calibration.model_copy(update={"revision": current.revision + 1})
-                    conn.execute("UPDATE frames SET calibration=%s,preview=NULL,"
-                                 "preview_expires=NULL WHERE id=%s", (Jsonb(committed.model_dump()), frame_id))
-                    commit_position(conn, frame_id)
-                    result = committed.model_dump()
-            else:
-                raise RegistryError("invalid_calibration_operation", 422)
-            conn.execute("UPDATE frames SET configuration_revision=configuration_revision+1 WHERE id=%s",
-                         (frame_id,))
-            self._audit(conn, f"calibration_{operation}", frame_id)
-            return result
 
     def commit_calibration_trial_in(self, conn, *, frame_id: str, player_id: str,
             authority_epoch: int, output_id: str, binding_generation: int,
@@ -771,11 +687,8 @@ class Registry:
         Caller holds Coordination→Runtime then Fleet/session locks. This method
         owns persistent Frame calibration only; it never interprets trial evidence.
         """
-        from central.equipment_drain import require_unfenced_frame_in
-
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
-        require_unfenced_frame_in(conn, frame_id)
         row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id "
                            "FROM frames f JOIN bindings b ON b.frame_id=f.id "
                            "JOIN players p ON p.id=b.player_id WHERE f.id=%s FOR UPDATE OF f",
@@ -790,8 +703,8 @@ class Registry:
             raise RegistryError("calibration_revision_conflict")
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
-        conn.execute("UPDATE frames SET calibration=%s,preview=NULL,"
-                     "preview_expires=NULL,configuration_revision=configuration_revision+1 "
+        conn.execute("UPDATE frames SET calibration=%s,"
+                     "configuration_revision=configuration_revision+1 "
                      "WHERE id=%s", (Jsonb(committed.model_dump(mode="json")), frame_id))
         commit_position(conn, frame_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
@@ -811,7 +724,6 @@ class Registry:
                               "AND retired_at IS NULL FOR SHARE", (player_id, epoch)).fetchone()
         if not player:
             raise RegistryError("stale_authority", 403)
-        self._expire_previews(conn)
         rows = conn.execute(f"SELECT f.*,b.output_id,{POSITION_COLUMNS} FROM bindings b "  # noqa: S608
                             f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} "
                             "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
@@ -819,37 +731,25 @@ class Registry:
         bindings = [OutputBinding(output_id=r["output_id"], frame_id=r["id"], generation=r["generation"],
                               configuration_revision=r["configuration_revision"],
                               profile=FrameProfile.model_validate(r["profile"]),
-                              calibration=Calibration.model_validate(r["calibration"]),
-                              preview=Calibration.model_validate(r["preview"]) if r["preview"] else None,
-                              preview_expires=r["preview_expires"])
+                              calibration=Calibration.model_validate(r["calibration"]))
                 for r in rows]
         return {"bindings": bindings, "execution_bindings": [binding for binding, row in
                 zip(bindings, rows, strict=True) if frame_readiness(row) is Readiness.READY]}
 
     def inventory(self) -> InstallationInventory:
         with self.db.transaction() as conn:
-            now = self.clock.utc()
-            self._expire_previews(conn)
-            return self.inventory_in(conn, now)
+            return self.inventory_in(conn, self.clock.utc())
 
     def inventory_in(self, conn, now: float) -> InstallationInventory:
-        """Read inventory in a caller-owned transaction without writing expiry cleanup.
-
-        Expired previews are omitted from the returned view. A later mutating registry
-        operation may persist their expiry; this method is safe in read-only snapshots.
-        """
+        """Read inventory in a caller-owned transaction; safe in read-only snapshots."""
         players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
                                "FROM players ORDER BY registered_at,id").fetchall()
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
         frames = conn.execute("SELECT f.id,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
-                              "f.calibration,f.preview,f.preview_expires,f.configuration_revision,"
+                              "f.calibration,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
                               f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
-        for frame in frames:
-            if frame["preview_expires"] is not None and frame["preview_expires"] <= now:
-                frame["preview"] = None
-                frame["preview_expires"] = None
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
         return InstallationInventory(
             players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})

@@ -117,7 +117,7 @@ out.sentUrl = posts[0]?.url;
 const result = (status, error) => stage.stageResult({ ok: false, status, error, data: null }, closed);
 out.results = Object.fromEntries([
   ["node_app_current_process_unlinked", 409], ["node_app_target_base_mismatch", 409],
-  ["node_app_qualified_fallback_required", 409], ["node_app_existing_drain", 409],
+  ["node_app_qualified_fallback_required", 409],
   ["node_app_operator_target_changed", 403], ["node_session_unavailable", 403], ["node_session_superseded", 403],
   ["node_deployment_unknown", 404], ["node_environment_unknown", 404], ["node_app_operation_identity_conflict", 409],
   ["rollout_gate_closed", 503], ["rollout_serving_verifier_unavailable", 503], ["rollout_measured_evidence_expired", 503],
@@ -228,7 +228,6 @@ def test_every_stage_code_maps_to_its_words_and_an_unlisted_one_is_refused():
         "This deployment's base differs from the base this Player booted, or it has no app.")
     assert refused["node_app_qualified_fallback_required"] == (
         "No qualified fallback for this Player's current Outputs and base: qualify the running app first.")
-    assert refused["node_app_existing_drain"] == "An equipment drain is active on this Player."
     assert refused["node_deployment_unknown"] == "Central has no such deployment."
     assert refused["node_environment_unknown"] == "Central does not know this app environment."
     assert refused["node_app_operation_identity_conflict"] == "This request id was already used for another stage."

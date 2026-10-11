@@ -229,11 +229,8 @@ class NodeObservations:
                                                                "required_bytes")}}
             boot = None
             if row["current_admission"] is not None:
-                # As node_lifecycle's qualification reads it: an admission adopted from a
-                # legacy offer (history from the retired V1 path) has no node offer payload.
-                payload = row["offer_payload"]
-                boot = {"base_tag": None if payload is None
-                        else parse_node_boot_offer(bytes(payload)).base.tag}
+                # An admission is always a node offer's, issued with its payload.
+                boot = {"base_tag": parse_node_boot_offer(bytes(row["offer_payload"])).base.tag}
             facts = None
             if row["facts_payload"] is not None:
                 # Tolerant: an older-shape row serves its missing facts as None, never fails

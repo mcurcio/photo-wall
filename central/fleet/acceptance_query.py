@@ -22,7 +22,7 @@ def load_current_app_control_in(conn, device_id: str) -> AppControl | None:
     if player is None:
         return None
     row = conn.execute(
-        "SELECT authority_epoch,schema_version,status,issued_sequence,pending_id,"
+        "SELECT authority_epoch,status,issued_sequence,pending_id,"
         "pending_digest,pending_expires,applied_sequence,applied_at,"
         "applied_delivery_id,applied_digest,applied_ack_nonce,last_result,"
         "last_result_sequence,last_delivery_id,last_result_digest,last_result_at "
@@ -33,8 +33,7 @@ def load_current_app_control_in(conn, device_id: str) -> AppControl | None:
         return None
     return AppControl(
         player_id=player["id"], public_key=player["public_key"],
-        authority_epoch=row["authority_epoch"], schema_version=row["schema_version"],
-        status=row["status"], applied_sequence=row["applied_sequence"],
+        authority_epoch=row["authority_epoch"], status=row["status"], applied_sequence=row["applied_sequence"],
         applied_delivery_id=row["applied_delivery_id"],
         applied_digest=row["applied_digest"], applied_at=row["applied_at"],
         last_result=row["last_result"],

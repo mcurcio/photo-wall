@@ -1,10 +1,10 @@
 """The GitHub Releases wire as tests serve it, and a fake origin HTTP server.
 
-One place states what `GitHubReleaseOrigin` reads: the release-list entry (`tag_name`, `draft`,
-`prerelease`, `assets[].browser_download_url`, and the manifest asset's `id` and `updated_at`:
-the release's upstream version), the release's `manifest.json` (`base_image`, `player_deb`) and
-the base tarball `scripts/package_release_artifacts.py` builds. The
-`httpx.MockTransport` e2e and the real-process two-pod test both serve these bytes.
+A release here carries the base tarball `scripts/package_release_artifacts.py` builds and one
+sealed environment blob; its list entry names both (`tag_name`, `draft`, `prerelease`,
+`assets[].browser_download_url`). It attaches no node release manifest, so the release sync lists
+and skips it: the test that serves it writes its node deployment directly. The real-process
+two-pod test serves these bytes.
 """
 
 from __future__ import annotations
@@ -17,14 +17,13 @@ import tarfile
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 TARBALL_NAME = "photo-wall-base.tar.gz"
-MANIFEST_NAME = "manifest.json"
-# The manifest asset's (updated_at, id) of a first upload: GitHub's asset `updated_at` format.
+ENVIRONMENT_NAME = "environment.tar"
+# The first asset's (updated_at, id): GitHub's asset `updated_at` format.
 FIRST_UPLOAD = ("2026-09-01T00:00:00Z", 7)
 
 
@@ -48,34 +47,17 @@ def real_tarball(squashfs: bytes) -> tuple[bytes, str, str]:
     return data, hashlib.sha256(data).hexdigest(), sq_sha
 
 
-def deb_name(tag: str) -> str:
-    return f"photo-wall-player_{tag.lstrip('v')}_all.deb"
-
-
-def manifest_bytes(*, tarball: bytes, tarball_sha: str, deb: bytes, deb_filename: str) -> bytes:
-    """A release's `manifest.json` (schema 1) naming its base tarball and Player `.deb`."""
-    return json.dumps({
-        "schema": 1,
-        "revision": "0" * 40,
-        "base_image": {"filename": TARBALL_NAME, "sha256": tarball_sha, "size": len(tarball)},
-        "player_deb": {"filename": deb_filename, "sha256": hashlib.sha256(deb).hexdigest(),
-                       "size": len(deb)},
-    }).encode()
-
-
-def release_entry(tag: str, *, manifest_url: str, tarball_url: str, deb_filename: str,
-                  deb_url: str, uploaded: tuple[str, int] = FIRST_UPLOAD) -> dict:
+def release_entry(tag: str, *, tarball_url: str, environment_url: str,
+                  uploaded: tuple[str, int] = FIRST_UPLOAD) -> dict:
     """One published (non-draft, non-prerelease) entry of the releases list. Every asset was
-    uploaded at `uploaded` = (updated_at, the manifest asset's id); the others take the next ids.
-    """
-    updated_at, manifest_id = uploaded
-    names_and_urls = ((MANIFEST_NAME, manifest_url), (TARBALL_NAME, tarball_url),
-                      (deb_filename, deb_url))
+    uploaded at `uploaded` = (updated_at, the first asset's id); the other takes the next id."""
+    updated_at, first_id = uploaded
+    names_and_urls = ((TARBALL_NAME, tarball_url), (ENVIRONMENT_NAME, environment_url))
     return {
         "tag_name": tag,
         "draft": False,
         "prerelease": False,
-        "assets": [{"id": manifest_id + offset, "name": name, "updated_at": updated_at,
+        "assets": [{"id": first_id + offset, "name": name, "updated_at": updated_at,
                     "browser_download_url": url}
                    for offset, (name, url) in enumerate(names_and_urls)],
     }
@@ -90,31 +72,17 @@ class FakeRelease:
     tarball: bytes
     tarball_sha: str
     squashfs_sha: str
-    deb: bytes
+    environment: bytes
     tarball_status: int = 200  # 404 makes the OS image terminally unobtainable
-    uploaded: tuple[str, int] = FIRST_UPLOAD  # the manifest asset's (updated_at, id)
-
-    @property
-    def deb_filename(self) -> str:
-        return deb_name(self.tag)
+    uploaded: tuple[str, int] = FIRST_UPLOAD  # the first asset's (updated_at, id)
 
 
 def make_release(tag: str, *, squashfs_bytes: int = 4 * 1024 * 1024,
-                 deb_bytes: int = 64 * 1024) -> FakeRelease:
-    """Random (incompressible) squashfs and `.deb` bytes, so either is big enough to throttle or
-    hold."""
+                 environment_bytes: int = 64 * 1024) -> FakeRelease:
+    """Random (incompressible) squashfs and environment bytes, so either is big enough to
+    throttle or hold."""
     tarball, tarball_sha, squashfs_sha = real_tarball(os.urandom(squashfs_bytes))
-    return FakeRelease(tag, tarball, tarball_sha, squashfs_sha, os.urandom(deb_bytes))
-
-
-def recut(release: FakeRelease, *, squashfs_bytes: int = 4 * 1024 * 1024) -> FakeRelease:
-    """`release` re-cut upstream (`--clobber`): new tarball bytes under the same tag, uploaded one
-    hour later as new assets (a newer manifest `updated_at` and id), so the sync takes it."""
-    tarball, tarball_sha, squashfs_sha = real_tarball(os.urandom(squashfs_bytes))
-    updated_at, manifest_id = release.uploaded
-    later = datetime.fromisoformat(updated_at) + timedelta(hours=1)
-    return replace(release, tarball=tarball, tarball_sha=tarball_sha, squashfs_sha=squashfs_sha,
-                   uploaded=(later.isoformat().replace("+00:00", "Z"), manifest_id + 3))
+    return FakeRelease(tag, tarball, tarball_sha, squashfs_sha, os.urandom(environment_bytes))
 
 
 @dataclass
@@ -122,8 +90,7 @@ class FakeGitHubOrigin:
     """The GitHub Releases API for `repo` plus every release asset, served over real HTTP on
     127.0.0.1 so separate processes reach it (`PHOTO_WALL_RELEASE_API_BASE=api_base`).
 
-    Counts every asset GET per (tag, "manifest"|"tarball"|"deb"). A tarball or a `.deb` can be
-    throttled (`chunk_delay` per 64 KiB) or held at half its body until `hold` is set, and a
+    Counts every asset GET per (tag, "tarball"|"environment"). Either can be throttled (`chunk_delay` per 64 KiB) or held at half its body until `hold` is set, and a
     tarball answered with `tarball_status` instead. Use as a context manager; closing releases any held download.
     """
 
@@ -145,9 +112,8 @@ class FakeGitHubOrigin:
         for release in sorted(self.releases.values(), key=lambda r: r.tag, reverse=True):
             url = f"{self.api_base}/dl/{release.tag}"
             entries.append(release_entry(
-                release.tag, manifest_url=f"{url}/{MANIFEST_NAME}",
-                tarball_url=f"{url}/{TARBALL_NAME}", deb_filename=release.deb_filename,
-                deb_url=f"{url}/{release.deb_filename}", uploaded=release.uploaded))
+                release.tag, tarball_url=f"{url}/{TARBALL_NAME}",
+                environment_url=f"{url}/{ENVIRONMENT_NAME}", uploaded=release.uploaded))
         return json.dumps(entries).encode()
 
     def __enter__(self) -> FakeGitHubOrigin:
@@ -172,19 +138,14 @@ class FakeGitHubOrigin:
                 parts = url.path.split("/")  # ['', 'dl', tag, name]
                 release = origin.releases.get(parts[2]) if len(parts) == 4 else None
                 name = parts[3] if release is not None else None
-                what = {MANIFEST_NAME: "manifest", TARBALL_NAME: "tarball"}.get(
-                    name, "deb" if release is not None and name == release.deb_filename else None)
+                what = {TARBALL_NAME: "tarball", ENVIRONMENT_NAME: "environment"}.get(name)
                 if what is None:
                     self._send(404)
                     return
                 with origin.lock:
                     origin.hits[(release.tag, what)] += 1
-                if what == "manifest":
-                    self._send(200, manifest_bytes(
-                        tarball=release.tarball, tarball_sha=release.tarball_sha,
-                        deb=release.deb, deb_filename=release.deb_filename))
-                elif what == "deb":
-                    self._stream(release.deb)
+                if what == "environment":
+                    self._stream(release.environment)
                 elif release.tarball_status != 200:
                     self._send(release.tarball_status)
                 else:

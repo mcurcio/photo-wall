@@ -236,7 +236,6 @@ const STAGE_CODES = Object.freeze({
   [STAGE_REFUSAL.baseMismatch]: refused("This deployment's base differs from the base this Player booted, or it has no app"),
   [STAGE_REFUSAL.fallbackRequired]: refused("No qualified fallback for this Player's current Outputs and base: qualify "
     + "the running app first"),
-  node_app_existing_drain: refused("An equipment drain is active on this Player"),
   node_app_operator_target_changed: SESSION_CHANGED,
   node_session_unavailable: SESSION_CHANGED,
   node_session_superseded: SESSION_CHANGED,

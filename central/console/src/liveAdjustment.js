@@ -100,9 +100,10 @@ function useVisible() {
 
 /**
  * @typedef {{corners: number[][], crop: number[], rotation: number, gain: number}} Draft
- * @typedef {"checking"|"unsupported"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
+ * @typedef {"checking"|"not_admitted"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
  *           |"stopped"|"sending"|"shown"} Phase
- *   `unsupported`: the Pi's software cannot show changes live; `waiting`: another session for
+ *   `not_admitted`: the Pi did not start from Photo Wall, so Central offers it no live
+ *   adjustment (Central's capability `not_admitted`); `waiting`: another session for
  *   this Frame is running; `stopped`: a refusal stopped it until Revert; `sending`: the latest
  *   change is not shown yet; `shown`: the Pi has presented it.
  * @typedef {{words: string, code: string, stops: boolean}} Problem
@@ -348,7 +349,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   let phase;
   if (!bound) phase = "unbound";
   else if (capability === null) phase = "checking";
-  else if (capability === "legacy_preview") phase = "unsupported";
+  else if (capability === "not_admitted") phase = "not_admitted";
   else if (capability !== "native_trial") phase = "unavailable";
   else if (!open || !visible) phase = "idle";
   else if (error?.stops) phase = "stopped";

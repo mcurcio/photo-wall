@@ -178,8 +178,6 @@ class NodeAcceptance:
                         or active[0].opacity != 1 or active[0].fade_in or active[0].fade_out):
                     raise NodeControlError("node_representative_single_media_required")
                 binding = by_output[output]
-                if binding.preview is not None:
-                    raise NodeControlError("node_qualification_preview_active")
                 expected_tag = frame_witness_tag(output_id=output, frame_id=binding.frame_id, binding_generation=binding.generation,
                     config_revision=binding.configuration_revision, calibration=binding.calibration.model_dump(mode="json"),
                     layers=({"assignment_id": active[0].assignment_id, "variant_sha256": active[0].variant.sha256},))

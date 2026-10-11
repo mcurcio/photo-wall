@@ -9,17 +9,15 @@ import functools
 import json
 import logging
 import math
-import os
 import queue
 import re
 import signal
-import tempfile
 import threading
 import uuid
 from collections import deque
 from collections.abc import Awaitable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
@@ -60,7 +58,6 @@ from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs, output_app_id
 from player.probe_responder import ProbeResponder
 from player.rendering import CapacityResult, PrepareResult, PresentationResult, Renderer
-from uplink import watchdog
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
@@ -86,7 +83,7 @@ BACKOFF = SESSION_BACKOFF
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
 APP_LINK_RETRY = 5.0
 # How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
-# main_loop_late health fault instead of waiting on a starved loop in silence (G8). Readiness
+# main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
 DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
 LOG = logging.getLogger("photo_wall.player")
@@ -176,27 +173,26 @@ class State(Model):
     revocations: tuple[Revocation, ...] = Field(max_length=1024)
     identify_output: IdentifyOutput | None = None
     identify_expires_at: Instant | None = None
-    delivery_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
-    delivery_sequence: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    delivery_sequence: int = Field(ge=1, le=2**63 - 1)
 
     @model_validator(mode="after")
-    def coherent_delivery(self):
-        if (self.delivery_id is None) != (self.delivery_sequence is None):
-            raise ValueError("control_delivery_pair")
+    def coherent_identify(self):
         if self.identify_expires_at is not None and self.identify_output is None:
             raise ValueError("identify_expiry_without_request")
-        if (self.delivery_sequence is not None and self.identify_output is not None
-                and self.identify_expires_at is None):
+        if self.identify_output is not None and self.identify_expires_at is None:
             raise ValueError("identify_request_without_expiry")
         return self
 
 
 class BootContext(Model):
     """The equipment and run this Player enrolls as: the Pi's serial-derived device_id and a
-    fresh id for this run."""
+    fresh `run_id` for this Player process. The run id is not the kernel boot id
+    (`PlayerService.boot_id`, which the node link names); it travels as the enrollment's
+    `boot_id` field, so a restarted Player is a new enrollment."""
 
     device_id: str = Field(pattern=r"^device-[a-f0-9]{64}$")
-    boot_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
+    run_id: str = Field(pattern=r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$")
 
 
 class Registration(Model):
@@ -253,7 +249,7 @@ def display_serial(raw: bytes | None) -> str | None:
 def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_serial) -> BootContext:
     """The Player's boot context: `device_id` from the Pi hardware serial by the one
     kind+hash scheme (contracts.equipment.equipment_device_id, kind="pi"), so one Pi keeps one
-    device_id (0008: device_id is the immutable serial), and a fresh `boot_id` for this run.
+    device_id (0008: device_id is the immutable serial), and a fresh `run_id` for this run.
     """
     try:
         raw = serial_reader()
@@ -262,7 +258,7 @@ def hardware_boot_context(serial_reader: Callable[[], bytes | None] = read_pi_se
     device_id = equipment_device_id("pi", raw) if raw is not None else None
     if device_id is None:
         raise ServiceError("boot_equipment_identity")
-    return BootContext(device_id=device_id, boot_id=str(uuid.uuid4()))
+    return BootContext(device_id=device_id, run_id=str(uuid.uuid4()))
 
 
 @dataclass(frozen=True)
@@ -311,9 +307,8 @@ class PlayerService:
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
                  node_link_client: NodeAppLinkClient | None = None,
-                 health_path: Path | None = Path("/run/photo-wall/player/service-health.json"),
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
-                 boot_context: BootContext | None = None):
+                 boot_context: BootContext):
         self.config, self.identity, self.outputs = config, identity, outputs
         self.renderer, self.dispatcher = renderer, dispatcher
         self.clock = clock or SystemClock()
@@ -322,7 +317,6 @@ class PlayerService:
                                 time_client=time_client, websocket_connect=websocket_connect)
         self.clock_record = clock_record
         self.cache_factory, self.executor_factory = cache_factory, executor_factory
-        self.health_path = health_path
         try:
             with boot_id_path.open("r") as stream:
                 boot_id = stream.read(37).strip()
@@ -372,7 +366,7 @@ class PlayerService:
         self._identify_output: str | None = None
         self._identify_deadline: float | None = None
         # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
-        # every dispatch is MainLoopLate at once, and run() does not pet the watchdog.
+        # every dispatch is MainLoopLate at once.
         self._late_posts = LatePosts()
 
     def fault(self, code: str, *, detail: str | None = None):
@@ -381,13 +375,11 @@ class PlayerService:
         self.last_fault, self.last_fault_detail = code, detail
 
     def _main_loop_late(self) -> None:
-        """The GLib loop missed a dispatch deadline: raise the health fault, never touch
-        readiness. Central keeps the last readiness it accepted, so committed groups stand; it
+        """The GLib loop missed a dispatch deadline: raise the fault, never touch readiness. Central keeps the last readiness it accepted, so committed groups stand; it
         commits no new group once that report is older than readiness_seconds, and a long
         stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
         withdraw prepared playback)."""
         self.fault("main_loop_late")
-        self._write_health(False, "main_loop_late")
 
     def _render_unbound_diagnostic(self) -> None:
         """Publish Central-link context only on known unbound outputs."""
@@ -431,9 +423,8 @@ class PlayerService:
         one is unreached: a late loop is never a capacity refusal and never fills the
         dispatcher's slots (E-G8-7). A callback that started before the deadline cannot be
         abandoned, so its outcome is awaited and returned, never MainLoopLate: its effects
-        landed (E-G8-10). One that never returns blocks the GLib thread: on a V2 node its
-        probes go unanswered and the broker's probe kill ends that Player; under the V1 unit
-        the watchdog, no longer petted, does."""
+        landed (E-G8-10). One that never returns blocks the GLib thread: its probes go
+        unanswered and the broker's probe kill ends that Player."""
         source, abandon = self._late_posts.post(self.dispatcher, callback)
         loop = asyncio.get_running_loop()
         waiter = loop.create_future()
@@ -558,8 +549,6 @@ class PlayerService:
         return length
 
     async def enroll(self):
-        if self.boot_context is None:
-            raise ServiceError("boot_context")
         session = self.session
         challenge = Challenge.model_validate(await self.request("POST", "/v1/enrollment/challenge",
             body={"public_key": self.identity.public_key}, authenticated=False))
@@ -567,7 +556,7 @@ class PlayerService:
             challenge.nonce,
             self.outputs,
             device_id=self.boot_context.device_id,
-            boot_id=self.boot_context.boot_id,
+            boot_id=self.boot_context.run_id,
         )
         registered = Registration.model_validate(await self.request("POST", "/v1/enrollment/register",
             body=enrollment.model_dump(mode="json"), authenticated=False))
@@ -641,12 +630,7 @@ class PlayerService:
             raise ServiceError("state_authority")
         sequence = state.delivery_sequence
         with self._lock:
-            if sequence is None:
-                # An old pod can answer during a mixed rollout. Its unsequenced state
-                # cannot supersede a v2 delivery already observed in this epoch.
-                if self._highest_control_sequence:
-                    return "superseded"
-            elif sequence < self._highest_control_sequence:
+            if sequence < self._highest_control_sequence:
                 return "superseded"
             elif sequence == self._highest_control_sequence:
                 if state.delivery_id != self._highest_control_delivery_id:
@@ -702,7 +686,7 @@ class PlayerService:
             unbound = self._unbound_outputs
             selection = self._control_selection
             cue = state.identify_output if (
-                sequence is not None and selection is not None
+                selection is not None
                 and selection.authority_epoch == configuration.authority_epoch
                 and "identify_output" in selection.capabilities
             ) else None
@@ -720,7 +704,7 @@ class PlayerService:
     async def _ack_control(self, state: State, result: str) -> None:
         session = self._session
         selection = self._control_selection
-        if (result == "superseded" or state.delivery_id is None
+        if (result == "superseded"
                 or session is None or session.registration is None or selection is None
                 or selection.authority_epoch != session.registration.authority_epoch):
             return
@@ -823,56 +807,6 @@ class PlayerService:
                 and (observation.authority_epoch, observation.plan_id, observation.revision) ==
                     (self._plan.authority_epoch, self._plan.plan_id, self._plan.revision)
                 and any(layer.assignment_id == observation.assignment_id for layer in self._plan.layers))
-
-    def _health(self):
-        return self._health_status()[0]
-
-    def _health_status(self):
-        """One renderer-thread evaluation owns both health and its public reason."""
-        self._main()
-        if self.executor is None:
-            return False, "executor"
-        if self._configuration is None:
-            return False, "configuration"
-        if not self.mapping.healthy():
-            return False, "clock"
-        if not self.renderer.capacity(()).available:
-            return False, "renderer_capacity"
-        return True, "healthy"
-
-    def _write_health(self, healthy: bool, reason: str | None = None):
-        if self.health_path is None:
-            return
-        if reason is None:
-            reason = "healthy" if healthy else "disconnected"
-        if healthy and not self.boot_id:
-            healthy, reason = False, "identity"
-        if (reason not in {"healthy", "executor", "identity", "configuration", "clock",
-                           "renderer_capacity", "disconnected", "main_loop_late"}
-                or (reason == "healthy") != bool(healthy)):
-            raise ValueError("inconsistent health reason")
-        body = dict(boot_id=self.boot_id, sampled_monotonic=self.clock.monotonic(),
-                    player_id=self.registration.player_id if self.registration else None,
-                    authority_epoch=self.registration.authority_epoch if self.registration else None,
-                    persistence="volatile", healthy=bool(healthy), health_reason=reason,
-                    clock=asdict(self.mapping.diagnostics))
-        temporary = None
-        try:
-            # The root-owned /run/photo-wall parent protects boot.json; this
-            # Player-owned child is the only place health publication may write.
-            fd, temporary = tempfile.mkstemp(prefix=".service-health-", dir=self.health_path.parent)
-            with os.fdopen(fd, "w") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                json.dump(body, stream, allow_nan=False, separators=(",", ":"))
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.health_path)
-        except (OSError, ValueError):
-            self.fault("health_storage")
-        finally:
-            if temporary is not None:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(temporary)
 
     def _authorized(self, job: Download):
         with self._lock:
@@ -1035,13 +969,11 @@ class PlayerService:
             try:
                 await self.poll_state()
                 readiness, observations = await self.dispatch(self._feedback)
-                healthy, reason = await self.dispatch(self._health_status)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
                 self._main_loop_late()
                 await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
-            self._write_health(healthy, reason)
             if readiness is not None:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
@@ -1051,9 +983,6 @@ class PlayerService:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
                 self._outgoing.append(observation)
-            # A completed state/readiness exchange with the GLib thread answering: the
-            # session is live (M5; the unit's WatchdogSec is the deadline owner).
-            watchdog.pet()
             await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
@@ -1109,7 +1038,7 @@ class PlayerService:
                 revision = self._control_proof_revision
             if (registration is not None and applied is not None
                     and applied[0] is session and applied != recorded
-                    and self.boot_context is not None and self.boot_id):
+                    and self.boot_id):
                 receipt = applied[1]
 
                 def applied_current() -> bool:
@@ -1205,11 +1134,6 @@ class PlayerService:
                     with self._lock:
                         self._offered = False
                         self._jobs = ()
-                    self._write_health(False)
-                    # One completed cycle, whatever its outcome (M5), unless the GLib loop has
-                    # not reached an abandoned dispatch: a stuck loop is the watchdog's to end.
-                    if not self._late_posts.late:
-                        watchdog.pet()
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)
@@ -1390,7 +1314,6 @@ def main():
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink,
                    gl_renderer=lambda: renderer.gl_renderer).start()
-    watchdog.ready()    # Type=notify: started; WatchdogSec runs from here (M5)
     with contextlib.suppress(KeyboardInterrupt):
         loop.run()
 

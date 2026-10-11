@@ -4,6 +4,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from support.calibrated_frame import calibrate_frame
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_registry import enroll, frame
@@ -44,7 +45,7 @@ def rig(registry):
     for index in range(2):
         frame(registry, f"node-f{index}")
         registry.bind(f"node-f{index}", player["player_id"], f"HDMI-A-{index+1}", expected_generation=0)
-        registry.calibrate(f"node-f{index}", "commit", 1, Calibration(), expected_generation=1)
+        calibrate_frame(registry.db, f"node-f{index}")
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="node-scene", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:node-f0", kind="black"),
@@ -166,7 +167,7 @@ def test_link_replay_exact_but_modified_proof_and_new_control_rejected(registry)
         links.admit(broker.session_id, claims["app_effect_broker"].credential, encode_node_app_link(changed))
 
 
-def test_display_admission_is_exact_and_never_releases_runtime_or_active_drain(registry):
+def test_display_admission_is_exact_and_never_releases_runtime(registry):
     from central.transaction_locks import acquire_runtime_locks
     coordinator, player, _, _, _, _, surfaces, _, proof = rig(registry)
     surface = surfaces[0]
@@ -186,11 +187,6 @@ def test_display_admission_is_exact_and_never_releases_runtime_or_active_drain(r
             "process": replace(surface.process, start_ticks=surface.process.start_ticks+1)}).allowed
         assert not coordinator.display_admission_in(conn, **{**arguments,
             "config_revision": surface.config_revision+1}).allowed
-        conn.execute("INSERT INTO equipment_drains(player_id,attempt_id,boot_id,authority_epoch,phase,"
-                     "prepared_at,authorization_expires_at,snapshot) VALUES(%s,'test','test',1,'prepared',1000,1100,jsonb_build_object('outputs',jsonb_build_array()))",
-                     (player["player_id"],))
-        denied = coordinator.display_admission_in(conn, **arguments)
-        assert not denied.allowed and denied.reason == "equipment_drain_requires_v2_target_reservation"
     assert coordinator.runtime.read().export_state() == before
 
 

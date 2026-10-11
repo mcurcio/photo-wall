@@ -22,7 +22,7 @@ export interface PixelSize {
 export interface FramePositionProps {
   adjustment: Adjustment;
   size: PixelSize;
-  softwareHref: string | null;
+  piHref: string | null;
 }
 
 const CORNERS = ["Top-left", "Top-right", "Bottom-right", "Bottom-left"] as const;
@@ -42,7 +42,7 @@ const inside = (value: number) => value >= 0 && value <= 1;
  * (liveAdjustment.js), and Done keeps it. A change that would fold the picture or leave the
  * screen is refused where it is made.
  */
-export function FramePosition({ adjustment, size, softwareHref }: FramePositionProps) {
+export function FramePosition({ adjustment, size, piHref }: FramePositionProps) {
   const [selected, setSelected] = useState<number | null>(null);
   const [step, setStep] = useState<(typeof STEPS)[number]>("10");
   const [problem, setProblem] = useState<string | null>(null);
@@ -85,7 +85,7 @@ export function FramePosition({ adjustment, size, softwareHref }: FramePositionP
 
   return (
     <Section title="Position">
-      <LiveAdjustment adjustment={adjustment} noun="position" softwareHref={softwareHref}>
+      <LiveAdjustment adjustment={adjustment} noun="position" piHref={piHref}>
         <Note>
           Drag a corner (or an edge&apos;s square to trim it), or choose what to move and use the
           arrows. Each change is sent to the Pi as you make it; press Done to keep it.

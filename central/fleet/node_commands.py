@@ -17,7 +17,6 @@ from central.fleet.node_sessions import (
     NodeControlError,
     NodeSessions,
     claim_intake_in,
-    command_eligibility_in,
 )
 from central.fleet.principal import SessionAdmission, _clock_sample
 from central.fleet.rollout_gate import RolloutEffectGate
@@ -91,9 +90,6 @@ class NodeCommands:
             grant = parse_session_grant(bytes(row["grant_payload"]))
             if grant.producer.installation_audience != config.installation_audience:
                 raise NodeControlError("node_audience_mismatch", 403)
-            eligible, reason = command_eligibility_in(conn, grant.offer_id)
-            if not eligible:
-                raise NodeControlError(reason, 409)
             prior = conn.execute("SELECT request_sha256,payload,expires_at FROM node_reboot_commands "
                                  "WHERE command_id=%s", (request.command_id,)).fetchone()
             if prior:

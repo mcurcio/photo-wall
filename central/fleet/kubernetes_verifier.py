@@ -385,20 +385,3 @@ class KubernetesRolloutVerifier:
         certificate = self.evidence.verify(observed)
         return MeasuredServingImage(observed.deployment_uid, observed.local_image,
                                     observed.local_measurement_ref, _hash(_scope(certificate)), certificate.expires_at)
-
-
-def configured_verifier(db, path: Path) -> KubernetesRolloutVerifier:
-    """Deployment-owned public configuration; supplying it never opens the gate."""
-    raw = path.read_bytes()
-    config = loads_object(raw, max_bytes=8192)
-    expected = {"identity_directory", "namespace", "ci_record", "guard_record", "ci_public_key",
-                "guard_public_key", "audience"}
-    if config is None or set(config) != expected or any(type(v) is not str or not v for v in config.values()):
-        _fail("configuration_invalid")
-    api = KubernetesReader.in_cluster()
-    identity = KubernetesIdentity.from_directory(Path(config["identity_directory"]))
-    evidence = SignedRolloutEvidence(api, namespace=config["namespace"], ci_record=config["ci_record"],
-        guard_record=config["guard_record"], ci_public_key=bytes.fromhex(config["ci_public_key"]),
-        guard_public_key=bytes.fromhex(config["guard_public_key"]), audience=config["audience"],
-        watermarks=PostgresEvidenceWatermarks(db))
-    return KubernetesRolloutVerifier(KubernetesTopology(api, identity), evidence)

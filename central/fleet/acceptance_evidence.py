@@ -19,7 +19,6 @@ class AppControl:
     player_id: str
     public_key: str
     authority_epoch: int
-    schema_version: int
     status: str
     applied_sequence: int
     applied_delivery_id: str | None
@@ -45,7 +44,7 @@ def current_control_receipt_matches(receipt: ControlAppliedReceipt,
     if control is None:
         return False
     return (
-        control.status == "negotiated" and control.schema_version == 2
+        control.status == "negotiated"
         and control.applied_at is not None and control.last_result_at is not None
         and control.last_result == "applied"
         and control.issued_sequence == control.applied_sequence

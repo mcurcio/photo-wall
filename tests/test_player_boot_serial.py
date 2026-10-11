@@ -50,13 +50,13 @@ def node_device_id(serial: str) -> str:
     return device_id_for_serial(serial)
 
 
-def test_hardware_boot_context_derives_the_node_device_id_and_a_fresh_boot_id():
+def test_hardware_boot_context_derives_the_node_device_id_and_a_fresh_run_id():
     context = hardware_boot_context(serial_reader=lambda: RAW_PI_SERIAL)
     again = hardware_boot_context(serial_reader=lambda: RAW_PI_SERIAL)
 
     assert context.device_id == node_device_id(SERIAL)
     assert re.fullmatch(r"device-[a-f0-9]{64}", context.device_id)
-    assert again.device_id == context.device_id and again.boot_id != context.boot_id
+    assert again.device_id == context.device_id and again.run_id != context.run_id
 
 
 @pytest.mark.parametrize("failing_reader", [lambda: None, Mock(side_effect=OSError("no serial"))])
@@ -113,7 +113,6 @@ def test_hardware_boot_context_enrolls_against_a_real_registry_pending_unbound(r
                 RecordingRenderer(), _immediate, find_central=finding("http://central"),
                 trust=Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA)),
                 clock=registry.clock, client=client, time_client=client, boot_context=context,
-                health_path=None,
             )
             try:
                 await service.locate_central()

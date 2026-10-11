@@ -151,29 +151,34 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
     assert expired["state"] == "expired"
 
 
-def test_native_capability_survives_session_loss_and_refuses_legacy_write(registry):
+def test_native_capability_survives_session_loss(registry):
     setup_trial(registry)
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
-    from central.registry import RegistryError
     with registry.db.transaction() as conn:
         conn.execute("UPDATE node_sessions SET revoked_at=999 WHERE owner='display_host'")
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
-    with pytest.raises(RegistryError, match="calibration_trial_required"):
-        registry.calibrate("node-f0", "commit", 2, Calibration(), expected_generation=1)
 
 
 def test_native_capability_survives_generation_revocation_without_current_boot(registry):
     setup_trial(registry)
-    from central.registry import RegistryError
-
     with registry.db.transaction() as conn:
         conn.execute("UPDATE node_sessions SET revoked_at=999")
         conn.execute("UPDATE node_boot_admissions SET superseded_at=999")
         conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1")
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
-    for operation in ("preview", "commit"):
-        with pytest.raises(RegistryError, match="calibration_trial_required"):
-            registry.calibrate("node-f0", operation, 2, Calibration(), expected_generation=1)
+
+
+def test_a_frame_whose_player_never_booted_a_node_is_not_admitted(registry):
+    """A Player with no node admission (a Compose or demo Player) has no calibration protocol:
+    Central offers its Frame none, and an unbound Frame none either. Mutation probe: answer
+    `native_trial` for every bound Frame."""
+    from test_registry import enroll, frame
+
+    identity, _, _ = enroll(registry)
+    frame(registry, "plain")
+    assert registry.calibration_capability("plain")["mode"] == "not_admitted"
+    registry.bind("plain", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    assert registry.calibration_capability("plain")["mode"] == "not_admitted"
 
 
 def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):

@@ -324,11 +324,6 @@ class RolloutEffectGate:
                     raise RolloutGateError("rollout_revision_conflict")
                 if row["state"] != "closed":
                     raise RolloutGateError("rollout_gate_already_open")
-                # An unresolved equipment drain must be reconciled before a new effect
-                # generation can start.
-                if conn.execute("SELECT EXISTS(SELECT 1 FROM active_equipment_drains) AS drain"
-                                ).fetchone()["drain"]:
-                    raise RolloutGateError("rollout_barrier_unresolved")
                 now = _time_in(conn)
                 encoded, scope_digest = _validated_certificate(certificate, now=now)
                 updated = conn.execute(

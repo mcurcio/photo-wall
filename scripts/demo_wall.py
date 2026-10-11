@@ -180,7 +180,7 @@ config = PlayerConfig(central_origin='http://central:8000',
                       cache_dir='/tmp/cache', cache_bytes=32*1024**2)
 # A container has no Pi serial: the demo names the device the Player enrolls as.
 boot_context = BootContext(device_id=os.environ['PHOTO_WALL_DEMO_DEVICE_ID'],
-                           boot_id=str(uuid.uuid4()))
+                           run_id=str(uuid.uuid4()))
 # The production wiring (R1): the container's kernel command line names no Central,
 # so the configured origin is the saved root, located before the first request.
 # One Trust for the whole process: the same anchors locate Central and every
@@ -189,7 +189,7 @@ trust = Trust.public()
 find_central = central_finder(config, resolve_central(read_kernel_command_line()),
                               transport=HttpTransport(trust=trust))
 service = AuditedService(config, load_identity(), outputs, renderer, dispatcher,
-                         find_central=find_central, trust=trust, health_path=None,
+                         find_central=find_central, trust=trust,
                          boot_context=boot_context)
 stopping = [False]
 def stop(*_):
@@ -813,8 +813,11 @@ def upstream_action(action: str):
 
 
 def operator_action(action: str):
-    """Control through real operator HTTP; SQL is limited to evidence reads."""
+    """Control through real operator HTTP; SQL is limited to evidence reads and one named
+    exception: the demo's Players have no Node, so Central offers their Frames no calibration
+    protocol, and `support.calibrated_frame` saves each Frame's calibration in its row (R7)."""
     import httpx
+    from support.calibrated_frame import calibrate_frame
 
     from central.db import Database
     client = httpx.Client(base_url="http://central:8000", trust_env=False, follow_redirects=False,
@@ -848,16 +851,18 @@ def operator_action(action: str):
         expected = 1 if os.environ["DEMO_SCENARIO"] == "baseline" else 3
         require(len(outputs) == expected, "players_not_registered")
         frames = []
-        for index, output in enumerate(outputs):
-            frame = "demo-frame-" + str(index + 1)
-            request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 500, "height_mm": 300,
-                "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
-            request("PUT", "/v1/operator/frames/" + frame + "/binding", {
-                "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
-            request("POST", "/v1/operator/frames/" + frame + "/calibration", {
-                "operation": "commit", "expected_revision": 1, "expected_generation": 1,
-                "calibration": {}})
-            frames.append(frame)
+        database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+        try:
+            for index, output in enumerate(outputs):
+                frame = "demo-frame-" + str(index + 1)
+                request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 500, "height_mm": 300,
+                    "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}})
+                request("PUT", "/v1/operator/frames/" + frame + "/binding", {
+                    "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
+                calibrate_frame(database, frame)
+                frames.append(frame)
+        finally:
+            database.close()
         request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True,
             "cycle_seconds": SCENE_CYCLE_SECONDS,
             "contributions": [{"target": "frame:" + frame, "kind": "media", "source_refs": ["demo:1"]}
