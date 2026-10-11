@@ -1,9 +1,9 @@
-"""Migration 076 deletes the retired legacy adoption's history and keeps every node boot.
+"""Migration 077 deletes the retired legacy adoption's history and keeps every node boot.
 
-One database at 075 holds two real node boots (Central's own boot and session services, each
+One database at 076 holds two real node boots (Central's own boot and session services, each
 with a session and an ingested event). One boot's context is then put in the shape the retired
 adoption left (basis 'legacy_adoption', no node offer) by SQL, the immutable-record trigger set
-aside for that edit only. `Database.migrate()` applies 076. Real PostgreSQL; skips without
+aside for that edit only. `Database.migrate()` applies 077. Real PostgreSQL; skips without
 PHOTO_WALL_TEST_DATABASE_URL (CI runs it).
 """
 
@@ -24,14 +24,14 @@ from contracts.node_protocol import NodeEventV2, RebootFact, encode_node_message
 from contracts.time import ManualClock
 
 OTHER_SERIAL = "1234567890abcdef"
-# Every table 076 deletes from, keyed by the producer its rows hang off.
+# Every table 077 deletes from, keyed by the producer its rows hang off.
 BY_PRODUCER = ("node_sessions", "node_evidence", "node_host_observations",
                "node_reconciliation_work")
 
 
 @pytest.fixture
-def before_076(empty_database):
-    with schema_before(empty_database, "076") as db:
+def before_077(empty_database):
+    with schema_before(empty_database, "077") as db:
         yield Registry(db, ManualClock(1000))
 
 
@@ -49,10 +49,10 @@ def _counts(conn, producer_id) -> dict[str, int]:
                                 (producer_id,)).fetchone()["n"] for table in BY_PRODUCER}
 
 
-def test_076_deletes_adopted_history_and_keeps_node_boots(before_076):
+def test_077_deletes_adopted_history_and_keeps_node_boots(before_077):
     """Mutation probe: drop the `DELETE FROM node_offer_contexts` (the narrowed CHECK and NOT
     NULL refuse the adopted row, so the migration fails)."""
-    registry = before_076
+    registry = before_077
     boots, sessions, _ = cold_setup(registry)
     adopted_offer, adopted = _boot(boots, sessions, SERIAL)
     kept_offer, kept = _boot(boots, sessions, OTHER_SERIAL)

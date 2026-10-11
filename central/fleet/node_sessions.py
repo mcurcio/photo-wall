@@ -161,7 +161,7 @@ class NodeSessions:
                             (grant.session_id, self.clock.utc())).fetchone()
         if live is None:
             return replace(grant, command_eligible=False, command_reason="node_session_unavailable")
-        # Every admission is a node boot offer's (076): a live session carries commands.
+        # Every admission is a node boot offer's (077): a live session carries commands.
         return replace(grant, command_eligible=True, command_reason="boot_admitted")
 
     def enroll(self, claim: NodeSessionClaim) -> NodeSessionGrant:

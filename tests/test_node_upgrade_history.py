@@ -106,7 +106,7 @@ def seed_historical_v1_offer(registry, *, session: bool = True) -> None:
 
 def test_049_to_current_drops_the_v1_offer_session_and_drain(history):
     # The V1 offer goes (069), so does the OS command session that named it (070), and the
-    # committed drain row written before the node migrations goes with the drain table (077).
+    # committed drain row written before the node migrations goes with the drain table (078).
     with history(49) as (registry, _through):
         _seed(registry)
         seed_historical_release(registry)
@@ -155,7 +155,7 @@ def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
                     conn.execute("UPDATE node_boot_admissions SET offer_id=%s", (uuid4(),))
         registry.db.migrate()
         with registry.db.transaction() as conn:
-            # 076: the adopted context and its admission are V1 history, deleted.
+            # 077: the adopted context and its admission are V1 history, deleted.
             assert conn.execute("SELECT * FROM node_boot_admissions").fetchall() == []
             assert conn.execute("SELECT * FROM node_offer_contexts").fetchall() == []
             assert conn.execute("SELECT count(*) AS n FROM node_sessions").fetchone()["n"] == 0

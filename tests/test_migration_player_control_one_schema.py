@@ -1,9 +1,9 @@
-"""Migration 075 leaves one control schema: rows a legacy session sealed, or that negotiated
+"""Migration 076 leaves one control schema: rows a legacy session sealed, or that negotiated
 schema 1, reopen so their Player's next hello negotiates; a schema-2 negotiation stands; the
 per-session schema column and the older pods' nonce guard trigger are gone.
 
 One database at 074 holds three enrolled Players (through the real Registry), their control rows
-put in the pre-075 shapes by SQL; `Database.migrate()` then applies 075. Real PostgreSQL; skips
+put in the pre-076 shapes by SQL; `Database.migrate()` then applies 076. Real PostgreSQL; skips
 without PHOTO_WALL_TEST_DATABASE_URL (CI runs it).
 """
 
@@ -21,15 +21,15 @@ NONCE = "d" * 64
 
 
 @pytest.fixture
-def before_075(empty_database):
-    with schema_before(empty_database, "075") as db:
+def before_076(empty_database):
+    with schema_before(empty_database, "076") as db:
         yield Registry(db, ManualClock(1000))
 
 
-def test_075_reopens_legacy_and_schema_1_rows_and_keeps_schema_2(before_075):
+def test_076_reopens_legacy_and_schema_1_rows_and_keeps_schema_2(before_076):
     """Mutation probe: `WHERE false` on the UPDATE (the legacy and schema-1 rows stay sealed,
     and the status CHECK refuses the legacy row)."""
-    registry = before_075
+    registry = before_076
     players = [enroll(registry)[0]["player_id"] for _ in range(3)]
     legacy, schema_1, schema_2 = players
     with registry.db.transaction() as conn:
