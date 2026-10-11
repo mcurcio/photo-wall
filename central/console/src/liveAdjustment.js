@@ -45,14 +45,15 @@ import { useMutate } from "./useMutate.js";
  * each waits for a loop request in flight rather than being dropped.
  */
 
-const TICK_MS = 500;
+/** How often a live session is kept (`keepalive`): the Position and Picture tabs share it. */
+export const TICK_MS = 500;
 const EDIT_DELAY_MS = 180;
 const RENEW_BEFORE_S = 15;
 const RETRY_MS = 2000;
 
 // Someone saved this Frame's calibration after the draft was made (Central's compare-and-set).
 const OVERTAKEN =
-  "Someone saved a different position or picture for this Frame meanwhile. Press Revert to load it, then adjust again.";
+  "Someone saved a different position for this Frame meanwhile. Press Revert to load it, then adjust again.";
 
 /** Central's refusals, in the operator's words. */
 const REFUSALS = {
@@ -88,7 +89,7 @@ const leftUnsaved = new Map();
 const ending = new Map();
 
 /** The browser tab is shown (the Page Visibility API). */
-function useVisible() {
+export function useVisible() {
   const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
   useEffect(() => {
     const update = () => setVisible(document.visibilityState !== "hidden");

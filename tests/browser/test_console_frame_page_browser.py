@@ -36,7 +36,6 @@ pytestmark = pytest.mark.skipif(
 FRAME = "hall-frame"
 OUTPUT = "HDMI-A-1"
 DEVICE = "device-frame-page-pi"  # its Player id ends "d89500"
-GAIN = 1.5
 # The fake's idle window: shorter than Central's 5 s, so a page that stopped keeping its session
 # would see it end within the test.
 IDLE_SECONDS = 1.5
@@ -45,8 +44,10 @@ IDLE_SECONDS = 1.5
 SHORT_WINDOW = 16
 PRESENTED = re.compile(r"^Presented by the Pi · \d\d:\d\d:\d\d$")
 WAITING = "Previewing — waiting for the Pi"
-OVERTAKEN = "Someone saved a different position or picture for this Frame meanwhile"
-BRIGHTNESS = "Brightness — Photo Wall picture adjustment"
+OVERTAKEN = "Someone saved a different position for this Frame meanwhile"
+# The saved top-left corner, in pixels of the 1920 x 1080 output, and one saved elsewhere.
+SAVED_X = 100
+ELSEWHERE_X = 300
 
 
 LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
@@ -55,9 +56,14 @@ LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 
 
+def _corners(x):
+    """The whole output with its top-left corner `x` pixels in."""
+    return ((x / 1920, 0), (1, 0), (1, 1), (0, 1))
+
+
 def _seed(registry, profile=LANDSCAPE, rotation=0):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
-    saved calibration (gain 1.5, revision 2); returns the Player's id."""
+    saved position (its top-left corner SAVED_X pixels in, revision 2); returns the Player's id."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
@@ -66,7 +72,7 @@ def _seed(registry, profile=LANDSCAPE, rotation=0):
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
-    save_position(registry, FRAME, Calibration(gain=GAIN, rotation=rotation), expected_revision=1)
+    save_position(registry, FRAME, Calibration(corners=_corners(SAVED_X), rotation=rotation), expected_revision=1)
     return identity["player_id"]
 
 
@@ -74,9 +80,15 @@ def _saved(registry):
     return next(frame for frame in registry.inventory().frames if frame.id == FRAME).calibration
 
 
-def _save_elsewhere(registry, gain=1.2):
-    """Another window saves the Frame's calibration (revision 2 -> 3)."""
-    save_position(registry, FRAME, Calibration(gain=gain), expected_revision=2)
+def _top_left_x(calibration):
+    """A saved or drafted position's top-left corner, in pixels of the output."""
+    corners = calibration["corners"] if isinstance(calibration, dict) else calibration.corners
+    return round(corners[0][0] * 1920)
+
+
+def _save_elsewhere(registry, x=ELSEWHERE_X):
+    """Another window saves the Frame's position (revision 2 -> 3)."""
+    save_position(registry, FRAME, Calibration(corners=_corners(x)), expected_revision=2)
 
 
 class FakeSessions:
@@ -235,13 +247,20 @@ def _bar(page):
     return page.get_by_role("group", name="Show on the Display", exact=True)
 
 
-def _brighten(page, presses=-1):
-    """Change Brightness by `presses` steps of 5 % (negative dims) on the Picture tab."""
-    slider = page.get_by_role("slider", name=BRIGHTNESS, exact=True)
-    slider.focus()
-    for _ in range(abs(presses)):
-        page.keyboard.press("ArrowRight" if presses > 0 else "ArrowLeft")
-    return slider
+def _move(page, presses=1):
+    """Move the top-left corner `presses` steps of 10 px right on the Position tab; returns its
+    x field (under Exact values)."""
+    page.get_by_label("Move", exact=True).select_option(label="Top-left corner")
+    for _ in range(presses):
+        page.get_by_role("button", name="Move right: the top-left corner", exact=True).click()
+    return _top_left_field(page)
+
+
+def _top_left_field(page):
+    field = page.get_by_label("Top-left x", exact=True)
+    if not field.is_visible():
+        page.get_by_role("button", name="Exact values", exact=True).click()
+    return field
 
 
 def _set_visibility(page, state):
@@ -286,7 +305,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         page.get_by_label("Move", exact=True).select_option(label="Top-left corner")
         page.get_by_role("button", name="Move right: the top-left corner", exact=True).click()
         page.get_by_role("button", name="Exact values", exact=True).click()
-        expect(page.get_by_label("Top-left x", exact=True)).to_have_value("10")
+        expect(page.get_by_label("Top-left x", exact=True)).to_have_value(str(SAVED_X + 10))
         expect(bar.get_by_role("status")).to_have_text(WAITING)
         expect(done).to_be_disabled()
         expect(bar).to_contain_text("Done is offered once the Pi presents your latest change.")
@@ -302,9 +321,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         done.click()
         expect(page.get_by_role("status").filter(has_text="Saved at")).to_have_text(
             re.compile(r"^Saved at \d\d:\d\d:\d\d\.$"))
-        saved = _saved(registry)
-        assert saved.corners[0][0] == pytest.approx(10 / 1920)
-        assert saved.gain == GAIN
+        assert _top_left_x(_saved(registry)) == SAVED_X + 10
 
         # The next session shows the saved position; leaving the tab (nothing unkept: no
         # question) ends it.
@@ -317,16 +334,6 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
         while fake.count("end") == ended and time.monotonic() < deadline:
             page.wait_for_timeout(100)
         assert fake.count("end") > ended, fake.sent
-
-
-def test_brightness_is_on_the_picture_tab_in_plain_words(page, registry, sessions):
-    _seed(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        frame = open_frame(page, FRAME, "picture")
-        brightness = frame.get_by_role("slider", name=BRIGHTNESS, exact=True)
-        expect(brightness).to_have_value("150")
-        expect(brightness).to_have_attribute("aria-valuetext", "150 %")
 
 
 def test_every_tab_speaks_plain_words(page, registry, sessions):
@@ -447,12 +454,13 @@ def test_dragging_a_corner_inward_moves_the_picture(page, registry, sessions):
         editor.scroll_into_view_if_needed()
         box = editor.bounding_box()
         scale = box["width"] / 512  # the drawing is 480 wide inside a 16 px margin
-        page.mouse.move(box["x"] + 16 * scale, box["y"] + 16 * scale)
+        start = 16 + SAVED_X / 1920 * 480  # the saved top-left corner's handle
+        page.mouse.move(box["x"] + start * scale, box["y"] + 16 * scale)
         page.mouse.down()
         page.mouse.move(box["x"] + 76 * scale, box["y"] + 76 * scale, steps=6)
         page.mouse.up()
         frame.get_by_role("button", name="Exact values", exact=True).click()
-        expect(frame.get_by_label("Top-left x", exact=True)).not_to_have_value("0")
+        expect(frame.get_by_label("Top-left x", exact=True)).not_to_have_value(str(SAVED_X))
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
         assert fake.count("edit") >= 1
@@ -489,23 +497,23 @@ def test_a_folded_or_thin_picture_is_refused_where_it_is_typed(page, registry, s
 def test_a_refresh_never_overwrites_the_draft(page, registry, sessions):
     """Two planes: the draft is the operator's; a refresh replaces the snapshot, never it.
 
-    Mutation: have useDraft re-seed from the saved calibration on refresh -> the slider jumps
-    to 120 after Refresh -> RED."""
+    Mutation: have useDraft re-seed from the saved position on refresh -> the corner jumps
+    to ELSEWHERE_X after Refresh -> RED."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        open_frame(page, FRAME, "picture")
-        brightness = _brighten(page, 8)  # 150 -> 190 %
-        expect(brightness).to_have_value("190")
+        open_frame(page, FRAME, "position")
+        corner = _move(page, 4)  # 100 -> 140 px
+        expect(corner).to_have_value("140")
 
-        # The saved calibration moves underneath the open draft (a save from elsewhere).
+        # The saved position moves underneath the open draft (a save from elsewhere).
         _save_elsewhere(registry)
         page.get_by_role("button", name="Refresh", exact=True).click()
         page.wait_for_timeout(500)
-        expect(brightness).to_have_value("190")
-        # Revert returns to the saved calibration as refreshed: the refresh was real.
+        expect(corner).to_have_value("140")
+        # Revert returns to the saved position as refreshed: the refresh was real.
         _bar(page).get_by_role("button", name="Revert", exact=True).click()
-        expect(brightness).to_have_value("120")
+        expect(corner).to_have_value(str(ELSEWHERE_X))
 
 
 def test_a_stale_done_is_refused_and_keeps_the_other_save(page, registry, sessions):
@@ -514,18 +522,18 @@ def test_a_stale_done_is_refused_and_keeps_the_other_save(page, registry, sessio
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        frame = open_frame(page, FRAME, "picture")
+        frame = open_frame(page, FRAME, "position")
         bar = _bar(page)
-        brightness = _brighten(page)  # 150 -> 145 %
+        corner = _move(page)  # 100 -> 110 px
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
 
         _save_elsewhere(registry)
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(frame.get_by_role("alert")).to_contain_text(OVERTAKEN)
-        assert _saved(registry).gain == 1.2
+        assert _top_left_x(_saved(registry)) == ELSEWHERE_X
 
         frame.get_by_role("alert").get_by_role("button", name="Revert", exact=True).click()
-        expect(brightness).to_have_value("120")
+        expect(corner).to_have_value(str(ELSEWHERE_X))
         expect(frame.get_by_role("alert")).to_have_count(0)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
 
@@ -548,9 +556,9 @@ def test_a_draft_resumed_after_the_page_was_hidden_never_overwrites_a_save_made_
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        frame = open_frame(page, FRAME, "picture")
+        frame = open_frame(page, FRAME, "position")
         bar = _bar(page)
-        _brighten(page)  # 150 -> 145 %
+        _move(page)  # 100 -> 110 px
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
 
@@ -565,7 +573,7 @@ def test_a_draft_resumed_after_the_page_was_hidden_never_overwrites_a_save_made_
         expect(frame.get_by_role("alert")).to_contain_text(OVERTAKEN)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
         page.wait_for_timeout(1000)
-        assert _saved(registry).gain == 1.2
+        assert _top_left_x(_saved(registry)) == ELSEWHERE_X
         assert sessions.bodies[sessions.sent.index("begin", 1)]["calibration"]["revision"] == 2
 
 
@@ -579,16 +587,16 @@ def test_a_handover_carries_the_draft_and_never_overwrites_a_save_made_meanwhile
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        frame = open_frame(page, FRAME, "picture")
+        frame = open_frame(page, FRAME, "position")
         bar = _bar(page)
-        _brighten(page)  # 150 -> 145 %
+        _move(page)  # 100 -> 110 px
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
 
         _save_elsewhere(registry)
         expect(frame.get_by_role("alert")).to_contain_text(OVERTAKEN)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
         page.wait_for_timeout(1000)
-        assert _saved(registry).gain == 1.2
+        assert _top_left_x(_saved(registry)) == ELSEWHERE_X
 
 
 def test_the_session_is_handed_over_with_the_draft_while_the_tab_stays_open(page, registry, handovers):
@@ -602,21 +610,21 @@ def test_the_session_is_handed_over_with_the_draft_while_the_tab_stays_open(page
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        open_frame(page, FRAME, "picture")
+        open_frame(page, FRAME, "position")
         bar = _bar(page)
-        _brighten(page)  # 150 -> 145 %
+        _move(page)  # 100 -> 110 px
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         page.wait_for_timeout(4000)
         sent = list(handovers.sent)
         assert sent.count("renew") >= 2, sent
         assert sent.count("begin") == 1 and "end" not in sent, sent
-        drafts = [began["gain"] for began in handovers.began_with[1:]]
-        assert drafts and all(gain == 1.45 for gain in drafts[1:]), drafts
+        drafts = [_top_left_x(began) for began in handovers.began_with[1:]]
+        assert drafts and all(x == SAVED_X + 10 for x in drafts[1:]), drafts
         assert handovers.state_now() == "active"
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         bar.get_by_role("button", name="Done", exact=True).click()
         expect(page.get_by_role("status").filter(has_text="Saved at")).to_be_visible()
-        assert _saved(registry).gain == 1.45
+        assert _top_left_x(_saved(registry)) == SAVED_X + 10
 
 
 def test_a_closed_page_stops_keeping_its_session_and_it_ends_within_the_idle_window(page, registry, sessions):
@@ -642,9 +650,9 @@ def test_done_and_revert_never_flicker_while_the_session_is_kept(page, registry,
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        open_frame(page, FRAME, "picture")
+        open_frame(page, FRAME, "position")
         bar = _bar(page)
-        _brighten(page)
+        _move(page)
         done = bar.get_by_role("button", name="Done", exact=True)
         expect(done).to_be_enabled()
         changes = page.evaluate("""() => new Promise((resolve) => {
@@ -665,7 +673,7 @@ def test_a_passing_refusal_keeps_the_session_and_clears_itself(page, registry, s
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        frame = open_frame(page, FRAME, "picture")
+        frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         sessions.fail["keepalive"] = (409, "trial_display_unavailable")
         expect(frame.get_by_role("alert")).to_contain_text("This Frame's Pi is not connected to Photo Wall")
@@ -681,45 +689,45 @@ def test_leaving_the_tab_with_changes_asks_keep_or_revert(page, registry, sessio
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        open_frame(page, FRAME, "picture")
+        open_frame(page, FRAME, "position")
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
-        _brighten(page)
+        _move(page)
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
 
         tabs.get_by_role("tab", name="Overview", exact=True).click()
         dialog = page.get_by_role("dialog", name="Keep your changes?")
         dialog.get_by_role("button", name="Stay", exact=True).click()
         expect(dialog).to_have_count(0)
-        assert page.evaluate("location.hash").endswith("/picture")
+        assert page.evaluate("location.hash").endswith("/position")
 
         tabs.get_by_role("tab", name="Overview", exact=True).click()
         dialog.get_by_role("button", name="Revert", exact=True).click()
         expect(page.get_by_role("region", name="Now", exact=True)).to_be_visible()
-        assert _saved(registry).gain == GAIN
+        assert _top_left_x(_saved(registry)) == SAVED_X
 
-        tabs.get_by_role("tab", name="Picture", exact=True).click()
-        expect(_brighten(page, 2)).to_have_value("160")
+        tabs.get_by_role("tab", name="Position", exact=True).click()
+        expect(_move(page, 2)).to_have_value(str(SAVED_X + 20))
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         tabs.get_by_role("tab", name="Hardware", exact=True).click()
         dialog.get_by_role("button", name="Keep", exact=True).click()
         expect(page.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
-        assert _saved(registry).gain == 1.6
+        assert _top_left_x(_saved(registry)) == SAVED_X + 20
 
 
 def test_leaving_the_page_with_changes_says_they_were_reverted_on_return(page, registry, sessions):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        open_frame(page, FRAME, "picture")
-        _brighten(page)
+        open_frame(page, FRAME, "position")
+        _move(page)
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         visit(page, "#/wall")
         expect(page.get_by_role("button", name=f"Frame {FRAME}", exact=True)).to_be_visible()
-        open_frame(page, FRAME, "picture")
+        open_frame(page, FRAME, "position")
         expect(page.get_by_role("status").filter(has_text="Your unsaved changes were reverted at")).to_have_text(
             re.compile(r"reverted at \d\d:\d\d:\d\d because you left this Frame's page\.$"))
-        expect(page.get_by_role("slider", name=BRIGHTNESS, exact=True)).to_have_value("150")
-        assert _saved(registry).gain == GAIN
+        expect(_top_left_field(page)).to_have_value(str(SAVED_X))
+        assert _top_left_x(_saved(registry)) == SAVED_X
 
 
 @pytest.mark.parametrize("scheme", ["dark", "light"])
@@ -747,18 +755,18 @@ def test_a_revert_or_a_quick_return_never_races_its_own_end(page, registry, sess
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        open_frame(page, FRAME, "picture")
+        open_frame(page, FRAME, "position")
         bar = _bar(page)
         tabs = page.get_by_role("tablist", name="Frame settings", exact=True)
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         sessions.hold_end = True
         if how == "revert":
-            _brighten(page)
+            _move(page)
             expect(bar.get_by_role("status")).to_have_text(PRESENTED)
             bar.get_by_role("button", name="Revert", exact=True).click()
         else:
             tabs.get_by_role("tab", name="Overview", exact=True).click()
-            tabs.get_by_role("tab", name="Picture", exact=True).click()
+            tabs.get_by_role("tab", name="Position", exact=True).click()
             bar = _bar(page)
         page.wait_for_timeout(1500)  # long enough for a begin that did not wait
         assert sessions.refused_busy == 0, sessions.sent
@@ -780,7 +788,7 @@ def test_the_side_rail_stays_put_and_the_tabs_never_wrap(page, registry, session
         tops = {}
         for tab in ("overview", "position", "picture", "hardware"):
             open_frame(page, FRAME, tab)
-            if tab in ("position", "picture"):
+            if tab == "position":
                 expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
             tops[tab] = rail.bounding_box()["y"]
         assert len(set(tops.values())) == 1, tops
