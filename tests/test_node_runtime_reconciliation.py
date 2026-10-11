@@ -4,6 +4,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from support.position import save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_registry import enroll, frame
@@ -44,7 +45,7 @@ def rig(registry):
     for index in range(2):
         frame(registry, f"node-f{index}")
         registry.bind(f"node-f{index}", player["player_id"], f"HDMI-A-{index+1}", expected_generation=0)
-        registry.calibrate(f"node-f{index}", "commit", 1, Calibration(), expected_generation=1)
+        save_position(registry, f"node-f{index}")
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="node-scene", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:node-f0", kind="black"),

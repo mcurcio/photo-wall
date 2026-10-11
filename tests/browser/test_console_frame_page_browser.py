@@ -22,6 +22,7 @@ import pytest
 from console_tasks import open_frame, visit
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
+from support.position import save_position
 from test_registry import enroll
 
 from central.registry import FrameCreate, RegistryError
@@ -65,8 +66,7 @@ def _seed(registry, profile=LANDSCAPE, rotation=0):
         id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
         height_mm=300 if landscape else 500, profile=profile))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
-    registry.calibrate(FRAME, "commit", expected_revision=1,
-                       calibration=Calibration(gain=GAIN, rotation=rotation), expected_generation=1)
+    save_position(registry, FRAME, Calibration(gain=GAIN, rotation=rotation), expected_revision=1)
     return identity["player_id"]
 
 
@@ -76,8 +76,7 @@ def _saved(registry):
 
 def _save_elsewhere(registry, gain=1.2):
     """Another window saves the Frame's calibration (revision 2 -> 3)."""
-    registry.calibrate(FRAME, "commit", expected_revision=2, calibration=Calibration(gain=gain),
-                       expected_generation=1)
+    save_position(registry, FRAME, Calibration(gain=gain), expected_revision=2)
 
 
 class FakeSessions:
@@ -194,9 +193,8 @@ class FakeSessions:
                 return
             calibration = Calibration.model_validate(self.row["calibration"])
             try:  # Central's Save is a compare-and-set on the draft's base revision
-                self.registry.calibrate(
-                    FRAME, "commit", expected_revision=self.row["calibration_revision"],
-                    calibration=calibration, expected_generation=1)
+                save_position(self.registry, FRAME, calibration,
+                              expected_revision=self.row["calibration_revision"])
             except RegistryError as error:
                 route.fulfill(status=409, json={"error": error.code})
                 return

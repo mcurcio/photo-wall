@@ -18,12 +18,13 @@ import pytest
 from console_tasks import connect, current_hash, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.position import save_position
 from test_display_identity import NO_SERIAL, SERIAL_DISPLAY, _bind, _frame, enroll_pi
 from test_display_identity import _report as _recorded
 
 from central.displays.model import Readiness
 from central.registry import FrameCreate
-from contracts.models import Calibration, FrameProfile
+from contracts.models import FrameProfile
 from contracts.node_output import DisplayIdentity
 
 pytestmark = pytest.mark.skipif(
@@ -54,10 +55,8 @@ def _row(registry, frame_id: str):
 
 
 def _commit_position(registry, frame_id: str) -> None:
-    """The Position tab's Done (`Registry.calibrate` commit)."""
-    frame = _row(registry, frame_id)
-    registry.calibrate(frame_id, "commit", frame.calibration.revision, Calibration(),
-                       expected_generation=frame.generation)
+    """The Position tab's Save (tests/support/position.py, the Save CAS)."""
+    save_position(registry, frame_id)
 
 
 def _display(frame):
