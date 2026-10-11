@@ -10,7 +10,12 @@ Frame profile's aspect, slid along the photo's free axis (contracts/photo_crop.p
 1. removes no more than the crop limit of the photo's area (`crop_share`; the backstop),
 2. has at least the Frame's pixels in the original (`profile.width_px` x `profile.height_px`),
 3. keeps every face whole (each `UnitBox` inside the window), and
-4. keeps at least ENOUGH_INTEREST of the interest grid (`interest_kept`).
+4. cuts no key content: the share of the interest grid it removes (1 - `interest_kept`) is at
+   most MAX_LOST_INTEREST_DENSITY x the share of the area it removes (`crop_share`). A side that
+   holds no more than its share of the photo's interest may go (owner, 2026-10-11: "if the key
+   content is on the left and the right is benign, then it would be reasonable to crop the
+   picture so that the left edge is preserved"); one holding key content may not ("if it has key
+   content on the sides then it can't be cropped to fit"). An even spread of interest passes.
 Among the windows passing 3 and 4, the one keeping the most interest wins; ties go to the window
 nearest the centre, then the lower offset. Windows are tried at offsets k / WINDOW_STEPS for
 k = 0..WINDOW_STEPS, plus 0.5.
@@ -30,8 +35,10 @@ from contracts.photo_crop import Window
 # The Scene setting's default (design "Crop limit": 35 %, between 1:1 on 3:2, 33 %, and 4:5 on
 # 5:4, 36 %). SceneSelection's default is this value.
 DEFAULT_CROP_LIMIT: Final = 0.35
-# Rule 4's threshold (design parked note: placeholder 90 %).
-ENOUGH_INTEREST: Final = 0.90
+# Rule 4's limit: how much denser in interest than the photo's average the removed part may be.
+# A placeholder to tune on the owner's library (run ledger finding F-2; the design's parked
+# "enough interest, placeholder 90 %" refused every evenly spread 4:3 photo on a 16:9 Frame).
+MAX_LOST_INTEREST_DENSITY: Final = 1.25
 # How many steps the window is slid across its free axis.
 WINDOW_STEPS: Final = 64
 # requirements :186: on a Frame this large a video needs this shorter side.
@@ -42,7 +49,7 @@ FitRefusal = Literal[
     "beyond_crop_limit",     # "doesn't fit this Frame's shape"
     "below_frame_pixels",    # "too small for this Frame"
     "face_cut",              # "a face would be cut"
-    "too_little_interest",   # "the interesting part would be cut"
+    "interest_cut",          # "the interesting part would be cut"
     "no_video_here",         # "this Frame shows no videos"
 ]
 MediaKind = Literal["image", "video"]
@@ -89,7 +96,7 @@ def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None,
           profile: FrameProfile, crop_limit: float) -> FitVerdict:
     """The whole rule for one photo on one Frame profile: `shape_fit` first, then (an image)
     rules 3 and 4 over the slid windows, `face_cut` when no window keeps every face whole, else
-    `too_little_interest` when none keeps ENOUGH_INTEREST; a video gets the centred window.
+    `interest_cut` when none passes rule 4; a video gets the centred window.
     `Fits.crop_share` is `crop_share(...)`; `Fits.interest_kept` the chosen window's (1.0 for a
     video). Pure; ValueError for an image judged with `key` None (an image is judged only once
     measured) or a crop limit outside (0, 1)."""
