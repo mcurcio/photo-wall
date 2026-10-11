@@ -1,0 +1,167 @@
+"""Settings › Photo library's routes (roadmap 4, slice C1; run ledger .claude/runs/photo-4.md, C1
+cases 1-5): a connection is pasted with its key, which no answer, job or log ever carries again.
+
+FastAPI's TestClient over create_app with a real database and Procrastinate's real queue.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import pytest
+from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
+from runtime_fakes import apply_procrastinate_schema
+
+from central.app import create_app
+from central.media_queue import CHECK_CONNECTION_TASK
+from central.photo_library.model import SourceQuery
+from central.photo_library.policy import REQUIRED_PERMISSIONS
+
+ADMIN = "photo-library-operator-" + "t" * 32
+AUTH = {"Authorization": "Bearer " + ADMIN}
+KEY = "PUBLIC-FIXTURE-KEY-1234"
+CONNECTIONS = "/v1/operator/library/connections"
+
+
+@pytest.fixture
+def client(registry, tmp_path, monkeypatch):
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path))
+    apply_procrastinate_schema(registry.db.dsn)
+    app = create_app(registry.db, registry.clock, ADMIN)
+    with TestClient(app) as test_client:
+        yield test_client, app.state.photo_library
+
+
+def _jobs(db):
+    with db.transaction() as conn:
+        return conn.execute("SELECT task_name,args,status,queueing_lock FROM procrastinate_jobs "
+                            "ORDER BY id").fetchall()
+
+
+def _ran(db):
+    """The worker took and finished every queued job."""
+    with db.transaction() as conn:
+        conn.execute("UPDATE procrastinate_jobs SET status='succeeded' WHERE status='todo'")
+
+
+def _add(test_client, **body):
+    return test_client.post(CONNECTIONS, json={"name": "Home", "url": "http://immich.invalid:2283",
+                                               "key": KEY, **body}, headers=AUTH)
+
+
+def test_a_pasted_connection_is_listed_with_a_key_hint_and_not_checked(client):
+    """Case 1."""
+    test_client, _ = client
+    created = _add(test_client)
+    assert created.status_code == 201
+    ref = created.json()["connection_ref"]
+    assert ref.startswith("library-") and len(ref) == len("library-") + 12
+    [row] = test_client.get(CONNECTIONS, headers=AUTH).json()
+    assert row == {"connection_ref": ref, "name": "Home", "url": "http://immich.invalid:2283/api",
+                   "key_hint": "…1234", "immich_user": None, "health": {"state": "not_checked"},
+                   "counts": None, "required_permissions": list(REQUIRED_PERMISSIONS)}
+
+
+def test_the_key_is_in_no_answer_job_or_log(client, caplog):
+    """Case 2. Mutation probe: return api_key in LibraryConnectionView."""
+    test_client, library = client
+    caplog.set_level(logging.DEBUG)
+    created = _add(test_client)
+    ref = created.json()["connection_ref"]
+    answers = [created, test_client.get(CONNECTIONS, headers=AUTH),
+               test_client.put(f"{CONNECTIONS}/{ref}", json={"name": "Home", "url": "http://h",
+                                                             "key": KEY + "-2"}, headers=AUTH),
+               test_client.post(CONNECTIONS, json={"name": "x", "url": "ftp://x", "key": KEY},
+                                headers=AUTH),
+               test_client.post(CONNECTIONS, json={"name": "", "url": "http://h", "key": KEY},
+                                headers=AUTH),
+               test_client.get(CONNECTIONS, headers=AUTH)]
+    for response in answers:
+        assert KEY not in response.text
+    jobs = _jobs(library.db)
+    assert [(job["task_name"], job["args"]) for job in jobs] == [
+        (CHECK_CONNECTION_TASK, {"connection_ref": ref})]
+    assert KEY not in str(jobs)
+    assert all(KEY not in record.getMessage() and KEY not in str(record.args)
+               for record in caplog.records)
+
+
+def test_refusals(client):
+    """Case 3."""
+    test_client, _ = client
+    assert test_client.post(CONNECTIONS, json={"name": "Home", "url": "http://h"},
+                            headers=AUTH).json() == {"error": "key_required"}
+    refused = _add(test_client, url="ftp://x")
+    assert (refused.status_code, refused.json()) == (422, {"error": "invalid_url"})
+    unknown = test_client.put(f"{CONNECTIONS}/library-000000000000",
+                              json={"name": "Home", "url": "http://h"}, headers=AUTH)
+    assert (unknown.status_code, unknown.json()) == (404, {"error": "connection_unknown"})
+    gone = test_client.delete(f"{CONNECTIONS}/library-000000000000", headers=AUTH)
+    assert (gone.status_code, gone.json()) == (404, {"error": "connection_unknown"})
+    assert test_client.get(CONNECTIONS).status_code == 401
+    ref = _add(test_client).json()["connection_ref"]
+    taken = _add(test_client)
+    assert (taken.status_code, taken.json()) == (409, {"error": "connection_name_exists"})
+    bad = test_client.put(f"{CONNECTIONS}/{ref}", json={"name": "Home", "url": "h"}, headers=AUTH)
+    assert (bad.status_code, bad.json()) == (422, {"error": "invalid_url"})
+
+
+def test_a_put_keeps_or_replaces_the_key_and_queues_a_check_each_time(client):
+    """Case 4."""
+    test_client, library = client
+    ref = _add(test_client).json()["connection_ref"]
+    _ran(library.db)
+    renamed = test_client.put(f"{CONNECTIONS}/{ref}",
+                              json={"name": "Family", "url": "https://photos.example/immich/"},
+                              headers=AUTH)
+    assert (renamed.status_code, renamed.json()) == (200, {"connection_ref": ref})
+    secret = library.connection_secret(ref)
+    assert secret.api_key.get_secret_value() == KEY
+    assert secret.base_url == "https://photos.example/immich/api"
+    assert [view.name for view in library.connections()] == ["Family"]
+    _ran(library.db)
+    test_client.put(f"{CONNECTIONS}/{ref}", json={"name": "Family", "url": "http://h",
+                                                  "key": "NEW-KEY-5678"}, headers=AUTH)
+    assert library.connection_secret(ref).api_key.get_secret_value() == "NEW-KEY-5678"
+    assert library.connections()[0].key_hint == "…5678"
+    _ran(library.db)
+    assert test_client.post(f"{CONNECTIONS}/{ref}/checks", headers=AUTH).status_code == 202
+    assert test_client.post(f"{CONNECTIONS}/{ref}/checks", headers=AUTH).status_code == 202
+    jobs = _jobs(library.db)
+    assert [job["status"] for job in jobs] == ["succeeded", "succeeded", "succeeded", "todo"]
+    assert {job["task_name"] for job in jobs} == {CHECK_CONNECTION_TASK}
+    unknown = test_client.post(f"{CONNECTIONS}/library-000000000000/checks", headers=AUTH)
+    assert (unknown.status_code, unknown.json()) == (404, {"error": "connection_unknown"})
+
+
+def test_a_cut_over_row_needs_its_key_once(client):
+    test_client, library = client
+    with library.db.transaction() as conn:
+        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
+                     "VALUES('family-library','family-library',0)")
+    path = f"{CONNECTIONS}/family-library"
+    assert test_client.put(path, json={"name": "family-library", "url": "http://h"},
+                           headers=AUTH).json() == {"error": "key_required"}
+    assert test_client.put(path, json={"name": "family-library", "url": "http://h", "key": KEY},
+                           headers=AUTH).status_code == 200
+    assert library.connection_secret("family-library").base_url == "http://h/api"
+
+
+def test_a_connection_a_source_uses_is_not_removed(client):
+    """Case 5."""
+    test_client, library = client
+    ref = _add(test_client).json()["connection_ref"]
+    query = SourceQuery(connection_ref=ref)
+    with library.db.transaction() as conn:
+        conn.execute("INSERT INTO media_sources(source_ref,query) VALUES('family:1',%s)",
+                     (Jsonb(query.model_dump(mode="json")),))
+        conn.execute("INSERT INTO media_source_names(name,current_ref,revision) "
+                     "VALUES('family','family:1',1)")
+    refused = test_client.delete(f"{CONNECTIONS}/{ref}", headers=AUTH)
+    assert (refused.status_code, refused.json()) == (409, {"error": "sources_use_connection"})
+    with library.db.transaction() as conn:
+        conn.execute("UPDATE media_source_names SET deleted=TRUE")
+        conn.execute("UPDATE media_sources SET refresh_active=FALSE")
+    assert test_client.delete(f"{CONNECTIONS}/{ref}", headers=AUTH).status_code == 204
+    assert test_client.get(CONNECTIONS, headers=AUTH).json() == []

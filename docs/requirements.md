@@ -180,6 +180,8 @@ Immich query results can change asynchronously during a Run. New holiday photos 
 
 An AssetSource has no fixed upstream membership ceiling. Central discovers and revisits large or changing matches incrementally, with bounded requests, work, preparation, and storage. A large result is not itself an incompatible Source; incomplete discovery, upstream failure, and a truly empty result remain distinct. Before entering filters, the operator chooses the upstream connection and can inspect actual matching photos/videos through a paged operator view before and after saving. These views do not put upstream credentials or direct upstream access in Players.
 
+**One Immich query per Photo source, and exclusions.** The owner, 2026-09-28: "immich should be the computation engine as much as possible", with each photo-source configuration mapping to one Immich query. Immich's search has no "not", so an exclusion cannot sit inside that one query. Delivery 4 reads the rule this way: the include query is one Immich query; each exclusion (an album, a person, a tag, screenshots) is one more Immich query, read whole on every check; Photo Wall only subtracts their answers and never computes a filter of its own. **This reading is a choice made on 2026-10-11, in an overnight build with no owner gate, for the owner to confirm; it is not his statement.** If he meant one query literally, album, person and tag exclusions leave delivery 4 ([media module](module-media.md#photo-source-queries)).
+
 **Enforce compatibility before preference-based selection.** Frames may differ in aspect ratio, physical size, resolution, and playback capability.
 
 - Landscape photos must never be assigned to portrait Frames. Cropping does not create an implicit exception.

@@ -83,13 +83,28 @@ class ProcrastinateMediaQueue:
     def enqueue_connection_check_in(self, conn: Any, connection_ref: str) -> QueueReceipt:
         """Queue CHECK_CONNECTION_TASK(connection_ref=...) on MEDIA_QUEUE in the caller's
         transaction, lock and queueing lock LIBRARY_CONNECTION_LOCK_PREFIX + ref; an already
-        queued check coalesces (QueueReceipt(coalesced=True)). Slice C1."""
-        raise NotImplementedError("slice C1")
+        queued check coalesces (QueueReceipt(coalesced=True))."""
+        return self._defer_coalescing(conn, CHECK_CONNECTION_TASK,
+                                      LIBRARY_CONNECTION_LOCK_PREFIX + connection_ref,
+                                      connection_ref=connection_ref)
 
     def enqueue_pool_check_in(self, conn: Any, pool_key: str) -> QueueReceipt:
         """Queue CHECK_POOL_TASK(pool_key=...) as `enqueue_connection_check_in`, with
-        LIBRARY_POOL_LOCK_PREFIX + pool key. Slice C2."""
-        raise NotImplementedError("slice C2")
+        LIBRARY_POOL_LOCK_PREFIX + pool key: one step of a pool runs at a time, and a step
+        already waiting absorbs a second request."""
+        return self._defer_coalescing(conn, CHECK_POOL_TASK, LIBRARY_POOL_LOCK_PREFIX + pool_key,
+                                      pool_key=pool_key)
+
+    def _defer_coalescing(self, conn: Any, task: str, lock: str, **arguments: str) -> QueueReceipt:
+        """Defer `task` once per `lock`: a queued (not yet running) duplicate coalesces. The
+        savepoint keeps the caller's transaction usable after Procrastinate's refusal."""
+        try:
+            with conn.transaction():
+                self.app.configure_task(task, queue=MEDIA_QUEUE, lock=lock, queueing_lock=lock,
+                                        connection=conn).defer(**arguments)
+            return QueueReceipt(coalesced=False)
+        except procrastinate.exceptions.AlreadyEnqueued:
+            return QueueReceipt(coalesced=True)
 
     @classmethod
     def apply_schema(cls, dsn: str) -> None:

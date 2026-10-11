@@ -6,8 +6,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import procrastinate
+import pytest
 
 from central.media_queue import (
+    CHECK_CONNECTION_TASK,
+    CHECK_POOL_TASK,
+    LIBRARY_CONNECTION_LOCK_PREFIX,
+    LIBRARY_POOL_LOCK_PREFIX,
     MEDIA_QUEUE,
     MEDIA_REFRESH_LOCK_PREFIX,
     MEDIA_STORAGE_LOCK,
@@ -115,6 +120,54 @@ def test_refresh_adapter_coalesces_already_queued_request_without_private_job_lo
 
     assert receipt.coalesced
     assert queue.app.calls == 1
+
+
+@pytest.mark.parametrize("enqueue,task,prefix,argument", [
+    ("enqueue_connection_check_in", CHECK_CONNECTION_TASK, LIBRARY_CONNECTION_LOCK_PREFIX,
+     "connection_ref"),
+    ("enqueue_pool_check_in", CHECK_POOL_TASK, LIBRARY_POOL_LOCK_PREFIX, "pool_key"),
+])
+def test_library_checks_are_locked_per_connection_or_pool_and_coalesce(enqueue, task, prefix,
+                                                                        argument):
+    """Roadmap 4 (C1, C2): one check of a connection, one step of a pool, at a time; a second
+    request while one waits coalesces."""
+    queue = object.__new__(ProcrastinateMediaQueue)
+    queue.app = App()
+    connection = SimpleNamespace(transaction=nullcontext)
+
+    receipt = getattr(queue, enqueue)(connection, "library-0123456789ab")
+
+    assert not receipt.coalesced
+    assert queue.app.configured == {
+        "name": task,
+        "queue": MEDIA_QUEUE,
+        "lock": prefix + "library-0123456789ab",
+        "queueing_lock": prefix + "library-0123456789ab",
+        "connection": connection,
+        "payload": {argument: "library-0123456789ab"},
+    }
+
+    class Queued:
+        def defer(self, **kwargs):
+            raise procrastinate.exceptions.AlreadyEnqueued()
+
+    queue.app.configure_task = lambda name, **kwargs: Queued()
+    assert getattr(queue, enqueue)(connection, "library-0123456789ab").coalesced
+
+
+def test_a_queued_connection_check_coalesces_in_procrastinate(registry):
+    ProcrastinateMediaQueue.apply_schema(registry.db.dsn)
+    queue = ProcrastinateMediaQueue(registry.db.dsn)
+    with registry.db.transaction() as conn:
+        first = queue.enqueue_connection_check_in(conn, "library-0123456789ab")
+        second = queue.enqueue_connection_check_in(conn, "library-0123456789ab")
+        other = queue.enqueue_pool_check_in(conn, "a" * 64)
+    assert (first.coalesced, second.coalesced, other.coalesced) == (False, True, False)
+    with registry.db.transaction() as conn:
+        jobs = conn.execute("SELECT task_name,args FROM procrastinate_jobs ORDER BY id").fetchall()
+    assert [(job["task_name"], job["args"]) for job in jobs] == [
+        (CHECK_CONNECTION_TASK, {"connection_ref": "library-0123456789ab"}),
+        (CHECK_POOL_TASK, {"pool_key": "a" * 64})]
 
 
 def test_schema_install_is_repeatable_and_safe_across_concurrent_central_starts(registry):

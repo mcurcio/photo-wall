@@ -1,6 +1,6 @@
 # Operator console design (2026-10-09)
 
-**Status:** as recorded in [decision 0019](decisions/0019-first-principles-console.md). Nothing here is built except what the [roadmap](roadmap.md#delivery-order) marks as landed; for display identity and power (1b), §5 to §7 and the catalogue rows #110 and #116–#120 say what was built and what was not; for picture settings and the Frame fit (1c), §5's Position and Picture rows, §6 and the catalogue rows #96–#99, #111–#114 and #119 do. The [roadmap](roadmap.md) owns the delivery order, each journey step's status today, and the deferred list; [decision 0019](decisions/0019-first-principles-console.md) records the decisions and what they replace. The earlier [console UX design](operator-console-ux-design.md) is the historical gate record this document supersedes. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) stand: every page here is built from that catalog, following the [design language](design-language.md) (principles, page templates, patterns, save models, status words and voice).
+**Status:** as recorded in [decision 0019](decisions/0019-first-principles-console.md). Nothing here is built except what the [roadmap](roadmap.md#delivery-order) marks as landed; for display identity and power (1b), §5 to §7 and the catalogue rows #110 and #116–#120 say what was built and what was not; for picture settings and the Frame fit (1c), §5's Position and Picture rows, §6 and the catalogue rows #96–#99, #111–#114 and #119 do; for real photo sources (4), §9's Photo sources line and the catalogue rows #8–#33 and #36 do. The [roadmap](roadmap.md) owns the delivery order, each journey step's status today, and the deferred list; [decision 0019](decisions/0019-first-principles-console.md) records the decisions and what they replace. The earlier [console UX design](operator-console-ux-design.md) is the historical gate record this document supersedes. The design-system layers, tokens, lint rules and look of [decision 0018](decisions/0018-console-by-domain-and-design-system.md) stand: every page here is built from that catalog, following the [design language](design-language.md) (principles, page templates, patterns, save models, status words and voice).
 
 **Review page:** [Console Setup Review](https://claude.ai/artifact/EwjdvEcM82HyLDb4BrDSdC).
 
@@ -201,11 +201,11 @@ Continuous viewer tracking stays out of scope ([operations](requirements.md#oper
 - **Home.** One word for the house ("All good"). Problems pinned on top, each with a plain cause, a since time and one fix button. A live map of each Wall where every tile shows what its Pi is presenting, labelled as that. A now/next strip, and active takeovers with a countdown and **Back to normal**. Tile actions: Skip, Previous, Never show this photo, Why is this playing?, Open Frame (what Skip and Never show do to secured content is in [§12](#12-where-a-power-users-expectation-meets-a-written-requirement)). Updates by push, with no Refresh button. If the whole network is down, one house-wide banner replaces per-tile alerts.
 - **Schedule.** The Power lane on top (§7); below it the content calendar with a now line. A Schedule has a Scene, days, start and end (a clock time or sunrise/sunset ±, showing the resolved time), runs past midnight without splitting, an optional date range or yearly event, and a priority (Normal, Special event, Always wins). The Default Scene fills the gaps. Clicking any block explains why it wins ("Evenings (Normal, Mon–Fri 17:00–23:00) beats the Default Scene").
 - **Show now** (a sheet from Home, a tile, or the phone tab). Pick what (an album, person, Photo source or Scene), where (Frames or Groups; every current Frame pre-selected explicitly) and how long (1 hour, until tonight's Night off, until I stop). It is an overlay: the schedule beneath keeps advancing and is revealed in its current state ([progression](requirements.md#progression-visibility-and-target-control)).
-- **Scenes and Photo sources.** A form with a live preview on a chosen Frame, in sections What, Where, Timing, Order, Photo fit, Video, Captions, Ending, Advanced. Photo sources pair every include with an exclude (albums, people, places, dates, favourites, tags); archived, hidden and screenshots are excluded by default; a live count and thumbnails show before and after saving. The Never show list shows every photo on it with **Show again**.
+- **Scenes and Photo sources.** A form with a live preview on a chosen Frame, in sections What, Where, Timing, Order, Photo fit, Video, Captions, Ending, Advanced. Photo sources include by albums, people, place, dates, favourites, tags, media types and partners, and exclude albums, people, tags and screenshots (screenshots on by default); archived, hidden and locked photos are never included, one fixed line rather than switches; the pool, its counts and its thumbnails fill as Immich is read, before and after saving. **Built in 4** ([media module](module-media.md#photo-source-queries)). The Never show list shows every photo on it with **Show again**.
 - **Frames.** A tab per Wall plus "+ Wall"; a canvas to real scale in cm or inches; Identify on each Frame; overlapping Frames flagged; Groups.
 - **Pis.** "New Pis waiting: which Frame did you plug this into?" (one tap binds). A table with Frames fed, status, software version and last heard. The Pi page has rename, Identify, Restart app, Reboot (requested → reboot started → back online), logs and Retire. Boxes too small say so ("2 GB, needs 4 GB").
 - **Setup checklist.** Server checks (a Pi release picked automatically on a wall that never had one), Immich URL and key with a Test showing counts, house basics, first Pi, first Frame with Position, a pre-filled Favourites slideshow, a schedule and Night off. Each step turns green from a real check, never from a click. It hides itself when done.
-- **Settings.** House; Photo library (the Immich connection, set and tested in the console); Updates, which follow the release choices of [console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer); Integrations (§8); Backups; Storage and network boot.
+- **Settings.** House; Photo library (the Immich connections, set and checked in the console, **built in 4**); Updates, which follow the release choices of [console DDD Part E](operator-console-ddd.md#part-e-v2-only-console-and-node-release-workflows-feature-layer); Integrations (§8); Backups; Storage and network boot.
 
 ## 10. How it behaves
 
@@ -231,37 +231,37 @@ Every setting a power user expects, with exactly one home: 143 settings (numbere
 
 | # | Setting | Lives on | Default | P |
 |---|---|---|---|---|
-| 8 | Immich server URL | Settings › Photo library | none | M |
-| 9 | API key (stored server-side, masked) | Settings › Photo library | none | M |
-| 10 | Test connection + counts | Settings › Photo library | n/a | M |
-| 11 | Additional Immich users/connections | Settings › Photo library | none | S |
-| 12 | Look for new photos every | Settings › Photo library | 15 min | N |
+| 8 | Immich server URL (built in 4; "/api" added when missing, plain http accepted) | Settings › Photo library | none | M |
+| 9 | API key (built in 4: stored in Central's database, written and never read back; the console shows its last four characters, [decision 0020](decisions/0020-immich-key-in-central-database.md)) | Settings › Photo library | none | M |
+| 10 | Check now + counts (built in 4: Save checks at once; Immich's photo, video, album and people counts; health over time as Needs a look with the fix) | Settings › Photo library | n/a | M |
+| 11 | Additional Immich users/connections (built in 4: one connection per Immich user) | Settings › Photo library | none | S |
+| 12 | Look for new photos every (4 checks every 15 min; no control yet) | Settings › Photo library | 15 min | N |
 
 ### Photo source
 
 | # | Setting | Lives on | Default | P |
 |---|---|---|---|---|
-| 13 | Name | Scenes › Photo sources › editor | from first chip | M |
-| 14 | Connection (which Immich) | Photo source editor › top | the only one | S |
-| 15 | Include albums | Photo source editor › Include | none | M |
-| 16 | Include people | Photo source editor › Include | none | M |
-| 17 | People must all appear (any/all) | Photo source editor › Include | any | N |
-| 18 | Include places | Photo source editor › Include | none | S |
-| 19 | Date range (fixed) | Photo source editor › Include | none | M |
-| 20 | Relative dates ("last 2 years") | Photo source editor › Include | none | S |
-| 21 | On this day | Photo source editor › Include | off | S |
-| 22 | Favourites only | Photo source editor › Include | off | M |
-| 23 | Tags | Photo source editor › Include | none | M |
-| 24 | Minimum rating | Photo source editor › Include | none | N |
-| 25 | Media types (photos / videos / live photos) | Photo source editor › Include | photos + videos | M |
-| 26 | Exclude albums | Photo source editor › Exclude | none | M |
-| 27 | Exclude people | Photo source editor › Exclude | none | M |
-| 28 | Exclude tags | Photo source editor › Exclude | none | S |
-| 29 | Exclude archived | Photo source editor › Exclude | on | M |
-| 30 | Exclude hidden/locked | Photo source editor › Exclude | on | M |
-| 31 | Exclude screenshots | Photo source editor › Exclude | on | M |
-| 32 | Include partners' photos | Photo source editor › Include | off | N |
-| 33 | Skip blurry/duplicates | Photo source editor › Exclude | off | N |
+| 13 | Name (built in 4) | Scenes › Photo sources › editor | from first chip | M |
+| 14 | Connection (which Immich; built in 4, hidden when there is one) | Photo source editor › top | the only one | S |
+| 15 | Include albums (built in 4: in every chosen album) | Photo source editor › Include | none | M |
+| 16 | Include people (built in 4) | Photo source editor › Include | none | M |
+| 17 | People must all appear (built in 4 as all, fixed: Immich's meaning; for any of them, a second Source on the Scene, #36) | Photo source editor › Include | all | N |
+| 18 | Include places (built in 4: one place, its city, state and country together) | Photo source editor › Include | none | S |
+| 19 | Date range (fixed; built in 4) | Photo source editor › Include | none | M |
+| 20 | Relative dates ("last 2 years"; built in 4, counted in UTC until 2b) | Photo source editor › Include | none | S |
+| 21 | On this day (moved in 4: an order, not a filter; built with 5a) | Scene editor › Order | off | S |
+| 22 | Favourites only (built in 4) | Photo source editor › Include | off | M |
+| 23 | Tags (built in 4: every chosen tag, nested tags included) | Photo source editor › Include | none | M |
+| 24 | Minimum rating (deferred in 4: Immich 2.5 matches one exact rating only) | Photo source editor › Include | none | N |
+| 25 | Media types (photos / videos / live photos; built in 4) | Photo source editor › Include | photos, live photos and videos | M |
+| 26 | Exclude albums (built in 4) | Photo source editor › Exclude | none | M |
+| 27 | Exclude people (built in 4) | Photo source editor › Exclude | none | M |
+| 28 | Exclude tags (built in 4) | Photo source editor › Exclude | none | S |
+| 29 | Archived photos never included (built in 4 as one fixed line with #30, not a switch) | Photo source editor › Exclude | always | M |
+| 30 | Hidden and locked photos never included (the same fixed line as #29) | Photo source editor › Exclude | always | M |
+| 31 | Exclude screenshots (built in 4: a file named "screenshot", or a PNG with no camera maker) | Photo source editor › Exclude | on | M |
+| 32 | Include partners' photos (built in 4) | Photo source editor › Include | off | N |
+| 33 | Skip blurry/duplicates (deferred in 4: needs Immich's machine learning) | Photo source editor › Exclude | off | N |
 
 ### Scene
 
@@ -269,7 +269,7 @@ Every setting a power user expects, with exactly one home: 143 settings (numbere
 |---|---|---|---|---|
 | 34 | Name | Scene editor › header | "New Scene" | M |
 | 35 | Kind (Slideshow / Hand-placed / Dark) | Scene editor › header | Slideshow | M |
-| 36 | Photo sources (several) | Scene editor › What | one | M |
+| 36 | Photo sources (several; built in 4: the Scene plays the photos of all of them) | Scene editor › What | one | M |
 | 37 | Frames / Groups targeted | Scene editor › Where | every current Frame, selected explicitly | M |
 | 38 | Hand-placed photo per Frame | Scene editor › What (Hand-placed) | none | S |
 | 39 | Seconds per photo | Scene editor › Timing | 30 s | M |

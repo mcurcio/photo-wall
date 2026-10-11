@@ -9,13 +9,18 @@ from psycopg.types.json import Jsonb
 
 from central.app import create_app
 from central.catalog import CatalogSnapshot
-from central.db import ProcessTransactionClock
+from central.db import DatabaseTransactionClock, ProcessTransactionClock
+from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_repository import MediaRepository
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, RuntimeConflict, Scene
 from central.runtime_store import RuntimeStore
 from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
 from media.models import OriginalAsset, RefreshResult, SourceSpec
+
+
+def _library(registry):
+    return PgPhotoLibrary(registry.db, times=DatabaseTransactionClock())
 
 
 def write(expected, *, favorites=None):
@@ -26,7 +31,7 @@ def write(expected, *, favorites=None):
 def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     assert names.put("all-photos", write(None))["source_ref"] == "all-photos:1"
     child = Scene(scene_id="child", contributions=(Contribution(target="frame:child",
                               source_refs=("all-photos:1",)),))
@@ -70,7 +75,7 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(registry):
 def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     names.put("used", write(None))
     runtime.command("set_scene", Scene(scene_id="dependent", contributions=(
         Contribution(target="frame:main", source_refs=("used:1",)),)))
@@ -87,7 +92,7 @@ def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(registry):
 def test_rename_changes_future_scene_and_keeps_old_run(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     names.put("old", write(None))
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
         Contribution(target="frame:main", source_refs=("old:1",)),)))
@@ -106,7 +111,7 @@ def test_rename_changes_future_scene_and_keeps_old_run(registry):
 def test_planner_catalog_excludes_dormant_revisions(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     names.put("photos", write(None))
     runtime.command("set_scene", Scene(scene_id="show", contributions=(
         Contribution(target="frame:main", source_refs=("photos:1",)),)))
@@ -120,7 +125,7 @@ def test_planner_catalog_excludes_dormant_revisions(registry):
 def test_dormant_revision_stops_scheduled_refresh_and_reactivates_for_run(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     names.put("photos", write(None))
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
         Contribution(target="frame:main", source_refs=("photos:1",)),)))
@@ -150,7 +155,8 @@ def test_dormant_revision_stops_scheduled_refresh_and_reactivates_for_run(regist
 
 def test_retirement_waits_for_lease_then_fences_expired_publication(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
-    names = SourceNameService(registry.db, repository, RuntimeStore(registry.db, registry.clock))
+    names = SourceNameService(registry.db, repository, RuntimeStore(registry.db, registry.clock),
+                              _library(registry))
     names.put("photos", write(None))
     lease = repository.begin_scheduled_refresh()
     assert lease.source.source_ref == "photos:1"
@@ -173,7 +179,7 @@ def test_retirement_waits_for_lease_then_fences_expired_publication(registry):
 def test_retirement_waits_for_requested_refresh_completion(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     names.put("photos", write(None))
     repository.queue = RecordingMediaQueue()
     receipt = repository.request_refresh("photos:1")
@@ -196,7 +202,7 @@ def test_retirement_waits_for_requested_refresh_completion(registry):
 def test_dormant_snapshot_releases_metadata_capacity_after_run_ends(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
-    names = SourceNameService(registry.db, repository, runtime)
+    names = SourceNameService(registry.db, repository, runtime, _library(registry))
     names.put("photos", write(None))
     asset = OriginalAsset(connection_id="immich-main", upstream_id=str(uuid.UUID(int=1)),
                           original_sha1="0" * 39 + "1", kind="image", raw_width=30,
@@ -281,7 +287,8 @@ def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry
     refs = ("foo", "foo:1", "foo:bar", "large:" + "9" * 22)
     with registry.db.transaction() as conn:
         conn.execute("DROP TABLE media_source_name_versions")
-        conn.execute("DROP TABLE media_source_names")
+        # 080's drafts name a Source name: their reference goes with the table (030 re-runs).
+        conn.execute("DROP TABLE media_source_names CASCADE")
         conn.execute("DELETE FROM schema_migrations WHERE name='030_source_names.sql'")
         for ref in refs:
             spec = SourceSpec(source_ref=ref, connection_ref="immich-main")
@@ -298,7 +305,7 @@ def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry
 
 def test_a_named_source_keeps_its_tags_and_an_equivalent_write_creates_nothing(registry):
     names = SourceNameService(registry.db, MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)),
-                              RuntimeStore(registry.db, registry.clock))
+                              RuntimeStore(registry.db, registry.clock), _library(registry))
     tags = (str(uuid.UUID(int=12)), str(uuid.UUID(int=11)))
     created = names.put("family", NamedSourceWrite(expected_revision=None, connection_ref="immich-main",
                                                    tags=tags))

@@ -1,7 +1,7 @@
 """The photo library's vocabulary (roadmap 4; run ledger .claude/runs/photo-4.md, F0).
 
-Values only. Invariants that a Field cannot state are each type's docstring; slice C1 adds the
-validators that enforce them (the page names each one). `canonical_uuid`, `TagRef`,
+Values only. Invariants that a Field cannot state are each type's docstring and are enforced by
+its validators (slice T0). `canonical_uuid`, `TagRef`,
 `visible_text`, `TagText`, `LibraryTag` and `asset_identity` moved here verbatim from
 media/models.py (which re-exports them until the integrate slice), so the domain has one home
 and imports nothing from `media`.
@@ -13,13 +13,23 @@ left out with a reason; the **photo pool** is a query's matches after exclusions
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
-from pydantic import AfterValidator, BeforeValidator, Field, SecretStr
+from pydantic import (
+    AfterValidator,
+    BeforeValidator,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from contracts.models import Digest, Identifier, Instant, Model, Positive
 
@@ -113,12 +123,24 @@ class LibraryPerson(Model):
 class Place(Model):
     """A place is a city, state and country together; Immich matches all three exactly (C3).
 
-    Invariant (C1 validator): at least `country` is non-empty after `visible_text`.
+    Invariant (validator): at least `country` is non-empty after `visible_text`.
     """
 
     city: TagText | None = None
     state: TagText | None = None
     country: TagText
+
+    @field_validator("city", "state")
+    @classmethod
+    def _empty_is_none(cls, value: str | None) -> str | None:
+        return value or None
+
+    @field_validator("country")
+    @classmethod
+    def _country_named(cls, value: str) -> str:
+        if not value:
+            raise ValueError("a place names its country")
+        return value
 
 
 # --- A Photo source's query (#13-#33) ----------------------------------------------------------
@@ -127,26 +149,45 @@ MediaType = Literal["photo", "video", "live_photo"]
 MAX_CHOSEN = 32  # albums, people or tags chosen in one list of one query: bounds one request body
 
 
+def _unique_sorted[T: str](values: tuple[T, ...]) -> tuple[T, ...]:
+    """A chosen list's canonical form: refused when an item repeats, else sorted."""
+    if len(set(values)) != len(values):
+        raise ValueError("an item is chosen twice")
+    return tuple(sorted(values))
+
+
 class TakenBetween(Model):
     """#19, fixed dates. `start` and `end` are UTC instants, either open.
 
-    Invariant (C1 validator): `start < end` when both are set.
+    Invariant (validator): `start < end` when both are set.
     """
 
     kind: Literal["between"] = "between"
     start: Instant | None = None
     end: Instant | None = None
 
+    @model_validator(mode="after")
+    def _start_before_end(self) -> Self:
+        if self.start is not None and self.end is not None and not self.start < self.end:
+            raise ValueError("start must be before end")
+        return self
+
 
 class TakenLast(Model):
     """#20, relative dates ("last 3 years"), resolved in UTC at each check (until 2b's timezone).
 
-    Invariant (C1 validator): `years + months > 0`.
+    Invariant (validator): `years + months > 0`.
     """
 
     kind: Literal["last"] = "last"
     years: int = Field(default=0, ge=0, le=200, strict=True)
     months: int = Field(default=0, ge=0, le=11, strict=True)
+
+    @model_validator(mode="after")
+    def _some_time(self) -> Self:
+        if self.years + self.months <= 0:
+            raise ValueError("a relative range spans at least one month")
+        return self
 
 
 TakenRange = Annotated[TakenBetween | TakenLast, Field(discriminator="kind")]
@@ -156,13 +197,15 @@ class Exclusions(Model):
     """#26-#28, #31. Each is its own Immich query, read whole each check and subtracted (C4).
     Archived, hidden and locked photos are never included: a fixed line, not a switch (C5).
 
-    Invariant (C1 validator): each list unique and sorted (its canonical form).
+    Invariant (validator): each list unique and sorted (its canonical form).
     """
 
     albums: tuple[AlbumRef, ...] = Field(default=(), max_length=MAX_CHOSEN)
     people: tuple[PersonRef, ...] = Field(default=(), max_length=MAX_CHOSEN)
     tags: tuple[TagRef, ...] = Field(default=(), max_length=MAX_CHOSEN)
     screenshots: bool = True
+
+    _canonical_lists = field_validator("albums", "people", "tags")(_unique_sorted)
 
 
 class SourceQuery(Model):
@@ -171,7 +214,7 @@ class SourceQuery(Model):
     Several albums, people or tags mean "all of them" (Immich's meaning, C3); "any of them" is a
     second Source on the Scene (#36). Partners' photos are left out unless `partners` (#32).
 
-    Invariants (C1 validators): `albums`, `people`, `tags` unique and sorted; `media_types`
+    Invariants (validators): `albums`, `people`, `tags` unique and sorted; `media_types`
     non-empty, unique and sorted. `canonical()` and `pool_key()` depend on them.
     """
 
@@ -187,14 +230,17 @@ class SourceQuery(Model):
     partners: bool = False
     exclude: Exclusions = Exclusions()
 
+    _canonical_lists = field_validator("albums", "people", "tags", "media_types")(_unique_sorted)
+
     def canonical(self) -> str:
         """The query's meaning as canonical JSON (sorted keys, no spaces); a relative range stays
         relative, so "last 3 years" is one pool however many days pass."""
-        raise NotImplementedError("slice C1")
+        return json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+                          allow_nan=False)
 
     def pool_key(self) -> PoolKey:
         """sha256 hex of `canonical()`: equal queries share one pool, its check and its rows."""
-        raise NotImplementedError("slice C1")
+        return hashlib.sha256(self.canonical().encode()).hexdigest()
 
 
 # --- Connections and their health (#8-#12; design "Settings › Photo library") -------------------
@@ -347,7 +393,7 @@ class LibraryAsset(Model):
 
     `width` and `height` are upright (EXIF applied) and edited: the largest copy Photo Wall can
     fetch (C10). Replaces media.models.OriginalAsset in the integrate slice.
-    Invariant (C1 validator): `duration` is set exactly for videos.
+    Invariant (validator): `duration` is set exactly for videos.
     """
 
     connection_ref: ConnectionRef
@@ -358,6 +404,12 @@ class LibraryAsset(Model):
     width: int = Field(gt=0, strict=True)
     height: int = Field(gt=0, strict=True)
     duration: Positive | None = None
+
+    @model_validator(mode="after")
+    def _duration_for_videos(self) -> Self:
+        if (self.duration is not None) != (self.kind == "video"):
+            raise ValueError("a video has a duration and a photo has none")
+        return self
 
     @property
     def asset_id(self) -> str:
@@ -455,9 +507,31 @@ class PoolCursor(Model):
 
     def encode(self) -> str:
         """Opaque URL-safe text the console hands back as `after`."""
-        raise NotImplementedError("slice C2")
+        position = json.dumps([self.taken_at, self.asset_id], separators=(",", ":"),
+                              allow_nan=False)
+        return base64.urlsafe_b64encode(position.encode()).rstrip(b"=").decode("ascii")
 
     @classmethod
     def decode(cls, text: str) -> PoolCursor:
         """The cursor `encode` wrote; ValueError on anything else (routes: 422 cursor_invalid)."""
-        raise NotImplementedError("slice C2")
+        try:
+            raw = base64.b64decode(text + "=" * (-len(text) % 4), altchars=b"-_", validate=True)
+            position = json.loads(raw, parse_constant=_refuse_constant)
+        except (binascii.Error, UnicodeError, json.JSONDecodeError) as error:
+            raise ValueError("not a pool cursor") from error
+        match position:
+            case [float() | int() as taken_at, str() as asset_id] if not isinstance(taken_at, bool):
+                pass
+            case _:
+                raise ValueError("not a pool cursor")
+        try:
+            cursor = cls(taken_at=taken_at, asset_id=asset_id)
+        except ValidationError as error:
+            raise ValueError("not a pool cursor") from error
+        if cursor.encode() != text:   # only the exact text `encode` writes
+            raise ValueError("not a pool cursor")
+        return cursor
+
+
+def _refuse_constant(name: str) -> object:
+    raise ValueError(f"{name} is not a time")

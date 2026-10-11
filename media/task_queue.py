@@ -8,19 +8,21 @@ import procrastinate
 
 from central.infra.job_queue import async_connector
 from central.media_queue import (
+    CHECK_CONNECTION_TASK,
+    CHECK_POOL_TASK,
+    LIBRARY_CONNECTION_LOCK_PREFIX,
+    LIBRARY_POOL_LOCK_PREFIX,
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
     PREPARE_MEDIA_TASK,
-    PREVIEW_SOURCE_TASK,
-    REFRESH_MEDIA_SOURCE_TASK,
 )
 
+# The library tick: due connection and pool checks are queued every 30 seconds (each is due once
+# CHECK_EVERY_SECONDS have passed, central/photo_library/policy.py).
 REFRESH_CRON = "* * * * * */30"
 MAINTENANCE_MINUTES: Final = 5
 MAINTENANCE_CRON = f"*/{MAINTENANCE_MINUTES} * * * * 0"
-# The guaranteed check-in (`worker_status`) cadence: boot plus every maintenance pass. A refresh
-# tick checks in only when a Source is due (`MediaWorker.refresh_once`), so an idle worker is
-# quiet between maintenance passes.
+# The guaranteed check-in (`worker_status`) cadence: boot plus every maintenance pass.
 WORKER_CHECK_IN_SECONDS: Final = MAINTENANCE_MINUTES * 60
 # A check-in older than this marks the worker unhealthy (`media.healthcheck`). It is the
 # console's worker-quiet window (central/console/src/mediaHealth.js WORKER_QUIET_AFTER: two
@@ -49,8 +51,26 @@ class MediaRetryStrategy(procrastinate.BaseRetryStrategy):
         )
 
 
-class RefreshRetryStrategy(MediaRetryStrategy):
-    delays = (5, 15, 30, 60)
+class ProcrastinateCheckQueue:
+    """`media.library_checks.LibraryCheckQueue` over this app: one queued check per connection
+    or pool at a time (an already queued one coalesces); a running one holds the lock."""
+
+    def __init__(self, app: procrastinate.App) -> None:
+        self.app = app
+
+    async def _defer(self, task: str, lock: str, **arguments: str) -> None:
+        try:
+            await self.app.configure_task(task, queue=MEDIA_QUEUE, lock=lock,
+                                          queueing_lock=lock).defer_async(**arguments)
+        except procrastinate.exceptions.AlreadyEnqueued:
+            pass
+
+    async def connection(self, connection_ref: str) -> None:
+        await self._defer(CHECK_CONNECTION_TASK, LIBRARY_CONNECTION_LOCK_PREFIX + connection_ref,
+                          connection_ref=connection_ref)
+
+    async def pool(self, pool_key: str) -> None:
+        await self._defer(CHECK_POOL_TASK, LIBRARY_POOL_LOCK_PREFIX + pool_key, pool_key=pool_key)
 
 
 def create_worker_app(dsn: str) -> procrastinate.App:
@@ -76,20 +96,19 @@ def create_worker_app(dsn: str) -> procrastinate.App:
     @app.periodic(cron=REFRESH_CRON)
     @app.task(name="photo_wall.media.refresh", queue=MEDIA_QUEUE, pass_context=True,
               queueing_lock="media-refresh")
-    async def refresh_media(context, timestamp: int):
+    async def library_tick(context, timestamp: int):
         del timestamp
-        worker = context.additional_context["media_worker"]
-        await worker.refresh_once()
-        await worker.list_tags()  # each connection's list, once it is 5 min old
+        await context.additional_context["library_checks"].tick()
 
-    @app.task(name=REFRESH_MEDIA_SOURCE_TASK, queue=MEDIA_QUEUE, pass_context=True,
-              retry=RefreshRetryStrategy())
-    async def refresh_media_source(context, source_ref: str):
-        await context.additional_context["media_worker"].refresh_source(source_ref)
+    # One connection check, or one bounded step of a pool's check (the step queues the next).
+    # The lock keeps one step per connection or pool running at a time.
+    @app.task(name=CHECK_CONNECTION_TASK, queue=MEDIA_QUEUE, pass_context=True)
+    async def check_connection(context, connection_ref: str):
+        await context.additional_context["library_checks"].contact(connection_ref)
 
-    @app.task(name=PREVIEW_SOURCE_TASK, queue=MEDIA_QUEUE, pass_context=True)
-    async def preview_source(context, request_id: str):
-        await context.additional_context["media_worker"].preview_source(request_id)
+    @app.task(name=CHECK_POOL_TASK, queue=MEDIA_QUEUE, pass_context=True)
+    async def check_pool(context, pool_key: str):
+        await context.additional_context["library_checks"].check_pool(pool_key)
 
     @app.periodic(cron=MAINTENANCE_CRON)
     @app.task(name="photo_wall.media.maintenance", queue=MEDIA_QUEUE, pass_context=True,
