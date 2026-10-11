@@ -68,6 +68,101 @@ subprocess.run(
     ],
     check=True,
 )
+# Frame protocol v4 (roadmap 1c, P2): a second probe, an app on the library's two v4 functions. It
+# prints each new `picture` operations text it receives for the Output ("PICTURE <text>") and tags
+# every buffer with tag_picture and the picture change given as argv[1].
+PICTURE_PROBE = r"""
+#define _GNU_SOURCE
+#include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <wayland-client.h>
+#include "xdg-shell-client.h"
+#include "frame-client.h"
+static struct wl_compositor *comp;
+static struct wl_shm *shm;
+static struct xdg_wm_base *wm;
+static int configured;
+static void ping(void *d, struct xdg_wm_base *w, uint32_t serial) { (void)d; xdg_wm_base_pong(w, serial); }
+static const struct xdg_wm_base_listener wm_listener = {.ping = ping};
+static void global(void *d, struct wl_registry *r, uint32_t n, const char *i, uint32_t v) {
+    (void)d; (void)v;
+    if (!strcmp(i, "wl_compositor")) comp = wl_registry_bind(r, n, &wl_compositor_interface, 1);
+    if (!strcmp(i, "wl_shm")) shm = wl_registry_bind(r, n, &wl_shm_interface, 1);
+    if (!strcmp(i, "xdg_wm_base")) {
+        wm = wl_registry_bind(r, n, &xdg_wm_base_interface, 1); xdg_wm_base_add_listener(wm, &wm_listener, NULL);
+    }
+}
+static void removed(void *d, struct wl_registry *r, uint32_t n) { (void)d; (void)r; (void)n; }
+static const struct wl_registry_listener registry_listener = {global, removed};
+static void configure(void *d, struct xdg_surface *s, uint32_t serial) {
+    (void)d; xdg_surface_ack_configure(s, serial); configured = 1;
+}
+static const struct xdg_surface_listener surface_listener = {configure};
+static void top_config(void *d, struct xdg_toplevel *t, int32_t w, int32_t h, struct wl_array *a) {
+    (void)d; (void)t; (void)w; (void)h; (void)a;
+}
+static void top_close(void *d, struct xdg_toplevel *t) { (void)d; (void)t; exit(0); }
+static const struct xdg_toplevel_listener top_listener = {.configure = top_config, .close = top_close};
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    struct wl_display *d = wl_display_connect(NULL);
+    if (!d) return 2;
+    struct wl_registry *r = wl_display_get_registry(d);
+    wl_registry_add_listener(r, &registry_listener, NULL);
+    if (wl_display_roundtrip(d) < 0 || wl_display_roundtrip(d) < 0) return 3;
+    struct pw_frame_client *c = pw_frame_client_create(d);
+    if (!c) return 5;
+    struct wl_surface *s = wl_compositor_create_surface(comp);
+    struct xdg_surface *xs = xdg_wm_base_get_xdg_surface(wm, s);
+    xdg_surface_add_listener(xs, &surface_listener, NULL);
+    struct xdg_toplevel *top = xdg_surface_get_toplevel(xs);
+    xdg_toplevel_add_listener(top, &top_listener, NULL);
+    xdg_toplevel_set_app_id(top, "photo-wall-headless");
+    wl_surface_commit(s);
+    int fd = memfd_create("picture-probe", MFD_CLOEXEC), size = 640 * 480 * 4;
+    if (ftruncate(fd, size) < 0) return 6;
+    uint32_t *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    for (int i = 0; i < 640 * 480; i++) p[i] = 0xff445566;
+    struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
+    struct wl_buffer *b = wl_shm_pool_create_buffer(pool, 0, 640, 480, 640 * 4, WL_SHM_FORMAT_XRGB8888);
+    close(fd);
+    char printed[513] = "";
+    for (int n = 0; n < 3000; n++) {
+        usleep(30000);
+        wl_display_dispatch_pending(d);
+        struct pollfd pollfd = {.fd = wl_display_get_fd(d), .events = POLLIN};
+        wl_display_flush(d);
+        if (poll(&pollfd, 1, 100) > 0 && wl_display_dispatch(d) < 0) return 7;
+        char operations[513], grant[37], frame[97];
+        uint64_t generation, revision;
+        uint32_t state;
+        int picture = pw_frame_client_picture(c, "headless", operations, sizeof operations);
+        if (picture < 0) { fprintf(stderr, "picture probe: picture failed\n"); return 8; }
+        if (picture == 1 && strcmp(operations, printed)) {
+            strcpy(printed, operations); printf("PICTURE %s\n", operations); fflush(stdout);
+        }
+        int current = pw_frame_client_grant(c, "headless", grant, frame, &generation, &revision, &state);
+        if (current < 0) { fprintf(stderr, "picture probe: grant lost\n"); return 9; }
+        if (!configured || current != 1) continue;
+        if (pw_frame_client_tag_picture_next_commit(c, s, grant, "picture-probe", argv[1]) < 0) {
+            fprintf(stderr, "picture probe: tag_picture failed\n"); return 10;
+        }
+        wl_surface_attach(s, b, 0, 0); wl_surface_damage(s, 0, 0, 640, 480); wl_surface_commit(s);
+    }
+    return 0;
+}
+"""
+pathlib.Path("/tmp/picture_probe.c").write_text(PICTURE_PROBE)
+subprocess.run(
+    ["cc", "-Wall", "-Wextra", "-Werror", "-I/tmp", "-I/current-native", "/tmp/picture_probe.c",
+     "/tmp/xdg-shell.c", "-L" + CLIENT, "-Wl,-rpath," + CLIENT, "-lphoto-wall-frame-client",
+     "-lwayland-client", "-o", "/tmp/picture-probe"],
+    check=True,
+)
 # Python bindings, generated here as the overlay client's build will: the core protocol (the
 # generated interfaces import it relatively), Weston's capture and debug protocols and the
 # private one.
@@ -209,6 +304,17 @@ def drain():
 
 def capture_pixel(x, y):
     """(r, g, b) of output pixel (x, y), read from Weston's framebuffer by weston_capture_v1."""
+    return capture(lambda pixels, stride: tuple(reversed(pixels[y * stride + x * 4: y * stride + x * 4 + 3])))
+
+
+def capture_box(x0, y0, x1, y1):
+    """The raw XRGB bytes of output pixels x0..x1-1, y0..y1-1, row by row."""
+    return capture(lambda pixels, stride: b"".join(
+        pixels[row * stride + x0 * 4: row * stride + x1 * 4] for row in range(y0, y1)))
+
+
+def capture(read):
+    """`read(pixels, stride)` over one capture of Weston's framebuffer (weston_capture_v1)."""
     display = Display(str(root / "wayland-0"))
     display.connect()
     try:
@@ -244,8 +350,7 @@ def capture_pixel(x, y):
                     time.sleep(0.02)
                 if state.get("done") == "complete":
                     with mmap.mmap(fd, stride * height, prot=mmap.PROT_READ) as pixels:
-                        blue, green, red = pixels[y * stride + x * 4 : y * stride + x * 4 + 3]
-                    return red, green, blue
+                        return read(pixels, stride)
                 buffer.destroy()
                 pool.destroy()
             finally:
@@ -407,6 +512,83 @@ def foreign_bind_refused():
         timeout=10,
     )
     assert "error 3: private_diagnostic_role" in foreign.stderr, (foreign.returncode, foreign.stderr)
+
+
+# Frame protocol v4 (roadmap 1c, P2). The slate's sixth line (overlay/render.py render_slate) on a
+# 640-wide Output: scale 0.5, baseline y 172.5, x from 24, 9 px text.
+BRIGHTNESS_BOX = (20, 160, 260, 178)
+OPERATIONS = ('{"contrast_slope":1.0,"gamma_exponent":1.0,"light_factor":0.8,"output_id":"headless",'
+              '"picture_change":6,"rgb_multipliers":[1.0,1.0,1.0]}')
+NOT_JSON = "not-json!!"     # 10 bytes: the shell forwards, never parses
+
+
+def picture_lines(proc, wanted, limit=8):
+    """The v4 probe's next `PICTURE <text>` line whose text is `wanted`, within `limit` s."""
+    import selectors
+
+    end = time.monotonic() + limit
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        while time.monotonic() < end:
+            if not selector.select(end - time.monotonic()):
+                break
+            line = proc.stdout.readline()
+            assert line, ("picture_probe_exited", proc.poll())
+            if line.rstrip("\n") == "PICTURE " + wanted:
+                return line
+            drain()
+    raise AssertionError(("picture_line", wanted))
+
+
+def picture_v4():
+    """The controller's `picture` op reaches the Output's v4 app verbatim (stored, so an app granted
+    later gets it), its brightness line reaches the private client's slate, and `tag_picture`'s
+    picture change comes back in `presented`; a v3 `tag` presents null."""
+    global app
+    presented = [e for e in events if e["event"] == "presented"]
+    assert presented and all("picture_change" in e and e["picture_change"] is None for e in presented)
+    print("PASS v3_tag_presents_a_null_picture_change", flush=True)
+    # The production private client (manager v4) draws the brightness line; the magenta test
+    # client binds v3. Back to the magenta one at the end, for the steps that follow.
+    pathlib.Path(HEALTH_MODE).write_text("production")
+    kill_private_client()
+    read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
+    time.sleep(0.5)
+    before = capture_box(*BRIGHTNESS_BOX)
+    assert request("picture", operations=OPERATIONS, brightness="Brightness: on the display \u00b7 60 %")["accepted"]
+    assert not request("picture", operations="x" * 513, brightness="")["accepted"]
+    assert not request("picture", operations=OPERATIONS, brightness="b" * 129)["accepted"]
+    end = time.monotonic() + 5
+    while capture_box(*BRIGHTNESS_BOX) == before:
+        assert time.monotonic() < end, "slate brightness line not drawn"
+        drain()
+        time.sleep(0.1)
+    print("PASS slate_draws_the_brightness_line", flush=True)
+    app = subprocess.Popen(["/tmp/picture-probe", "6"], env=env, preexec_fn=user, stdout=subprocess.PIPE,
+                           text=True)
+    ticks = int(pathlib.Path(f"/proc/{app.pid}/stat").read_text().rpartition(") ")[2].split()[19])
+    identity = {"frame_id": "picture-frame", "output": output,
+                "process": {"pid": app.pid, "start_ticks": ticks, "invocation_id": str(uuid.uuid4())},
+                "app_epoch": 1, "binding_generation": 1, "config_revision": 1}
+    assert request("candidate", identity=identity, grant_id=str(uuid.uuid4()), uid=10004)["accepted"]
+    picture_lines(app, OPERATIONS)
+    print("PASS app_granted_after_the_op_receives_the_stored_operations", flush=True)
+    tagged = read_until(lambda e: e["event"] == "presented" and e["identity"] == identity)
+    assert tagged["frame_tag"] == "picture-probe" and tagged["picture_change"] == "6", tagged
+    print("PASS tag_picture_echoes_the_picture_change", flush=True)
+    assert request("picture", operations=NOT_JSON, brightness="")["accepted"]
+    picture_lines(app, NOT_JSON)
+    print("PASS picture_op_reaches_the_v4_app_verbatim", flush=True)
+    app.terminate()
+    app.wait(timeout=3)
+    app = None
+    read_until(lambda e: e["event"] == "invalidated")
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    killed = kill_private_client()
+    read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
+    await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
+    time.sleep(0.5)
+    drain()     # the respawn's own presentations: later steps wait for new ones
 
 
 def request(op, **kw):
@@ -699,6 +881,7 @@ try:
     read_until(lambda e: e["event"] == "invalidated")
     read_until(lambda e: e["event"] == "diagnostic_presented")
     print("PASS app_exit_private_diagnostic_restored", flush=True)
+    picture_v4()
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)
     killed = kill_private_client()
