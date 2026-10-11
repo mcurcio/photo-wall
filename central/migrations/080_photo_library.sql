@@ -3,8 +3,16 @@
 -- central/infra/photo_library_store.py's worker side (C1); each connection's health, counts and
 -- lists; pools keyed by their query's canonical form, their rows and check marks; drafts.
 --
+-- Photos are stored normalized (follow-ups 2026-10-11, slice A2; owner: "a normalized database,
+-- with each upstream immich asset being a primary resource"): one `library_assets` row per Immich
+-- asset holds the asset's own facts (kind, taken time, the original file's); its children, keyed
+-- to it one-to-many, hold each version of it: `asset_revisions` (one per edit Immich made, its
+-- upright size), `asset_copies` (each Immich copy Photo Wall downloaded and measured, a child of
+-- the revision) and `media_jobs` (each copy Photo Wall prepared, `made_from` naming the Immich
+-- copy it was made from). A pool row names a revision and copies none of its facts.
+--
 -- Plain tables and data only: no trigger, stored procedure or function (logic lives in Python).
--- Forward-only (central/db.py). Rollback is manual: drop the seven tables and the added columns.
+-- Forward-only (central/db.py). Rollback is manual: drop the nine tables and the added columns.
 
 CREATE TABLE library_connections (
   connection_ref TEXT PRIMARY KEY CHECK (connection_ref ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$'),
@@ -18,6 +26,7 @@ CREATE TABLE library_connections (
   last_contact BIGINT NOT NULL DEFAULT 0,      -- the last contact number handed out
   applied_contact BIGINT NOT NULL DEFAULT 0,   -- the last contact number applied (newest wins)
   contact_started_at DOUBLE PRECISION NULL,    -- database time of the last begin_contact
+  full_size_copies BOOLEAN NULL,    -- Immich's last answer on full-size copies; NULL: not told
   created_at DOUBLE PRECISION NOT NULL,
   CHECK (applied_contact <= last_contact));
 
@@ -62,16 +71,12 @@ CREATE TABLE photo_pool_rows (
   upstream_id UUID NOT NULL,
   outcome TEXT NOT NULL CHECK (outcome IN ('in_pool','waiting','left_out')),
   reason TEXT NULL CHECK (reason IN ('unreadable_answer','over_item_limits')),
-  asset_id TEXT NULL REFERENCES asset_revisions(asset_id),
-  revision TEXT NULL, kind TEXT NULL CHECK (kind IN ('image','video')),
-  taken_at DOUBLE PRECISION NULL, width INTEGER NULL, height INTEGER NULL,
+  asset_id TEXT NULL REFERENCES asset_revisions(asset_id),   -- the revision; its facts live there
   seen_check BIGINT NOT NULL,
   PRIMARY KEY (pool_key, upstream_id),
-  CHECK ((outcome = 'in_pool') = (asset_id IS NOT NULL AND width IS NOT NULL AND height IS NOT NULL
-                                  AND taken_at IS NOT NULL AND kind IS NOT NULL AND revision IS NOT NULL)),
+  CHECK ((outcome = 'in_pool') = (asset_id IS NOT NULL)),
   CHECK ((outcome = 'left_out') = (reason IS NOT NULL)));
-CREATE INDEX photo_pool_rows_page ON photo_pool_rows (pool_key, taken_at DESC, asset_id DESC)
-  WHERE outcome = 'in_pool';
+CREATE INDEX photo_pool_rows_in_pool ON photo_pool_rows (pool_key, asset_id) WHERE outcome = 'in_pool';
 CREATE INDEX photo_pool_rows_asset ON photo_pool_rows (asset_id) WHERE asset_id IS NOT NULL;
 
 CREATE TABLE photo_check_marks (
@@ -86,10 +91,43 @@ CREATE TABLE photo_drafts (
   editing_name TEXT NULL REFERENCES media_source_names(name),
   created_at DOUBLE PRECISION NOT NULL);
 
+-- One row per Immich asset (the parent): rewritten by every check that sees it.
+CREATE TABLE library_assets (
+  connection_ref TEXT NOT NULL,
+  upstream_id UUID NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('image','video')),
+  taken_at DOUBLE PRECISION NOT NULL,
+  original_media_type TEXT NULL CHECK (length(original_media_type) <= 127
+    AND original_media_type ~ '^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$'),
+  original_width INTEGER NULL CHECK (original_width > 0),
+  original_height INTEGER NULL CHECK (original_height > 0),
+  original_orientation SMALLINT NULL CHECK (original_orientation BETWEEN 1 AND 8),
+  original_bytes BIGINT NULL CHECK (original_bytes > 0),
+  first_seen DOUBLE PRECISION NOT NULL,
+  last_seen DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (connection_ref, upstream_id));
+
+-- A revision is a child of its Immich asset (081 sets these NOT NULL, adds the parent's foreign
+-- key and drops the pre-4 `metadata` once it has converted the rows it keeps).
 ALTER TABLE asset_revisions ADD COLUMN connection_ref TEXT NULL, ADD COLUMN upstream_id UUID NULL,
+  ADD COLUMN revision TEXT NULL, ADD COLUMN width INTEGER NULL CHECK (width > 0),
+  ADD COLUMN height INTEGER NULL CHECK (height > 0),
+  ADD COLUMN duration DOUBLE PRECISION NULL CHECK (duration > 0),
   ADD COLUMN updated_at TEXT NULL;   -- KnownRevision's source (NULL on pre-4 rows)
-CREATE INDEX asset_revisions_upstream ON asset_revisions (connection_ref, upstream_id)
-  WHERE upstream_id IS NOT NULL;
+
+-- Each Immich copy of a revision Photo Wall downloaded, as measured (a cache of Immich).
+CREATE TABLE asset_copies (
+  asset_id TEXT NOT NULL REFERENCES asset_revisions(asset_id) ON DELETE CASCADE,
+  copy TEXT NOT NULL CHECK (copy IN ('thumbnail','preview','fullsize')),
+  media_type TEXT NOT NULL CHECK (length(media_type) <= 127),
+  width INTEGER NOT NULL CHECK (width > 0),
+  height INTEGER NOT NULL CHECK (height > 0),
+  measured_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (asset_id, copy));
+
+-- Which Immich copy a prepared copy was made from (MediaStore.publish).
+ALTER TABLE media_jobs ADD COLUMN made_from TEXT NULL
+  CHECK (made_from IN ('preview','fullsize','original'));
 
 ALTER TABLE media_sources ALTER COLUMN spec DROP NOT NULL,
   ADD COLUMN query JSONB NULL, ADD COLUMN pool_key TEXT NULL REFERENCES photo_pools;

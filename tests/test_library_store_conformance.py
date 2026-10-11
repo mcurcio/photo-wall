@@ -12,13 +12,14 @@ database's clock, as it does in every store test that steps time).
 
 from __future__ import annotations
 
+from typing import NamedTuple
 from uuid import UUID
 
 import pytest
 from support.library_store_fake import FakeLibraryStore
 
 from central.db import ProcessTransactionClock
-from central.infra.photo_library_store import PgPhotoLibrary
+from central.infra.photo_library_store import PgPhotoLibrary, _original_of, library_assets_in
 from central.media_queue import QueueReceipt
 from central.photo_library.model import (
     CheckMark,
@@ -34,8 +35,10 @@ from central.photo_library.model import (
     LibraryAlbum,
     LibraryAsset,
     LibraryCounts,
+    MeasuredCopy,
     MissingPermissions,
     NeedsALook,
+    OriginalFile,
     OtherUser,
     PoolThumbnail,
     SourceQuery,
@@ -77,6 +80,19 @@ def photo(ref: str, number: int, taken_at: float, *, revision: str | None = None
     return LibraryAsset(connection_ref=ref, upstream_id=uid(number),
                         revision=revision or f"{number:040x}", kind="image", taken_at=taken_at,
                         width=4000, height=3000)
+
+
+class Parent(NamedTuple):
+    """An Immich asset's own record (`library_assets`, slice A2), as either store holds it."""
+    kind: str
+    taken_at: float
+    original: OriginalFile | None
+    first_seen: float
+    last_seen: float
+
+
+ORIGINAL = OriginalFile(media_type="image/jpeg", width=4032, height=3024, orientation=6,
+                        size_bytes=3_456_789)
 
 
 def step(*entries, marks=(), seen=0, up_to=None, page=0):
@@ -146,6 +162,16 @@ class FakeHarness:
     def listed(self, ref: str, kind: str) -> tuple[str, ...]:
         return tuple(item.album_ref for item in self.store.connection(ref).lists.get(kind, ()))
 
+    def parent(self, ref: str, upstream_id: str) -> Parent | None:
+        record = self.store.assets.get((ref, upstream_id))
+        if record is None:
+            return None
+        return Parent(record.kind, record.taken_at, record.original, record.first_seen,
+                      record.last_seen)
+
+    def leased(self, asset_id: str) -> LibraryAsset | None:
+        return self.store.library_asset(asset_id)
+
 
 class PgHarness:
     name = "postgres"
@@ -211,6 +237,19 @@ class PgHarness:
             return tuple(row["item_ref"] for row in conn.execute(
                 "SELECT item_ref FROM library_list_items WHERE connection_ref=%s AND kind=%s "
                 "ORDER BY item_ref", (ref, kind)).fetchall())
+
+    def parent(self, ref: str, upstream_id: str) -> Parent | None:
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT * FROM library_assets WHERE connection_ref=%s AND "
+                               "upstream_id=%s", (ref, upstream_id)).fetchone()
+        if row is None:
+            return None
+        return Parent(row["kind"], row["taken_at"], _original_of(row), row["first_seen"],
+                      row["last_seen"])
+
+    def leased(self, asset_id: str) -> LibraryAsset | None:
+        with self.db.transaction() as conn:
+            return library_assets_in(conn, [asset_id]).get(asset_id)
 
 
 @pytest.fixture(params=["fake", "postgres"])
@@ -497,6 +536,92 @@ def test_maintenance_retires_unwanted_pools_and_keeps_wanted_ones(harness):
     assert store.pool_thumbnail(wanted.asset_id) is not None
     assert store.due_pools() == ()
     assert store.begin_check(gone) is None
+
+
+# --- One record per Immich asset, its revisions and copies as children (slice A2) -------------
+
+
+def test_one_immich_asset_seen_by_two_pools_and_two_checks_is_one_record(harness, clock):
+    """A2 case 1: one parent per Immich asset; its first sighting stays, its last moves, and a
+    taken-time change (a date edit in Immich, revision unchanged) rewrites the one record.
+    Mutation probe: keep taken_at on pool rows -> the second pool reads the old time (the
+    PostgreSQL half, tests/test_asset_tables.py)."""
+    store = harness.store
+    ref = harness.connect()
+    first = harness.want(SourceQuery(connection_ref=ref))
+    second = harness.want(SourceQuery(connection_ref=ref, favourites_only=True))
+    shown = photo(ref, 1, 100.0)
+    store.record_step(store.begin_check(first), step(InPool(asset=shown)))
+    seen_at = clock.utc()
+    clock.advance(60)
+    redated = shown.model_copy(update={"taken_at": 50.0})
+    store.record_step(store.begin_check(second), step(InPool(asset=redated)))
+    parent = harness.parent(ref, uid(1))
+    assert (parent.kind, parent.taken_at) == ("image", 50.0)
+    assert (parent.first_seen, parent.last_seen) == (seen_at, clock.utc())
+    assert harness.leased(shown.asset_id) == redated    # the same revision, the new date
+
+
+def test_an_edit_is_a_second_revision_under_the_same_parent(harness, clock):
+    """A2 case 2: a new revision is a new child; known_revisions answers the newer."""
+    store = harness.store
+    ref = harness.connect()
+    key = harness.want(SourceQuery(connection_ref=ref))
+    unedited = photo(ref, 1, 100.0)
+    edited = photo(ref, 1, 100.0, revision=EDITED).model_copy(update={"width": 3000})
+    store.record_step(store.begin_check(key), step(
+        InPool(asset=unedited, updated_at="2026-10-01T00:00:00.000Z")))
+    clock.advance(60)
+    harness.request_check(key)
+    store.record_step(store.begin_check(key), step(
+        InPool(asset=edited, updated_at="2026-10-02T00:00:00.000Z")))
+    assert (harness.leased(unedited.asset_id), harness.leased(edited.asset_id)) == (
+        unedited, edited)
+    assert store.known_revisions(ref, [uid(1)]) == {
+        uid(1): KnownRevision(updated_at="2026-10-02T00:00:00.000Z", revision=EDITED)}
+
+
+def test_only_a_photo_read_in_full_rewrites_its_originals_facts(harness):
+    """A2 case 3: a Waiting entry did not read the original, so it keeps the facts an InPool
+    wrote; a later InPool with `original=None` clears them. Mutation probe: let Waiting write
+    NULL originals -> this fails."""
+    store = harness.store
+    ref = harness.connect()
+    key = harness.want(SourceQuery(connection_ref=ref))
+    lease = store.begin_check(key)
+    store.record_step(lease, step(InPool(asset=photo(ref, 1, 100.0).model_copy(
+        update={"original": ORIGINAL}))))
+    store.record_step(lease, step(Waiting(upstream_id=uid(1), kind="image", taken_at=90.0),
+                                  LeftOut(upstream_id=uid(2), reason="unreadable_answer")))
+    parent = harness.parent(ref, uid(1))
+    assert (parent.taken_at, parent.original) == (90.0, ORIGINAL)
+    assert harness.parent(ref, uid(2)) is None          # no kind or taken time: no record
+    store.record_step(lease, step(InPool(asset=photo(ref, 1, 100.0))))
+    assert harness.parent(ref, uid(1)).original is None
+
+
+def test_a_copy_is_measured_once_per_revision_and_the_later_size_wins(harness, clock):
+    """A2 case 5: one row per (revision, copy), the later measurement kept; an unknown revision
+    has no copies and records none."""
+    store = harness.store
+    ref = harness.connect()
+    key = harness.want(SourceQuery(connection_ref=ref))
+    shown = photo(ref, 1, 100.0)
+    store.record_step(store.begin_check(key), step(InPool(asset=shown)))
+    store.record_copies(shown.asset_id, [MeasuredCopy(name="preview", media_type="image/jpeg",
+                                                      width=1440, height=1080)])
+    clock.advance(60)
+    store.record_copies(shown.asset_id, [
+        MeasuredCopy(name="preview", media_type="image/jpeg", width=2160, height=1620),
+        MeasuredCopy(name="fullsize", media_type="image/jpeg", width=4000, height=3000)])
+    sizes = store.copy_sizes(shown.asset_id)
+    assert sorted(sizes) == ["fullsize", "preview"]
+    assert (sizes["preview"].width, sizes["preview"].height,
+            sizes["preview"].measured_at) == (2160, 1620, clock.utc())
+    assert store.copy_sizes("unknown") == {}
+    store.record_copies("unknown", [MeasuredCopy(name="preview", media_type="image/jpeg",
+                                                 width=10, height=10)])
+    assert store.copy_sizes("unknown") == {}
 
 
 # --- The list status the store's table gives each problem the worker sends --------------------

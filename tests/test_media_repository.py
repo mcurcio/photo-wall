@@ -5,12 +5,12 @@ are separate."""
 import pytest
 from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
-from pydantic import ValidationError
 from support.photo_pools import photo, seed_pool
 
 from central.db import ProcessTransactionClock
+from central.infra.photo_library_store import library_assets_in
 from central.media_queue import PREPARE_MEDIA_TASK, ProcrastinateMediaQueue
-from central.media_repository import MediaRepository, StoreLimits, lease_asset_of
+from central.media_repository import MediaRepository, StoreLimits
 from central.planner import AcquisitionRequest
 from central.registry import RegistryError
 from contracts.models import Variant
@@ -126,15 +126,12 @@ def test_source_pools_in_hydrates_a_ready_variant_and_leaves_out_an_unknown_sour
 
 
 
-def test_a_job_leases_its_pool_row_as_a_library_asset(registry):
-    """`lease_asset_of` is the one rule: a row a pool check wrote leases its LibraryAsset; a
-    row that is not one is refused."""
+def test_a_job_leases_its_revision_and_its_immich_asset_as_one_library_asset(registry):
+    """`library_assets_in` is the one rule: a job leases its revision's row joined to its Immich
+    asset's row, the LibraryAsset the pool check wrote; an unknown id is absent."""
     repo, (pooled,) = setup_repository(registry)
     repo.request_acquisitions((request(pooled),))
     assert repo.claim_job().asset == pooled
     with registry.db.transaction() as conn:
-        row = conn.execute("SELECT metadata,upstream_id FROM asset_revisions WHERE asset_id=%s",
-                           (pooled.asset_id,)).fetchone()
-    assert lease_asset_of(row) == pooled
-    with pytest.raises(ValidationError):
-        lease_asset_of({**row, "metadata": {"original_sha1": "0" * 40}})
+        assert library_assets_in(conn, [pooled.asset_id, "unknown"]) == {pooled.asset_id: pooled}
+        assert library_assets_in(conn, []) == {}
