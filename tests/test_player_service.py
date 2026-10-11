@@ -1865,7 +1865,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     from central.media_repository import MediaRepository, StoreLimits
     from central.media_store import MediaStore
     from contracts.enrollment import OutputReport
-    from media.models import SourceSpec
 
     repository = MediaRepository(registry.db, registry.clock, StoreLimits(
         max_bytes=10000, max_original_bytes=1000, max_image_bytes=1000, max_video_bytes=2000),
@@ -1873,11 +1872,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     repository.set_recipe(RECIPE)
     storage = MediaStore(repository, tmp_path / "central-media")
     with storage.worker_lock():
-        lease, _, prepared = staged(storage)
-        repository.configure_source(SourceSpec(source_ref="library:1", connection_ref="fixture"))
-        with repository.transaction() as conn:
-            conn.execute("UPDATE media_sources SET status='ok'")
-            conn.execute("INSERT INTO source_members VALUES('library:1',%s)", (lease.asset.asset_id,))
+        lease, _, prepared = staged(storage)   # a photo of Source library:1's pool
         storage.publish(lease, prepared)
     app = create_app(
         registry.db,

@@ -74,7 +74,6 @@ services:
       # PHOTO_WALL_CACHE_ROOT default, so no env override needed. The writable
       # mount is what lets the boot assertions pass under read_only rootfs.
       - cache:/var/cache/photo-wall
-      - connections:/etc/photo-wall/private
       # The hub's configuration, written by the worker (the image populates the volume as `wall`).
       - hub-config:/var/lib/photo-wall/hub
     depends_on:
@@ -131,5 +130,4 @@ services:
 volumes:
   database:
   cache:
-  connections:
   hub-config:

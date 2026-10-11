@@ -381,15 +381,28 @@ interface TargetPickerProps { frames: readonly { key: string; name: string; room
 
 Stories: `Default`, `GroupChosen`, `AllFramesChosen`, `ExcludesThisFrame`.
 
+### Members for delivery 4's photo pages (follow-ups D1)
+
+| Member | Layer | Purpose | Stories |
+|---|---|---|---|
+| `MultiToggle` | ui | Two to five choices any of which can be on together (Base UI ToggleGroup); each says "on" or "off" in words, not by the accent alone; `required` keeps one on | Default, AllOn, InField, Disabled |
+| `Sheet` | ui | The sheet of §2: from the bottom on a phone, from the side above `md`, above the page's sticky bars | Default |
+| `Menu` | ui | Overflow actions behind a "More" button named for what it acts on ("More actions for garden") | Default |
+| `EditorPage` | patterns | T4: form and preview side by side from `lg` (the preview sticky), stacked from `md`, a count line opening the preview in a `Sheet` on a phone; the `SaveBar` last | Default |
+| `SaveBar` | patterns | An editor's Save and Discard, kept at the bottom of the view, with the refusal beside them | Default, Refused |
+| `UndoToast` | patterns | As specified above; the count pauses while hovered or focused, and `onExpire` makes the action final (a Source's Delete is sent then) | Default |
+| `MediaGrid` | patterns | Thumbnails in justified rows, each at its photo's own ratio (Immich's timeline), never a square crop, since a photo's shape is what a Frame judges it by; "Show more" | Default, WithMore, ReadingMore |
+| `MediaCard` (+ `MediaCardAdd`, `MediaCardList`) | patterns | T2's card for a thing made of photos: a four-photo mosaic, its name, its count, what it holds, its status chip and More; or, in a form, a choice by checkbox or radio; "+ New …" as the list's last card | Default, Empty, Chosen, List |
+
 ### Later patterns (props written when their delivery starts)
 
 | Pattern | Purpose | Delivery |
 |---|---|---|
 | `OverrideBanner` | Something overriding the plan, with an explicit `kind`: `"power-hold"` ("Off — by Home Assistant (Away mode) · **Resume schedule**"), `"takeover"` (Show now: countdown and **Back to normal**) or `"pause"` ("Paused until 22:04 · **Carry on**") | 2a (power-hold); 3b-i (takeover, pause) |
 | `TimelineLane` | One lane of blocks on a time axis (power on/off, content, holds, Default Scene); blocks are also a text list | 2a |
-| `SaveBar` | Explicit Save / Save and apply now, or Change now / From the next block | 2b |
+| `SaveBar` (the Schedule's pairs) | Explicit Save / Save and apply now, or Change now / From the next block; the editor's bar of delivery 4 is above | 2b |
 | `WallMap`, `WallTile` | Frames to scale; a tile shows the status, what the Pi is presenting and its actions; read-only on Home, editable in T6 | 3b-i (status and actions); 3b-ii (what the Pi presents); 6 (T6) |
-| `IncludeExcludePicker`, `MediaGrid` | Photo source filters paired with excludes; a thumbnail grid with a live count | 4 |
+| `IncludeExcludePicker` | Photo source filters paired with excludes | 4 |
 | `Checklist` | Steps from real checks: T7's body and a settings area's live checks | 3 (Integrations); 6 (T7) |
 | `StepProgress` | Long actions across the network ("Reboot requested → started → back online") | 3b-i (G3); 7 (G6) |
 | `AppShell` | Rail on desktop, bottom tabs on phone, house word in the top bar | 3b-i |
@@ -510,6 +523,7 @@ Never claim what the display lights up, and never offer a fix the system cannot 
 |---|---|
 | Clock time | One formatter (`timeWords.js`). Until the House timezone and clock format exist (2b, [settings catalogue](operator-console-design.md#11-settings-catalogue) #2, #5) it uses the browser's zone and 24-hour time; then the House's: "21:04" or "9:04 pm". Acknowledgement times carry seconds ("21:04:07") |
 | Since / last heard | Absolute beyond an hour ("since 21:04", "since Tue 09:12"); "3 min ago" only within the hour; always Central's receive time, never a Pi's clock |
+| Check and contact times | `timeWords.js` `sinceTime`: the weekday and a 24-hour time, "Checked Sun 03:39", "Needs a look since Sun 03:39"; no zone abbreviation, no seconds; a date instead of the weekday only when a served read time says it is more than six days old. One time per page: the pool's line carries no second copy of its check's time |
 | Durations | "30 s", "1 h", "1 h 30 min" |
 | Lengths | House units (cm or in), one decimal at most |
 | Counts | Locale grouping ("41,203 photos"); exact, never "many" |
@@ -525,7 +539,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | A1 Install Central | Setup checklist › Server | T7 | Checklist, ProblemCard | none | each step green from a real check | "Network boot files not staged" with the fix |
 | A2 Sign in | Sign-in page | exception (no template) | Field, Button | Action | lands on Home | wrong password inline, without saying which part was wrong |
 | A2 Owner account | Settings › People and access | T8 | SettingRow | Autosave | "Signed in as …" | none |
-| A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field, Button (Test) | Autosave | Test: "41,203 photos, 212 albums, 96 people" | EmptyState "Connect your photo library"; "Immich rejected the API key" |
+| A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field (the key a password field, then "Key ending …1234"), Button (Check now), ProblemCard | Save (Save checks at once) | "41,203 photos · 2,110 videos · 212 albums · 96 people" (Immich's totals, archived photos included) and the Immich user; Connected, Checking, Paste the address and key, or Needs a look | EmptyState "Connect your photo library: paste the address of your Immich and an API key below."; a ProblemCard per problem with its one fix, for example "Immich rejected the API key." → Paste a new key, each saying "Photos keep playing." |
 | A4 House basics | Settings › House | T8 | SettingRow, SegmentedControl | Autosave | none | browser-derived defaults shown as defaults |
 | A5 Ready for Pis | Setup checklist › Ready for Pis | T7 | Checklist, ProblemCard | none | "Network boot OK · release 1.4.2 ready" | the problem names the piece (DHCP, files, release) |
 | B1 Pi appears | Pis › New Pis waiting | T2 | EntityList, HealthBadge | none | the display shows its code; "Waiting · seen 21:04" | EmptyState "Plug a Pi into a display and power"; "2 GB, needs 4 GB" |
@@ -542,8 +556,8 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | C3 Copy settings | Frame page › Picture | T3 + QuickActionSheet | TargetPicker, AckBadge per Frame | Action + Undo | per Frame: requested → acknowledged | a display that refuses a value: that Frame's row says so |
 | C4 Two displays per Pi | Frame page › Hardware | T3 | SettingRow, LinkToOwner (Pi page lists ports read-only) | Autosave | "Fed by Pi pw-3f2a · HDMI 2" | port in use: the picker shows by which Frame |
 | C5 Span | Frames › wall layout | T6 | WallTile | Autosave | deferred ([roadmap](roadmap.md#deferred-and-what-that-costs)) | none |
-| D1 Pick photos | Photo source editor › Include | T4 | IncludeExcludePicker, MediaGrid, SaveBar | Save | live count and thumbnails | "No photos match" naming the narrowest filter |
-| D2 Exclude | Photo source editor › Exclude | T4 | IncludeExcludePicker, SettingRow | Save | count before and after | archived, hidden, screenshots shown as defaults |
+| D1 Pick photos | Photo source editor › Include | T4 (`EditorPage`) | IncludeExcludePicker, MultiToggle, MediaGrid, SaveBar, Sheet | Save | live count and thumbnails at each photo's ratio | "No photos match all of these: …" naming every choice the query makes, each with a Clear (per-choice counts are not built: each would be one more Immich search) |
+| D2 Exclude | Photo source editor › Exclude | T4 | IncludeExcludePicker, SettingRow | Save | the pool beside the form is read again from the top | Leave out albums, people and tags (none by default) and Leave out screenshots (on by default); one fixed line, not a switch: "Archived, hidden and locked photos are never included." |
 | D3 Photo fit | Scene editor › Photo fit | T4 | SettingRow, SegmentedControl | Save | preview shows the fit | none |
 | D3 Photo fit | Frame page › Photo fit (override) | T3 | SettingRow (content, inherited), SegmentedControl | Autosave | skipped counts, each a link | "312 too small" opens the list |
 | D4 Order | Scene editor › Order | T4 | SettingRow, SegmentedControl | Save | preview order | none |

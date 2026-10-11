@@ -25,10 +25,10 @@ Scenes page, then Kind → Photos → Frames → [Media per frame] → Playback 
 at a time behind Continue. `author_scene` walks it; `start_scene`, `scene_continue` and
 `scene_form` are its parts, for tests about the flow's own steps.
 
-A Source is added in the Source flow (#/sources/new/<step>, console DDD §37): "New
-Source", then Library → Tags → Narrow → Name → Review (no Library step when exactly one
-connection is known). `add_source` walks it; `start_source`, `source_continue`,
-`source_step`, `source_form` and `answer_connection` are its parts.
+A Source is made in the Photo source editor (#/sources/new/query, roadmap 4): "New Photo
+source" opens an unsaved Source whose pool fills as Immich is read; Name and Save Photo source work at any
+time. `add_source` makes one; `start_source` and `source_editor` are its parts. A connection
+must be seeded first (tests/browser/photo_seed.py).
 
 As of bead 4 a Program is scheduled in the Schedule flow (#/schedule/new/<step>): "Schedule
 a Program" on the Schedule page, then Scene → When → Review. `schedule_program` walks it;
@@ -47,10 +47,12 @@ from playwright.sync_api import expect
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
-SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | {"attention"}
+SETTINGS_SECTIONS = frozenset({"photo-library"})
+SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
     "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
+    "photo-library": "Photo library",
     # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
     "players": "Software and screens",
 }
@@ -219,7 +221,7 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     """
     picks = frames if isinstance(frames, Mapping) else None
     form = start_scene(page, hand_picked=picks is not None)
-    form.get_by_label("Source", exact=True).select_option(source)
+    choose_source(form, source)
     scene_continue(page, "Frames")
     for frame_id in frames:
         form.get_by_label(f"Target frame {frame_id}", exact=True).check()
@@ -248,89 +250,51 @@ def author_scene(page, scene_id, source, frames, *, seconds=None, loop=None, sub
     return info.value
 
 
-def source_form(page):
-    """The Source flow's current step: the form "Configure a Source" in the Sources region.
-    Every step renders it, with the step's fields and its Back and Continue (Review: Save
-    Source)."""
-    return page.get_by_role("region", name="Sources", exact=True).get_by_role(
-        "form", name="Configure a Source", exact=True)
+def source_choice(form, source_ref):
+    """The Scene flow's Photos step: the card control (a checkbox, or a radio for a hand-picked
+    Scene) that chooses the saved Source `source_ref`; its value is the stored ref."""
+    return form.get_by_role("group", name="Photo sources", exact=True).locator(
+        f'input[value="{source_ref}"]')
 
 
-def source_continue(page, step=None):
-    """Press the Source flow's Continue; with `step` (a stepper label such as "Name"), wait
-    until that step shows."""
-    source_form(page).get_by_role("button", name="Continue", exact=True).click()
-    if step is not None:
-        expect(page.get_by_role("navigation", name="Steps", exact=True).locator(
-            "[aria-current=step]")).to_contain_text(step)
+def choose_source(form, source_ref):
+    """Choose the saved Source `source_ref` on the Scene flow's Photos step (its card's control)."""
+    source_choice(form, source_ref).check()
 
 
-def source_step(page):
-    """The Source flow's current step, by its stepper label ("Library", "Tags", …)."""
-    current = page.get_by_role("navigation", name="Steps", exact=True).locator("[aria-current=step]")
-    expect(current).to_have_count(1)
-    return current.locator("span").last.inner_text().strip()
+def source_editor(page):
+    """The Photo source editor (`#/sources/new/query`, `#/sources/<name>/edit/query`): the
+    Sources region while it shows the editor, its Name field first."""
+    region = page.get_by_role("region", name="Sources", exact=True)
+    expect(region.get_by_label("Name", exact=True)).to_be_visible()
+    return region
 
 
 def start_source(page):
-    """Go to Sources and press "New Source"; returns the flow's form, on its first step
-    (Library, or Tags when exactly one connection is known)."""
+    """Go to Sources and press "New Photo source"; returns the editor once its unsaved Source exists
+    (the draft POST answered). A connection must be seeded (tests/browser/photo_seed.py)."""
     go(page, "sources")
-    page.get_by_role("region", name="Sources", exact=True).get_by_role(
-        "button", name="New Source", exact=True).click()
-    form = source_form(page)
-    expect(form).to_be_visible()
-    return form
+    with page.expect_response(lambda r: r.url.endswith("/v1/operator/photo-drafts")
+                              and r.request.method == "POST") as created:
+        page.get_by_role("region", name="Sources", exact=True).get_by_role(
+            "button", name="New Photo source", exact=True).click()
+    assert created.value.status == 201, created.value.text()
+    return source_editor(page)
 
 
-def answer_connection(form, connection):
-    """Answer "Connection name" however the connection rule shows it: a text field on the
-    Library step (no Source yet), under the Name step's Advanced (one known connection;
-    opened here first) or a chooser on the Library step (several; "Another connection…"
-    and "New connection name" for one no Source uses yet)."""
-    field = form.get_by_label("Connection name", exact=True)
-    if not field.is_visible():
-        form.get_by_role("button", name="Advanced", exact=True).click()
-    if field.evaluate("(element) => element.tagName") != "SELECT":
-        field.fill(connection)
-    elif connection in field.evaluate("(element) => [...element.options].map((o) => o.value)"):
-        field.select_option(connection)
-    else:  # a connection no Source uses yet
-        field.select_option(label="Another connection…")
-        form.get_by_label("New connection name", exact=True).fill(connection)
-
-
-def add_source(page, source_ref, connection, *, media_type=None, submit=True):
-    """Configure a Source named `source_ref` (`name:rev`) on library `connection` through
-    the Source flow: [Library] → Tags (none) → Narrow → Name → Review, then Save Source.
-
-    `media_type` picks "Media type" ("image", "video"); None keeps the flow's default.
-    With `submit`, saves, waits (on success) for the saved Source's card and returns the PUT
-    response; without it, returns the flow's form on Review, filled and unsaved.
-    """
-    form = start_source(page)
-    if source_step(page) == "Library":
-        answer_connection(form, connection)
-        source_continue(page, "Tags")
-    source_continue(page, "Narrow")
-    if media_type is not None:
-        form.get_by_label("Media type", exact=True).select_option(media_type)
-    source_continue(page, "Name")
-    form.get_by_label("Source name", exact=True).fill(source_ref)
-    if form.get_by_role("button", name="Advanced", exact=True).count():
-        answer_connection(form, connection)
-    source_continue(page, "Review")
+def add_source(page, name, *, submit=True):
+    """Make a Photo source named `name` (every photo of the one seeded connection): New Photo
+    source, the name, Save Photo source. With `submit`, returns the save response once the Source's card is
+    listed; without it, returns the editor, named and unsaved."""
+    editor = start_source(page)
+    editor.get_by_label("Name", exact=True).fill(name)
     if not submit:
-        return form
-    with page.expect_response(
-        lambda r: r.url.endswith("/v1/operator/source-names/" + quote(source_ref, safe=""))
-        and r.request.method == "PUT"
-    ) as info:
-        form.get_by_role("button", name="Save Source", exact=True).click()
+        return editor
+    with page.expect_response(lambda r: r.url.endswith("/save") and r.request.method == "POST") as info:
+        editor.get_by_role("button", name="Save Photo source", exact=True).click()
     if info.value.ok:
-        # The flow ended on the cards, which list it (the refresh after the save landed).
         expect(page.get_by_role("region", name="Sources", exact=True).get_by_role(
-            "article", name=source_ref, exact=True)).to_be_visible()
+            "article", name=name, exact=True)).to_be_visible()
     return info.value
 
 
@@ -423,7 +387,7 @@ def start_show_now(page, scene_id=None):
         "button", name="Show now", exact=True).click()
     form = show_form(page)
     if scene_id is not None:
-        form.get_by_label("Scene to activate", exact=True).select_option(scene_id)
+        form.get_by_label("Scene", exact=True).select_option(scene_id)
     return form
 
 
@@ -485,3 +449,10 @@ def open_frame(page, frame_id, tab):
     expect(page.get_by_role("tablist", name="Frame settings", exact=True).get_by_role(
         "tab", name=TABS[tab], exact=True)).to_have_attribute("aria-selected", "true")
     return visible_page(page)
+
+
+def source_card_action(page, card, name, action):
+    """On the Sources list, a Source card's overflow action: More, then `action` ("Check now",
+    "Delete"). The menu opens over the page, outside the card."""
+    card.get_by_role("button", name=f"More actions for {name}", exact=True).click()
+    page.get_by_role("menuitem", name=action, exact=True).click()

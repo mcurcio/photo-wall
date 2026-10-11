@@ -32,7 +32,7 @@ import { SceneList } from "./SceneList.jsx";
 import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep } from "./SceneSteps.jsx";
 import { useCandidates } from "./useCandidates.js";
 import { mediaNow } from "./mediaHealth.js";
-import { useSourceRefresh } from "./useSourceRefresh.js";
+import { useSourceCheck } from "./useSourceCheck.js";
 
 const EMPTY = {};
 
@@ -115,7 +115,8 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const [reloaded, setReloaded] = useState(/** @type {string|null} */ (null));
   // The Scene just saved, for the next actions (Show now, Schedule it).
   const [saved, setSaved] = useState(/** @type {string|null} */ (null));
-  const sourceRefresh = useSourceRefresh(JSON.stringify([draft.id, value.sourceRef]));
+  // Check now on a chosen Source: its receipts belong to this draft.
+  const sourceCheck = useSourceCheck(JSON.stringify([draft.id]));
   const saveRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const reloadRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
   const refs = useFlowRefs();
@@ -142,11 +143,13 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     );
   }, [loaded, frameKey, value.targets, draft.key, patch]);
 
-  const currentSource = sources.find((source) => source.source_ref === value.sourceRef) ?? null;
+  // A hand-picked Scene picks from its first Source; its candidates are read again when that
+  // Source's check moves on (a new check, or one completed).
+  const firstSource = sources.find((source) => source.source_ref === value.sourceRefs[0]) ?? null;
   const candidates = useCandidates(
-    draft.key !== null && value.mode === "authored" ? value.sourceRef : "",
+    draft.key !== null && value.mode === "authored" ? value.sourceRefs[0] ?? "" : "",
     value.targets,
-    Number(currentSource?.refresh_completed_revision ?? 0),
+    checkStamp(firstSource?.check),
   );
 
   // A per-frame choice belongs to one Source's catalog: once a frame's candidates are
@@ -185,13 +188,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
 
   const write = useFlowWrite({ draft, confirm, failure: "Could not save Scene" });
   const sourceReadiness = {
-    source: currentSource,
-    historicalRef: value.sourceRef !== "" && currentSource === null,
+    chosen: value.sourceRefs.map((ref) => ({
+      ref, source: sources.find((source) => source.source_ref === ref) ?? null,
+    })),
     now,
-    feedback: sourceRefresh.feedback[value.sourceRef] ?? null,
-    refreshing: sourceRefresh.pending === value.sourceRef,
+    check: sourceCheck,
     onManage: () => navigate({ section: "sources" }),
-    onRefresh: () => sourceRefresh.run(value.sourceRef),
   };
 
   // A Save Central did not answer may have stored its id: while the draft is the one it
@@ -267,7 +269,12 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
       return false; // the draft it was begun for is gone
     }
     if (result !== null) {
-      draft.patch({ sourceRef: result.sourceRef });
+      // The new Source joins the chosen ones (a hand-picked Scene has one, so it replaces it).
+      draft.patch((current) => ({
+        sourceRefs: current.mode === "authored" ? [result.sourceRef]
+          : current.sourceRefs.includes(result.sourceRef) ? current.sourceRefs
+            : [...current.sourceRefs, result.sourceRef],
+      }));
     }
     if (show) {
       focus.openField("source");
@@ -346,7 +353,7 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const buildSceneSave = (sceneId) =>
     buildSave(value.mode, {
       sceneId,
-      sourceRef: value.sourceRef,
+      sourceRefs: value.sourceRefs,
       targetIds: value.targets,
       cycleSeconds: Number(value.cycleSeconds),
       loop: value.loop,
@@ -523,11 +530,9 @@ const REPLACE_CHANGED =
   "This Scene was changed since you opened it; nothing was replaced. Review now offers Reload.";
 
 // Refusals in plain words (slice 3 §13): media_repository.py `author_candidates_in`
-// answers the first two (authored route) with 409; runtime.py `set_scene` the last
+// answers the first (authored route) with 409; runtime.py `set_scene` the last
 // (both routes) when another save of this id landed first.
 const SAVE_REFUSALS = {
-  source_not_fresh:
-    "The Source's last refresh failed; authored choices can be saved once it succeeds.",
   authored_asset_not_member: "That item is no longer in the Source; choose again.",
   scene_revision_conflict: "A Scene with this id was saved meanwhile; nothing was replaced.",
 };
@@ -579,4 +584,9 @@ function replaceRequest(sceneId, revision, { path, body }, reload, after) {
     },
     after,
   };
+}
+
+/** A number that moves when a Source's check moves on: its start, or its completion. */
+function checkStamp(check) {
+  return Number(check?.at ?? check?.started_at ?? 0);
 }

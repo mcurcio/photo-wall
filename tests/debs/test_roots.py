@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -111,7 +112,28 @@ def mounted(request, components: Path, tmp_path_factory) -> Iterator[tuple[str, 
     try:
         yield role, mount
     finally:
-        subprocess.run(as_root(["umount", str(mount)]), check=True)
+        _unmount(mount)
+
+
+# umount's "target is busy" (exit 32): a process that touched the mount may still be finishing
+# its exit when the test that started it returns (CI run 38171591122 tore down the app root's
+# mount while one was), so the teardown waits for the mount to be released, then names the
+# holders when it never is.
+UNMOUNT_BUSY, UNMOUNT_WAIT_SECONDS = 32, 30.0
+
+
+def _unmount(mount: Path) -> None:
+    deadline = time.monotonic() + UNMOUNT_WAIT_SECONDS
+    while True:
+        done = subprocess.run(as_root(["umount", str(mount)]), capture_output=True, text=True)
+        if done.returncode == 0:
+            return
+        if done.returncode != UNMOUNT_BUSY or time.monotonic() >= deadline:
+            holders = subprocess.run(as_root(["fuser", "-vm", str(mount)]),
+                                     capture_output=True, text=True)
+            raise AssertionError(f"umount {mount} exited {done.returncode}: {done.stderr.strip()}"
+                                 f"\nholders:\n{holders.stdout}{holders.stderr}")
+        time.sleep(0.2)
 
 
 def _walk(mount: Path) -> dict:

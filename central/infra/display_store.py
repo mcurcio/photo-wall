@@ -116,7 +116,9 @@ from central.displays.views import (
 )
 from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgLinkStores
+from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
+from contracts.models import Calibration, FrameProfile, frame_output
 from contracts.node_link import Pipe
 from contracts.node_output import (
     AS_THE_DISPLAY_HAS_IT,
@@ -163,6 +165,32 @@ POSITION_FACTS: Final = ("bound", "generation", "position_generation", "position
                          "seen_display_id")
 POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.position_generation, "
                            "f.position_display_id, seen.display_id AS seen_display_id")
+
+
+def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
+    """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
+    2026-10-11, slice A1): frames LEFT JOIN bindings LEFT JOIN outputs on (player_id,
+    output_id); `display_px` from `outputs.observation` width_px x height_px when both are >= 1
+    (the enrollment report, connected or not); `output_px` is `contracts.models.frame_output`.
+    The one read of Frame outputs: the media worker's rendition choice (PgPhotoLibrary), the
+    Planner's slots and the fit analysis (roadmap 5a) all ask here. Never raises for a Frame
+    without an Output."""
+    rows = conn.execute(
+        "SELECT f.id, f.profile, f.calibration, (o.observation->>'width_px')::int AS width_px, "
+        "(o.observation->>'height_px')::int AS height_px FROM frames f "
+        "LEFT JOIN bindings b ON b.frame_id=f.id "
+        "LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
+        "ORDER BY f.id").fetchall()
+    frames = []
+    for row in rows:
+        profile = FrameProfile.model_validate(row["profile"])
+        width, height = row["width_px"], row["height_px"]
+        display = (width, height) if width is not None and height is not None \
+            and width >= 1 and height >= 1 else None
+        frames.append(FrameOutput(
+            frame_id=row["id"], profile=profile, display_px=display,
+            output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display)))
+    return tuple(frames)
 
 
 def frame_position(row: Mapping[str, Any]) -> FramePosition:

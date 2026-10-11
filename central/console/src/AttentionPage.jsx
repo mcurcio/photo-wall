@@ -1,6 +1,7 @@
 import React from "react";
 
 import { AttentionList, attentionView } from "./AttentionList.jsx";
+import { LibraryHealthCard } from "./domain/library-health-card.tsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { readinessRecoveryFrames } from "./readinessRecovery.js";
 import { formatRoute, isPlainClick } from "./routes.js";
@@ -12,18 +13,39 @@ import { formatRoute, isPlainClick } from "./routes.js";
  * take focus once, as the strip's own navigation does. A G1 list module (console DDD §49):
  * its closure reaches no page and no write (tests/test_console_routes_r4.py).
  *
+ * Below the Frames, one card per photo library connection that needs a look (roadmap 4, K1),
+ * each with its one fix as a link to Settings › Photo library, where the fix is made. The
+ * connections come from the route's own read (`library`, neutralRoutes.jsx), so this page reaches
+ * no write.
+ *
  * @param {{snapshot: object, central: {scheduler: string|null},
  *          wall: import("./wallState.js").WallMemory,
- *          hosts: import("./fleetHosts.js").FleetHosts|null, bootFacts: object|null}} props
+ *          hosts: import("./fleetHosts.js").FleetHosts|null, bootFacts: object|null,
+ *          library?: {connections: Array<object>|null}|null}} props
  */
-export function AttentionPage({ snapshot, central, wall, hosts, bootFacts }) {
+export function AttentionPage({ snapshot, central, wall, hosts, bootFacts, library = null }) {
   const { frameCount, rows } = attentionView(snapshot, central, hosts, bootFacts);
   const readinessFrames = readinessRecoveryFrames(snapshot);
+  const looks = (library?.connections ?? []).filter((connection) => connection.health?.state === "needs_a_look");
+  const photoLibrary = looks.length > 0 && (
+    <section className="readiness-attention" aria-label="Photo library">
+      <h2>Photo library</h2>
+      {looks.map((connection) => (
+        <LibraryHealthCard key={connection.connection_ref} connection={connection} />
+      ))}
+    </section>
+  );
   if (frameCount === 0) {
-    return <p className="page__empty">No frames yet. Draw one on the Wall.</p>;
+    return <>
+      <p className="page__empty">No frames yet. Draw one on the Wall.</p>
+      {photoLibrary}
+    </>;
   }
   if (rows.length === 0 && readinessFrames.length === 0) {
-    return <p className="page__empty">Nothing needs attention.</p>;
+    return <>
+      {looks.length === 0 && <p className="page__empty">Nothing needs attention.</p>}
+      {photoLibrary}
+    </>;
   }
   return <>
     {rows.length > 0 && (
@@ -66,5 +88,6 @@ export function AttentionPage({ snapshot, central, wall, hosts, bootFacts }) {
         </ul>
       </section>
     )}
+    {photoLibrary}
   </>;
 }

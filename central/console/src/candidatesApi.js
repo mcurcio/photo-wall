@@ -11,8 +11,8 @@ import { apiWrite } from "./apiWrite.js";
  *
  * @param {string} sourceRef
  * @param {string} frameId
- * @returns {Promise<{status: string, candidates: Array<object>}>} the Source's
- *   served refresh status and its candidates for this frame
+ * @returns {Promise<{ready: boolean, candidates: Array<object>}>} whether the
+ *   Source's pool has a complete check, and its candidates for this frame
  */
 export async function readCandidates(sourceRef, frameId) {
   // frame_id makes Central drop every asset ineligible for THIS frame's
@@ -25,5 +25,5 @@ export async function readCandidates(sourceRef, frameId) {
   if (!result.ok) {
     throw new Error(result.error ?? `HTTP ${result.status}`);
   }
-  return { status: result.data?.status ?? null, candidates: result.data?.candidates ?? [] };
+  return { ready: result.data?.ready === true, candidates: result.data?.candidates ?? [] };
 }

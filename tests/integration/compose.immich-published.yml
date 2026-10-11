@@ -1,0 +1,9 @@
+# `scripts/immich_fixture.py run --publish` only: Immich also joins a non-internal network and
+# publishes its API on an ephemeral 127.0.0.1 port, for the named tests on this host
+# (tests/support/immich_library.py). The topology check allows exactly this one binding.
+services:
+  immich:
+    networks: [upstream_net, published_net]
+    ports: ["127.0.0.1::2283"]
+networks:
+  published_net: {}

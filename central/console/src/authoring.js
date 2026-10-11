@@ -151,7 +151,7 @@ export const SCENE_SETTING_DEFAULTS = Object.freeze({
  * nothing to choose: its problem belongs to the frame choice (field `targets`).
  *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
- *          sourceRef: string, targets: string[], cycleSeconds: string|number,
+ *          sourceRefs: string[], targets: string[], cycleSeconds: string|number,
  *          selections: Record<string, string>, loadingMedia?: boolean,
  *          noMedia?: string[]}} draft
  * @param {Set<string>} existingIds the stored Scene ids
@@ -160,7 +160,7 @@ export const SCENE_SETTING_DEFAULTS = Object.freeze({
  */
 export function sceneProblems(draft, existingIds, { editing = false } = {}) {
   const problems = editing ? [] : identityProblems("Scene", draft, existingIds);
-  if (draft.sourceRef === "") {
+  if (draft.sourceRefs.length === 0) {
     problems.push({ field: "source", message: "Choose a Source." });
   }
   if (draft.targets.length === 0) {
@@ -195,7 +195,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
         problems.push({
           field: "targets",
           message:
-            `No compatible media for ${frameId} in ${sourceName(draft.sourceRef)}. ` +
+            `No compatible media for ${frameId} in ${sourceName(draft.sourceRefs[0])}. ` +
             "Choose another frame, or another Source.",
         });
       } else {
@@ -208,9 +208,11 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
 
 /**
  * Build the save {path, body} for the given authoring mode (the 14a/14b seam).
- * "live": the plain scene route with the Scene as the body. "authored": the
- * authored route with a {scene, source_ref, asset_ids} body — one media
- * Contribution per target Frame carrying that Frame's chosen asset ref.
+ * "live": the plain scene route with the Scene as the body; every media Contribution
+ * carries the Scene's Photo sources, in the order chosen (roadmap 4, #36: the Scene plays
+ * the photos of all of them). "authored": the authored route with a {scene, source_ref,
+ * asset_ids} body — one media Contribution per target Frame carrying that Frame's chosen
+ * asset ref, chosen from the first Source.
  * `revision` is 1 for a new Scene; an edit sends the stored revision + 1 (§13).
  *
  * Delivery 1x's settings (an omitted one writes what the console always wrote):
@@ -226,7 +228,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
  * - `keepTogether` (#65): the Scene's `protect_frames`.
  *
  * @param {"live"|"authored"} mode
- * @param {{sceneId: string, sourceRef: string, targetIds: string[], cycleSeconds: number,
+ * @param {{sceneId: string, sourceRefs: string[], targetIds: string[], cycleSeconds: number,
  *          loop: boolean, selections?: Record<string,string>, revision?: number,
  *          fadeSeconds?: number, ending?: Ending, endingSeconds?: number,
  *          keepLastPhoto?: boolean, keepTogether?: boolean}} draft
@@ -235,7 +237,7 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
 export function buildSave(
   mode,
   {
-    sceneId, sourceRef, targetIds, cycleSeconds, loop, selections = {}, revision = 1,
+    sceneId, sourceRefs, targetIds, cycleSeconds, loop, selections = {}, revision = 1,
     fadeSeconds = 0, ending = "none", endingSeconds = 0, keepLastPhoto = true, keepTogether = false,
   },
 ) {
@@ -247,7 +249,7 @@ export function buildSave(
   // role carries the frame id.
   const media = (frameId) => (mode === "authored"
     ? { asset_refs: [selections[frameId]] }
-    : { source_refs: [sourceRef] });
+    : { source_refs: [...sourceRefs] });
   const half = Number(fadeSeconds) / 2;
   const contributions = targetIds.map((frameId) => ({
     target: toTarget(frameId),
@@ -275,7 +277,7 @@ export function buildSave(
     const assetIds = [...new Set(targetIds.map((frameId) => selections[frameId]))];
     return {
       path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}/authored`,
-      body: { scene, source_ref: sourceRef, asset_ids: assetIds },
+      body: { scene, source_ref: sourceRefs[0], asset_ids: assetIds },
     };
   }
   return { path: `/v1/operator/scenes/${encodeURIComponent(sceneId)}`, body: scene };
@@ -349,7 +351,7 @@ function canonical(value) {
  * does not rebuild to itself, so {@link editableDraft} withholds Edit.
  *
  * @param {object} scene a served Scene definition
- * @returns {{mode: "live"|"authored", sourceRef: string, targetIds: string[],
+ * @returns {{mode: "live"|"authored", sourceRefs: string[], targetIds: string[],
  *            cycleSeconds: number, loop: boolean, selections: Record<string, string>,
  *            fadeSeconds: number, ending: Ending, endingSeconds: number,
  *            keepLastPhoto: boolean, keepTogether: boolean}}
@@ -365,7 +367,7 @@ export function decodeScene(scene) {
   const ending = outroSeconds === 0 ? "none" : outro[0]?.kind === "black" ? "black" : "fade";
   return {
     mode: authored ? "authored" : "live",
-    sourceRef: authored ? "" : (first?.source_refs[0] ?? ""),
+    sourceRefs: authored ? [] : [...(first?.source_refs ?? [])],
     targetIds: contributions.map(frameIdOf),
     cycleSeconds,
     loop,
@@ -412,7 +414,7 @@ export function editableDraft(scene) {
  * `baseRevision`).
  *
  * @typedef {{mode: "live"|"authored", name: string, idOverride: string|null,
- *            sourceRef: string, targets: string[], selections: Record<string, string>,
+ *            sourceRefs: string[], targets: string[], selections: Record<string, string>,
  *            cycleSeconds: string|number, loop: boolean, fadeSeconds: number,
  *            ending: Ending, endingSeconds: number, keepLastPhoto: boolean,
  *            keepTogether: boolean, revision: number|null}} SceneDraft
@@ -429,7 +431,7 @@ export const NEW_SCENE_DRAFT = Object.freeze({
   mode: "live",
   name: "",
   idOverride: null,
-  sourceRef: "",
+  sourceRefs: Object.freeze([]),
   targets: Object.freeze([]),
   selections: Object.freeze({}),
   cycleSeconds: 30,
@@ -649,50 +651,5 @@ export function windowProblems(draft, existingIds, now) {
       problems.push({ field: idField, message: `${windowId} already exists.` });
     }
   });
-  return problems;
-}
-
-// --- Sources (§6 Source, §7).
-
-/**
- * A `date` input value ("2024-03-01") as the POSIX seconds of that day's local
- * midnight; null when empty.
- *
- * @param {string} value
- * @returns {number|null}
- */
-export function localDayStart(value) {
-  if (!value) {
-    return null;
-  }
-  const [year, month, day] = value.split("-").map(Number);
-  return new Date(year, month - 1, day).getTime() / 1000;
-}
-
-/**
- * A Source draft's problems (§6 Source).
- *
- * @param {{sourceName: string, connectionRef: string, capturedFrom: string,
- *          capturedUntil: string}} draft
- * @returns {Problem[]}
- */
-export function sourceProblems({ sourceName, connectionRef, capturedFrom, capturedUntil }) {
-  const problems = [];
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(sourceName.trim())) {
-    problems.push({
-      field: "ref",
-      message: "Choose a Source name of up to 120 letters, digits, hyphens, underscores or dots, starting with a letter or digit.",
-    });
-  }
-  if (connectionRef.trim() === "") {
-    problems.push({ field: "connection", message: "Connection name is required." });
-  } else if (!IDENTIFIER_PATTERN.test(connectionRef.trim())) {
-    problems.push({ field: "connection", message: ID_RULE });
-  }
-  const from = localDayStart(capturedFrom);
-  const until = localDayStart(capturedUntil);
-  if (from !== null && until !== null && until <= from) {
-    problems.push({ field: "until", message: "'Dated until' must be after 'Dated from'." });
-  }
   return problems;
 }

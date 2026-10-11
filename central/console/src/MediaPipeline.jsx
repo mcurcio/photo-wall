@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import { readCandidates } from "./candidatesApi.js";
 import { rankedContributions } from "./join.js";
@@ -6,17 +6,18 @@ import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { sourceName } from "./sourceNames.js";
 import {
   checkCounts,
-  codeWords,
   mediaNow,
   sourceState,
   whyNothingNew,
   workerLoad,
   workerState,
 } from "./mediaHealth.js";
+import { sourcePool } from "./photoSourcesApi.js";
+import { counted, lastCompleteWords } from "./sourceWords.js";
 
 /**
  * The media pipeline (pass 2 slice 3 §14), in the "Now" column: the worker
- * (checked in, jobs, cache) and each Source's refresh, from the media read
+ * (checked in, jobs, cache) and each Source's check (roadmap 4), from the media read
  * Plane A already fetches. Central fetches and prepares all media; Players
  * receive it only from Central.
  *
@@ -49,9 +50,9 @@ export function MediaPipeline({ snapshot }) {
       {sources.length === 0 ? (
         <p className="showrunner__empty">No Sources yet.</p>
       ) : (
-        <ul className="media-pipeline__sources" aria-label="Source refreshes">
+        <ul className="media-pipeline__sources" aria-label="Source checks">
           {sources.map((source) => (
-            <SourceRefresh key={source.source_ref} source={source} now={now} />
+            <SourceCheck key={source.source_ref} source={source} now={now} />
           ))}
         </ul>
       )}
@@ -59,43 +60,59 @@ export function MediaPipeline({ snapshot }) {
   );
 }
 
-/** One Source's refresh: its state, counts, diagnostics and next refresh. */
-function SourceRefresh({ source, now }) {
+/**
+ * One Source's check: its state in words, how far a running check has read, and when its last
+ * complete check was (against the media read time: both are the database's clock).
+ */
+function SourceCheck({ source, now }) {
   const state = sourceState(source, now);
-  const counts = source.counts ?? {};
-  const reported = [...new Set((source.diagnostics ?? []).map((entry) => entry.code))];
-  const next = source.next_refresh ? source.next_refresh - now : null;
+  const check = source.check ?? null;
+  const last = lastCompleteWords(check, now);
   return (
-    <li className="media-pipeline__source" aria-label={`Refresh of ${sourceName(source)}`}>
+    <li className="media-pipeline__source" aria-label={`Check of ${sourceName(source)}`}>
       <dl className="record">
         <dt>Source</dt>
         <dd>{sourceName(source)}</dd>
         <dt>State</dt>
         <dd className={`health--${state.severity}`}>{state.label}</dd>
-        {counts.discovered !== undefined && (
+        {check?.state === "checking" && (
           <>
-            <dt>Last refresh</dt>
-            <dd>
-              {`found ${counts.discovered ?? 0} · valid ${counts.valid ?? 0} · pending ` +
-                `${counts.pending ?? 0} · rejected ${counts.rejected ?? 0}`}
-            </dd>
+            <dt>Checking</dt>
+            <dd>{`Checking: ${counted(check.seen_so_far, "photo")} so far`}</dd>
           </>
         )}
-        {reported.length > 0 && (
+        {last !== null && (
           <>
-            <dt>Reported</dt>
-            <dd>{reported.map(codeWords).join(", ")}</dd>
-          </>
-        )}
-        {next !== null && Number.isFinite(next) && (
-          <>
-            <dt>Next refresh</dt>
-            <dd>{next > 0 ? `due in ${Math.ceil(next)} s` : "due now"}</dd>
+            <dt>Last complete check</dt>
+            <dd>{last}</dd>
           </>
         )}
       </dl>
     </li>
   );
+}
+
+/**
+ * Each of `refs`' pools as "Why nothing new?" judges them: its photos and whether its check is
+ * running, read once per ref list and again when a served check moves on.
+ */
+function usePools(refs, sources) {
+  const [pools, setPools] = useState({});
+  const key = JSON.stringify(refs.map((ref) => [ref,
+    sources.find((source) => source.source_ref === ref)?.check ?? null]));
+  useEffect(() => {
+    let current = true;
+    const wanted = JSON.parse(key).map(([ref]) => ref);
+    Promise.all(wanted.map(async (ref) => [ref, await sourcePool(ref)])).then((answers) => {
+      if (!current) return;
+      setPools(Object.fromEntries(answers.filter(([, answer]) => answer.ok).map(([ref, { pool }]) => [ref, {
+        photos: pool.in_pool.photos + pool.in_pool.videos,
+        checking: pool.check?.state === "checking" || pool.check?.state === "never_checked",
+      }])));
+    });
+    return () => { current = false; };
+  }, [key]);
+  return pools;
 }
 
 /**
@@ -109,7 +126,9 @@ function SourceRefresh({ source, now }) {
 export function WhyNothingNew({ snapshot, frameId }) {
   const [check, setCheck] = useState(/** @type {object|null} */ (null));
   const [checking, setChecking] = useState(false);
-  const steps = whyNothingNew(snapshot, frameId, check);
+  const [winner] = rankedContributions(snapshot?.runtime, frameId);
+  const pools = usePools(winner?.source_refs ?? [], snapshot?.media?.sources ?? []);
+  const steps = whyNothingNew(snapshot, frameId, check, pools);
   const title = `Why nothing new on ${frameId}?`;
 
   const runCheck = async () => {

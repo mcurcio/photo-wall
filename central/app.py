@@ -29,21 +29,19 @@ from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.infra.display_store import PgDisplayCommands, PgDisplayQueries, PgPictureSessions
+from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.media_gateway import MediaGateway
-from central.media_ports import (
-    MediaApplication,
-    RefreshReceipt,
-    SourceConfigurationReceipt,
-    SourcePreviewReceipt,
-)
+from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
 from central.media_store import MediaStore
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
+from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
 from central.registry import (
     Enrollment,
@@ -55,7 +53,7 @@ from central.registry import (
 )
 from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
-from central.source_names import NamedSourceWrite, SourceInUse, SourceNameService
+from central.source_names import SourceInUse, SourceNameService
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     Identifier,
@@ -66,7 +64,6 @@ from contracts.models import (
 )
 from contracts.player_control import ControlAck, ControlHello
 from contracts.time import Clock, SystemClock
-from media.models import SourcePreviewQuery, SourceSpec
 
 LOG = logging.getLogger("central.app")
 
@@ -162,7 +159,13 @@ def create_app(
     operator_snapshot = OperatorSnapshotReader(
         db, clock, registry, runtime_store, media_repository, coordinator
     )
-    source_names = SourceNameService(db, media_repository, runtime_store)
+    # Roadmap 4: the photo library store (connections, lists, drafts, pools); its times are
+    # always the database's, and it queues connection checks and pool steps on its own queue.
+    photo_library = PgPhotoLibrary(
+        db, times=DatabaseTransactionClock(),
+        queue=ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None)
+    source_names = SourceNameService(db, media_repository, runtime_store, photo_library)
+    photo_sources = PhotoSources(photo_library, source_names)
     # 0013: the app owns the layout. Every domain root is derived from the ONE
     # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
@@ -176,7 +179,7 @@ def create_app(
         build_content_services(
             db, clock, cache_root=cache_layout.cache_root(),
             servable_thumbnail=lambda asset_id: (
-                media_repository.servable_thumbnail(asset_id) is not None))
+                photo_library.pool_thumbnail(asset_id) is not None))
         if isinstance(db, Database)
         else None
     )
@@ -269,6 +272,7 @@ def create_app(
     app.state.coordinator = coordinator
     app.state.operator_snapshot = operator_snapshot
     app.state.media_repository = media_repository
+    app.state.photo_library = photo_library
     app.state.content = content
     bearer = HTTPBearer(auto_error=False)
     # The operator principal (pass A): bearer or signed session cookie. The key derives from the
@@ -645,44 +649,9 @@ def create_app(
     def media_state():
         return media_application.media_read()
 
-    @app.put("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
-    def configure_source_name(name: str, request: NamedSourceWrite):
-        return source_names.put(name, request)
-
     @app.delete("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
     def delete_source_name(name: str, expected_revision: int = Query(ge=1)):
         return source_names.delete(name, expected_revision)
-
-    @app.put(
-        "/v1/operator/sources/{source_ref}",
-        dependencies=[Depends(admin)],
-        response_model=SourceConfigurationReceipt,
-    )
-    def configure_source(source_ref: Identifier, source: SourceSpec):
-        if source.source_ref != source_ref:
-            raise ValueError("Source identity mismatch")
-        return SourceConfigurationReceipt(
-            source_ref=source_ref,
-            created=media_application.configure_source(source),
-        )
-
-    @app.post(
-        "/v1/operator/sources/{source_ref}/refresh",
-        dependencies=[Depends(admin)],
-        status_code=202,
-        response_model=RefreshReceipt,
-    )
-    def refresh_source(source_ref: Identifier):
-        return media_application.request_refresh(source_ref)
-
-    @app.post("/v1/operator/source-previews", dependencies=[Depends(admin)],
-              status_code=202, response_model=SourcePreviewReceipt)
-    def request_source_preview(query: SourcePreviewQuery):
-        return media_application.request_source_preview(query)
-
-    @app.get("/v1/operator/source-previews/{request_id}", dependencies=[Depends(admin)])
-    def source_preview(request_id: Identifier):
-        return media_application.source_preview(request_id)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(source_ref: Identifier, frame_id: Identifier | None = None):
@@ -747,7 +716,9 @@ def create_app(
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
         return coordinator.runtime.command_current(operation, run_id)
 
-    mount_library_routes(app, admin=admin, media=media_application, content=content)
+    mount_photo_library_routes(app, admin=admin, queries=photo_library, commands=photo_library)
+    mount_photo_source_routes(app, admin=admin, queries=photo_sources, commands=photo_sources)
+    mount_library_routes(app, admin=admin, library=photo_library, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)

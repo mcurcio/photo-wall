@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 from media_queue import RecordingMediaQueue
 from psycopg.types.json import Jsonb
+from support.photo_pools import FIXTURE_CONNECTION, seed_pool
 from support.position import save_position
 from test_registry import enroll, frame
 
@@ -18,9 +19,9 @@ from central.db import ProcessTransactionClock
 from central.execution_repository import PostgresExecutionRepository
 from central.media_repository import MediaRepository, StoreLimits
 from central.media_store import MediaStore, MediaStoreError
+from central.photo_library.model import LibraryAsset
 from central.registry import RegistryError
 from contracts.models import Layer, Plan, Variant
-from media.models import OriginalAsset, SourceSpec
 from media.prepare import BuildIdentity, PreparedMedia
 
 RECIPE = "e" * 64
@@ -42,13 +43,13 @@ def storage(registry, tmp_path):
 
 
 def queued(storage, number=1, *, original=ORIGINAL):
-    asset = OriginalAsset(connection_id="fixture", upstream_id=str(UUID(int=number)),
-                          original_sha1=hashlib.sha1(original).hexdigest(), kind="image",
-                          raw_width=1080, raw_height=1920, orientation=1, captured_at=1000,
-                          file_size=len(original))
+    """A queued job for one photo of Source `library:1`'s pool (found by its running check,
+    through the store's worker side), whose unedited checksum is `original`'s."""
+    asset = LibraryAsset(connection_ref=FIXTURE_CONNECTION, upstream_id=str(UUID(int=number)),
+                         revision=hashlib.sha1(original).hexdigest(), kind="image",
+                         taken_at=1000, width=1080, height=1920)
+    seed_pool(storage, "library:1", (asset,), complete=False)
     with storage.repository.transaction() as conn:
-        conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,1000,1000)",
-                     (asset.asset_id, Jsonb(asset.model_dump(mode="json"))))
         conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,updated_at) "
                      "VALUES(%s,%s,%s,'queued',1000,1000)", (f"job-{number}", asset.asset_id, RECIPE))
     return asset
@@ -65,10 +66,11 @@ def staged(storage, number=1, *, original=ORIGINAL, derivative=VARIANT):
                       media_type="image/jpeg", width=1080, height=1920)
     build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64, ffprobe_sha256="c" * 64,
                           ffmpeg_version="synthetic", ffprobe_version="synthetic", python_version="synthetic",
-                          pillow_version="synthetic", littlecms_version="synthetic", jpeg_version="synthetic",
+                          pillow_version="synthetic", littlecms_version="synthetic",
+                          libheif_version="synthetic", jpeg_version="synthetic",
                           zlib_version="synthetic", platform="synthetic", memory_limit_enforced=False)
     prepared = PreparedMedia(path=paths.variant, variant=variant, original_sha256=hashlib.sha256(original).hexdigest(),
-                             recipe_id=RECIPE, build=build)
+                             recipe_id=RECIPE, build=build, made_from="preview")
     return lease, paths, prepared
 
 
@@ -135,23 +137,23 @@ def test_reservation_exists_before_staging_and_stale_attempt_cannot_create_files
 
 
 def test_publish_durable_bytes_exact_journal_and_catalog(storage):
+    """P2 case 1: a pool photo's lease (a LibraryAsset) publishes; the journal pins the photo by
+    its asset id, with no original digest beside it, and the pool reads the variant."""
     with storage.worker_lock():
         lease, paths, prepared = staged(storage)
-        storage.repository.configure_source(SourceSpec(source_ref="library:1", connection_ref="fixture"))
-        with storage.repository.transaction() as conn:
-            conn.execute("UPDATE media_sources SET status='ok'")
-            conn.execute("INSERT INTO source_members VALUES('library:1',%s)", (lease.asset.asset_id,))
+        assert isinstance(lease.asset, LibraryAsset)
         storage.publish(lease, prepared)
         assert not paths.directory.exists()
         assert (storage.root / "blobs" / prepared.variant.sha256).read_bytes() == VARIANT
         job = row(storage, "media_jobs", "id", lease.job_id)
         assert job["state"] == "ready" and job["reserved_bytes"] == 0 and job["cleanup_state"] is None
-        assert job["result"]["original_sha1"] == lease.asset.original_sha1
+        assert job["result"]["asset_id"] == lease.asset.asset_id
+        assert "original_sha1" not in job["result"]
         assert job["result"]["build"] == prepared.build.model_dump(mode="json")
         assert storage.repository.health()["accounted_bytes"] == len(VARIANT)
         with storage.db.transaction() as conn:
-            snapshot = conn.execute("SELECT snapshot FROM catalog_snapshots WHERE source_ref='library:1'").fetchone()["snapshot"]
-        assert snapshot["candidates"][0]["variant"] == prepared.variant.model_dump(mode="json")
+            pool = storage.repository.source_pools_in(conn, {"library:1"})["library:1"]
+        assert [c.variant for c in pool.candidates] == [prepared.variant]
 
 
 def test_duplicate_digest_is_verified_and_counted_once(storage):
@@ -167,6 +169,8 @@ def test_duplicate_digest_is_verified_and_counted_once(storage):
 
 @pytest.mark.parametrize("fault", ["recipe", "original", "digest", "path", "stale"])
 def test_publication_mismatch_never_exposes_ready_bytes(storage, fault):
+    """P2 case 2 is "original": a pool photo's staged file whose sha256 is not the one the
+    preparation read is `media_original_mismatch`, and nothing is published."""
     with storage.worker_lock():
         lease, paths, prepared = staged(storage)
         if fault == "recipe":
@@ -179,8 +183,10 @@ def test_publication_mismatch_never_exposes_ready_bytes(storage, fault):
             prepared = prepared.model_copy(update={"path": storage.root / "other"})
         else:
             lease = lease.model_copy(update={"attempt_token": "wrong"})
-        with pytest.raises(RegistryError):
+        with pytest.raises(RegistryError) as refused:
             storage.publish(lease, prepared)
+        if fault == "original":
+            assert refused.value.code == "media_original_mismatch"
         with storage.db.transaction() as conn:
             assert conn.execute("SELECT count(*) AS n FROM media_blobs").fetchone()["n"] == 0
         assert storage.repository.health()["accounted_bytes"] == 2000
@@ -499,7 +505,7 @@ def test_idle_read_timer_closes_real_descriptor_and_releases_transfer(storage, r
             assert conn.execute("SELECT count(*) AS n FROM media_references WHERE owner LIKE 'transfer:%'").fetchone()["n"] == 0
 
 
-@pytest.mark.parametrize("field", ["recipe_id", "asset_id", "original_sha1", "blob_variant"])
+@pytest.mark.parametrize("field", ["recipe_id", "asset_id", "blob_variant"])
 def test_recovery_rejects_mismatched_publication_journal(storage, monkeypatch, field):
     with storage.worker_lock():
         lease, _, prepared = staged(storage)

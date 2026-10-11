@@ -4,7 +4,6 @@ and polling for a condition.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections.abc import Callable
@@ -35,16 +34,12 @@ def fake_media_tools(directory: Path) -> Path:
 def worker_env(root: Path, dsn: str, **extra: str) -> dict[str, str]:
     """The environment a worker (and Central) process boots with, rooted at `root`.
 
-    Creates `root/cache` (the one shared cache root), an empty `root/connections.json` (0600, as
-    the loader requires) and the media-tool stand-ins in `root/bin`, first on PATH. `extra`
-    overrides or adds variables.
+    Creates `root/cache` (the one shared cache root) and the media-tool stand-ins in `root/bin`,
+    first on PATH. Immich connections live in Central's database (roadmap 4), so no file is
+    written. `extra` overrides or adds variables.
     """
     (root / "cache").mkdir()
-    connections = root / "connections.json"
-    connections.write_text(json.dumps({"schema": 1, "connections": []}))
-    connections.chmod(0o600)
     return {**os.environ, "PHOTO_WALL_DATABASE_URL": dsn,
-            "PHOTO_WALL_CONNECTIONS_FILE": str(connections),
             "PHOTO_WALL_CACHE_ROOT": str(root / "cache"),
             "PATH": f"{fake_media_tools(root / 'bin')}{os.pathsep}{os.environ.get('PATH', '')}",
             **extra}

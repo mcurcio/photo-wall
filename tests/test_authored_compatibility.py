@@ -155,12 +155,9 @@ def test_authored_scene_accepts_an_eligible_alternative_for_each_frame(registry)
 def test_frame_filtered_api_and_atomic_save_share_original_eligibility(registry):
     from test_authored_media import ADMIN, client_for
 
-    from media.models import OriginalAsset
-
     landscape = asset(1, width=2000, height=1000)
     portrait = asset(2, width=1000, height=2000)
-    low_video = OriginalAsset.model_validate(asset(3, width=1280, height=720).model_dump() |
-                                              {"kind": "video", "duration": 5})
+    low_video = asset(3, width=1280, height=720, kind="video")
     _, spec, _ = setup_source(registry, assets=(landscape, portrait, low_video))
     registry.create_frame(FrameCreate(id="large", width_mm=300, height_mm=500,
         profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=55)))

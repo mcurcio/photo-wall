@@ -4,8 +4,9 @@ name: Controller and Player software e2e
 # owns the triggers and the concurrency. To prepare a missing media OS dependency by hand,
 # dispatch service-base.yml.
 #
-# Three parallel jobs, each with its own disposable Immich: `immich-adapter` runs the fixture's
-# adapter and network-boundary checks; `two-players-three-outputs` is one job per fault segment
+# Three parallel jobs, each with its own disposable Immich: `photo-sources` publishes a set-up
+# fixture on the runner's loopback (`--publish`) and runs the named Immich tests against it
+# (`-m immich`, tests/conftest.py); `two-players-three-outputs` is one job per fault segment
 # of the full wall scenario (scripts/demo_wall.py SCENARIOS), each starting a set-up fixture only
 # (`--setup-only`) and running the same setup and baseline before its segment. Every job's
 # shared setup is the software-e2e-setup action. The scenario's Players run from the app root
@@ -149,7 +150,9 @@ jobs:
               --state-dir "$RUNNER_TEMP/immich-fixture"
           fi
 
-  immich-adapter:
+  # Roadmap 4's named tests against real Immich, one fixture start for the whole leg: the
+  # content set (scripts/immich_actions.py CONTENT), published on 127.0.0.1 for this runner.
+  photo-sources:
     needs: service-base
     if: always()
     permissions:
@@ -175,22 +178,39 @@ jobs:
         with:
           media-base-image: ${{ needs.service-base.outputs.image }}
 
-      # Not retained: the fixture removes its services when it finishes, passed or failed.
-      - name: Check the upstream adapter against a disposable real Immich
+      # Preparation tests convert on the runner.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Start the disposable test database
+        run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+
+      - name: Start and publish a disposable real Immich fixture
         env:
           WORKER_IMAGE: ${{ steps.setup.outputs.worker-image }}
           PHOTO_WALL_DOCKER_DEBUG: '1'
-          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-immich-adapter/docker-debug.log
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-photo-sources/docker-debug.log
         run: |
           .venv/bin/python -m scripts.immich_fixture run \
             --state-dir "$RUNNER_TEMP/immich-fixture" \
-            --base-image "$WORKER_IMAGE"
+            --base-image "$WORKER_IMAGE" \
+            --keep --setup-only --publish
 
-      - name: Upload sanitized adapter evidence
+      - name: Run the named Immich tests
+        env:
+          PHOTO_WALL_IMMICH_FIXTURE: ${{ runner.temp }}/immich-fixture
+          PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'
+        run: |
+          .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
+            -m immich -n 4 --dist loadgroup --ignore=tests/browser
+
+      - name: Upload sanitized fixture evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-immich-adapter-${{ github.sha }}
+          name: photo-wall-photo-sources-${{ github.sha }}
           path: ${{ runner.temp }}/immich-fixture/evidence.json
           if-no-files-found: warn
           retention-days: 7
@@ -199,7 +219,18 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: photo-wall-immich-adapter-docker-debug-${{ github.sha }}
-          path: ${{ runner.temp }}/photo-wall-immich-adapter/docker-debug.log
+          name: photo-wall-photo-sources-docker-debug-${{ github.sha }}
+          path: ${{ runner.temp }}/photo-wall-photo-sources/docker-debug.log
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Remove the disposable Immich fixture
+        if: always()
+        env:
+          PHOTO_WALL_DOCKER_DEBUG: '1'
+          PHOTO_WALL_DOCKER_DEBUG_LOG: ${{ runner.temp }}/photo-wall-photo-sources/docker-debug.log
+        run: |
+          if [ -f "$RUNNER_TEMP/immich-fixture/fixture.json" ]; then
+            .venv/bin/python -m scripts.immich_fixture cleanup \
+              --state-dir "$RUNNER_TEMP/immich-fixture"
+          fi

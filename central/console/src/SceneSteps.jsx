@@ -11,14 +11,15 @@ import { AdvancedRows, EndingRows, endingWords, onOff, secondsWords, TimingRows 
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
-import { sourceRefreshMessage } from "./useSourceRefresh.js";
+import { useDraftPool } from "./useDraftPool.js";
+import { sourceCheckMessage } from "./useSourceCheck.js";
 
 /**
  * The Scene flow's step views (flow design §7 J4): views over the draft that
  * SceneFlow.jsx owns. They hold no draft state and run no draft effect (the
  * container runs the prunes, whichever step shows); each renders its fields through
  * the shared pickers and Field.jsx, so labels and accessible names are the ones the
- * single form had (rule 3): "Source", "Target frame <id>", "Media for frame <id>",
+ * single form had (rule 3): "Choose <Source>", "Target frame <id>", "Media for frame <id>",
  * "Seconds per cycle", "Keep playing until the Program ends", "Scene name", "Id".
  *
  * Every view takes `{value, patch, problems}`: the draft value, the draft's patch,
@@ -75,34 +76,38 @@ export function KindStep({ value, patch, problems }) {
 }
 
 /**
- * Step 2, Photos: the Source (required), or a new selection from the photo library
- * (`onNewSource`: the Source flow, run inline; it returns here).
+ * Step 2, Photos (Scene editor › What, #36): the Photo sources the Scene plays, at least one,
+ * as one list of cards (SourcePicker.jsx), each chosen by its checkbox (any of them: the Scene
+ * plays the photos of all of them, C3); each chosen Source is listed with its state, whether its
+ * photos are ready, Check now and Remove. The last card, "New Photo source", opens the Photo
+ * source editor and returns here with it chosen (`onNewSource`, a hand-off). A hand-picked Scene
+ * picks from one Source (radios).
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
 export function PhotosStep({ value, patch, problems, sources, onNewSource, sourceReadiness }) {
+  const set = (sourceRefs) => {
+    patch({ sourceRefs });
+    problems.touch("source");
+  };
+  const several = value.mode !== "authored";
   return (
     <>
       <p className="field__hint">
-        A Source is a saved selection from your photo library; Photo Wall shows its media and
-        never changes anything there.
+        A Photo source asks Immich for photos; Photo Wall shows them and never changes anything there.
+        {several ? " Choose one or more: the Scene plays the photos of every one chosen." : " Choose the one to pick from."}
       </p>
       <SourcePicker
         id={problems.idFor("source")}
         reason={problems.reasonFor("source")}
         sources={sources}
-        value={value.sourceRef}
-        onChange={(sourceRef) => {
-          patch({ sourceRef });
-          problems.touch("source");
-        }}
+        value={value.sourceRefs}
+        single={!several}
+        onChange={set}
+        onNewSource={onNewSource}
       />
-      <SourceReadiness {...sourceReadiness} />
-      <div className="record__actions">
-        <button type="button" onClick={onNewSource}>
-          New selection from your photo library
-        </button>
-      </div>
+      <SourceReadiness {...sourceReadiness}
+        onRemove={(ref) => set(value.sourceRefs.filter((chosen) => chosen !== ref))} />
     </>
   );
 }
@@ -267,7 +272,7 @@ export function ReviewStep({
     {
       label: SCENE_ANSWER_LABELS.source,
       field: "source",
-      value: value.sourceRef === "" ? missing : sourceName(value.sourceRef),
+      value: value.sourceRefs.length === 0 ? missing : value.sourceRefs.map(sourceName).join(", "),
     },
     {
       label: SCENE_ANSWER_LABELS.targets,
@@ -341,40 +346,63 @@ export function ReviewStep({
   );
 }
 
-/** Current Source health and its effect on the Scene, shared by Photos and Review. */
-function SourceReadiness({ source, historicalRef, now, feedback, refreshing, onRefresh, onManage }) {
-  if (source === null && !historicalRef) return null;
-  const state = source === null ? null : sourceState(source, now, false);
-  const consequence = state === null
-    ? "Status is unavailable for this saved reference. Choose a current Source to check its media status."
-    : state.state === "ok"
-      ? "A recent refresh found media; each Frame still needs compatible, prepared content."
-      : state.state === "empty"
-        ? "The last refresh found no valid items, so this Scene may have nothing to show."
-        : state.state === "failing"
-          ? "The last refresh failed, so this Scene may have no current media."
-          : state.state === "overdue"
-            ? "The catalog may be stale, so this Scene may not show the latest media."
-            : "No catalog has been loaded yet, so this Scene may have nothing to show.";
-  const message = sourceRefreshMessage(feedback, source, state);
+/**
+ * The chosen Photo sources, each with its state in words (mediaHealth.js `sourceState`, from its
+ * check), whether its photos are ready, Check now and, on Photos, Remove; shared by Photos and
+ * Review. A Source still being read plays what is found so far; an empty one has nothing to
+ * show (its pool, read here).
+ */
+function SourceReadiness({ chosen, now, check, onManage, onRemove = null }) {
+  if (chosen.length === 0) return null;
   return (
-    <section className={`notice scene-flow__source-readiness${state !== null && state.severity !== "ok" ? " notice--warn" : ""}`} aria-label="Source media status">
-      <p><strong>Source status:</strong> {state?.label ?? "No longer current"}</p>
-      <p>{consequence}</p>
-      {message !== null && <p role="status">{message}</p>}
-      {state !== null && state.state !== "ok" && (
-        <button type="button" disabled={refreshing} onClick={onRefresh}>
-          {refreshing ? "Requesting refresh…" : "Refresh Source"}
-        </button>
-      )}
-      {(state === null || state.state !== "ok") && (
-        <div className="scene-flow__source-manage">
-          <p>Your Scene draft stays open in this tab while you manage Sources.</p>
-          <button type="button" onClick={onManage}>Manage in Sources</button>
-        </div>
-      )}
+    <section className="notice scene-flow__source-readiness" aria-label="Source media status">
+      <ul className="scene-flow__sources">
+        {chosen.map(({ ref, source }) => (
+          <ChosenSource key={ref} sourceRef={ref} source={source} now={now} check={check} onRemove={onRemove} />
+        ))}
+      </ul>
+      <div className="scene-flow__source-manage">
+        <p>Your Scene draft stays open in this tab while you manage Sources.</p>
+        <button type="button" onClick={onManage}>Manage in Sources</button>
+      </div>
     </section>
   );
+}
+
+function ChosenSource({ sourceRef, source, now, check, onRemove }) {
+  const name = sourceName(source ?? sourceRef);
+  const state = source === null ? null : sourceState(source, now);
+  const receipt = source === null ? null : sourceCheckMessage(check.feedback[sourceRef], source.check);
+  return (
+    <li aria-label={name}>
+      <p><strong>{name}</strong>{`: ${state?.label ?? "No longer current: choose a current Source"}`}</p>
+      {source !== null && <PoolReadiness sourceRef={sourceRef} />}
+      {receipt !== null && <p role="status">{receipt}</p>}
+      <div className="record__actions">
+        {source !== null && (
+          <button type="button" aria-label={`Check ${name} now`} disabled={check.pending !== null}
+            onClick={() => void check.run(sourceRef, source.check ?? null)}>
+            Check now
+          </button>
+        )}
+        {onRemove !== null && (
+          <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(sourceRef)}>Remove</button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/** Whether a chosen Source's photos are ready, from its pool; nothing when they are. */
+function PoolReadiness({ sourceRef }) {
+  const { view } = useDraftPool({ draftRef: null, sourceRef });
+  if (view === null) return null;
+  const empty = view.in_pool.photos + view.in_pool.videos === 0;
+  const state = view.check?.state;
+  if (state === "checking" || state === "never_checked") {
+    return <p>Still being read: what is found so far plays.</p>;
+  }
+  return empty ? <p>This Source has no photos.</p> : null;
 }
 
 /** Each target frame's chosen item, by its chooser label once the candidates are read. */

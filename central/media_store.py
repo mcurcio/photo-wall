@@ -19,6 +19,7 @@ from psycopg.types.json import Jsonb
 
 from central.db import MEDIA_LOCK
 from central.execution_ports import ExecutionMediaAuthorization
+from central.infra.photo_library_store import library_assets_in
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.media_repository import JobLease, MediaRepository
@@ -326,18 +327,6 @@ class MediaStore:
         else:
             self._unlink(path)
 
-    def _refresh(self, conn, digest: str):
-        sources = conn.execute(
-            "SELECT DISTINCT s.source_ref,s.status FROM media_sources s "
-            "JOIN source_members m ON m.source_ref=s.source_ref JOIN media_jobs j "
-            "ON j.asset_id=m.asset_id WHERE j.variant_sha=%s",
-            (digest,),
-        ).fetchall()
-        for source in sources:
-            self.repository.refresh_catalog_in(
-                conn, source["source_ref"], self.repository.times.now_in(conn), source["status"]
-            )
-
     def _mark_corrupt(self, digest: str):
         # Corruption may have enlarged the file. Preserve the larger measured charge.
         size = self._tree_size(self._blob(digest))
@@ -347,7 +336,6 @@ class MediaStore:
                 "WHERE digest=%s AND state<>'deleting'",
                 (size, digest),
             )
-            self._refresh(conn, digest)
 
     def _checked(self, conn, lease):
         row = conn.execute(
@@ -382,18 +370,12 @@ class MediaStore:
             try:
                 fd = self._open(paths.original)
                 try:
-                    original_size, sha1, sha256 = self._hash(
+                    original_size, _, sha256 = self._hash(
                         fd, self.repository.limits.max_original_bytes
                     )
                 finally:
                     os.close(fd)
-                if (
-                    sha1 != lease.asset.original_sha1
-                    or sha256 != prepared.original_sha256
-                    or (
-                        lease.asset.file_size is not None and original_size != lease.asset.file_size
-                    )
-                ):
+                if sha256 != prepared.original_sha256:
                     raise MediaStoreError("media_original_mismatch")
                 self._verify(paths.variant, variant)
                 with self.repository.transaction() as conn:
@@ -424,14 +406,17 @@ class MediaStore:
                         )
                     result = {
                         **prepared.model_dump(mode="json", exclude={"path"}),
+                        # The asset id pins the photo (its connection, upstream id and checksum
+                        # or revision), so the journal needs no original digest beside it.
                         "asset_id": lease.asset.asset_id,
-                        "original_sha1": lease.asset.original_sha1,
                     }
                     conn.execute(
-                        "UPDATE media_jobs SET state='publishing',variant_sha=%s,result=%s,"
-                        "reserved_bytes=reserved_bytes-%s,cleanup_state='ready',updated_at=%s WHERE id=%s",
+                        "UPDATE media_jobs SET state='publishing',variant_sha=%s,made_from=%s,"
+                        "result=%s,reserved_bytes=reserved_bytes-%s,cleanup_state='ready',"
+                        "updated_at=%s WHERE id=%s",
                         (
                             variant.sha256,
+                            prepared.made_from,
                             Jsonb(result),
                             0 if existing else variant.size,
                             self.repository.times.now_in(conn),
@@ -458,15 +443,10 @@ class MediaStore:
                 raise MediaStoreError("media_io", 503) from None
 
     def _lease_for(self, conn, row) -> JobLease:
-        from media.models import OriginalAsset
-
-        asset = conn.execute(
-            "SELECT metadata FROM asset_revisions WHERE asset_id=%s", (row["asset_id"],)
-        ).fetchone()
         return JobLease(
             job_id=row["id"],
             attempt_token=row["attempt_token"],
-            asset=OriginalAsset.model_validate(asset["metadata"]),
+            asset=library_assets_in(conn, (row["asset_id"],))[row["asset_id"]],
             recipe_id=row["recipe_id"],
             lease_until=row["lease_until"],
             reserved_bytes=max(1, row["reserved_bytes"]),
@@ -483,7 +463,6 @@ class MediaStore:
                 or result["recipe_id"] != row["recipe_id"]
                 or result["variant"]["sha256"] != row["variant_sha"]
                 or result.get("asset_id") != row["asset_id"]
-                or result.get("original_sha1") != recorded.asset.original_sha1
             ):
                 raise MediaStoreError("media_journal_invalid", 503)
             variant = Variant.model_validate(result["variant"])
@@ -527,8 +506,6 @@ class MediaStore:
                 "updated_at=%s WHERE id=%s",
                 (target, self.repository.times.now_in(conn), row["id"]),
             )
-            if current["variant_sha"]:
-                self._refresh(conn, current["variant_sha"])
 
     def fail(self, lease: JobLease, code: str, *, retry: bool = False):
         if not isinstance(code, str) or not _CODE.fullmatch(code):
@@ -755,7 +732,6 @@ class MediaStore:
                     ).fetchone()
                     if not changed:
                         continue
-                    self._refresh(conn, row["digest"])
                 try:
                     self._remove(self._blob(row["digest"]))
                     self._fsync_directory(self.root / "blobs")

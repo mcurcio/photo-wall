@@ -1,7 +1,7 @@
 """PostgreSQL regressions for content locks across Player authority epochs."""
 
 import pytest
-from psycopg.types.json import Jsonb
+from support.photo_pools import seed_pool
 from support.position import save_position
 from test_coordination import publish_fixture_catalog as _publish_catalog
 from test_coordination import schedule
@@ -21,12 +21,7 @@ def _player_with_frame(registry, frame_id="frame-0"):
 
 
 def _empty_catalog(registry):
-    with registry.db.transaction() as conn:
-        conn.execute(
-            "UPDATE catalog_snapshots SET snapshot=jsonb_set(snapshot,'{candidates}',%s::jsonb) "
-            "WHERE source_ref='library:1'",
-            (Jsonb([]),),
-        )
+    seed_pool(registry, "library:1", ())   # a complete check that found nothing
 
 
 def _schedule_media(coordinator, starts=1010):

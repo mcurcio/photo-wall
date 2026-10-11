@@ -21,28 +21,53 @@ import warnings
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
+import pillow_heif
 from pydantic import Field
 
+from central.photo_library.model import LibraryAsset
 from contracts.models import Digest, Model, Positive, Variant
 from contracts.time import Clock, SystemClock
-from media.models import MediaError, MediaLimits, OriginalAsset
+from media.library_client import FetchedRendition, FetchStep
+from media.models import MediaError
 
-_SOURCE_LIMITS = MediaLimits()
 _TRANSFORMS = {
     1: (), 2: ("hflip",), 3: ("hflip", "vflip"), 4: ("vflip",),
     5: ("transpose=clock", "hflip"), 6: ("transpose=clock",),
     7: ("transpose=clock", "vflip"), 8: ("transpose=cclock",),
 }
+_PIPES = {"JPEG": "jpeg_pipe", "PNG": "png_pipe", "WEBP": "webp_pipe"}
 _MATRICES = {
     (1, 0, 0, 1): 1, (-1, 0, 0, 1): 2, (-1, 0, 0, -1): 3, (1, 0, 0, -1): 4,
     (0, 1, 1, 0): 5, (0, 1, -1, 0): 6, (0, -1, -1, 0): 7, (0, -1, 1, 0): 8,
 }
 
 
+# HEIC and HEIF through libheif (pillow-heif), once per process: this module's importers (the
+# worker, the Immich client) and its bounded inspector, which runs it as `-m media.prepare`.
+# AVIF is Pillow's own (libavif). Owner, 2026-10-11: "lean on strong foundational libraries".
+pillow_heif.register_heif_opener()
+
+# The still media types preparation reads (follow-ups 2026-10-11, slice A5): the one home of
+# "Photo Wall can read this file". The rendition choice fetches an unedited photo's original only
+# when its type is here (media/library_client.py `fetch_plan`); the Immich client downloads only
+# these and videos. STILL_FORMATS are the Pillow decoders that read them.
+STILL_MEDIA_TYPES: Final[frozenset[str]] = frozenset({
+    "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/avif"})
+STILL_FORMATS: Final = ("JPEG", "PNG", "WEBP", "HEIF", "AVIF")
+# Decoded by Pillow, then handed to ffmpeg as one lossless PNG (ffmpeg reads JPEG, PNG and WEBP).
+_DECODED_ONLY: Final = frozenset({"HEIF", "AVIF"})
+# H.273 transfer characteristics of HDR stills Photo Wall does not tone-map: PQ and HLG.
+_HDR_TRANSFERS: Final = frozenset({16, 18})
+# H.273 colour primaries an untagged still may carry and still be sRGB: BT.709 and unspecified.
+_SRGB_PRIMARIES: Final = frozenset({1, 2})
+
+
 class PreparationRecipe(Model):
-    version: Literal[1] = 1
+    # 2: preparation reads the photo Immich shows (roadmap 4, M3): every preparation is redone once.
+    # 3: HEIC, AVIF and wide-colour photos, converted to sRGB (follow-ups 2026-10-11, A5).
+    version: Literal[3] = 3
     image_long_edge: int = Field(default=3840, ge=2, le=16384, strict=True)
     jpeg_quality: int = Field(default=3, ge=1, le=31, strict=True)
     video_long_edge: int = Field(default=1920, ge=2, le=1920, strict=True)
@@ -54,10 +79,13 @@ class PreparationRecipe(Model):
 
 
 class PreparationLimits(Model):
-    max_original_bytes: int = Field(default=_SOURCE_LIMITS.max_original_bytes, ge=1, strict=True)
-    max_pixels: int = Field(default=_SOURCE_LIMITS.max_pixels, ge=1, strict=True)
-    max_dimension: int = Field(default=_SOURCE_LIMITS.max_dimension, ge=1, strict=True)
-    max_video_seconds: Positive = _SOURCE_LIMITS.max_video_seconds
+    """What preparation accepts; the home of the size bounds the Immich client's fetch also
+    checks (media.immich.LibraryLimits reads its defaults from here)."""
+
+    max_original_bytes: int = Field(default=256 * 1024**2, ge=1, strict=True)
+    max_pixels: int = Field(default=64_000_000, ge=1, strict=True)
+    max_dimension: int = Field(default=16384, ge=1, strict=True)
+    max_video_seconds: Positive = 300
     max_image_bytes: int = Field(default=16 * 1024**2, ge=1, strict=True)
     max_video_bytes: int = Field(default=256 * 1024**2, ge=1, strict=True)
     max_staging_bytes: int = Field(default=512 * 1024**2, ge=1, strict=True)
@@ -78,6 +106,7 @@ class BuildIdentity(Model):
     python_version: str
     pillow_version: str
     littlecms_version: str
+    libheif_version: str
     jpeg_version: str
     zlib_version: str
     platform: str
@@ -90,6 +119,10 @@ class PreparedMedia(Model):
     original_sha256: Digest
     recipe_id: Digest
     build: BuildIdentity
+    # Which of Immich's copies this was made from (`FetchedRendition.rendition`; follow-ups
+    # 2026-10-11, owner item 6): MediaStore.publish writes it to `media_jobs.made_from`, the
+    # prepared copy's own row.
+    made_from: FetchStep
 
 
 @dataclass
@@ -163,16 +196,20 @@ def _png_profile(path: Path) -> None:
                 return
 
 
-def _icc_is_srgb(data: bytes) -> bool:
-    """Validate profile behavior, never an attacker-controlled profile description."""
+def _icc_kind(data: bytes) -> Literal["srgb", "rgb"]:
+    """Whether an ICC profile is sRGB or another RGB profile LittleCMS converts from; anything
+    else (not RGB, unreadable, a PQ or HLG transfer in its `cicp` tag) is unsupported_color.
+    Validate profile behavior, never an attacker-controlled profile description."""
     from PIL import Image, ImageCms
 
     if len(data) > 1024**2:
         raise MediaError("preparation_limit", "incompatible")
+    if _icc_transfer(data) in _HDR_TRANSFERS:
+        raise MediaError("unsupported_color", "incompatible")
     try:
         source = ImageCms.ImageCmsProfile(io.BytesIO(data))
         if source.profile.xcolor_space.strip() != "RGB":
-            return False
+            raise MediaError("unsupported_color", "incompatible")
         levels = list(range(0, 256, 16)) + [255]
         colors = list(itertools.product(levels, repeat=3)) + [(i, i, i) for i in range(256)]
         grid = Image.new("RGB", (len(colors), 1))
@@ -180,13 +217,62 @@ def _icc_is_srgb(data: bytes) -> bool:
         transformed = ImageCms.profileToProfile(
             grid, source, ImageCms.createProfile("sRGB"), renderingIntent=1, outputMode="RGB",
         )
-        return all(abs(a - b) <= 2 for a, b in zip(grid.tobytes(), transformed.tobytes(), strict=True))
     except (ValueError, TypeError, OSError, ImageCms.PyCMSError):
-        return False
+        raise MediaError("unsupported_color", "incompatible") from None
+    same = all(abs(a - b) <= 2 for a, b in zip(grid.tobytes(), transformed.tobytes(), strict=True))
+    return "srgb" if same else "rgb"
 
 
-def _inspect_still(path: Path, limits: dict) -> dict:
-    """This function runs only in the disposable, bounded inspector process."""
+def _icc_transfer(data: bytes) -> int | None:
+    """The transfer characteristic of an ICC profile's `cicp` tag (ICC 4.4), if it has one."""
+    if len(data) < 132:
+        return None
+    count = struct.unpack(">I", data[128:132])[0]
+    for index in range(min(count, (len(data) - 132) // 12)):
+        signature, offset, size = struct.unpack(">4sII", data[132 + 12 * index:144 + 12 * index])
+        if signature == b"cicp" and size >= 12 and offset + 12 <= len(data):
+            return data[offset + 9]
+    return None
+
+
+def _bmff_colour(path: Path) -> tuple[set[int], set[int]]:
+    """The colour primaries and transfer characteristics every `nclx` colour box of a HEIF or
+    AVIF file's `meta` box names (ISO/IEC 23008-12; H.273 code points). Reads only the box
+    headers and the `meta` box itself."""
+    primaries: set[int] = set()
+    transfers: set[int] = set()
+    with path.open("rb") as stream:
+        for _ in range(10000):
+            header = stream.read(8)
+            if len(header) < 8:
+                return primaries, transfers
+            size, kind = struct.unpack(">I4s", header)
+            start = 8
+            if size == 1:
+                size, start = struct.unpack(">Q", stream.read(8))[0], 16
+            elif size == 0:                       # the box runs to the end of the file
+                size = start + 1024**2 + 1 if kind == b"meta" else 2**63
+            if size < start:
+                raise MediaError("preparation_invalid", "incompatible")
+            if kind != b"meta":
+                if size == 2**63:
+                    return primaries, transfers
+                stream.seek(size - start, os.SEEK_CUR)
+                continue
+            if size - start > 1024**2:
+                raise MediaError("preparation_limit", "incompatible")
+            box = stream.read(size - start)
+            at = box.find(b"colrnclx")
+            while at >= 0 and at + 14 <= len(box):
+                primary, transfer = struct.unpack(">HH", box[at + 8:at + 12])
+                primaries.add(primary)
+                transfers.add(transfer)
+                at = box.find(b"colrnclx", at + 8)
+    raise MediaError("preparation_limit", "incompatible")
+
+
+def _bounded_decoders(limits: dict) -> None:
+    """Pillow's bounds for one inspector process (runs only there)."""
     from PIL import Image, ImageFile, PngImagePlugin
 
     Image.MAX_IMAGE_PIXELS = limits["max_pixels"]
@@ -194,7 +280,19 @@ def _inspect_still(path: Path, limits: dict) -> dict:
     PngImagePlugin.MAX_TEXT_CHUNK = 1024**2
     PngImagePlugin.MAX_TEXT_MEMORY = 2 * 1024**2
     warnings.simplefilter("error")
-    with Image.open(path, formats=("JPEG", "PNG")) as image:
+
+
+def _inspect_still(path: Path, limits: dict) -> dict:
+    """This function runs only in the disposable, bounded inspector process.
+
+    `intermediate`: the still goes to ffmpeg through one lossless sRGB PNG (`_intermediate`):
+    a HEIC or AVIF (ffmpeg reads neither), or a still whose RGB ICC profile is not sRGB (owner,
+    2026-10-11, item 3: LittleCMS converts it). A PQ or HLG still is refused; a gain-map photo
+    is read as its base image (the decoders return the primary image)."""
+    from PIL import Image
+
+    _bounded_decoders(limits)
+    with Image.open(path, formats=STILL_FORMATS) as image:
         width, height = image.size
         if (width > limits["max_dimension"] or height > limits["max_dimension"]
                 or width * height > limits["max_pixels"]):
@@ -204,6 +302,11 @@ def _inspect_still(path: Path, limits: dict) -> dict:
             raise MediaError("unsupported_media", "incompatible")
         if image.format == "PNG":
             _png_profile(path)
+        icc = image.info.get("icc_profile")
+        if image.format in _DECODED_ONLY:
+            primaries, transfers = _bmff_colour(path)
+            if transfers & _HDR_TRANSFERS or (not icc and primaries - _SRGB_PRIMARIES):
+                raise MediaError("unsupported_color", "incompatible")
         exif = image.getexif()
         orientation = exif.get(274, 1)
         if type(orientation) is not int or orientation not in _TRANSFORMS:
@@ -214,9 +317,9 @@ def _inspect_still(path: Path, limits: dict) -> dict:
             color_space = exif.get_ifd(34665).get(40961, color_space)
         if color_space not in (None, 1, 65535):
             raise MediaError("unsupported_color", "incompatible")
-        icc = image.info.get("icc_profile")
-        if icc is not None and (not isinstance(icc, bytes) or not _icc_is_srgb(icc)):
+        if icc is not None and not isinstance(icc, bytes):
             raise MediaError("unsupported_color", "incompatible")
+        convert = bool(icc) and _icc_kind(icc) == "rgb"
         if color_space == 65535 and not icc:
             raise MediaError("unsupported_color", "incompatible")
         gamma = image.info.get("gamma")
@@ -228,11 +331,30 @@ def _inspect_still(path: Path, limits: dict) -> dict:
             abs(a - b) > .0001 for a, b in zip(chroma, srgb, strict=True)
         )):
             raise MediaError("unsupported_color", "incompatible")
-        xmp = image.info.get("xmp", b"")
-        if isinstance(xmp, bytes) and (b"hdr" in xmp.lower() or b"gainmap" in xmp.lower()):
-            raise MediaError("unsupported_color", "incompatible")
         image.load()
-        return dict(format=image.format, width=width, height=height, orientation=orientation)
+        return dict(format=image.format, width=width, height=height, orientation=orientation,
+                    intermediate=convert or image.format in _DECODED_ONLY)
+
+
+def _intermediate(path: Path, output: Path, limits: dict) -> dict:
+    """The still as one lossless sRGB PNG, upright, holding pixels only (runs only in the
+    bounded inspector process, after `_inspect_still` accepted `path`): an RGB ICC profile is
+    converted to sRGB by LittleCMS (perceptual intent)."""
+    from PIL import Image, ImageCms, ImageOps
+
+    _bounded_decoders(limits)
+    with Image.open(path, formats=STILL_FORMATS) as image:
+        icc = image.info.get("icc_profile")
+        pixels = ImageOps.exif_transpose(image).convert("RGB")
+    if icc and _icc_kind(icc) == "rgb":
+        pixels = ImageCms.profileToProfile(
+            pixels, ImageCms.ImageCmsProfile(io.BytesIO(icc)), ImageCms.createProfile("sRGB"),
+            renderingIntent=ImageCms.Intent.PERCEPTUAL, outputMode="RGB")
+    clean = Image.new("RGB", pixels.size)
+    clean.paste(pixels)
+    with output.open("xb") as stream:
+        clean.save(stream, "PNG", compress_level=1)
+    return dict(width=clean.width, height=clean.height)
 
 
 def _worker(payload: dict) -> None:
@@ -248,12 +370,15 @@ def _worker(payload: dict) -> None:
         os.execv(payload["argv"][0], payload["argv"])
     if operation == "inspect":
         result = _inspect_still(Path(payload["path"]), limits)
+    elif operation == "intermediate":
+        result = _intermediate(Path(payload["path"]), Path(payload["output"]), limits)
     elif operation == "identity":
         import PIL
         from PIL import features
         result = dict(
             python_version=platform.python_version(), pillow_version=PIL.__version__,
             littlecms_version=features.version("littlecms2") or "unavailable",
+            libheif_version=pillow_heif.libheif_version() or "unavailable",
             jpeg_version=features.version("jpg") or "unavailable",
             zlib_version=features.version("zlib") or "unavailable",
         )
@@ -341,8 +466,10 @@ class Preparer:
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _json(self, payload: dict, deadline: _Deadline) -> dict:
-        data = await self._run(payload, deadline, seconds=self.limits.probe_seconds)
+    async def _json(self, payload: dict, deadline: _Deadline, *, seconds: float | None = None,
+                    file_limit: int | None = None) -> dict:
+        data = await self._run(payload, deadline, seconds=seconds or self.limits.probe_seconds,
+                               file_limit=file_limit)
         try:
             result = json.loads(data)
             if not isinstance(result, dict):
@@ -410,7 +537,8 @@ class Preparer:
 
     def _input_flags(self) -> list[str]:
         return ["-max_alloc", str(self.limits.memory_bytes // 2),
-                "-protocol_whitelist", "file", "-format_whitelist", "jpeg_pipe,png_pipe,mov",
+                "-protocol_whitelist", "file",
+                "-format_whitelist", "jpeg_pipe,png_pipe,webp_pipe,mov",
                 "-probesize", "5000000", "-analyzeduration", "1000000",
                 "-threads", str(self.limits.threads)]
 
@@ -537,50 +665,74 @@ class Preparer:
             raise MediaError("unsupported_media", "incompatible")
         return result
 
-    async def prepare(self, asset: OriginalAsset, original: Path, destination: Path) -> PreparedMedia:
+    async def prepare_rendition(self, asset: LibraryAsset, rendition: FetchedRendition,
+                                destination: Path) -> PreparedMedia:
+        """The photo as Immich shows it (C10): a preview, full-size copy or original of any
+        STILL_MEDIA_TYPES type, or a video's original. Integrity is the fetched file's own sha256
+        and size; its size and orientation are the file's (a preview is upright, a JPEG
+        full-size copy may carry EXIF)."""
+        def verify(size: int, sha1: str, sha256: str) -> None:
+            if sha256 != rendition.sha256 or size != rendition.size:
+                raise MediaError("asset_integrity")
+        return await self._prepare(rendition.path, destination, video=asset.kind == "video",
+                                   verify=verify, duration=asset.duration,
+                                   made_from=rendition.rendition)
+
+    async def _prepare(self, original: Path, destination: Path, *, video: bool,
+                       verify, duration: float | None, made_from: FetchStep) -> PreparedMedia:
         original, destination = Path(original).absolute(), Path(destination).absolute()
         start = self.clock.monotonic()
         if not math.isfinite(start):
             raise MediaError("clock_invalid")
         deadline = _Deadline(self.clock, start, start + self.limits.wall_seconds)
         created = False
+        intermediate = destination.with_name(destination.name + ".png")
+        decoded = False
         try:
             async with asyncio.timeout(self.limits.wall_seconds):
                 size, sha1, original_sha256 = _file_hashes(original, self.limits.max_original_bytes, deadline)
-                if sha1 != asset.original_sha1 or (asset.file_size is not None and size != asset.file_size):
-                    raise MediaError("asset_integrity")
-                video = asset.kind == "video"
+                verify(size, sha1, original_sha256)
                 cap = self.limits.max_video_bytes if video else self.limits.max_image_bytes
                 if size + cap > self.limits.max_staging_bytes:
                     raise MediaError("preparation_limit", "incompatible")
                 recipe_id, build = await self._describe(deadline)
                 if video:
                     facts = self._video(await self._probe(original, deadline))
-                    if abs(facts["duration"] - asset.duration) > .15:
+                    if abs(facts["duration"] - duration) > .15:
                         raise MediaError("metadata_mismatch", "incompatible")
                 else:
                     facts = await self._json(dict(operation="inspect", path=str(original)), deadline)
-                if (facts["width"], facts["height"], facts["orientation"]) != (
-                    asset.raw_width, asset.raw_height, asset.orientation
-                ):
-                    raise MediaError("metadata_mismatch", "incompatible")
-                width, height = self._size(asset.raw_width, asset.raw_height, video=video,
-                                           sar=facts.get("sar", 1), orientation=asset.orientation)
+                source = original
+                if not video and facts["intermediate"]:
+                    decoded = True
+                    await self._json(dict(operation="intermediate", path=str(original),
+                                          output=str(intermediate)), deadline,
+                                     seconds=self.limits.wall_seconds,
+                                     file_limit=self.limits.max_staging_bytes)
+                    facts = await self._json(dict(operation="inspect", path=str(intermediate)),
+                                             deadline)
+                    if facts["format"] != "PNG" or facts["intermediate"] or facts["orientation"] != 1:
+                        raise MediaError("preparation_invalid", "incompatible")
+                    source = intermediate
+                raw_width, raw_height, orientation = (facts["width"], facts["height"],
+                                                      facts["orientation"])
+                width, height = self._size(raw_width, raw_height, video=video,
+                                           sar=facts.get("sar", 1), orientation=orientation)
                 try:
                     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 except FileExistsError:
                     raise MediaError("destination_exists", "incompatible") from None
                 os.close(fd)
                 created = True
-                filters = [*_TRANSFORMS[asset.orientation], f"scale={width}:{height}:flags=lanczos", "setsar=1"]
+                filters = [*_TRANSFORMS[orientation], f"scale={width}:{height}:flags=lanczos", "setsar=1"]
                 argv = [str(self.ffmpeg), "-nostdin", "-hide_banner", "-v", "error", "-xerror", "-y",
                         "-filter_threads", str(self.limits.threads), *self._input_flags(), "-noautorotate"]
                 major = re.search(r"ffmpeg version (\d+)", build.ffmpeg_version)
                 if major and int(major.group(1)) >= 6:
                     argv += ["-display_rotation", "0"]
                 if not video:
-                    argv += ["-f", {"JPEG": "jpeg_pipe", "PNG": "png_pipe"}[facts["format"]]]
-                argv += ["-i", str(original), "-map", "0:v:0", "-an", "-sn", "-dn",
+                    argv += ["-f", _PIPES[facts["format"]]]
+                argv += ["-i", str(source), "-map", "0:v:0", "-an", "-sn", "-dn",
                          "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"]
                 if video:
                     fps = min(facts["fps"], self.recipe.video_fps)
@@ -612,8 +764,7 @@ class Preparer:
                         raise MediaError("preparation_invalid", "incompatible")
                 if (verified["width"], verified["height"], verified["orientation"]) != (width, height, 1):
                     raise MediaError("preparation_invalid", "incompatible")
-                if _file_hashes(original, self.limits.max_original_bytes, deadline)[1] != asset.original_sha1:
-                    raise MediaError("asset_integrity")
+                verify(*_file_hashes(original, self.limits.max_original_bytes, deadline))
                 with destination.open("rb") as stream:
                     os.fsync(stream.fileno())
                 deadline.remaining()
@@ -621,6 +772,7 @@ class Preparer:
                     raise MediaError("preparation_build_changed")
                 return PreparedMedia(
                     path=destination, original_sha256=original_sha256, recipe_id=recipe_id, build=build,
+                    made_from=made_from,
                     variant=Variant(sha256=digest, size=output_size, width=width, height=height,
                                     media_type="video/mp4" if video else "image/jpeg",
                                     duration=verified["duration"] if video else None),
@@ -630,11 +782,13 @@ class Preparer:
         except OSError:
             raise MediaError("preparation_io") from None
         finally:
-            if created and sys.exc_info()[0] is not None:
-                try:
+            try:
+                if decoded:
+                    intermediate.unlink(missing_ok=True)
+                if created and sys.exc_info()[0] is not None:
                     destination.unlink(missing_ok=True)
-                except OSError:
-                    raise MediaError("staging_cleanup") from None
+            except OSError:
+                raise MediaError("staging_cleanup") from None
 
 
 if __name__ == "__main__":
