@@ -12,6 +12,7 @@ changes the shared content set.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -30,6 +31,15 @@ from scripts.immich_actions import (
 )
 
 FIXTURE_VARIABLE = "PHOTO_WALL_IMMICH_FIXTURE"
+# One event loop for every Immich call a test process makes: an `ImmichClient` keeps its
+# connections open between calls, and a connection belongs to the loop that opened it, so a
+# client used across `asyncio.run` calls meets a closed loop ("Event loop is closed").
+_LOOP = asyncio.Runner()
+
+
+def run(coroutine):
+    """Run `coroutine` on the test process's one loop (see `_LOOP`)."""
+    return _LOOP.run(coroutine)
 SKIP_REASON = "set PHOTO_WALL_IMMICH_FIXTURE"
 
 

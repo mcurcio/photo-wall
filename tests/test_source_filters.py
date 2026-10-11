@@ -5,13 +5,13 @@ content set (slice FX1, tests/support/immich_library.py): Immich answers every m
 Photo Wall only subtracts (design rule 1). Labels are the fixture's.
 """
 
-import asyncio
 import os
 import time
 from datetime import UTC, datetime
 
 import pytest
 from pydantic import SecretStr
+from support.immich_library import run
 from support.library_store_fake import check_to_end, immich_checks
 
 from central.photo_library.model import (
@@ -41,16 +41,16 @@ def pool_of(immich_library):
                                   ManualClock(wall=time.time()))
 
     def pool(**changes):
-        async def run():
+        async def checked():
             await checks.contact("main")   # binds the owner: partners' photos are told apart
             key = store.add_pool(SourceQuery(connection_ref="main", **changes))
             await check_to_end(checks, store, key)
             return key
-        key = asyncio.run(run())
+        key = run(checked())
         return {labels.get(ref, ref) for ref, entry in store.rows(key).items()
                 if isinstance(entry, InPool)}
     yield pool
-    asyncio.run(checks.close())
+    run(checks.close())
 
 
 def unscreened(**changes):
@@ -76,7 +76,7 @@ def test_a_place_is_matched_by_immich(immich_library, pool_of):
             return await client.places()
         finally:
             await client.close()
-    (paris,) = [place for place in asyncio.run(places()) if place.city == "Paris"]
+    (paris,) = [place for place in run(places()) if place.city == "Paris"]
     assert pool_of(place=paris) == {"paris-1", "paris-2"}
 
 

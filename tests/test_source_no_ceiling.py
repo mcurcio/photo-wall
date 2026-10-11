@@ -4,7 +4,6 @@ Real Immich (the fixture, slice FX1), the real `ImmichClient` at page size 3, `L
 over the fake store. Owner 2026-10-09: "i dont want any limit on the count of a source".
 """
 
-import asyncio
 import os
 import time
 import uuid
@@ -12,6 +11,7 @@ from collections import Counter
 
 import pytest
 from pydantic import SecretStr
+from support.immich_library import run
 from support.library_store_fake import check_to_end, immich_checks
 
 from central.photo_library.model import ConnectionSecret, InPool, SourceQuery
@@ -30,9 +30,9 @@ pytestmark = pytest.mark.immich
 def small_pages(immich_library):
     store, checks = immich_checks(immich_library.base_url, immich_library.api_key,
                                   ManualClock(wall=time.time()), page_size=3)
-    asyncio.run(checks.contact("main"))
+    run(checks.contact("main"))
     yield store, checks
-    asyncio.run(checks.close())
+    run(checks.close())
 
 
 def in_pool(store, key):
@@ -49,7 +49,7 @@ def test_equal_capture_times_lose_nothing_at_page_size_three(immich_library, sma
         return record_step(lease, step)
     store.record_step = counting
     key = store.add_pool(SourceQuery(connection_ref="main"))
-    asyncio.run(check_to_end(checks, store, key))
+    run(check_to_end(checks, store, key))
     same = {immich_library.assets[f"same-instant-{n}"].upstream_id for n in range(1, 9)}
     assert same <= in_pool(store, key)
     assert all(added[ref] == 1 for ref in same)
@@ -71,7 +71,7 @@ def test_the_pool_is_the_include_matches_less_exclusions_copies_and_partners(
     store, checks = small_pages
     query = SourceQuery(connection_ref="main")
     key = store.add_pool(query)
-    asyncio.run(check_to_end(checks, store, key))
+    run(check_to_end(checks, store, key))
 
     async def expected():
         client = ImmichClient.for_connection(ConnectionSecret(
@@ -87,7 +87,7 @@ def test_the_pool_is_the_include_matches_less_exclusions_copies_and_partners(
             return include, excluded
         finally:
             await client.close()
-    include, excluded = asyncio.run(expected())
+    include, excluded = run(expected())
     copy = immich_library.assets["stack-copy"].upstream_id
     partners = {item.upstream_id for item in include if item.owner_ref != immich_library.owner_ref}
     playable = {item.upstream_id for item in include if item.problem is None and item.width}
@@ -110,23 +110,29 @@ def test_a_new_photo_joins_and_a_deleted_one_leaves_at_a_complete_check(
             return next(t.tag_ref for t in await client.tags() if t.path == tag)
         finally:
             await client.close()
-    key = store.add_pool(SourceQuery(connection_ref="main", tags=(asyncio.run(tag_ref()),)))
-    asyncio.run(check_to_end(checks, store, key))
-    assert in_pool(store, key) == {uploaded.upstream_id}
-    immich_library.delete(uploaded.upstream_id)
-    store.pools[key].requested = True
-    asyncio.run(check_to_end(checks, store, key))
-    assert in_pool(store, key) == set()
-    assert store.pools[key].outcome.outcome == "complete"
+    deleted = False
+    try:
+        key = store.add_pool(SourceQuery(connection_ref="main", tags=(run(tag_ref()),)))
+        run(check_to_end(checks, store, key))
+        assert in_pool(store, key) == {uploaded.upstream_id}
+        immich_library.delete(uploaded.upstream_id)
+        deleted = True
+        store.pools[key].requested = True
+        run(check_to_end(checks, store, key))
+        assert in_pool(store, key) == set()
+        assert store.pools[key].outcome.outcome == "complete"
+    finally:
+        if not deleted:   # the shared fixture keeps its counts for the tests after this one
+            immich_library.delete(uploaded.upstream_id)
 
 
 def test_a_check_stopped_after_two_steps_removes_nothing(small_pages):
     store, checks = small_pages
     key = store.add_pool(SourceQuery(connection_ref="main"))
-    asyncio.run(check_to_end(checks, store, key))
+    run(check_to_end(checks, store, key))
     before = dict(store.rows(key))
     store.pools[key].requested = True
     for _ in range(2):
-        asyncio.run(checks.check_pool(key))
+        run(checks.check_pool(key))
     assert store.pools[key].checking
     assert dict(store.rows(key)) == before

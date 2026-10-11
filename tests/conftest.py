@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 from support.database import TestDatabases, server_dsn
-from support.immich_library import load_immich_library
 
 from central.db import Database
 from central.registry import Registry
@@ -60,13 +59,17 @@ def pytest_collection_modifyitems(items):
     """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit; and
     `immich` by its fixtures, whatever its tier."""
     for item in items:
-        if IMMICH_ROOT in getattr(item, "fixturenames", ()):
+        immich = IMMICH_ROOT in getattr(item, "fixturenames", ())
+        if immich:
             item.add_marker(pytest.mark.immich)
+            # The fixture is one shared library that some tests add photos to and remove them
+            # from while others count it: every Immich test runs on one worker, in order.
+            item.add_marker(pytest.mark.xdist_group("immich"))
         if BROWSER_TESTS in item.path.parents:
             item.add_marker(pytest.mark.browser)
         elif DATABASE_ROOT in getattr(item, "fixturenames", ()):
             item.add_marker(pytest.mark.db)
-            if "module_registry" in item.fixturenames:
+            if "module_registry" in item.fixturenames and not immich:
                 # One system for the whole module, its tests in order: keep them on one worker.
                 item.add_marker(pytest.mark.xdist_group(item.module.__name__))
 
@@ -133,7 +136,10 @@ def pytest_runtest_makereport(item, call):
 @pytest.fixture(scope="session")
 def immich_library():
     """The published real Immich fixture (support/immich_library.py); skips without
-    PHOTO_WALL_IMMICH_FIXTURE."""
+    PHOTO_WALL_IMMICH_FIXTURE. Imported here, not at the top: it reads the fixture's own tooling
+    (`scripts`), which an image that runs only other tests (linux-media's) does not carry."""
+    from support.immich_library import load_immich_library
+
     try:
         return load_immich_library()
     except LookupError as unset:
