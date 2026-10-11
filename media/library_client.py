@@ -10,15 +10,17 @@ It parses answers into per-photo facts, and a malformed photo is only that photo
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import Field
 
+from central.installation_models import FrameOutput
 from central.photo_library.model import (
     AssetRevision,
     ContactResult,
+    CopySize,
     Count,
     Kind,
     LeftOutReason,
@@ -28,10 +30,62 @@ from central.photo_library.model import (
     LibraryProblem,
     LibraryRef,
     LibraryTag,
+    MeasurableCopy,
+    MeasuredCopy,
     Place,
     SourceQuery,
 )
 from contracts.models import Digest, Instant, Model, Positive
+
+# --- The rendition choice (follow-ups 2026-10-11, slice A4; owner, 2026-10-09: "use Immich
+# downsampled copy only if it is at least the visible Frame size, else the original") --------
+
+FetchStep = Literal["preview", "fullsize", "original"]
+
+
+class FrameNeed(Model):
+    """What one Frame asks of a photo's copy: a window of `aspect` (its profile's width_px /
+    height_px, the shape the Player cuts) holding `width` x `height` pixels: its Frame output,
+    or, until its Pi reports its Output's size, its profile's width_px x height_px (never too
+    small; `rendition_needs`)."""
+
+    aspect: Positive
+    width: int = Field(gt=0, strict=True)
+    height: int = Field(gt=0, strict=True)
+
+
+def rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]:
+    """One FrameNeed per distinct (aspect, width, height) over every Frame of the wall
+    (`central.registry.Registry.frame_outputs`), sorted. A photo is prepared once for the whole
+    wall, so its copy must hold every Frame's output. Pure."""
+    raise NotImplementedError
+
+
+def covers(width: int, height: int, needs: Sequence[FrameNeed]) -> bool:
+    """Whether a `width` x `height` copy holds every need (`contracts.frame_fit.window_holds` at
+    each need's aspect). No need: False (the full-resolution copy is taken). Pure."""
+    raise NotImplementedError
+
+
+def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
+               known: Mapping[MeasurableCopy, CopySize], readable: frozenset[str]
+               ) -> tuple[FetchStep, ...]:
+    """The copies to try, smallest first; the fetch keeps the first that `covers` the needs and
+    always keeps the last. Pure.
+
+    - A video: ("original",).
+    - The full-resolution step: "fullsize" for an edited photo (Immich always keeps its edited
+      full-size copy; fetched `size=fullsize&edited=true`); "original" for an unedited photo
+      whose original's type is in `readable` (`media.prepare.STILL_MEDIA_TYPES`; fetched
+      `/assets/{id}/original?edited=false`); otherwise "fullsize" (`size=fullsize&edited=false`;
+      Immich redirects it to the preview when it keeps no full-size copy, and the preview is then
+      the only copy Photo Wall can read).
+    - No need: the full-resolution step alone.
+    - A known preview size (`known["preview"]`) that does not cover: the full-resolution step
+      alone (the preview is not downloaded again). Otherwise ("preview", <full-resolution step>).
+    The thumbnail is never tried: Immich's thumbnail (long edge 250 by default) is below any
+    Frame output a wall uses, and its size is unknown until downloaded."""
+    raise NotImplementedError
 
 
 def preview_covers(width: int, height: int, frames: Sequence[tuple[int, int]]) -> bool:
@@ -145,6 +199,9 @@ class FetchedRendition(Model):
     sha256: Digest
     width: int = Field(gt=0)
     height: int = Field(gt=0)
+    # Every copy this fetch downloaded and measured, the kept one included (slice A4: the worker
+    # records them, `LibraryWorkerStore.record_copies`). Empty only before slice A4 lands.
+    measured: tuple[MeasuredCopy, ...] = ()
 
 
 class FaceBox(Model):

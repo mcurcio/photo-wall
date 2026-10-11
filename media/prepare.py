@@ -21,7 +21,7 @@ import warnings
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import Field
 
@@ -41,6 +41,12 @@ _MATRICES = {
     (1, 0, 0, 1): 1, (-1, 0, 0, 1): 2, (-1, 0, 0, -1): 3, (1, 0, 0, -1): 4,
     (0, 1, 1, 0): 5, (0, 1, -1, 0): 6, (0, -1, -1, 0): 7, (0, -1, 1, 0): 8,
 }
+
+
+# The still media types preparation reads (follow-ups 2026-10-11): the one home of "Photo Wall can
+# read this file". The rendition choice fetches an unedited photo's original only when its type is
+# here (media/library_client.py `fetch_plan`); slice A2 widens it with mature decoders.
+STILL_MEDIA_TYPES: Final[frozenset[str]] = frozenset({"image/jpeg", "image/png", "image/webp"})
 
 
 class PreparationRecipe(Model):
@@ -96,6 +102,10 @@ class PreparedMedia(Model):
     original_sha256: Digest
     recipe_id: Digest
     build: BuildIdentity
+    # Which of Immich's copies this was made from (`FetchedRendition.rendition`; follow-ups
+    # 2026-10-11, owner item 6): MediaStore.publish writes it to `media_jobs.made_from`, the
+    # prepared copy's own row. Slice A4 sets it on every preparation and drops the default.
+    made_from: Literal["preview", "fullsize", "original"] | None = None
 
 
 @dataclass

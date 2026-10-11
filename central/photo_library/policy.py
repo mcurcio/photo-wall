@@ -16,9 +16,11 @@ from central.photo_library.model import (
     ContactRefused,
     ContactResult,
     HealthOk,
+    ImmichCopy,
     ImmichTooOld,
     ImmichUser,
     ImmichVersion,
+    Kind,
     LibraryHealth,
     LibraryNote,
     MissingPermissions,
@@ -44,6 +46,12 @@ CHECK_EVERY_SECONDS: Final = 900
 STALE_CHECK_SECONDS: Final = 900
 # C8: an unsaved draft and its pool, when nothing else uses that pool, go after a day.
 DRAFT_KEEP_SECONDS: Final = 86400
+# The original types Immich v2.5.6 calls web-supported (server/src/utils/mime-types.ts): for these
+# Immich makes no full-size copy of an unedited photo and redirects `size=fullsize&edited=false`
+# to the original (follow-ups 2026-10-11, slice A3; the one home, media/immich.py reads it).
+IMMICH_WEB_TYPES: Final[frozenset[str]] = frozenset({
+    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/avif",
+    "image/svg+xml", "image/bmp"})
 # One page of a pool in the console (newest first).
 POOL_PAGE_SIZE: Final = 60
 # A stored connection URL's longest form (ConnectionSecret.base_url).
@@ -129,3 +137,14 @@ def contact_health(result: ContactResult, *, bound_user: ImmichUser | None,
 
 def _named(user: ImmichUser) -> str:
     return user.name or user.email
+
+
+def copies_in_immich(kind: Kind, edited: bool, original_type: str | None,
+                     full_size_copies: bool | None) -> dict[ImmichCopy, bool | None]:
+    """Which copies Immich v2.5.6 keeps for one asset (follow-ups 2026-10-11, slice A3; facts:
+    Immich media.service.ts): thumbnail, preview and original always (a video: original only;
+    its stills are not Photo Wall's); a full-size copy when the photo is edited, else when its
+    original's type is not in IMMICH_WEB_TYPES and the connection's full-size copies are on
+    (`full_size_copies`; None, or an unknown `original_type`: None, cannot tell). Keys in the
+    order thumbnail, preview, fullsize, original. Pure."""
+    raise NotImplementedError

@@ -398,12 +398,73 @@ SourceProblem = Literal[
 ]
 
 
+# Immich's copies of one photo (Immich v2.5.6, follow-ups 2026-10-11, owner item 1): its small
+# thumbnail (WebP, long edge 250 by default), its preview (JPEG, long edge 1,440 by default), a
+# full-size copy (only when the photo is edited, or Immich's full-size copies are on and the
+# original is a type a browser cannot show), and the original file. Copy sizes are in no Immich
+# answer an API key may read: Photo Wall knows one only once it has downloaded and measured it.
+# The original's size is the one Immich reports (`OriginalFile`), so it is never measured.
+ImmichCopy = Literal["thumbnail", "preview", "fullsize", "original"]
+MeasurableCopy = Literal["thumbnail", "preview", "fullsize"]
+MediaTypeName = Annotated[str, Field(max_length=127,
+                                     pattern=r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")]
+
+
+class OriginalFile(Model):
+    """The original file Immich keeps for a photo, as the check's search answer describes it
+    (`search/metadata` with `withExif: true`: `originalMimeType` and `exifInfo`; follow-ups
+    2026-10-11, slice A3). Stored on the asset's `library_assets` row (owner item 6: one row per
+    Immich asset holds the facts of the asset itself). Each field is None when Immich did not say.
+
+    `width` x `height` are `exifImageWidth` x `exifImageHeight`, the file's stored pixels. Whether
+    Immich reports them before or after the EXIF `orientation` is proven by slice A3's real-Immich
+    test; `upright` follows what it proves."""
+
+    media_type: MediaTypeName | None = None
+    width: int | None = Field(default=None, gt=0, strict=True)
+    height: int | None = Field(default=None, gt=0, strict=True)
+    orientation: int | None = Field(default=None, ge=1, le=8, strict=True)   # EXIF, 1..8
+    size_bytes: int | None = Field(default=None, gt=0, strict=True)          # fileSizeInByte
+
+    @property
+    def upright(self) -> tuple[int, int] | None:
+        """The original's (width, height) as shown upright; None when either size is unknown."""
+        raise NotImplementedError
+
+
+class MeasuredCopy(Model):
+    """A copy of one revision Photo Wall downloaded during one fetch, measured from its header
+    (upright). Stored as an `asset_copies` row (slice A2's table, written by slice A4)."""
+
+    name: MeasurableCopy
+    media_type: MediaTypeName
+    width: int = Field(gt=0, strict=True)
+    height: int = Field(gt=0, strict=True)
+
+
+class CopySize(Model):
+    """A copy's measured size as stored (table `asset_copies`, a child of the revision; slice
+    A2): when Photo Wall last measured it."""
+
+    name: MeasurableCopy
+    media_type: MediaTypeName
+    width: int = Field(gt=0, strict=True)
+    height: int = Field(gt=0, strict=True)
+    measured_at: Instant
+
+
 class LibraryAsset(Model):
     """One photo or video as Immich shows it now (edited), as the worker fetches and prepares it.
 
     `width` and `height` are upright (EXIF applied) and edited: the largest copy Photo Wall can
     fetch (C10).
     Invariant (validator): `duration` is set exactly for videos.
+
+    Stored normalized (follow-ups 2026-10-11, owner item 6; slice A2): `connection_ref`,
+    `upstream_id`, `kind`, `taken_at` and `original` on the asset's `library_assets` row (one per
+    Immich asset); `revision`, `width`, `height` and `duration` on its `asset_revisions` row (one
+    per edit, keyed by `asset_id`). `original`: None until a check with `withExif` read it
+    (slice A3).
     """
 
     connection_ref: ConnectionRef
@@ -414,6 +475,14 @@ class LibraryAsset(Model):
     width: int = Field(gt=0, strict=True)
     height: int = Field(gt=0, strict=True)
     duration: Positive | None = None
+    original: OriginalFile | None = None
+
+    @property
+    def edited(self) -> bool:
+        """Whether Immich shows this photo edited: its revision carries an edit-list suffix
+        (`AssetRevision`, "<checksum>-<edits>"); an unedited photo's revision is its checksum.
+        The one home of the test (slice A3); never stored."""
+        raise NotImplementedError
 
     @model_validator(mode="after")
     def _duration_for_videos(self) -> Self:

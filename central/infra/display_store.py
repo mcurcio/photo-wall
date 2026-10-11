@@ -116,6 +116,7 @@ from central.displays.views import (
 )
 from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgLinkStores
+from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease, touched
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -163,6 +164,17 @@ POSITION_FACTS: Final = ("bound", "generation", "position_generation", "position
                          "seen_display_id")
 POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.position_generation, "
                            "f.position_display_id, seen.display_id AS seen_display_id")
+
+
+def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
+    """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
+    2026-10-11, slice A1): frames LEFT JOIN bindings LEFT JOIN outputs on (player_id,
+    output_id); `display_px` from `outputs.observation` width_px x height_px when both are >= 1
+    (the enrollment report, connected or not); `output_px` is `contracts.models.frame_output`.
+    The one read of Frame outputs: the media worker's rendition choice (PgPhotoLibrary), the
+    Planner's slots and the fit analysis (roadmap 5a) all ask here. Never raises for a Frame
+    without an Output."""
+    raise NotImplementedError
 
 
 def frame_position(row: Mapping[str, Any]) -> FramePosition:

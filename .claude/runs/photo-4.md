@@ -1447,3 +1447,294 @@ Every rule has one home, and the others link to it. `python3 scripts/check_docs.
 | FX1 | landed (run 1) | 8a2b00c |
 | FX2 | stopped (E-P4-FX2-1); re-cut into lane seams | |
 | X1 | drafts landed (run 1); final pass is X2 | 4c5f68c, 749e776, 7aacda5 |
+
+---
+
+# Follow-ups (owner 2026-10-11)
+
+**Start here for the follow-up run.** Decisions and their reasons: `/Volumes/Dock/tmp/photo-followups/plan.md` (revision 2; D1 to D10 are named below). Designer proposal: `/Volumes/Dock/tmp/photo-followups/ux-proposal.md`. Code map: `/Volumes/Dock/tmp/photo-followups/facts.md`. The 5a half (fu-b, fu-c) is the same-named section of `.claude/runs/photo-5a.md` on `feat/photo-pool-on-frames`. Errata: `E-FU-<slice>-<n>` in `.claude/errata.md`, append only; an implementer who hits a wall appends one and STOPS.
+
+## Owner words (binding; verbatim, 2026-10-11, on PRs 81 and 82)
+
+1. "Immich does have the full and original image. Part of the immich discovery should include fetching (and caching?) metadata about the original photos and any immich copies that might be available."
+2. "The no-smaller-than-the-frame rule suggests that some analysis of the selected content pool should be shown to the user along the way, like "1,689 immich photos selected, 92% have 4:3 ratio, 5% have 3:4 ratio … 2 of your Frames have no compatible content in this set". That's a strawman example — the real solution should be more visual and allow me to preview the content selections and transient Frame compatibility. ALSO make sure that compatibility is measuring against the Frame output and not the Display."
+3. "I would rather lean on strong foundational libraries than reinvent the wheel. Especially when it comes to standard libraries like opencv."
+4. "Agreed that these should be configurable, and not hardcoded." (the fit rule's tuning values)
+5. "I don't need to review it, but I do expect "UX designer" agents to review it. They should propose layouts, screens, actions, widgets, etc, and then they should also be in the loop for the final verification steps. In other words, send designer agents to adversarially review the posted screenshots and to propose solutions that will make them more useful and elegant and engaging."
+6. "I would build this as a normalized database, with each upstream immich asset being a primary resource and then have no join tables which hold different resolutions, crops, encodings of that asset."
+7. "Note that this preview idea could apply at a few different moments. Like the source creation time, but also frame config, show authoring, etc."
+
+Earlier rules still binding: 2026-10-09 "use Immich downsampled copy only if it is at least the visible Frame size, else the original"; a photo either fills its Frame or does not show there; ratio, not labels; never the same photo on two Frames at once; the console feels related to Immich (`docs/design-language.md`, `.claude/skills/console-ux/SKILL.md`).
+
+## Lanes (both PRs; this page holds fu-a, fu-a2, fu-d)
+
+| Lane | Branch | Starts from | After | Slices | Lands on |
+|---|---|---|---|---|---|
+| fu-a | `lane/fu-a` | `origin/lane/fu-a` (this freeze) | none | A1, A2, XA | `feat/photo-sources` |
+| fu-d | `lane/fu-d` | `origin/lane/fu-d` (this freeze) | none | D1, D2, XD | `feat/photo-sources` |
+| fu-a2 | `lane/fu-a2` | `origin/lane/fu-a` (its tip once fu-a is done) | fu-a | A3, A4, A5, XA2 | `feat/photo-sources` |
+| fu-b | `lane/fu-b` | 5a ledger | fu-a | B1, B2, XB | `feat/photo-pool-on-frames` |
+| fu-c | `lane/fu-c` | 5a ledger | fu-b, fu-a2, fu-d | C1, C2, XC | `feat/photo-pool-on-frames` |
+
+Every lane branch was created at a freeze commit, so a lane that starts from another lane's tip pushes a fast-forward of its own branch. Each lane agent: `git fetch && git switch --detach <starts from>`, `uv sync --frozen`, commits each slice, `git push origin HEAD:<lane branch>`. Landing (the run, merge commits, never rebases): `lane/fu-a2` (holds fu-a) and `lane/fu-d` into `feat/photo-sources`; then `feat/photo-sources` and `lane/fu-c` into `feat/photo-pool-on-frames`.
+
+**Environment and gates:** as "Environment and gates" above, with `--basetemp=/tmp/pwfu/<slice>/<gate>`, `DOCKER_CONTEXT=default` for the Immich fixture, and the Node 22 `PATH` for every console command. Budget: 120 min per slice; two fix cycles per gate, then a pushed `wip/fu-<slice>` branch and a stop. Models: `claude-opus-5-5` for every code slice; `claude-sonnet-5-5` allowed for XA, XA2, XD (owner, 2026-10-09).
+
+## The freeze (this commit; code architect)
+
+Additive: new names, new bodies `NotImplementedError`, existing consumers unchanged.
+
+| File | What is frozen |
+|---|---|
+| `contracts/frame_fit.py` | `PictureSize`, `picture_size`, `window_holds` |
+| `contracts/models.py` | `frame_output` |
+| `central/installation_models.py` | `Pixels`, `FrameOutput` |
+| `central/infra/display_store.py` | `frame_outputs_in` |
+| `central/infra/photo_library_store.py` | `library_assets_in` |
+| `central/photo_library/model.py` | `ImmichCopy`, `MeasurableCopy`, `MediaTypeName`, `OriginalFile` (+ `upright`), `MeasuredCopy`, `CopySize`; `LibraryAsset.original`, `LibraryAsset.edited` |
+| `central/photo_library/policy.py` | `IMMICH_WEB_TYPES`, `copies_in_immich` |
+| `central/photo_library/views.py` | `CopyView`, `PhotoFacts` |
+| `central/photo_library/ports.py` | `PhotoLibraryQueries.photo_facts`; `LibraryWorkerStore.frame_outputs`, `.copy_sizes`, `.record_copies` |
+| `media/library_client.py` | `FetchStep`, `FrameNeed`, `rendition_needs`, `covers`, `fetch_plan`; `FetchedRendition.measured` |
+| `media/prepare.py` | `STILL_MEDIA_TYPES`; `PreparedMedia.made_from` |
+
+Verified at the freeze: ruff 0, lint-imports 23 kept, unit tier on the touched modules 267 passed. NOT RUN: DB, browser, catalog, Immich fixture, images (no behaviour changed).
+
+## Shared primitives (each one responsibility; altitude tree)
+
+| Primitive | Responsibility | Consumers now | Scheduled |
+|---|---|---|---|
+| `contracts.frame_fit.window_holds` | "a photo or copy is at least the Frame output" | none (A1) | A4 `covers`; B1 rule 2 |
+| `contracts.models.frame_output` | a Frame's calibration, profile and Output size → its Frame output | `frame_outputs_in` (A1) | B2's draft Frames |
+| `central.infra.display_store.frame_outputs_in` | the one read of every Frame's output | `PgPhotoLibrary.frame_outputs` (A1) | A4 (rendition), B1 (Planner slots), B2 (analysis) |
+| `central.infra.photo_library_store.library_assets_in` | the one place a stored asset becomes a `LibraryAsset` | job leases (A2) | 5a key content measurement (fu-b's merge) |
+| `central.photo_library.policy.copies_in_immich` | which copies Immich keeps for a photo | `photo_facts` (A3) | C2's photo sheet (through `PhotoFacts`) |
+| `media.library_client.fetch_plan` | which copies to try, smallest first | the worker (A4) | none |
+| `media.prepare.STILL_MEDIA_TYPES` | "Photo Wall can read this file" | `fetch_plan`, `media/immich.py` `_RENDITION_TYPES` (A4, A5) | none |
+
+## Test architecture
+
+- **Pure rules (unit leg):** `picture_size`, `window_holds`, `frame_output`, `copies_in_immich`, `rendition_needs`, `covers`, `fetch_plan`, `OriginalFile.upright`, `LibraryAsset.edited`: table tests through the public functions (`tests/test_frame_fit.py`, `tests/test_frame_output.py`, `tests/test_photo_library_policy.py`, `tests/test_photo_library_model.py`, `tests/test_rendition_choice.py`).
+- **Tables and store (db leg):** through `LibraryWorkerStore` and the operator routes only; the schema's invariants (one parent per Immich asset, children cascade, no copied facts on pool rows) are proven by writes and reads, never by reading `information_schema`. The conformance suite `tests/test_library_store_conformance.py` holds the fake equal to PostgreSQL for every new method.
+- **Adapter (unit leg):** `httpx.MockTransport` answers shaped as Immich v2.5.6 (`tests/test_immich_library.py`): `withExif` asked, EXIF parsed, each copy requested with the right `edited` flag.
+- **Real Immich (`immich` marker, CI `photo-sources` leg):** `tests/test_preparation_rendition.py` (the xfail goes), `tests/test_original_facts.py`.
+- **Console (D):** browser tests drive the real app and database (`tests/browser/test_source_flow_browser.py`, `test_photo_library_settings_browser.py`, `test_scene_flow_browser.py`, `test_show_now_browser.py`); stories through the catalog leg.
+
+## Maintenance risks
+
+- **Every pool read is a join** (D2). The page, counts and Planner reads now join `library_assets` and `asset_revisions`; A2 reports the 50,000-photo page time. If it grows, the fix is an index, never copying the facts back onto pool rows.
+- **Two 080s in the wild.** 080 changes in place; any local database that applied the old 080 must be recreated (`docker compose ... down -v`). No deployed database has it (main ends at 079).
+- **`media_jobs.result` repeats the variant** as the publication journal (D2). Left as is; a later change to the media store could fold it.
+- **Immich drift on EXIF.** `exifImageWidth/Height` before or after orientation is proven on 2.5.6 only (A3's real-Immich test); a newer Immich changing it shows as a wrong `upright`, caught by that test on the next fixture bump.
+- **pillow-heif (LGPL, libheif)** is a native dependency in the image (A5); a CVE in libheif is a rebuild.
+
+---
+
+## A1 (tracer): the Frame output (lane fu-a)
+
+**Owned:** `contracts/frame_fit.py`, `contracts/models.py` (`frame_output` only), `central/installation_models.py` (`FrameOutput`), `central/infra/display_store.py` (`frame_outputs_in` only), `central/infra/photo_library_store.py` (`PgPhotoLibrary.frame_outputs` only), `tests/support/library_store_fake.py` (`frame_outputs`), `tests/test_frame_fit.py`, `tests/test_frame_output.py` (new).
+**Design:** plan D1; owner item 2's last sentence.
+
+**Frozen page.** The bodies of the frozen names, as their docstrings say:
+- `picture_size(mode: Literal["cover", "corners"], corners: Corners, rotation: float, output: OutputSize, aspect: float) -> PictureSize`.
+- `window_holds(width: int, height: int, aspect: float, need: PictureSize) -> bool`.
+- `frame_output(profile: FrameProfile, calibration: Calibration, output: OutputSize | None) -> PictureSize | None`: `picture_size(calibration.fit.mode, calibration.fit.corners, calibration.fit.rotation, output, profile.width_px / profile.height_px)`.
+- `frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]`; `PgPhotoLibrary.frame_outputs(self) -> tuple[FrameOutput, ...]` (its own transaction); `FakeLibraryStore.frame_outputs` returns `self.outputs` (a new attribute, default `()`), as `largest_frame_edge` returns `self.frame_edge`.
+
+**Acceptance:**
+- `tests/test_frame_fit.py` (unit):
+  1. Cover, full screen, 3,840 x 2,160 Output, 16:9 → (3840, 2160).
+  2. Cover with corners inset to a 40 % x 40 % opening → (1536, 864).
+  3. Cover turned 10° inside the same opening → both sides larger than the opening's.
+  4. Corners with a 90° quarter turn on a 1,920 x 1,080 Output, full screen → (1080, 1920).
+  5. `window_holds`, a 4:3 photo of 4,032 x 3,024 at 16:9: need (3840, 2160) holds; (4032, 2268) holds exactly; (4033, 2268) does not; (4100, 2000) does not (a smaller area, a wider side); a non-positive size → `ValueError("window_size")`.
+- `tests/test_frame_output.py` (db): a bound Frame with a reported Output → its `output_px`; a Frame whose Output reported 0 x 0 → both None; an unbound Frame → both None; ordered by frame id.
+
+**Mutation probes:** compare areas instead of both axes in `window_holds` → case 5's (4100, 2000) holds and the test fails; drop the quarter-turn swap → case 4 fails.
+
+**Land:** `feat(contracts): the Frame output, one home, and the one test of "at least the Frame output" (follow-ups A1)`.
+
+## A2: one row per Immich asset, its copies as children (lane fu-a, after A1)
+
+**Owned:** `central/migrations/080_photo_library.sql`, `central/migrations/081_retire_snapshots.sql`, `central/infra/photo_library_store.py`, `central/media_repository.py`, `central/media_store.py`, `tests/support/library_store_fake.py`, `tests/test_photo_pools.py`, `tests/test_photo_library_store.py`, `tests/test_migration_081.py`, `tests/test_media_repository.py`, `tests/test_media_store.py`, `tests/test_library_store_conformance.py`, `tests/test_asset_tables.py` (new).
+**Design:** plan D2; owner item 6.
+
+**Frozen page: the schema.** 080 is edited in place (it has never been applied outside a branch: main ends at 079; 5a owns 082 to 085). Exact DDL, added to 080 after `photo_drafts`:
+
+```sql
+CREATE TABLE library_assets (
+  connection_ref TEXT NOT NULL,
+  upstream_id UUID NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('image','video')),
+  taken_at DOUBLE PRECISION NOT NULL,
+  original_media_type TEXT NULL CHECK (length(original_media_type) <= 127
+    AND original_media_type ~ '^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$'),
+  original_width INTEGER NULL CHECK (original_width > 0),
+  original_height INTEGER NULL CHECK (original_height > 0),
+  original_orientation SMALLINT NULL CHECK (original_orientation BETWEEN 1 AND 8),
+  original_bytes BIGINT NULL CHECK (original_bytes > 0),
+  first_seen DOUBLE PRECISION NOT NULL,
+  last_seen DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (connection_ref, upstream_id));
+
+ALTER TABLE asset_revisions ADD COLUMN connection_ref TEXT NULL, ADD COLUMN upstream_id UUID NULL,
+  ADD COLUMN revision TEXT NULL, ADD COLUMN width INTEGER NULL CHECK (width > 0),
+  ADD COLUMN height INTEGER NULL CHECK (height > 0),
+  ADD COLUMN duration DOUBLE PRECISION NULL CHECK (duration > 0),
+  ADD COLUMN updated_at TEXT NULL;
+
+CREATE TABLE asset_copies (
+  asset_id TEXT NOT NULL REFERENCES asset_revisions(asset_id) ON DELETE CASCADE,
+  copy TEXT NOT NULL CHECK (copy IN ('thumbnail','preview','fullsize')),
+  media_type TEXT NOT NULL CHECK (length(media_type) <= 127),
+  width INTEGER NOT NULL CHECK (width > 0),
+  height INTEGER NOT NULL CHECK (height > 0),
+  measured_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (asset_id, copy));
+
+ALTER TABLE media_jobs ADD COLUMN made_from TEXT NULL
+  CHECK (made_from IN ('preview','fullsize','original'));
+```
+
+In 080's existing statements: `library_connections` gains `full_size_copies BOOLEAN NULL` (Immich's last answer; `record_contact` writes it); `photo_pool_rows` loses `revision`, `kind`, `taken_at`, `width`, `height`, its in-pool check becomes `CHECK ((outcome = 'in_pool') = (asset_id IS NOT NULL))`, and `photo_pool_rows_page` becomes `CREATE INDEX photo_pool_rows_in_pool ON photo_pool_rows (pool_key, asset_id) WHERE outcome = 'in_pool'`; the `asset_revisions_upstream` index goes. 081 step 1 writes each converted pre-4 record as a `library_assets` row (connection, Immich id, kind, taken time; originals NULL) plus the typed revision columns instead of the `metadata` rewrite. After step 5, 081 ends with:
+
+```sql
+ALTER TABLE asset_revisions DROP COLUMN metadata,
+  ALTER COLUMN connection_ref SET NOT NULL, ALTER COLUMN upstream_id SET NOT NULL,
+  ALTER COLUMN revision SET NOT NULL, ALTER COLUMN width SET NOT NULL,
+  ALTER COLUMN height SET NOT NULL,
+  ADD FOREIGN KEY (connection_ref, upstream_id) REFERENCES library_assets,
+  ADD UNIQUE (connection_ref, upstream_id, revision);
+```
+
+**Frozen page: the store.**
+- `record_step`, one transaction, in this order: upsert `library_assets` for every entry that names a kind and taken time (an `InPool` asset, a `Waiting` entry, a `LeftOut` entry with both): `first_seen` kept, `last_seen` = now; `kind`, `taken_at` rewritten; the five `original_*` columns rewritten from an `InPool` asset's `original` (None writes NULLs) and left unchanged by `Waiting` and `LeftOut`. Then upsert `asset_revisions` typed columns for each `InPool` asset. Then the pool rows (no copied facts).
+- `known_revisions`: the latest (`last_seen`) revision row per Immich id with `updated_at` set, from the typed columns.
+- `pool_members_in`, `_pool_view_in` (counts and page) and `pool_thumbnail` join `asset_revisions` (revision, size) and `library_assets` (kind, taken time; `Waiting` and `LeftOut` counts by kind through `photo_pools.connection_ref` and the Immich id, a `LeftOut` row with no asset row counted with kind unknown, as today). The page's order and cursor are unchanged (`taken_at` DESC, `asset_id` DESC).
+- `library_assets_in(conn, asset_ids) -> dict[str, LibraryAsset]` (frozen above) replaces `media_repository.lease_asset_of` and the two `metadata` selects (`media_repository.py` claim and the `JOIN asset_revisions`, `media_store.py` `_lease_for`); `lease_asset_of` is deleted.
+- `copy_sizes(asset_id) -> dict[MeasurableCopy, CopySize]`, `record_copies(asset_id, measured: Sequence[MeasuredCopy]) -> None` on `PgPhotoLibrary` and the fake (frozen signatures).
+- `record_contact` writes `full_size_copies` from the `ContactResult`; the stored health is still `contact_health`'s.
+- `MediaStore.publish` writes `media_jobs.made_from` from `prepared.made_from` in the same UPDATE that sets `variant_sha`.
+
+**Acceptance (`tests/test_asset_tables.py`, db, through the store):**
+1. One Immich asset seen by two pools and two checks is one `library_assets` row; its `last_seen` moves, its `first_seen` does not. A taken-time change between the checks (a date edit in Immich, revision unchanged) shows in both pools' pages.
+2. An edit (new revision) adds a second `asset_revisions` row under the same parent; `known_revisions` answers the newer.
+3. A `Waiting` entry after an `InPool` one keeps the original's facts; a later `InPool` with `original=None` clears them.
+4. Pool page, counts and Planner members read the same sizes and times as before the change (the existing `tests/test_photo_pools.py` cases, unchanged in intent, all pass).
+5. `record_copies` twice for the same copy keeps one row with the later size; `copy_sizes` of an unknown id is `{}`; deleting a revision row removes its copies.
+6. A published job's `made_from` reads back as written.
+7. 081 on a pre-4 database (the `test_migration_081.py` fixture) leaves no `metadata` column and a parent row for every kept revision.
+8. Conformance: cases 1, 2, 3, 5 run against the fake and PostgreSQL.
+Report in the commit body: the 50,000-photo pool page and counts time on this machine (seeded through `record_step`).
+
+**Mutation probes:** keep `taken_at` on pool rows and read it there → case 1's second pool shows the old time; let `Waiting` write NULL originals → case 3 fails.
+
+**Land:** `refactor(photos): one row per Immich asset, its revisions and copies as child tables (follow-ups A2)`.
+
+## XA: docs for fu-a (lane fu-a, last)
+
+**Owned:** `docs/module-media.md` (the data model section), `docs/central-system-architecture.md` (the asset tables line), `docs/module-planner.md` (only if it names `photo_pool_rows` columns). Write the tables of D2 as built (one parent per Immich asset; revisions, copies and prepared copies as children; why `media_jobs.result` stays) and the Frame output (D1) in the owner's words. `python3 scripts/check_docs.py` 0. **Land:** `docs(photos): the asset tables and the Frame output (follow-ups XA)`.
+
+## A3: discovery reads the original's facts; one photo's facts read (lane fu-a2)
+
+**Owned:** `media/immich.py` (the search body and `_item`), `media/library_client.py` (`SearchItem.original`), `media/pool_check.py`, `central/photo_library/model.py` (`OriginalFile.upright`, `LibraryAsset.edited`), `central/photo_library/policy.py` (`copies_in_immich`), `central/infra/photo_library_store.py` (`photo_facts`), `central/photo_library_routes.py` (the new route), `tests/support/library_store_fake.py`, `tests/test_immich_library.py`, `tests/test_pool_check.py`, `tests/test_photo_library_model.py`, `tests/test_photo_library_policy.py`, `tests/test_photo_library_routes.py`, `tests/test_original_facts.py` (new, `immich` marker).
+**Design:** plan D3; owner item 1.
+
+**Frozen page.**
+- `SearchItem.original: OriginalFile | None = None`; `search/metadata` bodies send `withExif: True` (every search the check makes); `_item` reads `originalMimeType` and `exifInfo.exifImageWidth`, `exifImageHeight`, `orientation` (Immich sends a string; "1".."8" parse, anything else is None), `fileSizeInByte`; a malformed EXIF field is None, never the row's problem. `media/pool_check.py` copies it onto the `InPool` asset.
+- `OriginalFile.upright` and `LibraryAsset.edited`: as their docstrings; `upright` swaps width and height for orientation 5 to 8 unless case 4 below proves Immich already reports upright sizes, in which case it never swaps (record which in an erratum).
+- `copies_in_immich(kind: Kind, edited: bool, original_type: str | None, full_size_copies: bool | None) -> dict[ImmichCopy, bool | None]` as its docstring.
+- `PgPhotoLibrary.photo_facts(asset_id: str) -> PhotoFacts` (`PhotoLibraryQueries.photo_facts`): `LibraryRefused("photo_not_found")` unless a wanted pool's in-pool row names the id (`_WANTED`, the thumbnail route's rule).
+- Route: `GET /v1/operator/library/photos/{asset_id}` → `PhotoFacts`; 404 `{"error": "photo_not_found"}`; operator `admin`; mounted by `mount_photo_library_routes`.
+
+**Acceptance:**
+1. (unit) A v2.5.6-shaped row with `exifInfo` → `SearchItem.original` with each field; a row without `exifInfo` → None; orientation "6" → 6, "x" → None.
+2. (unit) Every `search/metadata` request body the check sends has `withExif: true`.
+3. (unit) `copies_in_immich`: edited JPEG → fullsize True; unedited JPEG → fullsize False; unedited HEIC with full-size copies on → True, off → False, unknown → None; a video → thumbnail, preview, fullsize False, original True.
+4. (immich) The fixture's rotated photo (EXIF orientation 6) reports `exifImageWidth/Height`; `upright` equals Immich's `width`/`height` for that photo.
+5. (db) The route answers a pool photo's facts with copies in order thumbnail, preview, fullsize, original, `measured` from `asset_copies`, `prepared_from` from `media_jobs.made_from`; an id in no wanted pool → 404; the answer holds no Immich id (asserted on the JSON text).
+
+**Mutation probes:** drop `withExif` → case 2 fails; never swap in `upright` while Immich reports stored pixels → case 4 fails.
+
+**Land:** `feat(photos): discovery keeps each photo's original-file facts; one photo's facts read (follow-ups A3)`.
+
+## A4: the copy that is at least the Frame output, else the original (lane fu-a2, after A3)
+
+**Owned:** `media/library_client.py` (`rendition_needs`, `covers`, `fetch_plan`, `LibraryClient.fetch_rendition`), `media/immich.py` (`fetch_rendition`), `media/worker.py` (`process_job`'s fetch), `media/prepare.py` (`prepare_rendition` sets `made_from`; `PreparedMedia.made_from` loses its default), `central/photo_library/ports.py` and `central/infra/photo_library_store.py` and the fake (`largest_frame_edge` deleted), `tests/test_rendition_choice.py` (new), `tests/test_immich_library.py`, `tests/test_media_worker.py`, `tests/test_preparation_rendition.py`.
+**Design:** plan D4; the owner's 2026-10-09 rule.
+
+**Frozen page.**
+- `rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]`, `covers(width: int, height: int, needs: Sequence[FrameNeed]) -> bool`, `fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed], known: Mapping[MeasurableCopy, CopySize], readable: frozenset[str]) -> tuple[FetchStep, ...]`: as their docstrings (`readable` is `STILL_MEDIA_TYPES`; the original's type is `asset.original.media_type`; an unknown type is not readable).
+- `LibraryClient.fetch_rendition(self, asset: LibraryAsset, *, plan: Sequence[FetchStep], needs: Sequence[FrameNeed], destination: Path) -> FetchedRendition`: downloads each step in order, measures it, keeps the first that `covers(needs)` and always the last; "preview" is `size=preview&edited=true`; "fullsize" is `size=fullsize&edited=<asset.edited>`; "original" is `/assets/{id}/original?edited=false`. `FetchedRendition.rendition` is the kept step; `measured` lists every downloaded still copy (a redirected "fullsize" answered by the preview is measured as "preview"); an original is never in `measured`. Exclusively creates `destination`; removes only what it created on failure.
+- `process_job`: `needs = rendition_needs(library.frame_outputs())`, `known = library.copy_sizes(asset_id)`, `plan = fetch_plan(...)`, fetch, `library.record_copies(asset_id, fetched.measured)`, prepare, publish.
+
+**Acceptance:**
+1. (unit, `tests/test_rendition_choice.py`) `fetch_plan`: a video → ("original",); an unedited JPEG → ("preview", "original"); an edited JPEG → ("preview", "fullsize"); an unedited HEIC (not readable) → ("preview", "fullsize"); a stored preview that does not cover → the full-resolution step alone; no Frame → the full-resolution step alone.
+2. (unit) `rendition_needs` on a Frame with no output uses its profile size; two Frames with one shape give one need.
+3. (unit, MockTransport) an unedited JPEG on a Frame larger than the preview downloads the preview then `/original?edited=false`, keeps the original, and `measured` holds the preview's size.
+4. (unit, worker) copies are recorded after the fetch; `made_from` reaches `publish`.
+5. (immich) the strict xfail `test_the_preview_serves_a_frame_it_covers_and_the_full_size_copy_a_larger_one` becomes a plain test and passes: a Frame output above the preview's long edge keeps the original, whose size is the original's.
+
+**Mutation probes:** send `edited=true` for the unedited full-resolution step → case 5 fails; keep the first step always → case 3 fails; compare long edges instead of `window_holds` → a 9:16 need in case 1's table fails.
+
+**Land:** `fix(media): take Immich's preview only when it holds every Frame output, else the original (follow-ups A4)`.
+
+## A5: read the originals Immich keeps (lane fu-a2, after A4)
+
+**Owned:** `media/prepare.py`, `media/immich.py` (`_RENDITION_TYPES` reads `STILL_MEDIA_TYPES`), `pyproject.toml` and `uv.lock` (pillow-heif: a deliberate lockfile change), `tests/test_prepare.py`.
+**Design:** plan D5; owner item 3.
+
+**Frozen page.** `STILL_MEDIA_TYPES` becomes {image/jpeg, image/png, image/webp, image/heic, image/heif, image/avif}; `pillow_heif.register_heif_opener()` once at import of `media/prepare.py`; AVIF through Pillow's built-in plugin (Pillow 12.3 reports `features.check("avif")` True). A still whose ICC profile is not sRGB is converted to sRGB with `PIL.ImageCms` (rendering intent perceptual) instead of `unsupported_color`; a photo with a PQ or HLG transfer still fails `unsupported_color`; a gain-map photo prepares from its base image. A decoded HEIC or AVIF, or a converted still, goes through one lossless PNG intermediate; plain sRGB JPEG, PNG and WebP keep the direct path. `PreparationRecipe.version: Literal[3] = 3`.
+
+**Acceptance (`tests/test_prepare.py`, unit; files made in the test with Pillow and pillow-heif):**
+1. A HEIC (4:3) prepares to a JPEG of the recipe's size, upright.
+2. A Display P3 JPEG of a known colour prepares to sRGB values matching the P3 → sRGB conversion within 2 per channel, with no non-sRGB profile left.
+3. An AVIF prepares.
+4. A PQ-tagged still → `unsupported_color`.
+5. The recipe id differs from version 2's.
+Record in the commit body: the image size change from pillow-heif (`docker image ls` before and after, or NOT RUN with the reason).
+
+**Mutation probes:** skip the ICC conversion → case 2 fails; drop the HEIF opener → case 1 fails.
+
+**Land:** `feat(media): prepare HEIC, AVIF and wide-colour photos with libheif and LittleCMS (follow-ups A5)`.
+
+## XA2: docs for fu-a2 (lane fu-a2, last)
+
+**Owned:** `docs/module-media.md` (rendition choice: replace the "open decision" at the xfail with the rule as built), `docs/module-media-preparation.md` (formats, colour, recipe 3), `docs/runbook.md` (only the full-size-copies note: RAW alone needs it). Findings F-FU-1 to F-FU-4 restated where each applies. **Land:** `docs(media): the copy choice and the formats Photo Wall reads (follow-ups XA2)`.
+
+## D1: 4's pages after the designer's critique (lane fu-d)
+
+**Owned:** `central/console/src/pages/photo-source-page.tsx`, `central/console/src/domain/source-query-editor.tsx` (+ stories), `central/console/src/domain/source-pool-view.tsx` (+ stories), `central/console/src/patterns/media-grid.tsx` (+ stories), `central/console/src/pages/photo-library-page.tsx`, `central/console/src/domain/library-connection.tsx`, `central/console/src/domain/library-health-card.tsx` (+ stories), `central/console/src/SourcesRegion.jsx`, `central/console/src/SourcePicker.jsx`, `central/console/src/ShowNowFlow.jsx`, `central/console/src/AttentionList.jsx`, `central/console/src/Shell.jsx` (the Draft marker only), `central/console/src/timeWords.js`, their browser tests (`tests/browser/test_source_flow_browser.py`, `test_photo_library_settings_browser.py`, `test_scene_flow_browser.py`, `test_show_now_browser.py`), `tests/browser/catalog-baselines/` for the stories it changes.
+**Design:** `ux-proposal.md` (c) items 2, 5 (the Source cards only), 8, 9 (words only), 10, 11; plan section 3 row 10 (the Draft marker); `docs/design-language.md`; `.claude/skills/console-ux/SKILL.md`. Not here: anything that needs the fit analysis (the Fit board, "fits N of M Frames" lines, per-filter counts) and the Scene flow's step order (C1, on 5a).
+
+**Frozen page (what each page becomes):**
+- **Photo source editor:** T4 two columns at `lg` and wider, the pool preview beside the filters and sticky; filter inputs fill their column; one page title ("New Photo source" / the Source's name), no "Sources / New Source"; Photos, Live photos and Videos as one multi-toggle whose on states are in words; one check time, not two; the sticky save bar holds Save; at phone width the preview collapses to a count line that opens it in a Sheet. The empty state names the active filters, each with a Clear (no per-filter counts).
+- **MediaGrid:** a justified layout at each photo's own ratio (Immich's timeline), never square crops; the grid takes each item's width and height.
+- **Sources list:** T2 cards, one per Source, with a four-photo mosaic, the photo count, the status chip (status colour only inside it) and an overflow menu holding Delete, which gives an Undo toast.
+- **Scene editor, Photos step:** chosen Sources as cards (mosaic, count, check), "New Photo source" as the last card; one list instead of "Source" plus "Add another Source".
+- **Show now:** no "Runs" or "Scene to activate" (DL forbidden words); the "Saved Sources…" boilerplate and Check now leave the quick action.
+- **Photo library:** card titles in sentence case; the problem card names its action once; "Add a connection" is a button that opens the form; the full-size-copies note reads "RAW photos without a full-size copy in Immich play at Immich's preview size. Turn on full-size copies in Immich to show them in full." (A5 makes every other format readable).
+- **Needs a look:** "Archive (Immich): Needs a look since Sun 03:39 — Immich rejected the API key. Photos keep playing."; its action is the same `ProblemCard` button as on Photo library.
+- **Times (`timeWords.js`, the one home):** 24-hour, no zone abbreviation, weekday and time ("since Sun 03:39"), seconds only for acknowledgements, on every page that shows a check or contact time.
+- **Draft marker:** the sidebar's "Draft" is a badge beside the section's label, and the Photo source editor marks Sources while its draft is unsaved (`markDraft`).
+
+**Acceptance:** each page's browser test asserts its new words and structure (no "Runs", "Scene to activate" or "Refresh" text; one time on the Source editor; the preview beside the filters at 1,280 px and behind a count line at 390 px; Delete then Undo restores a Source); stories updated, catalog baselines re-recorded for the changed stories only; console typecheck, lint and build 0.
+**Mutation probes:** render two check times → the Source editor test fails; square-crop the grid → the MediaGrid story's ratio assertion fails.
+**Land:** `feat(console): Photo source, Sources, Scene Photos, Show now and Photo library pages after the designer review (follow-ups D1)`.
+
+## D2: the varied fixture and the evidence (lane fu-d, after D1)
+
+**Owned:** `tests/browser/photo_seed.py` (it seeds through the store's worker API, which A2 keeps, so fu-a and fu-d never share it), `tests/browser/capture_photo4_evidence.py`, `docs/evidence/photo4/`.
+**Design:** plan D10; `ux-proposal.md` (c) item 12.
+**Frozen page.** `photo_seed.py` gains `seed_varied_library(store, connection_ref) -> tuple[str, ...]` (the seeded asset ids), seeding through the store's worker side (no Immich): 3:2, 4:3, 16:9, 9:16, 1:1, a 4:1 panorama, an 8 MP 4:3 photo and a photo whose face sits at an edge, each thumbnail drawn at its true ratio (a gradient with a visible shape, so a crop reads); and a 9:16 Frame beside the existing Frames. Re-capture every 4 page D1 changed, dark and light, at 1,280 px and 390 px; befores stay.
+**Acceptance:** the capture runs green (`PHOTO_WALL_BROWSER_TESTS=1`); the PNGs are in `docs/evidence/photo4/` and named in the PR body. **Land:** `test(console): a varied photo library and the follow-up screenshots for PR 81 (follow-ups D2)`.
+
+## XD: docs for fu-d (lane fu-d, last)
+
+**Owned:** `docs/operator-console-design.md` (the pages D1 changed), `docs/design-language.md` (MediaGrid justified; the time format rule, if not already there). **Land:** `docs(console): the photo pages after the designer review (follow-ups XD)`.
+
+## Follow-up outcome (filled by the run's closing step)
+
+| Slice | Outcome | sha |
+|---|---|---|
+| freeze | landed | (this commit) |
