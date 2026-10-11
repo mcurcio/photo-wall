@@ -1,0 +1,288 @@
+"""What depends on the photo library store (roadmap 4; run ledger .claude/runs/photo-4.md): one
+plain method per question, never a generic apply. central/infra/photo_library_store.py implements
+the operator and worker sides over PostgreSQL (slices C1, C2); the routes depend only on the
+operator protocols, the media worker only on `LibraryWorkerStore`, coordination only on
+`ScenePoolReader` (through central.media_ports.CoordinationMedia).
+
+Every time compared here is the database's (G11). Fences are numbers the database hands out
+(contact numbers, check numbers), never clock comparisons across processes.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any, Literal, Protocol
+
+from pydantic import Field
+
+from central.catalog import SourcePool
+from central.photo_library.model import (
+    AlbumRef,
+    AssetRevision,
+    CheckMark,
+    ConnectionRef,
+    ConnectionSecret,
+    ContactResult,
+    ContactTicket,
+    Count,
+    DraftRef,
+    LibraryAlbum,
+    LibraryPerson,
+    LibraryRef,
+    LibraryTag,
+    ListKind,
+    PersonRef,
+    Place,
+    PoolCursor,
+    PoolEntry,
+    PoolKey,
+    PoolThumbnail,
+    SourceProblem,
+    SourceQuery,
+    SourceRef,
+    TagRef,
+)
+from central.photo_library.views import (
+    ConnectionWrite,
+    LibraryConnectionView,
+    ListAnswer,
+    SourcePoolView,
+)
+from contracts.models import Instant, Model
+
+
+class LibraryRefused(Exception):
+    """A refusal the routes answer as {"error": code} with `status`:
+    connection_unknown 404, sources_use_connection 409, invalid_url 422, key_required 422,
+    draft_unknown 404, source_unknown 404, cursor_invalid 422, source_name_exists 409,
+    source_revision_conflict 409, invalid_source_name 422."""
+
+    def __init__(self, code: str, status: int) -> None:
+        super().__init__(code)
+        self.code = code
+        self.status = status
+
+
+# --- Operator side (routes) --------------------------------------------------------------------
+
+
+class PhotoLibraryQueries(Protocol):
+    def connections(self) -> tuple[LibraryConnectionView, ...]:
+        """Every connection, by name; cut-over rows (C12) included."""
+        ...
+
+    def albums(self, connection_ref: ConnectionRef, q: str, limit: int) -> ListAnswer[LibraryAlbum]:
+        """Albums whose name starts with `q` first, then those containing it (casefolded, NFKC).
+        LibraryRefused("connection_unknown", 404)."""
+        ...
+
+    def albums_by_id(self, connection_ref: ConnectionRef,
+                     ids: tuple[AlbumRef, ...]) -> ListAnswer[LibraryAlbum]:
+        """Exactly these albums; `absent` names ids a current, complete list lacks."""
+        ...
+
+    def people(self, connection_ref: ConnectionRef, q: str, limit: int) -> ListAnswer[LibraryPerson]:
+        """Named people, matched as `albums`."""
+        ...
+
+    def people_by_id(self, connection_ref: ConnectionRef,
+                     ids: tuple[PersonRef, ...]) -> ListAnswer[LibraryPerson]:
+        ...
+
+    def places(self, connection_ref: ConnectionRef, q: str, limit: int) -> ListAnswer[Place]:
+        """Places whose city, state or country matches `q`, as `albums`."""
+        ...
+
+    def tags(self, connection_ref: ConnectionRef, q: str, limit: int) -> ListAnswer[LibraryTag]:
+        """GET /v1/operator/library/tags, now from the generalised list store."""
+        ...
+
+    def tags_by_id(self, connection_ref: ConnectionRef,
+                   ids: tuple[TagRef, ...]) -> ListAnswer[LibraryTag]:
+        ...
+
+
+class PhotoLibraryCommands(Protocol):
+    def add_connection(self, write: ConnectionWrite) -> ConnectionRef:
+        """Store a new connection (key write-only) and queue its check in the same transaction.
+        LibraryRefused("invalid_url", 422), ("key_required", 422)."""
+        ...
+
+    def change_connection(self, connection_ref: ConnectionRef, write: ConnectionWrite) -> None:
+        """Rename, re-point or re-key; `write.key` None keeps the key. Queues a check.
+        The bound Immich user stays (a key for another user reads Needs a look, other_user).
+        LibraryRefused("connection_unknown", 404), ("invalid_url", 422)."""
+        ...
+
+    def remove_connection(self, connection_ref: ConnectionRef) -> None:
+        """Delete the connection, its key, health and lists. Refused while a saved Source or a
+        draft uses it: LibraryRefused("sources_use_connection", 409); ("connection_unknown", 404)."""
+        ...
+
+    def check_connection(self, connection_ref: ConnectionRef) -> None:
+        """Check now: queue a contact; the answer lands on the row's health."""
+        ...
+
+
+class PhotoSourceCommands(Protocol):
+    def create_draft(self, query: SourceQuery, editing: SourceRef | None) -> DraftRef:
+        """An unsaved Source whose check starts at once (C8). LibraryRefused
+        ("connection_unknown", 404), ("source_unknown", 404) for an unknown `editing`."""
+        ...
+
+    def set_draft_query(self, draft: DraftRef, query: SourceQuery) -> None:
+        """Point the draft at the new query's pool (cleared from the console's view: a different
+        pool), queueing its check. ("draft_unknown", 404), ("connection_unknown", 404)."""
+        ...
+
+    def save_draft(self, draft: DraftRef, name: str) -> SourceRef:
+        """Save at any time: the next revision of `editing`'s name (renamed to `name` when it
+        differs), or revision 1 of a new name; the pool carries over (same pool key) and Scenes
+        using the edited Source move to the new revision (Runtime, as Source edits do today).
+        ("draft_unknown", 404), ("source_name_exists", 409), ("source_revision_conflict", 409),
+        ("invalid_source_name", 422)."""
+        ...
+
+    def check_source(self, source_ref: SourceRef) -> None:
+        """Check now (#12's button): queue the Source's pool check. ("source_unknown", 404)."""
+        ...
+
+
+class PhotoSourceQueries(Protocol):
+    def draft_pool(self, draft: DraftRef, after: PoolCursor | None) -> SourcePoolView:
+        """("draft_unknown", 404)."""
+        ...
+
+    def source_pool(self, source_ref: SourceRef, after: PoolCursor | None) -> SourcePoolView:
+        """("source_unknown", 404)."""
+        ...
+
+
+# --- Media worker side -------------------------------------------------------------------------
+
+JsonObject = dict[str, Any]
+
+
+class KnownRevision(Model):
+    """The revision last recorded for an Immich asset, and the `updatedAt` it was taken at: an
+    edited photo's edit list is re-read only when `updatedAt` moved."""
+
+    updated_at: str = Field(max_length=64)
+    revision: AssetRevision
+
+
+class CheckLease(Model):
+    """One running check of one pool, handed to the step that continues it."""
+
+    pool_key: PoolKey
+    query: SourceQuery
+    connection: ConnectionSecret
+    check_number: int = Field(ge=1, strict=True)
+    started_at: Instant
+    progress: JsonObject | None = None   # the worker's own resume state; None: a fresh check
+
+
+class CheckStep(Model):
+    """One bounded step's result. Rows are added (never removed) as they are confirmed."""
+
+    progress: JsonObject
+    marks: tuple[CheckMark, ...] = ()
+    entries: tuple[PoolEntry, ...] = ()
+    seen_so_far: Count
+    immich_up_to: Count | None = None
+
+
+class CheckComplete(Model):
+    outcome: Literal["complete"] = "complete"
+
+
+class CheckIncomplete(Model):
+    outcome: Literal["incomplete"] = "incomplete"
+    reason: Literal["over_1000_at_one_instant"]
+
+
+class CheckFailed(Model):
+    outcome: Literal["failed"] = "failed"
+    problem: SourceProblem
+
+
+CheckFinish = CheckComplete | CheckIncomplete | CheckFailed
+
+
+class LibraryWorkerStore(Protocol):
+    """The media worker's whole view of the store (slices C1 for contacts and lists, C2 for
+    checks). Implemented by central.infra.photo_library_store.PgPhotoLibrary; media tests use
+    tests/support/library_store_fake.py, held to the same behaviour by the conformance suite."""
+
+    def due_contacts(self) -> tuple[ConnectionRef, ...]:
+        """Connections with a key whose last contact started CHECK_EVERY_SECONDS ago or more."""
+        ...
+
+    def begin_contact(self, connection_ref: ConnectionRef) -> ContactTicket | None:
+        """Take the next contact number and the secret; None for an unknown or keyless one."""
+        ...
+
+    def record_contact(self, ticket: ContactTicket, result: ContactResult) -> bool:
+        """Apply iff `ticket.contact_number` is newer than the last applied (False: stale, nothing
+        written). Health through policy.contact_health; the first passing contact binds the
+        Immich user; counts kept from a passing contact."""
+        ...
+
+    def record_list(self, connection_ref: ConnectionRef, kind: ListKind,
+                    items: Sequence[LibraryAlbum | LibraryPerson | Place | LibraryTag] | None,
+                    error: str | None) -> None:
+        """A listing replaces that kind's stored list; a failure (error code) keeps it and its
+        age. Exactly one of `items` and `error`. No count cap (owner 2026-10-09)."""
+        ...
+
+    def due_pools(self) -> tuple[PoolKey, ...]:
+        """Wanted pools (a live draft, or a Source revision Runtime or a name needs) with no check
+        running whose last check finished CHECK_EVERY_SECONDS ago or more, or never ran, or
+        that a Check now asked for."""
+        ...
+
+    def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
+        """Resume the pool's running check, or start the next check number; None when the pool
+        is gone, unwanted, or its connection has no key."""
+        ...
+
+    def known_revisions(self, connection_ref: ConnectionRef,
+                        upstream_ids: Sequence[LibraryRef]) -> dict[str, KnownRevision]:
+        """The recorded revisions of these Immich assets, by upstream id."""
+        ...
+
+    def record_step(self, lease: CheckLease, step: CheckStep) -> bool:
+        """In one transaction, fenced by `lease.check_number` (False: superseded, nothing
+        written): upsert each entry's row as seen by this check (an InPool's asset also into
+        asset_revisions), store the marks and the progress, and queue the next step."""
+        ...
+
+    def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
+        """Complete: remove rows this check did not see (the sweep), record the time.
+        Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`."""
+        ...
+
+    def largest_frame_edge(self) -> int | None:
+        """The long edge in pixels of the wall's largest Frame profile; None with no Frame."""
+        ...
+
+    def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
+        """The library identity of a row of a wanted pool with this asset id, or None: only such
+        an id may be referenced, fetched or served (replaces servable_thumbnail)."""
+        ...
+
+    def retire_unwanted(self) -> None:
+        """Maintenance: drafts older than DRAFT_KEEP_SECONDS go; pools nothing wants go with
+        their rows and marks."""
+        ...
+
+
+# --- Coordination side -------------------------------------------------------------------------
+
+
+class ScenePoolReader(Protocol):
+    def source_pools_in(self, conn: Any, source_refs: set[str]) -> dict[str, SourcePool]:
+        """Each saved Source revision's whole pool (in-pool rows only, no window, no limit, C11),
+        hydrated with variants, read in the caller's transaction. A Scene's pool is the union the
+        Planner takes over its contributions' refs, one row per asset id (planner `_pool`)."""
+        ...

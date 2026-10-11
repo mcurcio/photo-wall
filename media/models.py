@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, Self
-from uuid import UUID
 
 import httpx
 from pydantic import (
-    AfterValidator,
-    BeforeValidator,
     ConfigDict,
     Field,
     SecretStr,
@@ -25,6 +20,18 @@ from pydantic import (
 )
 
 from central.catalog import Candidate, CatalogSnapshot
+
+# Moved to the photo library's vocabulary (roadmap 4, F0); re-exported until the integrate slice.
+from central.photo_library.model import (  # noqa: F401
+    MAX_LIBRARY_TAGS,
+    MAX_TAG_TEXT,
+    LibraryTag,
+    TagRef,
+    TagText,
+    asset_identity,
+    canonical_uuid,
+    visible_text,
+)
 from contracts.models import Digest, Identifier, Instant, Model, Positive
 
 Status = Literal["unavailable", "permission", "incompatible"]
@@ -33,15 +40,6 @@ Sha1 = Annotated[str, Field(pattern=r"^[a-f0-9]{40}$")]
 Count = Annotated[int, Field(ge=0, strict=True)]
 
 
-def canonical_uuid(value: str) -> str:
-    try:
-        return str(UUID(value))
-    except (ValueError, TypeError, AttributeError):
-        raise ValueError("invalid UUID") from None
-
-
-# A library tag's id; tag ids may reach the browser (R22, PR 37 Q4).
-TagRef = Annotated[str, Field(max_length=36), AfterValidator(canonical_uuid)]
 MAX_SOURCE_TAGS = 4
 PREVIEW_SHOWN = 24
 
@@ -112,38 +110,6 @@ class SourceSpec(SourceQuery):
 
 class SourcePreviewQuery(SourceQuery):
     """An unsaved query that may be evaluated without a persistent Source."""
-
-
-# Control characters, bidi controls (LRM, RLM, ALM, embeddings, isolates) and zero-width
-# characters never reach the console (PR 37 §9): a tag name may otherwise reorder the text
-# around it, or read as empty while not being so. Stripped before any length check.
-_UNSAFE_TEXT = re.compile(
-    "[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
-MAX_LIBRARY_TAGS = 5000
-MAX_TAG_TEXT = 1024
-
-
-def visible_text(value: object) -> object:
-    return _UNSAFE_TEXT.sub("", value) if isinstance(value, str) else value
-
-
-# Empty when nothing visible is left once stripped: the tag still exists in the library, so
-# the stored list keeps its id (a by-id lookup must never call it gone); only the search
-# hides it (`central/media_repository.py` `matching_tags`).
-TagText = Annotated[str, BeforeValidator(visible_text), Field(max_length=MAX_TAG_TEXT)]
-
-
-class LibraryTag(Model):
-    """A tag as the browser may receive it (R22): ids, path and name only.
-
-    The listed list is the library's whole list: every listed id is kept, even one whose
-    path or name has nothing visible (`""`), which the search never offers.
-    """
-
-    tag_ref: TagRef
-    path: TagText  # the full nested path, e.g. "Family/Christmas"
-    name: TagText
-    parent_ref: TagRef | None = None
 
 
 class PreviewMember(Model):
@@ -262,11 +228,6 @@ class MediaLimits(Model):
     max_dimension: int = Field(default=16384, ge=1, strict=True)
     max_video_seconds: Positive = 300
     max_diagnostics: int = Field(default=128, ge=1, strict=True)
-
-
-def asset_identity(connection_id: str, upstream_id: str, original_sha1: str) -> str:
-    identity = json.dumps([connection_id, upstream_id, original_sha1], separators=(",", ":"))
-    return "asset-" + hashlib.sha256(identity.encode()).hexdigest()
 
 
 class OriginalAsset(Model):

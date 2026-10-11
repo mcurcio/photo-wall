@@ -23,3 +23,14 @@ class CatalogSnapshot(Model):
     refreshed_at: Instant
     status: Literal["ok", "unavailable", "permission", "incompatible"] = "ok"
     candidates: tuple[Candidate, ...] = ()
+
+
+class SourcePool(Model):
+    """One saved Source revision's whole pool as the Planner reads it (roadmap 4, slice C2;
+    replaces CatalogSnapshot): every in-pool photo, hydrated with its variant, no window and no
+    limit (C11). `ready` is False until the pool has a complete check; what it has so far still
+    plays (C7: the last pool keeps playing while Immich is down)."""
+
+    source_ref: Identifier
+    ready: bool
+    candidates: tuple[Candidate, ...] = ()

@@ -12,7 +12,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field, StrictBool, model_validator
 
-from central.catalog import Candidate, CatalogSnapshot
+from central.catalog import Candidate, CatalogSnapshot, SourcePool
 from central.planner import AcquisitionRequest
 from contracts.models import FrameProfile, Identifier, Model, Variant
 from media.models import SourcePreviewQuery, SourceSpec
@@ -58,6 +58,11 @@ class CoordinationMedia(Protocol):
     def catalog_in(
         self, conn: Any, source_refs: set[str] | None = None,
     ) -> tuple[dict[str, CatalogSnapshot], dict[str, Candidate]]: ...
+
+    def source_pools_in(self, conn: Any, source_refs: set[str]) -> dict[str, SourcePool]:
+        """Roadmap 4 (slice C2 implements; the integrate slice deletes `catalog_in`'s snapshot
+        half): central.photo_library.ports.ScenePoolReader.source_pools_in."""
+        ...
 
     def authored_candidates_in(
         self, conn: Any, asset_ids: tuple[str, ...],
