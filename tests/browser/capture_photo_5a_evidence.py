@@ -156,9 +156,16 @@ def _sized(page, scheme, width):
 
 
 def _top_shot(page, name, scheme):
-    """A full-page shot taken from the top, so the sticky sidebar sits where it belongs."""
+    """A full-page shot taken from the top, so the sticky sidebar sits where it belongs, with
+    nothing stuck over the page (a sticky save bar would cover what is under it)."""
     page.evaluate("window.scrollTo(0, 0)")
+    # A sticky pane scrolls on its own (the editor's preview): unstuck and drawn whole.
+    style = page.add_style_tag(content=(
+        r".sticky, .lg\:sticky { position: static !important; }"
+        r" .lg\:max-h-screen { max-height: none !important; }"
+        r" .lg\:overflow-y-auto { overflow: visible !important; }"))
     _shot(page, name, scheme)
+    style.evaluate("node => node.remove()")
 
 
 def _view_shot(page, name, scheme):
@@ -198,6 +205,7 @@ def _varied_wall(registry, page):
            [InPool(asset=assets[0]), InPool(asset=assets[2])])
     measure_varied(registry, assets)
     seed_varied_frames(registry)
+    _matted_living_room(registry)
     route_thumbnails(page, assets)
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(scene_id=EVENINGS, loop=True, contributions=tuple(
@@ -205,6 +213,21 @@ def _varied_wall(registry, page):
     runtime.command("set_scene", Scene(scene_id=WIDE_ONLY, loop=True, contributions=(
         Contribution(target="frame:hall", source_refs=("landscapes:1",)),)))
     return library, ref, assets
+
+
+def _matted_living_room(registry):
+    """living-room's Pi reports a 3,840 x 2,160 Display and its Position is a 1,920 x 1,080 mat
+    opening, so the shots show the Frame output (what a photo must fill) apart from the Display
+    (owner, 2026-10-11: "measuring against the Frame output and not the Display")."""
+    from support.position import save_position
+    from test_registry import enroll
+
+    from contracts.models import Calibration, CoverFit
+
+    player, _key, _request = enroll(registry, count=1, size=(3840, 2160))
+    registry.bind("living-room", player["player_id"], "HDMI-A-1", expected_generation=0)
+    save_position(registry, "living-room", Calibration(fit=CoverFit(
+        corners=((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)))))
 
 
 def _board(within, name):
@@ -239,10 +262,10 @@ def test_followup_source_editor_and_sources(page, registry, scheme, suffix):
             expect(sheet.get_by_role("article", name="Frame living-room")).to_be_visible()
             _view_shot(page, f"followup-source-editor-sheet{suffix}", scheme)
             return
-        board = _board(page, "Which Frames can show them")
+        board = _board(page, "What these photos are, and which Frames can show them")
         expect(board.get_by_role("img", name=re.compile(r"^living-room, 16:9: Photo"))).to_be_visible()
+        expect(board).to_contain_text("Frame output 1,920 × 1,080 px, 16:9 · on a 3,840 × 2,160 display")
         _top_shot(page, f"followup-source-editor{suffix}", scheme)
-        board.get_by_role("button", name="Why: the shapes of these photos").click()
         board.get_by_role("article", name="Frame hall").get_by_role("button", name=re.compile(r"^Why ")).click()
         _top_shot(page, f"followup-source-editor-why{suffix}", scheme)
         board.get_by_role("list", name="Photos living-room would show").get_by_role(
@@ -262,7 +285,8 @@ def test_followup_source_editor_and_sources(page, registry, scheme, suffix):
                  enumerate(((4000, 3000), (6000, 4000), (2160, 3840)))]
         lease = begin(library, draft_pool_key(registry))
         step(library, lease, [InPool(asset=a) for a in fresh], seen=3, up_to=900)
-        expect(_board(page, "Which Frames can show them")).to_contain_text("Still reading Immich")
+        expect(_board(page, "What these photos are, and which Frames can show them")).to_contain_text(
+            "Still reading Immich")
         _top_shot(page, f"followup-fit-board-reading{suffix}", scheme)
 
 
