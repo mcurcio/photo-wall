@@ -67,6 +67,16 @@ from central.displays.model import (
     remaining_seconds,
     serial_usable,
 )
+from central.displays.picture import (
+    DisplayPicture,
+    PictureSession,
+    Setting,
+    StoredSetting,
+    default_picture,
+    effective_picture,
+    output_picture,
+    placed_at_first_probe,
+)
 from central.displays.ports import DisplayRefused
 from central.displays.views import (
     DisplayPowerSettings,
@@ -80,13 +90,18 @@ from central.displays.views import (
 )
 from central.fleet.node_bus_presence import bus_links_in
 from central.infra.node_link_store import PgLinkStores
+from central.live_session import Lease
 from contracts.node_link import Pipe
 from contracts.node_output import (
+    AS_THE_DISPLAY_HAS_IT,
     OUTPUT_IDS,
+    ActsOn,
     DisplayIdentity,
     DisplayMode,
     OutputDocument,
+    OutputPicture,
     OutputReport,
+    PictureReport,
     Power,
     PowerMethod,
     RequestReason,
@@ -262,6 +277,8 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
                                 before=before, recorded=display_id, now=now)
     if display_id is not None and display_id != seen_before:   # a Display newly recorded here
         _adopt(conn, player_id, report.output_id, seen_before, display_id)
+    if display_id is not None and report.picture is not None:
+        _place_at_first_probe(conn, display_id, report.picture)
     identity = report.identity or before
     conn.execute(
         "INSERT INTO output_displays(player_id, output_id, connected, identity, display_id, report, reported_at) "
@@ -270,6 +287,18 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
         "report=EXCLUDED.report, reported_at=EXCLUDED.reported_at",
         (player_id, report.output_id, report.connected, None if identity is None else _identity_json(identity),
          display_id, Jsonb(_report_json(report)), now))
+
+
+def _place_at_first_probe(conn: Any, display_id: UUID, probe: PictureReport) -> None:
+    """Place the Display's unplaced picture settings by what the display answered
+    (`picture.placed_at_first_probe`); a placed setting is never moved by a report (sticky)."""
+    row = conn.execute(f"SELECT {_PICTURE_COLUMNS} FROM displays d WHERE d.id=%s FOR NO KEY UPDATE",  # noqa: S608
+                       (display_id,)).fetchone()
+    stored = stored_picture(row)
+    if stored.brightness.acts_on is not None and stored.contrast.acts_on is not None:
+        return
+    write_picture(conn, display_id, placed_at_first_probe(
+        stored, brightness_answered=probe.brightness_answered, contrast_answered=probe.contrast_answered))
 
 
 def resolve_output(conn: Any, player_id: str, output_id: str) -> None:
@@ -300,6 +329,64 @@ def _player_of(conn: Any, device_id: str, lock: str) -> str | None:
     row = conn.execute(f"SELECT id FROM players WHERE device_id=%s AND retired_at IS NULL {lock}",  # noqa: S608
                        (device_id,)).fetchone()
     return None if row is None else row["id"]
+
+
+# --- The Display's picture settings (roadmap 1c, slices C1 and C2; migration 075) ----------------
+
+# A displays row `d` gives these; `stored_picture` reads them, `write_picture` writes them. A
+# session's draft is stored under the same names.
+_PICTURE_FIELDS: Final = ("brightness_acts_on", "brightness", "contrast_acts_on", "contrast",
+                          "colour_temperature_kelvin", "gamma_tenths")
+_PICTURE_COLUMNS: Final = ", ".join("d." + field for field in _PICTURE_FIELDS)
+
+
+def _stored_setting(acts_on: str | None, value: int | None) -> StoredSetting:
+    return StoredSetting(None if acts_on is None else ActsOn(acts_on),
+                         AS_THE_DISPLAY_HAS_IT if value is None else value)
+
+
+def stored_picture(row: Mapping[str, Any]) -> DisplayPicture:
+    """The DisplayPicture of a mapping with `_PICTURE_FIELDS` (a displays row, or a session's draft)."""
+    return DisplayPicture(_stored_setting(row["brightness_acts_on"], row["brightness"]),
+                          _stored_setting(row["contrast_acts_on"], row["contrast"]),
+                          row["colour_temperature_kelvin"], row["gamma_tenths"])
+
+
+def picture_fields(picture: DisplayPicture) -> dict[str, Any]:
+    """`picture` under the stored columns' names (`_PICTURE_FIELDS`)."""
+    def value(setting: StoredSetting) -> int | None:
+        return None if setting.value == AS_THE_DISPLAY_HAS_IT else int(setting.value)
+
+    def acts_on(setting: StoredSetting) -> str | None:
+        return None if setting.acts_on is None else setting.acts_on.value
+    return {"brightness_acts_on": acts_on(picture.brightness), "brightness": value(picture.brightness),
+            "contrast_acts_on": acts_on(picture.contrast), "contrast": value(picture.contrast),
+            "colour_temperature_kelvin": picture.colour_temperature_kelvin, "gamma_tenths": picture.gamma_tenths}
+
+
+def write_picture(conn: Any, display_id: UUID, picture: DisplayPicture) -> None:
+    """Store `picture` on the Display, in the caller's transaction."""
+    fields = picture_fields(picture)
+    conn.execute(f"UPDATE displays SET {', '.join(f + '=%s' for f in _PICTURE_FIELDS)} WHERE id=%s",  # noqa: S608
+                 (*(fields[f] for f in _PICTURE_FIELDS), display_id))
+
+
+# A picture_sessions row `ps` gives these; `picture_session` reads them.
+_SESSION_COLUMNS: Final = (
+    "ps.id AS session_id, ps.display_id AS session_display_id, ps.frame_id AS session_frame_id, "
+    "ps.sequence AS session_sequence, ps.draft AS session_draft, ps.before_brightness, ps.before_contrast, "
+    "ps.touched AS session_touched, ps.idle_until AS session_idle_until")
+
+
+def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
+    """The picture session of a row selected with `_SESSION_COLUMNS` (None when it has none). It has
+    no hard deadline: the console's keepalive holds it, and its idle deadline ends it."""
+    if row["session_id"] is None:
+        return None
+    return PictureSession(row["session_id"], row["session_display_id"], row["session_sequence"],
+                          stored_picture(row["session_draft"]), (row["before_brightness"], row["before_contrast"]),
+                          frozenset(Setting(name) for name in row["session_touched"]),
+                          Lease(row["session_idle_until"], None))
 
 
 # --- The Output report judge ---------------------------------------------------------------------
@@ -452,23 +539,31 @@ class _OutputDocuments:
         return await self._stores.run(lambda conn: output_documents(conn, self._device_id))
 
     async def changed(self) -> None:
-        """When this Node's facts are woken, or at the earliest end of its live tests (measured
-        from Central's clock, slept on this process's)."""
+        """When this Node's facts are woken, or at the earliest end of its live tests or idle
+        deadline of a picture session on its Outputs' Displays (measured from Central's clock,
+        slept on this process's), so an ended test, and an abandoned session's revert, reach the Pi
+        with no other write and no reaper."""
         seen = self._seen
-        remaining = await self._stores.run(lambda conn: _until_next_test_end(conn, self._device_id))
+        remaining = await self._stores.run(lambda conn: _until_next_deadline(conn, self._device_id))
         try:
             self._seen = await asyncio.wait_for(self._wakes.after(self._device_id, seen), remaining)
         except TimeoutError:
             return
 
 
-def _until_next_test_end(conn: Any, device_id: str) -> float | None:
-    """Seconds until the earliest live console test on the Node's Outputs ends; None without one."""
+def _until_next_deadline(conn: Any, device_id: str) -> float | None:
+    """Seconds until the earliest live console test on the Node's Outputs ends, or the earliest idle
+    deadline of a picture session on a Display last seen on them; None without either."""
     now = _CLOCK.now_in(conn)
-    row = conn.execute("SELECT min(r.ends_at) AS ends_at FROM players p JOIN bindings b ON b.player_id=p.id "
-                       "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%s "
-                       "AND p.retired_at IS NULL AND r.ends_at > %s", (device_id, now)).fetchone()
-    return None if row["ends_at"] is None else row["ends_at"] - now
+    row = conn.execute(
+        "SELECT least((SELECT min(r.ends_at) FROM players p JOIN bindings b ON b.player_id=p.id "
+        "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%(device)s "
+        "AND p.retired_at IS NULL AND r.ends_at > %(now)s), "
+        "(SELECT min(ps.idle_until) FROM players p JOIN output_displays o ON o.player_id=p.id "
+        "JOIN picture_sessions ps ON ps.display_id=o.display_id WHERE p.device_id=%(device)s "
+        "AND p.retired_at IS NULL AND ps.idle_until > %(now)s)) AS deadline",
+        {"device": device_id, "now": now}).fetchone()
+    return None if row["deadline"] is None else row["deadline"] - now
 
 
 def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
@@ -492,10 +587,11 @@ def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
     now = _CLOCK.now_in(conn)
     rows = conn.execute(
         "SELECT o.output_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
-        f"w.change, w.digest, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
+        f"{_PICTURE_COLUMNS}, {_SESSION_COLUMNS}, w.change, w.digest, w.picture_change, w.picture_digest, "
+        f"{_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
         "LEFT JOIN output_displays s ON s.player_id=%(player)s AND s.output_id=o.output_id "
-        "LEFT JOIN displays d ON d.id=s.display_id "
+        "LEFT JOIN displays d ON d.id=s.display_id LEFT JOIN picture_sessions ps ON ps.display_id=d.id "
         "LEFT JOIN output_documents w ON w.player_id=%(player)s AND w.output_id=o.output_id "
         f"LEFT JOIN bindings b ON b.player_id=%(player)s AND b.output_id=o.output_id {_TEST_JOIN} "
         "ORDER BY o.output_id", {"player": player_id}).fetchall()
@@ -503,19 +599,31 @@ def output_documents(conn: Any, device_id: str) -> dict[str, bytes]:
     for row in rows:
         if row["output_id"] not in OUTPUT_IDS:
             continue
-        projected = project_output(row["output_id"], test=_power_test(row), settings=_settings(row), now=now)
-        digest = projected.digest()
-        change = row["change"] or 0
-        if row["digest"] != digest:
-            change += 1
-            document = projected.at_change(change)
+        projected = project_output(row["output_id"], test=_power_test(row), settings=_settings(row),
+                                   picture=_picture_in_force(row, now), now=now)
+        digest, picture_digest = projected.digest(), projected.picture_digest()
+        change = (row["change"] or 0) + (row["digest"] != digest)
+        picture_change = (row["picture_change"] or 0) + (row["picture_digest"] != picture_digest)
+        document = projected.at_change(change, picture_change)
+        if (change, picture_change) != (row["change"], row["picture_change"]):
             conn.execute(
-                "INSERT INTO output_documents(player_id, output_id, change, digest, document) "
-                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (player_id, output_id) DO UPDATE SET "
-                "change=EXCLUDED.change, digest=EXCLUDED.digest, document=EXCLUDED.document",
-                (player_id, row["output_id"], change, digest, Jsonb(_document_json(document))))
-        documents[output_document_key(row["output_id"])] = encode_output_document(projected.at_change(change))
+                "INSERT INTO output_documents(player_id, output_id, change, digest, picture_change, picture_digest, "
+                "document) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (player_id, output_id) DO UPDATE SET "
+                "change=EXCLUDED.change, digest=EXCLUDED.digest, picture_change=EXCLUDED.picture_change, "
+                "picture_digest=EXCLUDED.picture_digest, document=EXCLUDED.document",
+                (player_id, row["output_id"], change, digest, picture_change, picture_digest,
+                 Jsonb(_document_json(document))))
+        documents[output_document_key(row["output_id"])] = encode_output_document(document)
     return documents
+
+
+def _picture_in_force(row: Mapping[str, Any], now: float) -> OutputPicture:
+    """The document's picture part: the picture in force on the Display last seen on the Output (its
+    open session's draft while live, `reverted` once the lease ran out with no Done; `picture.
+    effective_picture`), or a new Display's (unplaced, unset) when none was seen."""
+    if row["colour_temperature_kelvin"] is None:
+        return output_picture(default_picture())
+    return output_picture(effective_picture(stored_picture(row), picture_session(row), now))
 
 
 def _settings(row: Mapping[str, Any]) -> DisplaySettings | None:
