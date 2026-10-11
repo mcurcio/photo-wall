@@ -15,6 +15,7 @@ photo fit rule); the Frame fit (contracts/frame_fit.py); the masks and the final
 """
 from __future__ import annotations
 
+import math
 from typing import Final
 
 from contracts.models import PhotoCrop
@@ -35,4 +36,17 @@ def crop_window(crop: PhotoCrop, source_width: int, source_height: int,
     edge at offset x (1 - that height). Equal aspects: (0, 0, 1, 1) whatever the offset.
     `crop_window(CENTRED, w, h, a)` equals the centred cover player/geometry.py drew before 5a.
     Pure; ValueError for a non-positive or non-finite aspect or a non-positive size."""
-    raise NotImplementedError
+    if not math.isfinite(frame_aspect) or frame_aspect <= 0:
+        raise ValueError("positive finite Frame aspect required")
+    if source_width <= 0 or source_height <= 0:
+        raise ValueError("positive source dimensions required")
+    photo_aspect = source_width / source_height
+    if photo_aspect > frame_aspect:
+        width = frame_aspect / photo_aspect
+        left = crop.offset * (1 - width)
+        return (left, 0.0, left + width, 1.0)
+    if photo_aspect < frame_aspect:
+        height = photo_aspect / frame_aspect
+        top = crop.offset * (1 - height)
+        return (0.0, top, 1.0, top + height)
+    return (0.0, 0.0, 1.0, 1.0)
