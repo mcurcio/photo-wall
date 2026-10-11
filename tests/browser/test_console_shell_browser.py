@@ -349,7 +349,7 @@ def test_a_scene_draft_survives_a_wall_visit_a_section_change_and_a_refresh(page
         page.get_by_role("button", name="Resume draft (Draft)", exact=True).click()
 
         expect(form.get_by_label("Scene name", exact=True)).to_have_value("evening-draft")
-        form.get_by_role("button", name="Change Photos", exact=True).click()
+        form.get_by_role("button", name="Change Photos from", exact=True).click()
         expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
         scene_continue(page, "Review")
         form.get_by_role("button", name="Change Frames", exact=True).click()

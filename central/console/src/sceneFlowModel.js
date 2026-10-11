@@ -100,7 +100,7 @@ export function seedScene(definitions, initialTarget = null) {
  */
 export const SCENE_ANSWER_LABELS = Object.freeze({
   mode: KIND.label,
-  source: PHOTOS.label,
+  source: "Photos from",
   targets: FRAMES.label,
   media: MEDIA.label,
   cycle: PLAYBACK_LABELS.cycle,
@@ -114,7 +114,7 @@ export const SCENE_ANSWER_LABELS = Object.freeze({
 // The authored values a Reload can change, each by its answer label.
 const RELOADED = [
   [SCENE_ANSWER_LABELS.mode, (draft) => draft.mode],
-  [SCENE_ANSWER_LABELS.source, (draft) => draft.sourceRef],
+  [SCENE_ANSWER_LABELS.source, (draft) => draft.sourceRefs],
   [SCENE_ANSWER_LABELS.targets, (draft) => [...draft.targets].sort()],
   [SCENE_ANSWER_LABELS.media, (draft) => draft.selections],
   [SCENE_ANSWER_LABELS.cycle, (draft) => Number(draft.cycleSeconds)],

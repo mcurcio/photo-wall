@@ -187,7 +187,7 @@ out.here = [
 ];
 
 // --- The Scene's problems and labels (authoring.js).
-const hand = { ...scene.seedScene({})("new"), name: "x", mode: "authored", sourceRef: "holiday:1",
+const hand = { ...scene.seedScene({})("new"), name: "x", mode: "authored", sourceRefs: ["holiday:1"],
                targets: ["lobby", "hall"] };
 out.noMedia = authoring.sceneProblems({ ...hand, noMedia: ["lobby"] }, new Set())
   .map((p) => [p.field, p.message]);
@@ -202,13 +202,13 @@ out.answerLabels = scene.SCENE_ANSWER_LABELS;
 // --- Delivery 1x's settings: each one saved is read back by Edit (a lossless round trip).
 const settings = { fadeSeconds: 3, ending: "fade", endingSeconds: 4.5, keepLastPhoto: false,
                    keepTogether: true };
-const live = authoring.buildSave("live", { sceneId: "evening", sourceRef: "holiday:1",
+const live = authoring.buildSave("live", { sceneId: "evening", sourceRefs: ["holiday:1"],
   targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings }).body;
 out.liveBody = live;
 const pick = ({ fadeSeconds, ending, endingSeconds, keepLastPhoto, keepTogether }) =>
   ({ fadeSeconds, ending, endingSeconds, keepLastPhoto, keepTogether });
 out.liveBack = pick(authoring.editableDraft(live));
-const hands = authoring.buildSave("authored", { sceneId: "evening", sourceRef: "holiday:1",
+const hands = authoring.buildSave("authored", { sceneId: "evening", sourceRefs: ["holiday:1"],
   targetIds: ["lobby"], cycleSeconds: 20, loop: true, selections: { lobby: "a1" },
   ...settings, ending: "black" }).body.scene;
 out.authoredOutro = hands.outro_contributions;
@@ -218,7 +218,7 @@ out.unequal = authoring.editableDraft({ ...live, contributions: [
   { ...live.contributions[0], fade_in_seconds: 1 }] });
 // Values the sliders cannot show exactly are not the console's either (no silent snapping).
 const stretched = (fade, ending) => authoring.buildSave("live", { sceneId: "evening",
-  sourceRef: "holiday:1", targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings,
+  sourceRefs: ["holiday:1"], targetIds: ["lobby"], cycleSeconds: 20, loop: true, ...settings,
   fadeSeconds: fade, endingSeconds: ending }).body;
 out.outOfRange = [stretched(3, 12), stretched(1.3, 4.5), stretched(6, 4.5), stretched(3, 4.5)]
   .map((body) => authoring.editableDraft(body) !== null);
@@ -295,7 +295,7 @@ def test_flow_kit_and_scene_flow_shape():
     # A new Scene's 1x settings at the settings catalogue's defaults (#41 1.5 s, #64 on,
     # #65 off); how it ends stays "none" (roadmap 1x: #62 and #63's defaults disagree).
     assert out["seedNew"] == {
-        "mode": "live", "name": "", "idOverride": None, "sourceRef": "", "targets": [],
+        "mode": "live", "name": "", "idOverride": None, "sourceRefs": [], "targets": [],
         "selections": {}, "cycleSeconds": 30, "loop": True, "fadeSeconds": 1.5,
         "ending": "none", "endingSeconds": 3, "keepLastPhoto": True, "keepTogether": False,
         "revision": None}
@@ -303,7 +303,7 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["seedNewBadTarget"]["targets"] == []
     assert out["seedEditWithTarget"] == out["seedEdit"]
     assert out["seedEdit"] == {
-        "mode": "live", "name": "", "idOverride": None, "sourceRef": "holiday:1",
+        "mode": "live", "name": "", "idOverride": None, "sourceRefs": ["holiday:1"],
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True,
         "fadeSeconds": 0, "ending": "none", "endingSeconds": 3, "keepLastPhoto": True,
         "keepTogether": False, "revision": 3}
@@ -329,7 +329,7 @@ def test_flow_kit_and_scene_flow_shape():
     # One wording per label: the problem, Review's answers and Reload share it.
     assert out["cycleProblem"] == ["Seconds per cycle must be more than 0."]
     assert out["answerLabels"] == {
-        "mode": "Kind", "source": "Photos", "targets": "Frames", "media": "Media per frame",
+        "mode": "Kind", "source": "Photos from", "targets": "Frames", "media": "Media per frame",
         "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends",
         "fade": "Fade between photos", "ending": "How it ends",
         "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together"}

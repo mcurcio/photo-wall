@@ -5011,3 +5011,10 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 - `test_sources_have_no_immich_or_album_language` is deleted: 4 names Immich and albums by design. The Source flow's model cases in `tests/test_console_flow.py` go (the hand-off cases stay); its two refresh-based `sourceState` cases move to `tests/test_console_sources.py` on the check.
 - `mediaHealth.js` keeps `SOURCE_REFRESH_SECONDS` and `REFRESH_RUN_SECONDS` unused only because `tests/test_media_queue.py` (lane seams) pins them; I1 retires both with the refresh.
 - Delete stays on `DELETE /v1/operator/source-names/{name}` (not retired by the route table).
+
+## E-P4-K3-1 (console lane, K3, 2026-10-11) · as built, resolved in the lane
+- Scene editor › What keeps "Source" as the first Source's picker (every scene test and helper picks by that label) and adds "Add another Source" beside the chosen ones; the chosen Sources are listed with their state, readiness, Check now and Remove. A hand-picked Scene picks from one Source, so it offers no second one. "New selection from your photo library" is now "New Source…".
+- The answer label is "Photos from" (Review's row and Reload's "Changed: …" name it), so its Change button is "Change Photos from"; the scene browser cases that press it follow.
+- A chosen Source's readiness ("Still being read: what is found so far plays", "This Source has no photos") is read from its pool's first page (`useDraftPool`), since a served `sources` row carries its check but not its counts.
+- `useCandidates`' reload key is the first Source's served check (`at` or `started_at`), not `refresh_completed_revision`; its browser case seeds candidates through the old catalog until I1 moves `source_candidates` onto pools (P1).
+- `authoring.js` loses `sourceProblems` and `localDayStart`, the Source flow's, which nothing calls since K2.

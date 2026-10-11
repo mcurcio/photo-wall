@@ -1768,7 +1768,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
         # The stored values, exactly, where each is asked: every Change link opens its
         # step, and Continue returns to Review.
-        form.get_by_role("button", name="Change Photos", exact=True).click()
+        form.get_by_role("button", name="Change Photos from", exact=True).click()
         expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
         scene_continue(page, "Review")
         form.get_by_role("button", name="Change Frames", exact=True).click()
