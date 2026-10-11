@@ -1,7 +1,9 @@
-"""Preparation fetches the photo Immich shows, against real Immich (roadmap 4, slice M3).
+"""Preparation fetches the photo Immich shows, against real Immich (roadmap 4, slice M3; the
+copy choice: follow-ups 2026-10-11, slice A4).
 
 The fixture (slice FX1) holds `edited`, cropped through Immich's own edits, and `video-1`, a 2 s
-MP4. The real `ImmichClient` fetches; the real `Preparer` (ffmpeg) prepares (C10).
+MP4, and keeps no full-size copies. The real `ImmichClient` fetches the plan `fetch_plan` makes;
+the real `Preparer` (ffmpeg) prepares (C10).
 """
 
 import io
@@ -17,7 +19,8 @@ from support.immich_library import run
 from central.photo_library.model import ConnectionSecret, LibraryAsset
 from contracts.time import ManualClock
 from media.immich import ImmichClient
-from media.prepare import Preparer
+from media.library_client import FrameNeed, fetch_plan
+from media.prepare import STILL_MEDIA_TYPES, Preparer
 
 if not os.environ.get("PHOTO_WALL_IMMICH_FIXTURE"):
     pytest.skip("set PHOTO_WALL_IMMICH_FIXTURE", allow_module_level=True)
@@ -48,7 +51,17 @@ def pool_asset(client, label, immich_library):
     item, revision = run(read())
     return LibraryAsset(connection_ref="main", upstream_id=item.upstream_id, revision=revision,
                         kind=item.kind, taken_at=item.taken_at, width=item.width,
-                        height=item.height, duration=item.duration)
+                        height=item.height, duration=item.duration, original=item.original)
+
+
+def need(width: int, height: int) -> tuple[FrameNeed, ...]:
+    return (FrameNeed(aspect=width / height, width=width, height=height),)
+
+
+def fetched_for(client, asset, needs, destination):
+    """The real choice: the plan from the asset and the needs, then the real fetch."""
+    plan = fetch_plan(asset, needs, {}, STILL_MEDIA_TYPES)
+    return run(client.fetch_rendition(asset, plan=plan, needs=needs, destination=destination))
 
 
 def test_the_edited_photo_is_fetched_thumbnailed_and_revised_edited(
@@ -57,8 +70,8 @@ def test_the_edited_photo_is_fetched_thumbnailed_and_revised_edited(
     asset = pool_asset(client, "edited", immich_library)
     assert "-" in asset.revision            # checksum, then the edit fingerprint
     assert (asset.width, asset.height) == (edited.width, edited.height)
-    fetched = run(client.fetch_rendition(asset, frame_long_edge=None,
-                                                 destination=tmp_path / "full"))
+    fetched = fetched_for(client, asset, (), tmp_path / "full")
+    assert fetched.rendition == "fullsize"   # Immich always keeps an edited photo's
     assert fetched.width / fetched.height == pytest.approx(edited.width / edited.height,
                                                            rel=0.02)
     thumbnail = run(client.thumbnail(asset.upstream_id, asset.revision))
@@ -67,27 +80,35 @@ def test_the_edited_photo_is_fetched_thumbnailed_and_revised_edited(
                                                            rel=0.05)
 
 
-@pytest.mark.xfail(strict=True, reason="E-P4-I1-2: the fixture's Immich keeps no full-size copies "
-                   "and answers size=fullsize for a JPEG with a redirect to its preview, so a "
-                   "frame larger than the preview gets the preview, not the full-size photo")
-def test_the_preview_serves_a_frame_it_covers_and_the_full_size_copy_a_larger_one(
+def test_the_preview_serves_a_frame_it_covers_and_the_original_a_larger_one(
         client, immich_library, tmp_path):
+    """A4 case 5 (E-P4-I1-3's strict xfail, now a plain test). The fixture keeps no full-size
+    copies, so an unedited JPEG larger than its preview is fetched as its original, at the
+    original's size: directly when discovery read its type, and through `size=fullsize&
+    edited=false` (Immich redirects a web original to it) when it did not. Mutation probe: send
+    `edited=true` for the unedited full-size step and Immich redirects to the preview (the
+    defect E-P4-I1-3 found), so the last assertion fails."""
     asset = pool_asset(client, "garden-1", immich_library)
-    preview = run(client.fetch_rendition(asset, frame_long_edge=1,
-                                                 destination=tmp_path / "preview"))
+    assert not asset.edited and asset.original is not None
+    preview = fetched_for(client, asset, need(1, 1), tmp_path / "preview")
     assert preview.rendition == "preview"
-    larger = max(preview.width, preview.height) + 1
-    full = run(client.fetch_rendition(asset, frame_long_edge=larger,
-                                              destination=tmp_path / "full"))
-    assert full.rendition == "fullsize"
-    assert max(full.width, full.height) == max(asset.width, asset.height)
+    assert [copy.name for copy in preview.measured] == ["preview"]
+    larger = need(preview.width + 1, preview.height + 1)
+    full = fetched_for(client, asset, larger, tmp_path / "full")
+    assert full.rendition == "original"
+    assert (full.width, full.height) == (asset.width, asset.height)
+    assert [copy.name for copy in full.measured] == ["preview"]
+    unread = asset.model_copy(update={"original": None})
+    assert fetch_plan(unread, larger, {}, STILL_MEDIA_TYPES) == ("preview", "fullsize")
+    redirected = fetched_for(client, unread, larger, tmp_path / "redirected")
+    assert (redirected.rendition, redirected.width, redirected.height) == (
+        "original", asset.width, asset.height)
 
 
 def test_the_video_is_fetched_as_its_original_and_prepares_to_mp4(
         client, immich_library, tmp_path):
     asset = pool_asset(client, "video-1", immich_library)
-    fetched = run(client.fetch_rendition(asset, frame_long_edge=1920,
-                                                 destination=tmp_path / "original"))
+    fetched = fetched_for(client, asset, need(1920, 1080), tmp_path / "original")
     assert fetched.rendition == "original"
     preparer = Preparer(ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
                         clock=ManualClock(asset.taken_at))

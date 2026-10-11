@@ -40,11 +40,17 @@ from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
-from media.library_client import FetchedRendition, LibraryClient
+from media.library_client import FetchedRendition, LibraryClient, fetch_plan, rendition_needs
 from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import MediaError
-from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
+from media.prepare import (
+    STILL_MEDIA_TYPES,
+    BuildIdentity,
+    PreparationLimits,
+    PreparedMedia,
+    Preparer,
+)
 from media.task_queue import (
     MediaTaskFailed,
     ProcrastinateCheckQueue,
@@ -192,9 +198,15 @@ class MediaWorker:
             async with asyncio.timeout(self.limits.job_seconds):
                 paths = await _blocking(self.store.staging, lease)
                 client = await self._client(lease.asset.connection_ref)
-                edge = await _blocking(self.library.largest_frame_edge)
-                fetched = await client.fetch_rendition(lease.asset, frame_long_edge=edge,
+                # The copy that holds every Frame output, else the full-resolution one (owner,
+                # 2026-10-09; follow-ups slice A4). Known copy sizes skip a preview too small.
+                needs = rendition_needs(await _blocking(self.library.frame_outputs))
+                known = await _blocking(self.library.copy_sizes, lease.asset.asset_id)
+                plan = fetch_plan(lease.asset, needs, known, STILL_MEDIA_TYPES)
+                fetched = await client.fetch_rendition(lease.asset, plan=plan, needs=needs,
                                                        destination=paths.original)
+                await _blocking(self.library.record_copies, lease.asset.asset_id,
+                                fetched.measured)
                 if fetched.path.absolute() != paths.original:
                     raise MediaError("asset_integrity")
                 prepared = await self.preparer.prepare_rendition(lease.asset, fetched,

@@ -66,10 +66,11 @@ def staged(storage, number=1, *, original=ORIGINAL, derivative=VARIANT):
                       media_type="image/jpeg", width=1080, height=1920)
     build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64, ffprobe_sha256="c" * 64,
                           ffmpeg_version="synthetic", ffprobe_version="synthetic", python_version="synthetic",
-                          pillow_version="synthetic", littlecms_version="synthetic", jpeg_version="synthetic",
+                          pillow_version="synthetic", littlecms_version="synthetic",
+                          libheif_version="synthetic", jpeg_version="synthetic",
                           zlib_version="synthetic", platform="synthetic", memory_limit_enforced=False)
     prepared = PreparedMedia(path=paths.variant, variant=variant, original_sha256=hashlib.sha256(original).hexdigest(),
-                             recipe_id=RECIPE, build=build)
+                             recipe_id=RECIPE, build=build, made_from="preview")
     return lease, paths, prepared
 
 

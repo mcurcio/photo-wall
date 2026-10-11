@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from central.photo_library.model import (
     Exclusions,
     LibraryAsset,
+    OriginalFile,
     Place,
     PoolCursor,
     SourceQuery,
@@ -206,3 +207,26 @@ def test_an_unedited_photo_keeps_its_pre_4_asset_id() -> None:
     assert asset_identity("wall-library", "0b9f9a52-3c1e-4c64-9d0f-6a8e2f0c7d11", SHA1) == (
         "asset-3383ff621759f0dc232c2bfadd6446e223615c92adc5fc42ce3dab1b507f5f85")
     assert asset().asset_id == asset_identity("main", UPSTREAM, SHA1)
+
+
+# The original's facts (follow-ups 2026-10-11, slice A3) ----------------------------------------
+
+
+@pytest.mark.parametrize(("orientation", "upright"), [
+    (None, (4032, 3024)), (1, (4032, 3024)), (3, (4032, 3024)), (4, (4032, 3024)),
+    (5, (3024, 4032)), (6, (3024, 4032)), (7, (3024, 4032)), (8, (3024, 4032)),
+])
+def test_an_original_turned_a_quarter_by_exif_is_upright_swapped(orientation, upright) -> None:
+    """Immich reports the file's stored pixels (tests/test_original_facts.py proves it)."""
+    original = OriginalFile(width=4032, height=3024, orientation=orientation)
+    assert original.upright == upright
+
+
+def test_an_original_of_unknown_size_has_no_upright_size() -> None:
+    assert OriginalFile(width=4032, orientation=6).upright is None
+    assert OriginalFile(media_type="image/heic").upright is None
+
+
+def test_a_photo_is_edited_exactly_when_its_revision_carries_an_edit_fingerprint() -> None:
+    assert not asset().edited
+    assert asset(revision=SHA1 + "-" + "0123456789abcdef").edited

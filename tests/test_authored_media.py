@@ -131,10 +131,12 @@ def test_worker_publication_eviction_and_failure_cooldown_hydrate_authored_refs(
         build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="fixture", ffprobe_version="fixture",
             python_version="fixture", pillow_version="fixture", littlecms_version="fixture",
+            libheif_version="fixture",
             jpeg_version="fixture", zlib_version="fixture", platform="fixture",
             memory_limit_enforced=False)
         prepared = PreparedMedia(path=staged.variant, variant=variant,
-            original_sha256=hashlib.sha256(original_bytes).hexdigest(), recipe_id=RECIPE, build=build)
+            original_sha256=hashlib.sha256(original_bytes).hexdigest(), recipe_id=RECIPE, build=build,
+            made_from="original")
         store.publish(lease, prepared)
     with repo.db.transaction() as conn:
         assert repo.authored_in(conn)[originals[0].asset_id].variant == variant

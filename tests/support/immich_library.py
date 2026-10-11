@@ -96,12 +96,14 @@ class ImmichLibrary:
 
     def upload(self, label: str, *, taken: str, size: tuple[int, int] = (96, 64),
                png: bool = False, filename: str | None = None,
-               tags: Sequence[str] = ()) -> FixtureAsset:
+               tags: Sequence[str] = (), orientation: int = 1) -> FixtureAsset:
         """Upload one synthetic image as the owner and wait until Immich has read its size.
 
         `label` should be unique to the test (it makes the bytes unique); `tags` are tag paths,
-        made when missing."""
-        data = synthetic_image(label, size, taken, png=png, camera=not png)
+        made when missing. `size` is the file's stored pixels; a JPEG's EXIF `orientation`
+        turns it when shown (the returned width and height stay the stored ones)."""
+        data = synthetic_image(label, size, taken, png=png, camera=not png,
+                               orientation=orientation)
         name = filename or label + (".png" if png else ".jpg")
         admin = self._admin()
         try:

@@ -22,6 +22,7 @@ from central.photo_library.model import (
 )
 from central.photo_library.policy import (
     contact_health,
+    copies_in_immich,
     key_hint,
     normalise_url,
     version_verdict,
@@ -131,3 +132,28 @@ def test_since_carries_while_the_problem_kind_stays_the_same() -> None:
     # The kind decides, not the detail: a different missing list keeps `since`.
     missing = health(answer(missing=("face.read",)), at=50.0)
     assert health(answer(missing=("tag.read",)), previous=missing, at=60.0).since == 50.0
+
+
+# Which copies Immich keeps (follow-ups 2026-10-11, slice A3) ------------------------------------
+
+
+@pytest.mark.parametrize(("edited", "original_type", "full_size_copies", "fullsize"), [
+    (True, "image/jpeg", False, True),        # an edit always makes a full-size copy
+    (True, None, None, True),
+    (False, "image/jpeg", True, False),       # a web original: never a full-size copy
+    (False, "image/PNG", None, False),
+    (False, "image/heic", True, True),        # a non-web original: when copies are on
+    (False, "image/heic", False, False),
+    (False, "image/heic", None, None),        # the connection has not said
+    (False, None, True, None),                # the original's type is not known
+])
+def test_a_photo_has_a_full_size_copy_when_edited_or_not_web_with_copies_on(
+        edited, original_type, full_size_copies, fullsize):
+    copies = copies_in_immich("image", edited, original_type, full_size_copies)
+    assert list(copies) == ["thumbnail", "preview", "fullsize", "original"]
+    assert copies == {"thumbnail": True, "preview": True, "fullsize": fullsize, "original": True}
+
+
+def test_a_video_keeps_only_its_original_for_photo_wall():
+    assert copies_in_immich("video", False, "video/mp4", True) == {
+        "thumbnail": False, "preview": False, "fullsize": False, "original": True}

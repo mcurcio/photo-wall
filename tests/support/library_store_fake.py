@@ -120,7 +120,6 @@ class FakeLibraryStore:
         self.revisions: dict[str, RevisionRecord] = {}
         self.copies: dict[str, dict[str, CopySize]] = {}
         self.queued: list[str] = []               # pool keys whose next step was queued
-        self.frame_edge: int | None = None
         self.outputs: tuple[FrameOutput, ...] = ()   # what `frame_outputs` answers
 
     # seeding and reading (tests only) --------------------------------------------------------
@@ -310,9 +309,6 @@ class FakeLibraryStore:
             pool.last_complete_at = now
         pool.checking, pool.progress, pool.finished_at, pool.outcome = False, None, now, finish
         return True
-
-    def largest_frame_edge(self) -> int | None:
-        return self.frame_edge
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         return self.outputs

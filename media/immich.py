@@ -15,9 +15,10 @@ import json
 import os
 import re
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Self
+from typing import NamedTuple, Self
 
 import httpx
 from PIL import Image, ImageOps
@@ -39,6 +40,8 @@ from central.photo_library.model import (
     LibraryCounts,
     LibraryPerson,
     LibraryTag,
+    MeasuredCopy,
+    OriginalFile,
     Place,
     UnexpectedAnswer,
     Unreachable,
@@ -46,13 +49,15 @@ from central.photo_library.model import (
     visible_text,
 )
 from central.photo_library.model import SourceQuery as LibraryQuery
-from central.photo_library.policy import REQUIRED_PERMISSIONS
+from central.photo_library.policy import IMMICH_WEB_TYPES, REQUIRED_PERMISSIONS
 from contracts.models import Model, Positive
 from contracts.time import Clock, SystemClock
 from media.library_client import (
     ChosenItemGone,
     ExclusionQuery,
     FetchedRendition,
+    FetchStep,
+    FrameNeed,
     IdsPage,
     KeysetPosition,
     LibraryUnavailable,
@@ -60,9 +65,10 @@ from media.library_client import (
     SearchPage,
     TakenWindow,
     TimeBucket,
+    covers,
 )
 from media.models import MediaError
-from media.prepare import PreparationLimits
+from media.prepare import STILL_FORMATS, STILL_MEDIA_TYPES, PreparationLimits
 
 # Library thumbnails (PR 37 §7): bounded bytes and pixels, three decoders, one re-encoding.
 THUMBNAIL_BYTES = 1024**2
@@ -322,7 +328,7 @@ class ImmichClient:
         rows = _array(_mapping(answer.get("assets"), "search").get("items"), "search")
         probe = next((row for row in rows if isinstance(row, dict)
                       and isinstance(row.get("originalMimeType"), str)
-                      and row["originalMimeType"].lower() not in _WEB_IMAGES), None)
+                      and row["originalMimeType"].lower() not in IMMICH_WEB_TYPES), None)
         if probe is None:
             return None
         upstream_id = _ref(probe.get("id"), "search")
@@ -424,21 +430,24 @@ class ImmichClient:
 
     async def search_page(self, query: LibraryQuery, window: TakenWindow,
                           after: KeysetPosition | None) -> SearchPage:
-        body = {**_filters(query, window), "withStacked": True, "withExif": False}
+        body = {**_filters(query, window), "withStacked": True}
         rows, position, over = await self._step(self._keyset(body, window, after))
         return SearchPage(items=tuple(self._item(row) for row in rows), next=position,
                           over_one_instant=over)
 
     async def exclusion_page(self, exclusion: ExclusionQuery,
                              after: KeysetPosition | None) -> IdsPage:
-        body = {**_exclusion_body(exclusion), "withExif": False}
+        body = _exclusion_body(exclusion)
         rows, position, _ = await self._step(self._keyset(body, TakenWindow(), after))
         return IdsPage(ids=tuple(_ref(row.get("id"), "search") for row in rows), next=position)
 
     async def _search(self, body: dict) -> tuple[list[dict], bool]:
-        """One `search/metadata` page 1: its rows and whether more match."""
+        """One `search/metadata` page 1: its rows and whether more match. Every search a check
+        makes asks `withExif` (follow-ups 2026-10-11, owner item 1: discovery reads each
+        original's facts), about 1 KB more per row and no extra request."""
         answer = _mapping(await self._answer("POST", "search/metadata", body={
-            **body, "size": self.library_limits.page_size, "page": 1, "order": "desc"},
+            **body, "withExif": True, "size": self.library_limits.page_size, "page": 1,
+            "order": "desc"},
             chosen=_names_chosen(body)), "search")
         assets = _mapping(answer.get("assets"), "search")
         rows = [_mapping(row, "search") for row in _array(assets.get("items"), "search")]
@@ -531,7 +540,8 @@ class ImmichClient:
                 taken_at=_instant(row.get("fileCreatedAt")),
                 checksum=_checksum(row.get("checksum")), is_edited=row.get("isEdited") is True,
                 updated_at=updated if isinstance(updated, str) else None,
-                width=width, height=height, duration=duration, stack_primary=primary)
+                width=width, height=height, duration=duration, stack_primary=primary,
+                original=_original(row))
         except (KeyError, ValueError, TypeError, MediaError, ValidationError, _Malformed):
             return SearchItem(upstream_id=upstream_id, problem="unreadable_answer")
         limits = self.library_limits
@@ -619,34 +629,51 @@ class ImmichClient:
                 raise MediaError("upstream_integrity", "incompatible")
             return bytes(data)
 
-    async def fetch_rendition(self, asset: LibraryAsset, *, frame_long_edge: int | None,
-                              destination: Path) -> FetchedRendition:
-        """The photo as Immich shows it (C10); see LibraryClient.fetch_rendition."""
+    async def fetch_rendition(self, asset: LibraryAsset, *, plan: Sequence[FetchStep],
+                              needs: Sequence[FrameNeed], destination: Path) -> FetchedRendition:
+        """The photo as Immich shows it (C10), at least every Frame output when Immich has such
+        a copy (follow-ups 2026-10-11, slice A4); see LibraryClient.fetch_rendition."""
         destination = Path(destination)
-        spare = destination.with_name(destination.name + ".fullsize")
+        if not plan:
+            raise MediaError("rendition_plan", "incompatible")
         created: list[Path] = []
         try:
             async with asyncio.timeout(self.library_limits.fetch_seconds):
                 await self._current(asset.upstream_id, asset.revision)
-                base = f"assets/{asset.upstream_id}"
-                if asset.kind == "video":   # Immich 2.5 edits photos only: the original
-                    fetched = await self._download(f"{base}/original", {}, destination, created)
-                    return _rendition(fetched, "original", asset.width, asset.height)
-                preview = await self._download(f"{base}/thumbnail",
-                                               {"size": "preview", "edited": "true"},
-                                               destination, created)
-                width, height = _measure(destination, self.library_limits)
-                if frame_long_edge is not None and max(width, height) >= frame_long_edge:
-                    return _rendition(preview, "preview", width, height)
-                full = await self._download(f"{base}/thumbnail",
-                                            {"size": "fullsize", "edited": "true"},
-                                            spare, created, preview_means_off=True)
-                if full is None:   # Immich keeps no full-size copies: its preview
-                    return _rendition(preview, "preview", width, height)
-                os.replace(spare, destination)
-                created.remove(spare)
-                width, height = _measure(destination, self.library_limits)
-                return _rendition({**full, "path": destination}, "fullsize", width, height)
+                measured: list[MeasuredCopy] = []
+                kept: _Fetched | None = None
+                for index, step in enumerate(plan):
+                    path = (destination if index == 0
+                            else destination.with_name(f"{destination.name}.{step}"))
+                    held = kept if kept is not None and kept.copy == "preview" else None
+                    fetched = await self._download(*_request(asset, step), path, created,
+                                                   stop_at_preview=held is not None)
+                    if fetched is None:   # Immich keeps no such copy: the preview held is all
+                        break
+                    if asset.kind == "video":
+                        fetched = fetched._replace(width=asset.width, height=asset.height)
+                    else:
+                        width, height = _measure(path, self.library_limits)
+                        fetched = fetched._replace(width=width, height=height)
+                        if fetched.copy != "original":
+                            measured.append(MeasuredCopy(
+                                name=fetched.copy, media_type=fetched.media_type,
+                                width=width, height=height))
+                    kept = fetched
+                    if covers(fetched.width, fetched.height, needs):
+                        break
+                if kept is None:   # never: the first step either raises or downloads
+                    raise MediaError("rendition_plan", "incompatible")
+                if kept.path != destination:
+                    os.replace(kept.path, destination)
+                for path in created:
+                    if path != destination:
+                        path.unlink(missing_ok=True)
+                created[:] = [destination]
+                return FetchedRendition(
+                    path=destination, rendition=kept.copy, media_type=kept.media_type,
+                    size=kept.size, sha256=kept.sha256, width=kept.width, height=kept.height,
+                    measured=tuple(measured))
         except (TimeoutError, httpx.TimeoutException):
             raise MediaError("upstream_timeout") from None
         except httpx.HTTPError:
@@ -659,10 +686,11 @@ class ImmichClient:
                     path.unlink(missing_ok=True)
 
     async def _download(self, path: str, params: dict, destination: Path, created: list[Path],
-                        *, preview_means_off: bool = False) -> dict | None:
-        """Stream one rendition into `destination` (exclusively created, fsynced), following at
-        most three same-origin redirects. With `preview_means_off`, a redirect to the preview
-        answers None (Immich has no full-size copy)."""
+                        *, stop_at_preview: bool = False) -> _Fetched | None:
+        """Stream one copy into `destination` (exclusively created, fsynced), following at most
+        three same-origin redirects; the answer names the copy Immich served. With
+        `stop_at_preview` (the preview is already downloaded), a redirect to the preview answers
+        None instead of downloading it again."""
         limits = self.library_limits
         url = self._client.base_url.join(path).copy_merge_params(params)
         for _ in range(_MAX_REDIRECTS + 1):
@@ -674,10 +702,11 @@ class ImmichClient:
                     if (target.scheme, target.host, target.port) != (url.scheme, url.host,
                                                                      url.port):
                         raise MediaError("upstream_redirect", "incompatible")
-                    if preview_means_off and target.params.get("size") == "preview":
+                    if stop_at_preview and _copy_of(target) == "preview":
                         return None
                     url = target
                     continue
+                copy = _copy_of(url)
                 self._status(response, original=True)
                 media_type = response.headers.get("content-type", "").split(";")[0]
                 media_type = media_type.strip().lower()
@@ -704,8 +733,8 @@ class ImmichClient:
                         raise MediaError("asset_integrity")
                     output.flush()
                     os.fsync(output.fileno())
-                return {"path": destination, "media_type": media_type, "size": size,
-                        "sha256": digest.hexdigest()}
+                return _Fetched(path=destination, copy=copy, media_type=media_type, size=size,
+                                sha256=digest.hexdigest())
         raise MediaError("upstream_redirect", "incompatible")
 
     # stacks (C9): Immich's timeline hides stacked copies -------------------------------------
@@ -744,11 +773,16 @@ class ImmichClient:
 
 # --- The LibraryClient surface's helpers ---------------------------------------------------------
 
-_WEB_IMAGES = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
-                         "image/avif", "image/svg+xml", "image/bmp"})
-_RENDITION_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "video/mp4",
-                              "video/quicktime", "video/webm", "video/x-matroska"})
+# What a fetch downloads: a still preparation reads (follow-ups 2026-10-11, slice A5), or a
+# video; any other type is refused before a byte is written.
+_RENDITION_TYPES = STILL_MEDIA_TYPES | frozenset({
+    "video/mp4", "video/quicktime", "video/webm", "video/x-matroska"})
 _MAX_REDIRECTS = 3
+_MEDIA_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
+_ORIENTATIONS = frozenset("12345678")
+# The largest original side and byte size stored (`library_assets` INTEGER and BIGINT columns).
+_MAX_SIDE = 2**31 - 1
+_MAX_BYTES = 2**63 - 1
 # The narrowest window of upload times worth halving: below it one instant holds more than a
 # page, and the check is incomplete.
 _CREATED_RESOLUTION = 1e-3
@@ -902,6 +936,35 @@ def _month(value: object) -> str:
     return value[:7] + "-01"
 
 
+def _original(row: dict) -> OriginalFile | None:
+    """The original file a row describes (`originalMimeType` and `exifInfo`); None without
+    `exifInfo`, or when Immich said nothing usable. A malformed field is None, never the row's
+    problem. Immich sends the EXIF orientation as text ("1" to "8")."""
+    exif = row.get("exifInfo")
+    if not isinstance(exif, dict):
+        return None
+    media_type = row.get("originalMimeType")
+    media_type = media_type.lower() if isinstance(media_type, str) else None
+    if media_type is not None and (len(media_type) > 127
+                                   or not _MEDIA_TYPE.fullmatch(media_type)):
+        media_type = None
+    orientation = exif.get("orientation")
+    original = OriginalFile(
+        media_type=media_type, width=_positive(exif.get("exifImageWidth"), _MAX_SIDE),
+        height=_positive(exif.get("exifImageHeight"), _MAX_SIDE),
+        orientation=(int(orientation) if isinstance(orientation, str)
+                     and orientation in _ORIENTATIONS else None),
+        size_bytes=_positive(exif.get("fileSizeInByte"), _MAX_BYTES))
+    return None if original == OriginalFile() else original
+
+
+def _positive(value: object, limit: int) -> int | None:
+    """A JSON whole number in 1..`limit`; anything else is None."""
+    if type(value) is float and value.is_integer():
+        value = int(value)
+    return value if type(value) is int and 0 < value <= limit else None
+
+
 def _lands_on_preview(location: str) -> bool:
     try:
         return httpx.URL(location).params.get("size") == "preview"
@@ -910,9 +973,10 @@ def _lands_on_preview(location: str) -> bool:
 
 
 def _measure(path: Path, limits: LibraryLimits) -> tuple[int, int]:
-    """A fetched image's upright size, from its header and EXIF orientation."""
+    """A fetched image's upright size, from its header and EXIF orientation (libheif applies a
+    HEIC's own turn on decode and reports orientation 1)."""
     try:
-        with Image.open(path, formats=_THUMBNAIL_FORMATS) as image:
+        with Image.open(path, formats=STILL_FORMATS) as image:
             width, height = image.size
             orientation = image.getexif().get(0x0112, 1)
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
@@ -922,10 +986,39 @@ def _measure(path: Path, limits: LibraryLimits) -> tuple[int, int]:
     return (height, width) if orientation in (5, 6, 7, 8) else (width, height)
 
 
-def _rendition(fetched: dict, rendition: str, width: int, height: int) -> FetchedRendition:
-    return FetchedRendition(path=fetched["path"], rendition=rendition,
-                            media_type=fetched["media_type"], size=fetched["size"],
-                            sha256=fetched["sha256"], width=width, height=height)
+class _Fetched(NamedTuple):
+    """One downloaded copy: `copy` is the one Immich served (after any redirect)."""
+
+    path: Path
+    copy: FetchStep
+    media_type: str
+    size: int
+    sha256: str
+    width: int = 0
+    height: int = 0
+
+
+def _request(asset: LibraryAsset, step: FetchStep) -> tuple[str, dict]:
+    """The path and query of one fetch step (`media.library_client.fetch_plan`)."""
+    base = f"assets/{asset.upstream_id}"
+    match step:
+        case "preview":
+            return f"{base}/thumbnail", {"size": "preview", "edited": "true"}
+        case "fullsize":
+            return f"{base}/thumbnail", {"size": "fullsize",
+                                         "edited": "true" if asset.edited else "false"}
+        case "original":
+            return f"{base}/original", {"edited": "false"}
+
+
+def _copy_of(url: httpx.URL) -> FetchStep:
+    """Which copy a (redirected) Immich URL serves; any other URL is refused."""
+    if url.path.endswith("/original"):
+        return "original"
+    size = url.params.get("size")
+    if url.path.endswith("/thumbnail") and size in ("preview", "fullsize"):
+        return size
+    raise MediaError("upstream_redirect", "incompatible")
 
 
 def edits_fingerprint(edits: list) -> str:

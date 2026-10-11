@@ -283,11 +283,6 @@ class LibraryWorkerStore(Protocol):
         Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`."""
         ...
 
-    def largest_frame_edge(self) -> int | None:
-        """The long edge in pixels of the wall's largest Frame profile; None with no Frame.
-        Retired by slice A4 (follow-ups 2026-10-11) for `frame_outputs`."""
-        ...
-
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         """Every Frame's Frame output (`central.infra.display_store.frame_outputs_in`, its own
         transaction): what the rendition choice must cover (slice A1; read by A4)."""
