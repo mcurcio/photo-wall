@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type * as React from "react";
 
 import { Note } from "../patterns/fact-row";
 import { NudgePad } from "../patterns/nudge-pad";
@@ -29,6 +30,9 @@ export interface FramePositionProps {
   piHref: string | null;
   /** The Frame's readiness: a Position to check again is kept by Done with no change. */
   readiness?: Readiness;
+  /** What would fit with this Position, judged before Done (follow-ups C1: the Frame config
+   * moment); the page composes it. */
+  whatFits?: React.ReactNode;
 }
 
 type Mode = "cover" | "corners";
@@ -66,7 +70,7 @@ const inside = (value: number) => value >= 0 && value <= 1;
  * checked again (its picture changed, or another display is on its port) is kept by Done with no
  * change. A change that would fold the picture or leave the screen is refused where it is made.
  */
-export function FramePosition({ adjustment, size: reported, piHref, readiness }: FramePositionProps) {
+export function FramePosition({ adjustment, size: reported, piHref, readiness, whatFits }: FramePositionProps) {
   const size = reported ?? FALLBACK_SIZE;
   const checkAgain = readiness === "position-needed" || readiness === "display-changed";
   const [selected, setSelected] = useState<number | null>(null);
@@ -178,6 +182,7 @@ export function FramePosition({ adjustment, size: reported, piHref, readiness }:
             </Field>
           </Inline>
         )}
+        {whatFits}
         <Disclosure summary="Exact values">
           <Note>{`Corners, in pixels of the Pi's ${size.width} × ${size.height} output`}</Note>
           <Inline>

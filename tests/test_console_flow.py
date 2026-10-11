@@ -313,8 +313,9 @@ def test_flow_kit_and_scene_flow_shape():
     assert out["next"] == ["b", "c", "review", "review"]
     assert out["previous"] == [None, "b"]
 
-    assert out["liveSteps"] == ["kind", "photos", "frames", "playback", "review"]
-    assert out["handPickedSteps"] == ["kind", "photos", "frames", "media", "playback", "review"]
+    # Frames before Photos (follow-ups C1): photos are chosen against known Frames.
+    assert out["liveSteps"] == ["kind", "frames", "photos", "playback", "review"]
+    assert out["handPickedSteps"] == ["kind", "frames", "photos", "media", "playback", "review"]
     # A Scene whose id is "new" is an edit key of its own, never the new Scene.
     assert out["keys"] == ["new", "edit/new", None, None, None]
     assert out["routes"] == [
@@ -341,7 +342,7 @@ def test_flow_kit_and_scene_flow_shape():
         "mode": "live", "name": "", "idOverride": None, "sourceRefs": [], "targets": [],
         "selections": {}, "cycleSeconds": 30, "loop": True, "fadeSeconds": 1.5,
         "ending": "none", "endingSeconds": 3, "keepLastPhoto": True, "keepTogether": False,
-        "order": "shuffle", "noRepeatDays": 7, "cropLimit": 0.35, "revision": None}
+        "order": "shuffle", "noRepeatDays": 7, "cropLimit": None, "revision": None}
     assert out["seedNewTarget"]["targets"] == ["frame_one"]
     assert out["seedNewBadTarget"]["targets"] == []
     assert out["seedEditWithTarget"] == out["seedEdit"]
@@ -352,7 +353,7 @@ def test_flow_kit_and_scene_flow_shape():
         "keepTogether": False, "order": "shuffle", "noRepeatDays": 7, "cropLimit": None,
         "revision": 3}
     assert out["seedMissing"] is None
-    assert out["changed"] == ["Keep playing until the Program ends"]
+    assert out["changed"] == ["Keep repeating"]
 
     # Focus views: away while another section shows; a step; between views (normalising,
     # opening) none; any other place by its name.
@@ -371,16 +372,16 @@ def test_flow_kit_and_scene_flow_shape():
         ["media:hall", "Choose media for hall."]]
     assert out["loadingMedia"] == ["media:lobby", "media:hall"]
     # One wording per label: the problem, Review's answers and Reload share it.
-    assert out["cycleProblem"] == ["Seconds per cycle must be more than 0."]
+    assert out["cycleProblem"] == ["Each photo shows for: choose more than 0 seconds."]
     assert out["answerLabels"] == {
         "mode": "Kind", "source": "Photos from", "targets": "Frames", "media": "Media per frame",
-        "cycle": "Seconds per cycle", "loop": "Keep playing until the Program ends",
+        "cycle": "Each photo shows for", "loop": "Keep repeating",
         "fade": "Fade between photos", "ending": "How it ends",
         "keepLastPhoto": "Keep the last photo up", "keepTogether": "Keep these Frames together",
         "order": "Order", "noRepeatDays": "Don't repeat within", "cropLimit": "Crop limit"}
     # A fade longer than the cycle is the fade's problem (the planner refuses it).
     assert out["fadeProblem"] == [
-        ["fade", "Fade between photos must be no longer than Seconds per cycle."]]
+        ["fade", "Fade between photos must be no longer than each photo shows for."]]
 
     # Delivery 1x: each setting is written to the Scene model's own field...
     body = out["liveBody"]

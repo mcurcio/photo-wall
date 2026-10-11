@@ -140,6 +140,38 @@ def seed_varied_library(store: PgPhotoLibrary, connection_ref: str, *, pool_key:
     return tuple(a.asset_id for a in assets)
 
 
+def subject_grid(width: int, height: int, subject=(0.5, 0.5)):
+    """An interest grid (16 columns, rows by the photo's shape) whose weight sits around
+    `subject` (fractions of the width and height), the rest spread thinly: where the eye goes."""
+    import math
+
+    from central.wall_plan.key_content import INTEREST_COLUMNS, InterestGrid
+
+    columns = INTEREST_COLUMNS
+    rows = max(1, min(64, round(columns * height / width)))
+    weights = []
+    for row in range(rows):
+        for column in range(columns):
+            dx = (column + 0.5) / columns - subject[0]
+            dy = (row + 0.5) / rows - subject[1]
+            weights.append(0.02 + math.exp(-(dx * dx + dy * dy) / 0.01))
+    total = sum(weights)
+    return InterestGrid(columns=columns, rows=rows, weights=tuple(w / total for w in weights))
+
+
+def measure_varied(registry, assets) -> None:
+    """Key content for the varied library's photos (follow-ups C2), as the media worker writes it:
+    each photo's interest around its VARIED subject; the "face at the edge" photo also has a face
+    there (Immich's box, unpadded). `assets` in VARIED's order (varied_assets)."""
+    from support.key_content_builders import face
+    from support.measured_photos import measure
+
+    for asset, (name, _width, _height, (x, y)) in zip(assets, VARIED, strict=False):
+        faces = (face(max(0.0, x - 0.06), max(0.0, y - 0.1), min(1.0, x + 0.06), min(1.0, y + 0.1)),) \
+            if "face" in name else ()
+        measure(registry, asset, faces=faces, grid=subject_grid(asset.width, asset.height, (x, y)))
+
+
 TALL_FRAME, WIDE_FRAME = "hall", "living-room"
 
 

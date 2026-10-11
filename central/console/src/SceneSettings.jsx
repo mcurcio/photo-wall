@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 
 import { cropPercent, ORDERS, PLAYBACK_LABELS, SCENE_SETTING_DEFAULTS, SETTING_RANGES } from "./authoring.js";
 import { SettingRow } from "./patterns/setting-row.tsx";
@@ -184,15 +184,23 @@ export function EndingRows({ value, patch, problems }) {
  * Roadmap 5a's selection: "Order" (#43), "Don't repeat within" (#44; 0 is Off) and "Crop
  * limit" (the one row that replaced #48–#52). Don't repeat within only ranks: a Frame never
  * goes blank because of it. The crop limit is a fraction in the draft and whole percent on
- * its slider.
+ * its slider. A Scene without its own follows the house crop limit (`houseCropLimit`, Settings ›
+ * Photo fit; follow-ups C1), and the row says so; moving the slider gives the Scene its own,
+ * and Reset follows the house again. While the slider moves, `onCropPreview` gets each value
+ * (the Fit board answers it by shape), and null once it is let go.
  *
- * @param {RowsProps} props
+ * @param {RowsProps & {houseCropLimit?: number|null, onCropPreview?: (limit: number|null) => void}} props
  */
-export function SelectionRows({ value, patch, problems }) {
+export function SelectionRows({ value, patch, problems, houseCropLimit = null, onCropPreview }) {
   const order = value.order ?? D.order;
   const days = value.noRepeatDays ?? D.noRepeatDays;
   const typed = String(days).trim() !== "";
-  const crop = Number(value.cropLimit ?? D.cropLimit);
+  // The value under a dragging pointer, shown until it is let go (the draft keeps the last kept).
+  const [dragged, setDragged] = useState(/** @type {number|null} */ (null));
+  const follows = value.cropLimit === null || value.cropLimit === undefined;
+  const house = houseCropLimit ?? 0.35;
+  const crop = follows ? house : Number(value.cropLimit);
+  const houseWords = houseCropLimit === null ? "the house setting" : `the house setting, ${cropWords(houseCropLimit)}`;
   const percents = {
     min: cropPercent(SETTING_RANGES.cropLimit.min),
     max: cropPercent(SETTING_RANGES.cropLimit.max),
@@ -253,17 +261,26 @@ export function SelectionRows({ value, patch, problems }) {
           label={PLAYBACK_LABELS.cropLimit}
           help={
             "The most of a photo a Frame may cut away to fill itself. Faces and the " +
-            "interesting part are always kept."
+            "interesting part are always kept. " +
+            (follows ? `This Scene follows ${houseWords}.` : "This Scene has its own.")
           }
-          defaultLabel={`Default: ${cropWords(D.cropLimit)}`}
-          onReset={crop === D.cropLimit ? undefined : () => patch({ cropLimit: D.cropLimit })}
+          defaultLabel={`Default: follows ${houseWords}`}
+          onReset={follows ? undefined : () => patch({ cropLimit: null })}
           state="idle"
           control={
             <Slider
               {...percents}
-              value={cropPercent(crop)}
+              value={dragged ?? cropPercent(crop)}
               unit="%"
-              onCommit={(percent) => patch({ cropLimit: percent / 100 })}
+              onPreview={(percent) => {
+                setDragged(percent);
+                onCropPreview?.(percent / 100);
+              }}
+              onCommit={(percent) => {
+                setDragged(null);
+                patch({ cropLimit: percent / 100 });
+                onCropPreview?.(null);
+              }}
             />
           }
         />

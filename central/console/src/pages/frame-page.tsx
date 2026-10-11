@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameDisplay } from "../domain/frame-display";
 import { FrameOverview } from "../domain/frame-overview";
-import { FramePhotoFit } from "../domain/frame-photo-fit";
+import { FrameDraftFit, FramePhotos } from "../domain/frame-photos";
 import { FramePicture } from "../domain/frame-picture";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FramePower } from "../domain/frame-power";
@@ -40,8 +40,20 @@ interface Frame {
   generation?: number;
   player_id?: string | null;
   output_id?: string | null;
-  profile?: { width_px?: number; height_px?: number };
+  profile?: { width_px?: number; height_px?: number; diagonal_inches?: number; video?: boolean };
+  calibration?: { revision?: number; fit?: object };
   readiness?: Readiness;
+}
+
+type WholeProfile = { width_px: number; height_px: number; diagonal_inches: number; video: boolean };
+
+/** A Frame profile whose every value is set, as a Frame draft carries it; null otherwise. */
+function wholeProfile(profile: Frame["profile"] | null | undefined): WholeProfile | null {
+  if (!profile) return null;
+  const { width_px: width, height_px: height, diagonal_inches: diagonal } = profile;
+  if (!(Number.isInteger(width) && (width ?? 0) > 0 && Number.isInteger(height) && (height ?? 0) > 0
+    && Number.isFinite(diagonal) && (diagonal ?? 0) > 0)) return null;
+  return { width_px: width!, height_px: height!, diagonal_inches: diagonal!, video: profile.video ?? true };
 }
 
 const TABS = [
@@ -67,11 +79,23 @@ function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
   return null;
 }
 
+interface Health { state: string; severity: "ok" | "todo" | "alarm"; label: string }
+
+/**
+ * The header's status: health.js's, except a Pi enrolled within the silence limit that has not
+ * reported yet, which is "Getting ready" (design language §6, a notice), not its enrollment age.
+ */
+function headerVerdict(health: Health | null): { severity: "ok" | "todo" | "notice" | "alarm"; label: string } | null {
+  if (health === null) return null;
+  if (health.state === "awaiting-report" && health.severity === "todo") return { severity: "notice", label: "Getting ready" };
+  return { severity: health.severity, label: health.label };
+}
+
 /**
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
- * the plan tile's words). Overview is what Central puts on it and why, and its Photos: how many
- * of each Source's photos fit it and why the rest do not (roadmap 5a); Position is where the
+ * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
+ * row per Scene that shows photos here (follow-ups C1); Position is where the
  * picture sits on the Display (its fit, corners, nudges, rotation); Picture is the brightness,
  * contrast, colour temperature and gamma of the display that feeds it; Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
@@ -125,7 +149,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
     );
   }
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
-  const health = frameHealth(snapshot, frameId) as { severity: "ok" | "todo" | "alarm"; label: string } | null;
+  const health = headerVerdict(frameHealth(snapshot, frameId) as Health | null);
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
@@ -146,12 +170,16 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         {tab === "overview" && (
           <>
             <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} hosts={hosts} />
-            <FramePhotoFit key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />
+            <FramePhotos key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />
           </>
         )}
         {tab === "position" && (
           <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
-            readiness={frame.readiness} />
+            readiness={frame.readiness}
+            whatFits={(
+              <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(frame.profile)}
+                calibration={{ revision: frame.calibration?.revision ?? 1, fit: adjustment.draft.fit }} />
+            )} />
         )}
         {tab === "picture" && (
           <FramePicture frameId={frameId} piHref={piHref} session={picture}
@@ -163,7 +191,11 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}
               onTab={(next: string) => choose(next as Tab)} />
             <FrameDisplay key={`${frameId}:display`} frameId={frameId} />
-            <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame} />
+            <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame}
+              draftFit={(profile) => (
+                <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(profile)}
+                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "cover" } }} />
+              )} />
           </>
         )}
       </Tabs>

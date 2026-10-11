@@ -96,12 +96,14 @@ export function identityProblems(kind, draft, existingIds) {
 /**
  * The labels of a Scene's playback fields (slice 3 §4): the one wording wherever they
  * are asked (CycleInput.jsx, SceneSettings.jsx), answered (the Scene flow's Review) or
- * named (Reload). Five are delivery 1x's (settings catalogue #41, #62–#65); the last three are
+ * named (Reload), the Playback step's Advanced summary included (one name per setting; the
+ * designer review of follow-ups C2 renamed "Seconds per cycle" and "Keep playing until the
+ * Program ends", whose words were internal). Five are delivery 1x's (settings catalogue #41, #62–#65); the last three are
  * roadmap 5a's selection (#43 Order, #44 Don't repeat within, and the one Crop limit row).
  */
 export const PLAYBACK_LABELS = Object.freeze({
-  cycle: "Seconds per cycle",
-  loop: "Keep playing until the Program ends",
+  cycle: "Each photo shows for",
+  loop: "Keep repeating",
   fade: "Fade between photos",
   ending: "How it ends",
   endingSeconds: "Ending length",
@@ -179,13 +181,13 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
     problems.push({ field: "targets", message: "Choose at least one frame." });
   }
   if (!(Number(draft.cycleSeconds) > 0)) {
-    problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle} must be more than 0.` });
+    problems.push({ field: "cycle", message: `${PLAYBACK_LABELS.cycle}: choose more than 0 seconds.` });
   } else if (Number(draft.fadeSeconds) > Number(draft.cycleSeconds)) {
     // A photo's fade out and the next one's fade in share its cycle (central/planner.py
     // refuses fades longer than the cycle).
     problems.push({
       field: "fade",
-      message: `${PLAYBACK_LABELS.fade} must be no longer than ${PLAYBACK_LABELS.cycle}.`,
+      message: `${PLAYBACK_LABELS.fade} must be no longer than each photo shows for.`,
     });
   }
   if (draft.ending === "fade" && Number(draft.endingSeconds) < Number(draft.fadeSeconds) / 2) {
@@ -356,9 +358,9 @@ export const CONTRIBUTION_DEFAULTS = {
  * one choice in the built model and disagree, so the built behaviour stays until the owner
  * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
  * together (#65); and the selection's order and no-repeat, which are the Scene model's own
- * ({@link SCENE_DEFAULTS}`.selection`: shuffle, 7 days). The crop limit starts at 35 %, the
- * house default, written on the Scene: the model's default is null (the Scene follows the
- * house crop limit, follow-ups B1), which the Scene editor offers from follow-ups C1 on.
+ * ({@link SCENE_DEFAULTS}`.selection`: shuffle, 7 days). The crop limit is the model's own
+ * default, null: a new Scene follows the house crop limit (Settings › Photo fit; follow-ups B1
+ * and C1), so the value lives in one place until a Scene sets its own.
  */
 export const SCENE_SETTING_DEFAULTS = Object.freeze({
   fadeSeconds: 1.5,
@@ -368,7 +370,7 @@ export const SCENE_SETTING_DEFAULTS = Object.freeze({
   keepTogether: false,
   order: SCENE_DEFAULTS.selection.order,
   noRepeatDays: SCENE_DEFAULTS.selection.no_repeat_days,
-  cropLimit: 0.35,
+  cropLimit: SCENE_DEFAULTS.selection.crop_limit,
 });
 
 export const UNAUTHORABLE_REASON =

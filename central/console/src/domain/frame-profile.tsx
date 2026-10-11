@@ -42,6 +42,9 @@ interface Draft {
 export interface FrameProfileProps {
   snapshot: object | null;
   frame: Frame;
+  /** What would fit with the profile being edited, judged before it is saved (follow-ups C1:
+   * the Frame config moment); the page composes it. */
+  draftFit?: (profile: Profile) => React.ReactNode;
 }
 
 const usable = (size: { width_px?: number; height_px?: number } | null | undefined) =>
@@ -73,7 +76,7 @@ function refusal(code: string): string {
  * started (its last enrollment). Saving needs a Frame with no Pi and clears its position, which
  * is set again on the Position tab.
  */
-export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
+export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [generation, setGeneration] = useState(0);
   const [problem, setProblem] = useState<{ words: string; code: string | null } | null>(null);
@@ -208,6 +211,8 @@ export function FrameProfile({ snapshot, frame }: FrameProfileProps) {
               <Switch checked={draft.video} onChange={(video) => setDraft({ ...draft, video })} />
             </Field>
           </Inline>
+          {draftFit?.({ width_px: Number(draft.width_px), height_px: Number(draft.height_px),
+            diagonal_inches: Number(draft.diagonal_inches), video: draft.video })}
           {problemCard}
           <Inline>
             <Button type="submit" variant="primary" disabled={saving}>{saving ? "Saving…" : "Save profile"}</Button>

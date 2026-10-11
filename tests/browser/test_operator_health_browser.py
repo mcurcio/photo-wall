@@ -327,7 +327,8 @@ def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues
         expect(health).to_contain_text("Needs a Player")
         # The refresh the bind issued lands.
         reads.release(0)
-        expect(health).to_contain_text("Enrolled 0 s ago, no report yet")
+        # A Pi enrolled within the silence limit with no report yet: "Getting ready" (follow-ups C2).
+        expect(health).to_contain_text("Getting ready")
 
         # The dropped poll released its slot: the next tick reads and applies.
         report_readiness(registry, identity["player_id"])

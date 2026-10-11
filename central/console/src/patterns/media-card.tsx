@@ -41,6 +41,8 @@ export interface MediaCardProps {
   menu?: MenuProps;
   /** The card is a choice in a form. */
   choice?: CardChoice;
+  /** A line under the card, outside its choice (how its photos fit the Frames). */
+  footer?: React.ReactNode;
 }
 
 /**
@@ -48,7 +50,7 @@ export interface MediaCardProps {
  * a four-photo mosaic, its name, its count, its status chip and its overflow actions; or, in a
  * form, a choice with a checkbox or a radio. Immich's album card is the model.
  */
-export function MediaCard({ title, href, mosaic, emptyText = "No photos yet", line, detail, verdict = null, note, menu, choice }: MediaCardProps) {
+export function MediaCard({ title, href, mosaic, emptyText = "No photos yet", line, detail, verdict = null, note, menu, choice, footer }: MediaCardProps) {
   const shown = mosaic.slice(0, 4);
   const content = (
     <>
@@ -98,9 +100,10 @@ export function MediaCard({ title, href, mosaic, emptyText = "No photos yet", li
     <article aria-label={title} className={frame}>
       {/* The whole card chooses: a press anywhere on it toggles its control. */}
       <label className="flex min-w-0 cursor-pointer flex-col gap-2">{content}</label>
+      {footer}
     </article>
   ) : (
-    <article aria-label={title} className={frame}>{content}</article>
+    <article aria-label={title} className={frame}>{content}{footer}</article>
   );
 }
 

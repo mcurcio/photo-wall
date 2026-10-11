@@ -112,6 +112,18 @@ export const searchPlaces = (ref, q) => list("places", ref, { q });
 export const searchTags = (ref, q) => list("tags", ref, { q });
 export const tagsById = (ref, ids) => list("tags", ref, { ids });
 
+/**
+ * One pool photo's facts and Immich's copies of it (follow-ups A3, `PhotoFacts`): the original's
+ * type, size and bytes, each copy with whether Immich keeps it and its size when Photo Wall last
+ * measured it, and the copy the wall's prepared one was made from. No Immich id (R22).
+ *
+ * @param {string} assetId
+ * @returns {Promise<{ok: true, facts: object}|{ok: false, error: string}>}
+ */
+export function photoFacts(assetId) {
+  return call("facts", `${LIBRARY}/photos/${encodeURIComponent(assetId)}`, { method: "GET" });
+}
+
 const NOT_READ = Object.freeze({ connections: null, failed: false });
 
 /**
