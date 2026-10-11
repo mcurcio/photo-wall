@@ -1224,6 +1224,37 @@ def test_a_changed_draft_after_an_unanswered_save_checks_its_name_again(page, re
 # --- Roadmap 1x: the Scene settings Central already plays, set in the console.
 
 
+def test_a_scene_following_the_house_shows_the_saved_house_crop_limit_and_no_guess(page, registry):
+    """A Scene that sets no crop limit shows the house's as saved in Settings › Photo fit, never
+    a copy of its default, and draws no number while that is being read. Mutation probe: fall
+    back to 35 % while the read is pending -> the slider is drawn before the read answers."""
+    from central.db import ProcessTransactionClock
+    from central.infra.fit_settings_store import PgFitSettings
+    from central.wall_plan.fit_settings import FitSettings
+    _seed(registry)
+    queue = _seed_source(registry)
+    PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock)).save_fit_settings(
+        FitSettings(crop_limit=0.25))
+    held = []
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        page.route(re.compile(r".*/v1/operator/settings/photo-fit$"), lambda route: held.append(route))
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
+        choose_source(form, SOURCE)
+        scene_continue(page, "Playback")
+        crop = _row(form, "Crop limit")
+        expect(crop).to_contain_text("Reading the house setting…")
+        expect(form.get_by_label("Crop limit", exact=True)).to_have_count(0)
+        assert held
+        for route in held:
+            route.continue_()
+        page.unroute(re.compile(r".*/v1/operator/settings/photo-fit$"))
+        expect(form.get_by_label("Crop limit", exact=True)).to_have_value("25")
+        expect(crop).to_contain_text("This Scene follows the house setting, 25 %.")
+
+
 def _row(form, label):
     """A setting's row (patterns/setting-row.tsx): its control, help, default and Reset."""
     return form.locator(f'[data-setting="{label}"]')

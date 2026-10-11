@@ -198,8 +198,10 @@ export function SelectionRows({ value, patch, problems, houseCropLimit = null, o
   // The value under a dragging pointer, shown until it is let go (the draft keeps the last kept).
   const [dragged, setDragged] = useState(/** @type {number|null} */ (null));
   const follows = value.cropLimit === null || value.cropLimit === undefined;
-  const house = houseCropLimit ?? 0.35;
-  const crop = follows ? house : Number(value.cropLimit);
+  // Following the house: the value is the served one (Settings › Photo fit), never a copy of
+  // its default; until it is read the row draws no number.
+  const known = !follows || houseCropLimit !== null;
+  const crop = follows ? houseCropLimit : Number(value.cropLimit);
   const houseWords = houseCropLimit === null ? "the house setting" : `the house setting, ${cropWords(houseCropLimit)}`;
   const percents = {
     min: cropPercent(SETTING_RANGES.cropLimit.min),
@@ -267,10 +269,12 @@ export function SelectionRows({ value, patch, problems, houseCropLimit = null, o
           defaultLabel={`Default: follows ${houseWords}`}
           onReset={follows ? undefined : () => patch({ cropLimit: null })}
           state="idle"
-          control={
+          control={!known ? (
+            <span className="text-sm text-muted" role="status">Reading the house setting…</span>
+          ) : (
             <Slider
               {...percents}
-              value={dragged ?? cropPercent(crop)}
+              value={dragged ?? cropPercent(/** @type {number} */ (crop))}
               unit="%"
               onPreview={(percent) => {
                 setDragged(percent);
@@ -282,7 +286,7 @@ export function SelectionRows({ value, patch, problems, houseCropLimit = null, o
                 onCropPreview?.(null);
               }}
             />
-          }
+          )}
         />
       </FieldSlot>
     </>
