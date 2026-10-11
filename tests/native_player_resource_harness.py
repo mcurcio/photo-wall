@@ -236,7 +236,10 @@ class Frames:
     def trial(self, _composition, _grant):
         return None
 
-    def tag_rendered_buffer(self, *_args):
+    def picture(self, _output_id):
+        return None                     # no picture operations: neutral (frame protocol v4)
+
+    def tag_rendered_buffer(self, *_args, **_picture_change):
         pass
 
     def close(self):

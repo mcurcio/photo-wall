@@ -197,10 +197,10 @@ def output_picture(picture: DisplayPicture) -> OutputPicture:
 
 def picture_status(*, bound: bool, document: OutputDocument | None,
                    report: OutputReport | None) -> PictureStatus:
-    """NO_DISPLAY unless bound with a document carrying a picture part; SHOWN when the report's
-    picture part has for_change == document.picture_change and presented_change >=
-    document.picture_change; else WAITING."""
-    if not bound or document is None or document.picture is None or document.picture_change is None:
+    """NO_DISPLAY unless bound with a document; SHOWN when the report's picture part has
+    for_change == document.picture_change and presented_change >= document.picture_change; else
+    WAITING."""
+    if not bound or document is None:
         return PictureStatus.NO_DISPLAY
     shown = (report is not None and report.picture is not None
              and report.picture.for_change == document.picture_change
