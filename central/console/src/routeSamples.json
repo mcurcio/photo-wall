@@ -41,6 +41,9 @@
     "releases": ["#/releases", "#/releases/update/v0.15.0", "#/releases/update/v0.15.0/try/sample-player",
       "#/releases/update/v0.15.0/skip/sample-player", "#/releases/update/v0.15.0/try/sample-player/skip/other-player/third-player"]
   },
+  "settings": {
+    "photo-library": ["#/photo-library"]
+  },
   "neutral": {
     "attention": ["#/attention"]
   }

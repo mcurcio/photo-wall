@@ -56,7 +56,7 @@ ESBUILD = CONSOLE / "node_modules/.bin/esbuild"
 SOURCE_SUFFIXES = (".js", ".jsx", ".ts", ".tsx")
 SAMPLES = json.loads((SRC / "routeSamples.json").read_text())
 TABLES = {"show": "showRoutes.jsx", "wall": "wallRoutes.jsx", "fleet": "fleetRoutes.jsx",
-          "neutral": "neutralRoutes.jsx"}
+          "settings": "settingsRoutes.jsx", "neutral": "neutralRoutes.jsx"}
 # The Frame page, its Position tab and the live adjustment that writes a Frame's calibration,
 # and its Picture tab with the session and routes that write the display's picture (1c K1).
 DISPLAY_CONTROLS = {"frame-page.tsx", "frame-position.tsx", "liveAdjustment.js", "frame-picture.tsx",
@@ -513,6 +513,14 @@ def test_show_fleet_and_neutral_routes_never_reach_the_wall_only_closure(graph, 
     assert naming == [], f"{naming} name the display's calibration route"
 
 
+def test_the_settings_routes_never_reach_the_wall_only_closure(graph):
+    # Settings › Photo library (roadmap 4) is house-wide: it reaches no Frame page or display write.
+    modules = reachable(graph, TABLES["settings"])
+    assert "photo-library-page.tsx" in modules  # the walk reached past the table itself
+    assert not modules & _wall_only(graph), sorted(modules & _wall_only(graph))
+    assert not any(CALIBRATION_ROUTE in module.read_text() for module in graph if module.name in modules)
+
+
 def test_the_shell_reaches_the_wall_only_closure_only_through_the_wall_routes(graph):
     # From the entry point, with the Wall table reached but not followed: the shell's own
     # modules (App, Shell, the Wall's memory) import nothing only the Wall needs.
@@ -526,7 +534,7 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
     # closure (a module no longer shared is taken off), and none of it is a display control.
     wall = reachable(graph, TABLES["wall"]) - _shell_own(graph)
     shown = (reachable(graph, TABLES["show"]) | reachable(graph, TABLES["fleet"])
-             | reachable(graph, TABLES["neutral"]))
+             | reachable(graph, TABLES["settings"]) | reachable(graph, TABLES["neutral"]))
     assert wall & shown - _catalog(graph) == SHARED_WITH_SHOW
     assert not (SHARED_WITH_SHOW | _catalog(graph)) & DISPLAY_CONTROLS
 
@@ -585,8 +593,9 @@ def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
 @pytest.mark.parametrize("table", sorted(TABLES))
 def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(table):
     source = (SRC / TABLES[table]).read_text()
-    declared = re.findall(r'^\s*section: "(\w+)",$', source, re.M)
-    referenced = re.findall(r"\bSAMPLES\.(\w+)\.(\w+)\b", source)
+    declared = re.findall(r'^\s*section: "([\w-]+)",$', source, re.M)
+    referenced = re.findall(r'\bSAMPLES\.(\w+)(?:\.(\w+)\b|\["([\w-]+)"\])', source)
+    referenced = [(group, dotted or quoted) for group, dotted, quoted in referenced]
     assert declared and sorted(declared) == sorted(SAMPLES[table])
     assert referenced == [(table, section) for section in declared]
 
@@ -594,7 +603,8 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases", "attention"])
+        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
+         "photo-library", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -633,7 +643,8 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "attention")
+    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
+     "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -775,6 +786,12 @@ FRAME_PAGE_IMPORTS = {
     "live-adjustment.tsx": {"liveAdjustment.js"},
     "frame-power.tsx": {"polledRead.js", "powerApi.js"},
 }
+# Roadmap 4's photo library pages, each with the legacy modules it alone may import: their routes
+# (libraryApi.js, photoSourcesApi.js) and hooks.
+PHOTO_PAGE_IMPORTS = {
+    "photo-library-page.tsx": {"libraryApi.js"},
+}
+DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 
 
 def _layer(module, src=SRC):
@@ -873,12 +890,12 @@ def test_pages_and_domain_components_import_only_models_and_declared_legacy_mark
         if _layer(module) not in ("pages", "domain"):
             continue
         extra = {imported.name for imported in imports if _layer(imported) is None} - PAGE_IMPORTS
-        if module.name in FRAME_PAGE_IMPORTS:
+        if module.name in DECLARED_IMPORTS:
             frame[module.name] = extra
         else:
             legacy |= extra
     assert legacy == LEGACY_MARKUP, sorted(legacy)
-    assert frame == FRAME_PAGE_IMPORTS, frame
+    assert frame == DECLARED_IMPORTS, frame
 
 
 def test_reboot_and_retire_have_one_home_and_it_is_not_the_software_page(graph):

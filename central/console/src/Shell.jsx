@@ -9,6 +9,7 @@ import { neutralRoutes } from "./neutralRoutes.jsx";
 import { useFleetHosts } from "./fleetHosts.js";
 import { PageHiddenContext } from "./pageVisibility.js";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
+import { settingsRoutes } from "./settingsRoutes.jsx";
 import { showRoutes } from "./showRoutes.jsx";
 import { useRoute } from "./useRoute.js";
 import { useHealth, useSnapshot, useSnapshotAge } from "./useSnapshot.js";
@@ -52,11 +53,12 @@ const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 const WIDE = "(min-width: 850px)";
 
 // Sidebar groups, in a fixed order (console DDD §48): Wall; Show (Now, Scenes, Schedule,
-// Sources); Fleet (Hardware, Releases); Needs attention. Nothing reorders or counts on state.
+// Sources); Fleet (Hardware, Releases); Settings (Photo library); Needs attention. Nothing reorders or counts on state.
 const GROUPS = [
   { name: "Wall", table: wallRoutes },
   { name: "Show", table: showRoutes },
   { name: "Fleet", table: fleetRoutes },
+  { name: "Settings", table: settingsRoutes },
   { name: "Needs attention", table: neutralRoutes },
 ];
 const ENTRIES = GROUPS.flatMap((group) => group.table);

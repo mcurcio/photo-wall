@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
-import { Field, NumberInput } from "./field";
+import { Field, NumberInput, TextInput } from "./field";
 import { Select } from "./select";
 import { Slider } from "./slider";
 import { Switch } from "./switch";
@@ -58,4 +58,16 @@ export const SwitchKind: Story = {
 
 export const Disabled: Story = {
   args: { label: "Brightness", children: <Slider value={100} min={0} max={200} step={5} unit="%" onCommit={() => {}} disabled /> },
+};
+
+/** TextInput: a name or an address typed in a Field. */
+export const TextKind: Story = {
+  name: "Text",
+  args: { label: "Immich address", children: <TextInput value="http://immich.local:2283" type="url" width="long" onChange={() => {}} /> },
+};
+
+/** A key pasted once: a password field, never shown back. */
+export const PasswordKind: Story = {
+  name: "Password",
+  args: { label: "API key", children: <TextInput value="" type="password" width="long" onChange={() => {}} /> },
 };

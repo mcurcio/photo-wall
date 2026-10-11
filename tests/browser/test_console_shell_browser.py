@@ -178,14 +178,16 @@ def test_landing_is_always_the_wall(page, registry):
         expect(page.get_by_role("note", name="Getting started")).to_have_count(0)
 
 
-def test_the_sidebar_groups_wall_show_fleet_and_needs_attention_in_a_fixed_order(page, registry):
+def test_the_sidebar_groups_wall_show_fleet_settings_and_needs_attention_in_a_fixed_order(
+        page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         nav = page.get_by_role("navigation", name="Sections", exact=True)
-        expect(nav.get_by_role("list")).to_have_count(4)
+        expect(nav.get_by_role("list")).to_have_count(5)
         for group, labels in (("Wall", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
+                              ("Settings", ["Photo library"]),
                               ("Needs attention", ["Needs attention"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
@@ -399,7 +401,7 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
             expect(landmark).to_have_count(1)
 
         visited = 0
-        for table in ("show", "fleet", "neutral"):
+        for table in ("show", "fleet", "settings", "neutral"):
             for section, paths in SAMPLES[table].items():
                 for path in paths:
                     visit(page, path)
@@ -408,7 +410,7 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
                     for landmark in commissioning:
                         expect(landmark).to_have_count(0)
                     visited += 1
-        assert visited == sum(len(paths) for table in ("show", "fleet", "neutral")
+        assert visited == sum(len(paths) for table in ("show", "fleet", "settings", "neutral")
                               for paths in SAMPLES[table].values())
 
 

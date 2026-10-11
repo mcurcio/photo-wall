@@ -277,10 +277,10 @@ def test_what_a_draft_selects_the_summary_and_the_tag_rules():
                           "Unknown: your photo library has not reported its tags (upstream timeout)"]
 
 
-# --- One noun (§37): the source scan.
+# --- Retired words (§37): the source scan. Roadmap 4 names Immich, its albums and the Photo source
+# (console design #8-#33, design-language row A3), so only the retired preview words remain.
 
-RETIRED = re.compile(r"photo source|match preview|album|immich|· taken|taken (?:from|before|until|\$\{|\d)",
-                     re.IGNORECASE)
+RETIRED = re.compile(r"match preview|· taken|taken (?:from|before|until|\$\{|\d)", re.IGNORECASE)
 COMMENT = re.compile(r"/\*.*?\*/|(?<![:\w])//[^\n]*", re.DOTALL)
 
 
@@ -413,14 +413,13 @@ console.log(JSON.stringify(Object.fromEntries(
     assert offenders == {}, f"library-owned codes raised for Photo Wall's own limits: {offenders}"
 
 
-def test_no_console_string_says_photo_source_album_or_the_librarys_vendor():
+def test_no_console_string_says_a_retired_preview_word():
     modules = sorted(path for path in [*SRC.rglob("*.js"), *SRC.rglob("*.jsx")]
                      if "node_modules" not in path.parts)
     assert len(modules) > 50
     offenders = sorted(f"{path.relative_to(SRC)}: {match.group(0)}" for path in modules
                        for match in RETIRED.finditer(_console_strings_of(path.read_text())))
-    assert offenders == [], f"{offenders}: the console's noun is Source, and it names no vendor"
+    assert offenders == [], f"{offenders}: retired preview words"
     # The scan sees strings: a comment-free probe line is caught.
-    assert RETIRED.search(_console_strings_of('const label = "Photo sources";'))
     assert RETIRED.search(_console_strings_of("const label = `${kind} · taken ${day}`;"))
     assert RETIRED.search(_console_strings_of('filters.push(`taken ${year}`);'))

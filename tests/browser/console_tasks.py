@@ -47,10 +47,12 @@ from playwright.sync_api import expect
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
-SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | {"attention"}
+SETTINGS_SECTIONS = frozenset({"photo-library"})
+SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"attention"}
 LABELS = {
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
     "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
+    "photo-library": "Photo library",
     # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
     "players": "Software and screens",
 }
