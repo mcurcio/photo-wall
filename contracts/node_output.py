@@ -161,7 +161,7 @@ class PictureSetting:
     def __post_init__(self) -> None:
         """ValueError("picture_setting") unless acts_on is a member and value is an int (never a
         bool) in 0..PERCENT_MAX or exactly AS_THE_DISPLAY_HAS_IT."""
-        raise NotImplementedError
+        _require(isinstance(self.acts_on, ActsOn) and _is_picture_value(self.value), "picture_setting")
 
 
 @dataclass(frozen=True)
@@ -178,7 +178,10 @@ class OutputPicture:
         """ValueError("output_picture") unless brightness and contrast are PictureSettings,
         KELVIN_MIN <= colour_temperature_kelvin <= KELVIN_MAX in KELVIN_STEP, and
         GAMMA_TENTHS_MIN <= gamma_tenths <= GAMMA_TENTHS_MAX (ints, never bools)."""
-        raise NotImplementedError
+        _require(isinstance(self.brightness, PictureSetting) and isinstance(self.contrast, PictureSetting)
+                 and _count(self.colour_temperature_kelvin, KELVIN_MIN, KELVIN_MAX)
+                 and (self.colour_temperature_kelvin - KELVIN_MIN) % KELVIN_STEP == 0
+                 and _count(self.gamma_tenths, GAMMA_TENTHS_MIN, GAMMA_TENTHS_MAX), "output_picture")
 
 
 @dataclass(frozen=True)
@@ -196,7 +199,11 @@ class SettingReport:
         """ValueError("setting_report") unless acts_on is a member; read is None or an int in
         0..PERCENT_MAX; result is None or a WriteResult; and both are None when acts_on is
         PICTURE_ADJUSTMENT."""
-        raise NotImplementedError
+        _require(isinstance(self.acts_on, ActsOn)
+                 and (self.read is None or _count(self.read, 0, PERCENT_MAX))
+                 and (self.result is None or isinstance(self.result, WriteResult))
+                 and (self.acts_on is ActsOn.DISPLAY or (self.read is None and self.result is None)),
+                 "setting_report")
 
 
 @dataclass(frozen=True)
@@ -217,7 +224,10 @@ class PictureReport:
     def __post_init__(self) -> None:
         """ValueError("picture_report") unless the two answered flags are bools, for_change >= 1,
         brightness and contrast are SettingReports, and presented_change is None or >= 1."""
-        raise NotImplementedError
+        _require(type(self.brightness_answered) is bool and type(self.contrast_answered) is bool
+                 and _count(self.for_change, 1)
+                 and isinstance(self.brightness, SettingReport) and isinstance(self.contrast, SettingReport)
+                 and (self.presented_change is None or _count(self.presented_change, 1)), "picture_report")
 
 
 @dataclass(frozen=True)
@@ -246,7 +256,9 @@ class OutputDocument:
                  and len({request.request_id for request in power}) == len(power)
                  and power[-1].for_seconds is None
                  and (isinstance(self.method, PowerMethod) or _is_best_detected(self.method))
-                 and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool,
+                 and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool
+                 and ((self.picture_change is None and self.picture is None)
+                      or (_count(self.picture_change, 1) and isinstance(self.picture, OutputPicture))),
                  "output_document")
 
 
@@ -332,7 +344,8 @@ class OutputReport:
                  and (self.method is None or self.method in answers)
                  and (self.for_change is None or _count(self.for_change, 1))
                  and (self.result is None or isinstance(self.result, PowerResult))
-                 and (self.in_force is None or isinstance(self.in_force, InForce)), "output_report")
+                 and (self.in_force is None or isinstance(self.in_force, InForce))
+                 and (self.picture is None or isinstance(self.picture, PictureReport)), "output_report")
 
 
 @dataclass(frozen=True)
@@ -380,10 +393,11 @@ def decode_output_document(raw: bytes) -> OutputDocument:
     unknown field); ValueError("output_document") for anything else. 1c (slice T0): builds the
     nested picture part (`acts_on` an ActsOn, `value` an int or AS_THE_DISPLAY_HAS_IT)."""
     def build(value: dict[str, Any]) -> OutputDocument:
-        method = value["method"]
+        method, picture = value["method"], value["picture"]
         return OutputDocument(**{
             **value, "power": tuple(_power_request(request) for request in _list(value["power"])),
-            "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method)})
+            "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method),
+            "picture": None if picture is None else _output_picture(picture)})
     return _decode(raw, OUTPUT_DOCUMENT_BYTES, OutputDocument, build, "output_document")
 
 
@@ -396,7 +410,7 @@ def decode_output_report(raw: bytes) -> OutputReport:
     """ValueError("output_report") for anything but a valid encoding. 1c (slice T0): builds the
     nested picture part."""
     def build(value: dict[str, Any]) -> OutputReport:
-        identity, in_force = value["identity"], value["in_force"]
+        identity, in_force, picture = value["identity"], value["in_force"], value["picture"]
         return OutputReport(**{
             **value,
             "identity": None if identity is None else DisplayIdentity(**_fields(DisplayIdentity, identity)),
@@ -404,7 +418,8 @@ def decode_output_report(raw: bytes) -> OutputReport:
             "answers": tuple(PowerMethod(method) for method in _list(value["answers"])),
             "method": _optional(PowerMethod, value["method"]),
             "result": _optional(PowerResult, value["result"]),
-            "in_force": None if in_force is None else InForce(**_fields(InForce, in_force))})
+            "in_force": None if in_force is None else InForce(**_fields(InForce, in_force)),
+            "picture": None if picture is None else _picture_report(picture)})
     return _decode(raw, OUTPUT_REPORT_BYTES, OutputReport, build, "output_report")
 
 
@@ -444,6 +459,11 @@ def _is_token(value: object) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_picture_value(value: object) -> bool:
+    """A whole percent 0..PERCENT_MAX (never a bool) or exactly AS_THE_DISPLAY_HAS_IT."""
+    return _count(value, 0, PERCENT_MAX) or (type(value) is str and value == AS_THE_DISPLAY_HAS_IT)
 
 
 def _is_best_detected(value: object) -> bool:
@@ -494,6 +514,29 @@ def _optional(kind: type[StrEnum], value: object) -> Any:
 def _power_request(value: object) -> PowerRequest:
     request = _fields(PowerRequest, value)
     return PowerRequest(**{**request, "power": Power(request["power"]), "reason": RequestReason(request["reason"])})
+
+
+def _picture_setting(value: object) -> PictureSetting:
+    setting = _fields(PictureSetting, value)
+    return PictureSetting(**{**setting, "acts_on": ActsOn(setting["acts_on"])})
+
+
+def _output_picture(value: object) -> OutputPicture:
+    picture = _fields(OutputPicture, value)
+    return OutputPicture(**{**picture, "brightness": _picture_setting(picture["brightness"]),
+                            "contrast": _picture_setting(picture["contrast"])})
+
+
+def _setting_report(value: object) -> SettingReport:
+    report = _fields(SettingReport, value)
+    return SettingReport(**{**report, "acts_on": ActsOn(report["acts_on"]),
+                            "result": _optional(WriteResult, report["result"])})
+
+
+def _picture_report(value: object) -> PictureReport:
+    report = _fields(PictureReport, value)
+    return PictureReport(**{**report, "brightness": _setting_report(report["brightness"]),
+                            "contrast": _setting_report(report["contrast"])})
 
 
 _Wire = TypeVar("_Wire")

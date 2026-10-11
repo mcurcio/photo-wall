@@ -1,0 +1,429 @@
+{
+ "_comment": "Shared Frame fit vectors (roadmap 1c, slice T0): tests/test_frame_fit.py checks contracts/frame_fit.py against them and the console's convex.js check reads them too. Points are fractions of the output, origin top-left, clockwise from top-left; cover rectangles are in output pixels (centre, width along the picture's u axis, height along v).",
+ "output": [
+  1920,
+  1080
+ ],
+ "convex": [
+  [
+   [
+    0,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  [
+   [
+    0.1,
+    0.1
+   ],
+   [
+    0.9,
+    0.05
+   ],
+   [
+    0.8,
+    0.95
+   ],
+   [
+    0.2,
+    0.8
+   ]
+  ],
+  [
+   [
+    0.25,
+    0.25
+   ],
+   [
+    0.75,
+    0.25
+   ],
+   [
+    0.75,
+    0.75
+   ],
+   [
+    0.25,
+    0.75
+   ]
+  ]
+ ],
+ "folded": [
+  [
+   [
+    0,
+    0
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  [
+   [
+    0,
+    0
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    1,
+    1
+   ],
+   [
+    1,
+    0
+   ]
+  ],
+  [
+   [
+    0,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  [
+   [
+    0,
+    0
+   ],
+   [
+    0.5,
+    0
+   ],
+   [
+    1,
+    0
+   ],
+   [
+    0,
+    1
+   ]
+  ]
+ ],
+ "cover": [
+  {
+   "name": "full-screen-0",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 0,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 1920.0,
+   "height": 1080.0,
+   "landscape": true
+  },
+  {
+   "name": "full-screen-7",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 7,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 2037.307502029,
+   "height": 1305.938983111,
+   "landscape": true
+  },
+  {
+   "name": "full-screen-45",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 45,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 2121.32034356,
+   "height": 2121.32034356,
+   "landscape": true
+  },
+  {
+   "name": "full-screen-90",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 90,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 1080.0,
+   "height": 1920.0,
+   "landscape": false
+  },
+  {
+   "name": "full-screen-135",
+   "corners": [
+    [
+     0,
+     0
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     1
+    ]
+   ],
+   "rotation": 135,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 2121.32034356,
+   "height": 2121.32034356,
+   "landscape": true
+  },
+  {
+   "name": "asymmetric-0",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 0,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 1536.0,
+   "height": 972.0,
+   "landscape": true
+  },
+  {
+   "name": "asymmetric-7",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 7,
+   "centre": [
+    914.459560931,
+    451.897112259
+   ],
+   "width": 1517.969944377,
+   "height": 988.153773329,
+   "landscape": true
+  },
+  {
+   "name": "asymmetric-45",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 45,
+   "centre": [
+    1014.0,
+    417.0
+   ],
+   "width": 1599.475539044,
+   "height": 1523.108006676,
+   "landscape": true
+  },
+  {
+   "name": "asymmetric-90",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 90,
+   "centre": [
+    960.0,
+    540.0
+   ],
+   "width": 972.0,
+   "height": 1536.0,
+   "landscape": false
+  },
+  {
+   "name": "asymmetric-135",
+   "corners": [
+    [
+     0.1,
+     0.1
+    ],
+    [
+     0.9,
+     0.05
+    ],
+    [
+     0.8,
+     0.95
+    ],
+    [
+     0.2,
+     0.8
+    ]
+   ],
+   "rotation": 135,
+   "centre": [
+    1014.0,
+    417.0
+   ],
+   "width": 1523.108006676,
+   "height": 1599.475539044,
+   "landscape": false
+  }
+ ]
+}

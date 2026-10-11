@@ -12,20 +12,27 @@ import json
 import pytest
 
 from contracts.node_output import (
+    AS_THE_DISPLAY_HAS_IT,
     BEST_DETECTED,
     MAX_POWER_REQUESTS,
     OUTPUT_DOCUMENT_BYTES,
+    ActsOn,
     DisplayIdentity,
     DisplayMode,
     InForce,
     OutputDocument,
+    OutputPicture,
     OutputReport,
+    PictureReport,
+    PictureSetting,
     Power,
     PowerAttempt,
     PowerMethod,
     PowerRequest,
     PowerResult,
     RequestReason,
+    SettingReport,
+    WriteResult,
     decode_output_document,
     decode_output_report,
     decode_power_attempt,
@@ -199,3 +206,90 @@ def test_decoding_a_report_or_attempt_refuses():
     for broken in ({**attempt, "result": "lit"}, {**attempt, "elapsed_ms": -1}, {**attempt, "unknown": 0}):
         with pytest.raises(ValueError, match="^power_attempt$"):
             decode_power_attempt(json.dumps(broken).encode())
+
+
+# 1c (slice T0): the picture parts of the document and the report.
+
+PICTURE = OutputPicture(PictureSetting(ActsOn.DISPLAY, 60), PictureSetting(ActsOn.PICTURE_ADJUSTMENT, AS_THE_DISPLAY_HAS_IT),
+                        3000, 24)
+PICTURE_DOCUMENT = OutputDocument("HDMI-A-1", 3, (STANDING,), BEST_DETECTED, True, False, picture_change=17,
+                                  picture=PICTURE)
+PICTURE_REPORT = PictureReport(True, False, 17, SettingReport(ActsOn.DISPLAY, 60, WriteResult.TAKEN),
+                               SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, None), 16)
+
+
+def test_a_document_and_a_report_with_picture_parts_round_trip():
+    raw = encode_output_document(PICTURE_DOCUMENT)
+    assert decode_output_document(raw) == PICTURE_DOCUMENT
+    assert b'"value":"as-the-display-has-it"' in raw and b'"value":60' in raw
+    report = _report(picture=PICTURE_REPORT)
+    assert decode_output_report(encode_output_report(report)) == report
+    for result in WriteResult:
+        report = _report(picture=PictureReport(False, True, 1, SettingReport(ActsOn.DISPLAY, None, result),
+                                               SettingReport(ActsOn.DISPLAY, 0, None), None))
+        assert decode_output_report(encode_output_report(report)) == report
+
+
+def test_a_picture_documents_bytes_are_canonical_whatever_the_field_order():
+    canonical = encode_output_document(PICTURE_DOCUMENT)
+    parsed = json.loads(canonical)
+    picture = parsed["picture"]
+    shuffled = {key: parsed[key] for key in reversed(list(parsed))}
+    shuffled["picture"] = {key: (dict(reversed(value.items())) if isinstance(value, dict) else value)
+                           for key, value in reversed(list(picture.items()))}
+    raw = json.dumps(shuffled).encode()
+    assert raw != canonical
+    assert encode_output_document(decode_output_document(raw)) == canonical
+
+
+@pytest.mark.parametrize("build, code", [
+    (lambda: OutputDocument("HDMI-A-1", 3, (STANDING,), BEST_DETECTED, True, False, picture_change=17),
+     "output_document"),                                                           # change without picture
+    (lambda: OutputDocument("HDMI-A-1", 3, (STANDING,), BEST_DETECTED, True, False, picture=PICTURE),
+     "output_document"),                                                           # picture without change
+    (lambda: OutputDocument("HDMI-A-1", 3, (STANDING,), BEST_DETECTED, True, False, picture_change=0,
+                            picture=PICTURE), "output_document"),
+    (lambda: PictureSetting(ActsOn.DISPLAY, 101), "picture_setting"),
+    (lambda: PictureSetting(ActsOn.DISPLAY, -1), "picture_setting"),
+    (lambda: PictureSetting(ActsOn.DISPLAY, "50"), "picture_setting"),
+    (lambda: PictureSetting(ActsOn.DISPLAY, True), "picture_setting"),
+    (lambda: PictureSetting("display", 50), "picture_setting"),
+    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 6550, 22), "output_picture"),
+    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 9400, 22), "output_picture"),
+    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 6500, 27), "output_picture"),
+    (lambda: OutputPicture(PICTURE.brightness, PICTURE.contrast, 6500, 2.2), "output_picture"),
+    (lambda: SettingReport(ActsOn.PICTURE_ADJUSTMENT, 40, None), "setting_report"),  # a software value as read
+    (lambda: SettingReport(ActsOn.PICTURE_ADJUSTMENT, None, WriteResult.TAKEN), "setting_report"),
+    (lambda: SettingReport(ActsOn.DISPLAY, 101, None), "setting_report"),
+    (lambda: PictureReport(True, False, 17, PICTURE_REPORT.brightness, PICTURE_REPORT.contrast, 0),
+     "picture_report"),                                                            # presented_change 0
+    (lambda: PictureReport(True, False, 0, PICTURE_REPORT.brightness, PICTURE_REPORT.contrast, None),
+     "picture_report"),
+    (lambda: PictureReport(1, False, 17, PICTURE_REPORT.brightness, PICTURE_REPORT.contrast, None),
+     "picture_report"),
+    (lambda: _report(picture={"for_change": 1}), "output_report"),
+], ids=["change-without-picture", "picture-without-change", "picture-change-0", "value-101", "value-negative",
+        "value-string", "value-bool", "acts-on-string", "kelvin-off-step", "kelvin-past-max", "gamma-27",
+        "gamma-float", "read-while-picture-adjustment", "result-while-picture-adjustment", "read-101",
+        "presented-0", "for-change-0", "answered-int", "report-picture-not-a-report"])
+def test_picture_parts_refuse(build, code):
+    with pytest.raises(ValueError, match=f"^{code}$"):
+        build()
+
+
+def test_decoding_picture_parts_refuses():
+    document = json.loads(encode_output_document(PICTURE_DOCUMENT))
+    for picture in ({**document["picture"], "brightness": {"acts_on": "display", "value": "50"}},
+                    {**document["picture"], "contrast": {"acts_on": "panel", "value": 50}},
+                    {**document["picture"], "colour_temperature_kelvin": 6550},
+                    {**document["picture"], "extra": 1}):
+        with pytest.raises(ValueError, match="^output_document$"):
+            decode_output_document(json.dumps({**document, "picture": picture}).encode())
+    with pytest.raises(ValueError, match="^output_document$"):
+        decode_output_document(json.dumps({**document, "picture": None}).encode())   # change without picture
+    report = json.loads(encode_output_report(_report(picture=PICTURE_REPORT)))
+    for picture in ({**report["picture"], "presented_change": 0},
+                    {**report["picture"], "brightness": {"acts_on": "display", "read": 60, "result": "lit"}},
+                    {**report["picture"], "contrast": {"acts_on": "picture-adjustment", "read": 3, "result": None}}):
+        with pytest.raises(ValueError, match="^output_report$"):
+            decode_output_report(json.dumps({**report, "picture": picture}).encode())

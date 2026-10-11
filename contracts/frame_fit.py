@@ -27,6 +27,7 @@ player/geometry.py and player/native.py); which fit a Frame uses and where its p
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -63,7 +64,7 @@ class CoverRectangle:
     @property
     def landscape(self) -> bool:
         """Orientation (#96): at least as wide as tall (a square reads landscape)."""
-        raise NotImplementedError
+        return self.width >= self.height
 
 
 def cover_rectangle(corners: Corners, rotation: float, output: OutputSize) -> CoverRectangle:
@@ -71,7 +72,24 @@ def cover_rectangle(corners: Corners, rotation: float, output: OutputSize) -> Co
     output pixels (corners scaled by `output`). Pure. ValueError("cover_rotation") unless
     0 <= rotation < 360 and finite; ValueError("cover_output") unless both sizes >= 1;
     ValueError("cover_corners") unless `convex_clockwise(corners)`."""
-    raise NotImplementedError
+    if not (isinstance(rotation, (int, float)) and not isinstance(rotation, bool)
+            and math.isfinite(rotation) and 0 <= rotation < 360):
+        raise ValueError("cover_rotation")
+    width, height = output
+    if not (type(width) is int and type(height) is int and width >= 1 and height >= 1):
+        raise ValueError("cover_output")
+    if not convex_clockwise(corners):
+        raise ValueError("cover_corners")
+    turn = math.radians(rotation)
+    cos, sin = math.cos(turn), math.sin(turn)
+    pixels = [(x * width, y * height) for x, y in corners]
+    along_u = [x * cos + y * sin for x, y in pixels]
+    along_v = [-x * sin + y * cos for x, y in pixels]
+    mid_u = (min(along_u) + max(along_u)) / 2
+    mid_v = (min(along_v) + max(along_v)) / 2
+    return CoverRectangle(centre_x=mid_u * cos - mid_v * sin, centre_y=mid_u * sin + mid_v * cos,
+                          width=max(along_u) - min(along_u), height=max(along_v) - min(along_v),
+                          rotation=float(rotation))
 
 
 __all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize", "Point",
