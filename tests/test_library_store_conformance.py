@@ -213,14 +213,6 @@ class PgHarness:
                 "ORDER BY item_ref", (ref, kind)).fetchall())
 
 
-def diverges(request, harness, store: str, reason: str) -> None:
-    """A known difference between the two stores (erratum E-P4-I2-1): the case is expected to
-    fail on `store` until its owner fixes it, and strict, so the fix flips it to a failure that
-    says to remove this call."""
-    if harness.name == store:
-        request.applymarker(pytest.mark.xfail(strict=True, reason=reason))
-
-
 @pytest.fixture(params=["fake", "postgres"])
 def harness(request, registry):
     return FakeHarness(registry.clock) if request.param == "fake" else PgHarness(registry)
@@ -307,11 +299,9 @@ def test_the_first_passing_contact_binds_its_user_and_another_user_never_rebinds
     assert store.begin_contact(ref).connection.bound_user == ANNA.user_ref
 
 
-def test_an_immich_too_old_to_use_binds_no_user(request, harness):
+def test_an_immich_too_old_to_use_binds_no_user(harness):
     """A contact that reads Needs a look (Update Immich) has not passed, so the next passing
     contact's user is the connection's."""
-    diverges(request, harness, "postgres", "E-P4-I2-1 (1): PgPhotoLibrary.record_contact binds "
-             "the user of any answer without missing permissions, an old Immich's too")
     store = harness.store
     ref = harness.connect()
     store.record_contact(store.begin_contact(ref), answer(BEN, version=(1, 140, 0)))
@@ -377,11 +367,9 @@ def test_an_unwanted_pool_is_never_checked(harness):
     assert store.due_pools() == () and store.begin_check(unwanted) is None
 
 
-def test_a_pool_of_a_connection_with_no_key_is_never_due(request, harness):
+def test_a_pool_of_a_connection_with_no_key_is_never_due(harness):
     """A cut-over connection (C12) waits for its key: its pools are not queued for a check
     begin_check would refuse."""
-    diverges(request, harness, "fake", "E-P4-I2-1 (2): FakeLibraryStore.due_pools asks for a "
-             "key only of a running check")
     store = harness.store
     keyless = harness.want(SourceQuery(connection_ref=harness.connect(key=None)))
     assert store.begin_check(keyless) is None
@@ -464,11 +452,9 @@ def test_only_a_complete_check_removes_what_it_did_not_see(harness):
     assert harness.rows(key) == {uid(2): "in_pool"}
 
 
-def test_a_row_added_before_its_mark_leaves_when_the_check_completes(request, harness):
+def test_a_row_added_before_its_mark_leaves_when_the_check_completes(harness):
     """A photo found by an earlier step and then marked by a later step of the same check (an
     exclusion read after it) is subtracted at completion, not kept."""
-    diverges(request, harness, "fake", "E-P4-I2-1 (3): FakeLibraryStore.finish_check sweeps "
-             "only unseen rows, not rows this check marked after adding them")
     store = harness.store
     ref = harness.connect()
     key = harness.want(SourceQuery(connection_ref=ref))
@@ -520,9 +506,7 @@ def test_maintenance_retires_unwanted_pools_and_keeps_wanted_ones(harness):
     (KeyRejected(), "permission"),
     (MissingPermissions(missing=("album.read",)), "permission"),
     (ImmichTooOld(found="1.140.0", oldest="2.5.0"), "incompatible"),
-    pytest.param(UnexpectedAnswer(detail="albums"), "incompatible", marks=pytest.mark.xfail(
-        strict=True, reason="E-P4-I2-1 (4): LibraryChecks sends an unexpected answer's detail, "
-        "not its kind, so the store reads it as unavailable")),
+    (UnexpectedAnswer(detail="albums"), "incompatible"),
     (Unreachable(), "unavailable"),
 ])
 def test_a_failed_listing_reads_as_the_status_of_the_problem_the_worker_sends(

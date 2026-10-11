@@ -1305,3 +1305,67 @@ def test_no_image_or_service_names_a_connections_file():
                  "tests/support/workers.py"):
         source = (root / name).read_text()
         assert "PHOTO_WALL_CONNECTIONS_FILE" not in source and "connections.json" not in source
+
+
+def test_the_demo_operator_drives_centrals_photo_routes_end_to_end(registry, tmp_path, monkeypatch):
+    """Seam g (run ledger .claude/runs/photo-4.md): the wall demo's operator role pastes its
+    connection, builds `demo:1` from a draft and asks for both checks through Central's real
+    C1 and C2 routes, with the statuses `operator_status` expects; its pool read follows the
+    Source's check as the worker's side records it. The demo's own requests run against
+    create_app over a real database (no Immich, no worker); CI's software e2e then runs the
+    whole wall on top of this."""
+    from uuid import UUID
+
+    import httpx
+    from fastapi.testclient import TestClient
+    from runtime_fakes import apply_procrastinate_schema
+
+    import scripts.demo_wall as demo
+    from central.app import create_app
+    from central.photo_library.model import InPool, LibraryAsset
+    from central.photo_library.ports import CheckComplete, CheckStep
+
+    token = "demo-operator-" + "t" * 32
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("DEMO_ADMIN_TOKEN", token)
+    monkeypatch.setenv("DEMO_CAPTURE_START", "1700000000")
+    handoff, state = tmp_path / "handoff.json", tmp_path / "connection.json"
+    handoff.write_text(json.dumps({"url": "http://immich.invalid", "key": "PUBLIC-DEMO-KEY-1234"}))
+    monkeypatch.setattr(demo, "CONNECTION_HANDOFF", handoff)
+    monkeypatch.setattr(demo, "CONNECTION_STATE", state)
+    apply_procrastinate_schema(registry.db.dsn)
+    app = create_app(registry.db, registry.clock, token)
+    with TestClient(app, base_url="http://central:8000") as client:
+        def central(*, base_url, headers, **_):
+            client.headers.update(headers)
+            return client
+
+        monkeypatch.setattr(httpx, "Client", central)
+
+        class Host:
+            def role(self, role, action):
+                assert role == "operator"
+                return operator_action(action)
+
+        connection = connect_demo_library(Host())
+        assert json.loads(state.read_text()) == connection
+        assert operator_action("connection")["health"] == {"state": "not_checked"}
+        assert configure_demo_source(Host())["source_ref"] == "demo:1"
+        before = operator_action("check")
+        assert before["check"] == {"state": "never_checked"}
+        library = app.state.photo_library
+        with registry.db.transaction() as conn:
+            queued = {row["task_name"] for row in conn.execute(
+                "SELECT task_name FROM procrastinate_jobs").fetchall()}
+            pool_key = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref='demo:1'"
+                                    ).fetchone()["pool_key"]
+        assert {"photo_wall.library.check_connection", "photo_wall.library.check_pool"} <= queued
+        photo = LibraryAsset(connection_ref=connection["connection_ref"],
+                             upstream_id=str(UUID(int=1)), revision="1" * 40, kind="image",
+                             taken_at=1700000010, width=4000, height=3000)
+        lease = library.begin_check(pool_key)
+        assert library.record_step(lease, CheckStep(progress={"page": 1}, entries=(
+            InPool(asset=photo),), seen_so_far=1))
+        assert library.finish_check(lease, CheckComplete())
+        after = operator_action("check")
+        assert demo.check_finished({"pool": after}, before, "ok")

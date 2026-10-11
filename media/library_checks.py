@@ -14,7 +14,6 @@ reaches nothing else.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from collections.abc import Callable
 from typing import Protocol
@@ -32,6 +31,7 @@ from central.photo_library.ports import (
 from contracts.time import Clock
 from media import pool_check
 from media.library_client import ChosenItemGone, LibraryClient, LibraryUnavailable
+from media.library_clients import LibraryClients
 from media.pool_check import CheckProgress
 
 logger = logging.getLogger("photo_wall.library")
@@ -45,7 +45,8 @@ class LibraryCheckQueue(Protocol):
 
 
 def _code(problem: LibraryProblem) -> str:
-    return getattr(problem, "detail", None) or problem.kind
+    """A failed list's error code: the problem's kind, which the store's list status reads."""
+    return problem.kind
 
 
 async def _blocking(function, *args):
@@ -57,19 +58,10 @@ class LibraryChecks:
                  client_for: Callable[[ConnectionSecret], LibraryClient], clock: Clock, *,
                  queue: LibraryCheckQueue | None = None) -> None:
         self.store, self.client_for, self.clock, self.queue = store, client_for, clock, queue
-        self._clients: dict[str, tuple[str, LibraryClient]] = {}
+        self._clients = LibraryClients(client_for, self._close)
 
     async def _client(self, secret: ConnectionSecret) -> LibraryClient:
-        """One client per connection and key: a new key gets a new client (the old one closes)."""
-        fingerprint = hashlib.sha256(secret.api_key.get_secret_value().encode()).hexdigest()
-        held = self._clients.get(secret.connection_ref)
-        if held is not None and held[0] == fingerprint:
-            return held[1]
-        client = self.client_for(secret)
-        self._clients[secret.connection_ref] = (fingerprint, client)
-        if held is not None:
-            await self._close(held[1])
-        return client
+        return await self._clients.for_secret(secret)
 
     # connection checks -----------------------------------------------------------------------
 
@@ -171,5 +163,4 @@ class LibraryChecks:
             logger.warning("library client close failed")
 
     async def close(self) -> None:
-        clients, self._clients = [held[1] for held in self._clients.values()], {}
-        await asyncio.gather(*(self._close(client) for client in clients))
+        await self._clients.close()

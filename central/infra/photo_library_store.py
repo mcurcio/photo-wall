@@ -365,9 +365,8 @@ class PgPhotoLibrary:
             health = policy.contact_health(result, bound_user=bound,
                                            previous=_HEALTH.validate_python(row["health"]),
                                            checked_at=self.times.now_in(conn))
-            if (bound is None and isinstance(result, ContactAnswer)
-                    and not result.missing_permissions):
-                bound = result.user
+            if bound is None and isinstance(health, HealthOk) and isinstance(result, ContactAnswer):
+                bound = result.user  # the first passing contact binds (C1)
             counts = (result.counts if isinstance(health, HealthOk) and isinstance(
                 result, ContactAnswer) and result.counts is not None else None)
             conn.execute(

@@ -93,7 +93,15 @@ async def rescue_stalled(app: procrastinate.App, *,
 
     Deferring first leaves no window without a copy: the queueing-lock index covers only `todo`
     rows, and the copy cannot run while the stalled row holds the lock (the content runtime's
-    rescue, central/infra/queue_ops.py, follows the same order for its typed jobs)."""
+    rescue, central/infra/queue_ops.py, follows the same order for its typed jobs).
+
+    Two differences from that rescue, by design: the copy starts at attempt 0
+    (`defer_job_async` cannot carry `attempts`), and a copy of PREPARE_MEDIA_TASK usually
+    claims nothing, because the job's `media_jobs` row stays `running` (claims take `queued` or
+    `retry` only) until `MediaStore.recover`, run by the maintenance task, hands it back. What
+    this rescue guarantees is the lock: MEDIA_STORAGE_LOCK and a check's lock are free again.
+    The rule has these two bodies until a residual gives it one home (run ledger, maintenance
+    risks)."""
     periodic = {task.task.name for task in app.periodic_registry.periodic_tasks.values()}
     finished = 0
     for row in await app.job_manager.get_stalled_jobs(

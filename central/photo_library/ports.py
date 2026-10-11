@@ -240,9 +240,9 @@ class LibraryWorkerStore(Protocol):
         ...
 
     def due_pools(self) -> tuple[PoolKey, ...]:
-        """Wanted pools (a live draft, or a Source revision Runtime or a name needs) with no check
-        running whose last check finished CHECK_EVERY_SECONDS ago or more, or never ran, or
-        that a Check now asked for; and wanted pools whose connection has a key with a check
+        """Wanted pools (a live draft, or a Source revision Runtime or a name needs) whose
+        connection has a key, and either: no check running, and the last check finished
+        CHECK_EVERY_SECONDS ago or more, or never ran, or a Check now asked for one; or a check
         running whose latest step began STALE_CHECK_SECONDS ago or more (database time), so a
         step lost with its worker never leaves a pool checking."""
         ...

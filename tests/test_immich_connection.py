@@ -182,8 +182,7 @@ def test_each_key_problem_reads_as_needs_a_look_and_the_good_key_clears_it(
     system.write(immich_library.base_url, immich_library.other_user_key())
     other = system.problem("other_user")
     assert other["expected"] == immich_library.owner_name
-    # A key not used before, so the worker's client for it is made for the new address (a new
-    # address with a key it already holds is the next test's, E-P4-I2-1).
+    # A key not used before (a new address with a key it already holds is the next test's).
     system.write(immich_library.unreachable_url(), immich_library.new_key(REQUIRED_PERMISSIONS))
     system.problem("unreachable")
     system.write(immich_library.base_url, immich_library.api_key)
@@ -192,8 +191,6 @@ def test_each_key_problem_reads_as_needs_a_look_and_the_good_key_clears_it(
     assert found["immich_user"]["user_ref"] == immich_library.owner_ref   # bound once, kept
 
 
-@pytest.mark.xfail(strict=True, reason="E-P4-I2-1 (5): the worker's Immich client is cached "
-                   "by connection and key only, so a new address with the same key is never used")
 def test_a_new_address_with_the_same_key_is_used_without_a_restart(system, immich_library):
     """C1 "no restart": the owner corrects the server address and keeps the key. Before and
     after, the key is the same; only the URL changes."""

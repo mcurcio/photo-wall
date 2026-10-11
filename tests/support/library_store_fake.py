@@ -167,12 +167,13 @@ class FakeLibraryStore:
         now = self._now()
         def due(pool: _Pool) -> bool:
             if pool.checking:
-                return (self._secret(pool.query.connection_ref) is not None
-                        and (pool.step_at is None or now - pool.step_at >= STALE_CHECK_SECONDS))
+                return pool.step_at is None or now - pool.step_at >= STALE_CHECK_SECONDS
             return (pool.requested or pool.finished_at is None
                     or now - pool.finished_at >= CHECK_EVERY_SECONDS)
 
-        return tuple(sorted(key for key, pool in self.pools.items() if pool.wanted and due(pool)))
+        return tuple(sorted(key for key, pool in self.pools.items() if pool.wanted
+                            and self._secret(pool.query.connection_ref) is not None
+                            and due(pool)))
 
     def begin_check(self, pool_key: str) -> CheckLease | None:
         pool = self.pools.get(pool_key)
@@ -227,8 +228,10 @@ class FakeLibraryStore:
             return False
         now = self._now()
         if isinstance(finish, CheckComplete):
+            marked = {ref for ref, (_, number) in pool.marks.items()
+                      if number == lease.check_number}
             pool.rows = {ref: row for ref, row in pool.rows.items()
-                         if row[1] >= lease.check_number}
+                         if row[1] >= lease.check_number and ref not in marked}
             pool.marks = {ref: mark for ref, mark in pool.marks.items()
                           if mark[1] >= lease.check_number}
             pool.last_complete_at = now

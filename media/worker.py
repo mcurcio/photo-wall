@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import math
@@ -42,6 +41,7 @@ from contracts.time import Clock, SystemClock
 from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
 from media.library_client import FetchedRendition, LibraryClient
+from media.library_clients import LibraryClients
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import MediaError
 from media.prepare import BuildIdentity, PreparationLimits, PreparedMedia, Preparer
@@ -119,7 +119,7 @@ class MediaWorker:
         self.client_factory = client_factory or (lambda secret: ImmichClient.for_connection(
             secret, clock=self.clock,
             limits=LibraryLimits(max_fetch_bytes=repository.limits.max_original_bytes)))
-        self._clients: dict[str, tuple[str, LibraryClient]] = {}
+        self._clients = LibraryClients(self.client_factory, self._close)
         # The thumbnail directory, swept of files whose record maintenance retired.
         self.previews = previews
         self._error: str | None = None
@@ -144,17 +144,11 @@ class MediaWorker:
         return now
 
     async def _client(self, connection_ref: str) -> LibraryClient:
-        """The connection's client for its key now; a new key gets a new client."""
+        """The connection's client for its address and key now (`LibraryClients`)."""
         secret = await _blocking(self.library.connection_secret, connection_ref)
         if secret is None:
             raise MediaError("connection_unknown")
-        key = hashlib.sha256(secret.api_key.get_secret_value().encode()).hexdigest()
-        held = self._clients.get(connection_ref)
-        if held is None or held[0] != key:
-            if held is not None:
-                await self._close(held[1])
-            held = self._clients[connection_ref] = (key, self.client_factory(secret))
-        return held[1]
+        return await self._clients.for_secret(secret)
 
     async def _register_recipe(self):
         self._utc()
@@ -258,8 +252,7 @@ class MediaWorker:
             self._error = "connection_close"
 
     async def _close_clients(self):
-        clients, self._clients = [held[1] for held in self._clients.values()], {}
-        await asyncio.gather(*(self._close(client) for client in clients))
+        await self._clients.close()
 
 
 _STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
