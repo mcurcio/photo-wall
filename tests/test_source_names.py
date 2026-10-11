@@ -118,8 +118,8 @@ def test_planner_catalog_excludes_dormant_revisions(registry):
     names.put("photos", write(1, favorites=True))
     needed = runtime.read().planning_source_refs()
     with registry.db.transaction() as conn:
-        snapshots, _ = repository.catalog_in(conn, needed)
-    assert set(snapshots) == {"photos:2"}
+        pools = repository.source_pools_in(conn, needed)
+    assert set(pools) == {"photos:2"}
 
 
 def test_dormant_revision_stops_scheduled_refresh_and_reactivates_for_run(registry):
@@ -199,7 +199,7 @@ def test_retirement_waits_for_requested_refresh_completion(registry):
             "refresh_active"] is False
 
 
-def test_dormant_snapshot_releases_metadata_capacity_after_run_ends(registry):
+def test_dormant_snapshot_releases_its_members_after_run_ends(registry):
     repository = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     runtime = RuntimeStore(registry.db, registry.clock)
     names = SourceNameService(registry.db, repository, runtime, _library(registry))
@@ -217,18 +217,16 @@ def test_dormant_snapshot_releases_metadata_capacity_after_run_ends(registry):
                      (asset.asset_id,))
         conn.execute("UPDATE catalog_snapshots SET snapshot=%s WHERE source_ref='photos:1'",
                      (Jsonb(snapshot.model_dump(mode="json")),))
-        assert repository._candidate_capacity(conn) == 1
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
         Contribution(target="frame:main", source_refs=("photos:1",)),)))
     run = runtime.command("activate", "show", "first", 1000)
     names.put("photos", write(1, favorites=True))
     with registry.db.transaction() as conn:
-        assert repository._candidate_capacity(conn) == 1
+        assert conn.execute("SELECT count(*) AS n FROM source_members WHERE source_ref='photos:1'").fetchone()["n"] == 1
     runtime.command("cancel", run.run_id, 1001)
     with registry.db.transaction() as conn, runtime.edit(conn) as current:
         repository.reconcile_source_activity_in(conn, current.planning_source_refs())
     with registry.db.transaction() as conn:
-        assert repository._candidate_capacity(conn) == 0
         assert conn.execute("SELECT count(*) AS n FROM source_members WHERE source_ref='photos:1'").fetchone()["n"] == 0
 
 

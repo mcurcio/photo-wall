@@ -11,18 +11,19 @@ import re
 import secrets
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
 
-from central.catalog import Candidate, CatalogSnapshot
+from central.catalog import Candidate, CatalogSnapshot, SourcePool
 from central.db import MEDIA_LOCK, Database, TransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_ports import RefreshReceipt, SourcePreviewReceipt
 from central.media_queue import MediaTaskQueue
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import LibraryAsset, PoolMember
 from central.planner import AcquisitionRequest, candidate_standing, eligible
 from central.registry import RegistryError
 from contracts.models import (
@@ -94,9 +95,6 @@ class StoreLimits(Model):
     max_video_bytes: int = Field(default=256 * 1024**2, gt=0)
     lease_seconds: float = Field(default=600, ge=360, le=3600)
     refresh_seconds: float = Field(default=30, ge=1, le=3600)
-    # PlannerLimits.max_candidates is 10000; this shared bound covers source
-    # snapshots and retained authored references together.
-    max_authored_candidates: int = Field(default=10000, ge=1, le=10000)
     max_pending_previews: int = Field(default=32, ge=1, le=128)
     max_source_preview_records: int = Field(default=256, ge=1, le=1024)
 
@@ -108,11 +106,28 @@ class RefreshLease(Model):
     request_revision: int = Field(default=0, ge=0)
 
 
+def lease_asset_of(row: Mapping[str, Any]) -> OriginalAsset | LibraryAsset:
+    """The asset a job leases, from its `asset_revisions` row (`metadata`, `upstream_id`):
+    a `LibraryAsset` when `upstream_id` is set (a row written by a pool check), else the
+    pre-4 `OriginalAsset`. The one home of this rule: `claim_job` and `MediaStore` (P2) call
+    it. I1 deletes the `OriginalAsset` arm. Raises pydantic's ValidationError on a row that
+    fits neither."""
+    if row["upstream_id"] is not None:
+        return LibraryAsset.model_validate(row["metadata"])
+    return OriginalAsset.model_validate(row["metadata"])
+
+
+def _candidate_of(member: PoolMember) -> Candidate:
+    """A pool photo as the Planner reads it (Immich-free; its variant is hydrated apart)."""
+    return Candidate(asset_id=member.asset_id, kind=member.kind, original_width=member.width,
+                     original_height=member.height, captured_at=member.taken_at)
+
+
 class JobLease(Model):
     job_id: Identifier
     attempt_token: Identifier
-    # Roadmap 4: a pool's asset (LibraryAsset, slice P1's claim_job) or, until the integrate
-    # slice, a refreshed original (OriginalAsset).
+    # Roadmap 4: a pool's asset (LibraryAsset) or, until the integrate slice, a refreshed
+    # original (OriginalAsset); `lease_asset_of` decides which.
     asset: OriginalAsset | LibraryAsset
     recipe_id: Digest
     lease_until: Instant
@@ -606,18 +621,6 @@ class MediaRepository:
             if row is None or row["generation"] != lease.generation or row["refresh_started"] != lease.started_at:
                 return False
             if result.snapshot.status == "ok":
-                # The snapshot is the shared planner input.  Check the
-                # replacement's contribution before changing either metadata
-                # or membership so an over-capacity refresh leaves the last
-                # usable catalog intact.
-                old_snapshot = conn.execute(
-                    "SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
-                    (lease.source.source_ref,)).fetchone()
-                old_count = (len(CatalogSnapshot.model_validate(old_snapshot["snapshot"]).candidates)
-                             if old_snapshot else 0)
-                if (self._candidate_capacity(conn) - old_count + len(result.snapshot.candidates)
-                        > self.limits.max_authored_candidates):
-                    raise RegistryError("metadata_capacity", 409)
                 existing_count = conn.execute("SELECT count(*) AS n FROM asset_revisions").fetchone()["n"]
                 new_assets = []
                 for asset in result.assets:
@@ -693,26 +696,20 @@ class MediaRepository:
                      "DO UPDATE SET snapshot=EXCLUDED.snapshot", (source_ref, Jsonb(snapshot.model_dump(mode="json"))))
 
     def source_candidates(self, source_ref: str, *, profile: FrameProfile | None = None) -> dict:
-        """Return only neutral candidates from a configured source.
+        """A Source revision's whole pool as neutral candidates, newest first, with no limit
+        (F-10); `ready` is whether the pool has a complete check.
 
         With a Frame profile, only the candidates eligible for it, each with the
         planner's `standing` for that profile (`planner.candidate_standing`).
         """
         with self.transaction() as conn:
-            source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
-            if source is None:
+            pool = self.source_pools_in(conn, {source_ref}).get(source_ref)
+            if pool is None:
                 raise RegistryError("source_not_found", 404)
-            now = self.times.now_in(conn)
-            candidates = self._hydrate_candidates(conn, self._current_candidates(conn, source_ref), now)
-            if len(candidates) > 1000:
-                raise RegistryError("source_candidate_limit", 409)
+            candidates = pool.candidates
             if profile is not None:
                 candidates = tuple(candidate for candidate in candidates if eligible(candidate, profile))
-            snapshot_row = conn.execute("SELECT snapshot FROM catalog_snapshots WHERE source_ref=%s",
-                                        (source_ref,)).fetchone()
-            refreshed_at = CatalogSnapshot.model_validate(snapshot_row["snapshot"]).refreshed_at if snapshot_row else now
-            return {"source_ref": source_ref, "status": source["status"],
-                    "refreshed_at": refreshed_at,
+            return {"source_ref": source_ref, "ready": pool.ready,
                     "count": len(candidates),
                     "candidates": [
                         candidate.model_dump(mode="json") | (
@@ -727,15 +724,6 @@ class MediaRepository:
                             (list(asset_ids),)).fetchall()
         return {row["asset_id"]: Candidate.model_validate(row["candidate"]) for row in rows}
 
-    def _candidate_capacity(self, conn) -> int:
-        source_count = conn.execute(
-            "SELECT COALESCE(sum(jsonb_array_length(c.snapshot->'candidates')),0) AS n "
-            "FROM catalog_snapshots c JOIN media_sources s ON s.source_ref=c.source_ref "
-            "WHERE s.refresh_active"
-        ).fetchone()["n"]
-        authored_count = conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"]
-        return source_count + authored_count
-
     def author_authored_candidates(self, source_ref: str, asset_ids: tuple[str, ...]) -> dict:
         """Persist immutable, centrally derived references from current membership."""
         with self.transaction() as conn:
@@ -747,18 +735,15 @@ class MediaRepository:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
         if not 1 <= len(asset_ids) <= 1000 or len(asset_ids) != len(set(asset_ids)):
             raise RegistryError("invalid_authored_candidates", 422)
-        source = conn.execute("SELECT status FROM media_sources WHERE source_ref=%s", (source_ref,)).fetchone()
-        if source is None:
+        if conn.execute("SELECT 1 FROM media_sources WHERE source_ref=%s",
+                        (source_ref,)).fetchone() is None:
             raise RegistryError("source_not_found", 404)
-        # Failed refreshes retain the last successful membership for
-        # diagnosis and existing execution, but cannot create new durable
-        # authored authority from stale upstream data.
-        if source["status"] != "ok":
-            raise RegistryError("source_not_fresh", 409)
-        rows = conn.execute("SELECT a.asset_id,a.metadata FROM source_members m JOIN asset_revisions a "
-                            "ON a.asset_id=m.asset_id WHERE m.source_ref=%s AND a.asset_id=ANY(%s)",
-                            (source_ref, list(asset_ids))).fetchall()
-        members = {row["asset_id"]: OriginalAsset.model_validate(row["metadata"]) for row in rows}
+        # Pool rows are photos a check confirmed; they stay while Immich is down (C7), so a
+        # pool authors from what it holds whether or not its latest check completed.
+        pool, _ = PgPhotoLibrary.pool_members_in(conn, {source_ref})[source_ref]
+        chosen = set(asset_ids)
+        members = {member.asset_id: _candidate_of(member)
+                   for member in pool if member.asset_id in chosen}
         missing = [asset_id for asset_id in asset_ids if asset_id not in members]
         if missing:
             known = {row["asset_id"] for row in conn.execute(
@@ -770,7 +755,7 @@ class MediaRepository:
                                      "WHERE asset_id=ANY(%s)", (list(asset_ids),)).fetchall()
         existing = {row["asset_id"]: row for row in existing_rows}
         for asset_id in asset_ids:
-            candidate = members[asset_id].candidate
+            candidate = members[asset_id]
             old = existing.get(asset_id)
             if old:
                 prior = Candidate.model_validate(old["candidate"]).model_copy(
@@ -778,12 +763,10 @@ class MediaRepository:
                 if prior != candidate:
                     raise RegistryError("authored_candidate_immutable", 409)
         new = [asset_id for asset_id in asset_ids if asset_id not in existing]
-        if self._candidate_capacity(conn) + len(new) > self.limits.max_authored_candidates:
-            raise RegistryError("authored_candidate_limit", 409)
         for asset_id in new:
             conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
                          "VALUES(%s,%s,%s,%s)",
-                         (asset_id, Jsonb(members[asset_id].candidate.model_dump(mode="json")),
+                         (asset_id, Jsonb(members[asset_id].model_dump(mode="json")),
                           source_ref, self.times.now_in(conn)))
         return {"asset_refs": list(asset_ids), "created": len(new)}
 
@@ -903,7 +886,8 @@ class MediaRepository:
             now = self.times.now_in(conn)
             job_filter = "" if job_id is None else "AND j.id=%s "
             parameters = (now,) if job_id is None else (now, job_id)
-            row = conn.execute("SELECT j.*,a.metadata FROM media_jobs j JOIN asset_revisions a ON a.asset_id=j.asset_id "
+            row = conn.execute("SELECT j.*,a.metadata,a.upstream_id FROM media_jobs j "
+                               "JOIN asset_revisions a ON a.asset_id=j.asset_id "
                                "WHERE j.state IN ('queued','retry') AND j.retry_at<=%s AND j.reserved_bytes=0 "
                                + job_filter +
                                "AND j.recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
@@ -911,7 +895,7 @@ class MediaRepository:
                                parameters).fetchone()
             if row is None:
                 return None
-            asset = OriginalAsset.model_validate(row["metadata"])
+            asset = lease_asset_of(row)
             reserve = self.limits.max_original_bytes + (
                 self.limits.max_image_bytes if asset.kind == "image" else self.limits.max_video_bytes)
             maximum = conn.execute("SELECT max_bytes FROM media_settings WHERE singleton").fetchone()["max_bytes"]
@@ -932,31 +916,28 @@ class MediaRepository:
             raise RegistryError("stale_job")
         return row
 
-    def catalog_in(self, conn, source_refs: set[str] | None = None):
-        """Exclude known impossible unsecured candidates during cooldown; locks bypass this pool.
-
-        The cooldown compares worker-written `retry_at`, so its now is the database's (G11).
-        """
+    def source_pools_in(self, conn, source_refs: set[str]) -> dict[str, SourcePool]:
+        """ScenePoolReader: each Source revision's whole pool (in-pool rows, newest first, no
+        window and no limit, C11), hydrated with variants and preparation failures, in the
+        caller's transaction. A ref naming no Source revision is left out (the Planner's
+        `source_missing`); a revision whose pool has no complete check answers `ready=False`
+        with what it holds (C7). Hydration compares worker-written `retry_at`, so its now is
+        the database's (G11)."""
+        known = {row["source_ref"] for row in conn.execute(
+            "SELECT source_ref FROM media_sources WHERE source_ref=ANY(%s)",
+            (list(source_refs),)).fetchall()}
         now = self.times.now_in(conn)
-        if self._candidate_capacity(conn) > self.limits.max_authored_candidates:
-            raise RegistryError("authored_candidate_limit", 409)
-        snapshots = {}
-        rows = (conn.execute("SELECT * FROM catalog_snapshots").fetchall() if source_refs is None
-                else conn.execute("SELECT * FROM catalog_snapshots WHERE source_ref=ANY(%s)",
-                                  (list(source_refs),)).fetchall())
-        for row in rows:
-            snapshot = CatalogSnapshot.model_validate(row["snapshot"])
-            snapshots[row["source_ref"]] = snapshot.model_copy(update={
-                "candidates": self._hydrate_candidates(conn, snapshot.candidates, now)})
-        authored = {}
-        rows = conn.execute("SELECT * FROM authored_candidates ORDER BY asset_id LIMIT %s",
-                            (self.limits.max_authored_candidates + 1,)).fetchall()
-        if len(rows) > self.limits.max_authored_candidates:
-            raise RegistryError("authored_candidate_limit", 409)
-        stored = [(row["asset_id"], Candidate.model_validate(row["candidate"])) for row in rows]
-        hydrated = self._hydrate_candidates(conn, tuple(candidate for _, candidate in stored), now)
-        authored = {asset_id: candidate for (asset_id, _), candidate in zip(stored, hydrated)}
-        return snapshots, authored
+        return {ref: SourcePool(source_ref=ref, ready=ready, candidates=self._hydrate_candidates(
+                    conn, (_candidate_of(member) for member in members), now))
+                for ref, (members, ready) in PgPhotoLibrary.pool_members_in(conn, known).items()}
+
+    def authored_in(self, conn) -> dict[str, Candidate]:
+        """Every authored candidate, hydrated as `source_pools_in`'s (locks bypass both)."""
+        stored = [(row["asset_id"], Candidate.model_validate(row["candidate"])) for row in conn.execute(
+            "SELECT asset_id,candidate FROM authored_candidates ORDER BY asset_id").fetchall()]
+        hydrated = self._hydrate_candidates(
+            conn, tuple(candidate for _, candidate in stored), self.times.now_in(conn))
+        return {asset_id: candidate for (asset_id, _), candidate in zip(stored, hydrated)}
 
     def health(self) -> dict:
         """Worker check-in, cache and the jobs of the current recipe by state.

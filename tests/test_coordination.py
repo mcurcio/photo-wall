@@ -1,21 +1,18 @@
 """Real PostgreSQL coordination with explicit clocks; no physical rendering claim."""
 
 from concurrent.futures import ThreadPoolExecutor
-from hashlib import sha1
-from uuid import UUID
 
 import pytest
 from psycopg.types.json import Jsonb
+from support.photo_pools import photo, seed_pool
 from support.position import save_position
 from test_registry import SKEWED, enroll, frame
 
-from central.catalog import CatalogSnapshot
 from central.coordination import CoordinationError, CoordinationLimits, Coordinator
 from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
 from contracts.models import Failure, Readiness, Variant
-from media.models import OriginalAsset
 
 
 def setup_players(registry, count=2):
@@ -137,33 +134,46 @@ def test_late_join_has_bounded_preparation_grace_and_keeps_logical_origin(regist
 
 
 def publish_fixture_catalog(registry, digest="a" * 64, asset="original-a"):
+    """Source `library:1`'s pool becomes exactly one photo (`asset`), prepared as `digest`: a
+    complete check of the pool through the store's worker side, then the ready recipe state a
+    completed worker publication exposes (coordination hydrates variants through jobs)."""
     variant = Variant(sha256=digest, size=10, media_type="image/jpeg", width=1080, height=1920)
-    original = OriginalAsset(
-        connection_id="fixture", upstream_id=str(UUID(bytes=sha1(asset.encode()).digest()[:16])),
-        original_sha1=sha1(asset.encode()).hexdigest(), kind="image", raw_width=1080,
-        raw_height=1920, orientation=1, captured_at=registry.clock.utc(), file_size=10)
-    candidate = original.candidate.model_copy(update={"variant": variant})
-    snapshot = CatalogSnapshot(source_ref="library:1", refreshed_at=registry.clock.utc(), candidates=(candidate,))
-    # Seed the same durable metadata and ready recipe state that a completed
-    # worker publication exposes; coordination hydrates variants through jobs.
+    pool_photo = photo(asset, taken_at=registry.clock.utc())
+    seed_pool(registry, "library:1", (pool_photo,))
     recipe = "f" * 64
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO media_settings(singleton,max_bytes,recipe_id) VALUES(TRUE,%s,%s) "
                      "ON CONFLICT(singleton) DO UPDATE SET recipe_id=EXCLUDED.recipe_id",
                      (4 * 1024**3, recipe))
-        conn.execute("INSERT INTO asset_revisions VALUES(%s,%s,%s,%s) ON CONFLICT(asset_id) DO NOTHING",
-                     (original.asset_id, Jsonb(original.model_dump(mode="json")), registry.clock.utc(),
-                      registry.clock.utc()))
         conn.execute("INSERT INTO media_blobs VALUES(%s,%s,10,'ready',%s)",
                      (digest, Jsonb(variant.model_dump(mode="json")), registry.clock.utc()))
         conn.execute("INSERT INTO media_jobs(id,asset_id,recipe_id,state,earliest_start,variant_sha,updated_at) "
                      "VALUES(%s,%s,%s,'ready',%s,%s,%s)",
-                     ("fixture-job-" + original.asset_id, original.asset_id, recipe,
+                     ("fixture-job-" + pool_photo.asset_id, pool_photo.asset_id, recipe,
                       registry.clock.utc(), digest, registry.clock.utc()))
-        conn.execute("INSERT INTO catalog_snapshots VALUES(%s,%s) ON CONFLICT(source_ref) "
-                     "DO UPDATE SET snapshot=EXCLUDED.snapshot",
-                     (snapshot.source_ref, Jsonb(snapshot.model_dump(mode="json"))))
     return variant
+
+
+def test_a_scene_naming_two_sources_plays_only_their_pools_and_asks_for_their_photos(registry):
+    """F-1: a contribution's photos are the union of the pools of the Sources it names, whether or
+    not each pool's check completed (C7); a pool it does not name never plays."""
+    setup_players(registry, count=1)
+    family = (photo("family", taken_at=900), photo("shared", taken_at=950))
+    garden = (family[1], photo("garden", taken_at=990))
+    seed_pool(registry, "family:1", family)
+    seed_pool(registry, "garden:1", garden, complete=False)
+    seed_pool(registry, "other:1", (photo("other", taken_at=999),))
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(scene_id="two", loop=True, cycle_seconds=60,
+        contributions=(Contribution(target="frame:frame-0", kind="media",
+                                    source_refs=("family:1", "garden:1")),)))
+    coordinator.runtime.command("activate", "two", "two-start", 1000)
+    projection = coordinator.advance()
+    union = {asset.asset_id for asset in family + garden}
+    chosen = [selection.asset_id for selection in projection.selections]
+    assert set(chosen) == union and len(chosen) > len(union)
+    assert {request.asset_id for request in projection.acquisitions} == union
+    assert "source_missing" not in {d.code for d in projection.diagnostics}
 
 
 def test_offers_protect_possible_secured_bytes_across_central_restart_and_new_query_membership(registry):
