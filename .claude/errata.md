@@ -5051,3 +5051,9 @@ Order: (a) merge the iac PR that switches the factory to `central.app:create_app
 
 ## E-P4-K-DOCS (console lane, 2026-10-11) · one historical doc link
 - Deleting the Source flow broke two links in `docs/production-readiness-v0.13.md` (`check_docs` red). The docs lane owns docs; to keep the lane's static gate green the two links became plain words naming the removed files. X2 may reword it.
+
+## E-P4-I-1 (integrate lane, before I2, 2026-10-11) · the lane's start condition does not hold; STOP
+- **Contradiction.** The integrate lane starts "from `feat/photo-sources` once every lane is merged into it" (ledger, "Remaining lanes (run 2)" and "Integrate order"). At the start of this lane, after `git fetch origin`, `origin/feat/photo-sources` is still at 096a811 (the run-2 re-cut): no lane is merged into it, not even run 1's (`lane/photo4-merged` at 79e5cd2 is not in it).
+- **Lane tips seen:** planner a66476e (P1, P2); console f59dd87 (K1-K4, baselines); seams e67eb29 (S1 only: no FX2 commit, so the seams lane is not finished); merged 79e5cd2 (domain, central, media, fixture, docs from run 1).
+- **Why the lane does not merge them itself.** The merges are the run's step, in the ledger's order, outside this lane's slices; FX2 has not landed, and I2's wall-path tracer and I1's retirement of the connections file in the images depend on it.
+- **Needed to resume:** FX2 lands on `lane/photo4-seams`; the run merges domain, central, media, fixture, docs (or `lane/photo4-merged`), then planner, seams, console into `feat/photo-sources` (keeping both sides of each `.claude/errata.md` append), and pushes it; then the integrate lane re-starts from it. This erratum's commit is on `lane/photo4-integrate`; merge it with the lanes so the lane's next push stays a fast-forward.
