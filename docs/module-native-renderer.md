@@ -85,10 +85,10 @@ release removes stale queued work before another draw can execute.
 ## Geometry and colour
 
 `player/geometry.py` is the authoritative pure reference for the Frame fit's one
-matrix (`output_to_picture`: Cover's turned, evenly scaled rectangle from
-`contracts/frame_fit.py`, or Corners' inverse perspective with its quarter turn),
-the per-Frame mask (`inside_opening`), each photo's centred cover of the logical
-Frame aspect (`photo_rect`), sRGB/BT.709 transfer, premultiplied linear
+matrix (`output_to_picture`: Cover's turned, evenly scaled rectangle of the Frame
+profile's aspect from `contracts/frame_fit.py`, or Corners' inverse perspective
+with its quarter turn), the per-Frame mask (`inside_opening`), each photo's
+centred cover of the same Frame profile aspect (`photo_rect`, the one crop), sRGB/BT.709 transfer, premultiplied linear
 source-over composition and the final pass (`final_pixel`: the Display's picture
 operations, then the per-Output mask last). Its scalar reference is for tests,
 not production pixel loops. Shader parameters and GLSL implement those

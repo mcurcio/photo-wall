@@ -150,7 +150,8 @@ sudo env XDG_CACHE_HOME=/tmp/ddc ddcutil --noconfig --bus $B getvcp 10 12   # no
 4. **Hot-plug after a brightness write:** after step 1, `journalctl _PID=$(pgrep -x weston)` shows no
    `connector … disconnected`, and `photo-wall-node-player` is still running.
 5. **Cover on the test monitor:** on the Position tab, Cover at 7 degrees and at 90 degrees: the
-   picture is turned, never skewed, covers the four corners, and nothing shows outside them.
+   picture is turned, never skewed, keeps the Frame profile's shape (still landscape at 90 degrees
+   on a landscape Frame), covers the four corners, and nothing shows outside them.
 
 Afterwards put brightness and contrast back from the console (or Revert), not by hand: a hand write
 is reported as "Changed on the display's buttons" and left alone.
