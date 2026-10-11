@@ -5,7 +5,7 @@ import { CycleField, LoopField } from "./CycleInput.jsx";
 import { Field, IdField, idNeeded, NameField } from "./Field.jsx";
 import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
-import { candidateLabels, sourceState } from "./mediaHealth.js";
+import { candidateLabels } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
 import {
   AdvancedRows, cropWords, daysWords, EndingRows, endingWords, onOff, ORDER_LABELS, secondsWords, SelectionRows,
@@ -99,11 +99,11 @@ export function KindStep({ value, patch, problems }) {
 /**
  * Step 2, Photos (Scene editor › What, #36): the Photo sources the Scene plays, at least one,
  * as one list of cards (SourcePicker.jsx), each chosen by its checkbox (any of them: the Scene
- * plays the photos of all of them, C3); each chosen Source is listed with its state, whether its
- * photos are ready, Check now and Remove. The last card, "New Photo source", opens the Photo
+ * plays the photos of all of them, C3). The last card, "New Photo source", opens the Photo
  * source editor and returns here with it chosen (`onNewSource`, a hand-off). A hand-picked Scene
- * picks from one Source (radios). Under them, the Fit board of the chosen Sources on the Scene's
- * Frames (chosen on the step before).
+ * picks from one Source (radios). Right under the cards, the Fit board of the chosen Sources on
+ * the Scene's Frames (chosen on the step before), then one line of the chosen Sources' actions
+ * (design fix round 3: the Frames lead; each card already says its check's state).
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
@@ -128,9 +128,9 @@ export function PhotosStep({ value, patch, problems, sources, onNewSource, sourc
         onChange={set}
         onNewSource={onNewSource}
       />
-      <SourceReadiness {...sourceReadiness}
-        onRemove={(ref) => set(value.sourceRefs.filter((chosen) => chosen !== ref))} />
       {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="full" />}
+      <ChosenSources {...sourceReadiness}
+        onRemove={(ref) => set(value.sourceRefs.filter((chosen) => chosen !== ref))} />
     </>
   );
 }
@@ -295,7 +295,6 @@ export function ReviewStep({
   candidates,
   advanced,
   onChange,
-  sourceReadiness,
   fit,
 }) {
   const authored = value.mode === "authored";
@@ -396,7 +395,6 @@ export function ReviewStep({
       ))}
       </section>
       {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="strip" />}
-      <SourceReadiness {...sourceReadiness} />
     </>
   );
 }
@@ -405,48 +403,42 @@ export function ReviewStep({
 const FRAMES_LABEL = "Frames";
 
 /**
- * The chosen Photo sources, each with its state in words (mediaHealth.js `sourceState`, from its
- * check), whether its photos are ready, Check now and, on Photos, Remove; shared by Photos and
- * Review. A Source still being read plays what is found so far; an empty one has nothing to
- * show (its pool, read here).
+ * The chosen Photo sources' actions on one line (design fix round 3): each Source's name, a note
+ * only when its photos are not ready (pool, read here), Check now's receipt, Check now and
+ * Remove; then Manage in Sources (the Scene draft stays open in this tab meanwhile). Each card
+ * above already says its check's state, so the line does not repeat it.
  */
-function SourceReadiness({ chosen, now, check, onManage, onRemove = null }) {
+function ChosenSources({ chosen, check, onManage, onRemove }) {
   if (chosen.length === 0) return null;
   return (
-    <section className="notice scene-flow__source-readiness" aria-label="Source media status">
-      <ul className="scene-flow__sources">
+    <section className="chosen-sources" aria-label="Source media status">
+      <ul className="chosen-sources__list">
         {chosen.map(({ ref, source }) => (
-          <ChosenSource key={ref} sourceRef={ref} source={source} now={now} check={check} onRemove={onRemove} />
+          <ChosenSource key={ref} sourceRef={ref} source={source} check={check} onRemove={onRemove} />
         ))}
       </ul>
-      <div className="scene-flow__source-manage">
-        <p>Your Scene draft stays open in this tab while you manage Sources.</p>
-        <button type="button" onClick={onManage}>Manage in Sources</button>
-      </div>
+      <button type="button" className="chosen-sources__manage" onClick={onManage}>Manage in Sources</button>
     </section>
   );
 }
 
-function ChosenSource({ sourceRef, source, now, check, onRemove }) {
+function ChosenSource({ sourceRef, source, check, onRemove }) {
   const name = sourceName(source ?? sourceRef);
-  const state = source === null ? null : sourceState(source, now);
   const receipt = source === null ? null : sourceCheckMessage(check.feedback[sourceRef], source.check);
   return (
-    <li aria-label={name}>
-      <p><strong>{name}</strong>{`: ${state?.label ?? "No longer current: choose a current Source"}`}</p>
-      {source !== null && <PoolReadiness sourceRef={sourceRef} />}
-      {receipt !== null && <p role="status">{receipt}</p>}
-      <div className="record__actions">
-        {source !== null && (
-          <button type="button" aria-label={`Check ${name} now`} disabled={check.pending !== null}
-            onClick={() => void check.run(sourceRef, source.check ?? null)}>
-            Check now
-          </button>
-        )}
-        {onRemove !== null && (
-          <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(sourceRef)}>Remove</button>
-        )}
-      </div>
+    <li aria-label={name} className="chosen-sources__item">
+      <strong className="chosen-sources__name">{name}</strong>
+      {source === null
+        ? <span className="chosen-sources__note">No longer current: choose a current Source</span>
+        : <PoolReadiness sourceRef={sourceRef} />}
+      {receipt !== null && <span className="chosen-sources__note" role="status">{receipt}</span>}
+      {source !== null && (
+        <button type="button" aria-label={`Check ${name} now`} disabled={check.pending !== null}
+          onClick={() => void check.run(sourceRef, source.check ?? null)}>
+          Check now
+        </button>
+      )}
+      <button type="button" aria-label={`Remove ${name}`} onClick={() => onRemove(sourceRef)}>Remove</button>
     </li>
   );
 }
@@ -458,9 +450,9 @@ function PoolReadiness({ sourceRef }) {
   const empty = view.in_pool.photos + view.in_pool.videos === 0;
   const state = view.check?.state;
   if (state === "checking" || state === "never_checked") {
-    return <p>Still being read: what is found so far plays.</p>;
+    return <span className="chosen-sources__note">Still being read: what is found so far plays.</span>;
   }
-  return empty ? <p>This Source has no photos.</p> : null;
+  return empty ? <span className="chosen-sources__note">This Source has no photos.</span> : null;
 }
 
 /** Each target frame's chosen item, by its chooser label once the candidates are read. */

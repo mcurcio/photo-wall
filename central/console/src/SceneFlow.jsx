@@ -35,7 +35,6 @@ import { FramesStep, KindStep, MediaStep, PhotosStep, PlaybackStep, ReviewStep }
 import { useCandidates } from "./useCandidates.js";
 import { percentWords, useHouseCropLimit } from "./domain/photo-fit.ts";
 import { raiseAction, useFitRead } from "./domain/photo-fit-board.tsx";
-import { mediaNow } from "./mediaHealth.js";
 import { useSourceCheck } from "./useSourceCheck.js";
 
 const EMPTY = {};
@@ -114,7 +113,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const definitions = snapshot?.runtime?.definitions ?? EMPTY;
   const existingIds = useMemo(() => new Set(Object.keys(definitions)), [definitions]);
   const sources = snapshot?.media?.sources ?? [];
-  const now = mediaNow(snapshot);
   const loaded = snapshot != null;
 
   // The selected Frame is a seed for a newly opened Scene only. A route from the
@@ -209,7 +207,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
     chosen: value.sourceRefs.map((ref) => ({
       ref, source: sources.find((source) => source.source_ref === ref) ?? null,
     })),
-    now,
     check: sourceCheck,
     onManage: () => navigate({ section: "sources" }),
   };
@@ -489,7 +486,6 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
           snapshot={snapshot}
           editingId={editingId}
           candidates={candidates}
-          sourceReadiness={sourceReadiness}
           advanced={advanced("review")}
           onChange={flow.openField}
           fit={fit}

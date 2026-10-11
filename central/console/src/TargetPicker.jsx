@@ -106,7 +106,7 @@ export function FrameChips({ snapshot, frameIds, recoveryLinks = false }) {
         // The chip's severity and words are the Frame page header's (domain/frame-health-chip.ts).
         const chip = health === null ? null : frameChip(health, true);
         return (
-          <span key={frameId} className={`run-control__frame health--${chip?.severity ?? "notice"}`}>
+          <span key={frameId} className={`run-control__frame health--${chip?.severity ?? "todo"}`}>
             {chip === null ? `${frameId}: not in the inventory` : `${frameId}: ${chip.label}`}
             {recoveryTab !== null && recoveryTab !== undefined && (
               <a href={formatRoute({ section: "wall", id: frameId, tab: recoveryTab })}>

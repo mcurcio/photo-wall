@@ -9,7 +9,7 @@ const STATES: Record<string, FitBoardState> = {
   ready: { status: "ready", view: ALL_FIT, updating: false },
   partial: { status: "ready", view: READY, updating: false },
   thin: { status: "ready", view: THIN, updating: false },
-  oneFrame: { status: "ready", view: { ...ALL_FIT, line: "1,520 of 1,689 fit living-room", frames: [LIVING] }, updating: false },
+  oneFrame: { status: "ready", view: { ...ALL_FIT, line: "1,520 of 1,689 fit living-room", stripLine: "1,689 photos · 42 videos", frames: [LIVING] }, updating: false },
   noneFit: { status: "ready", view: NONE_FIT, updating: false },
   empty: { status: "ready", view: EMPTY, updating: false },
   cantTell: { status: "cant-tell", view: READY,

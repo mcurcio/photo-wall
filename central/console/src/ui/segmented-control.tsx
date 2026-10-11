@@ -17,7 +17,8 @@ export interface SegmentedControlProps<V extends string> {
 /**
  * SegmentedControl (design language §4): two to five exclusive choices side by side (Base UI
  * RadioGroup: a radio group to a screen reader, arrow keys move the choice). The chosen segment
- * is drawn in the accent, as a selection.
+ * is drawn in the accent, as a selection. A label never breaks: where the choices are wider
+ * than the screen (a phone) they wrap onto a second row, each row filling the width.
  */
 export function SegmentedControl<V extends string>({ label, value, options, onChange, disabled }: SegmentedControlProps<V>) {
   // Inside a Field the Field's label names the group (and is the one shown), and its help
@@ -33,14 +34,14 @@ export function SegmentedControl<V extends string>({ label, value, options, onCh
         value={value}
         disabled={disabled}
         onValueChange={(next) => onChange(next as V)}
-        className="inline-flex w-fit overflow-hidden rounded-input border border-line-input"
+        className="inline-flex w-fit max-w-full flex-wrap gap-px overflow-hidden rounded-input border border-line-input bg-line-input"
       >
         {options.map((option) => (
           <Radio.Root
             key={option.value}
             value={option.value}
             className={cn(
-              "cursor-pointer border-0 border-l border-line-input bg-surface-input px-3 py-1.5 first:border-l-0",
+              "grow cursor-pointer border-0 bg-surface-input px-3 py-1.5 whitespace-nowrap",
               "font-sans text-sm text-text",
               "focus-visible:relative focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
               "data-checked:bg-accent data-checked:text-on-accent",

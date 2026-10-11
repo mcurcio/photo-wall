@@ -67,7 +67,8 @@ function unjudged(snapshot: object | null, frameId: string, words: string): Fram
   if (width <= 0 || height <= 0) return null;
   return {
     key: frameId, name: frameId, aspect: width / height, ratio: ratioWords(width / height), lead: null, emptyText: "",
-    count: words, segments: [], samples: [], checked: null, detail: "", alert: null, why: null, draft: null,
+    count: words, segments: [], samples: [], checked: null, unknownOutput: null, detail: null, alert: null, why: null,
+    draft: null,
   };
 }
 

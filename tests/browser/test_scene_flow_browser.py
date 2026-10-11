@@ -113,16 +113,23 @@ def test_scene_photos_and_review_say_each_sources_state_and_readiness(page, regi
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Photos")
         choose_source(form, garden)
+        # The card says the check's state; the line of actions under the board says only
+        # whether the photos are ready (design fix round 3: the state is said once).
+        card = form.get_by_role("group", name="Photo sources", exact=True).get_by_role("article", name="garden")
+        expect(card).to_contain_text(expected)
         readiness = form.get_by_role("region", name="Source media status")
-        expect(readiness.get_by_role("listitem", name="garden")).to_contain_text(expected)
+        expect(readiness.get_by_role("listitem", name="garden")).to_be_visible()
+        expect(readiness).not_to_contain_text(expected)
         if readiness_line is not None:
             expect(readiness).to_contain_text(readiness_line)
+        # The Frames lead: the board sits right under the cards, the line of actions under it.
+        board = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
+        cards = form.get_by_role("group", name="Photo sources", exact=True)
+        assert cards.bounding_box()["y"] < board.bounding_box()["y"] < readiness.bounding_box()["y"]
         scene_continue(page, "Playback")
         scene_continue(page, "Review")
-        readiness = form.get_by_role("region", name="Source media status")
-        expect(readiness).to_contain_text(expected)
-        if readiness_line is not None:
-            expect(readiness).to_contain_text(readiness_line)
+        expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden")
+        expect(form.get_by_role("region", name="Source media status")).to_have_count(0)
 
 
 def test_check_now_from_scene_photos_preserves_draft_and_reports_request(page, registry):
@@ -135,7 +142,8 @@ def test_check_now_from_scene_photos_preserves_draft_and_reports_request(page, r
         scene_continue(page, "Photos")
         choose_source(form, garden)
         readiness = form.get_by_role("region", name="Source media status")
-        expect(readiness).to_contain_text("Not checked yet")
+        expect(form.get_by_role("group", name="Photo sources", exact=True).get_by_role(
+            "article", name="garden")).to_contain_text("Not checked yet")
         with page.expect_response(
             lambda response: response.url.endswith("/checks") and response.request.method == "POST"
         ) as info:
@@ -147,12 +155,14 @@ def test_check_now_from_scene_photos_preserves_draft_and_reports_request(page, r
         scene_continue(page, "Review")
         expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden")
         form.get_by_label("Scene name", exact=True).fill("check-keeps-draft")
+        form.get_by_role("button", name="Change Photos", exact=True).click()
         form.get_by_role("region", name="Source media status").get_by_role(
             "button", name="Manage in Sources", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Sources", exact=True)).to_be_visible()
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Resume draft (Draft)", exact=True).click()
-        assert current_hash(page) == "#/scenes/new/review"
+        assert current_hash(page).startswith("#/scenes/new/photos")
+        scene_continue(page, "Review")   # a step opened from Review's Change returns there
         expect(form.get_by_label("Scene name", exact=True)).to_have_value("check-keeps-draft")
         expect(form.get_by_label("Your answers", exact=True)).to_contain_text("garden")
 

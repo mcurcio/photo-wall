@@ -122,7 +122,7 @@ function SettingsRow({ row, draft, view, onChange, onDrag }: {
  * face and the smallest face that counts; under Advanced the rest, the crop positions tried
  * under its Details. Beside them the Fit board of every Source a Scene uses, judged with the
  * values as typed (a dragged slider by shape), so a change shows its effect before Save. Save
- * sends every value; it applies at the next planning pass, and photos on screen finish their
+ * sends every value; each Frame uses it from its next photo, and the photos showing now finish their
  * turn.
  */
 export function PhotoFitSettingsPage({ snapshot }: { snapshot: object | null }) {
@@ -172,7 +172,7 @@ export function PhotoFitSettingsPage({ snapshot }: { snapshot: object | null }) 
     setSaving(false);
     if (refusal === null) {
       setDraft(null);
-      setSaid("Saved. It applies at the next planning pass; photos on screen finish their turn.");
+      setSaid("Saved. Each Frame uses it from its next photo; the photos showing now finish their turn.");
     } else {
       setSaid(`Not saved: ${refusal === "unreachable" ? "Central did not answer." : `Central refused it (${refusal}).`}`);
     }
@@ -205,7 +205,7 @@ export function PhotoFitSettingsPage({ snapshot }: { snapshot: object | null }) 
           setDraft(null);
           setSaid(null);
         }}>Discard changes</Button>
-        <Note>Applies at the next planning pass; photos on screen finish their turn.</Note>
+        <Note>Each Frame uses it from its next photo; the photos showing now finish their turn.</Note>
       </SaveBar>
     </Stack>
   );

@@ -9,6 +9,9 @@
   --sidebar-width: 16rem;
   --header-height: calc(4.5rem + 4px);
   --breakpoint-sidebar: 850px;
+  /* The flow's sticky Back and Continue bar below the sidebar breakpoint: a 44 px button
+     between 12 px paddings. */
+  --flow-footer-height: 68px;
 
   /* The font's licence ships beside it: this reference makes the build emit
      OFL.txt into dist/assets/. The property is never used, so never fetched. */
@@ -1150,6 +1153,69 @@ label {
   border-color: var(--color-notice);
 }
 
+/* The Scene's chosen Photo sources' actions, on one line under the Fit board (design fix
+   round 3): each Source's name, a note when its photos are not ready, Check now and Remove,
+   then Manage in Sources at the end; wrapping on a phone. */
+.chosen-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  align-items: center;
+  margin: 0;
+  padding: 6px 8px 6px 14px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-input);
+  font-size: 14px;
+}
+
+.chosen-sources__list {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chosen-sources__item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.chosen-sources__name {
+  margin-right: 4px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.chosen-sources__note {
+  margin-right: 4px;
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+/* Its buttons are text actions in the accent (a record's other actions). */
+:where(.chosen-sources button) {
+  min-height: 44px;
+  padding: 0 10px;
+  background: transparent;
+  border-color: transparent;
+}
+
+:where(.chosen-sources button:hover) {
+  background: var(--color-accent-tint);
+}
+
+.chosen-sources__manage {
+  margin-left: auto;
+}
+
 /* The flow kit (flow design §6): step form, stepper, Advanced, summary card. */
 :where(.button--primary) {
   color: var(--color-on-accent);
@@ -1496,15 +1562,28 @@ label {
     display: block;
   }
 
-  /* Back and Continue stay in reach at the bottom of the screen. */
+  /* Back and Continue stay in reach at the bottom of the screen, one bar high
+     (--flow-footer-height). */
   .flow__footer {
     position: sticky;
     bottom: 0;
     z-index: 1;
+    box-sizing: border-box;
+    min-height: var(--flow-footer-height);
     margin: 0 -16px;
     padding: 12px 16px;
     background: var(--color-surface-raised);
     box-shadow: 0 -2px 8px var(--color-shadow);
+  }
+
+  /* So nothing stays hidden under the bar (design fix round 3): the page ends one bar
+     lower, and a field scrolled into view (focus, a refusal) stops above the bar. */
+  html:has(.flow__footer) {
+    scroll-padding-bottom: var(--flow-footer-height);
+  }
+
+  .shell__main:has(.flow__footer) {
+    padding-bottom: calc(48px + var(--flow-footer-height));
   }
 
   .review {

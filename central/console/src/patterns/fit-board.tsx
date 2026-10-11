@@ -16,8 +16,12 @@ import { WallStrip } from "./wall-strip";
 export interface FitBoardView {
   /** The selection's counts ("1,689 photos · 42 videos"). */
   summary: string;
-  /** The board in one line ("Fits 5 of 6 Frames · Hall has no photo that fits"). */
+  /** The board in one line ("Fits 5 of 6 Frames · Hall has no photo that fits"), where the
+   * line stands alone. */
   line: string;
+  /** The line over the Frames drawn side by side (a `strip`): a neutral count only ("Fits 5 of
+   * 6 Frames"), as each tile says its own alert. */
+  stripLine: string;
   /** What it is judged at ("Judged at the house crop limit, 35 %"), or null. */
   judged: string | null;
   /** While the selection is still being read ("Still reading Immich: these are the photos
@@ -199,14 +203,14 @@ function Body(props: BodyProps) {
   }
 }
 
-function lineOf(state: FitBoardState): string {
+function lineOf(state: FitBoardState, strip: boolean): string {
   switch (state.status) {
     case "loading":
       return "Reading how these photos fit…";
     case "error":
       return "Can't tell how these photos fit";
     default:
-      return state.view.empty ?? state.view.line;
+      return state.view.empty ?? (strip ? state.view.stripLine : state.view.line);
   }
 }
 
@@ -228,12 +232,12 @@ function Line({ title, state, strip = false, lead, named, ...rest }: Omit<FitBoa
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
         )}
       >
-        <span className="min-w-0 wrap-anywhere">{lineOf(state)}</span>
-        <span className="shrink-0 text-accent" aria-hidden="true">Show ›</span>
+        <span className="min-w-0 wrap-anywhere">{lineOf(state, strip && view !== null && view.empty === null)}</span>
+        <span className="shrink-0 whitespace-nowrap text-accent" aria-hidden="true">Show ›</span>
       </button>
       {strip && view !== null && view.empty === null && (
-        <WallStrip frames={view.frames} size="small" faded={state.status !== "ready" || state.updating}
-          onFrame={() => setOpen(true)} />
+        <WallStrip frames={view.frames} size="small" named={named} faded={state.status !== "ready" || state.updating}
+          label={lead === "frame" ? "This Frame" : undefined} onFrame={() => setOpen(true)} />
       )}
       <Sheet open={open} onOpenChange={setOpen} title={title}>
         {open ? <Body state={state} size="full" lead={lead} named={named} {...rest} /> : null}
@@ -249,7 +253,8 @@ function Line({ title, state, strip = false, lead, named, ...rest }: Omit<FitBoa
  * Each Frame is drawn at its output's shape and filled with what it would show, with how many
  * photos fit, a bar of why the rest do not and, at `full`, photos cropped as it crops them; a
  * Frame with nothing that fits, or too few to change, says so once, where it is drawn (its tile
- * on a wall, else its row). On a phone a `full` board is its line (a wall's with its strip),
+ * on a wall, else its row). On a phone a `full` board is its line (a wall's, and a Frame's own
+ * page's, with its strip of small tiles, the line then a neutral count),
  * opening the board in a sheet. The board judges nothing: it draws the words and pictures its host's domain
  * built from Central's one analysis. While a newer answer is read the board stays, dimmed, under
  * a thin line; a failed read keeps the last answer, greyed, as Can't tell.
@@ -273,7 +278,7 @@ export function FitBoard({ state, size, lead = "frames", named = true, title = "
   return (
     <>
       <div className="md:hidden">
-        <Line title={title} state={state} strip={lead === "wall"} lead={lead} named={named} {...rest} />
+        <Line title={title} state={state} strip={lead === "wall" || lead === "frame"} lead={lead} named={named} {...rest} />
       </div>
       <section aria-label={title} className="hidden min-w-0 md:block">{body}</section>
     </>

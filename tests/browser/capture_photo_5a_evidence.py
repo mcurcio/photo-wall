@@ -54,10 +54,29 @@ FRAME = "hall-wide"
 SCENE_ID = "hall-photos"
 
 
-def _shot(page, name: str, scheme: str) -> None:
+def _settled(page) -> None:
+    """Nothing mid-load: no board's progress line, no dimmed tile, no skeleton (each marks
+    itself `aria-busy`)."""
+    expect(page.locator("[aria-busy=true]")).to_have_count(0, timeout=20_000)
+
+
+def _shot(page, name: str, scheme: str, *, settle=True) -> None:
+    """One full-page PNG, settled. The view first grows to the page's height (as
+    capture_photo4_evidence.py `_shot` does), so a sticky bar (the Scene flow's Back and
+    Continue below 850 px) lands at the page's end rather than over the content mid-page.
+    `settle=False` only for a shot of the reading state itself."""
     OUT.mkdir(parents=True, exist_ok=True)
+    page.wait_for_timeout(400)
+    if settle:
+        _settled(page)
+    view = page.viewport_size
+    height = page.evaluate("document.documentElement.scrollHeight")
+    page.set_viewport_size({"width": view["width"], "height": max(height, view["height"])})
     page.wait_for_timeout(300)
+    if settle:
+        _settled(page)
     page.screenshot(path=str(OUT / f"{name}.{scheme}.png"), full_page=True, animations="disabled", caret="hide")
+    page.set_viewport_size(view)
 
 
 def _open(page, scheme):
@@ -155,7 +174,7 @@ def _sized(page, scheme, width):
     page.emulate_media(color_scheme=scheme)
 
 
-def _top_shot(page, name, scheme):
+def _top_shot(page, name, scheme, *, settle=True):
     """A full-page shot taken from the top, so the sticky sidebar sits where it belongs, with
     nothing stuck over the page (a sticky save bar would cover what is under it)."""
     page.evaluate("window.scrollTo(0, 0)")
@@ -164,7 +183,7 @@ def _top_shot(page, name, scheme):
         r".sticky, .lg\:sticky { position: static !important; }"
         r" .lg\:max-h-screen { max-height: none !important; }"
         r" .lg\:overflow-y-auto { overflow: visible !important; }"))
-    _shot(page, name, scheme)
+    _shot(page, name, scheme, settle=settle)
     style.evaluate("node => node.remove()")
 
 
@@ -172,6 +191,7 @@ def _view_shot(page, name, scheme):
     """The viewport only (a sheet over the page)."""
     OUT.mkdir(parents=True, exist_ok=True)
     page.wait_for_timeout(300)
+    _settled(page)
     page.screenshot(path=str(OUT / f"{name}.{scheme}.png"), animations="disabled", caret="hide")
 
 
@@ -264,7 +284,10 @@ def test_followup_source_editor_and_sources(page, registry, scheme, suffix):
             return
         board = _board(page, "What these photos are, and which Frames can show them")
         expect(board.get_by_role("img", name=re.compile(r"^living-room, 16:9: Photo"))).to_be_visible()
-        expect(board).to_contain_text("Frame output 1,920 × 1,080 px, 16:9 · on a 3,840 × 2,160 display")
+        # The Frame output's pixels are a Details fact: opened on living-room for the shot.
+        living = board.get_by_role("article", name="Frame living-room")
+        living.get_by_role("button", name="Details", exact=True).click()
+        expect(living).to_contain_text("Frame output 1,920 × 1,080 px, 16:9")
         _top_shot(page, f"followup-source-editor{suffix}", scheme)
         board.get_by_role("article", name="Frame hall").get_by_role("button", name=re.compile(r"^Why ")).click()
         _top_shot(page, f"followup-source-editor-why{suffix}", scheme)
@@ -287,7 +310,7 @@ def test_followup_source_editor_and_sources(page, registry, scheme, suffix):
         step(library, lease, [InPool(asset=a) for a in fresh], seen=3, up_to=900)
         expect(_board(page, "What these photos are, and which Frames can show them")).to_contain_text(
             "Still reading Immich")
-        _top_shot(page, f"followup-fit-board-reading{suffix}", scheme)
+        _top_shot(page, f"followup-fit-board-reading{suffix}", scheme, settle=False)
 
 
 @pytest.mark.parametrize("suffix", sorted(WIDTHS))

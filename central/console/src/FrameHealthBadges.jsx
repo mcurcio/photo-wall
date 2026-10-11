@@ -1,11 +1,13 @@
 import React from "react";
 
+import { frameChip } from "./domain/frame-health-chip.ts";
 import { frameHealth } from "./health.js";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 
 /**
- * Frame-health badges on the Now page: one per Frame, labelled by the one
- * classifier (health.js) exactly as the Wall labels it.
+ * Frame-health badges on the Now page: one per Frame, classified by health.js and drawn
+ * through the one chip mapping (domain/frame-health-chip.ts), so a Frame reads in the same
+ * colour and words here as in the Show now step below.
  *
  * A badge is a STATUS, never a control: a Frame that cannot present matters to the
  * showrunner, but every Display CONTROL stays on the Frame page's Position and Picture tabs
@@ -18,7 +20,7 @@ export function FrameHealthBadges({ snapshot }) {
   return (
     <section className="showrunner__health" role="group" aria-label="Frame health">
       {frames.map((frame) => {
-        const health = frameHealth(snapshot, frame.id);
+        const health = frameChip(frameHealth(snapshot, frame.id));
         return (
           <div key={frame.id} className="showrunner__badge-item">
             <span

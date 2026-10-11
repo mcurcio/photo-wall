@@ -301,7 +301,8 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         connect(page, origin, "now", paused_at=registry.clock.utc())
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
             re.compile(r"^Frame first: "))
-        expect(badge).to_have_accessible_name("Frame first: Enrolled 0 s ago, no report yet")
+        # The badge is the one Frame chip (domain/frame-health-chip.ts): a Pi enrolled, no report yet.
+        expect(badge).to_have_accessible_name("Frame first: Getting ready")
         for section in ("wall", "attention", "hardware", "schedule"):
             go(page, section)
             count = len(reads)

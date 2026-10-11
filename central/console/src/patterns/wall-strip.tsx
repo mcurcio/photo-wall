@@ -35,8 +35,9 @@ export function FrameFitTile({ frame, size = "full", faded = false, named = true
         label={`${frame.name}, ${frame.ratio}`} emptyText={frame.emptyText} />
     </span>
   );
+  // A faded tile is an older answer while a newer one is read: busy until it arrives.
   return (
-    <span className="flex min-w-0 flex-col gap-1">
+    <span className="flex min-w-0 flex-col gap-1" aria-busy={faded || undefined}>
       {onPress ? (
         <button type="button" onClick={onPress} aria-label={`${frame.name}: ${frame.count}`}
           className="cursor-pointer self-start border-0 bg-transparent p-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
@@ -65,6 +66,8 @@ export interface WallStripProps {
   onFrame?: (frameKey: string) => void;
   /** The strip's accessible name ("On the wall together"). */
   label?: string;
+  /** False when its host already names the Frame (a Frame's own page, one tile). */
+  named?: boolean;
 }
 
 /**
@@ -74,12 +77,13 @@ export interface WallStripProps {
  * with only a few, its alert. It shows how a Scene fills its Frames together, as a picture, and
  * is the one place a board says which Frames go without.
  */
-export function WallStrip({ frames, size = "full", faded = false, onFrame, label = "On the wall together" }: WallStripProps) {
+export function WallStrip({ frames, size = "full", faded = false, onFrame, label = "On the wall together", named = true }: WallStripProps) {
   return (
     <ul aria-label={label} className="m-0 flex min-w-0 list-none flex-wrap items-start gap-x-6 gap-y-4 p-0">
       {frames.map((frame) => (
         <li key={frame.key} className="min-w-0">
-          <FrameFitTile frame={frame} size={size} faded={faded} onPress={onFrame ? () => onFrame(frame.key) : undefined} />
+          <FrameFitTile frame={frame} size={size} faded={faded} named={named}
+            onPress={onFrame ? () => onFrame(frame.key) : undefined} />
         </li>
       ))}
     </ul>

@@ -274,12 +274,26 @@ function size([width, height]: [number, number]): string {
  * Position, at its shape), never its Display's mode (owner, 2026-10-11: "make sure that
  * compatibility is measuring against the Frame output and not the Display"). */
 export function outputWords(frame: FrameFit, name = frame.frame_id): string {
-  if (frame.output_px === null) {
-    return `Size not known yet: ${name}'s screen hasn't reported. Judged by shape only.`;
-  }
-  const shape = ratioWords(frame.output_px[0] / frame.output_px[1]);
-  const on = frame.display_px === null ? "" : ` · on a ${size(frame.display_px)} display`;
-  return `Frame output ${size(frame.output_px)} px, ${shape}${on}`;
+  if (frame.output_px === null) return `${name}'s Frame output isn't known yet`;
+  return `Frame output ${size(frame.output_px)} px, ${ratioWords(frame.output_px[0] / frame.output_px[1])}`;
+}
+
+/** The line over Frames drawn side by side (a strip): a neutral count only, as each tile says
+ * its own alert (design fix round 3: never "hall has no photo that fits" beside "Nothing
+ * fits"). Several Frames: "Fits 1 of 2 Frames"; one Frame: the selection's count, as its tile
+ * says how many fit it. */
+export function stripWords(analysis: FitAnalysis): string {
+  const frames = analysis.frames;
+  if (frames.length === 0) return "There is no Frame to show them on yet";
+  if (frames.length === 1) return countedWords(analysis);
+  const fits = frames.filter((frame) => frame.photos === 0 || hasFit(frame)).length;
+  return `Fits ${fits} of ${frames.length} Frames`;
+}
+
+/** The selection's counts ("8 photos · 0 videos"), "so far" while Immich is still read. */
+function countedWords(analysis: FitAnalysis): string {
+  const counted = `${countWords(analysis.photos, "photo")} · ${countWords(analysis.videos, "video")}`;
+  return analysis.reading ? `${counted} so far` : counted;
 }
 
 export interface BoardOptions {
@@ -346,7 +360,10 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, aler
     segments,
     samples: frame.fitting.map((sample) => cropOf(sample, frame.aspect, "fits")),
     checked: checkedWords(frame),
-    detail: outputWords(frame, name),
+    // The Frame output in pixels is a Details fact (design language §7, units); not known yet
+    // is said in words.
+    unknownOutput: frame.output_px === null ? outputWords(frame, name) : null,
+    detail: frame.output_px === null ? null : outputWords(frame, name),
     alert,
     why: summary === null ? null : { summary, reasons },
     draft: frame.draft ? "As you are setting it" : null,
@@ -386,9 +403,9 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
   const empty = total === 0
     ? (analysis.reading ? "Reading Immich: no photos found yet." : "No photos in this selection.")
     : analysis.frames.length === 0 ? "There is no Frame to show these photos on yet." : null;
-  const counted = `${countWords(analysis.photos, "photo")} · ${countWords(analysis.videos, "video")}`;
   return {
-    summary: analysis.reading ? `${counted} so far` : counted,
+    summary: countedWords(analysis),
+    stripLine: stripWords(analysis),
     line: options.lineOutput && analysis.frames.length === 1
       ? `${lineWords(analysis, name)} · ${outputWords(analysis.frames[0], name(analysis.frames[0].frame_id))}`
       : lineWords(analysis, name),

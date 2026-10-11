@@ -242,7 +242,11 @@ def test_the_scene_editor_asks_frames_first_and_previews_the_crop_limit_live(pag
         scene_continue(page, "Review")
         review = form.get_by_role("region", name="How this Scene fills its Frames", exact=True)
         expect(review.get_by_role("list", name="On the wall together", exact=True).get_by_role("listitem")).to_have_count(2)
-        review.get_by_role("button", name=re.compile(r"^Fits 1 of 2 Frames · hall has no photo that fits")).click()
+        # The strip's line is a neutral count: hall's tile says "Nothing fits", once.
+        strip_line = review.get_by_role("button", name="Fits 1 of 2 Frames", exact=True)
+        expect(strip_line).to_be_visible()
+        _said_once(review, "Nothing fits", "alarm")
+        strip_line.click()
         sheet = page.get_by_role("dialog", name="How this Scene fills its Frames", exact=True)
         expect(sheet.get_by_role("button", name="Raise the crop limit to 44 %", exact=True)).to_be_visible()
         sheet.get_by_role("button", name="Close", exact=True).click()
@@ -287,8 +291,8 @@ def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, r
         # The page is hall's: the row does not name hall or its shape again, and says what it is
         # judged at (no Pi reports hall's screen here).
         expect(_row(scene, HALL).get_by_role("heading", name=HALL, exact=True)).to_have_count(0)
-        expect(_row(scene, HALL)).to_contain_text(
-            "Size not known yet: hall's screen hasn't reported. Judged by shape only.")
+        expect(_row(scene, HALL)).to_contain_text("hall's Frame output isn't known yet")
+        expect(_row(scene, HALL).get_by_role("button", name="Details", exact=True)).to_have_count(0)
         expect(photos).not_to_contain_text("photos fit this Frame")
         expect(photos).not_to_contain_text("from Source")
 
@@ -316,18 +320,26 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
     try:
         with operator_server(registry.db, registry.clock) as origin:
             sign_in(page, origin)
+            # On the Overview the Frame output's pixels are a Details fact, never the Display's.
+            open_frame(page, FRAME, "overview")
+            row = page.get_by_role("region", name="Photos", exact=True).get_by_role("article", name=f"Frame {FRAME}")
+            expect(row).to_contain_text("1 of 2 fit")
+            expect(row).not_to_contain_text("Frame output")
+            row.get_by_role("button", name="Details", exact=True).click()
+            expect(row).to_contain_text("Frame output 1,920 × 1,080 px, 16:9")
+            expect(row).not_to_contain_text("display")
             position = open_frame(page, FRAME, "position").get_by_role("region", name="Position", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
             expect(position.get_by_role("button", name=re.compile(
-                rf"^1 of 2 fit {FRAME} · it will keep that one photo up · Frame output 1,920 × 1,080 px, 16:9 "
-                r"· on a 1,920 × 1,080 display"))).to_be_visible()
+                rf"^1 of 2 fit {FRAME} · it will keep that one photo up · Frame output 1,920 × 1,080 px, 16:9$"
+                ))).to_be_visible()
             position.get_by_role("button", name="Exact values", exact=True).click()
             for label, value in (("Top-left x", "480"), ("Bottom-left x", "480"), ("Top-right x", "1440"),
                                  ("Bottom-right x", "1440"), ("Top-left y", "270"), ("Top-right y", "270"),
                                  ("Bottom-right y", "810"), ("Bottom-left y", "810")):
                 position.get_by_label(label, exact=True).fill(value)
             expect(position.get_by_role("button", name=re.compile(
-                rf"^2 of 2 fit {FRAME} · Frame output 960 × 540 px, 16:9 · on a 1,920 × 1,080 display"))).to_be_visible()
+                rf"^2 of 2 fit {FRAME} · Frame output 960 × 540 px, 16:9$"))).to_be_visible()
     finally:
         page.unroute_all(behavior="ignoreErrors")
         del sessions
@@ -344,7 +356,7 @@ def test_show_now_and_the_sources_list_say_it_in_one_line_that_opens_the_board(p
         line = card.get_by_role("button", name=re.compile(r"Fits 1 of 2 Frames · hall has no photo that fits"))
         expect(line).to_be_visible()
         form = start_show_now(page, SCENE_ID)
-        line = form.get_by_role("button", name=re.compile(r"Fits 1 of 2 Frames · hall has no photo that fits"))
+        line = form.get_by_role("button", name="Fits 1 of 2 Frames", exact=True)
         expect(line).to_be_visible()
         expect(form.get_by_role("list", name="On the wall together", exact=True).get_by_role("listitem")).to_have_count(2)
         line.click()
@@ -362,7 +374,7 @@ def test_a_frame_with_too_few_photos_to_change_is_warned_of(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")
         form = start_show_now(page, SCENE_ID)
-        line = form.get_by_role("button", name=re.compile(r"^Fits 2 of 2 Frames · hall has only 1 photo"))
+        line = form.get_by_role("button", name="Fits 2 of 2 Frames", exact=True)
         expect(line).to_be_visible()
         wall = form.get_by_role("list", name="On the wall together", exact=True)
         expect(_tile(wall, HALL).locator("[data-severity=notice]")).to_have_text(re.compile("Few photos"))
@@ -386,14 +398,31 @@ def test_on_a_phone_the_board_is_a_line_that_opens_it_in_a_sheet(page, registry)
         scene_continue(page, "Photos")
         choose_source(form, SOURCE)
         expect(form.get_by_role("region", name="How this Scene fills its Frames", exact=True)).to_be_hidden()
-        line = form.get_by_role("button", name=re.compile(r"^3 of 4 fit living-room"))
+        # One Frame: the line is the selection's count, and the tile says how many fit it.
+        line = form.get_by_role("button", name=re.compile(r"^4 photos · "))
         expect(line).to_be_visible()
         strip = form.get_by_role("list", name="On the wall together", exact=True)
         expect(strip.get_by_role("img", name=re.compile(rf"^{LIVING}, 16:9: Photo, "))).to_be_visible()
+        expect(_tile(strip, LIVING)).to_contain_text("3 of 4 fit")
         line.click()
         sheet = page.get_by_role("dialog", name="How this Scene fills its Frames", exact=True)
         expect(_tile(sheet.get_by_role("list", name="On the wall together", exact=True), LIVING)).to_contain_text(
             "3 of 4 fit")
+
+    # The Frame page on a phone: each Scene's line keeps a small tile of the Frame's own, with
+    # its count and its alert's chip (the line is the Scene's count, not the alert again).
+    _scene(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin)
+        open_frame(page, HALL, "overview")
+        scene = page.get_by_role("region", name="Photos", exact=True).get_by_role(
+            "group", name=f"Scene {SCENE_ID}", exact=True)
+        tile = scene.get_by_role("list", name="This Frame", exact=True).get_by_role("listitem")
+        expect(tile).to_have_count(1)
+        expect(tile.get_by_role("img", name=f"{HALL}, 9:16", exact=True)).to_be_visible()
+        expect(tile).to_contain_text("0 of 4 fit")
+        expect(tile.locator("[data-severity=alarm]")).to_have_text(re.compile("Nothing fits"))
+        expect(scene.get_by_role("button", name=re.compile(r"^4 photos · "))).to_be_visible()
 
 
 def test_a_sample_opens_the_photo_sheet_with_immichs_copies_and_no_immich_id(page, registry):
