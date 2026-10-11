@@ -112,7 +112,7 @@ Each template's stories include `Loading`, `Empty`, `Error`, `Ready`, `CantTell`
 ### T6 Layout canvas
 
 - **Anatomy:** a Wall tab per wall plus "+ Wall"; a canvas drawn to real scale in house units; `WallTile`s dragged and resized, with keyboard nudge; overlaps flagged; a side panel for the selected Frame's placement fields; Identify on each Frame.
-- **Use** for Frames › wall layout (C1) and, later, spanning (C5). **Not** for Home's live map (T1 uses `WallMap` read-only).
+- **Use** for Frames › wall layout (C1). **Not** for Home's live map (T1 uses `WallMap` read-only).
 - **States:** Empty = "Add your first Frame"; Can't tell does not apply (placement is Central's own data).
 - **Phone:** view and select only; placement edits through the side panel's fields, not drag.
 - **Prior art:** macOS Displays arrangement; Home Assistant floor plans.
@@ -195,7 +195,7 @@ interface ToastProps { message: string; action?: { label: string; onAction(): vo
 // Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…). Field owns its label.
 interface SelectProps<V extends string> { value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
 
-// NumberInput — a number with its unit, for corner pixels, the rotation angle and the Frame display profile. Field owns its
+// NumberInput — a number with its unit, for corner pixels, the rotation angle, the Frame display profile and Scene settings in days or percent. Field owns its
 // label and error; arrow keys step by `step`, and the value commits on blur or Enter.
 interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
@@ -541,12 +541,11 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | C2 Rooms and groups | Frames › Groups | T2 | EntityList, TargetPicker | Autosave | member count | rooms make groups by themselves |
 | C3 Copy settings | Frame page › Picture | T3 + QuickActionSheet | TargetPicker, AckBadge per Frame | Action + Undo | per Frame: requested → acknowledged | a display that refuses a value: that Frame's row says so |
 | C4 Two displays per Pi | Frame page › Hardware | T3 | SettingRow, LinkToOwner (Pi page lists ports read-only) | Autosave | "Fed by Pi pw-3f2a · HDMI 2" | port in use: the picker shows by which Frame |
-| C5 Span | Frames › wall layout | T6 | WallTile | Autosave | deferred ([roadmap](roadmap.md#deferred-and-what-that-costs)) | none |
 | D1 Pick photos | Photo source editor › Include | T4 | IncludeExcludePicker, MediaGrid, SaveBar | Save | live count and thumbnails | "No photos match" naming the narrowest filter |
 | D2 Exclude | Photo source editor › Exclude | T4 | IncludeExcludePicker, SettingRow | Save | the pool beside the form is read again from the top | Leave out albums, people and tags (none by default) and Leave out screenshots (on by default); one fixed line, not a switch: "Archived, hidden and locked photos are never included." |
-| D3 Photo fit | Scene editor › Photo fit | T4 | SettingRow, SegmentedControl | Save | preview shows the fit | none |
-| D3 Photo fit | Frame page › Photo fit (override) | T3 | SettingRow (content, inherited), SegmentedControl | Autosave | skipped counts, each a link | "312 too small" opens the list |
-| D4 Order | Scene editor › Order | T4 | SettingRow, SegmentedControl | Save | preview order | none |
+| D3 Photo fit | Scene editor › Photo fit (the flow's Playback step) | T4 | SettingRow, NumberInput (Crop limit, percent, 5–60, default 35; help: "The most of a photo a Frame may cut away to fill itself. Faces and the interesting part are always kept.") | Save | Review lists it | none |
+| D3 Photo fit | Frame page › Overview › Photos | T3 | read-only lines: "N photos fit this Frame", then one count per non-zero reason in the [fit rule's words](module-planner.md#the-photo-fit-rule); no orientation words | none (read-only) | the counts | "not measured yet" while a new pool is measured |
+| D4 Order | Scene editor › Order (the flow's Playback step) | T4 | SettingRow, SegmentedControl (Order: Shuffle, Oldest first, Newest first, On this day), NumberInput (Don't repeat within, days; 0 reads "Off"; help: "A photo shown recently waits its turn, but a Frame never goes blank because of it.") | Save | Review lists both | none |
 | D5 Timing and transitions | Scene editor › Timing | T4 | SettingRow, Slider | Save | preview plays the timing | none |
 | D6 Video | Scene editor › Video | T4 | SettingRow, Slider, Switch | Save | share also shown as a count | no videos match: one-line note |
 | D7 Captions | Scene editor › Captions | T4 | SettingRow, SegmentedControl | Save | preview shows a caption | none |

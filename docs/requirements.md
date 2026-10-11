@@ -184,10 +184,13 @@ An AssetSource has no fixed upstream membership ceiling. Central discovers and r
 
 **Enforce compatibility before preference-based selection.** Frames may differ in aspect ratio, physical size, resolution, and playback capability.
 
-- Landscape photos must never be assigned to portrait Frames. Cropping does not create an implicit exception.
+- A photo is assigned only to a Frame it fills with its key content kept; cropping that would cut a face or the interesting part is not an exception. Fit is judged by the ratio of the photo's sides against the Frame's, not by the labels landscape, square or portrait. The owner, 2026-10-11: "a portrait photo should narrow land on a landscape frame. And there is no “blur” or “color mat” because a photo either fills the frame or it doesn’t show (it’s incompatible with that frame)" ("narrow" read as "never", the reading the accepted 5a design states); "It’s about the ratio, not strict labels of “landscape”, “square” or “portrait”". The rule's one home is the [Planner](module-planner.md#the-photo-fit-rule).
+- One photo per Frame: no pairs, mats or blur. The owner, 2026-10-11: "Correct. One photo per frame."
+- The same photo is never on two Frames at the same time, kept stills and hand-overs included. The owner, 2026-10-11: "Never show the same photo on two frames at the same time"; and, on how: "Frames are not running independently, and it’s up to Central to “plan” where the photos are assigned. I suggest an algorithm that computes all frame+photo assignments well in advance".
 - A 720p video must never be assigned to a 40-inch Frame. Upscaling does not make an insufficient source qualify.
 - Authored assignments must also satisfy compatibility. Artistic relationships add constraints beyond technical suitability.
 - Only eligible candidates are ranked by recency, weighting, variety, and other Scene preferences.
+- "Shown" means displayed on a Frame, and avoiding repeats only ranks photos: a Frame never goes without content to avoid a repeat. The owner, 2026-10-11: "“Shown” means it was displayed on a frame. Also note that this “no repeat” idea is secondary to always ensuring that frames have content".
 - An empty eligible pool retains the last valid still image by default. A Frame with no previous valid still uses a configured fallback. Eligibility rules are not silently relaxed.
 
 The central scheduler continually projects upcoming media, Frame assignments, and intended playback times. Players prepare a configurable rolling lookahead. They do not need to download the whole AssetSource or all of December. The [validation guide](validation.md#proposed-engineering-budgets) records a candidate preparation horizon.
