@@ -56,6 +56,7 @@ from operator_harness import (
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import public_photo, publish_photo
+from support.position import save_position
 from test_registry import ADMIN, enroll
 
 from central.catalog import CatalogSnapshot
@@ -66,7 +67,7 @@ from central.planner import AcquisitionRequest
 from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Program, Scene
 from central.runtime_store import RuntimeStore
-from contracts.models import Calibration, FrameProfile
+from contracts.models import FrameProfile
 from media.models import RefreshResult, SourceSpec
 
 pytestmark = pytest.mark.skipif(
@@ -169,9 +170,7 @@ def _seed(registry):
     # VALID_FRAME: bind (generation 0->1, position needed) then commit
     # (ready, revision 2).
     registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0)
-    registry.calibrate(
-        VALID_FRAME, "commit", expected_revision=1,
-        calibration=Calibration(gain=1.5), expected_generation=1)
+    save_position(registry, VALID_FRAME)
 
     # INVALID_FRAME: bind only -> it still needs its position.
     registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)

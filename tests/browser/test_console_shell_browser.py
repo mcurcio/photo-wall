@@ -45,6 +45,7 @@ from operator_harness import (
     submit_sign_in,
 )
 from playwright.sync_api import expect
+from support.position import save_position
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SOURCE,
@@ -56,7 +57,7 @@ from test_operator_showrunner_browser import (
 from test_registry import ADMIN, enroll
 
 from central.registry import FrameCreate
-from contracts.models import Calibration, FrameProfile
+from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -105,8 +106,7 @@ def _bound_commissioned(registry, frame_id, *, x_mm=100, commissioned=True):
     _frame(registry, frame_id, x_mm=x_mm)
     registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
     if commissioned:
-        registry.calibrate(frame_id, "commit", expected_revision=1,
-                           calibration=Calibration(), expected_generation=1)
+        save_position(registry, frame_id)
     report_readiness(registry, identity["player_id"])
 
 

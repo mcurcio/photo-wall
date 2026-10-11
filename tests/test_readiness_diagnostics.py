@@ -1,12 +1,13 @@
 """Current-authority readiness projection against real PostgreSQL state."""
 
 from psycopg.types.json import Jsonb
+from support.position import save_position
 from test_registry import enroll
 
 from central.coordination import Coordinator
 from central.readiness_diagnostics import project_readiness_diagnostics
 from central.registry import FrameCreate
-from contracts.models import Calibration, Failure, FrameProfile, Layer, Plan, Readiness
+from contracts.models import Failure, FrameProfile, Layer, Plan, Readiness
 
 
 def _seed(registry):
@@ -22,7 +23,7 @@ def _seed(registry):
         ))
         output_id = f"HDMI-A-{index + 1}"
         registry.bind(frame_id, player_id, output_id, expected_generation=0)
-        registry.calibrate(frame_id, "commit", 1, Calibration(), expected_generation=1)
+        save_position(registry, frame_id)
     bindings = tuple(registry.configuration_for(player_id, epoch)["bindings"])
     Coordinator(registry.db, registry.clock).configuration(player_id, epoch)
     layers = tuple(

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from support.position import save_position
 from test_display_identity import (
     ADMIN,
     AUTH,
@@ -57,10 +58,8 @@ def _executing(registry, player_id: str) -> list[str]:
 
 
 def _commit_by_calibrate(registry, frame_id: str, player_id: str) -> None:
-    """The Position tab's commit on a Pi that previews (`Registry.calibrate`)."""
-    frame = _frame_row(registry, frame_id)
-    registry.calibrate(frame_id, "commit", frame.calibration.revision, Calibration(),
-                       expected_generation=frame.generation)
+    """Position Save with no Pi presenting a trial (tests/support/position.py, the same Save CAS)."""
+    save_position(registry, frame_id)
 
 
 def _commit_by_trial(registry, frame_id: str, player_id: str) -> None:

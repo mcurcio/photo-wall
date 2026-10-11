@@ -7,6 +7,7 @@ from threading import Event
 import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
+from support.position import save_position
 from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
@@ -14,7 +15,6 @@ from central.coordination import COORDINATION_LOCK, Coordinator
 from central.runtime import Contribution, Program, RuntimeConflict, Scene
 from central.runtime_store import RUNTIME_LOCK, RuntimeStore
 from central.transaction_locks import acquire_runtime_locks
-from contracts.models import Calibration
 
 
 @pytest.mark.parametrize("held_lock", [COORDINATION_LOCK, RUNTIME_LOCK])
@@ -105,7 +105,7 @@ def test_operator_activation_uses_post_lock_time_after_drain_cut(registry, monke
     player, _, request = enroll(registry)
     frame(registry, "drained")
     registry.bind("drained", player["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.calibrate("drained", "commit", 1, Calibration(), expected_generation=1)
+    save_position(registry, "drained")
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(
         scene_id="manual", loop=True,
