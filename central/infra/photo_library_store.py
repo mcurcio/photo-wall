@@ -802,12 +802,13 @@ class PgPhotoLibrary:
                              (finish.problem, now, lease.pool_key))
             return True
 
-    def largest_frame_edge(self) -> int | None:
+    def frame_sizes(self) -> tuple[tuple[int, int], ...]:
         with self.db.transaction() as conn:
-            row = conn.execute(
-                "SELECT max(GREATEST((profile->>'width_px')::int,(profile->>'height_px')::int)) "
-                "AS edge FROM frames").fetchone()
-        return row["edge"]
+            rows = conn.execute(
+                "SELECT DISTINCT (profile->>'width_px')::int AS width,"
+                "(profile->>'height_px')::int AS height FROM frames "
+                "ORDER BY width, height").fetchall()
+        return tuple((row["width"], row["height"]) for row in rows)
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         with self.db.transaction() as conn:

@@ -57,7 +57,7 @@ def test_the_edited_photo_is_fetched_thumbnailed_and_revised_edited(
     asset = pool_asset(client, "edited", immich_library)
     assert "-" in asset.revision            # checksum, then the edit fingerprint
     assert (asset.width, asset.height) == (edited.width, edited.height)
-    fetched = run(client.fetch_rendition(asset, frame_long_edge=None,
+    fetched = run(client.fetch_rendition(asset, frames=(),
                                                  destination=tmp_path / "full"))
     assert fetched.width / fetched.height == pytest.approx(edited.width / edited.height,
                                                            rel=0.02)
@@ -73,11 +73,11 @@ def test_the_edited_photo_is_fetched_thumbnailed_and_revised_edited(
 def test_the_preview_serves_a_frame_it_covers_and_the_full_size_copy_a_larger_one(
         client, immich_library, tmp_path):
     asset = pool_asset(client, "garden-1", immich_library)
-    preview = run(client.fetch_rendition(asset, frame_long_edge=1,
+    preview = run(client.fetch_rendition(asset, frames=((1, 1),),
                                                  destination=tmp_path / "preview"))
     assert preview.rendition == "preview"
     larger = max(preview.width, preview.height) + 1
-    full = run(client.fetch_rendition(asset, frame_long_edge=larger,
+    full = run(client.fetch_rendition(asset, frames=((larger, larger),),
                                               destination=tmp_path / "full"))
     assert full.rendition == "fullsize"
     assert max(full.width, full.height) == max(asset.width, asset.height)
@@ -86,7 +86,7 @@ def test_the_preview_serves_a_frame_it_covers_and_the_full_size_copy_a_larger_on
 def test_the_video_is_fetched_as_its_original_and_prepares_to_mp4(
         client, immich_library, tmp_path):
     asset = pool_asset(client, "video-1", immich_library)
-    fetched = run(client.fetch_rendition(asset, frame_long_edge=1920,
+    fetched = run(client.fetch_rendition(asset, frames=((1920, 1080),),
                                                  destination=tmp_path / "original"))
     assert fetched.rendition == "original"
     preparer = Preparer(ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),

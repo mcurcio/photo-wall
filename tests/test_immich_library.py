@@ -39,6 +39,7 @@ from media.library_client import (
     ExclusionQuery,
     LibraryUnavailable,
     TakenWindow,
+    preview_covers,
 )
 from media.models import MediaError
 
@@ -458,7 +459,7 @@ def renditions(library: Library, number=1, *, preview=(2048, 1536), fullsize=Non
 def test_a_preview_that_covers_the_frame_is_kept(tmp_path):
     library = Library([asset(1)])
     renditions(library, preview=(2048, 1536))
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+    fetched = run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                                    destination=tmp_path / "original"))
     assert (fetched.rendition, fetched.width, fetched.height) == ("preview", 2048, 1536)
     data = (tmp_path / "original").read_bytes()
@@ -469,10 +470,26 @@ def test_a_preview_that_covers_the_frame_is_kept(tmp_path):
 def test_a_preview_smaller_than_the_frame_takes_the_full_size_copy(tmp_path):
     library = Library([asset(1)])
     renditions(library, preview=(1440, 1080), fullsize=(4000, 3000))
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+    fetched = run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                                    destination=tmp_path / "original"))
     assert (fetched.rendition, fetched.width, fetched.height) == ("fullsize", 4000, 3000)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["original"]
+
+
+def test_a_preview_whose_crop_window_is_smaller_than_the_frame_takes_the_full_size_copy(tmp_path):
+    """The Player shows a window of the Frame's shape cut from the photo (roadmap 5a), so a 4:5
+    preview of 1152 x 1440 on a 1280 x 800 Frame shows a 1152 x 720 window, smaller than the
+    Frame, though its long edge is larger: the full-size copy is taken. Mutation probe: compare
+    the long edges only."""
+    library = Library([asset(1)])
+    renditions(library, preview=(1152, 1440), fullsize=(3200, 4000))
+    fetched = run(library.client().fetch_rendition(library_asset(), frames=((1280, 800),),
+                                                   destination=tmp_path / "original"))
+    assert fetched.rendition == "fullsize"
+    assert preview_covers(1152, 1440, ((720, 900),)) and preview_covers(2048, 1536, (
+        (1920, 1080), (1080, 1440)))
+    assert not preview_covers(2048, 1536, ((1920, 1080), (1080, 1920)))
+    assert not preview_covers(4000, 3000, ())
 
 
 def test_a_full_size_copy_carrying_exif_orientation_is_measured_upright(tmp_path):
@@ -482,7 +499,7 @@ def test_a_full_size_copy_carrying_exif_orientation_is_measured_upright(tmp_path
         200, content=jpeg(400, 300, orientation=6), headers={"content-type": "image/jpeg"})
     renditions(library, preview=(720, 540),
                fullsize_redirect=f"/api/assets/{ref(1)}/original?edited=true")
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+    fetched = run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                                    destination=tmp_path / "original"))
     assert (fetched.rendition, fetched.width, fetched.height) == ("fullsize", 300, 400)
 
@@ -493,14 +510,14 @@ def test_a_same_origin_redirect_is_followed_and_another_origin_refused(tmp_path)
         200, content=jpeg(4000, 3000), headers={"content-type": "image/jpeg"})
     renditions(library, preview=(1440, 1080),
                fullsize_redirect=f"/api/assets/{ref(1)}/original?edited=true")
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+    fetched = run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                                    destination=tmp_path / "a"))
     assert fetched.rendition == "fullsize" and fetched.width == 4000
 
     renditions(library, preview=(1440, 1080),
                fullsize_redirect="http://elsewhere.test/api/assets/x/original")
     with pytest.raises(MediaError) as caught:
-        run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+        run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                              destination=tmp_path / "b"))
     assert caught.value.code == "upstream_redirect"
     assert not (tmp_path / "b").exists() and not (tmp_path / "b.fullsize").exists()
@@ -511,7 +528,7 @@ def test_with_full_size_copies_off_the_preview_is_kept(tmp_path):
     library = Library([asset(1)])
     renditions(library, preview=(1440, 1080),
                fullsize_redirect=f"/api/assets/{ref(1)}/thumbnail?size=preview&edited=true")
-    fetched = run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+    fetched = run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                                    destination=tmp_path / "original"))
     assert (fetched.rendition, fetched.width) == ("preview", 1440)
 
@@ -521,7 +538,7 @@ def test_a_video_is_fetched_as_its_original(tmp_path):
     library.routes[f"/api/assets/{ref(1)}/original"] = lambda request: httpx.Response(
         200, content=b"synthetic mp4", headers={"content-type": "video/mp4"})
     fetched = run(library.client().fetch_rendition(library_asset(kind="video"),
-                                                   frame_long_edge=1920,
+                                                   frames=((1920, 1080),),
                                                    destination=tmp_path / "original"))
     assert (fetched.rendition, fetched.media_type, fetched.size) == ("original", "video/mp4", 13)
     assert "edited" not in next(r for r in library.requests
@@ -533,7 +550,7 @@ def test_an_existing_destination_is_refused_and_kept(tmp_path):
     renditions(library)
     (tmp_path / "original").write_bytes(b"keep")
     with pytest.raises(MediaError) as caught:
-        run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+        run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                              destination=tmp_path / "original"))
     assert caught.value.code == "destination_exists"
     assert (tmp_path / "original").read_bytes() == b"keep"
@@ -544,7 +561,7 @@ def test_a_photo_whose_revision_moved_is_not_fetched(tmp_path):
     library.routes[f"/api/assets/{ref(1)}/edits"] = library.json({"assetId": ref(1), "edits": [
         {"action": "mirror", "parameters": {"axis": "horizontal"}}]})
     with pytest.raises(MediaError) as caught:
-        run(library.client().fetch_rendition(library_asset(), frame_long_edge=1920,
+        run(library.client().fetch_rendition(library_asset(), frames=((1920, 1080),),
                                              destination=tmp_path / "original"))
     assert caught.value.code == "asset_changed" and not (tmp_path / "original").exists()
 

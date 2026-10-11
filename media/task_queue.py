@@ -149,7 +149,8 @@ def create_worker_app(dsn: str) -> procrastinate.App:
     @app.task(name=MEASURE_KEY_CONTENT_TASK, queue=MEDIA_QUEUE, pass_context=True,
               retry=MediaRetryStrategy())
     async def measure_key_content(context, asset_id: str):
-        await context.additional_context["media_worker"].measure(asset_id)
+        final = max(1, context.job.attempts) > len(MediaRetryStrategy.delays)
+        await context.additional_context["media_worker"].measure(asset_id, final_attempt=final)
 
     # croniter places seconds last in a six-field expression.  Keeping that
     # explicit matters here: a conventional seconds-first expression silently

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Self
@@ -61,6 +62,7 @@ from media.library_client import (
     SearchPage,
     TakenWindow,
     TimeBucket,
+    preview_covers,
 )
 from media.models import MediaError
 from media.prepare import PreparationLimits
@@ -642,7 +644,7 @@ class ImmichClient:
                 raise MediaError("upstream_integrity", "incompatible")
             return bytes(data)
 
-    async def fetch_rendition(self, asset: LibraryAsset, *, frame_long_edge: int | None,
+    async def fetch_rendition(self, asset: LibraryAsset, *, frames: Sequence[tuple[int, int]],
                               destination: Path) -> FetchedRendition:
         """The photo as Immich shows it (C10); see LibraryClient.fetch_rendition."""
         destination = Path(destination)
@@ -659,7 +661,7 @@ class ImmichClient:
                                                {"size": "preview", "edited": "true"},
                                                destination, created)
                 width, height = _measure(destination, self.library_limits)
-                if frame_long_edge is not None and max(width, height) >= frame_long_edge:
+                if preview_covers(width, height, frames):
                     return _rendition(preview, "preview", width, height)
                 full = await self._download(f"{base}/thumbnail",
                                             {"size": "fullsize", "edited": "true"},

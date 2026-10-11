@@ -9,9 +9,10 @@ from test_coordination import publish_fixture_catalog, schedule, setup_players
 import central.coordination as coordination
 from central.coordination import Coordinator
 from central.infra.shown_history_store import PgShownHistory
+from central.registry import FrameCreate
 from central.wall_plan.order import KeptStill, PhotoShowing
 from central.wall_plan.ports import ShownHistory
-from contracts.models import Observation
+from contracts.models import FrameProfile, Observation
 
 DAY = 86400.0
 NOW = 1_000_000_000.0
@@ -28,7 +29,10 @@ def showing(assignment: str, asset: str, *, start: float, end: float | None = No
 
 
 @pytest.fixture
-def store() -> ShownHistory:
+def store(registry) -> ShownHistory:
+    for frame_id in ("frame-1", "frame-2"):
+        registry.create_frame(FrameCreate(id=frame_id, width_mm=500, height_mm=300, profile=(
+            FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24))))
     return PgShownHistory()
 
 
@@ -96,6 +100,25 @@ def test_wall_history_holds_the_window_the_current_pass_live_selections_and_kept
     assert history.selected == (live,)
     assert history.kept == (KeptStill(frame_id="frame-2", asset_id="f2-photo",
                                       since=NOW - 2 * DAY + 2),)
+
+
+def test_a_covered_layer_that_keeps_its_photo_is_kept_though_never_reported_presented(
+        registry, store):
+    """A covered layer is drawn, so its "keep this photo" applies, but its Player reports only
+    visible layers presented (and a report can be lost): the Frame's kept still comes from what
+    was offered as well. A layer not yet started keeps nothing yet. Mutation probe: read kept
+    stills from presented reports only."""
+    presented = showing("f1-shown", "older", frame="frame-1", start=NOW - 300,
+                        after_end="keep_this_photo")
+    covered = showing("f1-covered", "covered", frame="frame-1", start=NOW - 60, fade_in=1,
+                      after_end="keep_this_photo")
+    upcoming = showing("f1-next", "upcoming", frame="frame-1", start=NOW + 10,
+                       after_end="keep_this_photo")
+    with registry.db.transaction() as conn:
+        shown_now(store, conn, presented)
+        store.record_selected_in(conn, [covered, upcoming])
+        history = store.wall_history_in(conn, ["scene"], now=NOW, window_seconds=WEEK)
+    assert history.kept == (KeptStill(frame_id="frame-1", asset_id="covered", since=NOW - 59),)
 
 
 def test_prune_keeps_a_row_399_days_old_and_removes_one_401_days_old(registry, store):
@@ -203,3 +226,29 @@ def test_the_next_advance_reads_the_shown_history_of_the_plannable_scenes(
     coordinator.advance()
     assert [row.assignment_id for row in seen[0].shown] == [layer.assignment_id]
     assert layer.assignment_id in {row.assignment_id for row in seen[0].selected}
+
+
+def test_a_presented_report_racing_the_next_offer_still_counts_as_shown(
+        registry, scripted_scene_pass):
+    """A new revision is offered every cycle, so a Player's "presented" report often carries the
+    revision before the latest: the photo still counts as shown, while the report is still
+    refused as stale (the Player's cue to fetch the newer plan). Mutation probe: record nothing
+    for a report against an earlier revision."""
+    player = setup_players(registry, count=1)[0]
+    publish_fixture_catalog(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"], starts=1000, media=True)
+    old = coordinator.delivery(player["player_id"], 1)["plan"]
+    first, second = [layer for layer in old.layers if layer.presentation == "media"][:2]
+    for _ in range(40):       # until the next cycle's layer is offered
+        registry.clock.advance(15)
+        coordinator.advance()
+        if coordinator.delivery(player["player_id"], 1)["plan"].revision > old.revision:
+            break
+    assert coordinator.delivery(player["player_id"], 1)["plan"].revision > old.revision
+    with pytest.raises(coordination.CoordinationError, match="stale_observation"):
+        observe(coordinator, player, old, first, "presented")    # the Player's cue to renew
+    assert [row["assignment_id"] for row in rows(registry, "shown_photos")] == [
+        first.assignment_id]
+    with pytest.raises(coordination.CoordinationError, match="stale_observation"):
+        observe(coordinator, player, old, second, "failed")

@@ -242,3 +242,19 @@ def test_migration_080_converts_pre_4_sources_and_makes_cut_over_rows(empty_data
         assert SourceQuery.model_validate(rows[ref]["query"]) == query
         assert rows[ref]["pool_key"] is None
         assert rows[ref]["spec"] == specs[ref]
+
+
+def test_the_walls_frame_sizes_are_each_distinct_profile(registry):
+    """What the worker weighs Immich's downsampled copy against (media/library_client.py
+    `preview_covers`): every Frame profile's pixels, once each."""
+    from central.registry import FrameCreate
+    from contracts.models import FrameProfile
+
+    store = store_of(registry.db)
+    assert store.frame_sizes() == ()
+    for frame_id, width, height in (("a", 1920, 1080), ("b", 1920, 1080), ("c", 1080, 1920)):
+        registry.create_frame(FrameCreate(
+            id=frame_id, width_mm=500 if width > height else 300,
+            height_mm=300 if width > height else 500,
+            profile=FrameProfile(width_px=width, height_px=height, diagonal_inches=24)))
+    assert store.frame_sizes() == ((1080, 1920), (1920, 1080))

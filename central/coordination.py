@@ -618,6 +618,29 @@ class Coordinator:
             "FROM execution_events)"
         )
 
+    def _presented_from_an_earlier_offer(self, conn, player_id: str, observation: Observation,
+                                         config) -> bool:
+        """Roadmap 5a: a "presented" report stamped with a revision this Player was offered
+        before the latest still counts as shown (a new revision is offered every cycle, so a
+        report often races the next offer; losing it would let the photo come back sooner).
+        Only the shown history is written, and the report is still refused as stale."""
+        if observation.status != "presented":
+            return False
+        row = conn.execute(
+            "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+            "AND revision=%s", (player_id, observation.authority_epoch, observation.revision),
+        ).fetchone()
+        if row is None:
+            return False
+        offered = Plan.model_validate(row["manifest"])
+        layer = next((a for a in offered.layers
+                      if a.assignment_id == observation.assignment_id), None)
+        if (offered.plan_id != observation.plan_id or layer is None
+                or not self._authorized(layer, config)):
+            return False
+        self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
+        return True
+
     def _current_plan(self, conn, player_id, epoch) -> Plan | None:
         row = conn.execute(
             "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
@@ -1101,6 +1124,15 @@ class Coordinator:
                 self._skip_group(conn, group["id"], "not_ready")
 
     def observe(self, player_id: str, observation: Observation):
+        if not self._observe(player_id, observation):
+            # Refused after its transaction committed, so a stale "presented" report's shown
+            # row stays written while the Player still hears stale_observation (its cue to
+            # fetch the newer plan).
+            raise CoordinationError("stale_observation")
+
+    def _observe(self, player_id: str, observation: Observation) -> bool:
+        """Record one observation; False when it names a plan revision other than the latest
+        (a stale "presented" one still counts as shown, `_presented_from_an_earlier_offer`)."""
         with self._transaction() as conn:
             self._players(conn)
             config = self._configuration(conn, player_id, observation.authority_epoch)
@@ -1109,7 +1141,8 @@ class Coordinator:
                 observation.plan_id,
                 observation.revision,
             ):
-                raise CoordinationError("stale_observation")
+                self._presented_from_an_earlier_offer(conn, player_id, observation, config)
+                return False
             layer = next(
                 (a for a in plan.layers if a.assignment_id == observation.assignment_id), None
             )
@@ -1125,3 +1158,4 @@ class Coordinator:
             if observation.status == "presented":
                 # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11).
                 self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
+        return True

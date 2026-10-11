@@ -53,15 +53,15 @@ class FakeLibrary:
     def __init__(self, clock):
         self.clock = clock
         self.downloads, self.closed = 0, False
-        self.edges = []
+        self.frames = []
         self.fault = None
         self.gate = None
         self.entered = asyncio.Event()
         self.cancelled = False
 
-    async def fetch_rendition(self, asset, *, frame_long_edge, destination):
+    async def fetch_rendition(self, asset, *, frames, destination):
         self.downloads += 1
-        self.edges.append(frame_long_edge)
+        self.frames.append(frames)
         destination.write_bytes(b"partial public original")
         self.entered.set()
         try:
@@ -128,7 +128,7 @@ def worker_storage(registry, tmp_path):
 def library_store(clock):
     library = FakeLibraryStore(clock)
     library.add_connection("fixture", "https://immich.invalid/api", SECRET)
-    library.frame_edge = 2160
+    library.frames = ((3840, 2160),)
     return library
 
 
@@ -432,7 +432,7 @@ def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(wo
     assert sorted(checks.calls) == [("connection", "main"), ("pool", "a" * 64)]
 
 
-def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(worker_storage):
+def test_a_pool_photo_is_fetched_for_the_walls_frames_prepared_and_published(worker_storage):
     queued(worker_storage)
     source = FakeLibrary(worker_storage.clock)
     preparer = FakePreparer()
@@ -445,7 +445,7 @@ def test_a_pool_photo_is_fetched_for_the_largest_frame_prepared_and_published(wo
         finally:
             await close(instance)
     asyncio.run(exercise())
-    assert source.edges == [2160]
+    assert source.frames == [((3840, 2160),)]
     assert isinstance(preparer.prepared[0], LibraryAsset)
     assert row(worker_storage, "media_jobs", "id", "job-1")["state"] == "ready"
 
@@ -554,6 +554,20 @@ def test_a_library_failure_is_retried_and_records_nothing(worker_storage, client
     with pytest.raises(RetryableMediaTask):
         asyncio.run(instance.measure(pooled.asset_id))
     assert _analysis(worker_storage, store, pooled.asset_id) is None
+
+
+@pytest.mark.parametrize("client", [
+    FakeFaces(_grey_jpeg(), faces_fault=LibraryUnavailable(Unreachable())),
+    FakeFaces(thumbnail_fault=MediaError("thumbnail_not_ready", "unavailable")),
+])
+def test_the_last_attempt_records_the_failure_so_lower_ranked_photos_are_measured(
+        worker_storage, client):
+    """A photo Immich never answers for leaves the Planner's measurement requests until its
+    retry instead of holding the top of the list. Mutation probe: raise on the last attempt."""
+    pooled, store, instance = _measuring(worker_storage, client)
+    asyncio.run(instance.measure(pooled.asset_id, final_attempt=True))
+    assert _analysis(worker_storage, store, pooled.asset_id).model_dump() == {
+        "status": "failed", "reason": "timeout"}
 
 
 def test_measure_without_a_key_content_store_is_a_configuration_error(worker_storage):

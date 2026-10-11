@@ -6,6 +6,12 @@ migration 082's `photo_key_content` table: one row per asset id (the id already 
 revision) at one analysis version. Every time written or compared here is `times`' (the
 database's, G11): the worker writes `retry_at`, Central compares it. A stored key that no longer
 reads as KeyContent counts as not measured, so it is measured again and replaced.
+
+Content first (owner, 2026-10-11: frames always have content; C7, the pool plays on while Immich
+is down): a measurement at an older analysis version is still read until a new one replaces it,
+and is requested again. A photo's first measurement that found no face is provisional: Immich
+detects faces in a background job some time after the upload, so it is measured once more after
+FACELESS_REMEASURE_SECONDS (`retry_at` on a measured row), and that measurement is final.
 """
 from __future__ import annotations
 
@@ -30,6 +36,9 @@ from central.wall_plan.key_content import (
 
 # A failed measurement's photo is left out of plans this long, then measured again.
 MEASURE_RETRY_SECONDS: Final = 3600
+# A first measurement with no face is taken again this long after (Immich's face detection runs
+# after the upload; after a large import it can lag by hours). A placeholder to tune.
+FACELESS_REMEASURE_SECONDS: Final = 6 * 3600
 
 # One row per asset, replaced by each new measurement; nothing when the asset row is gone.
 _WRITE = ("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,failure,"
@@ -48,21 +57,32 @@ class PgKeyContent:
 
     def analyses_in(self, conn: Any, asset_ids: Iterable[str], *,
                     now: float) -> dict[str, Analysis]:
-        """KeyContentReader.analyses_in."""
+        """KeyContentReader.analyses_in: a measurement at any analysis version (an older one
+        holds until it is replaced), a failure until its retry."""
+        return {asset_id: analysis for asset_id, (analysis, _) in
+                self._read(conn, asset_ids, now=now).items() if analysis is not None}
+
+    def _read(self, conn: Any, asset_ids: Iterable[str], *,
+              now: float) -> dict[str, tuple[Analysis | None, bool]]:
+        """Each stored row's analysis (None: none to use) and whether it is due a measurement."""
         rows = conn.execute(
-            "SELECT asset_id,status,key,failure,retry_at FROM photo_key_content "
-            "WHERE asset_id = ANY(%s) AND analysis_version=%s",
-            (list(dict.fromkeys(asset_ids)), ANALYSIS_VERSION)).fetchall()
-        found: dict[str, Analysis] = {}
+            "SELECT asset_id,analysis_version,status,key,failure,retry_at FROM photo_key_content "
+            "WHERE asset_id = ANY(%s)", (list(dict.fromkeys(asset_ids)),)).fetchall()
+        found: dict[str, tuple[Analysis | None, bool]] = {}
         for row in rows:
             if row["status"] == "failed":
-                if row["retry_at"] > now:
-                    found[row["asset_id"]] = MeasureFailed(reason=row["failure"])
+                waiting = row["retry_at"] > now
+                found[row["asset_id"]] = (
+                    MeasureFailed(reason=row["failure"]) if waiting else None, not waiting)
                 continue
             try:
-                found[row["asset_id"]] = Measured(key=KeyContent.model_validate(row["key"]))
+                key = KeyContent.model_validate(row["key"])
             except ValidationError:
+                found[row["asset_id"]] = (None, True)
                 continue
+            due = (row["analysis_version"] != ANALYSIS_VERSION
+                   or (row["retry_at"] is not None and row["retry_at"] <= now))
+            found[row["asset_id"]] = (Measured(key=key), due)
         return found
 
     def request_in(self, conn: Any, asset_ids: Iterable[str], *, now: float) -> int:
@@ -73,8 +93,9 @@ class PgKeyContent:
             return 0
         present = {row["asset_id"] for row in conn.execute(
             "SELECT asset_id FROM asset_revisions WHERE asset_id = ANY(%s)", (wanted,)).fetchall()}
-        current = self.analyses_in(conn, present, now=now)
-        due = [asset_id for asset_id in wanted if asset_id in present and asset_id not in current]
+        stored = self._read(conn, present, now=now)
+        due = [asset_id for asset_id in wanted
+               if asset_id in present and (asset_id not in stored or stored[asset_id][1])]
         if not due:
             return 0
         if self.queue is None:
@@ -92,11 +113,17 @@ class PgKeyContent:
         return None if row is None else LibraryAsset.model_validate(row["metadata"])
 
     def record_measured(self, asset_id: str, key: KeyContent) -> None:
-        """KeyContentWriter.record_measured; nothing when the asset is gone."""
+        """KeyContentWriter.record_measured; nothing when the asset is gone. A photo's first
+        measurement with no face is measured again after FACELESS_REMEASURE_SECONDS."""
         with self.db.transaction() as conn:
+            now = self.times.now_in(conn)
+            earlier = conn.execute(
+                "SELECT 1 FROM photo_key_content WHERE asset_id=%s AND status='measured'",
+                (asset_id,)).fetchone()
+            again = None if key.faces or earlier else now + FACELESS_REMEASURE_SECONDS
             conn.execute(_WRITE, (key.analysis_version, "measured",
-                                  Jsonb(key.model_dump(mode="json")), None,
-                                  self.times.now_in(conn), None, asset_id))
+                                  Jsonb(key.model_dump(mode="json")), None, now, again,
+                                  asset_id))
 
     def record_failed(self, asset_id: str, reason: MeasureFailure) -> None:
         """KeyContentWriter.record_failed; nothing when the asset is gone."""

@@ -85,12 +85,25 @@ class PgShownHistory:
             "ORDER BY starts_at, assignment_id",
             (now,),
         ).fetchall()
-        # Each Frame's latest shown layer that set what it keeps; it keeps a photo only when that
-        # layer said "keep_this_photo" (a later "keep_nothing" clears it).
+        # Each Frame's latest started layer that set what it keeps, offered or presented: a
+        # covered layer is drawn, so its after-state applies, but its Player never reports it
+        # presented (and a report can be lost); the offered selection names it either way, and
+        # shown_photos holds the older history once selections are pruned. The Frame keeps a
+        # photo only when that layer said "keep_this_photo" (a later "keep_nothing" clears it).
+        # One index-backed row per Frame and table (photo_selections_kept, shown_photos_kept).
         kept = conn.execute(
-            "SELECT DISTINCT ON (frame_id) frame_id, asset_id, starts_at + fade_in AS since, "
-            "after_end FROM shown_photos WHERE after_end <> 'leave_as_is' "
-            "ORDER BY frame_id, starts_at DESC, assignment_id DESC",
+            "SELECT f.id AS frame_id, k.asset_id, k.starts_at + k.fade_in AS since, k.after_end "
+            "FROM frames f CROSS JOIN LATERAL ("
+            "  SELECT * FROM ("
+            "    (SELECT asset_id, starts_at, fade_in, after_end, assignment_id "
+            "     FROM photo_selections WHERE frame_id = f.id AND after_end <> 'leave_as_is' "
+            "       AND starts_at <= %s ORDER BY starts_at DESC, assignment_id DESC LIMIT 1) "
+            "    UNION ALL "
+            "    (SELECT asset_id, starts_at, fade_in, after_end, assignment_id "
+            "     FROM shown_photos WHERE frame_id = f.id AND after_end <> 'leave_as_is' "
+            "     ORDER BY starts_at DESC, assignment_id DESC LIMIT 1)) AS latest "
+            "  ORDER BY starts_at DESC, assignment_id DESC LIMIT 1) AS k",
+            (now,),
         ).fetchall()
         return WallHistory(
             shown=tuple(_showing(row) for row in shown),

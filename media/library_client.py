@@ -10,6 +10,7 @@ It parses answers into per-photo facts, and a malformed photo is only that photo
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -31,6 +32,23 @@ from central.photo_library.model import (
     SourceQuery,
 )
 from contracts.models import Digest, Instant, Model, Positive
+
+
+def preview_covers(width: int, height: int, frames: Sequence[tuple[int, int]]) -> bool:
+    """Whether Immich's downsampled copy, `width` x `height`, is at least each Frame's size as
+    the Player shows it (owner, 2026-10-09: the downsampled copy only if it is at least the
+    visible Frame size): the Player draws a window of the Frame's shape cut from the photo
+    (roadmap 5a, contracts/photo_crop.py), whose short side along the cut is the photo's, so
+    the window must hold the Frame's pixels. No Frame: False (take the full-size copy). Pure."""
+    if not frames:
+        return False
+    for frame_width, frame_height in frames:
+        if width * frame_height >= frame_width * height:     # cut left and right
+            if height < frame_height:
+                return False
+        elif width < frame_width:                              # cut top and bottom
+            return False
+    return True
 
 
 class LibraryUnavailable(Exception):
@@ -207,11 +225,12 @@ class LibraryClient(Protocol):
         malformed box is left out. Other failures raise LibraryUnavailable."""
         ...
 
-    async def fetch_rendition(self, asset: LibraryAsset, *, frame_long_edge: int | None,
+    async def fetch_rendition(self, asset: LibraryAsset, *, frames: Sequence[tuple[int, int]],
                               destination: Path) -> FetchedRendition:
-        """Photos: the edited preview when its long edge covers `frame_long_edge`, else Immich's
-        edited full-size copy (following same-origin redirects; with full-size copies off, the
-        preview); `None` takes the full-size copy. Videos: the original. Exclusively creates
+        """Photos: the edited preview when it covers every Frame of `frames` (each (width,
+        height) in pixels) as the Player draws it, a window of the Frame's shape cut from the
+        preview (`preview_covers`), else Immich's edited full-size copy (following same-origin
+        redirects; with full-size copies off, the preview); no Frame takes the full-size copy. Videos: the original. Exclusively creates
         `destination`; removes only a file it created on failure."""
         ...
 

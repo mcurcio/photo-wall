@@ -271,8 +271,8 @@ class LibraryWorkerStore(Protocol):
         Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`."""
         ...
 
-    def largest_frame_edge(self) -> int | None:
-        """The long edge in pixels of the wall's largest Frame profile; None with no Frame."""
+    def frame_sizes(self) -> tuple[tuple[int, int], ...]:
+        """Each distinct Frame profile's pixels (width, height); () with no Frame."""
         ...
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:

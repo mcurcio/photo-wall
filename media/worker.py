@@ -202,8 +202,8 @@ class MediaWorker:
             async with asyncio.timeout(self.limits.job_seconds):
                 paths = await _blocking(self.store.staging, lease)
                 client = await self._client(lease.asset.connection_ref)
-                edge = await _blocking(self.library.largest_frame_edge)
-                fetched = await client.fetch_rendition(lease.asset, frame_long_edge=edge,
+                frames = await _blocking(self.library.frame_sizes)
+                fetched = await client.fetch_rendition(lease.asset, frames=frames,
                                                        destination=paths.original)
                 if fetched.path.absolute() != paths.original:
                     raise MediaError("asset_integrity")
@@ -229,7 +229,7 @@ class MediaWorker:
         finally:
             await _blocking(self.repository.worker_status, self._error)
 
-    async def measure(self, asset_id: str) -> None:
+    async def measure(self, asset_id: str, *, final_attempt: bool = False) -> None:
         """Measure one photo's key content (roadmap 5a, slice M1; MEASURE_KEY_CONTENT_TASK): read
         its asset row (gone: nothing to do), ask its connection's client for `faces` and the
         `thumbnail` at its revision, `media.key_content.measure` them off the event loop, and
@@ -239,7 +239,12 @@ class MediaWorker:
 
         Any other bounded thumbnail failure: one whose status is `unavailable` (Immich busy or
         not ready) is retried the same way; one that is not (an oversize or unsupported
-        thumbnail) cannot be measured at this revision and is recorded as `decode`."""
+        thumbnail) cannot be measured at this revision and is recorded as `decode`.
+
+        On the `final_attempt` (the queue retries no more) a failure that would be retried is
+        recorded as `timeout` instead, so the photo leaves the Planner's measurement requests
+        until its retry and the photos ranked after it are measured (a photo Immich never
+        answers for must not hold the top of the list)."""
         if self.key_content is None:
             raise MediaError("media_config", "incompatible")
         asset = await _blocking(self.key_content.asset_to_measure, asset_id)
@@ -258,13 +263,19 @@ class MediaWorker:
             await _blocking(self.key_content.record_failed, asset_id, "timeout")
             return
         except LibraryUnavailable as error:
-            raise RetryableMediaTask(error.problem.kind) from None
+            retryable = error.problem.kind
         except MediaError as error:
             if error.code != "asset_changed" and error.status != "unavailable":
                 await _blocking(self.key_content.record_failed, asset_id, "decode")
                 return
-            raise RetryableMediaTask(error.code) from None
-        await _blocking(self.key_content.record_measured, asset_id, key)
+            retryable = error.code
+        else:
+            await _blocking(self.key_content.record_measured, asset_id, key)
+            return
+        if final_attempt:
+            await _blocking(self.key_content.record_failed, asset_id, "timeout")
+            return
+        raise RetryableMediaTask(retryable) from None
 
     async def maintain(self) -> None:
         await _blocking(self.store.recover)

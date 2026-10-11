@@ -87,7 +87,7 @@ class FakeLibraryStore:
         self.pools: dict[str, _Pool] = {}
         self.known: dict[tuple[str, str], KnownRevision] = {}
         self.queued: list[str] = []               # pool keys whose next step was queued
-        self.frame_edge: int | None = None
+        self.frames: tuple[tuple[int, int], ...] = ()
 
     # seeding and reading (tests only) --------------------------------------------------------
 
@@ -238,8 +238,8 @@ class FakeLibraryStore:
         pool.checking, pool.progress, pool.finished_at, pool.outcome = False, None, now, finish
         return True
 
-    def largest_frame_edge(self) -> int | None:
-        return self.frame_edge
+    def frame_sizes(self) -> tuple[tuple[int, int], ...]:
+        return self.frames
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         for pool in self.pools.values():

@@ -8,7 +8,11 @@ import pytest
 from support.photo_pools import photo, seed_pool
 
 from central.db import ProcessTransactionClock
-from central.infra.key_content_store import MEASURE_RETRY_SECONDS, PgKeyContent
+from central.infra.key_content_store import (
+    FACELESS_REMEASURE_SECONDS,
+    MEASURE_RETRY_SECONDS,
+    PgKeyContent,
+)
 from central.media_queue import (
     KEY_CONTENT_QUEUE_PREFIX,
     MEASURE_KEY_CONTENT_TASK,
@@ -100,8 +104,11 @@ def test_a_failed_photo_reads_failed_until_its_retry_then_is_measured_again(regi
     assert analyses(registry, store, [failed]) == {failed: Measured(key=KEY)}
 
 
-def test_a_row_at_another_analysis_version_or_unreadable_is_not_measured(registry):
-    store = store_of(registry, Queue())
+def test_an_older_analysis_holds_until_replaced_and_an_unreadable_one_is_not_measured(registry):
+    """Content first: a new analysis version never blanks the wall; each photo keeps its older
+    measurement until it is measured again. Mutation probe: read the current version only."""
+    queue = Queue()
+    store = store_of(registry, queue)
     older, unreadable = seeded(registry, "older", "unreadable")
     store.record_measured(older, KEY)
     store.record_measured(unreadable, KEY)
@@ -110,8 +117,33 @@ def test_a_row_at_another_analysis_version_or_unreadable_is_not_measured(registr
                      (older,))
         conn.execute("UPDATE photo_key_content SET key='{\"interest\": 1}' WHERE asset_id=%s",
                      (unreadable,))
-    assert analyses(registry, store, [older, unreadable]) == {}
+    assert analyses(registry, store, [older, unreadable]) == {older: Measured(key=KEY)}
     assert request(registry, store, [older, unreadable]) == 2
+    assert queue.waiting == [older, unreadable]
+
+
+def test_a_first_measurement_with_no_face_is_taken_once_more_later(registry):
+    """Immich finds faces in a background job after the upload: a photo measured before it ran
+    reads as faceless, so it is measured again after FACELESS_REMEASURE_SECONDS, once.
+    Mutation probe: treat every measurement as final."""
+    queue = Queue()
+    store = store_of(registry, queue)
+    early, with_face = seeded(registry, "early", "with-face")
+    faceless = KEY.model_copy(update={"faces": ()})
+    store.record_measured(early, faceless)
+    store.record_measured(with_face, KEY)
+    assert analyses(registry, store, [early]) == {early: Measured(key=faceless)}
+    registry.clock.advance(FACELESS_REMEASURE_SECONDS - 1)
+    assert request(registry, store, [early, with_face]) == 0
+    registry.clock.advance(1)
+    assert request(registry, store, [early, with_face]) == 1 and queue.waiting == [early]
+    assert analyses(registry, store, [early]) == {early: Measured(key=faceless)}  # still plays
+    queue.waiting.clear()
+    store.record_measured(early, KEY)          # Immich has found the face since
+    assert analyses(registry, store, [early]) == {early: Measured(key=KEY)}
+    store.record_measured(early, faceless)     # a later faceless measurement is final
+    registry.clock.advance(10 * FACELESS_REMEASURE_SECONDS)
+    assert request(registry, store, [early]) == 0
 
 
 def test_the_asset_row_carries_its_key_content_with_it(registry):

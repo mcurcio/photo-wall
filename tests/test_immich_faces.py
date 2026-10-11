@@ -66,3 +66,30 @@ def test_measuring_the_real_thumbnail_records_one_face_at_the_top_left(
     (face,) = analysis.key.faces
     assert (face.left + face.right) / 2 < 0.5 and (face.top + face.bottom) / 2 < 0.5
     assert sum(analysis.key.interest.weights) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_face_on_an_edited_photo_comes_back_on_the_edited_image(client, immich_library):
+    """media/key_content.py divides each box by the size `/faces` reports, and the interest grid
+    comes from the edited thumbnail: both must be the edited image. A 128 x 96 photo with a face
+    on its right half, cropped in Immich to that half: the face comes back on 64 x 96, moved
+    left by the crop (checked against Immich v2.5.6, 2026-10-11)."""
+    import uuid
+
+    asset = immich_library.upload("edited-face-" + uuid.uuid4().hex[:8],
+                                  taken="2023-03-03T03:03:03Z", size=(128, 96))
+    admin = immich_library._admin()
+    person = admin.request("POST", "/people", (201,), json={"name": "Edited Face"})
+    try:
+        admin.request("POST", "/faces", (201,), json={
+            "assetId": asset.upstream_id, "personId": person["id"], "imageWidth": 128,
+            "imageHeight": 96, "x": 80, "y": 10, "width": 30, "height": 30})
+        admin.request("PUT", f"/assets/{asset.upstream_id}/edits", json={"edits": [
+            {"action": "crop", "parameters": {"x": 64, "y": 0, "width": 64, "height": 96}}]})
+        (face,) = run(client.faces(asset.upstream_id))
+    finally:
+        admin.request("DELETE", "/assets", (204,), json={"ids": [asset.upstream_id],
+                                                         "force": True})
+        admin.request("DELETE", "/people/" + person["id"], (204,))
+        admin.close()
+    assert (face.image_width, face.image_height) == (64, 96)
+    assert (face.x1, face.x2, face.y1, face.y2) == (16, 46, 10, 40)
