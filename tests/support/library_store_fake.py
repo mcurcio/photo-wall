@@ -5,6 +5,8 @@ It behaves as the store's protocol docstrings say, and I1's conformance suite
 fenced by their number and judged by `policy.contact_health`; a check's steps are fenced by the
 check number; marks subtract (an id marked in a check never becomes a row of that check); a
 complete finish sweeps the rows the check did not see, any other finish removes nothing.
+Photos are held as PostgreSQL holds them (slice A2): one `assets` record per Immich asset, its
+`revisions` by asset id, and each revision's measured `copies`.
 
 Time is `clock.utc()` (a ManualClock in tests), standing in for the database's clock.
 """
@@ -16,19 +18,25 @@ from dataclasses import dataclass, field
 
 from pydantic import SecretStr
 
+from central.installation_models import FrameOutput
 from central.photo_library.model import (
     CheckMark,
     ConnectionSecret,
     ContactAnswer,
     ContactResult,
     ContactTicket,
+    CopySize,
     HealthOk,
     ImmichUser,
     InPool,
+    LibraryAsset,
     LibraryCounts,
     LibraryHealth,
     ListKind,
+    MeasurableCopy,
+    MeasuredCopy,
     NotChecked,
+    OriginalFile,
     PoolEntry,
     PoolThumbnail,
     SourceQuery,
@@ -62,6 +70,29 @@ class _Connection:
 
 
 @dataclass
+class LibraryAssetRecord:
+    """A `library_assets` row: one per Immich asset (connection, Immich id)."""
+    kind: str
+    taken_at: float
+    original: OriginalFile | None
+    first_seen: float
+    last_seen: float
+
+
+@dataclass
+class RevisionRecord:
+    """An `asset_revisions` row: the revision's own facts, keyed by its asset id."""
+    connection_ref: str
+    upstream_id: str
+    revision: str
+    width: int
+    height: int
+    duration: float | None
+    updated_at: str | None
+    last_seen: float
+
+
+@dataclass
 class _Pool:
     query: SourceQuery
     wanted: bool = True
@@ -85,9 +116,11 @@ class FakeLibraryStore:
         self.clock = clock
         self.connections: dict[str, _Connection] = {}
         self.pools: dict[str, _Pool] = {}
-        self.known: dict[tuple[str, str], KnownRevision] = {}
+        self.assets: dict[tuple[str, str], LibraryAssetRecord] = {}
+        self.revisions: dict[str, RevisionRecord] = {}
+        self.copies: dict[str, dict[str, CopySize]] = {}
         self.queued: list[str] = []               # pool keys whose next step was queued
-        self.frames: tuple[tuple[int, int], ...] = ()
+        self.outputs: tuple[FrameOutput, ...] = ()   # what `frame_outputs` answers
 
     # seeding and reading (tests only) --------------------------------------------------------
 
@@ -193,8 +226,39 @@ class FakeLibraryStore:
 
     def known_revisions(self, connection_ref: str,
                         upstream_ids: Sequence[str]) -> dict[str, KnownRevision]:
-        return {ref: self.known[(connection_ref, ref)] for ref in upstream_ids
-                if (connection_ref, ref) in self.known}
+        known: dict[str, RevisionRecord] = {}
+        for revision in self.revisions.values():   # the latest seen with updatedAt, per id
+            if (revision.connection_ref == connection_ref and revision.updated_at is not None
+                    and revision.upstream_id in upstream_ids):
+                kept = known.get(revision.upstream_id)
+                if kept is None or revision.last_seen >= kept.last_seen:
+                    known[revision.upstream_id] = revision
+        return {ref: KnownRevision(updated_at=r.updated_at, revision=r.revision)
+                for ref, r in known.items()}
+
+    def library_asset(self, asset_id: str) -> LibraryAsset | None:
+        """The revision as a LibraryAsset (`library_assets_in`'s answer); None when unknown."""
+        revision = self.revisions.get(asset_id)
+        if revision is None:
+            return None
+        parent = self.assets[(revision.connection_ref, revision.upstream_id)]
+        return LibraryAsset(connection_ref=revision.connection_ref,
+                            upstream_id=revision.upstream_id, revision=revision.revision,
+                            kind=parent.kind, taken_at=parent.taken_at, width=revision.width,
+                            height=revision.height, duration=revision.duration,
+                            original=parent.original)
+
+    def _record_asset(self, connection_ref: str, upstream_id: str, kind: str, taken_at: float,
+                      original: OriginalFile | None, *, reads_original: bool) -> None:
+        now = self._now()
+        parent = self.assets.get((connection_ref, upstream_id))
+        if parent is None:
+            self.assets[(connection_ref, upstream_id)] = LibraryAssetRecord(
+                kind, taken_at, original if reads_original else None, now, now)
+            return
+        parent.kind, parent.taken_at, parent.last_seen = kind, taken_at, now
+        if reads_original:
+            parent.original = original
 
     def _fenced(self, lease: CheckLease) -> _Pool | None:
         pool = self.pools.get(lease.pool_key)
@@ -211,11 +275,19 @@ class FakeLibraryStore:
         marked = {ref for ref, (_, number) in pool.marks.items() if number == lease.check_number}
         for entry in step.entries:
             ref = entry.asset.upstream_id if isinstance(entry, InPool) else entry.upstream_id
-            if ref not in marked:
-                pool.rows[ref] = (entry, lease.check_number)
-                if isinstance(entry, InPool) and entry.updated_at is not None:
-                    self.known[(entry.asset.connection_ref, ref)] = KnownRevision(
-                        updated_at=entry.updated_at, revision=entry.asset.revision)
+            if ref in marked:
+                continue
+            if isinstance(entry, InPool):
+                asset = entry.asset
+                self._record_asset(asset.connection_ref, ref, asset.kind, asset.taken_at,
+                                   asset.original, reads_original=True)
+                self.revisions[asset.asset_id] = RevisionRecord(
+                    asset.connection_ref, ref, asset.revision, asset.width, asset.height,
+                    asset.duration, entry.updated_at, self._now())
+            elif entry.kind is not None and entry.taken_at is not None:
+                self._record_asset(pool.query.connection_ref, ref, entry.kind, entry.taken_at,
+                                   None, reads_original=False)
+            pool.rows[ref] = (entry, lease.check_number)
         pool.progress, pool.seen_so_far = step.progress, step.seen_so_far
         if step.immich_up_to is not None:
             pool.up_to = step.immich_up_to
@@ -238,8 +310,25 @@ class FakeLibraryStore:
         pool.checking, pool.progress, pool.finished_at, pool.outcome = False, None, now, finish
         return True
 
-    def frame_sizes(self) -> tuple[tuple[int, int], ...]:
-        return self.frames
+    def frame_outputs(self) -> tuple[FrameOutput, ...]:
+        return self.outputs
+
+    def copy_sizes(self, asset_id: str) -> dict[MeasurableCopy, CopySize]:
+        return dict(self.copies.get(asset_id, {}))
+
+    def record_copies(self, asset_id: str, measured: Sequence[MeasuredCopy]) -> None:
+        if asset_id not in self.revisions:
+            return
+        copies = self.copies.setdefault(asset_id, {})
+        for copy in measured:
+            copies[copy.name] = CopySize(name=copy.name, media_type=copy.media_type,
+                                         width=copy.width, height=copy.height,
+                                         measured_at=self._now())
+
+    def delete_revision(self, asset_id: str) -> None:
+        """Seeding: a revision row deleted (its copies cascade)."""
+        self.revisions.pop(asset_id, None)
+        self.copies.pop(asset_id, None)
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         for pool in self.pools.values():

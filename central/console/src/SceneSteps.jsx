@@ -22,7 +22,7 @@ import { sourceCheckMessage } from "./useSourceCheck.js";
  * SceneFlow.jsx owns. They hold no draft state and run no draft effect (the
  * container runs the prunes, whichever step shows); each renders its fields through
  * the shared pickers and Field.jsx, so labels and accessible names are the ones the
- * single form had (rule 3): "Source", "Target frame <id>", "Media for frame <id>",
+ * single form had (rule 3): "Choose <Source>", "Target frame <id>", "Media for frame <id>",
  * "Seconds per cycle", "Keep playing until the Program ends", "Scene name", "Id".
  *
  * Every view takes `{value, patch, problems}`: the draft value, the draft's patch,
@@ -79,16 +79,16 @@ export function KindStep({ value, patch, problems }) {
 }
 
 /**
- * Step 2, Photos (Scene editor › What, #36): the Photo sources the Scene plays, at least one.
- * "Source" is the first; "Add another Source" adds one more (any of them: the Scene plays the
- * photos of all of them, C3); each chosen Source is listed with its state, whether its photos
- * are ready, Check now and Remove. "New Source…" opens the Photo source editor and returns here
- * with it chosen (`onNewSource`, a hand-off). A hand-picked Scene picks from one Source.
+ * Step 2, Photos (Scene editor › What, #36): the Photo sources the Scene plays, at least one,
+ * as one list of cards (SourcePicker.jsx), each chosen by its checkbox (any of them: the Scene
+ * plays the photos of all of them, C3); each chosen Source is listed with its state, whether its
+ * photos are ready, Check now and Remove. The last card, "New Photo source", opens the Photo
+ * source editor and returns here with it chosen (`onNewSource`, a hand-off). A hand-picked Scene
+ * picks from one Source (radios).
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
 export function PhotosStep({ value, patch, problems, sources, onNewSource, sourceReadiness }) {
-  const [first = "", ...more] = value.sourceRefs;
   const set = (sourceRefs) => {
     patch({ sourceRefs });
     problems.touch("source");
@@ -98,33 +98,19 @@ export function PhotosStep({ value, patch, problems, sources, onNewSource, sourc
     <>
       <p className="field__hint">
         A Photo source asks Immich for photos; Photo Wall shows them and never changes anything there.
-        {several && " For photos matching any of several choices, add a Source for each."}
+        {several ? " Choose one or more: the Scene plays the photos of every one chosen." : " Choose the one to pick from."}
       </p>
       <SourcePicker
         id={problems.idFor("source")}
         reason={problems.reasonFor("source")}
         sources={sources}
-        value={first}
-        exclude={more}
-        onChange={(sourceRef) => set(sourceRef === "" ? more : [sourceRef, ...more])}
+        value={value.sourceRefs}
+        single={!several}
+        onChange={set}
+        onNewSource={onNewSource}
       />
-      {several && first !== "" && (
-        <SourcePicker
-          id={`${problems.idFor("source")}-more`}
-          label="Add another Source"
-          sources={sources}
-          value=""
-          exclude={value.sourceRefs}
-          onChange={(sourceRef) => sourceRef !== "" && set([...value.sourceRefs, sourceRef])}
-        />
-      )}
       <SourceReadiness {...sourceReadiness}
         onRemove={(ref) => set(value.sourceRefs.filter((chosen) => chosen !== ref))} />
-      <div className="record__actions">
-        <button type="button" onClick={onNewSource}>
-          New Source…
-        </button>
-      </div>
     </>
   );
 }

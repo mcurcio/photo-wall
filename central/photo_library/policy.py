@@ -147,4 +147,15 @@ def copies_in_immich(kind: Kind, edited: bool, original_type: str | None,
     original's type is not in IMMICH_WEB_TYPES and the connection's full-size copies are on
     (`full_size_copies`; None, or an unknown `original_type`: None, cannot tell). Keys in the
     order thumbnail, preview, fullsize, original. Pure."""
-    raise NotImplementedError
+    if kind == "video":
+        return {"thumbnail": False, "preview": False, "fullsize": False, "original": True}
+    fullsize: bool | None
+    if edited:
+        fullsize = True
+    elif original_type is None:
+        fullsize = None
+    elif original_type.lower() in IMMICH_WEB_TYPES:
+        fullsize = False
+    else:
+        fullsize = full_size_copies
+    return {"thumbnail": True, "preview": True, "fullsize": fullsize, "original": True}

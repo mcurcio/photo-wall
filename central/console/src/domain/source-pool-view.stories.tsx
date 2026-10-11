@@ -47,6 +47,19 @@ export const Empty: Story = {
   args: { view: { ...COMPLETE, in_pool: { photos: 0, videos: 0 }, items: [] }, pages: [[]], hasMore: false },
 };
 
+/** Nothing matches: the query's choices are named, each with a Clear. */
+export const EmptyWithChoices: Story = {
+  args: {
+    view: { ...COMPLETE, in_pool: { photos: 0, videos: 0 }, items: [] },
+    pages: [[]],
+    hasMore: false,
+    filters: [
+      { label: "People: 2 chosen", onClear: () => {} },
+      { label: "Dates: last 3 years", onClear: () => {} },
+    ],
+  },
+};
+
 export const NotCheckedYet: Story = {
   args: { view: { ...COMPLETE, check: { state: "never_checked" }, in_pool: { photos: 0, videos: 0 }, items: [] }, pages: [[]], hasMore: false },
 };

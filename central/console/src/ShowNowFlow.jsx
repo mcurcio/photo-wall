@@ -40,7 +40,6 @@ import {
 } from "./showState.js";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips } from "./TargetPicker.jsx";
-import { sourceCheckMessage, useSourceCheck } from "./useSourceCheck.js";
 
 const EMPTY = {};
 
@@ -100,8 +99,6 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
   const frames = useMemo(() => sceneFrames(scene), [scene]);
   const sourceRefs = useMemo(() => sceneSourceRefs(scene), [scene]);
   const authoredMedia = useMemo(() => sceneHasAuthoredMedia(scene), [scene]);
-  // Check now on the chosen Scene's Sources: its receipts belong to that Scene.
-  const sourceCheck = useSourceCheck(JSON.stringify([value.sceneId, scene?.revision ?? null]));
   const covering = coveringPriority(snapshot, frames);
   // Whether a live Run covers the frames at all: one may itself have priority 0.
   const covered = coveringRuns(snapshot, frames).length > 0;
@@ -199,7 +196,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
     });
 
   const priorityValid = !problemList.some((problem) => problem.field === "priority");
-  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceCheck };
+  const stepProps = { value, problems, edit, snapshot, frames, sourceRefs, authoredMedia };
   const views = {
     scene: () => (
       <SceneStep
@@ -274,7 +271,7 @@ function SceneFramesValue({ snapshot, frames }) {
  * Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. `offered`
  * is a Scene handed over while the draft keeps its own: a button offers it instead.
  */
-function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, sourceCheck, definitions, offered, onTake }) {
+function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, authoredMedia, definitions, offered, onTake }) {
   return (
     <>
       <OfferedScene
@@ -286,7 +283,7 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
       />
       <ScenePicker
         id={problems.idFor("scene")}
-        label="Scene to activate"
+        label="Scene"
         reason={problems.reasonFor("scene")}
         definitions={definitions}
         value={value.sceneId}
@@ -300,7 +297,7 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
               <SceneFramesValue snapshot={snapshot} frames={frames} />
             </dd>
           </dl>
-          <SavedSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} check={sourceCheck} />
+          <SceneSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} />
         </>
       )}
     </>
@@ -339,7 +336,6 @@ function ReviewStep({
   frames,
   sourceRefs,
   authoredMedia,
-  sourceCheck,
   definitions,
   covering,
   covered,
@@ -376,7 +372,7 @@ function ReviewStep({
         ]}
       />
       {value.sceneId !== "" && (
-        <SavedSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} check={sourceCheck} />
+        <SceneSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} />
       )}
       <Advanced
         summary={`Priority ${priority} · ${REPEAT_LABELS[value.repeat]}`}
@@ -426,52 +422,26 @@ function ReviewStep({
 }
 
 /**
- * The chosen Scene's Photo sources (roadmap 4, K4): each with its state in words (from its check)
- * and Check now, whose receipt lasts until Central serves a check that differs (useSourceCheck).
+ * The chosen Scene's Photo sources (roadmap 4, K4; follow-ups D1), one line: each by its name and
+ * its check's state in words ("garden (Checked Sun 03:39)"). Checking a Source is the Sources
+ * page's action, not this quick action's.
  */
-function SavedSources({ snapshot, refs, authoredMedia, check }) {
+function SceneSources({ snapshot, refs, authoredMedia }) {
   const sources = snapshot?.media?.sources ?? [];
   const now = mediaNow(snapshot);
-  const rows = refs.map((ref) => {
+  const words = refs.map((ref) => {
     const source = sources.find((candidate) => candidate.source_ref === ref) ?? null;
-    return { ref, source, state: source === null ? null : sourceState(source, now) };
+    const state = source === null ? "its state is not served" : sourceState(source, now).label;
+    return `${sourceName(source ?? ref)} (${state})`;
   });
-  const needsAttention = rows.some(({ state }) => state === null || state.severity !== "ok");
   return (
-    <section
-      className={`notice show-now__sources${needsAttention ? " notice--warn" : ""}`}
-      aria-label="Saved Sources"
-    >
-      <p><strong>Saved Sources.</strong> A Source keeps playing what it has found while it is checked, and while Immich cannot be read.</p>
-      {refs.length === 0 ? (
-        <p>{authoredMedia
-          ? "This Scene uses hand-picked media; checking a Source does not change its chosen items."
-          : "This Scene has no live Sources."}</p>
-      ) : (
-        <ul className="show-now__source-list">
-          {rows.map(({ ref, source, state }) => {
-            const message = source === null ? null : sourceCheckMessage(check.feedback[ref], source.check);
-            const name = sourceName(source ?? ref);
-            return (
-              <li key={ref}>
-                <span>{name}: {state?.label ?? "Its state is not served."}</span>
-                {source !== null && (
-                  <button
-                    type="button"
-                    disabled={check.pending !== null}
-                    aria-label={`Check ${name} now`}
-                    onClick={() => void check.run(ref, source.check ?? null)}
-                  >
-                    {check.pending === ref ? "Asking…" : "Check now"}
-                  </button>
-                )}
-                {message !== null && <p role="status">{message}</p>}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
+    <dl className="record" aria-label="Photos from">
+      <dt>Photos from</dt>
+      <dd>
+        {refs.length > 0 ? words.join(", ")
+          : authoredMedia ? "Hand-picked photos" : "No Photo source"}
+      </dd>
+    </dl>
   );
 }
 

@@ -113,7 +113,24 @@ def picture_size(mode: Literal["cover", "corners"], corners: Corners, rotation: 
     ValueError as `cover_rectangle` ("cover_rotation", "cover_output", "cover_aspect",
     "cover_corners") for either mode; ValueError("corners_rotation") for "corners" with a
     rotation other than a quarter turn."""
-    raise NotImplementedError
+    rect = cover_rectangle(corners, rotation, output, aspect)   # the one validation of the inputs
+    if mode == "cover":
+        return _pixels_up(rect.width), _pixels_up(rect.height)
+    if rotation not in (0, 90, 180, 270):
+        raise ValueError("corners_rotation")
+    width, height = output
+    tl, tr, br, bl = ((x * width, y * height) for x, y in corners)
+    across = max(math.dist(tl, tr), math.dist(bl, br))
+    down = max(math.dist(tl, bl), math.dist(tr, br))
+    if rotation in (90, 270):                # a quarter turn: the picture's top is a side edge
+        across, down = down, across
+    return _pixels_up(across), _pixels_up(down)
+
+
+def _pixels_up(length: float) -> int:
+    """`length` output pixels rounded up (a float within 1e-6 above an integer is that integer),
+    at least 1."""
+    return max(1, math.ceil(length - 1e-6))
 
 
 def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> bool:
@@ -125,7 +142,16 @@ def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> b
     rendition choice (media/library_client.py `covers`) and the photo fit rule's pixel floor
     (roadmap 5a, central/wall_plan/fit.py) both ask here. Pure; ValueError("window_size") unless
     every size is >= 1 and `aspect` is finite and above 0."""
-    raise NotImplementedError
+    need_width, need_height = need
+    if not (all(type(side) is int and side >= 1 for side in (width, height, need_width, need_height))
+            and isinstance(aspect, (int, float)) and not isinstance(aspect, bool)
+            and math.isfinite(aspect) and aspect > 0):
+        raise ValueError("window_size")
+    if width / height > aspect:              # wider than the window: it spans the whole height
+        window_width, window_height = aspect * height, float(height)
+    else:                                    # taller, or the same shape: the whole width
+        window_width, window_height = float(width), width / aspect
+    return window_width >= need_width - 1e-9 and window_height >= need_height - 1e-9
 
 
 __all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize",

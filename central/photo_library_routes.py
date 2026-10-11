@@ -13,6 +13,7 @@ question:
 | GET | /v1/operator/library/people?connection=&q=&limit= or &ids= | | ListAnswer[LibraryPerson] | as albums | C1 |
 | GET | /v1/operator/library/places?connection=&q=&limit= | | ListAnswer[Place] | 404 connection_unknown | C1 |
 | GET | /v1/operator/library/tags (library_routes.py, unchanged shape) | | ListAnswer[LibraryTag] | as albums | C1 |
+| GET | /v1/operator/library/photos/{asset_id} | | PhotoFacts | 404 photo_not_found | follow-ups A3 |
 | POST | /v1/operator/photo-drafts | DraftCreate | 201 DraftCreated | 404 connection_unknown, source_unknown | C2 |
 | PUT | /v1/operator/photo-drafts/{draft_ref}/query | DraftQueryWrite | 204 | 404 draft_unknown, connection_unknown | C2 |
 | POST | /v1/operator/photo-drafts/{draft_ref}/save | DraftSave | DraftSaved | 404 draft_unknown, 409 source_name_exists, source_revision_conflict, 422 invalid_source_name | C2 |
@@ -52,6 +53,7 @@ from central.photo_library.views import (
     DraftSave,
     DraftSaved,
     LibraryConnectionView,
+    PhotoFacts,
     SourcePoolView,
 )
 from contracts.models import Identifier
@@ -133,6 +135,11 @@ def mount_photo_library_routes(app: FastAPI, *, admin: Any, queries: PhotoLibrar
     def places(connection: Identifier, q: str = Query("", max_length=MAX_LIST_QUERY),
                limit: int = Query(MAX_LIST_RESULTS, ge=1, le=MAX_LIST_RESULTS)):
         return queries.places(connection, q, limit)
+
+    @app.get(LIBRARY + "photos/{asset_id}", dependencies=[Depends(admin)],
+             response_model=PhotoFacts)
+    def photo_facts(asset_id: str) -> PhotoFacts:
+        return queries.photo_facts(asset_id)
 
 
 def _cursor(after: str | None) -> PoolCursor | None:

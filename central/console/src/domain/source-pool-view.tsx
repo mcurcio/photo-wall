@@ -2,7 +2,9 @@ import { EmptyState } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
 import { MediaGrid } from "../patterns/media-grid";
-import { checkTime, checkWords, counted, FAILED_WORDS, INCOMPLETE_WORDS, PHOTOS_KEEP_PLAYING } from "../sourceWords.js";
+import { Button } from "../ui/button";
+import { Inline } from "../ui/stack";
+import { checkWords, counted, FAILED_WORDS, INCOMPLETE_WORDS, PHOTOS_KEEP_PLAYING } from "../sourceWords.js";
 import { captureDay, countText } from "../timeWords.js";
 
 /** A served check (central/photo_library/model.py `CheckState`). */
@@ -40,7 +42,10 @@ const LEFT_OUT_WORDS = {
   over_item_limits: (count: number) => `${countText(count)} ${count === 1 ? "is" : "are"} too large`,
 };
 
-/** The pool's line: what is in it, against its check (run ledger K2). */
+/**
+ * The pool's line: what is in it, against its check (run ledger K2). The check's time is the
+ * badge's alone ("Checked Sun 03:39"), so the page shows one time, not two.
+ */
 export function poolWords(view: SourcePoolViewData): string {
   const { check, in_pool: inPool } = view;
   const kinds = `${counted(inPool.photos, "photo")} · ${counted(inPool.videos, "video")}`;
@@ -50,7 +55,7 @@ export function poolWords(view: SourcePoolViewData): string {
       return `${countText(inPool.photos + inPool.videos)} in the pool so far${upTo}`;
     }
     case "complete":
-      return `${kinds} · checked ${checkTime(check.at, view.read_at)}`;
+      return kinds;
     case "incomplete":
       return `${kinds} · ${INCOMPLETE_WORDS}`;
     case "failed":
@@ -59,6 +64,9 @@ export function poolWords(view: SourcePoolViewData): string {
       return "Not checked yet: photos appear here as Immich is read";
   }
 }
+
+/** One choice the query makes, as an empty pool names it, with how to clear it. */
+export interface ActiveFilter { label: string; onClear: () => void }
 
 export interface SourcePoolViewProps {
   /** The first page's answer; null until it is read. */
@@ -71,14 +79,18 @@ export interface SourcePoolViewProps {
   loadingMore?: boolean;
   /** The last read failed (its code): the pool shown is the last one read. */
   error?: string | null;
+  /** The query's choices, named by an empty pool, each with a Clear. */
+  filters?: readonly ActiveFilter[];
 }
 
 /**
  * SourcePoolView: a draft's or a saved Source's pool as it fills (design-language T4's preview,
- * run ledger K2): its line ("12,400 in the pool so far · up to 41,203 in Immich"), the photos
- * still waiting or left out and why, and its thumbnails newest first with "Show more".
+ * run ledger K2): its check's state and time, its line ("12,400 in the pool so far · up to 41,203
+ * in Immich"), the photos still waiting or left out and why, and its thumbnails newest first, each
+ * at its own ratio, with "Show more". A complete check that found nothing names the query's
+ * choices, each with a Clear.
  */
-export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore = false, error = null }: SourcePoolViewProps) {
+export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore = false, error = null, filters = [] }: SourcePoolViewProps) {
   if (view === null) {
     return <Note live>{error === null ? "Reading the pool…" : "Photo Wall could not read the pool just now; it keeps trying."}</Note>;
   }
@@ -96,7 +108,20 @@ export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore =
       ))}
       {error !== null && <Note>Photo Wall could not read the pool just now; it keeps trying.</Note>}
       {empty ? (
-        view.check.state === "complete" ? <EmptyState>No photos match.</EmptyState> : null
+        view.check.state === "complete" ? (
+          <>
+            <EmptyState>
+              {filters.length === 0 ? "No photos match." : `No photos match all of these: ${filters.map((f) => f.label).join(" · ")}.`}
+            </EmptyState>
+            {filters.length > 0 && (
+              <Inline label="Clear a choice">
+                {filters.map((filter) => (
+                  <Button key={filter.label} variant="ghost" onClick={filter.onClear}>{`Clear ${filter.label}`}</Button>
+                ))}
+              </Inline>
+            )}
+          </>
+        ) : null
       ) : (
         <MediaGrid
           label="Photos in the pool"
@@ -104,6 +129,8 @@ export function SourcePoolView({ view, pages, hasMore, onLoadMore, loadingMore =
             key: item.asset_id,
             src: item.thumbnail,
             alt: `${item.kind === "video" ? "Video" : "Photo"} dated ${captureDay(item.taken_at)}`,
+            width: item.width,
+            height: item.height,
             video: item.kind === "video",
           }))}
           onMore={hasMore ? onLoadMore : undefined}

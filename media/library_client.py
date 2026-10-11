@@ -32,9 +32,12 @@ from central.photo_library.model import (
     LibraryTag,
     MeasurableCopy,
     MeasuredCopy,
+    MediaTypeName,
+    OriginalFile,
     Place,
     SourceQuery,
 )
+from contracts.frame_fit import window_holds
 from contracts.models import Digest, Instant, Model, Positive
 
 # --- The rendition choice (follow-ups 2026-10-11, slice A4; owner, 2026-10-09: "use Immich
@@ -58,13 +61,20 @@ def rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]:
     """One FrameNeed per distinct (aspect, width, height) over every Frame of the wall
     (`central.registry.Registry.frame_outputs`), sorted. A photo is prepared once for the whole
     wall, so its copy must hold every Frame's output. Pure."""
-    raise NotImplementedError
+    distinct = set()
+    for frame in frames:
+        profile = frame.profile
+        width, height = frame.output_px or (profile.width_px, profile.height_px)
+        distinct.add((profile.width_px / profile.height_px, width, height))
+    return tuple(FrameNeed(aspect=aspect, width=width, height=height)
+                 for aspect, width, height in sorted(distinct))
 
 
 def covers(width: int, height: int, needs: Sequence[FrameNeed]) -> bool:
     """Whether a `width` x `height` copy holds every need (`contracts.frame_fit.window_holds` at
     each need's aspect). No need: False (the full-resolution copy is taken). Pure."""
-    raise NotImplementedError
+    return bool(needs) and all(window_holds(width, height, need.aspect, (need.width, need.height))
+                               for need in needs)
 
 
 def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
@@ -85,24 +95,15 @@ def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
       alone (the preview is not downloaded again). Otherwise ("preview", <full-resolution step>).
     The thumbnail is never tried: Immich's thumbnail (long edge 250 by default) is below any
     Frame output a wall uses, and its size is unknown until downloaded."""
-    raise NotImplementedError
-
-
-def preview_covers(width: int, height: int, frames: Sequence[tuple[int, int]]) -> bool:
-    """Whether Immich's downsampled copy, `width` x `height`, is at least each Frame's size as
-    the Player shows it (owner, 2026-10-09: the downsampled copy only if it is at least the
-    visible Frame size): the Player draws a window of the Frame's shape cut from the photo
-    (roadmap 5a, contracts/photo_crop.py), whose short side along the cut is the photo's, so
-    the window must hold the Frame's pixels. No Frame: False (take the full-size copy). Pure."""
-    if not frames:
-        return False
-    for frame_width, frame_height in frames:
-        if width * frame_height >= frame_width * height:     # cut left and right
-            if height < frame_height:
-                return False
-        elif width < frame_width:                              # cut top and bottom
-            return False
-    return True
+    if asset.kind == "video":
+        return ("original",)
+    original_type = None if asset.original is None else asset.original.media_type
+    full: FetchStep = ("original" if not asset.edited and original_type in readable
+                       else "fullsize")
+    preview = known.get("preview")
+    if not needs or (preview is not None and not covers(preview.width, preview.height, needs)):
+        return (full,)
+    return ("preview", full)
 
 
 class LibraryUnavailable(Exception):
@@ -153,6 +154,9 @@ class SearchItem(Model):
     height: int | None = Field(default=None, gt=0)
     duration: Positive | None = None
     stack_primary: LibraryRef | None = None           # `stack.primaryAssetId` when Immich sends it
+    # The original file (`originalMimeType` and `exifInfo`, sent because every search asks
+    # `withExif`; follow-ups 2026-10-11, slice A3). None: the row carried no `exifInfo`.
+    original: OriginalFile | None = None
     problem: LeftOutReason | None = None
 
 
@@ -189,19 +193,23 @@ class TimeBucket(Model):
 
 
 class FetchedRendition(Model):
-    """What preparation reads: the edited photo Immich shows (C10), measured on download."""
+    """What preparation reads: the edited photo Immich shows (C10), measured on download.
+    `rendition` is the copy Immich served for the kept step: a "fullsize" step Immich redirected
+    to the preview is "preview", and one it redirected to the original is "original"."""
 
     path: Path
-    rendition: Literal["preview", "fullsize", "original"]
-    media_type: Literal["image/jpeg", "image/png", "image/webp", "video/mp4", "video/quicktime",
-                        "video/webm", "video/x-matroska"]
+    rendition: FetchStep
+    # One of the types the client downloads: `media.prepare.STILL_MEDIA_TYPES` or a video's
+    # (`media.immich` refuses any other before writing a byte).
+    media_type: MediaTypeName
     size: int = Field(gt=0)
     sha256: Digest
     width: int = Field(gt=0)
     height: int = Field(gt=0)
-    # Every copy this fetch downloaded and measured, the kept one included (slice A4: the worker
-    # records them, `LibraryWorkerStore.record_copies`). Empty only before slice A4 lands.
-    measured: tuple[MeasuredCopy, ...] = ()
+    # Every still copy this fetch downloaded and measured, the kept one included; never the
+    # original, whose size is Immich's (`OriginalFile`). The worker records them
+    # (`LibraryWorkerStore.record_copies`; slice A4).
+    measured: tuple[MeasuredCopy, ...]
 
 
 class FaceBox(Model):
@@ -282,13 +290,14 @@ class LibraryClient(Protocol):
         malformed box is left out. Other failures raise LibraryUnavailable."""
         ...
 
-    async def fetch_rendition(self, asset: LibraryAsset, *, frames: Sequence[tuple[int, int]],
-                              destination: Path) -> FetchedRendition:
-        """Photos: the edited preview when it covers every Frame of `frames` (each (width,
-        height) in pixels) as the Player draws it, a window of the Frame's shape cut from the
-        preview (`preview_covers`), else Immich's edited full-size copy (following same-origin
-        redirects; with full-size copies off, the preview); no Frame takes the full-size copy. Videos: the original. Exclusively creates
-        `destination`; removes only a file it created on failure."""
+    async def fetch_rendition(self, asset: LibraryAsset, *, plan: Sequence[FetchStep],
+                              needs: Sequence[FrameNeed], destination: Path) -> FetchedRendition:
+        """Download each step of `plan` (`fetch_plan`) in order, measure it, and keep the first
+        that `covers(needs)`, else the last: "preview" is `size=preview&edited=true`, "fullsize"
+        is `size=fullsize&edited=<asset.edited>` (following same-origin redirects; a redirect to
+        the preview after the preview was downloaded keeps that preview), "original" is
+        `/assets/{id}/original?edited=false`. Re-checks the asset's revision first. Exclusively
+        creates `destination`; removes only what it created on failure."""
         ...
 
     async def close(self) -> None: ...

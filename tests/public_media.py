@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 
 from PIL import Image
+from support.photo_pools import FIXTURE_CONNECTION
 
 from central.media_store import MediaStore
 from central.photo_library.model import LibraryAsset
@@ -28,7 +29,9 @@ class PublicPhoto:
         return hashlib.sha256(self.original).hexdigest()
 
 
-def public_photo(*, connection_id="fixture-library", number=1,
+# The fixture connection's photos (follow-ups A2: an Immich asset is keyed by its connection, so a
+# pool's photos must be its connection's for its counts to find them).
+def public_photo(*, connection_id=FIXTURE_CONNECTION, number=1,
                  width=108, height=192, captured_at=1000) -> PublicPhoto:
     buffers = (io.BytesIO(), io.BytesIO())
     for buffer, quality in zip(buffers, (95, 90)):
@@ -56,9 +59,11 @@ def publish_photo(storage: MediaStore, photo: PublicPhoto) -> Variant:
         build = BuildIdentity(preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64,
             ffprobe_sha256="c" * 64, ffmpeg_version="synthetic", ffprobe_version="synthetic",
             python_version="synthetic", pillow_version="synthetic", littlecms_version="synthetic",
+            libheif_version="synthetic",
             jpeg_version="synthetic", zlib_version="synthetic", platform="synthetic",
             memory_limit_enforced=False)
         prepared = PreparedMedia(path=paths.variant, variant=variant,
-            original_sha256=photo.original_sha256, recipe_id=lease.recipe_id, build=build)
+            original_sha256=photo.original_sha256, recipe_id=lease.recipe_id, build=build,
+            made_from="preview")
         assert storage.publish(lease, prepared) == variant
         return variant

@@ -10,7 +10,6 @@ outcome, and new whenever the form changes (slice 3B §11).
 
 import os
 import re
-from urllib.parse import quote
 
 import pytest
 from console_tasks import (
@@ -101,38 +100,32 @@ def _on(scene_id, source_ref, frame=VALID_FRAME):
         Contribution(target=f"frame:{frame}", source_refs=(source_ref,)),))
 
 
-def test_show_now_lists_the_scenes_sources_with_their_state_and_check_now(page, registry):
-    """K4 case 1: Show now lists the chosen Scene's Sources with their state and Check now;
-    pressing it posts once to /checks and shows the receipt, which lasts until the served
-    check differs (useSourceCheck.js; tests/test_console_show_now.py has the rule)."""
+def test_show_now_names_the_scenes_sources_in_one_line_with_no_check_now(page, registry):
+    """K4, after the designer review (follow-ups D1): Show now names the chosen Scene's Sources
+    with their state in one line ("Photos from garden (Not checked yet)"), with no boilerplate
+    and no Check now (the Sources page checks a Source), and none of the words Run, Runs or
+    "Scene to activate" while the quick action shows.
+
+    Mutation probe: render the old Saved Sources section -> the boilerplate assertion fails."""
     _seed(registry)
     _library, garden = _garden(registry)
     _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, SCENE_ID)
-        saved = form.get_by_role("region", name="Saved Sources", exact=True)
-        expect(saved).to_contain_text("garden: Not checked yet")
-        expect(saved).to_contain_text(
-            "A Source keeps playing what it has found while it is checked, and while Immich cannot be read.")
-        expect(saved).not_to_contain_text(garden)
-        posts = []
-        page.on("request", lambda r: posts.append(r.url) if r.url.endswith("/checks") else None)
-        with page.expect_response(lambda response: response.url.endswith(
-                f"/v1/operator/sources/{quote(garden, safe='')}/checks") and
-                response.request.method == "POST") as info:
-            saved.get_by_role("button", name="Check garden now", exact=True).click()
-        assert info.value.status == 202
-        expect(saved).to_contain_text("Check requested. Photos keep playing while Photo Wall reads Immich.")
+        line = form.get_by_role("definition").filter(has_text="garden")
+        expect(line).to_have_text("garden (Not checked yet)")
+        expect(form).not_to_contain_text("A Source keeps playing what it has found")
+        expect(form.get_by_role("button", name=re.compile("Check"))).to_have_count(0)
+        expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
+        shown = page.get_by_role("region", name="Runs", exact=True).inner_text()   # visible text only
+        assert not re.search(r"\bRuns\b|Scene to activate", shown), shown
         form.get_by_role("button", name="Continue", exact=True).click()
-        saved = form.get_by_role("region", name="Saved Sources", exact=True)
-        expect(saved).to_contain_text("garden: Not checked yet")
-        expect(saved).to_contain_text("Check requested.")
+        expect(form.get_by_role("definition").filter(has_text="garden")).to_have_text("garden (Not checked yet)")
         expect(form.get_by_role("button", name="Activate now", exact=True)).to_be_enabled()
-        assert len(posts) == 1
 
 
-def test_show_now_handles_historical_and_authored_scenes_without_check_now(page, registry):
+def test_show_now_handles_historical_and_authored_scenes(page, registry):
     _seed(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(scene_id="historical", contributions=(
@@ -142,43 +135,11 @@ def test_show_now_handles_historical_and_authored_scenes_without_check_now(page,
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, "historical")
-        saved = form.get_by_role("region", name="Saved Sources", exact=True)
-        expect(saved).to_contain_text("gone: Its state is not served.")
-        expect(saved).not_to_contain_text("gone:1")
-        expect(saved.get_by_role("button", name=re.compile("Check"))).to_have_count(0)
-        form.get_by_role("button", name="Continue", exact=True).click()
-        expect(form.get_by_role("region", name="Saved Sources", exact=True)).to_contain_text(
-            "Its state is not served.")
-        page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
-            "button", name="Scene", exact=True).click()
-        form.get_by_label("Scene to activate", exact=True).select_option("fixed")
-        saved = form.get_by_role("region", name="Saved Sources", exact=True)
-        expect(saved).to_contain_text(
-            "This Scene uses hand-picked media; checking a Source does not change its chosen items.")
-        expect(saved.get_by_role("button", name=re.compile("Check"))).to_have_count(0)
-
-
-def test_show_now_ignores_a_check_receipt_after_a_scene_change(page, registry):
-    _seed(registry)
-    _library, garden = _garden(registry)
-    runtime = _runtime(registry)
-    runtime.command("set_scene", _on("first", garden))
-    runtime.command("set_scene", _on("second", garden))
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "now")
-        form = start_show_now(page, "first")
-        saved = form.get_by_role("region", name="Saved Sources", exact=True)
-        gate = RequestGate(page, "**/v1/operator/sources/*/checks")
-        gate.holding = True
-        saved.get_by_role("button", name="Check garden now", exact=True).click()
-        gate.wait_held()
-        expect(saved.get_by_role("button", name="Check garden now", exact=True)).to_be_disabled()
-        form.get_by_label("Scene to activate", exact=True).select_option("second")
-        gate.release(status=202, content_type="application/json", body="null")
-        saved = form.get_by_role("region", name="Saved Sources", exact=True)
-        expect(saved).to_contain_text("garden: Not checked yet")
-        expect(saved).not_to_contain_text("Check requested.")
-        expect(saved.get_by_role("button", name="Check garden now", exact=True)).to_be_enabled()
+        sources = form.get_by_label("Photos from", exact=True)
+        expect(sources).to_contain_text("gone (its state is not served)")
+        expect(sources).not_to_contain_text("gone:1")
+        form.get_by_label("Scene", exact=True).select_option("fixed")
+        expect(form.get_by_label("Photos from", exact=True)).to_contain_text("Hand-picked photos")
 
 
 def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(page, registry):
@@ -266,7 +227,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
         # Selecting a healthy Frame leaves its chip informational.
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Scene", exact=True).click()
-        form.get_by_label("Scene to activate", exact=True).select_option("healthy")
+        form.get_by_label("Scene", exact=True).select_option("healthy")
         expect(form).to_contain_text(f"{VALID_FRAME}: Heard recently")
         expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
@@ -417,11 +378,11 @@ def test_a_scene_cards_show_now_opens_the_flow_on_that_scene(page, registry):
         scenes.get_by_role("button", name=f"Show Scene {SCENE_ID} now", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Now", exact=True)).to_be_visible()
         assert current_hash(page) == "#/now/show/scene"
-        expect(show_form(page).get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(show_form(page).get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
 
         go(page, "scenes")
         scenes.get_by_role("button", name="Show Scene elsewhere now", exact=True).click()
-        expect(show_form(page).get_by_label("Scene to activate", exact=True)).to_have_value(
+        expect(show_form(page).get_by_label("Scene", exact=True)).to_have_value(
             "elsewhere")
 
 
@@ -570,7 +531,7 @@ def test_a_card_show_now_offers_its_scene_to_a_changed_draft(page, registry):
         form = show_now(page, SCENE_ID, priority=2, submit=False)
         _show_scene_card(page, "elsewhere")
         assert current_hash(page) == "#/now/show/scene"
-        scene = form.get_by_label("Scene to activate", exact=True)
+        scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
         form.get_by_role("button", name="Show Scene elsewhere instead", exact=True).click()
@@ -590,7 +551,7 @@ def test_the_same_scene_handed_over_again_is_offered_again(page, registry):
         connect(page, origin, "now")
         _show_scene_card(page, "elsewhere")
         form = show_form(page)
-        scene = form.get_by_label("Scene to activate", exact=True)
+        scene = form.get_by_label("Scene", exact=True)
         expect(scene).to_have_value("elsewhere")
         scene.select_option(SCENE_ID)  # a changed draft
         _show_scene_card(page, "elsewhere")
@@ -616,7 +577,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
         # so the draft is clean (the sidebar does not say "Draft").
         _show_scene_card(page, SCENE_ID)
         form = show_form(page)
-        expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
         form.get_by_role("button", name="Continue", exact=True).click()
         form.get_by_role("button", name="Activate now", exact=True).click()
         expect(_outcome(page)).to_have_text(UNKNOWN)
@@ -626,7 +587,7 @@ def test_a_card_show_now_keeps_a_draft_whose_outcome_is_unknown(page, registry):
 
         _show_scene_card(page, "elsewhere")
         assert current_hash(page) == "#/now/show/scene"
-        expect(form.get_by_label("Scene to activate", exact=True)).to_have_value(SCENE_ID)
+        expect(form.get_by_label("Scene", exact=True)).to_have_value(SCENE_ID)
         expect(form).to_contain_text(f"Your unsaved draft shows Scene {SCENE_ID}.")
         expect(form.get_by_role("button", name="Show Scene elsewhere instead", exact=True)
                ).to_be_visible()
@@ -679,7 +640,7 @@ def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
         gate.holding = True
         _show_scene_card(page, SCENE_ID)  # a clean draft on SCENE_ID
         form = show_form(page)
-        scene = form.get_by_label("Scene to activate", exact=True)
+        scene = form.get_by_label("Scene", exact=True)
         form.get_by_role("button", name="Continue", exact=True).click()
         form.get_by_role("button", name="Activate now", exact=True).click()
         gate.wait_held()

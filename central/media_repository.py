@@ -9,9 +9,8 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
-from collections.abc import Mapping
 from contextlib import contextmanager
-from typing import Any, get_args
+from typing import get_args
 
 from psycopg.types.json import Jsonb
 from pydantic import Field
@@ -19,7 +18,7 @@ from pydantic import Field
 from central.catalog import Candidate, SourcePool
 from central.db import MEDIA_LOCK, Database, TransactionClock
 from central.infra.key_content_store import PgKeyContent
-from central.infra.photo_library_store import PgPhotoLibrary
+from central.infra.photo_library_store import PgPhotoLibrary, library_assets_in
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset, PoolMember
 from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing
@@ -45,14 +44,6 @@ class StoreLimits(Model):
     max_image_bytes: int = Field(default=16 * 1024**2, gt=0)
     max_video_bytes: int = Field(default=256 * 1024**2, gt=0)
     lease_seconds: float = Field(default=600, ge=360, le=3600)
-
-
-def lease_asset_of(row: Mapping[str, Any]) -> LibraryAsset:
-    """The asset a job leases, from its `asset_revisions` row's `metadata` (a pool check's
-    LibraryAsset; migration 081 rewrote the pre-4 records a Scene still held). The one home of
-    this rule: `claim_job` and `MediaStore` call it. Raises pydantic's ValidationError on a row
-    that is not one."""
-    return LibraryAsset.model_validate(row["metadata"])
 
 
 def _candidate_of(member: PoolMember) -> Candidate:
@@ -362,8 +353,7 @@ class MediaRepository:
             now = self.times.now_in(conn)
             job_filter = "" if job_id is None else "AND j.id=%s "
             parameters = (now,) if job_id is None else (now, job_id)
-            row = conn.execute("SELECT j.*,a.metadata,a.upstream_id FROM media_jobs j "
-                               "JOIN asset_revisions a ON a.asset_id=j.asset_id "
+            row = conn.execute("SELECT j.* FROM media_jobs j "
                                "WHERE j.state IN ('queued','retry') AND j.retry_at<=%s AND j.reserved_bytes=0 "
                                + job_filter +
                                "AND j.recipe_id=(SELECT recipe_id FROM media_settings WHERE singleton) "
@@ -371,7 +361,9 @@ class MediaRepository:
                                parameters).fetchone()
             if row is None:
                 return None
-            asset = lease_asset_of(row)
+            # The revision and its Immich asset (central.infra.photo_library_store's one read);
+            # a job's revision always has both (migration 081's foreign keys).
+            asset = library_assets_in(conn, (row["asset_id"],))[row["asset_id"]]
             reserve = self.limits.max_original_bytes + (
                 self.limits.max_image_bytes if asset.kind == "image" else self.limits.max_video_bytes)
             maximum = conn.execute("SELECT max_bytes FROM media_settings WHERE singleton").fetchone()["max_bytes"]
