@@ -7,7 +7,10 @@ import { Advanced } from "./flow/Advanced.jsx";
 import { CheckAnswers, NotChosen } from "./flow/CheckAnswers.jsx";
 import { candidateLabels, sourceState } from "./mediaHealth.js";
 import { SCENE_ANSWER_LABELS } from "./sceneFlowModel.js";
-import { AdvancedRows, EndingRows, endingWords, onOff, secondsWords, TimingRows } from "./SceneSettings.jsx";
+import {
+  AdvancedRows, cropWords, daysWords, EndingRows, endingWords, onOff, ORDER_LABELS, secondsWords, SelectionRows,
+  TimingRows,
+} from "./SceneSettings.jsx";
 import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
@@ -229,7 +232,7 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
 
 /**
  * Step 4, Playback: "Seconds per cycle" (default 30) and "Fade between photos"; how the
- * Scene ends; under Advanced, "Keep playing until the Program ends" (default on), "Keep
+ * Scene ends; "Order", "Don't repeat within" and "Crop limit" (roadmap 5a); under Advanced, "Keep playing until the Program ends" (default on), "Keep
  * the last photo up" and "Keep these Frames together" (SceneSettings.jsx).
  *
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void}}} props
@@ -249,6 +252,7 @@ export function PlaybackStep({ value, patch, problems, advanced }) {
       />
       <TimingRows value={value} patch={patch} problems={problems} />
       <EndingRows value={value} patch={patch} problems={problems} />
+      <SelectionRows value={value} patch={patch} problems={problems} />
       <Advanced summary={summary} open={advanced.open} onToggle={advanced.onToggle}>
         <LoopField problems={problems} loop={value.loop} onLoop={(loop) => patch({ loop })} />
         <AdvancedRows value={value} patch={patch} problems={problems} />
@@ -313,6 +317,9 @@ export function ReviewStep({
     { label: SCENE_ANSWER_LABELS.ending, field: "ending", value: endingWords(value) },
     { label: SCENE_ANSWER_LABELS.keepLastPhoto, field: "keepLastPhoto", value: onOff(value.keepLastPhoto) },
     { label: SCENE_ANSWER_LABELS.keepTogether, field: "keepTogether", value: onOff(value.keepTogether) },
+    { label: SCENE_ANSWER_LABELS.order, field: "order", value: ORDER_LABELS[value.order] },
+    { label: SCENE_ANSWER_LABELS.noRepeatDays, field: "noRepeatDays", value: daysWords(value.noRepeatDays) },
+    { label: SCENE_ANSWER_LABELS.cropLimit, field: "cropLimit", value: cropWords(value.cropLimit) },
   );
   const derived = idFromName(value.name);
   if (editingId === null) {

@@ -1,16 +1,19 @@
 import React from "react";
 
-import { PLAYBACK_LABELS, SCENE_SETTING_DEFAULTS, SETTING_RANGES } from "./authoring.js";
+import { cropPercent, ORDERS, PLAYBACK_LABELS, SCENE_SETTING_DEFAULTS, SETTING_RANGES } from "./authoring.js";
 import { SettingRow } from "./patterns/setting-row.tsx";
+import { NumberInput } from "./ui/field.tsx";
 import { SegmentedControl } from "./ui/segmented-control.tsx";
 import { Slider } from "./ui/slider.tsx";
+import { Inline } from "./ui/stack.tsx";
 import { Switch } from "./ui/switch.tsx";
 
 /**
  * Delivery 1x's Scene settings (roadmap 1x; settings catalogue #41, #62–#65): what Central
- * already plays but the console could not reach. Each is a `SettingRow` with its catalogue
- * default and Reset, on the Scene flow's Playback step: Timing (the fade), Ending, and two
- * under Advanced. The flow's Save is their save model (a Scene edit applies from the next
+ * already plays but the console could not reach; and roadmap 5a's selection (#43 Order, #44
+ * Don't repeat within, the one Crop limit row). Each is a `SettingRow` with its catalogue
+ * default and Reset, on the Scene flow's Playback step: Timing (the fade), Ending, the
+ * selection, and two under Advanced. The flow's Save is their save model (a Scene edit applies from the next
  * start, requirements › live media compatibility).
  *
  * Each row sits in an element with the flow's field id (`problems.idFor`), so a problem or
@@ -45,6 +48,27 @@ const ENDING_OPTIONS = Object.freeze(
 /** How a Scene ends in Review's words: "Stops", or "Black for 3 s". */
 export function endingWords({ ending, endingSeconds }) {
   return ending === "none" ? ENDING_LABELS.none : `${ENDING_LABELS[ending]} for ${secondsWords(endingSeconds)}`;
+}
+
+/** How a Scene picks its photos, in the words the control and Review use. */
+export const ORDER_LABELS = Object.freeze({
+  shuffle: "Shuffle",
+  chronological: "Oldest first",
+  newest_first: "Newest first",
+  on_this_day: "On this day",
+});
+
+const ORDER_OPTIONS = Object.freeze(ORDERS.map((value) => ({ value, label: ORDER_LABELS[value] })));
+
+/** Days in words: "Off" for none, "1 day", else "7 days". */
+export function daysWords(days) {
+  const value = Number(days);
+  return value === 0 ? "Off" : value === 1 ? "1 day" : `${value} days`;
+}
+
+/** A crop limit (a fraction) in words: "35 %". */
+export function cropWords(cropLimit) {
+  return `${cropPercent(cropLimit)} %`;
 }
 
 /** The element a field's problem and "Change" focus. */
@@ -148,6 +172,98 @@ export function EndingRows({ value, patch, problems }) {
         </FieldSlot>
       )}
     </section>
+  );
+}
+
+/**
+ * Roadmap 5a's selection: "Order" (#43), "Don't repeat within" (#44; 0 is Off) and "Crop
+ * limit" (the one row that replaced #48–#52). Don't repeat within only ranks: a Frame never
+ * goes blank because of it. The crop limit is a fraction in the draft and whole percent on
+ * its slider.
+ *
+ * @param {RowsProps} props
+ */
+export function SelectionRows({ value, patch, problems }) {
+  const order = value.order ?? D.order;
+  const days = value.noRepeatDays ?? D.noRepeatDays;
+  const typed = String(days).trim() !== "";
+  const crop = Number(value.cropLimit ?? D.cropLimit);
+  const percents = {
+    min: cropPercent(SETTING_RANGES.cropLimit.min),
+    max: cropPercent(SETTING_RANGES.cropLimit.max),
+    step: 1,
+  };
+  return (
+    <>
+      <FieldSlot problems={problems} field="order">
+        <SettingRow
+          kind="content"
+          label={PLAYBACK_LABELS.order}
+          help={
+            "Shuffle gives every photo a turn, then shuffles again. On this day starts with " +
+            "photos taken on today's date in earlier years."
+          }
+          defaultLabel={`Default: ${ORDER_LABELS[D.order]}`}
+          onReset={order === D.order ? undefined : () => patch({ order: D.order })}
+          state="idle"
+          control={
+            <SegmentedControl
+              label={PLAYBACK_LABELS.order}
+              value={order}
+              options={ORDER_OPTIONS}
+              onChange={(next) => patch({ order: next })}
+            />
+          }
+        />
+      </FieldSlot>
+      <FieldSlot problems={problems} field="noRepeatDays">
+        <SettingRow
+          kind="content"
+          label={PLAYBACK_LABELS.noRepeatDays}
+          help="A photo shown recently waits its turn, but a Frame never goes blank because of it."
+          defaultLabel={`Default: ${daysWords(D.noRepeatDays)}`}
+          onReset={typed && Number(days) === D.noRepeatDays
+            ? undefined
+            : () => patch({ noRepeatDays: D.noRepeatDays })}
+          state="idle"
+          error={reason(problems, "noRepeatDays")}
+          control={
+            <Inline>
+              <NumberInput
+                {...SETTING_RANGES.noRepeatDays}
+                value={days}
+                onChange={(noRepeatDays) => {
+                  patch({ noRepeatDays });
+                  problems.touch("noRepeatDays");
+                }}
+              />
+              <span aria-hidden="true">{typed && Number(days) === 0 ? "days: Off" : "days"}</span>
+            </Inline>
+          }
+        />
+      </FieldSlot>
+      <FieldSlot problems={problems} field="cropLimit">
+        <SettingRow
+          kind="content"
+          label={PLAYBACK_LABELS.cropLimit}
+          help={
+            "The most of a photo a Frame may cut away to fill itself. Faces and the " +
+            "interesting part are always kept."
+          }
+          defaultLabel={`Default: ${cropWords(D.cropLimit)}`}
+          onReset={crop === D.cropLimit ? undefined : () => patch({ cropLimit: D.cropLimit })}
+          state="idle"
+          control={
+            <Slider
+              {...percents}
+              value={cropPercent(crop)}
+              unit="%"
+              onCommit={(percent) => patch({ cropLimit: percent / 100 })}
+            />
+          }
+        />
+      </FieldSlot>
+    </>
   );
 }
 

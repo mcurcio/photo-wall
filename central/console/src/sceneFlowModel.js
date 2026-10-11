@@ -52,6 +52,9 @@ export const SCENE_FIELD_STEP = Object.freeze({
   endingSeconds: "playback",
   keepLastPhoto: "playback",
   keepTogether: "playback",
+  order: "playback",
+  noRepeatDays: "playback",
+  cropLimit: "playback",
   name: "review",
   id: "review",
 });
@@ -109,6 +112,9 @@ export const SCENE_ANSWER_LABELS = Object.freeze({
   ending: PLAYBACK_LABELS.ending,
   keepLastPhoto: PLAYBACK_LABELS.keepLastPhoto,
   keepTogether: PLAYBACK_LABELS.keepTogether,
+  order: PLAYBACK_LABELS.order,
+  noRepeatDays: PLAYBACK_LABELS.noRepeatDays,
+  cropLimit: PLAYBACK_LABELS.cropLimit,
 });
 
 // The authored values a Reload can change, each by its answer label.
@@ -124,6 +130,9 @@ const RELOADED = [
     (draft.ending === "none" ? "none" : `${draft.ending}:${Number(draft.endingSeconds)}`)],
   [SCENE_ANSWER_LABELS.keepLastPhoto, (draft) => draft.keepLastPhoto],
   [SCENE_ANSWER_LABELS.keepTogether, (draft) => draft.keepTogether],
+  [SCENE_ANSWER_LABELS.order, (draft) => draft.order],
+  [SCENE_ANSWER_LABELS.noRepeatDays, (draft) => Number(draft.noRepeatDays)],
+  [SCENE_ANSWER_LABELS.cropLimit, (draft) => Number(draft.cropLimit)],
 ];
 
 /**

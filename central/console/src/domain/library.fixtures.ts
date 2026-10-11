@@ -1,4 +1,4 @@
-import type { LibraryConnectionView, LibraryProblem } from "./library-health-card";
+import type { LibraryConnectionView, LibraryNote, LibraryProblem } from "./library-health-card";
 
 /** A fixed Central time, so every story renders the same times. */
 export const AT = 1791147840;
@@ -17,8 +17,10 @@ export function connectionWith(problem: LibraryProblem): LibraryConnectionView {
   };
 }
 
+/** The same connection, connected, its last check passing with `notes`. */
+export function connectedWith(...notes: LibraryNote[]): LibraryConnectionView {
+  return { ...connectionWith({ kind: "key_rejected" }), health: { state: "ok", checked_at: AT, notes } };
+}
+
 /** The same connection, connected. */
-export const CONNECTED: LibraryConnectionView = {
-  ...connectionWith({ kind: "key_rejected" }),
-  health: { state: "ok", checked_at: AT, notes: [] },
-};
+export const CONNECTED: LibraryConnectionView = connectedWith();
