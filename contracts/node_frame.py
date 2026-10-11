@@ -21,11 +21,14 @@ pass that applies them is the Player's (player/geometry.py, player/native.py).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import math
+import re
+from dataclasses import dataclass, fields
 from hashlib import sha256
 from typing import Final
 
 from contracts.node_protocol import counter, digest, token
+from contracts.strict_json import loads_object
 
 PICTURE_OPERATIONS_BYTES: Final = 512     # one `picture` event's operations, encoded
 LIGHT_FACTOR_MAX: Final = 2.0             # light_factor in 0..2 (brightness 0..100 % as picture adjustment)
@@ -56,36 +59,85 @@ class PictureOperations:
         multiplier is in (0, 1] with the largest exactly 1.0, 0 <= light_factor <=
         LIGHT_FACTOR_MAX, 0 <= contrast_slope <= CONTRAST_SLOPE_MAX, and GAMMA_EXPONENT_MIN <=
         gamma_exponent <= GAMMA_EXPONENT_MAX."""
-        raise NotImplementedError
+        multipliers = self.rgb_multipliers
+        try:
+            token(self.output_id)
+            counter(self.picture_change, 1)
+        except ValueError as error:
+            raise ValueError("picture_operations") from error
+        valid = (isinstance(multipliers, tuple) and len(multipliers) == 3
+                 and all(_number(value, 0, 1) and value > 0 for value in multipliers)
+                 and max(multipliers) == 1.0
+                 and _number(self.light_factor, 0, LIGHT_FACTOR_MAX)
+                 and _number(self.contrast_slope, 0, CONTRAST_SLOPE_MAX)
+                 and _number(self.gamma_exponent, GAMMA_EXPONENT_MIN, GAMMA_EXPONENT_MAX))
+        if not valid:
+            raise ValueError("picture_operations")
 
 
 def neutral_operations(output_id: str, picture_change: int) -> PictureOperations:
     """Operations that change nothing: multipliers (1, 1, 1) and every factor 1."""
-    raise NotImplementedError
+    return PictureOperations(output_id=output_id, picture_change=picture_change, rgb_multipliers=(1.0, 1.0, 1.0),
+                             light_factor=1.0, contrast_slope=1.0, gamma_exponent=1.0)
 
 
 def encode_picture_operations(operations: PictureOperations) -> str:
     """Canonical JSON (sorted keys, no spaces, tuples as lists, floats as Python's repr) of at most
     PICTURE_OPERATIONS_BYTES; ValueError("picture_operations_too_large") past it."""
-    raise NotImplementedError
+    value = {field.name: getattr(operations, field.name) for field in fields(PictureOperations)}
+    value["rgb_multipliers"] = list(operations.rgb_multipliers)
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if len(raw.encode()) > PICTURE_OPERATIONS_BYTES:
+        raise ValueError("picture_operations_too_large")
+    return raw
 
 
 def decode_picture_operations(raw: str) -> PictureOperations:
     """The operations `raw` encodes (contracts.strict_json rules; exactly the six fields);
     ValueError("picture_operations") for anything else."""
-    raise NotImplementedError
+    value = loads_object(raw.encode(), max_bytes=PICTURE_OPERATIONS_BYTES) if isinstance(raw, str) else None
+    if value is None or set(value) != {field.name for field in fields(PictureOperations)}:
+        raise ValueError("picture_operations")
+    multipliers = value["rgb_multipliers"]
+    if not isinstance(multipliers, list):
+        raise ValueError("picture_operations")
+    return PictureOperations(**{**value, "rgb_multipliers": tuple(multipliers)})
 
 
 def picture_change_text(change: int | None) -> str:
     """tag_picture's picture change argument: the decimal change, or NO_PICTURE_CHANGE for None.
     ValueError("picture_change") for a change below 1."""
-    raise NotImplementedError
+    if change is None:
+        return NO_PICTURE_CHANGE
+    _picture_change(change)
+    return str(change)
 
 
 def parse_picture_change(text: str) -> int | None:
     """The inverse of `picture_change_text`: None for NO_PICTURE_CHANGE; ValueError("picture_change")
     for anything but a canonical decimal of 1..2**63-1."""
-    raise NotImplementedError
+    if text == NO_PICTURE_CHANGE:
+        return None
+    if not isinstance(text, str) or _CANONICAL_CHANGE.fullmatch(text) is None:
+        raise ValueError("picture_change")
+    return _picture_change(int(text))
+
+
+_CANONICAL_CHANGE: Final = re.compile(r"[1-9][0-9]{0,18}")
+
+
+def _picture_change(change: int) -> int:
+    """`change` when it is a node counter of at least 1; ValueError("picture_change") otherwise."""
+    try:
+        counter(change, 1)
+    except ValueError as error:
+        raise ValueError("picture_change") from error
+    return change
+
+
+def _number(value: object, minimum: float, maximum: float) -> bool:
+    """A finite float or int (never a bool) in minimum..maximum."""
+    return type(value) in (int, float) and math.isfinite(value) and minimum <= value <= maximum
 
 
 def frame_witness_tag(*, output_id: str, frame_id: str, binding_generation: int, config_revision: int,
