@@ -20,8 +20,11 @@ its extent, and a rebooted Pi shows its local fallback.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
-from typing import Protocol
+from typing import Protocol, Self
+
+from pydantic import model_validator
 
 from contracts.models import AfterEnd, Instant, Model
 
@@ -49,21 +52,32 @@ class Extent(Model):
     start: Instant
     end: Instant | None = None
 
+    @model_validator(mode="after")
+    def forward(self) -> Self:
+        if self.end is not None and self.end <= self.start:
+            raise ValueError("an extent's end must follow its start")
+        return self
+
     def overlaps(self, other: Extent) -> bool:
         """Half-open overlap: start < other's end and other's start < end (None = +infinity).
         Two extents that only touch do not overlap."""
-        raise NotImplementedError
+        return ((other.end is None or self.start < other.end)
+                and (self.end is None or other.start < self.end))
 
 
 def kept_from(showing: Showing) -> float:
     """The instant a "keep_this_photo" after-state takes effect: start + fade_in. Pure."""
-    raise NotImplementedError
+    return showing.start + showing.fade_in
 
 
 def replaces_kept_at(showing: Showing) -> float | None:
     """When `showing` replaces what its Frame keeps: "keep_this_photo" at `kept_from`,
     "keep_nothing" at its start, "leave_as_is" never (None). Pure."""
-    raise NotImplementedError
+    if showing.after_end == "keep_this_photo":
+        return kept_from(showing)
+    if showing.after_end == "keep_nothing":
+        return showing.start
+    return None
 
 
 def on_screen_extent(showing: Showing, later_on_same_frame: Iterable[Showing],
@@ -76,4 +90,13 @@ def on_screen_extent(showing: Showing, later_on_same_frame: Iterable[Showing],
     its end; what the Frame keeps holds until R); open-ended (None) when none replaces it.
     Guard g = 2 x `max_clock_uncertainty`: Extent(start=showing.start - g, end=end + g, or None).
     Pure; ValueError for a negative or non-finite uncertainty."""
-    raise NotImplementedError
+    if not math.isfinite(max_clock_uncertainty) or max_clock_uncertainty < 0:
+        raise ValueError("a non-negative finite clock uncertainty is required")
+    guard = 2 * max_clock_uncertainty
+    end: float | None = showing.end
+    if showing.after_end == "keep_this_photo":
+        replaced = [at for later in later_on_same_frame
+                    if later is not showing and later.start >= showing.start
+                    and (at := replaces_kept_at(later)) is not None]
+        end = max(showing.end, min(replaced)) if replaced else None
+    return Extent(start=showing.start - guard, end=None if end is None else end + guard)
