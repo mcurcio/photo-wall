@@ -96,9 +96,8 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
                 outputs=outputs,
                 device_id=DEVICE_ID,
                 boot_id=value["boot_id"],
-                ticket_id=None,
                 signature=base64.b64encode(
-                    key.sign(enrollment_message(nonce, outputs, DEVICE_ID, value["boot_id"], None))
+                    key.sign(enrollment_message(nonce, outputs, DEVICE_ID, value["boot_id"]))
                 ).decode(),
             )
         )

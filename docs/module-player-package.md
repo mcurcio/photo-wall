@@ -5,7 +5,7 @@ The Player ships as the Debian binary package `photo-wall-player`, one of the pa
 ## What the package holds
 
 - **Contents.** `player/*.py` under `/usr/lib/photo-wall/player/player/` and the launcher `appliance/launchers/player/__main__.py` under `/usr/lib/photo-wall/player/`. The program runs as `python3 -I -B /usr/lib/photo-wall/player --config /etc/photo-wall/public.json`. The launcher puts three package directories on `sys.path` (`common`, `player`, `uplink`) and runs `player.service`; the import check refuses any other.
-- **Depends.** Debian packages for what the Player imports (`python3-httpx`, `-websockets`, `-pydantic`, `-cryptography`, `-zeroconf`, `-gi`, `-opengl`) and its render stack (GTK, GStreamer, Mesa), plus `photo-wall-common`, `photo-wall-uplink` and `photo-wall-frame-client` at their exact versions. Python libraries come from Debian, not from `uv.lock`; the import check holds each import to a declared Depends.
+- **Depends.** Debian packages for what the Player imports (`python3-httpx`, `-websockets`, `-pydantic`, `-cryptography`, `-gi`, `-opengl`) and its render stack (GTK, GStreamer, Mesa), plus `photo-wall-common`, `photo-wall-uplink` and `photo-wall-frame-client` at their exact versions. Python libraries come from Debian, not from `uv.lock`; the import check holds each import to a declared Depends.
 - **Nothing else.** It carries no `central_origin` and no deployment configuration: the Node binds `/etc/photo-wall/public.json` over the root at start. It contains no Central, media, Immich or database code ([import layering](../AGENTS.md#code-map): `player` never imports `central`, `media`, `appliance` or a database; Players are Immich-unaware).
 
 ## How it reaches a Node

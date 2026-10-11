@@ -27,8 +27,6 @@ class NodeRuntimeReconciler:
         self.sessions, self.coordinator = sessions, coordinator
 
     def advance(self, *, limit: int = 32) -> int:
-        if self.sessions.config is None:
-            return 0
         if type(limit) is not int or not 1 <= limit <= 128:
             raise ValueError("node_reconciliation_limit")
         with self.sessions.db.transaction() as conn:

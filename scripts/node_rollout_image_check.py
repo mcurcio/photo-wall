@@ -25,11 +25,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SUITES = {
     "compatibility_matrix": (
         "test_player_control_protocol.py::test_future_control_schema_offer_selects_highest_known_common",
-        "test_player_control_protocol.py::test_legacy_http_and_websocket_state_and_identify_refusal",
-        "test_player_control_protocol.py::test_mixed_pod_enrollment_without_control_row_seals_legacy",
-        "test_player_control_protocol.py::test_first_state_seals_hello_and_new_epoch_can_negotiate",
+        "test_player_control_protocol.py::test_state_before_hello_is_refused_and_identify_is_unsupported",
+        "test_player_control_protocol.py::test_hello_without_a_control_row_negotiates_the_current_epoch",
+        "test_player_control_protocol.py::test_a_refused_state_leaves_hello_open_and_new_epoch_can_negotiate",
         "test_player_control_protocol.py::test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_result",
-        "test_player_control_protocol.py::test_older_central_writer_cannot_leave_a_replayable_receipt",
         "test_node_protocol.py", "test_node_boot.py"),
     "fence_contract": ("test_node_lifecycle.py", "test_node_runtime_reconciliation.py"),
     "readiness_contract": ("test_readiness_diagnostics.py", "test_coordination.py", "test_node_central.py"),

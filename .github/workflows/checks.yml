@@ -289,7 +289,7 @@ jobs:
       - run: docker compose up -d --no-build --wait
       - run: curl --fail http://127.0.0.1:8000/healthz
       # The shipped image, on its own command, runs node control: a first boot request on a
-      # fresh Central is refused for the unselected boot policy, never node_control_disabled.
+      # fresh Central is refused for the unselected boot policy.
       - name: Node control answers on the image's own command
         run: |
           set -eu

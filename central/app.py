@@ -308,17 +308,16 @@ def create_app(
                 conn, identity["id"], identity["authority_epoch"]
             )
             payload = project_state(delivery, selection)
-            if selection.schema_version == 2:
-                cue = payload["identify_output"]
-                payload["identify_expires_at"] = (
-                    clock.utc() + cue["remaining_seconds"] if cue else None
-                )
-                digest = state_digest(
-                    payload, control_fence=control_fence_in(conn, identity["id"])
-                )
-                payload.update(registry.issue_control_delivery_record_in(
-                    conn, identity["id"], identity["authority_epoch"], digest
-                ))
+            cue = payload["identify_output"]
+            payload["identify_expires_at"] = (
+                clock.utc() + cue["remaining_seconds"] if cue else None
+            )
+            digest = state_digest(
+                payload, control_fence=control_fence_in(conn, identity["id"])
+            )
+            payload.update(registry.issue_control_delivery_record_in(
+                conn, identity["id"], identity["authority_epoch"], digest
+            ))
             return payload
 
         return coordinator.delivery(

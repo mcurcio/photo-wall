@@ -8,7 +8,7 @@ This page is the map; open an owning document only when the routing table sends 
 
 | Path | Owns | Entry points |
 |---|---|---|
-| `central/` | Registry, Runtime, Planner, operator API; content-serving layers (below) | `app.py:create_app` (Compose), `node_app.py:create_app` (V2 node transport) |
+| `central/` | Registry, Runtime, Planner, operator API; content-serving layers (below) | `app.py:create_app` |
 | `central/fleet/` | Node boot offers, sessions, commands, rollout, recovery | `routes.py`, `node_routes.py`, `service.py` |
 | `central/displays/` | Displays (roadmap 1b): the pure rules for same display, Frame readiness (worked out, never stored), the Output document and power status; I/O in `infra/display_store.py` (the Output report judge, the document source, the LISTEN wake), operator routes in `display_routes.py` | `model.py`, `ports.py`, `views.py` |
 | Central's bus side | The worker keeps the hub and records every Node's bus ([0017](docs/decisions/0017-node-redesign-r3.md) C20, [runbook](docs/runbook.md#the-node-bus-and-centrals-hub)): `node_bus_wiring.py` (the worker's one bus task), `fleet/node_bus_hub.py` (FleetHub: hub configuration, reload, WALL, retirement, presence looks), `fleet/node_bus_accounts.py` (the hub configuration), `infra/node_links.py` (one NodeLink supervisor per pipe), `infra/node_link_store.py` (the PostgreSQL link store and WALL mark), `fleet/node_bus_presence.py` (presence tables, read by the Player page), `fleet/leaf_bridge.py` (the leaf's WebSocket relay at Central's origin) | `central/node_bus_wiring.py:build_node_bus` |
