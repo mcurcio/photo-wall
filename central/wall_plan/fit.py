@@ -28,9 +28,9 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-from central.wall_plan.key_content import InterestGrid, KeyContent
+from central.wall_plan.key_content import InterestGrid, KeyContent, UnitBox
 from contracts.models import Fraction, FrameProfile, Model, PhotoCrop
-from contracts.photo_crop import Window
+from contracts.photo_crop import CENTRED, Window, crop_window
 
 # The Scene setting's default (design "Crop limit": 35 %, between 1:1 on 3:2, 33 %, and 4:5 on
 # 5:4, 36 %). SceneSelection's default is this value.
@@ -44,6 +44,9 @@ WINDOW_STEPS: Final = 64
 # requirements :186: on a Frame this large a video needs this shorter side.
 LARGE_FRAME_INCHES: Final = 40
 LARGE_FRAME_VIDEO_SHORT_SIDE: Final = 1080
+# Float slack for the rule's comparisons: a boundary case (4:3 on 16:9 at a 25 % limit, a photo of
+# exactly the Frame's pixels) is judged as its exact arithmetic says.
+_SLACK: Final = 1e-9
 
 FitRefusal = Literal[
     "beyond_crop_limit",     # "doesn't fit this Frame's shape"
@@ -74,7 +77,10 @@ def crop_share(width: int, height: int, profile: FrameProfile) -> float:
     """The share of the photo's area the largest profile-aspect window removes: 1 - (the
     smaller of the two aspects / the larger). 0 for equal aspects. Pure; ValueError for a
     non-positive size."""
-    raise NotImplementedError
+    if width <= 0 or height <= 0:
+        raise ValueError("positive photo dimensions required")
+    photo, frame = width / height, _aspect(profile)
+    return 1 - min(photo, frame) / max(photo, frame)
 
 
 def shape_fit(kind: MediaKind, width: int, height: int, profile: FrameProfile,
@@ -83,13 +89,35 @@ def shape_fit(kind: MediaKind, width: int, height: int, profile: FrameProfile,
     (a video on a profile with `video` off), then `beyond_crop_limit` (rule 1), then
     `below_frame_pixels` (rule 2 for an image; the :186 floor for a video). None: the photo
     passes on its size alone. `width` and `height` are the original's, upright. Pure."""
-    raise NotImplementedError
+    if kind == "video" and not profile.video:
+        return DoesNotFit(reason="no_video_here")
+    if crop_share(width, height, profile) > crop_limit + _SLACK:
+        return DoesNotFit(reason="beyond_crop_limit")
+    if kind == "video":
+        large = profile.diagonal_inches >= LARGE_FRAME_INCHES
+        if large and min(width, height) < LARGE_FRAME_VIDEO_SHORT_SIDE:
+            return DoesNotFit(reason="below_frame_pixels")
+        return None
+    # The window keeps the Frame's aspect, so its pixels against the Frame's is one comparison.
+    window_pixels = width * height * (1 - crop_share(width, height, profile))
+    if window_pixels < profile.width_px * profile.height_px * (1 - _SLACK):
+        return DoesNotFit(reason="below_frame_pixels")
+    return None
 
 
 def interest_kept(grid: InterestGrid, window: Window) -> float:
     """The share of the grid's weight inside `window` (UV fractions), each cell counted by the
     fraction of its area the window covers. Pure."""
-    raise NotImplementedError
+    left, top, right, bottom = window
+    kept = 0.0
+    for row in range(grid.rows):
+        tall = _covered(top, bottom, row / grid.rows, (row + 1) / grid.rows)
+        if tall <= 0:
+            continue
+        for column in range(grid.columns):
+            wide = _covered(left, right, column / grid.columns, (column + 1) / grid.columns)
+            kept += grid.weights[row * grid.columns + column] * wide * tall
+    return min(1.0, max(0.0, kept))
 
 
 def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None,
@@ -100,4 +128,46 @@ def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None,
     `Fits.crop_share` is `crop_share(...)`; `Fits.interest_kept` the chosen window's (1.0 for a
     video). Pure; ValueError for an image judged with `key` None (an image is judged only once
     measured) or a crop limit outside (0, 1)."""
-    raise NotImplementedError
+    if not 0 < crop_limit < 1:
+        raise ValueError("a crop limit inside (0, 1) is required")
+    if kind == "image" and key is None:
+        raise ValueError("an image is judged only once its key content is measured")
+    refused = shape_fit(kind, width, height, profile, crop_limit)
+    if refused is not None:
+        return refused
+    share = crop_share(width, height, profile)
+    if kind == "video" or key is None:
+        return Fits(crop=CENTRED, crop_share=share, interest_kept=1.0)
+    aspect = _aspect(profile)
+    windows = [(offset, crop_window(PhotoCrop(offset=offset), width, height, aspect))
+               for offset in _OFFSETS]
+    whole = [(offset, window) for offset, window in windows
+             if all(_inside(face, window) for face in key.faces)]
+    if not whole:
+        return DoesNotFit(reason="face_cut")
+    allowed = MAX_LOST_INTEREST_DENSITY * share + _SLACK
+    passing = [(kept, offset) for offset, window in whole
+               if 1 - (kept := interest_kept(key.interest, window)) <= allowed]
+    if not passing:
+        return DoesNotFit(reason="interest_cut")
+    kept, offset = max(passing, key=lambda pair: (round(pair[0], 9), -abs(pair[1] - 0.5),
+                                                  -pair[1]))
+    return Fits(crop=PhotoCrop(offset=offset), crop_share=share, interest_kept=kept)
+
+
+_OFFSETS: Final = tuple(sorted({k / WINDOW_STEPS for k in range(WINDOW_STEPS + 1)} | {0.5}))
+
+
+def _aspect(profile: FrameProfile) -> float:
+    return profile.width_px / profile.height_px
+
+
+def _covered(low: float, high: float, cell_low: float, cell_high: float) -> float:
+    """The fraction of [cell_low, cell_high] inside [low, high]."""
+    return max(0.0, min(high, cell_high) - max(low, cell_low)) / (cell_high - cell_low)
+
+
+def _inside(face: UnitBox, window: Window) -> bool:
+    left, top, right, bottom = window
+    return (face.left >= left - _SLACK and face.right <= right + _SLACK
+            and face.top >= top - _SLACK and face.bottom <= bottom + _SLACK)

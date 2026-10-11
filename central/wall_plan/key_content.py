@@ -12,9 +12,10 @@ through any scaling, and preparation fetches that same image (roadmap 4, C10).
 """
 from __future__ import annotations
 
-from typing import Annotated, Final, Literal
+import math
+from typing import Annotated, Final, Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from contracts.models import Fraction, Model
 
@@ -34,6 +35,12 @@ class UnitBox(Model):
     right: Fraction
     bottom: Fraction
 
+    @model_validator(mode="after")
+    def ordered(self) -> Self:
+        if not (self.left < self.right and self.top < self.bottom):
+            raise ValueError("a box needs left < right and top < bottom")
+        return self
+
 
 class InterestGrid(Model):
     """A coarse map of where the eye goes: `columns` x `rows` cells over the whole image,
@@ -43,6 +50,16 @@ class InterestGrid(Model):
     columns: int = Field(ge=1, le=64)
     rows: int = Field(ge=1, le=64)
     weights: tuple[float, ...]
+
+    @model_validator(mode="after")
+    def distribution(self) -> Self:
+        if len(self.weights) != self.columns * self.rows:
+            raise ValueError("an interest grid needs one weight per cell")
+        if not all(math.isfinite(w) and w >= 0 for w in self.weights):
+            raise ValueError("interest weights must be finite and non-negative")
+        if abs(math.fsum(self.weights) - 1) > 1e-6:
+            raise ValueError("interest weights must sum to 1")
+        return self
 
 
 class KeyContent(Model):
