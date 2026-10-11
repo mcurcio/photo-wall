@@ -61,7 +61,12 @@ class FrameNeed(Model):
 def rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]:
     """One FrameNeed per distinct (aspect, width, height) over every Frame of the wall
     (`central.registry.Registry.frame_outputs`), sorted. A photo is prepared once for the whole
-    wall, so its copy must hold every Frame's output. Pure."""
+    wall, so its copy must hold every Frame's output. Pure.
+
+    A Frame whose output is unknown (unbound, or its Pi has not reported) asks its profile's
+    size here, while the fit rule judges it by shape only (central/wall_plan/fit.py
+    `shape_fit`). The two answer different questions and vary independently: a fetch that guesses
+    generously costs bytes, while a fit rule that guessed would refuse photos on a guess."""
     distinct = set()
     for frame in frames:
         profile = frame.profile

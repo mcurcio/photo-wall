@@ -11,7 +11,9 @@ some window with the Frame profile's aspect, slid along the photo's free axis
 1. removes no more than the crop limit of the photo's area (`crop_share`; the backstop),
 2. holds at least the Frame output in the original's pixels (`contracts.frame_fit.window_holds`
    against `FitTarget.output_px`; owner, 2026-10-11: compatibility "measuring against the Frame
-   output and not the Display"); skipped for a Frame whose Output never reported a size,
+   output and not the Display"); skipped for a Frame whose Output never reported a size
+   (a guess would refuse photos on a guess; the rendition choice, which only sizes a fetch,
+   guesses the profile's pixels instead: media/library_client.py `rendition_needs`),
 3. keeps every face whole (`faces_judged`: each face of at least `min_face_share` of the photo's
    area, padded by `face_padding` of its own width and height, inside the window), and
 4. cuts no key content: the share of the interest grid it removes (1 - `interest_kept`) is at
