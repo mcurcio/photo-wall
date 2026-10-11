@@ -525,7 +525,7 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | A1 Install Central | Setup checklist › Server | T7 | Checklist, ProblemCard | none | each step green from a real check | "Network boot files not staged" with the fix |
 | A2 Sign in | Sign-in page | exception (no template) | Field, Button | Action | lands on Home | wrong password inline, without saying which part was wrong |
 | A2 Owner account | Settings › People and access | T8 | SettingRow | Autosave | "Signed in as …" | none |
-| A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field, Button (Test) | Autosave | Test: "41,203 photos, 212 albums, 96 people" | EmptyState "Connect your photo library"; "Immich rejected the API key" |
+| A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field (the key a password field, then "Key ending …1234"), Button (Check now), ProblemCard | Save (Save checks at once) | "41,203 photos · 2,110 videos · 212 albums · 96 people" | EmptyState "Connect your photo library"; a ProblemCard per problem with its one fix, for example "Immich rejected the API key" → Paste a new key, each saying "Photos keep playing" |
 | A4 House basics | Settings › House | T8 | SettingRow, SegmentedControl | Autosave | none | browser-derived defaults shown as defaults |
 | A5 Ready for Pis | Setup checklist › Ready for Pis | T7 | Checklist, ProblemCard | none | "Network boot OK · release 1.4.2 ready" | the problem names the piece (DHCP, files, release) |
 | B1 Pi appears | Pis › New Pis waiting | T2 | EntityList, HealthBadge | none | the display shows its code; "Waiting · seen 21:04" | EmptyState "Plug a Pi into a display and power"; "2 GB, needs 4 GB" |

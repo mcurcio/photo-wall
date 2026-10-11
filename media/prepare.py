@@ -25,8 +25,10 @@ from typing import Literal
 
 from pydantic import Field
 
+from central.photo_library.model import LibraryAsset
 from contracts.models import Digest, Model, Positive, Variant
 from contracts.time import Clock, SystemClock
+from media.library_client import FetchedRendition
 from media.models import MediaError, MediaLimits, OriginalAsset
 
 _SOURCE_LIMITS = MediaLimits()
@@ -35,6 +37,7 @@ _TRANSFORMS = {
     5: ("transpose=clock", "hflip"), 6: ("transpose=clock",),
     7: ("transpose=clock", "vflip"), 8: ("transpose=cclock",),
 }
+_PIPES = {"JPEG": "jpeg_pipe", "PNG": "png_pipe", "WEBP": "webp_pipe"}
 _MATRICES = {
     (1, 0, 0, 1): 1, (-1, 0, 0, 1): 2, (-1, 0, 0, -1): 3, (1, 0, 0, -1): 4,
     (0, 1, 1, 0): 5, (0, 1, -1, 0): 6, (0, -1, -1, 0): 7, (0, -1, 1, 0): 8,
@@ -42,7 +45,8 @@ _MATRICES = {
 
 
 class PreparationRecipe(Model):
-    version: Literal[1] = 1
+    # 2: preparation reads the photo Immich shows (roadmap 4, M3): every preparation is redone once.
+    version: Literal[2] = 2
     image_long_edge: int = Field(default=3840, ge=2, le=16384, strict=True)
     jpeg_quality: int = Field(default=3, ge=1, le=31, strict=True)
     video_long_edge: int = Field(default=1920, ge=2, le=1920, strict=True)
@@ -194,7 +198,7 @@ def _inspect_still(path: Path, limits: dict) -> dict:
     PngImagePlugin.MAX_TEXT_CHUNK = 1024**2
     PngImagePlugin.MAX_TEXT_MEMORY = 2 * 1024**2
     warnings.simplefilter("error")
-    with Image.open(path, formats=("JPEG", "PNG")) as image:
+    with Image.open(path, formats=("JPEG", "PNG", "WEBP")) as image:
         width, height = image.size
         if (width > limits["max_dimension"] or height > limits["max_dimension"]
                 or width * height > limits["max_pixels"]):
@@ -410,7 +414,8 @@ class Preparer:
 
     def _input_flags(self) -> list[str]:
         return ["-max_alloc", str(self.limits.memory_bytes // 2),
-                "-protocol_whitelist", "file", "-format_whitelist", "jpeg_pipe,png_pipe,mov",
+                "-protocol_whitelist", "file",
+                "-format_whitelist", "jpeg_pipe,png_pipe,webp_pipe,mov",
                 "-probesize", "5000000", "-analyzeduration", "1000000",
                 "-threads", str(self.limits.threads)]
 
@@ -538,6 +543,30 @@ class Preparer:
         return result
 
     async def prepare(self, asset: OriginalAsset, original: Path, destination: Path) -> PreparedMedia:
+        """A refreshed original (until the integrate slice): its SHA-1, size and raw geometry
+        are the library's metadata, checked against the file."""
+        def verify(size: int, sha1: str, sha256: str) -> None:
+            if sha1 != asset.original_sha1 or (asset.file_size is not None
+                                               and size != asset.file_size):
+                raise MediaError("asset_integrity")
+        return await self._prepare(original, destination, video=asset.kind == "video",
+                                   verify=verify, duration=asset.duration,
+                                   geometry=(asset.raw_width, asset.raw_height, asset.orientation))
+
+    async def prepare_rendition(self, asset: LibraryAsset, rendition: FetchedRendition,
+                                destination: Path) -> PreparedMedia:
+        """The photo as Immich shows it (C10): a JPEG, PNG or WEBP preview or full-size copy, or a
+        video's original. Integrity is the fetched file's own sha256 and size; its size and
+        orientation are the file's (a preview is upright, a JPEG full-size copy may carry EXIF)."""
+        def verify(size: int, sha1: str, sha256: str) -> None:
+            if sha256 != rendition.sha256 or size != rendition.size:
+                raise MediaError("asset_integrity")
+        return await self._prepare(rendition.path, destination, video=asset.kind == "video",
+                                   verify=verify, duration=asset.duration, geometry=None)
+
+    async def _prepare(self, original: Path, destination: Path, *, video: bool,
+                       verify, duration: float | None,
+                       geometry: tuple[int, int, int] | None) -> PreparedMedia:
         original, destination = Path(original).absolute(), Path(destination).absolute()
         start = self.clock.monotonic()
         if not math.isfinite(start):
@@ -547,39 +576,37 @@ class Preparer:
         try:
             async with asyncio.timeout(self.limits.wall_seconds):
                 size, sha1, original_sha256 = _file_hashes(original, self.limits.max_original_bytes, deadline)
-                if sha1 != asset.original_sha1 or (asset.file_size is not None and size != asset.file_size):
-                    raise MediaError("asset_integrity")
-                video = asset.kind == "video"
+                verify(size, sha1, original_sha256)
                 cap = self.limits.max_video_bytes if video else self.limits.max_image_bytes
                 if size + cap > self.limits.max_staging_bytes:
                     raise MediaError("preparation_limit", "incompatible")
                 recipe_id, build = await self._describe(deadline)
                 if video:
                     facts = self._video(await self._probe(original, deadline))
-                    if abs(facts["duration"] - asset.duration) > .15:
+                    if abs(facts["duration"] - duration) > .15:
                         raise MediaError("metadata_mismatch", "incompatible")
                 else:
                     facts = await self._json(dict(operation="inspect", path=str(original)), deadline)
-                if (facts["width"], facts["height"], facts["orientation"]) != (
-                    asset.raw_width, asset.raw_height, asset.orientation
-                ):
+                raw = (facts["width"], facts["height"], facts["orientation"])
+                if geometry is not None and raw != geometry:
                     raise MediaError("metadata_mismatch", "incompatible")
-                width, height = self._size(asset.raw_width, asset.raw_height, video=video,
-                                           sar=facts.get("sar", 1), orientation=asset.orientation)
+                raw_width, raw_height, orientation = raw
+                width, height = self._size(raw_width, raw_height, video=video,
+                                           sar=facts.get("sar", 1), orientation=orientation)
                 try:
                     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 except FileExistsError:
                     raise MediaError("destination_exists", "incompatible") from None
                 os.close(fd)
                 created = True
-                filters = [*_TRANSFORMS[asset.orientation], f"scale={width}:{height}:flags=lanczos", "setsar=1"]
+                filters = [*_TRANSFORMS[orientation], f"scale={width}:{height}:flags=lanczos", "setsar=1"]
                 argv = [str(self.ffmpeg), "-nostdin", "-hide_banner", "-v", "error", "-xerror", "-y",
                         "-filter_threads", str(self.limits.threads), *self._input_flags(), "-noautorotate"]
                 major = re.search(r"ffmpeg version (\d+)", build.ffmpeg_version)
                 if major and int(major.group(1)) >= 6:
                     argv += ["-display_rotation", "0"]
                 if not video:
-                    argv += ["-f", {"JPEG": "jpeg_pipe", "PNG": "png_pipe"}[facts["format"]]]
+                    argv += ["-f", _PIPES[facts["format"]]]
                 argv += ["-i", str(original), "-map", "0:v:0", "-an", "-sn", "-dn",
                          "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"]
                 if video:
@@ -612,8 +639,7 @@ class Preparer:
                         raise MediaError("preparation_invalid", "incompatible")
                 if (verified["width"], verified["height"], verified["orientation"]) != (width, height, 1):
                     raise MediaError("preparation_invalid", "incompatible")
-                if _file_hashes(original, self.limits.max_original_bytes, deadline)[1] != asset.original_sha1:
-                    raise MediaError("asset_integrity")
+                verify(*_file_hashes(original, self.limits.max_original_bytes, deadline))
                 with destination.open("rb") as stream:
                     os.fsync(stream.fileno())
                 deadline.remaining()

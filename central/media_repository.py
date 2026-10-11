@@ -19,6 +19,7 @@ from pydantic import Field, ValidationError
 
 from central.catalog import Candidate, CatalogSnapshot
 from central.db import MEDIA_LOCK, Database, TransactionClock
+from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_ports import RefreshReceipt, SourcePreviewReceipt
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset
@@ -190,13 +191,18 @@ class MediaRepository:
 
     @staticmethod
     def sources_in(conn) -> list[dict]:
-        """Read configured Source state through a caller-owned transaction."""
-        return conn.execute(
-            "SELECT n.name,n.revision,s.source_ref,s.spec,s.next_refresh,s.last_success,s.status,"
-            "s.diagnostics,s.counts,refresh_requested_revision,refresh_completed_revision "
+        """Read configured Source state through a caller-owned transaction (read-only).
+
+        Roadmap 4: each row carries its `query` (the SourceQuery, or null for a pre-4 row not
+        yet converted) and its pool's `check` (CheckState, PgPhotoLibrary.check_state_in)."""
+        rows = conn.execute(
+            "SELECT n.name,n.revision,s.source_ref,s.spec,s.query,s.next_refresh,s.last_success,"
+            "s.status,s.diagnostics,s.counts,refresh_requested_revision,refresh_completed_revision "
             "FROM media_source_names n JOIN media_sources s ON s.source_ref=n.current_ref "
             "WHERE NOT n.deleted ORDER BY n.name"
         ).fetchall()
+        return [{**row, "check": PgPhotoLibrary.check_state_in(conn, row["source_ref"]).model_dump(
+            mode="json")} for row in rows]
 
     def named_versions_in(self, conn, name: str) -> tuple[dict | None, tuple[str, ...]]:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
