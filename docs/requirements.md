@@ -255,4 +255,14 @@ The owner said these on 2026-10-09 (chat) while reviewing the operator console. 
 | Asked whether brightness should drive the display hardware or only adjust the picture | "As much as possible. The test pi is not connected to a TV — it's a portable monitor" | Control the display hardware as much as possible; the test display is a portable monitor. |
 | Asked who wins between the power schedule, Home Assistant and a person | "I don't know. I'm hoping for configuration options built in sensible defaults" | He does not know; he hopes for configuration options with sensible defaults. |
 
+On 2026-10-10 (chat, and the [1c gate page](https://claude.ai/artifact/GngF5gqPdD6f1PYayGHiZd)) he said these about where a Frame's picture sits. His gate answers are current choices, not fixed requirements; they change two written rules of the console design: Cover replaces the skewing fit as every Frame's default, and Trim edges is gone ([operator console design §5](operator-console-design.md#5-the-frame-page)).
+
+| Context | The owner's words | What it asks of Photo Wall |
+|---|---|---|
+| Unprompted, on the position editor | "Today it assumes a perspective transform to fit perfectly within the 4 corners, but I think a "cover" default is more likely plus an optional rotation angle. Cover means to ensure that the image is large enough for all 4 corners to fit inside, without skewing" | A Cover fit, unskewed and large enough to hold all four corners, with an optional rotation angle. |
+| Asked whether existing Frames stay on the skewing fit or switch to Cover | "Switch to cover. It's a more sensible default, and skewing transforms or rotations should be an explicit opt in" | Every Frame uses Cover; skewing is an explicit opt-in. |
+| Asked what shows outside the four corners in Cover | "Black/nothing. Remember that a display can have multiple frames, so outside the configured frame is "someone else's territory"" | Nothing is drawn outside a Frame's corners; a Frame never draws over another Frame on the same display. |
+| Asked whether to keep Trim edges, with removing it recommended | "Yes. The corners feel like enough" | Trim edges is removed; the corners set every edge. |
+| On existing Frames' rotation when they move to Cover | "Every frame should reset to 0 rotation" | Each Frame moved to Cover starts at angle 0. |
+
 Display power stays operational state under [operations and scope](#operations-and-scope). The Power lane, the hold rule, the guard defaults and Home Assistant through MQTT discovery are design choices, not owner statements.

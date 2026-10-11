@@ -195,7 +195,7 @@ interface ToastProps { message: string; action?: { label: string; onAction(): vo
 // Select — one choice from a list too long for SegmentedControl (the waiting Pi in Replace with…). Field owns its label.
 interface SelectProps<V extends string> { value: V | null; options: readonly { value: V; label: string; hint?: string }[]; onChange(v: V): void; placeholder?: string; disabled?: boolean }
 
-// NumberInput — a number with its unit, for corner pixels, crop trims and the Frame display profile. Field owns its
+// NumberInput — a number with its unit, for corner pixels, the rotation angle and the Frame display profile. Field owns its
 // label and error; arrow keys step by `step`, and the value commits on blur or Enter.
 interface NumberInputProps { value: number | null; unit: string; min?: number; max?: number; step?: number; onCommit(v: number): void; disabled?: boolean }
 
@@ -316,16 +316,14 @@ The Position controls, as patterns (they know geometry, not Frames). Prior art: 
 
 ```ts
 type Point = readonly [number, number];
-type Edge = 0 | 1 | 2 | 3;
-// QuadEditor — four draggable corners and four crop edges over an outline of the output, at its aspect.
+// QuadEditor — four draggable corners over an outline of the output, at its aspect. No crop edges since 1c
+// (Trim edges removed): the corners set every visible edge.
 interface QuadEditorProps {
   label: string;
   corners: readonly Point[];                        // four, in output coordinates
-  crop: readonly [number, number, number, number];  // per edge
   aspect: number;
   selected: number | null; onSelect(corner: number | null): void;
   onCorner(corner: number, point: Point): void;
-  onCrop(edge: Edge, point: Point): void;
   onArrow(dx: number, dy: number): void;            // arrow keys on the selected corner
   disabled?: boolean;
 }
@@ -333,7 +331,7 @@ interface QuadEditorProps {
 interface NudgePadProps { label: string; subject: string; onNudge(dx: number, dy: number): void; disabled?: boolean }
 ```
 
-Stories: `QuadEditor/Default`, `/CornerSelected`, `/Cropped`, `/Rotated`, `/Disabled`; `NudgePad/Default`, `/Disabled`. A11y: every corner and edge is reachable by keyboard; each NudgePad button names its direction and subject ("Move up: top-left corner").
+Stories: `QuadEditor/Default`, `/CornerSelected`, `/Rotated`, `/Disabled`; `NudgePad/Default`, `/Disabled`. A11y: every corner is reachable by keyboard; each NudgePad button names its direction and subject ("Move up: top-left corner").
 
 #### Dialog guards
 
@@ -535,8 +533,8 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | B2 Identify | Frame page › header | T3 | Button, AckBadge | Action | requested → acknowledged | no acknowledgement: ProblemCard inline, Retry |
 | B3 Name and place | Frame page › header (name) | T3 | EntityHeader (inline title) | Autosave | saved inline | duplicate name: inline error |
 | B3 Name and place | Frames › wall layout (placement) | T6 | WallTile, Tabs (walls) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
-| B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl, AckBadge, LeaveGuard | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note |
-| B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | SettingRow (equipment, actsOn), Slider, Switch (grey ramp) | Live | each slider says where it acts | a display that refuses DDC/CI: rows switch to picture adjustment and say so |
+| B4 Fit the picture | Frame page › Position | T3 + LivePreviewEditor | QuadEditor, NudgePad, SegmentedControl (fit: Cover or Corners; rotation 0/90/180/270), NumberInput and Slider (angle, Cover only), AckBadge, LeaveGuard | Live | Previewing → Presented by the Pi | unbound → binding picker; Pi offline → disabled with since; expired session note; a Cover Save whose picture would turn against the Frame's orientation: the refusal in plain words beside the angle |
+| B5 Picture quality | Frame page › Picture | T3 + LivePreviewEditor | SettingRow (equipment, actsOn), Slider, Switch (grey ramp, not built) | Live | each brightness and contrast slider says where it acts; Done once the Pi reports the latest change taken by the display or presented | a write the display refuses: the row says "The display did not take it" and stays on the display (it never switches by itself; the operator may move it to picture adjustment) |
 | B6 Power | Frame page › Power | T3 | SettingRow, Button (Test), Note (live status, in place of `AckBadge`, whose words are the live editor's), LinkToOwner | Autosave (options), no Undo until `UndoToast` exists; Action (Test) | "Waiting for the Pi" until the Pi answers the change that carried the test, then "Display confirmed off" / "Display confirmed on" / "Picture stopped; the display may sleep" / "Display didn't answer" / "Left on: the display is showing another input"; Pi not linked: "Last heard from the Pi at …" | no method answered (`not-supported`): EmptyState naming the smart-plug option; unbound: "Choose which Pi and HDMI port feeds this Frame", linking to Hardware |
 | B7 First photos | Setup checklist › First photos | T7 | Checklist, MediaGrid | none | done when a Frame is Showing | Immich not connected → that step first |
 | C1 Wall layout | Frames › wall layout | T6 | WallTile, Field (size in house units) | Autosave | overlaps flagged | EmptyState "Add your first Frame" |
