@@ -158,7 +158,7 @@ class Registry:
             signature = base64.b64decode(request.signature, validate=True)
             Ed25519PublicKey.from_public_bytes(bytes.fromhex(request.public_key)).verify(
                 signature, enrollment_message(request.nonce, request.outputs, request.device_id,
-                                              request.boot_id, request.ticket_id)
+                                              request.boot_id)
             )
         except (ValueError, InvalidSignature) as exc:
             raise RegistryError("invalid_proof", 403) from exc
@@ -207,14 +207,9 @@ class Registry:
                                  (player_id,)).fetchone()["authority_epoch"]
             # Negotiation belongs to this enrollment epoch, never to the serial or package tag.
             self._reset_control(conn, player_id, epoch, "open")
-            # Ticketless enroll (0009): the signed-rootfs boot-ticket path has
-            # been retired, so no boot server ever issues a ticket and there is
-            # no release session to bind. Every player enrolls unbound (pending)
-            # by serial alone; request.ticket_id is always None now and is only
-            # recorded in health below.
+            # Every Player enrolls unbound (pending) by serial alone; its boot is recorded.
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
-                         (Jsonb({"boot_id": request.boot_id, "ticket_id": request.ticket_id}),
-                          player_id))
+                         (Jsonb({"boot_id": request.boot_id}), player_id))
             self._audit(conn, "player_enrolled", player_id)
         return {"player_id": player_id, "token": token, "authority_epoch": epoch}
 
@@ -243,7 +238,7 @@ class Registry:
         conn.execute(
             "INSERT INTO player_control_sessions(player_id,authority_epoch,status) "
             "VALUES(%s,%s,%s) ON CONFLICT(player_id) DO UPDATE SET "
-            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,schema_version=1,"
+            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,schema_version=2,"
             "capabilities='[]',offered_schemas=NULL,offered_capabilities=NULL,"
             "issued_sequence=0,pending_id=NULL,pending_digest=NULL,pending_expires=NULL,"
             "applied_sequence=0,applied_at=NULL,applied_delivery_id=NULL,"
@@ -252,35 +247,25 @@ class Registry:
             (player_id, epoch, status),
         )
 
-    @classmethod
-    def _seal_legacy_control(cls, conn, player_id: str, epoch: int) -> ControlSelection:
-        """An epoch enrolled by an older Central is already legacy on the wire."""
-        cls._reset_control(conn, player_id, epoch, "legacy")
-        return ControlSelection(authority_epoch=epoch, schema=1)
-
     def control_hello(self, player_id: str, request: ControlHello) -> ControlSelection:
         with self.db.transaction() as conn:
             self._control_player(conn, player_id, request.authority_epoch)
             row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                                (player_id,)).fetchone()
-            if not row or row["authority_epoch"] != request.authority_epoch:
-                # A mixed-version pod may have enrolled this current epoch without a
-                # control row. Seal it as legacy so a new Player can still proceed.
-                if 1 not in request.schemas:
-                    raise RegistryError("control_schema_unsupported")
-                return self._seal_legacy_control(conn, player_id, request.authority_epoch)
-            if row["status"] == "negotiated":
+            current = row is not None and row["authority_epoch"] == request.authority_epoch
+            if current and row["status"] == "negotiated":
                 if (row["offered_schemas"] != list(request.schemas)
                         or row["offered_capabilities"] != list(request.capabilities)):
                     raise RegistryError("control_negotiation_conflict")
                 return ControlSelection(authority_epoch=request.authority_epoch,
                                         schema=row["schema_version"],
                                         capabilities=tuple(row["capabilities"]))
-            if row["status"] != "open":
-                raise RegistryError("control_negotiation_closed")
             selection = select_control(request)
             if selection is None:
                 raise RegistryError("control_schema_unsupported")
+            if not current:
+                # Enrollment opens each epoch's row; the epoch is current (checked above).
+                self._reset_control(conn, player_id, request.authority_epoch, "open")
             conn.execute(
                 "UPDATE player_control_sessions SET status='negotiated',schema_version=%s,"
                 "capabilities=%s,offered_schemas=%s,offered_capabilities=%s "
@@ -296,22 +281,19 @@ class Registry:
             return self.control_selection_in(conn, player_id, epoch)
 
     def control_selection_in(self, conn, player_id: str, epoch: int) -> ControlSelection:
-        """Seal/select under a caller-owned Coordination transaction when issuing state."""
+        """The epoch's negotiated selection, read under a caller-owned Coordination
+        transaction when issuing state. State is served only after the hello."""
         self._control_player(conn, player_id, epoch)
         row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                            (player_id,)).fetchone()
-        if not row or row["authority_epoch"] != epoch:
-            return self._seal_legacy_control(conn, player_id, epoch)
-        if row["status"] == "open":
-            conn.execute("UPDATE player_control_sessions SET status='legacy' "
-                         "WHERE player_id=%s", (player_id,))
-            return ControlSelection(authority_epoch=epoch, schema=1)
+        if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
+            raise RegistryError("control_negotiation_required")
         return ControlSelection(authority_epoch=epoch, schema=row["schema_version"],
                                 capabilities=tuple(row["capabilities"]))
 
     def issue_control_delivery_record(self, player_id: str, epoch: int,
                                       digest: str) -> dict:
-        """Persist a v2 challenge and sequence before sending either state transport."""
+        """Persist a challenge and sequence before sending either state transport."""
         with self.db.transaction() as conn:
             return self.issue_control_delivery_record_in(conn, player_id, epoch, digest)
 
@@ -322,7 +304,7 @@ class Registry:
         now = self.clock.utc()
         row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                            (player_id,)).fetchone()
-        if not row or row["authority_epoch"] != epoch or row["schema_version"] != 2:
+        if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
             raise RegistryError("control_protocol_mismatch")
         if (row["pending_id"] and row["pending_digest"] == digest
                 and row["pending_expires"] > now):
@@ -339,19 +321,10 @@ class Registry:
         return ControlDelivery(delivery_id=delivery_id,
                                delivery_sequence=issued["issued_sequence"]).model_dump()
 
-    def issue_control_delivery(self, player_id: str, epoch: int, digest: str) -> str:
-        """Compatibility wrapper while HTTP and WebSocket adopt the sequence field."""
-        return self.issue_control_delivery_record(player_id, epoch, digest)["delivery_id"]
-
-    def control_ack(self, player_id: str, report: ControlAck) -> bool:
-        """Compatibility wrapper for callers that only need ACK acceptance."""
-        return self.control_ack_response(player_id, report).accepted
-
     @staticmethod
     def _current_applied_receipt(row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
         """Replay only a receipt for the exact still-current applied delivery."""
         if (report.result != "applied" or row["status"] != "negotiated"
-                or row["schema_version"] != 2
                 or row["pending_id"] is not None or row["pending_digest"] is not None
                 or row["pending_expires"] is not None
                 or row["issued_sequence"] != row["applied_sequence"]
@@ -378,7 +351,7 @@ class Registry:
             row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                                (player_id,)).fetchone()
             if (not row or row["authority_epoch"] != report.authority_epoch
-                    or row["schema_version"] != 2):
+                    or row["status"] != "negotiated"):
                 return ControlAckResponse(accepted=False)
             if row["pending_id"] != report.delivery_id:
                 receipt = self._current_applied_receipt(row, report)
@@ -448,7 +421,7 @@ class Registry:
                 raise RegistryError("unknown_or_retired_player", 404)
             negotiated = conn.execute(
                 "SELECT 1 FROM player_control_sessions WHERE player_id=%s "
-                "AND authority_epoch=%s AND status='negotiated' AND schema_version=2 "
+                "AND authority_epoch=%s AND status='negotiated' "
                 "AND capabilities ? 'identify_output'",
                 (player_id, player["authority_epoch"]),
             ).fetchone()

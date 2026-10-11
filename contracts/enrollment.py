@@ -7,8 +7,6 @@ from pydantic import Field, model_validator
 
 from contracts.models import Identifier, Model
 
-BootTicketId = Annotated[str, Field(pattern=r"^[a-f0-9]{48}$")]
-
 
 class OutputReport(Model):
     output_id: Identifier
@@ -24,11 +22,6 @@ class Enrollment(Model):
     outputs: tuple[OutputReport, ...] = Field(default=(), max_length=2)
     device_id: Identifier
     boot_id: Identifier
-    # A real netboot boot ticket (0002/D1); None means no boot server ever
-    # issued one -- a flashed/ticketless (D0, 0008) enroll. This field IS the
-    # D0 signal: the request's own shape says whether a ticket exists, so
-    # there is no separate flag that could disagree with it.
-    ticket_id: BootTicketId | None = None
 
     @model_validator(mode="after")
     def unique_outputs(self):
@@ -38,12 +31,11 @@ class Enrollment(Model):
 
 
 def enrollment_message(nonce: str, outputs: tuple[OutputReport, ...], device_id: str,
-                       boot_id: str, ticket_id: str | None) -> bytes:
+                       boot_id: str) -> bytes:
     return json.dumps({
         "purpose": "photo-wall-enroll-v2",
         "nonce": nonce,
         "outputs": [o.model_dump() for o in outputs],
         "device_id": device_id,
         "boot_id": boot_id,
-        "ticket_id": ticket_id,
     }, sort_keys=True, separators=(",", ":")).encode()

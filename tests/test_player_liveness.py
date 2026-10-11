@@ -8,7 +8,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from test_coordination import report, schedule, setup_players
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN, enroll, hello
 
 import contracts.liveness as liveness
 import player.central_link
@@ -57,6 +57,7 @@ def test_an_accepted_report_sets_last_report_at_from_centrals_clock(registry):
 
 def test_unbound_player_is_offered_an_empty_plan_and_its_report_is_heard_over_http(registry):
     identity, _, _ = enroll(registry)
+    hello(registry, identity)
     player_headers = {"Authorization": "Bearer " + identity["token"]}
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         before = client.get("/v1/operator/inventory", headers=OPERATOR).json()

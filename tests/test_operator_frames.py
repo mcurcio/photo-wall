@@ -49,9 +49,9 @@ def enroll(registry, count=2):
     outputs = tuple(OutputReport(output_id=f"HDMI-A-{i+1}", width_px=1920, height_px=1080)
                     for i in range(count))
     request = Enrollment(public_key=public, nonce=nonce, outputs=outputs,
-                         device_id=device_id, boot_id=boot_id, ticket_id=None,
+                         device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
-                             nonce, outputs, device_id, boot_id, None))).decode())
+                             nonce, outputs, device_id, boot_id))).decode())
     return registry.enroll(request)
 
 

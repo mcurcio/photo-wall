@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 from test_coordination import setup_players
-from test_registry import ADMIN, enroll
+from test_registry import ADMIN, enroll, hello
 
 from central.app import create_app
 from central.media_ports import SourceConfigurationReceipt
@@ -15,6 +15,7 @@ from contracts.models import PlayerConfiguration, Readiness
 
 def test_operator_source_scene_program_workflow_and_player_originated_session(registry):
     player = setup_players(registry, count=1)[0]
+    hello(registry, player)
     app = create_app(registry.db, registry.clock, ADMIN)
     operator = {"Authorization": "Bearer " + ADMIN}
     appliance = {"Authorization": "Bearer " + player["token"]}
@@ -129,6 +130,7 @@ def test_operator_unbind_endpoint_reverses_binding_and_updates_pending_queue(reg
 
 def test_live_session_rejects_retired_or_wrong_epoch_authority(registry):
     player = setup_players(registry, count=1)[0]
+    hello(registry, player)
     app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
         with pytest.raises(WebSocketDisconnect) as unauthorized:

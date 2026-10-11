@@ -56,7 +56,6 @@ import importlib.util
 import json
 import os
 import queue
-import secrets
 import signal
 import sys
 import threading
@@ -177,21 +176,11 @@ state = Path('/state')
 outputs = tuple(OutputReport(output_id='HDMI-A-' + str(i+1), width_px=1920,
                             height_px=1080) for i in range(count))
 renderer, dispatcher = Recorder(), Dispatch()
-config = PlayerConfig(central_origin='http://central:8000', allow_http=True,
+config = PlayerConfig(central_origin='http://central:8000',
                       cache_dir='/tmp/cache', cache_bytes=32*1024**2)
-device_id = os.environ['PHOTO_WALL_DEMO_DEVICE_ID']
-# 0009 diskless/netboot: no boot ticket is issued -- the base bootstrapper
-# fetches the app .deb and hands off only the origin, never a ticket. A
-# ticketless boot context (ticket_id=None) is the signal the app and central
-# key ticketless enroll on: enroll() sends ticket_id=None (no appliance_devices
-# row to bind), release_accepted flips True immediately, and _control_loop
-# never POSTs the retired /v1/player/boot-health route. This is the runtime
-# contract p4 s3 proves; the old /v1/bootstrap/boot ticket path is gone here.
-boot_context = BootContext.model_validate({
-    'schema': 2, 'ticket_id': None, 'device_id': device_id,
-    'boot_id': str(uuid.uuid4()), 'release_id': secrets.token_hex(32),
-    'trial': False, 'persistence': 'volatile', 'fault': None,
-})
+# A container has no Pi serial: the demo names the device the Player enrolls as.
+boot_context = BootContext(device_id=os.environ['PHOTO_WALL_DEMO_DEVICE_ID'],
+                           boot_id=str(uuid.uuid4()))
 # The production wiring (R1): the container's kernel command line names no Central,
 # so the configured origin is the saved root, located before the first request.
 # One Trust for the whole process: the same anchors locate Central and every

@@ -5,7 +5,6 @@ systemd's watchdog (M5). Seeded from the review's bearer-leak probe and survivin
 
 import asyncio
 import errno
-import functools
 import json
 import logging
 import signal
@@ -18,7 +17,6 @@ import tls_fixture as tls
 from test_player_service import (
     CMDLINE,
     LOCATED,
-    NoMdns,
     _until_steady,
     close,
     finder_rig,
@@ -41,8 +39,6 @@ from player.service import (
 )
 from player.service import main as player_main
 from uplink.causes import Cause, UplinkError
-from uplink.finder import find_central
-from uplink.resolver import Unconfigured
 
 TOKEN = "1" * 32
 REGISTRATION = Registration(player_id="p-" + "a" * 32, token=TOKEN, authority_epoch=1)
@@ -254,19 +250,15 @@ def test_a_service_error_is_its_own_bounded_code(error):
     asyncio.run(check())
 
 
-def test_a_discovery_bug_reaches_the_player_as_player_error(monkeypatch):
-    """R9: a discovery that raises a programming error ends the cycle as "player_error" with
+def test_a_finder_bug_reaches_the_player_as_player_error(monkeypatch):
+    """R9: a finder that raises a programming error ends the cycle as "player_error" with
     its type, not as a configuration cause; the Player keeps cycling."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     raised = []
 
-    class Buggy:
-        async def discover(self, unconfigured):
-            raised.append(1)
-            raise AttributeError("a bug")
-
-    find = functools.partial(find_central, Unconfigured("absent"), transport=FakeTransport({}),
-                             discovery=Buggy())
+    async def find():
+        raised.append(1)
+        raise AttributeError("a bug")
 
     async def check():
         service, _ = await finder_rig(find)
@@ -381,7 +373,6 @@ def test_a_media_redirect_ends_the_cycle_and_locates_again(monkeypatch, caplog):
 # --- R4a / U3: the cmdline wins before anything saved is read --------------------------------
 
 def test_a_cmdline_root_wins_and_a_bad_saved_root_is_never_read(tmp_path, monkeypatch):
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
     cmdline = tmp_path / "cmdline"
     cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
     config = PlayerConfig(central_origin="not a central root")
@@ -391,7 +382,6 @@ def test_a_cmdline_root_wins_and_a_bad_saved_root_is_never_read(tmp_path, monkey
 
 
 def test_without_a_cmdline_the_saved_root_is_validated_and_used(tmp_path, monkeypatch):
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
     missing = tmp_path / "absent"
     transport = FakeTransport({str(LOCATED.url("/v1/locate")): central})
     found = asyncio.run(build_finder(PlayerConfig(central_origin="http://central"),
@@ -439,7 +429,6 @@ def test_a_cmdline_root_wins_over_any_malformed_saved_value(tmp_path, monkeypatc
     """U3, owner requirement: the cmdline wins outright. Whatever the saved central_origin
     holds, the config loads and the cmdline root is used; the value is validated only when
     the cmdline names no Central, and then refused."""
-    monkeypatch.setattr("player.mdns_discovery.MdnsCentralDiscovery", NoMdns)
     path = tmp_path / "public.json"
     path.write_text(json.dumps({"schema": 1, "central_origin": saved}))
     config = load_config(path)
@@ -476,7 +465,7 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     monkeypatch.setitem(sys.modules, "gi.repository", repository)
     monkeypatch.setattr(signal, "signal", lambda *_: None)
     monkeypatch.setattr("player.service.load_identity", lambda: "identity")
-    monkeypatch.setattr("player.service.resolve_boot_context", lambda path: None)
+    monkeypatch.setattr("player.service.hardware_boot_context", lambda: None)
     monkeypatch.setattr("player.service.discover_outputs",
                         lambda: types.SimpleNamespace(outputs=(), fault=None))
     monkeypatch.setattr(PlayerService, "start", lambda self: events.append("start"))
