@@ -1063,6 +1063,20 @@ def retryable_operator_error(error):
                           "operator_http_504", "operator_transport")
 
 
+def await_central(host, seconds=90):
+    """Wait for Central's health answer, retrying only while Central is not answering yet;
+    any other failure (a broken helper, a refused request) surfaces at once as itself."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            return host.role("operator", "health")
+        except Exception as error:
+            if not retryable_operator_error(error):
+                raise
+            require(time.monotonic() < deadline, "central_startup_timeout")
+            time.sleep(1)
+
+
 class FaultRun:
     """Sampling, bounded waits and phase records shared by the fault segments of one wall."""
 
@@ -1300,14 +1314,7 @@ def run_demo(state: Path, fixture_state: Path, app_image: Path, scenario: str, k
         setup_operation(evidence, save, "setup_central", "docker-compose", "start_central",
                         lambda: host.compose("up", "-d", "database", "central",
                                              timeout=120, capture=False))
-        deadline = time.monotonic() + 90
-        while True:
-            try:
-                host.role("operator", "health")
-                break
-            except Exception:
-                require(time.monotonic() < deadline, "central_startup_timeout")
-                time.sleep(1)
+        await_central(host)
         setup_operation(evidence, save, "setup_source", "operator", "configure_source",
                         lambda: configure_demo_source(host))
         initial_refresh = setup_operation(

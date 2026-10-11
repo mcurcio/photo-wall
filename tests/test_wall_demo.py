@@ -23,6 +23,7 @@ from scripts.demo_wall import (
     DemoError,
     DemoHost,
     OperationFailure,
+    await_central,
     baseline_checks,
     composition,
     configure_demo_source,
@@ -465,6 +466,46 @@ def test_real_http_client_transport_failure_is_coded_for_bounded_recovery(monkey
                                   "operator_http_500", "readiness_commit_proof", "demo_failed"])
 def test_recovery_does_not_retry_authority_schema_or_unknown_failures(code):
     assert not retryable_operator_error(DemoError(code))
+
+
+class _HealthProbe:
+    """A host whose operator health answers fail with `failures` in order, then succeed."""
+
+    def __init__(self, *failures):
+        self.failures, self.calls = list(failures), 0
+
+    def role(self, role, action):
+        assert (role, action) == ("operator", "health")
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return {"status": "ok"}
+
+
+def test_central_wait_retries_while_central_is_not_answering(monkeypatch):
+    monkeypatch.setattr("scripts.demo_wall.time.sleep", lambda _: None)
+    host = _HealthProbe(DemoError("operator_transport"), DemoError("operator_http_503"))
+    assert await_central(host) == {"status": "ok"}
+    assert host.calls == 3
+
+
+@pytest.mark.parametrize("failure", [DemoError("demo_failed"), DemoError("operator_http_401"),
+                                     ModuleNotFoundError("support")])
+def test_central_wait_fails_at_once_with_the_real_failure(monkeypatch, failure):
+    monkeypatch.setattr("scripts.demo_wall.time.sleep", lambda _: pytest.fail("retried"))
+    host = _HealthProbe(failure)
+    with pytest.raises(type(failure)) as caught:
+        await_central(host)
+    assert caught.value is failure and host.calls == 1
+    expected = str(failure) if isinstance(failure, DemoError) else "demo_failed"
+    assert public_failure(caught.value)["error"] == expected
+
+
+def test_central_wait_times_out_only_on_a_silent_central(monkeypatch):
+    monkeypatch.setattr("scripts.demo_wall.time.sleep", lambda _: None)
+    host = _HealthProbe(*[DemoError("operator_transport")] * 3)
+    with pytest.raises(DemoError, match="^central_startup_timeout$"):
+        await_central(host, seconds=0)
 
 
 @pytest.mark.parametrize("central,worker", [

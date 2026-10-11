@@ -10,15 +10,12 @@ from pathlib import Path
 
 
 def wall_helper_dockerfile(base_image: str, *, include_release: bool = False) -> str:
+    """The helper image: the base plus exactly WALL_HELPER_BUNDLE (and its manifest) at /harness."""
     if re.fullmatch(r"[A-Za-z0-9_.:/@-]+", base_image) is None:
         raise ValueError("harness_base_image")
     return (
         f"FROM {base_image}\n"
-        # Stage a traversable directory before copying files to explicit paths;
-        # chmod on a multi-source COPY can otherwise chmod the new directory.
-        "COPY scripts /harness/scripts/\n"
-        "COPY --chmod=0644 demo_wall.py /harness/demo_wall.py\n"
-        "COPY --chmod=0644 bundle.json /harness/bundle.json\n"
+        + WALL_HELPER_BUNDLE.image_copy_lines("/harness", ("bundle.json",))
         + ("COPY release /release/\n" if include_release else "")
     )
 
@@ -32,6 +29,20 @@ class BundleFile:
 @dataclass(frozen=True)
 class HarnessBundle:
     files: tuple[BundleFile, ...]
+
+    def image_copy_lines(self, destination: str, extra_files: tuple[str, ...] = ()) -> str:
+        """COPY lines that put a context staged by `stage` (plus `extra_files` at its top
+        level) under `destination`: the bundle is the one source of the image's file set."""
+        directories = sorted({item.target.split("/", 1)[0] for item in self.files
+                              if "/" in item.target})
+        files = sorted({item.target for item in self.files if "/" not in item.target}
+                       | set(extra_files))
+        # Stage traversable directories before copying files to explicit paths;
+        # chmod on a multi-source COPY can otherwise chmod the new directory.
+        return "".join(
+            [f"COPY {name} {destination}/{name}/\n" for name in directories]
+            + [f"COPY --chmod=0644 {name} {destination}/{name}\n" for name in files]
+        )
 
     def stage(self, source_root: Path, target_root: Path) -> dict[str, str]:
         """Copy the closed dependency set while preserving its import layout."""
