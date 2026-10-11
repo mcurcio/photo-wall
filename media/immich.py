@@ -291,7 +291,18 @@ class ImmichClient:
         missing = () if "all" in granted else tuple(
             permission for permission in REQUIRED_PERMISSIONS if permission not in granted)
         return ContactAnswer(version=version, user=user, missing_permissions=missing,
-                             counts=await self._counts(), full_size_copies=await self._full_size())
+                             counts=await self._counts(), full_size_copies=await self._full_size(),
+                             face_detection=await self._face_detection())
+
+    async def _face_detection(self) -> bool | None:
+        """Whether Immich's facial recognition is on (`GET server/features`
+        `facialRecognition`, roadmap 5a); None when the answer lacks it or the key may not ask."""
+        try:
+            features = _mapping(await self._answer("GET", "server/features"), "features")
+        except _Forbidden:
+            return None
+        value = features.get("facialRecognition")
+        return value if isinstance(value, bool) else None
 
     async def _counts(self) -> LibraryCounts | None:
         """Immich's own statistics; None when the key may not read one of them."""
@@ -575,8 +586,15 @@ class ImmichClient:
             raise MediaError("asset_changed", "incompatible")
 
     async def faces(self, upstream_id: str) -> tuple[FaceBox, ...]:
-        """LibraryClient.faces (roadmap 5a, slice M1)."""
-        raise NotImplementedError
+        """LibraryClient.faces (roadmap 5a, slice M1): `GET faces?id=`, each v2.5.6
+        `AssetFaceResponseDto`'s `boundingBoxX1/Y1/X2/Y2` on its `imageWidth` x `imageHeight`."""
+        upstream_id = _safe_ref(upstream_id)
+        try:
+            answer = await self._step(self._answer("GET", "faces", params={"id": upstream_id}))
+        except _Forbidden:
+            return ()
+        return tuple(box for row in _array(answer, "faces")
+                     if (box := _face_box(row)) is not None)
 
     async def thumbnail(self, upstream_id: str, revision: AssetRevision) -> bytes:
         """The edited thumbnail, re-encoded by Photo Wall; MediaError("asset_changed") when the
@@ -790,6 +808,26 @@ def _media_error(problem: object) -> MediaError:
                                             and problem.detail == "forbidden"):
         return MediaError("upstream_permission", "permission")
     return MediaError("upstream_schema", "incompatible")
+
+
+def _face_box(row: object) -> FaceBox | None:
+    """One face, or None when its box is missing a field or degenerate (left out). A corner a
+    little outside the image (detectors overshoot at the edge) is clamped to it, keeping the
+    face; media/key_content.py clamps the far corner."""
+    if not isinstance(row, dict):
+        return None
+    values = {name: row.get(field) for name, field in (
+        ("x1", "boundingBoxX1"), ("y1", "boundingBoxY1"), ("x2", "boundingBoxX2"),
+        ("y2", "boundingBoxY2"), ("image_width", "imageWidth"), ("image_height", "imageHeight"))}
+    if any(type(value) is not int for value in values.values()):
+        return None
+    if values["x2"] <= values["x1"] or values["y2"] <= values["y1"]:
+        return None
+    values["x1"], values["y1"] = max(0, values["x1"]), max(0, values["y1"])
+    try:
+        return FaceBox(**values)
+    except ValidationError:
+        return None
 
 
 def _parsed(model, detail: str, **values):
