@@ -82,10 +82,16 @@ SHARED_WITH_SHOW = {
     "ReadinessNotice.jsx",  # shared read-only Player failure explanation
     "readinessRecovery.js",  # plain-language failure mapping; no controls
     "useMutate.js",  # refresh after a write
-    # The one candidates read (a GET): the Scene flow's chooser, the Now page's "Check this
-    # frame" and the Frame page's Photos (roadmap 5a K2), so none imports another.
-    "candidatesApi.js",
     "sourceNames.js",  # a Source's plain name: the Show side's lists and the Frame page's Photos
+    # The Fit board (follow-ups C1): one read of how a selection fits the Frames, hosted by the
+    # Show side (Photo source editor, Sources, Scene editor, Show now), Settings › Photo fit and
+    # the Frame page (its Photos, and its profile and Position as drafts). Reads only: the
+    # analysis is a question in a body, the settings write is Settings' own.
+    "photo-fit.ts",
+    "photo-fit-board.tsx",
+    "photoFitApi.js",
+    "photo-sheet.tsx",  # the photo a Fit board's sample opens
+    "libraryApi.js",  # the photo sheet's one photo's facts
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
@@ -608,7 +614,7 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "attention"])
+         "photo-library", "photo-fit", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -648,7 +654,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "attention")
+     "photo-fit", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -789,8 +795,6 @@ FRAME_PAGE_IMPORTS = {
                           "useRoute.js", "useSnapshot.js"},
     "live-adjustment.tsx": {"liveAdjustment.js"},
     "frame-power.tsx": {"polledRead.js", "powerApi.js"},
-    # The Overview's Photos (roadmap 5a K2): the candidates read, polled, and a Source's name.
-    "frame-photo-fit.tsx": {"candidatesApi.js", "polledRead.js", "sourceNames.js"},
 }
 # Roadmap 4's photo library pages, each with the legacy modules it alone may import: their routes
 # (libraryApi.js, photoSourcesApi.js) and hooks.
@@ -802,6 +806,12 @@ PHOTO_PAGE_IMPORTS = {
     "source-query-editor.tsx": {"sourceWords.js"},
     # A saved Source as a card (follow-ups D1): its counts and first photos (its pool route).
     "source-card.tsx": {"photoSourcesApi.js", "sourceWords.js"},
+    # How a selection fits the Frames (follow-ups C1): the fit analysis and settings routes,
+    # and a Source's plain name (a Scene names a Source's revision). Every Fit board host reads
+    # through this one module; the Frame page's Photos among them (domain/frame-photos.tsx).
+    "photo-fit.ts": {"photoFitApi.js", "sourceNames.js"},
+    # The photo sheet (follow-ups C2): one photo's facts and Immich's copies.
+    "photo-sheet.tsx": {"libraryApi.js"},
 }
 DECLARED_IMPORTS = {**FRAME_PAGE_IMPORTS, **PHOTO_PAGE_IMPORTS}
 

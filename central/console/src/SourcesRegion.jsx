@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
 import { useHandOffTo } from "./flow/useHandOff.js";
+import { percentWords, scenesUsingSource } from "./domain/photo-fit.ts";
+import { FitBoardFor } from "./domain/photo-fit-board.tsx";
 import { SourceCard } from "./domain/source-card.tsx";
 import { mediaNow } from "./mediaHealth.js";
 import { PhotoSourcePage } from "./pages/photo-source-page.tsx";
@@ -107,6 +109,7 @@ export function SourcesRegion({ snapshot, route, navigate, markDraft, handOffs }
       }}
       onDiscard={() => close(null)}
       onChanged={(changed) => setOpen((current) => (current === null || current.changed === changed ? current : { ...current, changed }))}
+      scenes={editing === null ? [] : scenesUsingSource(snapshot, editing.source_ref)}
     />
   );
 
@@ -125,6 +128,19 @@ export function SourcesRegion({ snapshot, route, navigate, markDraft, handOffs }
       )}
       {editor !== null && <div hidden={routeKey === null}>{editor}</div>}
     </section>
+  );
+}
+
+/**
+ * A Source's card's fit line (follow-ups C1): how its photos fit every Frame at the house crop
+ * limit, by shape and size (the analysis's shape tier: a list asks for many at once), opening
+ * the board in a sheet.
+ */
+function SourceFitLine({ sourceRef, name }) {
+  const question = useMemo(() => ({ selection: { sources: [sourceRef] }, frames: null, crop_limit: null }), [sourceRef]);
+  return (
+    <FitBoardFor question={question} tier="shape" size="line" title={`How ${name}'s photos fit the Frames`}
+      judged={(analysis) => `Judged by shape and size at the house crop limit, ${percentWords(analysis.crop_limit)}.`} />
   );
 }
 
@@ -201,6 +217,7 @@ function SourceList({ sources, now, navigate, resume }) {
                     },
                     { label: "Delete", onAction: () => remove(source) },
                   ]}
+                  fit={<SourceFitLine sourceRef={source.source_ref} name={name} />}
                 />
               </MediaCardListItem>
             );

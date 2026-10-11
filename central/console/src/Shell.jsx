@@ -53,7 +53,7 @@ const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
 const WIDE = "(min-width: 850px)";
 
 // Sidebar groups, in a fixed order (console DDD §48): Wall; Show (Now, Scenes, Schedule,
-// Sources); Fleet (Hardware, Releases); Settings (Photo library); Needs attention. Nothing reorders or counts on state.
+// Sources); Fleet (Hardware, Releases); Settings (Photo library, Photo fit); Needs attention. Nothing reorders or counts on state.
 const GROUPS = [
   { name: "Wall", table: wallRoutes },
   { name: "Show", table: showRoutes },

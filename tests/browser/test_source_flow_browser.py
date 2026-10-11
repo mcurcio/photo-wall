@@ -99,7 +99,9 @@ def test_anna_and_ben_in_the_last_3_years_with_no_screenshots(page, registry, li
         assert query["taken"] == {"kind": "last", "years": 3, "months": 0}
         assert query["exclude"]["screenshots"] is True
         assert query["connection_ref"] == ref
-        # What Central keeps for the draft is that query.
+        # What Central keeps for the draft is that query (once Central has answered the PUT
+        # that was just sent).
+        _until(page, lambda: drafts(registry)[0]["query"]["taken"] == query["taken"])
         [row] = drafts(registry)
         assert row["query"]["people"] == query["people"] and row["query"]["taken"] == query["taken"]
 

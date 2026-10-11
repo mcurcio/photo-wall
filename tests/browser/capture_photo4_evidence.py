@@ -198,7 +198,7 @@ def _library(registry, page):
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_after_pages(page, registry, scheme, suffix):
     """The Sources cards, Scene Photos and Show now over the saved Photo source "garden"."""
-    from console_tasks import choose_source, connect, start_scene, start_show_now
+    from console_tasks import connect, scene_frames_then_photos, start_scene, start_show_now
     from operator_harness import operator_server
     from test_operator_showrunner_browser import SCENE_ID, VALID_FRAME, _runtime, _seed
 
@@ -216,8 +216,8 @@ def test_after_pages(page, registry, scheme, suffix):
         expect(card.get_by_role("img")).to_have_count(4)
         _shot(page, f"sources-after{suffix}", scheme)
 
-        form = start_scene(page)
-        choose_source(form, garden)
+        form = start_scene(page)  # Frames come before Photos since follow-ups C1
+        scene_frames_then_photos(page, form, (VALID_FRAME,), garden)
         expect(form.get_by_role("region", name="Source media status")).to_contain_text("garden")
         _shot(page, f"scene-photos-after{suffix}", scheme)
 

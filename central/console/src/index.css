@@ -1361,6 +1361,42 @@ label {
   background: var(--color-accent-tint);
 }
 
+/* A number field with its unit after it ("30 s"). */
+.field__with-unit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field__with-unit > input {
+  width: 8rem;
+}
+
+/* Review's groups (follow-ups C2): the answers of one step under its name, one Change each. */
+.review__group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  min-width: 0;
+}
+
+.review__group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.review__group-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--color-muted);
+}
+
 .review__missing {
   color: var(--color-notice);
   font-weight: 600;

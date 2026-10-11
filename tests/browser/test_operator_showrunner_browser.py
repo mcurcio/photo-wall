@@ -395,10 +395,10 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         # The flow: Kind (hand-picked) → Photos → Frames → Media per frame → Playback →
         # Review, with the same field labels the single form had.
         form = start_scene(page, hand_picked=True)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
+        choose_source(form, SOURCE)
         scene_continue(page, "Media per frame")
 
         # Each Frame's chooser loads its (profile-filtered) candidates: two
@@ -412,7 +412,7 @@ def test_author_authored_scene_saves_per_frame_choices_in_one_request(page, regi
         valid_choice.select_option(portrait_a.asset.asset_id)
         invalid_choice.select_option(portrait_b.asset.asset_id)
         scene_continue(page, "Playback")
-        form.get_by_label("Seconds per cycle", exact=True).fill("20")
+        form.get_by_label("Each photo shows for", exact=True).fill("20")
         scene_continue(page, "Review")
         form.get_by_label("Scene name", exact=True).fill(AUTHORED_SCENE_ID)
 
@@ -461,9 +461,9 @@ def test_authored_chooser_hard_filters_incompatible_candidate(page, registry):
         connect(page, origin, "scenes")
 
         form = start_scene(page, hand_picked=True)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
+        choose_source(form, SOURCE)
         scene_continue(page, "Media per frame")
 
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
@@ -482,8 +482,8 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         form = start_scene(page, hand_picked=True)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
 
         reads = RequestGate(page, "**/v1/operator/snapshot")
         reads.holding = True
@@ -493,8 +493,8 @@ def test_a_get_through_apiwrite_does_not_drop_a_poll(page, registry):
         expect(page.get_by_text(re.compile(r"updated 5 s ago"))).to_be_visible()
 
         # The candidates GET, through apiWrite, while the poll is in flight: the flow
-        # reads them as soon as a frame is targeted, whichever step shows.
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        # reads them as soon as a Source is chosen for a targeted frame, whichever step shows.
+        choose_source(form, SOURCE)
         scene_continue(page, "Media per frame")
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
         expect(choice.get_by_role("option", name=re.compile(r"^Photo 108×192"))).to_have_count(1)
@@ -955,12 +955,12 @@ def test_tracer_a_named_scene_keeps_playing_through_its_program(page, registry):
         connect(page, origin, "scenes")
         scenes = page.get_by_role("region", name="Scenes", exact=True)
         form = start_scene(page)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
+        choose_source(form, SOURCE)
         scene_continue(page, "Playback")
         form.get_by_role("button", name="Advanced", exact=True).click()
-        expect(form.get_by_label("Keep playing until the Program ends", exact=True)).to_be_checked()
+        expect(form.get_by_label("Keep repeating", exact=True)).to_be_checked()
         scene_continue(page, "Review")
         name = form.get_by_label("Scene name", exact=True)
         name.fill("Family Evening")
@@ -1227,7 +1227,7 @@ def test_a_one_cycle_scene_says_so_on_the_scene_and_its_run(page, registry):
         connect(page, origin, "scenes")
         form = author_scene(page, SCENE_ID, SOURCE, (VALID_FRAME,), loop=False, submit=False)
         # Review lists the advanced value too.
-        expect(form.get_by_text("No, it plays one cycle", exact=True)).to_be_visible()
+        expect(form.get_by_text("Off: it plays once through", exact=True)).to_be_visible()
         with page.expect_response(
             lambda r: r.url.endswith(f"/v1/operator/scenes/{SCENE_ID}") and r.request.method == "PUT"
         ) as info:
@@ -1337,8 +1337,6 @@ def test_the_target_picker_groups_by_surface_with_health_in_the_description(page
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
         lobby = form.get_by_role("group", name="Frames on lobby", exact=True)
         wall = form.get_by_role("group", name="Frames on wall", exact=True)
         picked = lobby.get_by_role("checkbox", name=f"Target frame {LOBBY_FRAME}", exact=True)
@@ -1357,8 +1355,6 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         form = start_scene(page)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
 
@@ -1371,6 +1367,8 @@ def test_a_target_deleted_mid_draft_is_dropped_and_announced(page, registry):
         expect(form.get_by_role("status")).to_have_text(
             f"{LOBBY_FRAME} was deleted and removed from this Scene.")
         expect(form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True)).to_have_count(0)
+        scene_continue(page, "Photos")
+        choose_source(form, SOURCE)
         scene_continue(page, "Playback")
         scene_continue(page, "Review")
         form.get_by_label("Scene name", exact=True).fill(SCENE_ID)
@@ -1774,20 +1772,20 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
         expect(form.get_by_label("Scene name", exact=True)).to_have_count(0)
         # The stored values, exactly, where each is asked: every Change link opens its
         # step, and Continue returns to Review.
-        form.get_by_role("button", name="Change Photos from", exact=True).click()
+        form.get_by_role("button", name="Change Photos", exact=True).click()
         expect(source_choice(form, SOURCE)).to_be_checked()
         scene_continue(page, "Review")
         form.get_by_role("button", name="Change Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).to_be_checked()
         expect(form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)).not_to_be_checked()
         scene_continue(page, "Review")
-        form.get_by_role("button", name="Change Keep playing until the Program ends",
+        form.get_by_role("button", name="Change Playback",
                          exact=True).click()
-        expect(form.get_by_label("Keep playing until the Program ends", exact=True)
+        expect(form.get_by_label("Keep repeating", exact=True)
                ).to_be_checked()
         scene_continue(page, "Review")
-        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
-        seconds = form.get_by_label("Seconds per cycle", exact=True)
+        form.get_by_role("button", name="Change Playback", exact=True).click()
+        seconds = form.get_by_label("Each photo shows for", exact=True)
         expect(seconds).to_be_focused()
         seconds.fill("45")
         scene_continue(page, "Review")
@@ -1905,7 +1903,6 @@ def test_editing_an_authored_scene_preselects_its_items_that_are_still_candidate
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Photos", exact=True).click()
         choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
         scene_continue(page, "Media per frame")
         expect(form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)).to_have_value(a)
         # b left the Source, so it is no longer a candidate and is not kept.
@@ -1962,8 +1959,8 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scene_row(page, SCENE_ID).get_by_role("button", name=f"Edit Scene {SCENE_ID}").click()
         form = _scenes_form(page)
-        form.get_by_role("button", name="Change Seconds per cycle", exact=True).click()
-        form.get_by_label("Seconds per cycle", exact=True).fill("45")
+        form.get_by_role("button", name="Change Playback", exact=True).click()
+        form.get_by_label("Each photo shows for", exact=True).fill("45")
         scene_continue(page, "Review")
 
         # The other editor replaces it meanwhile, as the console saves; no poll has
@@ -2291,11 +2288,11 @@ def test_the_chooser_says_dated_and_readiness_and_waits_while_loading(page, regi
         # Bead 2: the chooser is on the Media per frame step, whose Continue (the old
         # Save) reports the loading state.
         form = start_scene(page, hand_picked=True)
-        choose_source(form, SOURCE)
-        scene_continue(page, "Frames")
+        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        scene_continue(page, "Photos")
         reads = RequestGate(page, "**/candidates*")
         reads.holding = True
-        form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
+        choose_source(form, SOURCE)
         reads.wait_held()
         scene_continue(page, "Media per frame")
         choice = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)

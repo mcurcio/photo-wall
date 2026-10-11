@@ -129,6 +129,28 @@ export function noteWords(note: LibraryNote): string {
   }
 }
 
+/** Where Immich's face detection is turned on, in Immich's own words (no link: an Immich
+ * address with an id stays out of the page, R22). */
+export const FACE_SETTINGS_WORDS =
+  "Open Immich face settings: Administration › Settings › Machine Learning Settings › Facial Recognition.";
+
+/**
+ * A passing check's note on a connection's own page (follow-ups C2): face detection off is a
+ * notice with its consequence in numbers and where to turn it on; the others are a line.
+ */
+export function LibraryNoteLine({ connection, note }: { connection: LibraryConnectionView; note: LibraryNote }) {
+  if (note.kind !== "no_face_detection") return <Note>{noteWords(note)}</Note>;
+  const photos = connection.counts?.photos ?? null;
+  const consequence = photos === null ? "crops cannot protect faces"
+    : `crops cannot protect faces in ${countWords(photos, "photo")}`;
+  return (
+    <ProblemCard scope="setup" subject={connectionSubject(connection)} variant="inline"
+      verdict={{ severity: "notice", label: "Face detection off", receipt: null }}
+      what={`Immich's face detection is off, so ${consequence}. Crops still keep the interesting part. ${FACE_SETTINGS_WORDS}`}
+      doing="Photos keep playing." />
+  );
+}
+
 export interface LibraryHealthCardProps {
   connection: LibraryConnectionView;
   /** The fix, on the connection's own page; without it the fix is a link to that page. */

@@ -15,6 +15,19 @@ import { SourcePicker } from "./SourcePicker.jsx";
 import { sourceName } from "./sourceNames.js";
 import { FrameChips, TargetPicker } from "./TargetPicker.jsx";
 import { useDraftPool } from "./useDraftPool.js";
+import { PhotoFitBoard } from "./domain/photo-fit-board.tsx";
+
+/**
+ * The draft's Fit board (follow-ups C1): how its photos fit its Frames, read by SceneFlow.jsx
+ * (`fit`: its read, judged words and the raise a Frame with nothing that fits is offered).
+ */
+function SceneFitBoard({ fit, size }) {
+  if (!fit) return null;
+  return (
+    <PhotoFitBoard read={fit.read} size={size} judged={fit.judged} rescue={fit.rescue}
+      heading="How these photos fit the Frames" title="How these photos fit the Frames" />
+  );
+}
 import { sourceCheckMessage } from "./useSourceCheck.js";
 
 /**
@@ -23,7 +36,7 @@ import { sourceCheckMessage } from "./useSourceCheck.js";
  * container runs the prunes, whichever step shows); each renders its fields through
  * the shared pickers and Field.jsx, so labels and accessible names are the ones the
  * single form had (rule 3): "Choose <Source>", "Target frame <id>", "Media for frame <id>",
- * "Seconds per cycle", "Keep playing until the Program ends", "Scene name", "Id".
+ * "Each photo shows for", "Keep repeating", "Scene name", "Id".
  *
  * Every view takes `{value, patch, problems}`: the draft value, the draft's patch,
  * and the flow's `useProblems` (reasons beside fields; field ids). Views with an
@@ -84,11 +97,12 @@ export function KindStep({ value, patch, problems }) {
  * plays the photos of all of them, C3); each chosen Source is listed with its state, whether its
  * photos are ready, Check now and Remove. The last card, "New Photo source", opens the Photo
  * source editor and returns here with it chosen (`onNewSource`, a hand-off). A hand-picked Scene
- * picks from one Source (radios).
+ * picks from one Source (radios). Under them, the Fit board of the chosen Sources on the Scene's
+ * Frames (chosen on the step before).
  *
  * @param {StepProps & {sources: Array<{source_ref: string}>, onNewSource: () => void}} props
  */
-export function PhotosStep({ value, patch, problems, sources, onNewSource, sourceReadiness }) {
+export function PhotosStep({ value, patch, problems, sources, onNewSource, sourceReadiness, fit }) {
   const set = (sourceRefs) => {
     patch({ sourceRefs });
     problems.touch("source");
@@ -111,6 +125,7 @@ export function PhotosStep({ value, patch, problems, sources, onNewSource, sourc
       />
       <SourceReadiness {...sourceReadiness}
         onRemove={(ref) => set(value.sourceRefs.filter((chosen) => chosen !== ref))} />
+      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="full" />}
     </>
   );
 }
@@ -218,14 +233,14 @@ export function MediaStep({ value, problems, candidates, onSelect }) {
 
 /**
  * Step 4, Playback: "Seconds per cycle" (default 30) and "Fade between photos"; how the
- * Scene ends; "Order", "Don't repeat within" and "Crop limit" (roadmap 5a); under Advanced, "Keep playing until the Program ends" (default on), "Keep
+ * Scene ends; "Order", "Don't repeat within" and "Crop limit" (roadmap 5a); under Advanced, "Keep repeating" (default on), "Keep
  * the last photo up" and "Keep these Frames together" (SceneSettings.jsx).
  *
  * @param {StepProps & {advanced: {open: boolean, onToggle: () => void}}} props
  */
-export function PlaybackStep({ value, patch, problems, advanced }) {
+export function PlaybackStep({ value, patch, problems, advanced, fit, houseCropLimit = null, onCropPreview }) {
   const summary = [
-    `Loop: ${onOff(value.loop)}`,
+    `${PLAYBACK_LABELS.loop}: ${onOff(value.loop)}`,
     `${PLAYBACK_LABELS.keepLastPhoto}: ${onOff(value.keepLastPhoto)}`,
     `${PLAYBACK_LABELS.keepTogether}: ${onOff(value.keepTogether)}`,
   ].join(" · ");
@@ -238,7 +253,9 @@ export function PlaybackStep({ value, patch, problems, advanced }) {
       />
       <TimingRows value={value} patch={patch} problems={problems} />
       <EndingRows value={value} patch={patch} problems={problems} />
-      <SelectionRows value={value} patch={patch} problems={problems} />
+      <SelectionRows value={value} patch={patch} problems={problems} houseCropLimit={houseCropLimit}
+        onCropPreview={onCropPreview} />
+      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="full" />}
       <Advanced summary={summary} open={advanced.open} onToggle={advanced.onToggle}>
         <LoopField problems={problems} loop={value.loop} onLoop={(loop) => patch({ loop })} />
         <AdvancedRows value={value} patch={patch} problems={problems} />
@@ -248,10 +265,12 @@ export function PlaybackStep({ value, patch, problems, advanced }) {
 }
 
 /**
- * Step 5, Review: a check-answers list of every value, the advanced ones included,
- * each with a "Change" button (`onChange(field)` routes to the field's step); then,
- * for a new Scene, "Scene name" and, under Advanced, its "Id" (derived from the name
- * until the operator types one, slice 3 §5). An edit keeps its stored id.
+ * Step 5, Review (follow-ups C2, after the designer review): for a new Scene its "Scene name"
+ * first, with its id under Advanced only (derived from the name until the operator types one,
+ * slice 3 §5; an edit keeps its stored id); then every value, the advanced ones included,
+ * grouped by the step that asks it, with one "Change <step>" per group (`onChange(field)`
+ * opens that step at its first field); then the compact Fit board of the Scene's photos on its
+ * Frames, the last moment to see a Frame that nothing fits, with "Raise the crop limit".
  *
  * @param {StepProps & {snapshot: object|null, editingId: string|null,
  *          candidates: ReturnType<typeof import("./useCandidates.js").useCandidates>,
@@ -268,49 +287,55 @@ export function ReviewStep({
   advanced,
   onChange,
   sourceReadiness,
+  fit,
 }) {
   const authored = value.mode === "authored";
   const missing = <NotChosen />;
-  const rows = [
-    { label: SCENE_ANSWER_LABELS.mode, field: "mode", value: KIND_LABELS[value.mode] },
+  const groups = [
+    { label: "Kind", field: "mode", rows: [{ label: SCENE_ANSWER_LABELS.mode, value: KIND_LABELS[value.mode] }] },
     {
-      label: SCENE_ANSWER_LABELS.source,
-      field: "source",
-      value: value.sourceRefs.length === 0 ? missing : value.sourceRefs.map(sourceName).join(", "),
+      label: FRAMES_LABEL,
+      field: "targets",
+      rows: [{
+        label: SCENE_ANSWER_LABELS.targets,
+        value: value.targets.length === 0 ? missing : <FrameChips snapshot={snapshot} frameIds={value.targets} />,
+      }],
     },
     {
-      label: SCENE_ANSWER_LABELS.targets,
-      field: "targets",
-      value:
-        value.targets.length === 0 ? missing : <FrameChips snapshot={snapshot} frameIds={value.targets} />,
+      label: "Photos",
+      field: "source",
+      rows: [{
+        label: SCENE_ANSWER_LABELS.source,
+        value: value.sourceRefs.length === 0 ? missing : value.sourceRefs.map(sourceName).join(", "),
+      }],
     },
   ];
   if (authored) {
-    rows.push({
+    groups.push({
       label: SCENE_ANSWER_LABELS.media,
       field: value.targets.length > 0 ? `media:${value.targets[0]}` : "targets",
-      value: value.targets.length === 0 ? missing : <MediaAnswers value={value} candidates={candidates} />,
+      rows: [{
+        label: SCENE_ANSWER_LABELS.media,
+        value: value.targets.length === 0 ? missing : <MediaAnswers value={value} candidates={candidates} />,
+      }],
     });
   }
-  rows.push(
-    { label: SCENE_ANSWER_LABELS.cycle, field: "cycle", value: String(value.cycleSeconds) },
-    {
-      label: SCENE_ANSWER_LABELS.loop,
-      field: "loop",
-      value: value.loop ? "Yes" : "No, it plays one cycle",
-    },
-    { label: SCENE_ANSWER_LABELS.fade, field: "fade", value: secondsWords(value.fadeSeconds) },
-    { label: SCENE_ANSWER_LABELS.ending, field: "ending", value: endingWords(value) },
-    { label: SCENE_ANSWER_LABELS.keepLastPhoto, field: "keepLastPhoto", value: onOff(value.keepLastPhoto) },
-    { label: SCENE_ANSWER_LABELS.keepTogether, field: "keepTogether", value: onOff(value.keepTogether) },
-    { label: SCENE_ANSWER_LABELS.order, field: "order", value: ORDER_LABELS[value.order] },
-    { label: SCENE_ANSWER_LABELS.noRepeatDays, field: "noRepeatDays", value: daysWords(value.noRepeatDays) },
-    { label: SCENE_ANSWER_LABELS.cropLimit, field: "cropLimit", value: cropWords(value.cropLimit) },
-  );
+  groups.push({
+    label: "Playback",
+    field: "cycle",
+    rows: [
+      { label: SCENE_ANSWER_LABELS.cycle, value: secondsWords(value.cycleSeconds) },
+      { label: SCENE_ANSWER_LABELS.loop, value: value.loop ? onOff(true) : "Off: it plays once through" },
+      { label: SCENE_ANSWER_LABELS.fade, value: secondsWords(value.fadeSeconds) },
+      { label: SCENE_ANSWER_LABELS.ending, value: endingWords(value) },
+      { label: SCENE_ANSWER_LABELS.keepLastPhoto, value: onOff(value.keepLastPhoto) },
+      { label: SCENE_ANSWER_LABELS.keepTogether, value: onOff(value.keepTogether) },
+      { label: SCENE_ANSWER_LABELS.order, value: ORDER_LABELS[value.order] },
+      { label: SCENE_ANSWER_LABELS.noRepeatDays, value: daysWords(value.noRepeatDays) },
+      { label: SCENE_ANSWER_LABELS.cropLimit, value: cropWords(value.cropLimit) },
+    ],
+  });
   const derived = idFromName(value.name);
-  if (editingId === null) {
-    rows.push({ label: "Id", field: "id", value: draftId(value) || missing });
-  }
   return (
     <>
       {editingId !== null && (
@@ -320,8 +345,6 @@ export function ReviewStep({
           {`. Its name stays the same.`}
         </p>
       )}
-      <CheckAnswers rows={rows} onChange={onChange} />
-      <SourceReadiness {...sourceReadiness} />
       {editingId === null && (
         <>
           <NameField
@@ -349,9 +372,28 @@ export function ReviewStep({
           </Advanced>
         </>
       )}
+      <section aria-label="Your answers">
+      {groups.map((group) => (
+        <section key={group.label} className="review__group" aria-label={`${group.label} answers`}>
+          <div className="review__group-head">
+            <h4 className="review__group-title">{group.label}</h4>
+            <button type="button" className="review__change-button" aria-label={`Change ${group.label}`}
+              onClick={() => onChange(group.field)}>
+              Change
+            </button>
+          </div>
+          <CheckAnswers rows={group.rows} onChange={onChange} label={`${group.label}: your answers`} />
+        </section>
+      ))}
+      </section>
+      {value.sourceRefs.length > 0 && <SceneFitBoard fit={fit} size="compact" />}
+      <SourceReadiness {...sourceReadiness} />
     </>
   );
 }
+
+/** The Frames step's label, as Review's group names it. */
+const FRAMES_LABEL = "Frames";
 
 /**
  * The chosen Photo sources, each with its state in words (mediaHealth.js `sourceState`, from its

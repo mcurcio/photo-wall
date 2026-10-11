@@ -23,8 +23,11 @@ const MEDIA = Object.freeze({ id: "media", label: "Media per frame" });
 const PLAYBACK = Object.freeze({ id: "playback", label: "Playback" });
 const REVIEW = Object.freeze({ id: "review", label: "Review" });
 
-const LIVE_STEPS = Object.freeze([KIND, PHOTOS, FRAMES, PLAYBACK, REVIEW]);
-const HAND_PICKED_STEPS = Object.freeze([KIND, PHOTOS, FRAMES, MEDIA, PLAYBACK, REVIEW]);
+// Frames before Photos (follow-ups C1): photos are chosen against known Frames, so the Photos
+// step can show which of them fit (owner, 2026-10-11, the preview of "transient Frame
+// compatibility").
+const LIVE_STEPS = Object.freeze([KIND, FRAMES, PHOTOS, PLAYBACK, REVIEW]);
+const HAND_PICKED_STEPS = Object.freeze([KIND, FRAMES, PHOTOS, MEDIA, PLAYBACK, REVIEW]);
 
 /**
  * The steps of a Scene of kind `mode`: "Media per frame" only for a hand-picked one.
