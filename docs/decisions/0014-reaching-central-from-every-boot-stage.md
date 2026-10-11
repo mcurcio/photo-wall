@@ -102,7 +102,9 @@ Known defects against these rules, fixed in PR #28:
 - **The saved root, only when the cmdline names no Central.** When provisioning finds Central by
   mDNS, it writes that root to the handoff as `central_origin`, and the Player uses it before
   browsing mDNS itself. This is the current code, not an owner ruling. The "cmdline > saved root >
-  mDNS" order in [0008](0008-generic-image-and-serial-identity.md) describes it.
+  mDNS" order in [0008](0008-generic-image-and-serial-identity.md) describes it. *Amended
+  2026-10-10 (PR 45): mDNS discovery and advertising are deleted; the order is cmdline, then the
+  saved root the Node's handoff stage writes.*
 - **Computed module lists.** The build computes each artefact's import set, which replaces the
   hand-kept lists that caused the crash, for the initramfs and both packages.
 - **One Debian declaration; nothing on the device resolves packages.** `scripts/debian_packages.py`

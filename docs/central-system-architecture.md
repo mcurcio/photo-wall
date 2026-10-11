@@ -2,7 +2,7 @@
 
 **Status:** Approved by the owner: the shape, the module contracts (§10) and the five decisions (§9).
 Amended by [idempotent jobs](central-idempotent-jobs.md) (#26, implemented).
-**Scope:** how Central serves photos, videos, the OS image and the Player `.deb`. Playback
+**Scope:** how Central serves photos, videos, the OS image and the node release roots (the Player `.deb` of the original scope was removed with the V1 boot path, [0019](decisions/0019-debian-packaging-with-debhelper.md); the per-device pins and `.deb` rows below are that design's record, and a Pi now fetches the base through its node boot offer). Playback
 coordination, enrollment and the console UI are out of scope; they are neighbours only.
 **What it gives up:** a waiting request keeps a connection open for up to 30s. Two or more
 pods only work if they share one disk, and the code cannot check that (§6). Central writes
@@ -180,7 +180,7 @@ sequenceDiagram
   participant Q as Job queue
   participant W as A worker (any pod)
   participant D as Cache disk (shared)
-  Pi->>C: GET /v1/netboot/base
+  Pi->>C: GET /v2/node/boot-offers/{id}/artifacts/base
   C->>C: resolve → key (Unknown → 404, stop)
   C->>D: open(key) → missing
   C->>C: take a waiter slot (full → 503 Retry-After)
@@ -240,10 +240,11 @@ work runs inside the serving process, and N pods multiply the load on the origin
 
 ## 8. Today vs target
 
-- **Two job systems and four state stores → one queue and one Asset table.** Media runs a
-  hand-built lease queue beside procrastinate (`media_repository.py:450-470`). State is
+- **Two job systems and four state stores → one queue and one Asset table.** Media ran a
+  hand-built lease queue beside procrastinate (`media_repository.py:450-470`). State was
   spread across `base_cache`, `app_releases.mirror_state`, `app_packages`, and
-  `media_jobs`/`media_blobs`.
+  `media_jobs`/`media_blobs` (a snapshot from when this page was approved; the V1 `.deb`
+  and per-device base stores went with [0019](decisions/0019-debian-packaging-with-debhelper.md)).
 - **Jobs are not single-purpose.** The release poll also runs failed-boot sweeps,
   self-heal, OS GC and the orphan sweep (`app_release_service.py:190-217`). The target
   splits these into `SyncReleases`, `Prefetch` and `MaintainCache`.

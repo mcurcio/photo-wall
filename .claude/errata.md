@@ -4873,3 +4873,53 @@ Two reds on main, neither a spec contradiction. (1) `images` job: the Dockerfile
 - E-1B-FIX-6 (NOT DONE, deferred): (a) reliability P2-2's `app_descriptors` fact in the node-pid1 success scenario (node-pid1 does not run locally here); (b) reliability P2-4's MP4 churn in the resource harness, blocked by G14 (the H.264 pad never links on trixie's GStreamer, so a video decoder never prepares); (c) reliability P2-3, the browser and catalog legs over the ~4-minute budget (this run adds no browser test, one catalog story, and about 7 s to the display harness); (d) "Needs calibration" on the Wall, the Frame header and To finish for `position-needed` still uses the forbidden bare word "calibration" (DL §8 forbidden words); it predates 1b and many browser tests pin it, so renaming it is its own change. `display-changed` now has its own label ("Display changed", tab Hardware). (e) PR 76's body still promises "Display confirmed off" and calls the player-reliability plan "to follow"; it needs rewriting by whoever owns the PR text. (f) #110's scope cut (E-1B-3) still waits for the owner's answer.
 - E-1B-FIX-7 (PAGE vs DL, FIXED): the Power method label "HDMI signal off (the panel sleeps)" used "Panel", a forbidden bare word (design-language.md, Forbidden words). The label and docs/operator-console-design.md §5 and row 116 now say "(the display may sleep)"; the runbook's signal-off row says "display". Signal off's Turn on reads "Picture back on" (it read "Picture stopped; the display may sleep" for on too).
 - E-1B-FIX-2-CLOSED (implementer, 2026-10-10; closes E-1B-FIX-2, the spec wins): owner q1 says a test lasts "5 minutes, or less if you press Turn on. When the test ends, the request underneath takes over." Turn on now ENDS the live console test and puts nothing on top: `DELETE /v1/operator/frames/{id}/power-tests` (204; `DisplayCommands.end_power_test`) deletes the `power_requests` row, the projection (`model.power_stack`, the one home for the stack) is the request underneath again (standing on in 1b), and the change rises so the Pi carries it out. `POST …/power-tests` takes no body and is only Test: turn off (`PowerTestRequest` removed, `PowerTestAccepted` loses `power`), so no second path puts an on-test on top. With no live test there is nothing to end: the request underneath is already in force, the route answers 204 with no change, and the Power tab's Turn on is disabled while no test is live or sent. Chosen over keeping a 5-minute on-test in that case: an on-test would sit above the request underneath (above 2a's scheduled off, for 5 minutes), the divergence FIX-2 named, and re-applying it would fight a person who turned the display off by hand (output_power.py's "never fights a person with the remote"). The tab's `result` is now the Pi's result for the request Central has in force (`model.power_result`: the report answers the latest document and names the first request of `power_stack`), so after Turn on the tab reads "Display confirmed on" / "Display didn't answer" / "Picture back on" for the request underneath. Cost: an operator can no longer use the console to turn on a display someone turned off by hand while no test is live (use the remote, or Test: turn off then Turn on). Supersedes the C3 and K2 pages' "Turn on replaces it (one row)" and `requestPowerTest(frameId, power: "on" | "off")` in .claude/runs/display-1b.md. Tests: tests/test_display_power_requests.py (`…turn_on_ends_it`, `test_after_turn_on_the_tab_reads_the_pis_answer_for_the_request_underneath`), tests/browser/test_frame_power_browser.py (`…turn_on_ends_it`).
+
+## 2026-10-10 - PR 45 widened: V1 dead code removed
+
+Commits adda389 (lane 1, Central), 2bffffa (lane 2, Player/contracts/registry), 3b3d481 (seam), then the docs step.
+
+**Deploy order (iac, separate PR):**
+- iac must switch Central's uvicorn factory from `central.node_app:create_app` to `central.app:create_app` and drop `PHOTO_WALL_NODE_AUDIENCE` (and `PHOTO_WALL_MDNS_ADVERTISE`) before deploying an image without `central/node_app.py`; otherwise Central does not start. `PHOTO_WALL_NODE_VERIFIER_CONFIG` keeps working: `central.app:create_app` reads it now.
+- The node session audience changes from iac's `family-room` to the product constant `photo-wall` (`NODE_AUDIENCE`, central/fleet/node_sessions.py).
+
+**Lane errata:**
+- E-V1W-L1-1 · E-CDS-FIX-1 listed nodeControl.js as legacy markup composed by the Hardware Pi page; NodeRecords is deleted, so tests/test_console_routes_r4.py LEGACY_MARKUP drops it and the set is {ConfirmAction.jsx, PlayerCommands.jsx}.
+- E-V1W-L1-2 · docs/operator-console-ddd.md Part E §24-§28 specified the node-off banner, the "not shown" line, the on/off/unread states and transport_enabled; all deleted with node control always on (docs step rewrote those rows in place).
+- E-V1W-L1-3 · The brief treated mDNS as possibly live; only player/mdns_discovery.py used it, README still documented advertising, and zeroconf stayed a dependency (removed by the seam).
+- E-V1W-L1-4 · central/node_app.py was not a plain alias: it was the only reader of PHOTO_WALL_NODE_VERIFIER_CONFIG; the read moved into central.app:create_app.
+- E-V1W-L2-1 · Target D (legacy calibration preview) is not dead: the wall demo's Player has no node, so its Frame answers legacy_preview and scripts/demo_wall.py saves through Registry.calibrate; removing it first needs the demo on node calibration trials.
+- E-V1W-L2-2 · Target C premise wrong: node Players never had /run/photo-wall/boot.json (empty /run, appliance/apps/process_linux.py); hardware_boot_context was the live node path, not a V1 branch.
+- E-V1W-L2-3 · Target B consequence: with schema 1 gone, state before hello is refused with 409 control_negotiation_required (WebSocket 1008); scripts/node_rollout_image_check.py's compatibility_matrix ids were updated by the seam.
+- E-V1W-L2-4 · Migration 049's player_control_invalidate_ack_nonce trigger only guarded against older Central pods; registry code already clears applied_ack_nonce, so migration 075 drops it.
+- E-V1W-L2-5 · contracts/equipment.py and tests/test_player_boot_serial.py used appliance/bootstrap.py as the device-id source of truth; the real counterpart is Central's device_id_for_serial.
+- E-V1W-L2-6 · uplink/finder.py's discovery protocol had no caller; the "cmdline, saved root, then mDNS" order in decision 0014 and the design was stale (seam removed discovery; docs step amended 0014 and execution-contract.md).
+- E-V1W-SEAM-1 · README said Central is mDNS-found without a cmdline root; nothing does mDNS now (docs step fixed README).
+- E-V1W-SEAM-2 · decisions 0008 and 0009 still describe zeroconf in the base; left as history.
+
+**Kept live (lane 1):**
+- GET /v1/operator/node/status: the console's only effect-gate source; serves installation_audience (always a string), effect_gate and qualification strings.
+- create_app(node_control=NodeControlConfig): no longer optional; tests inject their own audiences.
+- mount_node_routes content: ContentServices | None: test injection without a database, not a node-off mode.
+- useFleetHosts skip: Shell skips only until sign-in is confirmed.
+- useNodeDevice skip: retired or unknown box.
+- central/node_runtime_reconciliation.py `sessions.config is None` branch: removed by the seam.
+- Player V1-shaped wire (/v1/enrollment/*, /v1/player/*, /v1/media/*, WS /v1/player/session, /v1/locate, /v1/operator/*): live for every node-path Player.
+- Node bus optional without PHOTO_WALL_HUB_URL, and Compose/demo/software-e2e Players without a node: out of scope.
+
+**Kept live (lane 2):**
+- Legacy calibration preview (Registry.calibrate, calibration_mode_in legacy_preview, liveAdjustment.js): the wall demo uses it (E-V1W-L2-1).
+- player/service.py hardware_boot_context and read_pi_serial: the Player's only boot-context source on a node.
+- PlayerConfig.central_origin and the saved-root branch: written by appliance/boot/node_bootstrap.py.
+- /v1/player/hello and identify_output capability negotiation: the operator's Identify depends on it.
+- central/fleet/acceptance_evidence.py AppControl and current_control_receipt_matches: used by node_acceptance, node_app_links, acceptance_query and the PID1 fixture.
+- player/node_app_link.py root_socket/_send/_receive: used by NodeAppLinkClient and player/probe_responder.py.
+- Player V1-shaped wire: used by every node-path Player.
+- Player _write_health and service-health.json (persistence=volatile): only tests/test_node_pid1.py reads it (asserting absence on the host); looks V1-dead, flagged for a later pass.
+- uplink/finder.py discovery: removed by the seam.
+- Compose/demo/software-e2e Players without a node and the optional node bus: out of scope.
+
+**Docs step findings:**
+- E-V1W-DOCS-1 · docs/module-appliance-release.md said every signed-release mechanism "remains live ... do not remove it"; migration 015 dropped the release authority long ago. The page now opens with a history banner; its 0009/0012 sections (code removed by 0019) are deleted.
+- E-V1W-DOCS-2 · docs/decisions/0009 is history (left), but its 9 links to the deleted player/mdns_discovery.py broke check_docs.py; they are now plain code spans marked "deleted in PR 45" (text otherwise unchanged).
+- E-V1W-DOCS-3 · docs/central-system-architecture.md (approved target) is V1-shaped beyond the named lines (player-deb Asset kind, per-device pins, FetchPackage in §5-§6); only the scope line, the base request in the sequence diagram and the §8 snapshot were corrected. A rewrite of its data model to the node release roots is open.
+- E-V1W-DOCS-4 · The runbook's Software and screens page said the serial comes from `GET /v1/operator/netboot`, which no longer exists; the console reads it from the fleet host read (`GET /v1/operator/node/hosts`).

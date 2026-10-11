@@ -132,25 +132,21 @@ actual outcome without claiming that a new Run started.
 
 `PHOTO_WALL_HORIZON_SECONDS` defaults to 300 seconds and `PHOTO_WALL_RENEWAL_SECONDS`, the plan renewal quantum (at most 60), to 30; the [wall demo](module-wall-demo.md) shortens both. In the scheduler's PostgreSQL transaction, the media repository records each bounded preparation request and defers its exact job ID through Procrastinate. The separate worker publishes verified derivatives into the `media` volume. Central mounts it read-only and serves exact authorized bytes; Players never receive an upstream URL or credential. Procrastinate owns dispatch, retry timing, and queue-worker liveness. Photo Wall schedules only domain preparation, source refresh, and publication/storage maintenance tasks; it retains publication recovery, reservations, and stale-attempt fencing. The worker has a read-only runtime, a private writable media volume, and container CPU/memory limits.
 
-Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player reads its RAM boot context, creates a new process key, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched from `/v1/netboot/base` (by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
+Fresh key-proof enrollment uses `/v1/enrollment/challenge` plus `/v1/enrollment/register`. The single-process Player entry point is `python -m player.service --config /etc/photo-wall/public.json`; see [service configuration and runtime requirements](module-player-service.md). The Player derives its boot context from the Pi's serial and a fresh boot id, creates a new process key, says hello on its control session before Central answers any state, and receives a new central authority epoch. A recognized returning equipment observation restores central bindings; unknown equipment remains unbound. `/v1/player/time` supplies independent authenticated clock samples. Base images are fetched through the node boot offer (`/v2/node/boot-offers/{offer_id}/artifacts/{role}`, by content hash). Physical Pi/PXE and complete current-image qualification remain pending. Startup-only DRM discovery currently requires a Player restart after connector topology changes.
 
 The `database` volume persists all authoritative state, including Procrastinate jobs and release/trial records. `media` holds central authoritative media blobs and preparation files, and `connections` holds private worker configuration. Central and worker startup apply forward Photo Wall SQL migrations under a database advisory lock and check hashes of already-applied migrations; they also install/upgrade Procrastinate's versioned schema. Do not edit an applied Photo Wall migration; add another numbered migration. Both containers run as an unprivileged user. The exact Python dependency graph is in `uv.lock`.
 
-## Player provisioning: flash and go
+## Player provisioning: netboot and enroll
 
-The baseline Player path (0008) is flash-and-go: no boot ticket, no pre-registration. Central advertises itself over mDNS (`_photowall._tcp`) once its process starts, unless `PHOTO_WALL_MDNS_ADVERTISE=false` is set. If the deployment serves central on a port other than the default `8000`, also set `PHOTO_WALL_HTTP_PORT` to that real port, or the advertisement points a discovering player at a dead port.
+A Player has one way in: it netboots. There is no flashed image, no boot ticket, no pre-registration and no mDNS discovery; the kernel command line names Central (`photowall.central=…`, [step 2 below](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
 
-1. **Flash the generic image** to an SD card or USB drive (build it per the [README's provisioning section](../README.md#provision-player-appliances); there is no published release artifact yet) and boot the Pi on the same trusted LAN as central.
-2. **Watch the pending queue.** The Pi derives its `device_id` from its own hardware serial, finds central by mDNS (only because no explicit origin is configured on the card), and enrolls over plain HTTP. It appears in the operator inventory (`/v1/operator/inventory`, or the operator UI's Players list) as **unbound** — no prior registration required.
+1. **Netboot the Pi** on the same trusted LAN as Central. Stage 1 locates Central from the command line and mounts the base; the Player app root and the App Manager root arrive as squashfs images through [Node control](#node-control). Nothing installs a `.deb` on a Node: the 0009 bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes and the Player `.deb` are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)).
+2. **Watch the pending queue.** The Player derives its `device_id` from its own hardware serial and enrolls. It appears in the operator inventory (`/v1/operator/inventory`, or the console's Hardware list) as **unbound**; no prior registration is required.
 3. **Bind** the pending Player's Output to a Frame from the operator interface, the same control used for any equipment change, then calibrate it.
-4. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) releases a Frame's binding without retiring the Player — the serial can be re-bound later, to the same or a different Frame. This is distinct from **retire**, which is permanent and refuses the serial's re-enrollment.
+4. **Unbind** (`DELETE /v1/operator/frames/{frame_id}/binding`) releases a Frame's binding without retiring the Player: the serial can be re-bound later, to the same or a different Frame. This is distinct from **retire**, which is permanent and refuses the serial's re-enrollment.
 5. **Reboot** of an already-bound Pi re-associates with its Frame automatically by serial; no operator action is required unless the binding itself needs to change.
 
-Netboot (PXE) is the opt-in enhancement path in place of flashing — see the [PXE service module](module-pxe-service.md). Certificate-based identity and pinned/explicit transport trust are further opt-in enhancements described in [decision 0008](decisions/0008-generic-image-and-serial-identity.md); they are designed but not yet implemented, so do not rely on them today. Physical Pi boot of either the flash image or the netboot tree is not yet hardware-qualified.
-
-## Player provisioning: the V1 netboot and promote path (removed)
-
-[Decision 0009](decisions/0009-minimal-base-and-app-package.md) shipped the Player as a `.deb` that a base-owned bootstrapper downloaded and installed with `dpkg --install`. That path is gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)): the bootstrapper, `photo-wall-provision.service`, the OS agent, Central's `/v1/app/*` and `/v1/netboot/*` routes, the `.deb` promotion and the Player `.deb`, bootstrapper `.deb` and Player payload release files no longer exist. A Node boots by [stage 1](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014), mounts its base, and its release roots (the Player app root and the AppManager root) arrive as squashfs images through [Node control](#node-control). A Pi enrolls by serial and appears **unbound** in the operator inventory (`/v1/operator/inventory`); bind it to a Frame and calibrate it as in the flash-and-go flow above.
+Physical Pi boot of the netboot tree is not yet hardware-qualified.
 
 ## Player provisioning: stage the netboot bundle and read its console (0014)
 
@@ -414,9 +410,9 @@ The **Hardware** section (`#/hardware`) has one row per physical box (a **Pi**),
 - **App**: the node app operations, each with its named state (for example "Rejected by App Effect Broker", or "Ended by a later boot" for a stage that ran before the Player rebooted). **Stage app** switches this Player's app for this boot only (see [Releases, Stage app and Update the wall](#releases-stage-app-and-update-the-wall)). **Qualified fallback** shows the app environment the Player app linked, lets you qualify it, and lists the stored acceptances.
 - **Danger zone**: **Unbind all outputs** (Bound only). Retire is on the Pi's Hardware page.
 
-A Pi's pages read that box's node state every 5 s while it is open and visible. If Central was started without node control, a banner sits above every page ("Node management is off on this Central …"), the Player page shows one line, "Node records are not shown: node management is off (see the banner).", in place of its node sections, and its header, Outputs, Bind, Identify and Unbind still work. That is a misconfiguration: start Central as [Node control](#node-control) describes. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
+A Pi's pages read that box's node state every 5 s while it is open and visible. A failed read keeps the last rows, marked "refresh failed". A retired Player is not read ("Not read: Player retired").
 
-The serial comes from a separate, optional read of `GET /v1/operator/netboot`, refreshed at most every 30 s or when the set of Players changes. If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
+The serial comes from the console's one fleet host read (`GET /v1/operator/node/hosts`, every 15 s once you are signed in). If that read fails, the Hardware list says **"Boot records unavailable"** and keeps the last serials it knew; you stay signed in and everything else works.
 
 ### Host health on the Players pages
 
@@ -857,20 +853,18 @@ so both know migrations 053–054 and the sealed-environment job kind. Keep the
 ordinary `PHOTO_WALL_DATABASE_URL` and `PHOTO_WALL_ADMIN_TOKEN` configuration in
 its existing protected deployment settings. No token is placed in a command line.
 
-Node control is the one supported configuration. Set an installation-specific
-`PHOTO_WALL_NODE_AUDIENCE` and run Central with the node factory:
+Central always runs node control; there is no switch to turn it off and no
+other factory. Run Central with its one factory (the image's own command):
 
 ```sh
-uvicorn central.node_app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
+uvicorn central.app:create_app --factory --host 0.0.0.0 --port 8000 --ws-max-size 16777216
 ```
 
-Keep `--ws-max-size` at 16 MiB (the image's own command uses the same value): a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
+Keep `--ws-max-size` at 16 MiB: a Node's bus leaf rides Central's WebSocket, and nats-server sends a connection's whole backlog as one frame ([the Node bus](#the-node-bus-and-centrals-hub)).
 
-The ordinary `central.app:create_app` factory (still the default image and Compose
-command until the [V1 follow-up](player-fleet-implementation-map.md) switches them)
-keeps node transport disabled. That is a **misconfiguration**: Players that boot by
-node path are refused, and the console shows one banner ("Node management is off on
-this Central") above every page. Every Pi boots by the node path: the V1 boot offer
+The node session audience is the product constant `photo-wall` (`NODE_AUDIENCE` in
+`central/fleet/node_sessions.py`), one Central per wall; no environment variable sets it.
+Every Pi boots by the node path: the V1 boot offer
 and the `photowall.node=v2` switch are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)),
 so the command line needs no flag. Do not add `cgroup_enable=memory`: every release's
 command line carries it, once, and it must stay. Boot trees staged from an earlier
@@ -878,11 +872,11 @@ release do not; restage them. Without the memory controller, which the Pi 5's de
 tree turns off, the base still mounts its store but no memory limit is enforced, and
 the console warns
 ([step 2](#player-provisioning-stage-the-netboot-bundle-and-read-its-console-0014)).
-A node release's boot tree carries both. The node factory enables observation, explicit session enrollment, immutable V2 boot
+Node control serves observation, explicit session enrollment, immutable V2 boot
 offers and scoped command routes; it does **not** open the durable effect gate.
 `/healthz` remains process/service health. Authenticated
-`GET /v1/operator/node/status` reports transport selection and the persistent gate
-state separately. A running HTTP server, accepted serial claim, stored sample, or
+`GET /v1/operator/node/status` reports the node audience and the persistent gate
+state. A running HTTP server, accepted serial claim, stored sample, or
 catalogued artifact is not command qualification, authenticated physical identity,
 verified downloaded bytes, or observed pixels.
 
@@ -967,7 +961,7 @@ Superseded images stay in the pool until the next reboot. A third distinct app i
 
 ### Optional read-only Kubernetes node verifier
 
-The node factory accepts `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
+Central (`central.app:create_app`) reads `PHOTO_WALL_NODE_VERIFIER_CONFIG`, the path to a
 read-only deployment-owned JSON file. Its exact keys are `identity_directory`,
 `namespace`, `ci_record`, `guard_record`, `ci_public_key`, `guard_public_key`, and
 `audience`. Public keys are distinct raw Ed25519 keys encoded as hex. The identity
@@ -1009,7 +1003,7 @@ unreconciled even after certification expiry. It must produce truthful exact-ima
 CI matrices and signed guard records from those enforcement results. The adapter
 and signatures do not implement that controller. No real such controller or
 qualification is established by the local tests. An unconfigured or uncertified
-node factory therefore continues to serve observations with effects closed.
+Central therefore continues to serve observations with effects closed.
 
 
 ## Reaching a Node over SSH
