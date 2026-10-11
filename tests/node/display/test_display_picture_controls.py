@@ -19,6 +19,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from node.display.fake_display_state import SOURCE as STATE_SOURCE
+from node.display.fake_display_state import changing_state
 
 from appliance.display_host.ddc import DdcChannel, VcpReading
 from appliance.display_host.output_report import OutputReports
@@ -62,13 +64,14 @@ UNSET = PictureSetting(ActsOn.DISPLAY, AS_THE_DISPLAY_HAS_IT)
 CHARITY = {3000: (1.0000, 0.4870, 0.1411), 6500: (1.0000, 0.9436, 0.9621), 9300: (0.6703, 0.7362, 1.0000)}
 
 # The scripted display. `vcp` maps a code to [current, maximum]; D6 is power (1 on, 2 standby).
+# Its state goes through `fake_display_state`, whose source the tool embeds ahead of this.
 FAKE_DDCUTIL = '''
 import json, sys, time
 state_path, log_path = {state!r}, {log!r}
 started = time.monotonic()
 args = sys.argv[sys.argv.index("--noconfig") + 1:]
 bus = sys.argv[sys.argv.index("--bus") + 1]
-state = json.load(open(state_path))
+state = read_state(state_path)
 def record(**entry):
     with open(log_path, "a") as log:
         log.write(json.dumps({{"bus": bus, "args": args, **entry}}) + "\\n")
@@ -84,12 +87,11 @@ try:
             print("VCP %s C %d %d" % (args[1], current, maximum))
     elif args[0] == "setvcp":
         time.sleep(state["write_seconds"])
-        state = json.load(open(state_path))
-        if args[1].upper() == "D6":
-            state["power"] = {{"1": 1, "4": 2}}[args[2]]
-        elif state["take"]:
-            state["vcp"][args[1]][0] = int(args[2])
-        json.dump(state, open(state_path, "w"))
+        with changing_state(state_path) as state:
+            if args[1].upper() == "D6":
+                state["power"] = {{"1": 1, "4": 2}}[args[2]]
+            elif state["take"]:
+                state["vcp"][args[1]][0] = int(args[2])
 finally:
     record(at="end", time=time.monotonic())
 '''
@@ -107,7 +109,7 @@ class Display:
         bin_dir = root / "bin"
         bin_dir.mkdir()
         tool = bin_dir / Path(DDCUTIL).name
-        tool.write_text(f"#!{sys.executable} -I\n"
+        tool.write_text(f"#!{sys.executable} -I\n" + STATE_SOURCE
                         + FAKE_DDCUTIL.format(state=str(self.state_path), log=str(self.log_path)))
         tool.chmod(0o755)
         self.tool = tool
@@ -120,13 +122,12 @@ class Display:
         self.channel = DdcChannel(self.run, drm_root=self.drm, cache_dir=root / "cache")
 
     def script(self, **values: object) -> None:
-        state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
-        self.state_path.write_text(json.dumps({**state, **values}))
+        with changing_state(self.state_path) as state:
+            state.update(values)
 
     def vcp(self, code: str, current: int, maximum: int) -> None:
-        state = json.loads(self.state_path.read_text())
-        state["vcp"][code] = [current, maximum]
-        self.state_path.write_text(json.dumps(state))
+        with changing_state(self.state_path) as state:
+            state["vcp"][code] = [current, maximum]
 
     def run(self, argv, timeout):
         """The production runner, with the tool's path pointed at the fake."""
