@@ -6,9 +6,9 @@ import { draftKey, useDraft } from "./useDraft.js";
 import { useMutate } from "./useMutate.js";
 
 /*
- * A Frame's live adjustment (the Frame page's Position and Picture tabs): the operator's draft
- * of the Frame's calibration (useDraft.js) and the live session that shows it on the Frame's
- * Display while one of those tabs is open. Central calls the session a calibration trial
+ * A Frame's live adjustment (the Frame page's Position tab): the operator's draft of the
+ * Frame's position, its fit (useDraft.js), and the live session that shows it on the Frame's
+ * Display while that tab is open. Central calls the session a calibration trial
  * (central/fleet/node_calibration.py); none of that wording reaches the page.
  *
  * THE DRAFT IS THE OPERATOR'S, THE SESSION ONLY SHOWS IT. A draft carries its base, the saved
@@ -19,7 +19,7 @@ import { useMutate } from "./useMutate.js";
  * revision. A session begun for an unchanged draft starts at the saved calibration, which the
  * draft then adopts (with its revision), so the draft follows saves made elsewhere.
  *
- * THE SESSION RUNS WHILE THE TAB IS OPEN AND SHOWN. `open` true (a Position or Picture tab is
+ * THE SESSION RUNS WHILE THE TAB IS OPEN AND SHOWN. `open` true (the Position tab is
  * shown for a bound Frame whose Pi serves live adjustment) and the browser tab visible begins a
  * session; the page then sends the draft as it changes, and every TICK_MS asks Central to keep
  * the session (`keepalive`), which also reads whether the Pi has shown the latest change.
@@ -67,6 +67,10 @@ const REFUSALS = {
   trial_baseline_revision_changed: OVERTAKEN,
   calibration_revision_conflict: OVERTAKEN,
   calibration_trial_baseline_changed: OVERTAKEN,
+  // Done in Cover (roadmap 1c F-4): the picture's shape must agree with the Frame's.
+  fit_orientation_mismatch:
+    "At this angle the picture is taller than it is wide, or the other way round, unlike this Frame. Turn it nearer to a quarter turn that matches the Frame.",
+  output_size_unknown: "The Pi has not reported this Display's size, so Cover cannot be worked out yet. Check that the Display is on and plugged in.",
 };
 const NO_ANSWER = "no_answer";
 const NO_ANSWER_WORDS = "Photo Wall's server did not answer.";
@@ -76,6 +80,9 @@ const STOPPING = new Set([
   "trial_frame_unbound",
 ]);
 const NOT_PRESENTED = "trial_latest_not_presented";
+// Refusals of the draft itself (at Done): they stay until the draft changes, not until the next
+// keepalive succeeds.
+const UNTIL_CHANGED = new Set(["fit_orientation_mismatch", "output_size_unknown"]);
 // Begin is refused while another session for this Frame runs (another window, or this page's
 // own a moment ago); Central ends an abandoned one within seconds, so it is tried again.
 const BUSY = "trial_already_active";
@@ -100,7 +107,8 @@ export function useVisible() {
 }
 
 /**
- * @typedef {{corners: number[][], crop: number[], rotation: number, gain: number}} Draft
+ * @typedef {import("./useDraft.js").Trying} Draft   `{fit}`: the Frame fit being tried
+ * @typedef {import("./useDraft.js").Fit} Fit
  * @typedef {"checking"|"unsupported"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
  *           |"stopped"|"sending"|"shown"} Phase
  *   `unsupported`: the Pi's software cannot show changes live; `waiting`: another session for
@@ -112,7 +120,7 @@ export function useVisible() {
 
 /**
  * @param {{frameId: string, frame: object|undefined, open: boolean}} props
- * @returns {{draft: Draft, change: (patch: Partial<Draft>) => {valid: boolean, reason?: string},
+ * @returns {{draft: Draft, change: (patch: Partial<Fit>) => {valid: boolean, reason?: string},
  *            dirty: boolean, phase: Phase, error: Problem|null, busy: boolean,
  *            ack: {revision: number, at: number}|null, latest: number|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, retry: () => void,
@@ -125,7 +133,7 @@ export function useVisible() {
  */
 export function useFrameAdjustment({ frameId, frame, open }) {
   const committed = frame?.calibration ?? null;
-  const { trying: draft, origin, base, dirty, updateHandles: change, clearDraft, adopt } =
+  const { trying: draft, base, dirty, updateHandles: change, clearDraft, adopt } =
     useDraft(frameId, committed);
   const bound = isBound(frame);
   const generation = frame?.generation ?? null;
@@ -155,8 +163,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   // Read by the loop between renders. `flight` is the request in flight (one at a time);
   // `acting` holds the loop while an operator's Done or Revert runs.
   const state = useRef({ row: null, received: 0, flight: null, acting: false, error: null, waitUntil: 0,
-    editAt: 0, resync: false, draft, origin, base, dirty, live, mounted: true });
-  Object.assign(state.current, { draft, origin, base, dirty, live, error });
+    editAt: 0, resync: false, draft, base, dirty, live, mounted: true });
+  Object.assign(state.current, { draft, base, dirty, live, error });
 
   const keep = useCallback((next) => {
     state.current.row = next;
@@ -179,8 +187,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     return done;
   }, [path]);
 
-  /** The draft as Central takes it: the saved calibration it was made from, changed, and its base. */
-  const payload = () => ({ ...state.current.origin, ...state.current.draft, revision: state.current.base });
+  /** The draft as Central takes it: its fit and its base, the saved revision it was made from. */
+  const payload = () => ({ revision: state.current.base, fit: state.current.draft.fit });
 
   /** One request; null when it failed (the problem is set) or the page went away. */
   const send = useCallback(async (operation, calibration) => {
@@ -228,7 +236,9 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     const passing = current.error;
     const shown = result.data.presented_sequence === result.data.sequence &&
       result.data.presented_sha256 === result.data.candidate_sha256;
-    if (passing !== null && !passing.stops && (passing.code !== NOT_PRESENTED || shown)) {
+    const clears = passing !== null && !passing.stops && (passing.code === NOT_PRESENTED ? shown
+      : !UNTIL_CHANGED.has(passing.code) || operation === "edit");
+    if (clears) {
       current.error = null;
       setError(null);
     }
