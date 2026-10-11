@@ -29,6 +29,7 @@ from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
 from central.infra.display_store import PgDisplayCommands, PgDisplayQueries, PgPictureSessions
+from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
 from central.media_gateway import MediaGateway
@@ -44,6 +45,8 @@ from central.media_store import MediaStore
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
+from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
 from central.registry import (
     Enrollment,
@@ -162,7 +165,13 @@ def create_app(
     operator_snapshot = OperatorSnapshotReader(
         db, clock, registry, runtime_store, media_repository, coordinator
     )
-    source_names = SourceNameService(db, media_repository, runtime_store)
+    # Roadmap 4: the photo library store (connections, lists, drafts, pools); its times are
+    # always the database's, and it queues connection checks and pool steps on its own queue.
+    photo_library = PgPhotoLibrary(
+        db, times=DatabaseTransactionClock(),
+        queue=ProcrastinateMediaQueue(db.dsn) if isinstance(db, Database) else None)
+    source_names = SourceNameService(db, media_repository, runtime_store, photo_library)
+    photo_sources = PhotoSources(photo_library, source_names)
     # 0013: the app owns the layout. Every domain root is derived from the ONE
     # optional cache root (PHOTO_WALL_CACHE_ROOT, baked default) as internal
     # constants -- there are no per-domain path envs. A caller may still inject an
@@ -176,7 +185,7 @@ def create_app(
         build_content_services(
             db, clock, cache_root=cache_layout.cache_root(),
             servable_thumbnail=lambda asset_id: (
-                media_repository.servable_thumbnail(asset_id) is not None))
+                photo_library.pool_thumbnail(asset_id) is not None))
         if isinstance(db, Database)
         else None
     )
@@ -269,6 +278,7 @@ def create_app(
     app.state.coordinator = coordinator
     app.state.operator_snapshot = operator_snapshot
     app.state.media_repository = media_repository
+    app.state.photo_library = photo_library
     app.state.content = content
     bearer = HTTPBearer(auto_error=False)
     # The operator principal (pass A): bearer or signed session cookie. The key derives from the
@@ -747,7 +757,9 @@ def create_app(
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
         return coordinator.runtime.command_current(operation, run_id)
 
-    mount_library_routes(app, admin=admin, media=media_application, content=content)
+    mount_photo_library_routes(app, admin=admin, queries=photo_library, commands=photo_library)
+    mount_photo_source_routes(app, admin=admin, queries=photo_sources, commands=photo_sources)
+    mount_library_routes(app, admin=admin, library=photo_library, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
