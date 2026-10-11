@@ -17,8 +17,9 @@ import {
 } from "../libraryApi.js";
 import { EmptyState } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
+import { Button } from "../ui/button";
 import { Section } from "../ui/section";
-import { Stack } from "../ui/stack";
+import { Inline, Stack } from "../ui/stack";
 
 /** How often the page re-reads the connections while it is shown: a check answers in seconds. */
 const CADENCE_MS = 3000;
@@ -43,6 +44,8 @@ export function PhotoLibraryPage() {
   const connections = read.connections as LibraryConnectionView[] | null;
   const [receipts, setReceipts] = useState<Record<string, CheckReceipt>>({});
   const [added, setAdded] = useState(0);
+  // "Add a connection" opens the form; with no connection yet it is open from the start.
+  const [adding, setAdding] = useState(false);
 
   // A receipt shows until the row's health differs from the one it was asked from.
   const checkNote = (connection: LibraryConnectionView): string | null => {
@@ -53,7 +56,8 @@ export function PhotoLibraryPage() {
   const add = async (write: ConnectionWrite) => {
     const result = await addConnection({ name: write.name, url: write.url, key: write.key ?? "" });
     if (result.ok) {
-      setAdded((count) => count + 1);   // a fresh, empty form
+      setAdded((count) => count + 1);   // a fresh, empty form, closed again
+      setAdding(false);
       await read.refresh();
     }
     return outcome(result);
@@ -96,7 +100,7 @@ export function PhotoLibraryPage() {
       {connections === null ? (
         <Note>Loading…</Note>
       ) : connections.length === 0 ? (
-        <EmptyState>Connect your photo library: paste the address of your Immich and an API key below.</EmptyState>
+        <EmptyState>Connect your photo library: paste the address of your Immich and an API key.</EmptyState>
       ) : (
         connections.map((connection) => {
           const row = rowProps(connection);
@@ -106,16 +110,21 @@ export function PhotoLibraryPage() {
           );
         })
       )}
-      <Section title="Add a connection">
-        <ConnectionForm
-          key={added}
-          label="Add a connection"
-          initial={{ name: "", url: "" }}
-          asks={{ name: true, url: true, key: true }}
-          submitLabel="Save"
-          onSubmit={add}
-        />
-      </Section>
+      {adding || connections?.length === 0 ? (
+        <Section title="New connection" heading="name">
+          <ConnectionForm
+            key={added}
+            label="Add a connection"
+            initial={{ name: "", url: "" }}
+            asks={{ name: true, url: true, key: true }}
+            submitLabel="Save connection"
+            onSubmit={add}
+            onCancel={connections?.length === 0 ? undefined : () => setAdding(false)}
+          />
+        </Section>
+      ) : (
+        <Inline><Button onClick={() => setAdding(true)}>Add a connection</Button></Inline>
+      )}
     </Stack>
   );
 }

@@ -4,24 +4,31 @@ import { type LibraryLookups, type SourceQuery, defaultQuery } from "./source-qu
 /** A fixed Central time, so every story renders the same times. */
 export const AT = 1791147840;
 
-/** A same-document thumbnail (an SVG square of one shade), so a story reaches no server. */
-function swatch(shade: number): string {
-  const grey = 60 + ((shade * 37) % 160);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="rgb(${grey},${grey},${grey})"/></svg>`;
+/** The varied library's shapes (3:2, 4:3, 16:9, 9:16, 1:1, a 4:1 panorama, 3:4), in turn. */
+const SHAPES: readonly [number, number][] = [[6000, 4000], [4032, 3024], [3840, 2160], [2160, 3840], [3000, 3000], [8000, 2000], [3024, 4032]];
+
+/** A same-document thumbnail at the photo's ratio (one shade and a circle), so a story reaches no server. */
+function swatch(shade: number, width: number, height: number): string {
+  const grey = 60 + ((shade * 37) % 140);
+  const w = Math.round(width / 50);
+  const h = Math.round(height / 50);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}"><rect width="${w}" height="${h}" fill="rgb(${grey},${grey},${grey})"/>`
+    + `<circle cx="${w / 2}" cy="${h / 2}" r="${Math.min(w, h) / 3}" fill="rgb(${grey + 50},${grey + 50},${grey + 50})"/></svg>`;
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
-/** `count` pool photos, newest first, every fifth a video. */
+/** `count` pool photos, newest first, every fifth a video, their shapes varied. */
 export function poolItems(count: number, from = 0): PoolItem[] {
   return Array.from({ length: count }, (_, index) => {
     const n = from + index;
+    const [width, height] = SHAPES[n % SHAPES.length];
     return {
       asset_id: `asset-${n.toString(16).padStart(64, "0")}`,
       kind: n % 5 === 4 ? "video" : "image",
       taken_at: AT - n * 86400,
-      width: 4032,
-      height: 3024,
-      thumbnail: swatch(n),
+      width,
+      height,
+      thumbnail: swatch(n, width, height),
     };
   });
 }

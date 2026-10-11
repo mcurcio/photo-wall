@@ -17,12 +17,14 @@ from console_tasks import (
     HAND_PICKED,
     LIVE,
     author_scene,
+    choose_source,
     connect,
     current_hash,
     go,
     open_frame,
     scene_continue,
     scene_form,
+    source_choice,
     start_scene,
     visit,
 )
@@ -107,7 +109,7 @@ def test_scene_photos_and_review_say_each_sources_state_and_readiness(page, regi
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(garden)
+        choose_source(form, garden)
         readiness = form.get_by_role("region", name="Source media status")
         expect(readiness.get_by_role("listitem", name="garden")).to_contain_text(expected)
         if readiness_line is not None:
@@ -128,7 +130,7 @@ def test_check_now_from_scene_photos_preserves_draft_and_reports_request(page, r
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(garden)
+        choose_source(form, garden)
         readiness = form.get_by_role("region", name="Source media status")
         expect(readiness).to_contain_text("Not checked yet")
         with page.expect_response(
@@ -170,7 +172,7 @@ def test_a_completed_check_reloads_authored_candidates_once(page, registry):
         page.on("response", lambda response: candidate_responses.append(response)
                 if "/candidates?" in response.url else None)
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Media per frame")
@@ -213,8 +215,8 @@ def test_a_scene_with_two_sources_writes_both_on_every_frame_and_reopens_with_bo
         connect(page, origin, "scenes")
         puts = _scene_puts(page)
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(garden)
-        form.get_by_label("Add another Source", exact=True).select_option(family)
+        choose_source(form, garden)
+        choose_source(form, family)   # one list of cards: a second checkbox
         chosen = form.get_by_role("region", name="Source media status")
         expect(chosen.get_by_role("listitem")).to_have_count(2)
         scene_continue(page, "Frames")
@@ -248,20 +250,44 @@ def test_a_scene_with_two_sources_writes_both_on_every_frame_and_reopens_with_bo
         assert [c["source_refs"] for c in puts[-1]["contributions"]] == [[garden]] * 2
 
 
+def test_the_photos_step_is_one_list_of_source_cards_with_new_photo_source_last(page, registry):
+    """Follow-ups D1: the Photos step shows the saved Sources as cards (photos, count, check
+    state) in one list chosen by checkboxes, with "New Photo source" as the last card; there is
+    no second "Add another Source" picker. A hand-picked Scene chooses one, by radio."""
+    _seed(registry)
+    library, ref, [garden, family] = _photo_sources(registry, "garden", "family")
+    filled(library, _pool_key(registry, garden), in_pool(ref, range(1, 6)))
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page)
+        group = form.get_by_role("group", name="Photo sources", exact=True)
+        cards = group.get_by_role("listitem")
+        expect(cards).to_have_count(3)
+        card = group.get_by_role("article", name="garden", exact=True)
+        expect(card).to_contain_text("5 photos · 0 videos")
+        expect(card.get_by_role("img")).to_have_count(4)
+        expect(cards.nth(2)).to_have_text("+ New Photo source")
+        expect(form.get_by_label("Add another Source")).to_have_count(0)
+        choose_source(form, garden)
+        choose_source(form, family)
+        expect(form.get_by_role("region", name="Source media status").get_by_role("listitem")).to_have_count(2)
+        expect(group.get_by_role("checkbox", name="Choose garden", exact=True)).to_be_checked()
+
+
 def test_new_source_from_the_scene_returns_with_it_chosen(page, registry):
     _seed(registry)
     _library, _ref, [garden] = _photo_sources(registry, "garden")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(garden)
+        choose_source(form, garden)
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/photo-drafts")
                                   and r.request.method == "POST"):
-            form.get_by_role("button", name="New Source…", exact=True).click()
+            form.get_by_role("button", name="+ New Photo source", exact=True).click()
         sources = page.get_by_role("region", name="Sources", exact=True)
         expect(sources).to_contain_text("For your Scene: saving returns there with this Source chosen.")
         sources.get_by_label("Name", exact=True).fill("autumn")
-        sources.get_by_role("button", name="Save Source", exact=True).click()
+        sources.get_by_role("button", name="Save Photo source", exact=True).click()
         chosen = form.get_by_role("region", name="Source media status")
         expect(chosen.get_by_role("listitem")).to_have_count(2)
         expect(chosen.get_by_role("listitem", name="autumn")).to_be_visible()
@@ -278,7 +304,7 @@ def test_commissioned_frame_opens_a_scene_with_an_explicit_editable_target(page,
         form = scene_form(page)
         expect(form.get_by_role("heading", name="What kind of Scene?", exact=True)).to_be_visible()
         scene_continue(page, "Photos")
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         chosen = form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)
         other = form.get_by_label(f"Target frame {INVALID_FRAME}", exact=True)
@@ -310,7 +336,7 @@ def test_commissioning_link_keeps_an_existing_dirty_scene_draft(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         go(page, "wall")
         inspector = open_frame(page, VALID_FRAME, "overview")
         inspector.get_by_role("link", name="Make a Scene", exact=True).click()
@@ -319,7 +345,7 @@ def test_commissioning_link_keeps_an_existing_dirty_scene_draft(page, registry):
         form.get_by_role("button", name="Choose Frames", exact=True).click()
         expect(form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)).not_to_be_checked()
         _steps(page).get_by_role("button", name="Photos", exact=True).click()
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        expect(source_choice(form, SOURCE)).to_be_checked()
 
 
 def _scenes_link(page):
@@ -397,7 +423,7 @@ def test_kind_is_the_first_question_and_decides_the_steps(page, registry):
         summary = form.get_by_role("alert")
         expect(summary).to_contain_text("Choose a Source.")
         expect(summary).not_to_contain_text("Choose at least one frame.")
-        expect(form.get_by_label("Source", exact=True)).to_be_focused()
+        expect(form.get_by_role("group", name="Photo sources", exact=True).locator("input").first).to_be_focused()
         assert current_hash(page) == "#/scenes/new/photos"
 
 
@@ -412,7 +438,7 @@ def test_steps_replace_their_entry_and_back_leaves_the_flow_keeping_the_draft(pa
         before = page.evaluate("history.length")
         expect(_scenes_link(page)).to_have_accessible_description("")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         assert current_hash(page) == "#/scenes/new/frames"
@@ -475,9 +501,8 @@ def test_a_review_problem_opens_its_step_and_focuses_the_field(page, registry):
 
         summary.get_by_role("button", name="Choose a Source.", exact=True).click()
         assert current_hash(page) == "#/scenes/new/photos"
-        source = form.get_by_label("Source", exact=True)
-        expect(source).to_be_focused()
-        source.select_option(SOURCE)
+        expect(form.get_by_role("group", name="Photo sources", exact=True).locator("input").first).to_be_focused()
+        choose_source(form, SOURCE)
         # Continue goes to the next step that still has a problem: Frames.
         scene_continue(page, "Frames")
         frame = form.get_by_label(f"Target frame {VALID_FRAME}", exact=True)
@@ -560,7 +585,7 @@ def test_a_frame_deleted_mid_draft_is_announced_on_the_current_step_and_on_revie
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         form.get_by_label(f"Target frame {LOBBY_FRAME}", exact=True).check()
@@ -598,7 +623,7 @@ def test_at_phone_width_the_stepper_collapses_and_the_footer_sticks(page, regist
         steps = _steps(page)
         expect(steps.get_by_text("Step 2 of 5 · Photos", exact=True)).to_be_visible()
         expect(steps.get_by_role("list")).to_be_hidden()
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page)
         expect(steps.get_by_text("Step 3 of 5 · Frames", exact=True)).to_be_visible()
         footer = form.locator(".flow__footer")
@@ -621,7 +646,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
 
         # A typed URL: the draft is kept until the operator decides.
         visit(page, "#/scenes/evening/edit/review")
@@ -631,7 +656,7 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
         expect(scene_form(page)).to_have_count(0)
         _scenes(page).get_by_role("button", name="Resume", exact=True).click()
         assert current_hash(page) == "#/scenes/new/photos"
-        expect(form.get_by_label("Source", exact=True)).to_have_value(SOURCE)
+        expect(source_choice(form, SOURCE)).to_be_checked()
         visit(page, "#/scenes/evening/edit/review")
         _scenes(page).get_by_role("button", name="Discard", exact=True).click()
         expect(form).to_contain_text("Editing evening. Its name stays the same.")
@@ -784,7 +809,7 @@ def test_continue_shows_only_its_own_steps_reasons(page, registry):
         form = start_scene(page)
         form.get_by_role("button", name="Continue", exact=True).click()
         expect(form.get_by_role("alert")).to_contain_text("Choose a Source.")
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         targets = form.get_by_role("group", name="Target frames", exact=True)
         expect(targets).to_be_visible()
@@ -813,7 +838,7 @@ def test_browser_back_from_a_discard_confirmation_leaves_the_page_usable(page, r
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         page.go_back()  # the flow's entry -> #/scenes
         page.go_back()  # -> #/now
         assert current_hash(page) == "#/now"
@@ -986,7 +1011,7 @@ def test_discarding_from_the_cards_says_so_and_focuses_new_scene(page, registry)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         go(page, "scenes")
         _scenes(page).get_by_role("button", name="Discard draft", exact=True).click()
         page.get_by_role("dialog", name="Discard your unsaved draft?").get_by_role(
@@ -1005,7 +1030,7 @@ def test_a_frame_with_no_compatible_media_is_a_frame_problem(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         message = (f"No compatible media for {VALID_FRAME} in holiday. "
@@ -1035,7 +1060,7 @@ def test_a_failed_candidates_read_offers_retry(page, registry):
         failed = answer_first(page, "**/v1/operator/sources/*/candidates*",
                               lambda route: route.fulfill(status=500))
         form = start_scene(page, hand_picked=True)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Media per frame")
@@ -1123,7 +1148,7 @@ def test_a_late_answer_after_log_out_leaves_the_new_sessions_draft_alone(page, r
         expect(page.get_by_role("group", name="Snapshot status", exact=True)
                ).not_to_have_attribute("aria-busy", "true")
         assert current_hash(page) == "#/scenes/new/photos"
-        expect(form.get_by_label("Source", exact=True)).to_be_visible()
+        expect(form.get_by_role("group", name="Photo sources", exact=True)).to_be_visible()
 
 
 def _stored(page, origin, key):
@@ -1225,7 +1250,7 @@ def test_each_built_scene_setting_is_set_saved_and_shown_again(page, registry):
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
-        form.get_by_label("Source", exact=True).select_option(SOURCE)
+        choose_source(form, SOURCE)
         scene_continue(page, "Frames")
         form.get_by_label(f"Target frame {VALID_FRAME}", exact=True).check()
         scene_continue(page, "Playback")

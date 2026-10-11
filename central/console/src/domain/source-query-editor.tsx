@@ -5,7 +5,9 @@ import { Section } from "../ui/section";
 import { SegmentedControl } from "../ui/segmented-control";
 import { Select } from "../ui/select";
 import { Inline, Stack } from "../ui/stack";
+import { takenWords } from "../sourceWords.js";
 import { countText } from "../timeWords.js";
+import { MultiToggle } from "../ui/multi-toggle";
 import { Switch } from "../ui/switch";
 
 /*
@@ -100,6 +102,41 @@ function dayStart(text: string, days = 0): number | null {
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days).getTime() / 1000;
 }
 
+/** "photos, live photos and videos": the media a query takes, in words, in MEDIA's order. */
+function mediaWords(types: readonly MediaType[]): string {
+  const names = MEDIA.filter(({ type }) => types.includes(type)).map(({ label }) => label.toLowerCase());
+  return names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
+/**
+ * The choices that narrow a query, as an empty pool names them, each with the query it leaves
+ * when cleared (design-language T4: an empty preview names what removed the photos). Chosen
+ * albums, people and tags are counted; a date range and a place are in words.
+ */
+export function activeFilters(query: SourceQuery): { label: string; cleared: SourceQuery }[] {
+  const all = defaultQuery(query.connection_ref);
+  const chosen = (count: number, noun: string) => `${noun}: ${countText(count)} chosen`;
+  const filters: { label: string; cleared: SourceQuery }[] = [];
+  if (query.albums.length > 0) filters.push({ label: chosen(query.albums.length, "Albums"), cleared: { ...query, albums: [] } });
+  if (query.people.length > 0) filters.push({ label: chosen(query.people.length, "People"), cleared: { ...query, people: [] } });
+  if (query.place !== null) filters.push({ label: `Place: ${placeWords(query.place)}`, cleared: { ...query, place: null } });
+  const taken = takenWords(query.taken);
+  if (taken !== null) filters.push({ label: `Dates: ${taken}`, cleared: { ...query, taken: null } });
+  if (query.favourites_only) filters.push({ label: "Favourites only", cleared: { ...query, favourites_only: false } });
+  if (query.tags.length > 0) filters.push({ label: chosen(query.tags.length, "Tags"), cleared: { ...query, tags: [] } });
+  if (query.media_types.length < MEDIA.length) {
+    filters.push({ label: `Media: ${mediaWords(query.media_types)} only`, cleared: { ...query, media_types: all.media_types } });
+  }
+  const left = query.exclude.albums.length + query.exclude.people.length + query.exclude.tags.length;
+  if (left > 0) {
+    filters.push({
+      label: `Leaving out ${countText(left)}`,
+      cleared: { ...query, exclude: { ...query.exclude, albums: [], people: [], tags: [] } },
+    });
+  }
+  return filters;
+}
+
 type TakenChoice = "any" | "between" | "last";
 
 export interface SourceQueryEditorProps {
@@ -120,10 +157,6 @@ export function SourceQueryEditor({ connections, value, onChange, lookups, dates
   const chooseTaken = (next: TakenChoice) => set({
     taken: next === "any" ? null : next === "between" ? { kind: "between", start: null, end: null } : { kind: "last", years: 1, months: 0 },
   });
-  const toggleMedia = (type: MediaType, on: boolean) => {
-    const types = on ? [...value.media_types, type] : value.media_types.filter((t) => t !== type);
-    set({ media_types: [...new Set(types)].sort() as MediaType[] });
-  };
   const sorted = (keys: string[]) => [...keys].sort();
   return (
     <Stack>
@@ -187,16 +220,15 @@ export function SourceQueryEditor({ connections, value, onChange, lookups, dates
             search={lookups.tags.search} byId={lookups.tags.byId}
             value={value.tags} onChange={(keys) => set({ tags: sorted(keys) })} keyOf={tagKey} render={tagWords}
             chosenNote={ALL_OF_THEM} />
-          <Inline label="Media types">
-            {MEDIA.map(({ type, label }) => {
-              const on = value.media_types.includes(type);
-              return (
-                <Field key={type} label={label}>
-                  <Switch checked={on} disabled={on && value.media_types.length === 1} onChange={(next) => toggleMedia(type, next)} />
-                </Field>
-              );
-            })}
-          </Inline>
+          <Field label="Media" help={`Takes ${mediaWords(value.media_types)}.`}>
+            <MultiToggle<MediaType>
+              label="Media"
+              required
+              value={value.media_types}
+              options={MEDIA.map(({ type, label }) => ({ value: type, label }))}
+              onChange={(types) => set({ media_types: [...new Set(types)].sort() as MediaType[] })}
+            />
+          </Field>
           <Field label="Include partners' photos" help="Photos your Immich partners share with you.">
             <Switch checked={value.partners} onChange={(on) => set({ partners: on })} />
           </Field>
@@ -210,7 +242,7 @@ export function SourceQueryEditor({ connections, value, onChange, lookups, dates
             value={value.exclude.people} onChange={(keys) => exclude({ people: sorted(keys) })} keyOf={personKey} render={personWords} />
           <ItemPicker label="Leave out tags" search={lookups.tags.search} byId={lookups.tags.byId}
             value={value.exclude.tags} onChange={(keys) => exclude({ tags: sorted(keys) })} keyOf={tagKey} render={tagWords} />
-          <Field label="Leave out screenshots" help="A file named screenshot, or a PNG with no camera maker.">
+          <Field label="Leave out screenshots" help="A file named screenshot, or a PNG with no camera model.">
             <Switch checked={value.exclude.screenshots} onChange={(on) => exclude({ screenshots: on })} />
           </Field>
           <Note>Archived, hidden and locked photos are never included.</Note>

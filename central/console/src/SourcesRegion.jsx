@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { useConfirm } from "./ConfirmAction.jsx";
-import { SummaryCard } from "./flow/SummaryCard.jsx";
 import { useHandOffTo } from "./flow/useHandOff.js";
-import { mediaNow, sourceState } from "./mediaHealth.js";
+import { SourceCard } from "./domain/source-card.tsx";
+import { mediaNow } from "./mediaHealth.js";
 import { PhotoSourcePage } from "./pages/photo-source-page.tsx";
+import { MediaCardList, MediaCardListItem } from "./patterns/media-card.tsx";
+import { UndoToast } from "./patterns/undo-toast.tsx";
+import { formatRoute } from "./routes.js";
 import { namedSource, sourceName } from "./sourceNames.js";
-import { queryWords } from "./sourceWords.js";
 import { sourceCheckMessage, useSourceCheck } from "./useSourceCheck.js";
 import { useSnapshot } from "./useSnapshot.js";
 
@@ -24,10 +25,10 @@ function editorKey(route) {
 }
 
 /**
- * The Sources section (`#/sources`; roadmap 4, K2): the saved Photo sources, each with its
- * state in words (mediaHealth.js `sourceState`, from its check), what it includes, Check now,
- * Edit and Delete, and the Photo source editor (pages/photo-source-page.tsx) for a new Source or
- * an edit.
+ * The Sources section (`#/sources`; roadmap 4, K2): the saved Photo sources as cards (each with
+ * its photos, counts and check state; its name opens its editor; More holds Check now and
+ * Delete, which Undo can take back), and the Photo source editor (pages/photo-source-page.tsx)
+ * for a new Source or an edit. While the editor shows, its title is the page's one heading.
  *
  * THE EDITOR stays mounted while it is open, whatever the route (the shell keeps Show sections
  * mounted, rule 2), so a section change or a visit to the list keeps what was typed; it closes on
@@ -111,9 +112,9 @@ export function SourcesRegion({ snapshot, route, navigate, markDraft, handOffs }
 
   return (
     <section className="showrunner__region" role="region" aria-label="Sources">
-      <h2 className="showrunner__region-title">Sources</h2>
       {routeKey === null && (
         <>
+          <h2 className="showrunner__region-title">Sources</h2>
           <p className="showrunner__region-note">
             A Photo source asks Immich for photos: albums, people, a place, dates, favourites and tags,
             minus what you leave out. Photo Wall never uploads, edits or deletes anything there.
@@ -127,84 +128,92 @@ export function SourcesRegion({ snapshot, route, navigate, markDraft, handOffs }
   );
 }
 
+/** The words of a refused delete, or null when it was taken. */
+function deleteRefusal(result, name) {
+  if (result.ok) return null;
+  if (result.error === "source_in_use") {
+    const scenes = result.data?.scene_ids;
+    return Array.isArray(scenes) && scenes.length > 0
+      ? `Source ${name} was not deleted: Scenes ${scenes.join(", ")} use it. Edit them to choose another Source first.`
+      : `Source ${name} was not deleted: a Scene uses it. Edit the Scene to choose another Source first.`;
+  }
+  if (result.error === "source_revision_conflict") {
+    return `Source ${name} was not deleted: it changed meanwhile. Look at it again.`;
+  }
+  return `Source ${name} was not deleted: ${result.error ?? result.status}.`;
+}
+
 /**
- * The saved Sources as cards: each by its name, its state from its check, what it includes, and
- * Check now, Edit and Delete. Delete is confirmed, and refused while a Scene uses the Source.
+ * The saved Sources as cards (the object list's cards; MediaCard): each with its first four photos,
+ * its photo and video counts, its check's state in the one chip, and More (Check now, Delete).
+ * Its name opens its editor. Delete takes effect when its Undo toast ends (10 s): the card goes
+ * at once, Undo brings it back, and nothing is sent until then. A refusal (a Scene uses it)
+ * brings the card back and says why.
  */
 function SourceList({ sources, now, navigate, resume }) {
   const check = useSourceCheck("sources-list");
-  const newRef = useRef(null);
-  const confirm = useConfirm(() => newRef.current?.focus());
-  const remove = (source, event) => {
-    const name = sourceName(source);
-    confirm.open(event, {
-      key: `delete-source:${name}`,
-      title: `Delete Source ${name}?`,
-      confirmLabel: "Confirm delete",
-      body: <p>{`Photo Wall stops using Source ${name}. Nothing in Immich changes.`}</p>,
-      run: async () => {
-        const result = await apiWrite(
-          `/v1/operator/source-names/${encodeURIComponent(name)}?expected_revision=${source.revision}`,
-          { method: "DELETE" },
-        );
-        if (result.ok) return { state: "done", message: `Source ${name} deleted.` };
-        if (result.error === "source_in_use") {
-          const scenes = result.data?.scene_ids;
-          return { state: "refused", message: Array.isArray(scenes) && scenes.length > 0
-            ? `Used by Scenes ${scenes.join(", ")}. Edit them to choose another Source first.`
-            : "A Scene uses this Source. Edit the Scene to choose another Source first." };
-        }
-        if (result.error === "source_revision_conflict") {
-          return { state: "changed", message: "This Source changed. Close this dialog and look at it again." };
-        }
-        return { state: "refused", message: `Could not delete Source ${name}: ${result.error ?? result.status}.` };
-      },
-    });
+  // The delete waiting for its Undo toast to end, and the last refusal's words.
+  const [pending, setPending] = useState(/** @type {{source: object, name: string}|null} */ (null));
+  const [refused, setRefused] = useState(/** @type {string|null} */ (null));
+  const commit = async ({ source, name }) => {
+    setPending((current) => (current?.source === source ? null : current));
+    const result = await apiWrite(
+      `/v1/operator/source-names/${encodeURIComponent(name)}?expected_revision=${source.revision}`,
+      { method: "DELETE" },
+    ).catch(() => ({ ok: false, status: 0, error: "unreachable" }));
+    setRefused(deleteRefusal(result, name));
+    if (result.ok) void refreshSnapshot();
   };
+  const { refresh: refreshSnapshot } = useSnapshot();
+  const remove = (source) => {
+    setRefused(null);
+    // One delete waits at a time: a second one makes the first final now.
+    if (pending !== null) void commit(pending);
+    setPending({ source, name: sourceName(source) });
+  };
+  const shown = sources.filter((source) => source !== pending?.source);
   return (
     <>
-      {confirm.confirmation("flow__status-line")}
+      {refused !== null && <p className="flow__status-line" role="status">{refused}</p>}
       <p>
-        <button ref={newRef} type="button" className="flow__new"
+        <button type="button" className="flow__new"
           onClick={() => navigate({ section: "sources", flow: "new", step: EDITOR_STEP })}>
-          {resume ? "Continue the new Source" : "New Source"}
+          {resume ? "Continue the new Photo source" : "New Photo source"}
         </button>
       </p>
-      {sources.length === 0 ? <p className="showrunner__empty">No Sources yet.</p> : (
-        <ul className="card-grid" role="list">
-          {sources.map((source) => {
+      {shown.length === 0 ? <p className="showrunner__empty">No Sources yet.</p> : (
+        <MediaCardList label="Photo sources">
+          {shown.map((source) => {
             const name = sourceName(source);
-            const state = sourceState(source, now);
-            const note = sourceCheckMessage(check.feedback[source.source_ref], source.check);
             return (
-              <li key={source.source_ref} className="card-grid__item">
-                <SummaryCard
-                  title={name}
-                  lines={[
-                    { label: "State", value: <span className={`health--${state.severity}`}>{state.label}</span> },
-                    { label: "Includes", value: queryWords(source.query) },
-                    ...(note === null ? [] : [{ label: "Check now", value: <span role="status">{note}</span> }]),
+              <MediaCardListItem key={source.source_ref}>
+                <SourceCard
+                  source={source}
+                  name={name}
+                  now={now}
+                  href={formatRoute({ section: "sources", id: name, flow: "edit", step: EDITOR_STEP })}
+                  note={sourceCheckMessage(check.feedback[source.source_ref], source.check)}
+                  actions={[
+                    {
+                      label: "Check now",
+                      disabled: check.pending !== null,
+                      onAction: () => void check.run(source.source_ref, source.check ?? null),
+                    },
+                    { label: "Delete", onAction: () => remove(source) },
                   ]}
-                  actions={(
-                    <>
-                      <button type="button" aria-label={`Check ${name} now`} disabled={check.pending !== null}
-                        onClick={() => void check.run(source.source_ref, source.check ?? null)}>
-                        Check now
-                      </button>
-                      <button type="button" aria-label={`Edit Source ${name}`}
-                        onClick={() => navigate({ section: "sources", id: name, flow: "edit", step: EDITOR_STEP })}>
-                        Edit
-                      </button>
-                      <button type="button" aria-label={`Delete Source ${name}`} onClick={(event) => remove(source, event)}>
-                        Delete
-                      </button>
-                    </>
-                  )}
                 />
-              </li>
+              </MediaCardListItem>
             );
           })}
-        </ul>
+        </MediaCardList>
+      )}
+      {pending !== null && (
+        <UndoToast
+          key={pending.source.source_ref}
+          message={`Deleted Source ${pending.name}.`}
+          onUndo={() => setPending(null)}
+          onExpire={() => void commit(pending)}
+        />
       )}
     </>
   );

@@ -10,9 +10,10 @@ Needs attention card -> the problems case fails.
 """
 
 import os
+import re
 
 import pytest
-from console_tasks import connect, go
+from console_tasks import connect, current_hash, go
 from operator_harness import operator_server
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
@@ -95,13 +96,15 @@ def test_a_pasted_connection_shows_only_its_key_ending_and_no_answer_carries_the
         add.get_by_label("API key", exact=True).fill(KEY)
         with page.expect_response(lambda r: r.url.endswith("/v1/operator/library/connections")
                                   and r.request.method == "POST") as posted:
-            add.get_by_role("button", name="Save", exact=True).click()
+            add.get_by_role("button", name="Save connection", exact=True).click()
         assert posted.value.status == 201
         row = _region(page, "Family")
         expect(row.get_by_text("Key ending …1234")).to_be_visible()
         expect(row.get_by_text("http://immich.invalid:2283/api")).to_be_visible()
         expect(row.get_by_text("Checking")).to_be_visible()
-        expect(add.get_by_label("API key", exact=True)).to_have_value("")
+        # Saved, the form closes; "Add a connection" is a button again, and the key went with it.
+        expect(add).to_have_count(0)
+        expect(page.get_by_role("button", name="Add a connection", exact=True)).to_be_visible()
         # The key is in no field, no text and no answer the page received.
         assert KEY not in page.content()
         assert page.evaluate("(key) => [...document.querySelectorAll('input')].every((i) => i.value !== key)", KEY)
@@ -130,7 +133,8 @@ def test_a_passing_check_shows_immich_counts_its_user_and_its_notes(page, regist
         expect(row.get_by_text(
             "Immich 2.7.0 is newer than Photo Wall has been tested with; it keeps working.")).to_be_visible()
         expect(row.get_by_text(
-            "HEIC and RAW photos play at preview size: turn on full-size copies in Immich.")).to_be_visible()
+            "RAW photos without a full-size copy in Immich play at Immich's preview size. "
+            "Turn on full-size copies in Immich to show them in full.")).to_be_visible()
         with page.expect_response(lambda r: r.url.endswith("/checks") and r.request.method == "POST") as asked:
             row.get_by_role("button", name="Check now", exact=True).click()
         assert asked.value.status == 202
@@ -171,12 +175,22 @@ def test_each_problem_says_its_sentence_and_its_fix_and_needs_attention_lists_it
         expect(row.get_by_text("Photos keep playing.")).to_be_visible()
         expect(row.get_by_role("group", name="Needs a look").get_by_role("button", name=fix, exact=True)
                ).to_be_visible()
+        # The fix is named once on the row, and the status once (in the card's chip).
+        expect(row.get_by_role("button", name=fix, exact=True)).to_have_count(1)
+        expect(row.locator("[data-severity]")).to_have_count(1)
+        expect(row.get_by_text(re.compile(r"^Family \(Immich\): Needs a look since \w{3} \d{2}:\d{2}\.$"))
+               ).to_be_visible()
 
         go(page, "attention")
         cards = _region(page, "Photo library")
         expect(cards.get_by_role("group", name="Needs a look")).to_have_count(1)
         expect(cards.get_by_text(sentence)).to_be_visible()
-        expect(cards.get_by_role("link", name=fix, exact=True)).to_have_attribute("href", "#/photo-library")
+        expect(cards.get_by_text(re.compile(r"^Family \(Immich\): Needs a look since \w{3} \d{2}:\d{2}\.$"))
+               ).to_be_visible()
+        # The same button as on Photo library; here it opens Photo library, where the fix is made.
+        cards.get_by_role("button", name=fix, exact=True).click()
+        expect(_region(page, "Family")).to_be_visible()
+        assert current_hash(page) == "#/photo-library"
         # A passing check removes the card.
         _contact(library, ref, _answer() if problem != "other_user" else _answer(user=ANNA))
         go(page, "photo-library")
@@ -225,9 +239,10 @@ def test_a_name_already_used_is_refused_in_plain_words(page, registry, library):
     _added(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "photo-library")
+        page.get_by_role("button", name="Add a connection", exact=True).click()
         add = page.get_by_role("form", name="Add a connection", exact=True)
         add.get_by_label("Name", exact=True).fill("Family")
         add.get_by_label("Immich address", exact=True).fill("http://other.invalid")
         add.get_by_label("API key", exact=True).fill(KEY)
-        add.get_by_role("button", name="Save", exact=True).click()
+        add.get_by_role("button", name="Save connection", exact=True).click()
         expect(add.get_by_text("A connection with this name exists.")).to_be_visible()

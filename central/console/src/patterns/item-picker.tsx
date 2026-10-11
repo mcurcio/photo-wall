@@ -130,6 +130,7 @@ export function ItemPicker<T>({
           value={text}
           onChange={(next) => { setText(next); setOpen(true); }}
           type="search"
+          width="long"
           placeholder={full ? (max === 1 ? "Remove the chosen one to choose another" : "As many as can be chosen") : "Type to search"}
           disabled={disabled || full}
           combobox={{ listId, expanded: shown && offered.length > 0, activeId: shown && offered.length > 0 ? optionId(active) : undefined }}
