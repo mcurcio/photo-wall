@@ -4,6 +4,7 @@
 **Rules:** `~/.claude/skills/implementation-workflow/SKILL.md` (binding). An implementer reads **its slice page below, the owner answers, and the design sections the page names**, nothing else.
 **Design (accepted overnight; recommended options adopted, the owner reviews it on the PR):** `/Volumes/Dock/tmp/photo-4/design-draft.md` (r1; its "For the code architects" and "Reconcile with existing code" sections are parked notes). Owner answers: `/Volumes/Dock/tmp/photo-4/answers.md` (binding). Review: `/Volumes/Dock/tmp/photo-4/review-r1.md`. Immich facts: the section below (checked against Immich v2.5.6's OpenAPI by the code architect).
 **Errata:** `grep -a 'E-P4-' .claude/errata.md`. A page changes only through an erratum and a re-cut: an implementer who hits a wall appends `E-P4-<slice>-<n>` and STOPS.
+**Run 2 (re-cut 2026-10-11): start at "Run 2: the re-cut after run 1" below.** It records what landed, the errata dispositions, the known-red tests at the new base and the remaining lanes. The slice pages below are current: pages changed by the re-cut say so in their first line.
 
 ## The problem in plain words
 
@@ -62,7 +63,13 @@ Delivery 4 is, in the owner's words, "create an immich query that becomes a phot
 - **F-9 (lists).** Albums, people, places and tags are re-listed with each connection check, every 15 minutes; before 4, tags were re-listed every 5. Lists have no count cap: the 5,000-tag refusal goes, and lists are stored one row per item.
 - **F-10 (caps).** Besides the design's four caps (F1), `source_candidates`' 1,000 refusal also goes. That is the hand-placed photo picker's list, so a huge pool now answers one large list. Paging that picker is not in 4.
 - **F-11 (URL and trust).** The owner may paste the server address without "/api" (it is appended), and plain http is accepted. The private CA file option (`ca_file`) goes with the connections file, so a private CA must be in the system trust store.
-- **F-12 (Immich facts not yet proven on the fixture).** These come from the OpenAPI spec and are proven only by the CI `photo-sources` leg: `originalFileName` matching "contains, any case"; a stacked copy's search answer carrying `stack.primaryAssetId`; manual faces through `POST /faces` with machine learning off; the place from GPS with reverse geocoding on. M1 and FX1 settle each one on the fixture. A missing capability is an erratum and a stop.
+- **F-12 (Immich facts not yet proven on the fixture).** These come from the OpenAPI spec and are proven only by the CI `photo-sources` leg: `originalFileName` matching "contains, any case"; a stacked copy's search answer carrying `stack.primaryAssetId`; manual faces through `POST /faces` with machine learning off; the place from GPS with reverse geocoding on. M1 and FX1 settle each one on the fixture. A missing capability is an erratum and a stop. **Settled by run 1 (FX1 on Immich v2.5.6, M1 against its source):** all hold except the stack one. The search answer never says which photos are stacked copies, so Photo Wall finds them the way C9 says: Immich's timeline, which shows a stack once (see "Immich facts" below).
+- **F-13 (Immich's counts include archived photos).** Settings shows Immich's own totals (`GET assets/statistics` with no filter): on the fixture that counted 25 photos, timeline plus archive; the timeline alone has 24. A pool never includes archived photos (C5), so a Source of "everything" can show fewer photos than the Settings total.
+- **F-14 (a check that stops part-way resumes by itself).** Before the re-cut, a check whose worker died between two steps stayed "checking" until someone pressed Check now. Now a check with no step for 15 minutes is resumed from where it stopped, and a dead worker's unfinished media job is handed back to the queue within about a minute (slice S1). The second part also fixes an older gap outside photo sources: a media worker killed mid-preparation used to stop all preparation until someone cleared the job by hand.
+- **F-15 (hand-placed photos from before 4).** A photo placed by hand on a Scene before 4, and no longer in any Source's pool, is rewritten once to the new photo record (same identity), so it can still be prepared from Immich. If it was edited in Immich since, its preparation fails and the operator picks it again (slice I1).
+- **F-16 (two editors of one Source).** Saving a draft never reports a conflict: if two people edit the same Source, each Save makes the next revision, and the later one is what Scenes use. Nothing warns the first person.
+- **F-17 (connection rules as built).** A connection's name must be unique ("A connection with this name exists"). A connection waiting since the cut-over (C12) takes its address and key together. Removing a connection is refused only while a Source in use (or a draft) names it: an old revision nobody uses does not block it.
+- **F-18 (several photos at one instant).** When more than a page of photos (1,000) share one capture time, the check splits them by upload time. Only when 1,000 photos share both one capture time and one upload time does the check end as "checked part of it". A video whose length Immich has not read yet counts as waiting.
 
 ## Immich facts (v2.5.6 OpenAPI, `open-api/immich-openapi-specs.json` at tag v2.5.6, checked 2026-10-11)
 
@@ -75,7 +82,77 @@ Delivery 4 is, in the owner's words, "create an immich query that becomes a phot
 - `GET assets/statistics` → `images`, `videos`, `total` (`asset.statistics`); `GET albums/statistics` → `owned`, `shared`, `notShared` (`album.statistics`); `GET people` → `total`, `hidden`, `people[]`, paged (`person.read`); `POST search/statistics` (`asset.statistics`); `GET search/cities` (`asset.read`).
 - `POST faces` (`face.create`) makes a manual face from `assetId`, `personId`, `x`, `y`, `width`, `height`, `imageWidth`, `imageHeight`; `GET faces?id=` needs `face.read` (5a).
 
-## Lanes, slices and order
+**Proven on the fixture (run 1: FX1 on Immich v2.5.6; M1 read against its source), binding over the list above:**
+- `search/metadata` items carry **no `stack` field**, with or without `withStacked`, and `withStacked` does not change the results. Only `GET assets/{id}` carries `stack.primaryAssetId`. `GET timeline/buckets?withStacked=true` counts a stack once, and `GET timeline/bucket?withStacked=true` lists only its primary. Stacked copies are therefore found through the timeline (`LibraryClient.stacked_buckets`, `stack_primaries`; M1 and M2 as landed).
+- `width`/`height` in an asset answer are already upright (Immich swaps them for sideways photos) and, after an edit, the edited size (`PUT assets/{id}/edits` crop: 64 x 96). No orientation read is needed.
+- Manual faces with machine learning off match `personIds`; `originalFileName` matches "contains, any case"; reverse geocoding gives city "Paris", state "Île-de-France", country "France"; a parent tag's search includes its child tag's photos; several `albumIds` mean all of them; partner photos appear in the owner's search when the partner's `inTimeline` is true; default search leaves out archived and hidden photos; `visibility=locked` answers 401 to an API key.
+- `GET assets/statistics` with no parameters counts timeline plus archive (25 on the fixture); `visibility=timeline` gives 24. The contact and the fixture's recorded `counts` both use the no-parameter answer (F-13).
+- Immich reports whether full-size copies are on only when asked about a photo a browser cannot show (HEIC, RAW).
+
+## Run 2: the re-cut after run 1 (2026-10-11, code architect)
+
+Re-cut, not redesigned: the design, the owner answers and every landed page stand. This section is the run's start page.
+
+### What landed in run 1
+
+| Lane | Slices | Commits (cherry-pick range) | Outcome |
+|---|---|---|---|
+| domain | T0 | `5188bc4..de67b11` (1a7cc4c, de67b11) | landed |
+| central | C1, C2 | `de67b11..a48dd0a` (018b59f, a48dd0a) | landed; erratum E-P4-C2-1 |
+| media | M1, M2, M3 | `de67b11..bfbefc8` (f882e85, f70ff43, bfbefc8) | landed; errata E-P4-M3-1, E-P4-M2-1 |
+| fixture | FX1 | `5188bc4..8a2b00c` (8a2b00c) | FX1 landed; FX2 stopped on E-P4-FX2-1 (moved to lane seams) |
+| docs | X1 (drafts) | `5188bc4..7aacda5` (4c5f68c, 749e776, 7aacda5) | drafts landed; the final pass is X2 |
+| planner, console | P1; K1-K3 | none | never started |
+
+The five landed branches merge with no conflict (their files are disjoint). **`lane/photo4-merged`** is that merge on top of `feat/photo-sources` at this run-2 commit; the planner, console and seams lanes start there (their branches are pushed at the same commit).
+
+### Known red at `lane/photo4-merged`
+
+Found by a trial merge on 2026-10-11 (unit tier `-n 4`; DB tier on the photo test files: 187 passed, 3 failed; ruff and lint-imports clean). Each has an owner; no other lane fixes them.
+
+| Test | Why | Owner |
+|---|---|---|
+| `tests/test_media_queue.py::test_worker_app_registers_only_domain_work_and_maintenance_tasks` | E-P4-M2-1: the task set changed | S1 |
+| `tests/test_content_wiring.py::test_the_media_loop_stands_by_while_another_process_writes_and_jobs_run_meanwhile` | E-P4-M2-1: boot is recipe then maintain | S1 |
+| `tests/test_library_tags.py` (collection error) | E-P4-M2-1: imports the removed `configuration` | S1 |
+| `tests/test_library_thumbnails.py`: `test_a_servable_thumbnail_answers_within_about_two_seconds_then_serves`, `test_a_fetch_for_a_retired_record_never_blocks_the_next_preview`, `test_a_purged_then_regenerated_thumbnail_serves_again_and_is_not_refetched` (404) | seam d: C2 serves a thumbnail only for a wanted pool's row; these cases still seed through source previews | S1 |
+| `tests/test_release_plan.py::test_a_suite_is_due_for_every_file_its_harness_imports[node-pid1]` | M3's `media/prepare.py` imports `media/library_client.py`, which the node-pid1 suite's paths (`scripts/release_plan.py`) do not list | S1 |
+| `tests/test_console_sources.py::test_every_served_refusal_code_has_one_owner` | `asset_superseded` (M3's refusing `OriginalAsset` arm) has no console row; the code goes with the arm | I1 |
+
+Environmental on the architect's Mac, not the branch: `tests/node/apps/test_player_device_grants.py` (`time.CLOCK_BOOTTIME` is Linux-only), and every node-run `test_console_*` in a worktree without `central/console/node_modules` (`ERR_MODULE_NOT_FOUND`; run `npm ci` in the console first). NOT RUN on the trial merge: browser, console typecheck/lint/build, node-bus, Immich fixture, images, software e2e.
+
+### Errata dispositions
+
+- **E-P4-FX2-1 (FX2's demo query) — accepted, one change.** The demo Source's query is `favourites_only=True`, `taken=TakenBetween(start=DEMO_CAPTURE_START, end=DEMO_CAPTURE_START + 60)`, `media_types=("photo", "video")` and **`exclude=Exclusions(screenshots=False)`** (the demo proves the wall path, not exclusions, which `test_source_filters` proves; this keeps the demo independent of its uploads' file types). Points (a)-(d) of the erratum are adopted as written. FX2 moves to lane seams (it needs C and M code). Page: FX2.
+- **E-P4-C2-1 (`updatedAt` never reaches the store) — accepted as proposed.** `InPool` gains `updated_at`; `entries_of` sets it; `record_step` writes it; the fake store keeps it. Page: S1 (spans domain, media and central).
+- **E-P4-M3-1 (a pool photo cannot publish) — accepted, widened.** Besides `publish`, `MediaStore._lease_for` validates every job's asset as `OriginalAsset` and `_cleanup` compares the journal's `original_sha1`; both break for a `LibraryAsset` lease. One rule decides a lease's asset type (P1's `lease_asset_of`), and `MediaStore` uses it. The journal's `original_sha1` goes (its `asset_id` already pins the identity, which is derived from the checksum or revision). The worker test's bridge goes in the same slice. Page: P2 (lane planner).
+- **E-P4-M2-1 (three test files) — accepted.** Plus two more found by the trial merge (`test_library_thumbnails.py`, `test_release_plan.py`). Task name `photo_wall.media.refresh` and `REFRESH_CRON` stay. Page: S1.
+- **Central lane findings, as built and accepted:** removal is refused only while a live Source revision or a draft names the connection (F-17); `409 connection_name_exists` on POST and PUT (route table updated; `LibraryRefused`'s docstring in S1); a cut-over row's PUT without a key answers `422 key_required` (K1 sends both); `save_draft` never answers `source_revision_conflict` (removed from the route table; F-16); list status by error code (`key_rejected`, `missing_permissions` → permission; `immich_too_old`, `unexpected_answer` → incompatible; else unavailable; M2 sends problem kinds, checked in I2's conformance suite); `due_pools` assigns pre-4 Sources' pools; `retire_unwanted` nulls dormant revisions' `pool_key`; `SourceNameService._configure_query_in` mirrors `configure_named_in` until I1 leaves one home. **Not accepted as is:** "a checking pool is never due" (C2 case 9) is replaced by the staleness rule (S1).
+- **Media lane findings, as built and accepted:** `LibraryChecks(..., queue=)`; `MediaWorker` without `thumbnails=`; `entries_of(..., copies=)`; `CheckProgress.stacked_months`; exclusion queries on the timeline; equal-instant splitting by upload time (F-18); a video without a duration is Waiting; until P1, `claim_job` hands out the old lease type and the worker refuses it as `asset_superseded`. Pages M1 and M2 carry these as built.
+- **Docs lane findings:** the stale documents outside X1's list, the console behaviour no slice owned (Show now's freshness and Refresh, "Why nothing new?" steps 4 and 5), and module-media.md's stack rule are X2's and K4's (pages below). F-7 holds.
+- **Found at the re-cut (new work, each on a page):**
+  1. *A check stuck in checking* never recovers by itself (C2 case 9). S1 adds the staleness rule.
+  2. *A dead media worker's job holds its Procrastinate lock forever*: the `doing` row of a killed worker keeps `MEDIA_STORAGE_LOCK` (every preparation and the maintenance task) or a pool's or connection's check lock, and nothing on the media queue rescues it (the content runtime's `RescueStalledJobsHandler` covers only its own jobs). The staleness rule alone cannot recover a pool whose lock is held. S1 adds the rescue for the media queue (F-14; the preparation half predates 4).
+  3. *Hand-placed pre-4 photos* outside every pool keep `OriginalAsset` records, which nothing can prepare once recipe 2 (M3) asks for a new variant. I1's migration rewrites them (F-15).
+  4. *I1's "no file under `central/console/dist`" key assertion* is dropped: the bundle is built before any key exists, and the photo-sources leg does not build it (FX1's finding). The key's absence from route answers, job rows and worker logs stays.
+  5. *Console reads of the retiring Source fields* (`status`, `diagnostics`, `counts`, `next_refresh`, `last_success`, `refresh_*_revision`, the refresh route) sit in `MediaPipeline.jsx`, `ShowNowFlow.jsx`, `useSourceRefresh.js`, `SceneFlow.jsx`, `SceneSteps.jsx` and `mediaHealth.js`, which no console slice owned. K2, K3 and the new K4 own them; I1's console grep becomes K4's acceptance.
+
+### Remaining lanes (run 2)
+
+| Lane | Branch | Starts from | After | Slices, in order | Expertise |
+|---|---|---|---|---|---|
+| planner | `lane/photo4-planner` | `lane/photo4-merged` | none | P1, then P2 | the Planner, coordination, the media repository and store |
+| console | `lane/photo4-console` | `lane/photo4-merged` | none | K1, K2, K3, K4 (in sequence: they share the build and the catalog baselines, and K3 and K4 use K2's hooks) | React, the console design system, Playwright |
+| seams | `lane/photo4-seams` | `lane/photo4-merged` | none | S1 and FX2 at once (disjoint files) | PostgreSQL store, Procrastinate, the media worker; Docker Compose and the wall demo |
+| integrate | `lane/photo4-integrate` | `feat/photo-sources` once every lane is merged into it | domain, central, media, fixture, docs, planner, seams, console | I2, then I1, then X2 | cross-package retirement, end-to-end tests, docs |
+
+The planner, console and seams lanes run at once; their owned files are disjoint (P: `central/planner.py`, `coordination.py`, `media_repository.py`, `media_ports.py`, `media_store.py` and their tests plus `tests/test_media_worker.py`; K: `central/console/`, `tests/browser/`, `tests/test_console_*.py`; S1/FX2: the files on their pages). Within the integrate lane I2 lands the tracer first, so I1's deletions must keep it green, and X2 reads the code as landed.
+
+**Integrate order:** domain, central, media, fixture, docs (run 1's ranges), then planner, seams, console, then integrate's own slices on top. A conflict in `.claude/errata.md` (appends from two lanes) is resolved by keeping both entries.
+
+**Critical path:** console (K1 90 + K2 120 + K3 90 + K4 90 min) then integrate (I2 120 + I1 120 + X2 90 min), about 12 h. Per-slice budgets as in "Budget gates" (S1 and FX2: 120 and 90; P2: 60).
+
+## Lanes, slices and order (run 1's plan; for run 2 read the section above first)
 
 Tracer first, package depth first:
 
@@ -110,7 +187,12 @@ Tracer first, package depth first:
 | **K2** | The Photo source editor: Include, Exclude, counts by outcome, pool pages before and after saving | see its page | K1 |
 | **K3** | Scene editor › What: several Sources | see its page | K2 |
 | **X1** | Owning documents updated to what landed | see its page | drafts from the pages at once; final pass after the code lanes |
-| **I1** | Retire the old shapes (migration 081); the end-to-end tracer; the store conformance suite; seams | see its page | every lane |
+| **I1** | Retire the old shapes (migration 081, which also rewrites hand-placed pre-4 photos) | see its page | I2 |
+| **P2** (run 2) | A pool photo's lease publishes: one rule for a lease's asset type, `MediaStore` on it | see its page | P1 |
+| **K4** (run 2) | Show now, the media pipeline and "Why nothing new?" read each Source's check; Refresh becomes Check now | see its page | K3 |
+| **S1** (run 2) | The seams the landed lanes left: `updatedAt`, the staleness rule, the media queue's stalled-job rescue, the broken tests | see its page | merged base |
+| **I2** (run 2) | The end-to-end tracer and the store conformance suite | see its page | every lane |
+| **X2** (run 2) | Docs read against the landed code | see its page | I1 |
 
 **Integrate order** (the run merges each lane branch into `feat/photo-sources` with a merge commit, in this order): domain, central, planner, media, fixture, console, docs, then integrate's own slice on top. The lanes' owned files are disjoint. The planner and console lanes both start from the central lane's tip and touch different files (P1: planning and the media repository; the console lane: `central/console/` and `tests/browser/`).
 
@@ -203,9 +285,9 @@ Interfaces as compiling code; new bodies `NotImplementedError`; additive, so eve
 | Method | Path | Body | Answer | Refusals | Mounted by |
 |---|---|---|---|---|---|
 | GET | `/v1/operator/library/connections` | | `tuple[LibraryConnectionView, ...]` | | C1 |
-| POST | `/v1/operator/library/connections` | `ConnectionWrite {name, url, key}` | 201 `ConnectionSaved` | 422 `invalid_url`, `key_required` | C1 |
-| PUT | `/v1/operator/library/connections/{connection_ref}` | `ConnectionWrite {name, url, key?}` | `ConnectionSaved` | 404 `connection_unknown`; 422 `invalid_url` | C1 |
-| DELETE | `/v1/operator/library/connections/{connection_ref}` | | 204 | 404 `connection_unknown`; 409 `sources_use_connection` | C1 |
+| POST | `/v1/operator/library/connections` | `ConnectionWrite {name, url, key}` | 201 `ConnectionSaved` | 409 `connection_name_exists`; 422 `invalid_url`, `key_required` | C1 |
+| PUT | `/v1/operator/library/connections/{connection_ref}` | `ConnectionWrite {name, url, key?}` | `ConnectionSaved` | 404 `connection_unknown`; 409 `connection_name_exists`; 422 `invalid_url`, `key_required` (a cut-over row takes url and key together) | C1 |
+| DELETE | `/v1/operator/library/connections/{connection_ref}` | | 204 | 404 `connection_unknown`; 409 `sources_use_connection` (while a live Source revision or a draft names it; F-17) | C1 |
 | POST | `/v1/operator/library/connections/{connection_ref}/checks` | | 202 | 404 `connection_unknown` | C1 |
 | GET | `/v1/operator/library/albums?connection=&q=&limit=` or `&ids=` (1-32, repeated) | | `ListAnswer[LibraryAlbum]` | 404 `connection_unknown`; 422 `ids_with_query` | C1 |
 | GET | `/v1/operator/library/people?…` (as albums) | | `ListAnswer[LibraryPerson]` | as albums | C1 |
@@ -213,7 +295,7 @@ Interfaces as compiling code; new bodies `NotImplementedError`; additive, so eve
 | GET | `/v1/operator/library/tags?…` (`library_routes.py`, same shape as today) | | `ListAnswer[LibraryTag]` | as albums | C1 |
 | POST | `/v1/operator/photo-drafts` | `DraftCreate {query, editing?}` | 201 `DraftCreated` | 404 `connection_unknown`, `source_unknown`; 422 | C2 |
 | PUT | `/v1/operator/photo-drafts/{draft_ref}/query` | `DraftQueryWrite {query}` | 204 | 404 `draft_unknown`, `connection_unknown` | C2 |
-| POST | `/v1/operator/photo-drafts/{draft_ref}/save` | `DraftSave {name}` | `DraftSaved` | 404 `draft_unknown`; 409 `source_name_exists`, `source_revision_conflict`; 422 `invalid_source_name` | C2 |
+| POST | `/v1/operator/photo-drafts/{draft_ref}/save` | `DraftSave {name}` | `DraftSaved` | 404 `draft_unknown`; 409 `source_name_exists`; 422 `invalid_source_name` (never `source_revision_conflict`: F-16) | C2 |
 | GET | `/v1/operator/photo-drafts/{draft_ref}/pool?after=` | | `SourcePoolView` | 404 `draft_unknown`; 422 `cursor_invalid` | C2 |
 | GET | `/v1/operator/sources/{source_ref}/pool?after=` | | `SourcePoolView` | 404 `source_unknown`; 422 `cursor_invalid` | C2 |
 | POST | `/v1/operator/sources/{source_ref}/checks` | | 202 | 404 `source_unknown` | C2 |
@@ -235,6 +317,11 @@ Every route takes the operator `admin` dependency. Refusals answer `{"error": co
 | `central/infra/photo_library_store.py` | The one home of migration 080's tables and the only reader of the key | create_app (C1, C2), the worker (M2, M3), P1's `source_pools_in` (`pool_members_in`) | none |
 | `tests/support/library_store_fake.py` (M2) | An in-memory `LibraryWorkerStore` | M2, M3 tests; I1's conformance suite holds it equal to the PostgreSQL store | none |
 | `tests/support/immich_library.py` (FX1) | The real fixture as tests see it | M2, M3 named tests; I1 | none |
+| `media_repository.lease_asset_of` (P1, run 2) | Which asset type a job leases, from its `asset_revisions` row | `claim_job`, `MediaStore._lease_for` (P2) | I1 drops its `OriginalAsset` arm |
+| `policy.STALE_CHECK_SECONDS` (S1, run 2) | When a running check counts as lost | `PgPhotoLibrary.due_pools`, `FakeLibraryStore` | none |
+| `media/task_queue.rescue_stalled` (S1, run 2) | Hand a dead worker's media job back to the queue and free its lock | the media worker's periodic `photo_wall.media.rescue` | a residual may merge it with `central/infra/queue_ops.py`'s rescue |
+| `central/console/src/useSourceCheck.js` (K2, run 2) | Check now's request and receipt | K2's Source page, K3's Scene steps, K4's Show now | none |
+| `mediaHealth.sourceState` (K2 rewrites it, run 2) | A Source's state in words, from its `check` | Sources list, K3, K4, the media pipeline | none |
 
 ## Test architecture
 
@@ -261,6 +348,8 @@ Every route takes the operator `admin` dependency. Refusals answer `{"error": co
 - **Pool sharing (F-2).** Retirement needs a correct "wanted" rule: a live draft, or a Source revision that Runtime or a name needs (`refresh_active`, already computed by `reconcile_source_activity_in`). I1's conformance suite pins it.
 - **Old shapes in the meantime.** Old shapes live on between the lanes and I1, as additive paths: `OriginalAsset` leases, `catalog_snapshots`, `source_previews`, the old routes. I1 retires every one; the grep list is on its page.
 - **The key in the database (C1).** A database backup holds the key (design Costs). No route reads it back, and the security lens checks every select of `api_key`.
+- **Two rescue homes (run 2).** The stalled-job rescue now exists for the content runtime's typed jobs (`central/infra/queue_ops.py`) and for the media queue's raw tasks (`media/task_queue.py`). Same rule, two bodies; a residual should give it one home.
+- **Two enqueue homes for checks.** Central enqueues a check inside its transaction (`ProcrastinateMediaQueue._defer_coalescing`, sync) and the worker's tick enqueues through `ProcrastinateCheckQueue` (async). They share the task names and lock prefixes from `central/media_queue.py`, which keeps them from drifting; the bodies differ only by transport.
 
 ---
 
@@ -463,6 +552,8 @@ Queue and composition:
 
 **Land:** `feat(photos): Immich connections in Central's database with a write-only key, health and lists (4 C1)`.
 
+**As built (landed 018b59f; run 2 accepts it):** `409 connection_name_exists` on POST and PUT; a cut-over row's PUT without a key answers `422 key_required`; removal is refused only while a live Source revision (a name's current one, or one Runtime needs) or a draft names the connection, not any old revision (F-17).
+
 ## C2: drafts, pools and the store half of a check (lane central)
 
 **Owned:**
@@ -542,7 +633,11 @@ Rules:
 
 **Land:** `feat(photos): drafts, pools keyed by their query, and the store half of a check (4 C2)`.
 
+**As built (landed a48dd0a; run 2):** case 3's `updated_at` is unmet (E-P4-C2-1) and is S1's. Case 9's "a checking pool is never due" is replaced by S1's staleness rule. `save_draft` never answers `source_revision_conflict` (F-16). `due_pools` also assigns pre-4 Sources' pools; `retire_unwanted` nulls dormant revisions' `pool_key` before deleting their pools.
+
 ## P1: the Planner and preparation read the pools (lane planner)
+
+*Run 2: starts from `lane/photo4-merged` (the landed lanes merged); adds `lease_asset_of` for P2. Known red at the start (not this slice's): the table in "Run 2".*
 
 **Owned:**
 - `central/planner.py`
@@ -570,7 +665,16 @@ Rules:
 - **Coordination.** `advance` calls `source_pools_in(conn, runtime.planning_source_refs())` and `authored_in(conn)`. `CoordinationMedia` loses `catalog_in` and gains `authored_in`.
 - **Authoring.** `author_candidates_in` reads the Source's in-pool rows through `pool_members_in` instead of `source_members`. The `source_not_fresh` status gate goes: pool rows are confirmed photos, C7.
 - **`source_candidates`** reads the pool through `pool_members_in` (hydrated), and its 1,000 refusal goes (F-10).
-- **`claim_job`** validates `asset_revisions.metadata` as `LibraryAsset` when the row has `upstream_id` (a 4 row), else as `OriginalAsset`. The `reserve` uses `asset.kind` either way.
+- **The lease's asset: one rule.** A module function in `central/media_repository.py`:
+  ```python
+  def lease_asset_of(row: Mapping[str, Any]) -> OriginalAsset | LibraryAsset:
+      """The asset a job leases, from its `asset_revisions` row (`metadata`, `upstream_id`):
+      a `LibraryAsset` when `upstream_id` is set (a row written by a pool check), else the
+      pre-4 `OriginalAsset`. The one home of this rule: `claim_job` and `MediaStore` (P2) call
+      it. I1 deletes the `OriginalAsset` arm. Raises pydantic's ValidationError on a row that
+      fits neither."""
+  ```
+- **`claim_job`** builds `JobLease.asset` through `lease_asset_of` (selecting `metadata` and `upstream_id`). The `reserve` uses `asset.kind` either way.
 
 **Acceptance:**
 - `tests/test_planner.py` (unit):
@@ -583,7 +687,8 @@ Rules:
 - `tests/test_media_repository.py` (db):
   - `claim_job` for a pool asset yields a `JobLease` whose asset is a `LibraryAsset`;
   - for a pre-4 row, an `OriginalAsset`;
-  - `source_pools_in` hydrates a ready variant.
+  - `source_pools_in` hydrates a ready variant;
+  - `lease_asset_of` on a row with `upstream_id` and on one without.
 
 **Mutation probes:**
 - Skip pools that are not ready → case 2's C7 assertion fails.
@@ -591,6 +696,37 @@ Rules:
 - Union without dedup → case 1 fails.
 
 **Land:** `feat(planner): the Planner reads each Source's whole pool; no candidate caps (4 P1)`.
+
+## P2 (run 2): a pool photo's lease publishes (lane planner, after P1)
+
+**Owned:**
+- `central/media_store.py`
+- `tests/test_media_store.py`
+- `tests/test_media_worker.py` (only `worker_storage`'s bridge and the M3 case it served)
+
+**Design:** C10; erratum E-P4-M3-1 and its disposition in "Run 2"; P1's `lease_asset_of`.
+
+**Frozen page.** No new public name. `MediaStore` behaviour:
+- **`_lease_for(conn, row) -> JobLease`** builds the asset with `media_repository.lease_asset_of` (selecting `metadata` and `upstream_id`), never `OriginalAsset.model_validate` directly.
+- **`publish(lease, prepared) -> Variant`.** The staged file at `paths.original` is hashed as today (bounded by `max_original_bytes`). Integrity, for every lease: its sha256 equals `prepared.original_sha256`. Only for an `OriginalAsset` lease (until I1): also its sha1 equals `original_sha1` and its size equals `file_size` when set. Any mismatch is `MediaStoreError("media_original_mismatch")` as today.
+- **The job journal (`media_jobs.result`)** is `{**prepared (without path), "asset_id": lease.asset.asset_id}`. The `original_sha1` key goes for both arms: `asset_id` is derived from the connection, the upstream id and the checksum or revision, so it already pins what `original_sha1` pinned.
+- **`_cleanup`** checks `result["asset_id"] == row["asset_id"]`, the recipe and the variant digest as today, and no longer compares `original_sha1`.
+- Everything else in `publish` and `_cleanup` (caps, media types, reserve, blobs, fsync, stale-job fences) is unchanged.
+- **`tests/test_media_worker.py`:** `worker_storage` hands `publish` the lease `claim_job` gave (no bridge); its comment naming E-P4-M3-1 goes.
+
+**Acceptance:**
+- `tests/test_media_store.py` (db):
+  1. A `LibraryAsset` lease (a pool row written through `PgPhotoLibrary.record_step`, claimed through `claim_job`) publishes: the variant is ready, and the journal holds `asset_id` and no `original_sha1`.
+  2. The same lease with a staged file whose sha256 differs from `prepared.original_sha256` → `media_original_mismatch`, nothing published.
+  3. A publish interrupted after the journal (cleanup state `ready`) is finished by `_cleanup` for a `LibraryAsset` lease.
+  4. An `OriginalAsset` lease still checks sha1 (a changed byte → `media_original_mismatch`).
+- `tests/test_media_worker.py` (db): M3 case 4 ("a `LibraryAsset` lease fetches with the largest Frame's edge and publishes") passes through the real `claim_job` and `publish`, with no bridge.
+
+**Mutation probes:**
+- Skip the sha256 comparison for a `LibraryAsset` lease → case 2 fails.
+- Validate `_lease_for`'s asset as `OriginalAsset` again → case 3 fails.
+
+**Land:** `fix(media): a pool photo's lease publishes and cleans up through one lease-asset rule (4 P2)`.
 
 ## M1: the Immich adapter (lane media)
 
@@ -666,6 +802,8 @@ Rules:
 - Treat a malformed row as a page error → case 5 fails.
 
 **Land:** `feat(media): the Immich adapter reads one query by keyset pages, exclusions, stacks and edits (4 M1)`.
+
+**As built (landed f882e85; run 2, from the facts proven on the fixture):** `width`/`height` are taken as Immich sends them (already upright and edited), with no swap and no orientation read. The search answer carries no `stack`, so `SearchItem.stack_primary` stays None from a search and stacked copies come from `stacked_buckets` (`GET timeline/buckets?withStacked=true`, the months whose counts differ) and `stack_primaries` (`GET timeline/bucket?withStacked=true`, which lists only primaries). Exclusion queries, like the include query, cover the timeline. Equal capture instants are split by upload time, halving the upload window until a slice fits one page (F-18).
 
 ## M2 (tracer, worker half): the checks (lane media)
 
@@ -763,6 +901,8 @@ Rules:
 
 **Land:** `feat(media): connection checks and pool checks in bounded steps; the refresh and preview loops go (4 M2)`.
 
+**As built (landed f70ff43; run 2):** stacks through the timeline (C9): the `up_to` step also reads the stacked months once (`CheckProgress.stacked_months: tuple[str, ...]`); each include page reads the timeline months around its photos (`months_to_read`) and marks a photo the timeline does not show as a stacked copy (`stacked_copies`, passed to `entries_of(..., copies=)`). `LibraryChecks.__init__` takes a keyword `queue: LibraryCheckQueue` (the tick queues through it). The 30-second task keeps the name `photo_wall.media.refresh` and `REFRESH_CRON`. A video whose duration Immich has not read is Waiting. `MediaWorker` drops `thumbnails=`. `entries_of` leaves `InPool.updated_at` unset until S1.
+
 ## M3: preparation from the photo Immich shows, edited thumbnails; the connections file goes (lane media)
 
 **Owned:**
@@ -812,6 +952,8 @@ Rules:
 - Check integrity by the original's SHA-1 → case 1 fails.
 
 **Land:** `feat(media): preparation fetches the edited photo at preview or full size; edited thumbnails; no connections file (4 M3)`.
+
+**As built (landed bfbefc8; run 2):** the worker is correct up to `store.publish`, which fails for a `LibraryAsset` lease (E-P4-M3-1, P2). `tests/test_media_worker.py`'s `worker_storage` bridges it (hands `publish` an `OriginalAsset` lease of the same job); P2 deletes the bridge.
 
 ## FX1: the content set, the published fixture and the `photo-sources` CI leg (lane fixture)
 
@@ -875,36 +1017,39 @@ Rules:
 
 **Land:** `test(fixture): the photo-source content set, a published fixture and the photo-sources CI leg (4 FX1)`.
 
-## FX2: the wall e2e and the images move off the connections file (lane fixture)
+## FX2: the wall e2e and the images move off the connections file (lane seams; re-cut in run 2 by E-P4-FX2-1)
+
+*Run 2: moved to lane seams (it needs C and M code), runs at once with S1 (disjoint files), from `lane/photo4-merged`.*
 
 **Owned:**
-- `scripts/demo_wall.py`, `scripts/service_base.py`
+- `scripts/demo_wall.py`, `scripts/service_base.py`, `scripts/harness_failure.py` (only the demo's failure codes)
 - `Dockerfile`, `compose.yaml`
 - `tests/support/workers.py`, `tests/test_wall_demo.py`, `tests/test_service_base.py` (if it pins the file)
 
-**Design:** "Reconcile with existing code" row 1; C7, C12; this ledger's seam (g).
+**Design:** "Reconcile with existing code" row 1; C7, C12; this ledger's seam (g); erratum E-P4-FX2-1 and its disposition in "Run 2".
 
 **Frozen page.**
-- **`Dockerfile`** loses the `connections.json` creation (lines 36-38) and `ENV PHOTO_WALL_CONNECTIONS_FILE` (line 130). `compose.yaml` loses the `connections` volume and its mount. `service_base.py` loses the file's assertion. `tests/support/workers.py` writes no connections file and sets no such variable.
-- **`demo_wall.py`'s setup:**
-  - It POSTs `/v1/operator/library/connections` with the fixture's internal URL and key, then waits until GET shows health `ok`.
-  - It creates the demo Source with POST `/v1/operator/photo-drafts` (query: favourites only, images), then saves it as "demo" → `demo:1`.
-  - The Scene's contributions name `demo:1`.
-  - `PERMISSIONS` = the fixture's runtime permissions (`REQUIRED_PERMISSIONS`).
-- **`demo_wall.py`'s upstream-faults segment:**
-  - Every `refresh_status(x, "permission" | "unavailable" | "ok")` becomes the connection's health (`missing_permissions` | `unreachable` | `ok`) plus the Source's `check` (`failed` with `connection` | `complete`), through `/v1/operator/library/connections` and `/v1/operator/sources/demo:1/pool`.
-  - The "refresh" role becomes POST `/sources/demo:1/checks`.
-  - The segment asserts that every Player keeps presenting through the permission loss and the outage (C7).
+- **The connections file goes from the images.** `Dockerfile` loses the `connections.json` creation (lines 36-38) and `ENV PHOTO_WALL_CONNECTIONS_FILE` (line 130). `compose.yaml` loses the `connections` volume and its mount. `service_base.py` loses the file's assertion. `tests/support/workers.py` writes no connections file and sets no such variable (I2 starts its real worker through it).
+- **The key's path (no file the worker reads).** The demo's upstream-tools role writes `/private/connection.json` `{"url", "key"}` (the fixture's internal URL and the runtime key). The operator role mounts `private:ro`, reads it, and POSTs `/v1/operator/library/connections` `{"name": "demo-library", "url", "key"}`; it keeps the returned `connection_ref`. The media worker no longer mounts `private`. The key never enters evidence, logs or the harness bundle.
+- **Setup.** After the POST, wait until GET `/v1/operator/library/connections` shows that connection's health `ok`. Then POST `/v1/operator/photo-drafts` with the query `SourceQuery(connection_ref=<returned>, favourites_only=True, taken=TakenBetween(start=DEMO_CAPTURE_START, end=DEMO_CAPTURE_START + 60), media_types=("photo", "video"), exclude=Exclusions(screenshots=False))`, and save it as "demo" → `demo:1`. The Scene's contributions name `demo:1`. `PERMISSIONS` = the fixture's runtime permissions (`REQUIRED_PERMISSIONS`).
+- **Membership.** The demo reads the pool through GET `/v1/operator/sources/demo:1/pool` (following `next` to the end) and compares `asset_id`s. The expected ids are `asset_identity(connection_ref, upstream_id, checksum)` with each upload's checksum from the upstream role's `GET /assets/{id}`, in the 40-hex form `media/immich.py` parses (an unedited photo's revision is its checksum). `source_members` and `original_sha1` are no longer read.
+- **Jobs** are matched by `asset_id`. `original_hash_mismatch` goes: preparation now fetches Immich's rendition, not the original.
+- **"A check finished"** = the Source's `check` (from the pool view) differs from the `check` read just before POST `/v1/operator/sources/demo:1/checks`: its state, `started_at` or `at` changed. Only values Central served are compared, never a host clock.
+- **The upstream-faults segment.** Every `refresh_status(x, "permission" | "unavailable" | "ok")` becomes the connection's health (`missing_permissions` | `unreachable` | `ok`) plus the Source's `check` (`failed` with `connection` | `complete`). The "refresh" role becomes POST `/sources/demo:1/checks`. The segment asserts that every Player keeps presenting through the permission loss and the outage (C7).
+- **`harness_failure.py`'s codes** follow the new words; a removed step's code goes.
 
 **Acceptance:**
-- `tests/test_wall_demo.py` (unit): the demo's setup requests are the API's (no file write) and the fault expectations use the new words.
-- In CI, the software e2e's two segments pass after the merge (judged at the end).
+- `tests/test_wall_demo.py` (unit): the demo's setup requests are the API's (no file write, no `PHOTO_WALL_CONNECTIONS_FILE`); the draft's query is the one above; the fault expectations use the new words; no generated service mounts `private` except upstream-tools and the operator role.
+- `tests/test_service_base.py` and the image tests that pin the file: green without it.
+- In CI, the software e2e's two segments pass after the merge (judged at the end; NOT RUN locally).
 
 **Mutation probe:** expect the pool to empty on permission loss → the e2e's C7 assertion fails.
 
 **Land:** `test(e2e): the wall demo pastes its connection and builds its Source through the API (4 FX2)`.
 
 ## K1: Settings › Photo library and Needs a look (lane console)
+
+*Run 2: the console lane starts from `lane/photo4-merged`; slices run K1, K2, K3, K4 in sequence. Known red at the start (not the console's): the table in "Run 2". Run `npm ci` in `central/console` before the node-run console tests.*
 
 **Owned:**
 - `central/console/src/libraryApi.js`
@@ -928,7 +1073,8 @@ Rules:
   - Immich's counts: "41,203 photos · 2,110 videos · 212 albums · 96 people";
   - the bound user;
   - each note: "Immich 2.7.0 is newer than Photo Wall has been tested with; it keeps working" and "HEIC and RAW photos play at preview size: turn on full-size copies in Immich";
-  - a cut-over row (no address): "Paste the address and key of this Immich to start new photos again";
+  - a cut-over row (no address): "Paste the address and key of this Immich to start new photos again"; its form sends both (the PUT refuses one without the other: `422 key_required`);
+  - a name already used: "A connection with this name exists" (`409 connection_name_exists`, on add and on rename);
   - "Check now", and Remove (refused in plain words while Sources use it).
 - **`library-health-card.tsx`** (`LibraryHealthCard(props: {connection: LibraryConnectionView}): JSX.Element`). It is a `ProblemCard`, for Needs attention and the page, with one fix per problem:
   - `key_rejected` "Immich rejected the API key" → Paste a new key;
@@ -965,7 +1111,9 @@ Rules:
 - `central/console/src/patterns/item-picker.tsx` (+ `.stories.tsx`)
 - `central/console/src/SourcesRegion.jsx`, `central/console/src/SourcePicker.jsx`, `central/console/src/sourceWords.js`, `central/console/src/mediaHealth.js`
 - `central/console/src/showRoutes.jsx` (only the sources section's render)
-- Deleted when no console module imports them any more: `SourceFlow.jsx`, `SourceSteps.jsx`, `sourceFlowModel.js`, `sourcePreview.js`, `usePreview.js`, `TagCombobox.jsx`, `libraryTags.js`
+- `central/console/src/useSourceCheck.js` (new, run 2)
+- Deleted when no console module imports them any more: `SourceFlow.jsx`, `SourceSteps.jsx`, `sourceFlowModel.js`, `sourcePreview.js`, `usePreview.js`, `PreviewPanel.jsx`, `TagCombobox.jsx`, `libraryTags.js`
+- `tests/browser/test_operator_showrunner_browser.py` (only the Source form cases: `test_source_configuration_creates_source_awaiting_refresh`, `test_sources_have_no_immich_or_album_language`, `test_the_source_form_sends_favourites_and_a_capture_window`, `test_a_capture_window_across_a_dst_change_names_its_last_whole_day`), `tests/browser/conftest.py` (only the evidence rows of tests this slice renames or deletes)
 - `tests/browser/test_source_flow_browser.py`, `tests/test_console_sources.py`, `tests/test_console_flow.py` (only source cases)
 - `tests/browser/catalog-baselines/`
 - `central/console/dist/`
@@ -995,6 +1143,22 @@ Rules:
   - the thumbnails grid, newest first, with "Show more".
 - **`pages/photo-source-page.tsx`.** New Source and Edit both open a draft. Every change PUTs the query, and the pool view restarts. Name and Save work at any time. Saving an edit keeps the name (F-3). "Check now" is shown on a saved Source.
 - **Sources list.** `SourcesRegion.jsx` lists Sources with their `check` (from `/v1/operator/media` rows) and opens the page.
+- **A Source's state in words: one home (run 2).** `mediaHealth.sourceState(source, now)` reads only `source.check` (`CheckState`) and keeps its answer shape `{state, severity, label, fact?}`; K3 and K4 consume it. It no longer reads `status`, `diagnostics`, `counts`, `next_refresh`, `last_success` or `refresh_*_revision`. Per C7, a `failed` check is `severity: "warn"` with the words "Photos keep playing", never an error that empties anything.
+- **`useSourceCheck.js` (run 2): Check now's request, one home.**
+  ```js
+  /** @typedef {{kind: "requested"|"unknown"|"failed", before: object|null, message: string}} CheckFeedback */
+  /** POST /v1/operator/sources/{ref}/checks (photoSourcesApi.checkSource). @returns {CheckFeedback} */
+  export function sourceCheckResult(result, before) {}
+  /** The receipt until the served `check` differs from `feedback.before` (state, started_at or at);
+   *  then null, and the caller shows sourceState's words. Never compares with the browser's clock. */
+  export function sourceCheckMessage(feedback, check) {}
+  /** Scene- or page-scoped Check now: {pending: string|null, feedback: Record<string, CheckFeedback>,
+   *  run(sourceRef: string, before: object|null): Promise<void>}; a scope change drops old feedback;
+   *  a transport error refreshes the snapshot once (useMutate) before calling the outcome unknown. */
+  export function useSourceCheck(scope) {}
+  ```
+  The words: "Check requested. Photos keep playing while Photo Wall reads Immich." · "The request's outcome is unknown. Look at the Source's state before asking again." · "Check request failed: <code words>."
+- **Browser cases this slice breaks** (the Source form cases above) are rewritten to the draft flow. Their seeding through the old refresh stays until I1 moves it.
 
 **Acceptance (CI browser; the real app and database; pools seeded through `PgPhotoLibrary.begin_check`/`record_step`/`finish_check`):**
 - Build "Anna and Ben, last 3 years, no screenshots": the draft POST carries both people, `taken {"kind":"last","years":3}` and `exclude.screenshots` true.
@@ -1018,6 +1182,7 @@ Rules:
 
 **Owned:**
 - `central/console/src/SceneSteps.jsx`, `central/console/src/sceneFlowModel.js`, `central/console/src/SceneFlow.jsx`, `central/console/src/authoring.js` (only `source_refs` writing)
+- `tests/browser/test_operator_showrunner_browser.py` (only Scene cases this slice's change breaks), `tests/browser/conftest.py` (only rows of tests it renames)
 - `tests/browser/test_scene_flow_browser.py`, `tests/test_console_flow.py` (only scene cases)
 - `central/console/dist/`
 
@@ -1029,6 +1194,7 @@ Rules:
 - Every media contribution the Scene writes carries `source_refs` = the chosen list, in order.
 - The answer label reads "Photos from: Anna and Ben, Garden".
 - Each chosen Source's readiness shows: not ready ("Still being read: what is found so far plays"), or empty ("This Source has no photos").
+- **Run 2:** `SceneSteps.jsx`'s "Refresh Source" becomes "Check now" through K2's `useSourceCheck`, and its state line is `sourceState`'s; `SceneFlow.jsx` uses `useSourceCheck` instead of `useSourceRefresh` and stops reading `refresh_completed_revision`. Scene browser cases this breaks (in `tests/browser/test_operator_showrunner_browser.py` and `test_scene_flow_browser.py`) are updated; their old seeding stays until I1.
 
 **Acceptance (CI browser):**
 - A Scene with two Sources saves with both refs on every Frame's contribution, and reopens with both.
@@ -1038,6 +1204,40 @@ Rules:
 **Mutation probe:** write only the first ref → the save case fails.
 
 **Land:** `feat(console): Scene editor › What takes several Photo sources (4 K3)`.
+
+## K4 (run 2): Show now, the media pipeline and "Why nothing new?" read each Source's check (lane console, after K3)
+
+**Owned:**
+- `central/console/src/ShowNowFlow.jsx`, `central/console/src/MediaPipeline.jsx`
+- `central/console/src/mediaHealth.js` (only `whyNothingNew` and its private helpers)
+- `central/console/src/useSourceRefresh.js`, `central/console/src/mediaApi.js` (deleted)
+- `tests/test_console_show_now.py`, `tests/test_console_planned.py` (only cases on these modules)
+- `tests/browser/test_operator_showrunner_browser.py` (only `test_sources_render_name_rev_with_refresh`, `test_the_media_pipeline_states_each_source`, `test_media_ages_are_taken_against_the_media_read_time_not_the_inventory_read_time`, `test_why_nothing_new_*`, `test_check_this_frame_*`), `tests/browser/conftest.py` (only rows of tests it renames)
+- `tests/browser/catalog-baselines/`, `central/console/dist/` (not committed)
+
+**Design:** console-ux skill; C7 ("the last pool keeps playing"); operator console design §14 ("Why nothing new?"); the docs lane's finding in "Run 2"; K2's `sourceState` and `useSourceCheck`.
+
+**Frozen page.**
+- **Show now.** The "Saved Source freshness" region becomes "Saved Sources": one line per Source of the chosen Scene with `sourceState`'s words and "Check now" (`useSourceCheck`, scope = the Scene). Its lead sentence: "A Source keeps playing what it has found while it is checked, and while Immich cannot be read." "Refresh Source" and "Central's latest catalog status" go.
+- **The media pipeline.** Each Source's row ("Check of <name>") shows State (`sourceState`), and when served, "Checking: 12,400 so far" (`Checking.seen_so_far`) and "Last complete check 21:04" (`Complete.at` or `last_complete_at`, in the house's time words against the media read time). The "Last refresh" counts, "Reported" diagnostics and "Next refresh" lines go: they are not served for a pool.
+- **"Why nothing new?"** Steps 4 and 5 judge pools, not refresh status: a Source counts when its pool has photos, whatever its check state (C7). The stop sentences: "None of this Scene's Sources has photos yet" (every pool empty and none checking), "Photo Wall is still reading this Scene's Sources" (every pool empty and one checking). "Check this frame" is unchanged (it reads `source_candidates`, which P1 points at the pools).
+- **Deleted:** `useSourceRefresh.js` and `mediaApi.js` (no importer is left after K3 and this slice).
+- **Grep proof (moved here from I1):** no module under `central/console/src` reads a Source row's `spec`, `status`, `diagnostics`, `counts`, `next_refresh`, `last_success`, `refresh_requested_revision`, `refresh_completed_revision`, `connection_ids`, `limited`, `source-previews` or the `/refresh` route of a Source (the release `/refresh` route is not a Source's and stays).
+
+**Acceptance:**
+- `tests/test_console_show_now.py`: the receipt and completion cases run on `useSourceCheck`; a served `check` differing from the one before ends the receipt; an equal one keeps it.
+- Browser (CI; the real app and database; checks seeded through `PgPhotoLibrary.begin_check`/`record_step`/`finish_check`):
+  1. Show now lists the Scene's Sources with their state and Check now; pressing it posts once to `/checks` and shows the receipt.
+  2. The media pipeline shows "Checking: N so far" for a running check and "Last complete check" for a finished one; a failed check says "Photos keep playing".
+  3. "Why nothing new?" stops at "None of this Scene's Sources has photos yet" for empty pools, and passes the Source step for a pool with photos whose last check failed.
+- The grep proof above, as a test or a scripted check in the slice's report.
+- Typecheck, lint, build, catalog.
+
+**Mutation probes:**
+- Treat a failed check as "no photos" in `whyNothingNew` → browser case 3's second half fails.
+- Compare the receipt against the browser's clock instead of the served check → the show-now receipt case fails.
+
+**Land:** `feat(console): Show now, the media pipeline and Why nothing new read each Source's check (4 K4)`.
 
 ## X1: docs (lane docs)
 
@@ -1061,37 +1261,98 @@ Every rule has one home, and the others link to it. `python3 scripts/check_docs.
 
 **Land:** `docs: real photo sources from Immich (4 X1)`.
 
-## I1: integrate (lane integrate, last)
+## S1 (run 2): the seams the landed lanes left (lane seams)
 
-**Owned:** every file naming a retiring shape (the deletion's scope is every file naming the deleted symbol); `central/migrations/081_retire_snapshots.sql`; `tests/test_immich_connection.py`; `tests/test_source_preview_matches_plan.py`; `tests/test_library_store_conformance.py`.
+*Starts from `lane/photo4-merged`; runs at once with FX2 (disjoint files). Fixes the known-red tests the "Run 2" table gives S1.*
 
-**Frozen page (the tripwire):**
-- **`media/models.py`:**
-  - `SourceQuery`, `SourceSpec`, `SourcePreviewQuery`, `PreviewMember`, `StoredPreviewMember`, `SourcePreviewResult`, `SourcePreview`, `ConnectionConfig`, `MediaLimits`, `OriginalAsset`, `Diagnostic`, `RefreshCounts`, `RefreshResult`, `MAX_SOURCE_TAGS` and `PREVIEW_SHOWN` are deleted;
-  - the re-exports go, and importers use `central.photo_library.model`;
-  - what is left (`MediaError`, `DownloadedOriginal` if still used, `Kind`, `Status`) stays.
-- **`media/immich.py`:** the old constructor and the old methods, `_walk`, `_head`, `_original` and `_SUPPORTED_VERSIONS` are deleted.
-- **`central/media_repository.py`:**
-  - `configure_source`, `request_refresh`, the source-preview methods, `servable_thumbnail`/`ServableThumbnail`, `begin_*_refresh`, `publish_refresh`, `refresh_catalog_in`, `_current_candidates`, the library-tag methods, `refresh_revisions`, `max_assets`/`metadata_capacity`, `worker_status`'s `connection_ids` are deleted;
-  - `JobLease.asset: LibraryAsset`.
-- **`central/catalog.py`:** `CatalogSnapshot` is deleted.
-- **`central/app.py` and `central/source_names.py`:** the routes the route table marks "removed" go, and so do `NamedSourceWrite` and `SourceNameService.put` (a rename is a draft saved under a new name). `SourceNameService.delete` and DELETE `/v1/operator/source-names/{name}` stay.
-- **`media/worker.py`:** the `OriginalAsset` arm is deleted.
-- **Migration 081:**
-  - DROP `catalog_snapshots`, `source_members`, `source_previews`, `library_tags`;
-  - `ALTER TABLE media_sources DROP COLUMN spec, DROP COLUMN status, DROP COLUMN diagnostics, DROP COLUMN counts, DROP COLUMN next_refresh, DROP COLUMN last_success, DROP COLUMN generation, DROP COLUMN refresh_started, DROP COLUMN refresh_lease_until, DROP COLUMN refresh_requested_revision, DROP COLUMN refresh_completed_revision` (keep `source_ref`, `query`, `pool_key`, `refresh_active`);
-  - `ALTER TABLE media_settings DROP COLUMN connection_ids`;
-  - `DELETE FROM media_jobs` and `asset_revisions` rows whose metadata lacks `upstream_id` and that no `media_references` pin (pre-4 rows nobody plays); keep pinned ones.
-- **Console:** nothing reads `spec`, `connection_ids`, `source-previews` or `limited`, and a grep shows it. The `tags` key of the tag answer goes (`items` only).
-- **Grep proof.** The grep for each deleted symbol over `central media scripts tests contracts` is empty, except the migrations.
+**Owned:**
+- `central/photo_library/model.py` (only `InPool`), `central/photo_library/policy.py` (only `STALE_CHECK_SECONDS`), `central/photo_library/ports.py` (only the docstrings of `due_pools`, `begin_check` and `LibraryRefused`)
+- `central/migrations/080_photo_library.sql` (one column), `central/infra/photo_library_store.py`
+- `media/pool_check.py`, `media/task_queue.py`
+- `scripts/release_plan.py` (only the node-pid1 suite's paths)
+- `tests/support/library_store_fake.py`
+- `tests/test_photo_pools.py`, `tests/test_pool_check.py`, `tests/test_library_checks.py`, `tests/test_photo_library_model.py`, `tests/test_photo_library_policy.py`
+- `tests/test_media_queue.py`, `tests/test_content_wiring.py`, `tests/test_library_tags.py`, `tests/test_library_thumbnails.py`, `tests/test_release_plan.py` (only if it pins the suite's list)
 
-**Acceptance (the tracer and the seams):**
+**Design:** errata E-P4-C2-1 and E-P4-M2-1 and "Found at the re-cut" 1 and 2 in "Run 2"; design rule 2 (add, then sweep only on a complete check); C7. Prior art for the rescue: Procrastinate's documented stalled-job retry (`JobManager.get_stalled_jobs` from a periodic task) and this repo's `central/infra/queue_ops.py` `RescueStalledJobsHandler` (re-publish first, then close the stalled row).
+
+**Frozen page.**
+
+1. **`updatedAt` reaches the store (E-P4-C2-1).**
+   ```python
+   class InPool(Model):
+       outcome: Literal["in_pool"] = "in_pool"
+       asset: LibraryAsset
+       updated_at: str | None = Field(default=None, max_length=64)
+       # Immich's `updatedAt` when the check read this photo: KnownRevision's source. None: not sent.
+   ```
+   - `pool_check.entries_of` sets it from `SearchItem.updated_at`.
+   - `PgPhotoLibrary.record_step`'s `asset_revisions` upsert gains the column (`updated_at = EXCLUDED.updated_at`). `known_revisions` is unchanged (rows with `updated_at` set).
+   - `FakeLibraryStore.record_step` keeps `KnownRevision(updated_at, revision)` per `(connection_ref, upstream_id)` for an InPool whose `updated_at` is set.
+2. **A check stuck in checking resumes by itself.**
+   - `policy.STALE_CHECK_SECONDS: Final = 900`. Docstring: a running check whose latest step began this long ago (database time) is due again, so a step lost with its worker never leaves a pool checking; it varies independently of `CHECK_EVERY_SECONDS`.
+   - Migration 080 gains `step_at DOUBLE PRECISION NULL` on `photo_pools` (the database time the running check's latest step began). 080 is edited in place: PR #81 is unmerged and 080 is applied nowhere but test databases.
+   - `begin_check` sets `step_at = now` when it starts a check and when it resumes one.
+   - `due_pools` also answers a wanted `checking` pool (its connection has a key) whose `step_at <= now - STALE_CHECK_SECONDS`. `begin_check` then resumes it from its stored `progress` (unchanged), and a step still queued for it absorbs the new request (the queueing lock).
+   - `FakeLibraryStore` follows the same rule on its clock. The `due_pools` and `begin_check` docstrings in `ports.py` say so.
+3. **The media queue rescues a dead worker's jobs.** In `media/task_queue.py`:
+   ```python
+   STALLED_HEARTBEAT_SECONDS: Final = 30
+   RESCUE_CRON: Final = "* * * * * */30"     # seconds last, as REFRESH_CRON
+   RESCUE_TASK: Final = "photo_wall.media.rescue"
+
+   async def rescue_stalled(app: procrastinate.App, *,
+                            heartbeat_seconds: float = STALLED_HEARTBEAT_SECONDS) -> int:
+       """Each `doing` job on MEDIA_QUEUE whose worker has not beaten for `heartbeat_seconds`
+       (Procrastinate's `get_stalled_jobs`), each on its own: first defer one copy (same task,
+       arguments, lock and queueing lock; an already queued copy absorbs it), then finish the
+       stalled row `failed`, which frees its lock. A periodic task's row is only finished: its
+       schedule defers the next run. Returns how many rows were finished. One row's failure never
+       skips the others; any failure is logged and the next run looks again."""
+   ```
+   `create_worker_app` registers `RESCUE_TASK` as a periodic task on `RESCUE_CRON` on `MEDIA_QUEUE`, with a queueing lock and no lock (so a stalled `MEDIA_STORAGE_LOCK` cannot block it). Cost: the rescue pattern has two homes until a residual merges them (`central/infra/queue_ops.py` for the content runtime's typed jobs, this one for the media queue's raw tasks).
+4. **The known-red tests (E-P4-M2-1 and the trial merge).**
+   - `tests/test_media_queue.py`: the worker app's task set is exactly `PREPARE_MEDIA_TASK`, `photo_wall.media.refresh`, `CHECK_CONNECTION_TASK`, `CHECK_POOL_TASK`, `photo_wall.media.maintenance`, `RESCUE_TASK`.
+   - `tests/test_content_wiring.py`: the media loop's boot is `[("recipe", True), ("maintain", True)]`.
+   - `tests/test_library_tags.py`: its worker half is deleted (the tag list is `LibraryChecks.contact`'s, tested in `test_library_checks.py`); its route half stays.
+   - `tests/test_library_thumbnails.py`: the three route cases seed a wanted pool's `in_pool` row through the store's own sides (`create_draft`, then `begin_check` and `record_step` with an `InPool`), so `pool_thumbnail` answers. They keep their assertions.
+   - `scripts/release_plan.py`: the node-pid1 suite's paths gain `media/library_client.py`.
+   - `LibraryRefused`'s docstring lists `connection_name_exists`.
+
+**Acceptance:**
+- `tests/test_photo_pools.py` (db):
+  - case 3 asserts `asset_revisions.updated_at` from `InPool.updated_at`, and `known_revisions` answers it;
+  - case 9 becomes: a `checking` pool whose latest step began 899 s ago is not due, 900 s is; `begin_check` on it keeps its check number and progress and moves `step_at`.
+- `tests/test_pool_check.py` (unit): `entries_of` copies `updated_at` into the InPool.
+- `tests/test_library_checks.py` (unit; fake client, fake store):
+  - a check whose step is lost after two steps (stop calling), with the clock moved 900 s: `tick` queues it, it resumes from its progress and completes, and nothing is removed before the finish;
+  - a second check reuses a known revision: no `edits_fingerprint` call for an edited photo whose `updatedAt` did not move.
+- `tests/test_media_queue.py` (db): a `doing` `CHECK_POOL_TASK` row whose worker's heartbeat is older than 30 s → `rescue_stalled` defers one copy and finishes the row `failed`; the copy can then take the lock. A stalled periodic row is only finished. A row whose worker beats is untouched.
+- Every test the "Run 2" table gives S1 is green; ruff, lint-imports, `check_docs`.
+
+**Mutation probes:**
+- `due_pools` skips every checking pool again → case 9 fails.
+- Finish a stalled prepare row without deferring its copy → the rescue case fails.
+- Drop `updated_at` from the upsert → case 3 fails.
+
+**Land:** `fix(photos): a lost check step resumes by itself, the media queue rescues a dead worker's jobs, and updatedAt reaches the store (4 S1)`.
+
+## I2 (run 2): the end-to-end tracer and the store conformance suite (lane integrate, first)
+
+*Starts from `feat/photo-sources` once every lane is merged. Lands before I1, so I1's deletions must keep it green.*
+
+**Owned:** `tests/test_library_store_conformance.py`, `tests/test_immich_connection.py`, `tests/test_source_preview_matches_plan.py` (all new); `.github/workflows/software-e2e.yml` (only the photo-sources job, and only if these tests need something it lacks; it needs no console bundle).
+
+**Design:** the tracer (design "What happens next", the named tests); seams (a)-(h); C1, C7, C9, C10.
+
+**Acceptance:**
 - `tests/test_library_store_conformance.py` (db): one parametrised suite over `FakeLibraryStore` and `PgPhotoLibrary`:
   - the contact fence, health, binding, `due_contacts`;
-  - `begin_check`, `record_step` (fence, marks, subtraction), `finish_check` (sweep or not), `due_pools`, `pool_thumbnail`, `retire_unwanted`.
+  - `begin_check`, `record_step` (fence, marks, subtraction, `updated_at` into `known_revisions`), `finish_check` (sweep or not), `due_pools` (including S1's staleness rule), `pool_thumbnail`, `retire_unwanted`;
+  - `record_list` with each problem kind as the error code gives the list status the store's table says (permission, incompatible, unavailable).
 - `tests/test_immich_connection.py` (`immich` + db; a real `python -m media.worker` started BEFORE the connection exists, via `tests/support/workers.py`):
   1. POST the fixture's URL and key. Within 60 s, GET shows health ok and exactly `immich_library.counts` (no file, no restart).
-  2. The key appears in no route answer, no job row, no worker log line, and no file under `central/console/dist`.
+  2. The key appears in no route answer, no job row and no worker log line.
   3. Key cases:
      - a key without `face.read` (`new_key`) → Needs a look `missing_permissions ["face.read"]`;
      - a bad key → `key_rejected`;
@@ -1100,23 +1361,89 @@ Every rule has one home, and the others link to it. `python3 scripts/check_docs.
      - restoring the good key clears it.
   4. Newest wins under two Check now requests.
 - `tests/test_source_preview_matches_plan.py` (`immich` + db; the real store, the real `LibraryChecks` and `ImmichClient`, the real coordination and preparation with ffmpeg):
-  1. A draft "Anna and Ben, last 3 years, no screenshots" is checked to complete at page size 3. Its pool equals the fixture's expected labels.
+  1. A draft "Anna and Ben, last 3 years, no screenshots" is checked to complete at page size 3. Its pool equals the fixture's expected labels (the stack's copy is not in it: C9 through the timeline).
   2. It is saved, and a Scene puts it beside a second Source ("Garden") on two Frames.
   3. `Coordination.advance` assigns only assets in the union of the two pools, and every pool photo eligible for a Frame's profile is a candidate.
-  4. Each assigned asset's job claims, fetches, prepares and publishes.
+  4. Each assigned asset's job claims, fetches, prepares and publishes (P2).
   5. An edited photo's variant comes from the edited rendition.
 - Seams (a) through (h) each have a named assertion in one of these three files or in a lane's tests. The PR body lists where.
+
+**Mutation probes:**
+- Restart the worker in case 1 → it is no longer the "no restart" proof (asserted by the worker's pid unchanged).
+- Assign from a stale pool after a sweep → tracer case 3 fails.
+
+**Land:** `test(photos): the end-to-end photo pool tracer and the store conformance suite (4 I2)`.
+
+## I1: retire the old shapes (lane integrate, after I2; re-cut in run 2)
+
+**Owned:** every file naming a retiring shape, except files other lanes already moved off them (K4's console grep, FX2's demo files) and I2's three tests; `central/migrations/081_retire_snapshots.sql`.
+
+**Frozen page (the tripwire):**
+- **`media/models.py`:**
+  - `SourceQuery`, `SourceSpec`, `SourcePreviewQuery`, `PreviewMember`, `StoredPreviewMember`, `SourcePreviewResult`, `SourcePreview`, `ConnectionConfig`, `MediaLimits`, `OriginalAsset`, `Diagnostic`, `RefreshCounts`, `RefreshResult`, `MAX_SOURCE_TAGS` and `PREVIEW_SHOWN` are deleted;
+  - the re-exports go, and importers use `central.photo_library.model`;
+  - what is left (`MediaError`, `DownloadedOriginal` if still used, `Kind`, `Status`) stays.
+- **`media/immich.py`:** the old constructor and the old methods, `_walk`, `_head`, `_original` and `_SUPPORTED_VERSIONS` are deleted.
+- **`media/prepare.py`:** the old `prepare` (from an original) goes; `prepare_rendition` stays.
+- **`media/worker.py`:** the `OriginalAsset` arm is deleted, and with it the `asset_superseded` code (which makes `tests/test_console_sources.py::test_every_served_refusal_code_has_one_owner` green again).
+- **`central/media_repository.py`:**
+  - `configure_source`, `request_refresh`, the source-preview methods, `servable_thumbnail`/`ServableThumbnail`, `begin_*_refresh`, `publish_refresh`, `refresh_catalog_in`, `_current_candidates`, the library-tag methods, `refresh_revisions`, `max_assets`/`metadata_capacity`, `worker_status`'s `connection_ids` are deleted;
+  - `JobLease.asset: LibraryAsset`; `lease_asset_of` loses its `OriginalAsset` arm (it validates `LibraryAsset`, or is inlined if one caller remains);
+  - `configure_named_in` goes, and `SourceNameService` keeps the one home for writing the three Source-name tables.
+- **`central/media_store.py`:** the `OriginalAsset` integrity branch goes (P2's sha256 rule stays).
+- **`central/catalog.py`:** `CatalogSnapshot` is deleted.
+- **`central/app.py` and `central/source_names.py`:** the routes the route table marks "removed" go, and so do `NamedSourceWrite` and `SourceNameService.put` (a rename is a draft saved under a new name). `SourceNameService.delete` and DELETE `/v1/operator/source-names/{name}` stay. The `tags` key of the tag answer goes (`items` only; K2's picker reads `items`).
+- **Migration 081**, in this order:
+  1. *Hand-placed pre-4 photos (F-15).* Each `asset_revisions` row whose metadata lacks `upstream_id` and that a `media_references` row pins is rewritten as a `LibraryAsset`: `connection_ref` = `connection_id`, `upstream_id`, `revision` = `original_sha1`, `kind`, `taken_at` = `captured_at`, `width`/`height` = the upright size (`raw_height`/`raw_width` swapped when `orientation` ≥ 5), `duration`; and the row's `connection_ref` and `upstream_id` columns are set. Its `asset_id` is unchanged (T0 case 8: `asset_identity(c, u, sha1)` is the pre-4 identity).
+  2. DROP `catalog_snapshots`, `source_members`, `source_previews`, `library_tags`.
+  3. `ALTER TABLE media_sources DROP COLUMN spec, DROP COLUMN status, DROP COLUMN diagnostics, DROP COLUMN counts, DROP COLUMN next_refresh, DROP COLUMN last_success, DROP COLUMN generation, DROP COLUMN refresh_started, DROP COLUMN refresh_lease_until, DROP COLUMN refresh_requested_revision, DROP COLUMN refresh_completed_revision` (keep `source_ref`, `query`, `pool_key`, `refresh_active`).
+  4. `ALTER TABLE media_settings DROP COLUMN connection_ids`.
+  5. `DELETE FROM media_jobs`, then the `asset_revisions` rows whose metadata still lacks `upstream_id` (pre-4 rows nobody pins).
+- **Tests.** Every test that seeds through a deleted shape (`publish_refresh`, `SourceSpec`, `RefreshResult`, `OriginalAsset`, source previews, `stored_member`/`sample` if they name them), browser tests included, seeds through the pool store's worker side instead.
+- **Grep proof.** The grep for each deleted symbol over `central media scripts tests contracts` is empty, except the migrations.
+
+**Acceptance:**
+- I2's three test files stay green with the old shapes gone.
+- `tests/test_migration_*` style test for 081 (db): a database seeded with a pinned pre-4 photo and an unpinned one → the pinned one is a `LibraryAsset` with the same `asset_id` and an upright size; the unpinned one is gone; `media_sources` keeps its four columns.
 - The whole unit, DB, node-bus, browser and photo-sources tiers, and the software e2e, are green in CI with the old shapes gone.
 
 **Mutation probes:**
 - Keep `catalog_snapshots` read in coordination → the grep proof fails.
-- Restart the worker in case 1 → it is no longer the "no restart" proof (asserted by the worker's pid unchanged).
-- Assign from a stale pool after a sweep → tracer case 3 fails.
+- Skip the orientation swap in 081 step 1 → the migration test's upright size fails.
 
-**Land:** `refactor(photos): retire the snapshot, preview and connections-file shapes; the end-to-end photo pool tracer (4 I1)`.
+**Land:** `refactor(photos): retire the snapshot, preview and connections-file shapes (4 I1)`.
+
+## X2 (run 2): the docs read against the landed code (lane integrate, last)
+
+**Owned:** X1's list, plus `README.md`, `docs/module-wall-demo.md`, `docs/module-authored-media.md`, `docs/module-media-preparation.md`, `docs/module-central-cache.md`, `docs/validation.md`, `docs/design-language.md` (rows A3 and D2).
+
+**Design:** X1's page; the docs lane's findings and "Found at the re-cut" in "Run 2"; F-13 to F-18.
+
+**Frozen page.** Every statement is checked against the code as landed, not the slice pages:
+- task names (`photo_wall.media.refresh` is the 30-second tick; `photo_wall.library.check_connection`, `photo_wall.library.check_pool`, `photo_wall.media.rescue`);
+- stacks through the timeline (module-media.md's outcome table, C9);
+- the staleness rule and the media queue's rescue (module-media-worker.md, runbook);
+- Settings counts include archived photos (F-13);
+- the console's address and sentences as K1-K4 landed them (Settings › Photo library, the Source editor, Scene editor › What, Show now's Saved Sources, "Why nothing new?");
+- the CI job shape (`photo-sources`; module-immich-fixture.md: `--publish`, the published-state files, no `verify` role, no `--page-size`);
+- README's "Connect a real media library (Immich)" and console paragraph; module-wall-demo.md's roles and the connection pasted through the API; module-authored-media.md (pools, not snapshots; no candidate cap; F-15); module-media-preparation.md (the edited rendition, preview or full size); module-central-cache.md (servable = a row of a wanted pool); design-language.md D2 (archived, hidden and locked are one fixed line, C5; screenshots excluded by default); validation.md's links;
+- the roadmap's Built and Not built for 4; no Developed row (F-7).
+
+Every rule has one home, and the others link to it. `python3 scripts/check_docs.py` is green.
+
+**Land:** `docs: real photo sources from Immich, read against the landed code (4 X2)`.
 
 ## Outcome (filled by the run's closing step)
 
 | Slice | Outcome | sha |
 |---|---|---|
-| F0 | landed | (the freeze commit and this ledger's commit) |
+| F0 | landed | c9f88cc, 5188bc4 |
+| T0 | landed (run 1) | 1a7cc4c, de67b11 |
+| C1 | landed (run 1) | 018b59f |
+| C2 | landed (run 1; case 3's `updated_at` moves to S1) | a48dd0a |
+| M1 | landed (run 1) | f882e85 |
+| M2 | landed (run 1) | f70ff43 |
+| M3 | landed (run 1; publish gap moves to P2) | bfbefc8 |
+| FX1 | landed (run 1) | 8a2b00c |
+| FX2 | stopped (E-P4-FX2-1); re-cut into lane seams | |
+| X1 | drafts landed (run 1); final pass is X2 | 4c5f68c, 749e776, 7aacda5 |
