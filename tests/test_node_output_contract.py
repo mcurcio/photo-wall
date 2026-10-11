@@ -46,8 +46,9 @@ REPORT = OutputReport(
     (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF), PowerMethod.DDC_CI, 3, PowerResult.CONFIRMED,
     InForce("req-7", 120))
 ATTEMPT = PowerAttempt("HDMI-A-1", 3, "req-7", Power.OFF, PowerMethod.DDC_CI, PowerResult.CONFIRMED, 840)
+# 1c F0: the additive picture fields encode as null until INTEGRATE makes them required.
 CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"output_id":"HDMI-A-1",'
-             b'"power":[{"for_seconds":300,"power":"off","reason":"console-test","request_id":"req-7"},'
+             b'"picture":null,"picture_change":null,"power":[{"for_seconds":300,"power":"off","reason":"console-test","request_id":"req-7"},'
              b'{"for_seconds":null,"power":"on","reason":"standing","request_id":"standing"}],'
              b'"switch_input_on_power_on":true}')
 

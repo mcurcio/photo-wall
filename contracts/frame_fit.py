@@ -1,0 +1,78 @@
+"""The Frame fit's shared geometry (roadmap 1c; run ledger .claude/runs/display-1c.md): stdlib only.
+
+Both sides that must agree on a Frame's picture import this one module: the Player draws the
+picture through it (player/geometry.py builds its one matrix on `cover_rectangle`), and Central
+writes the Frame profile's shape from it at Position Save in Cover (central/displays/model.py
+`cover_profile`). Display Host never imports it (pyproject.toml: "Display Host never computes a
+Frame's geometry"): the host never implements a second transform.
+
+Rules this module owns (one home each):
+- **Corners are convex and clockwise** (`convex_clockwise`): the four corners, top-left,
+  top-right, bottom-right, bottom-left in fractions of the output (origin top-left), turn the
+  same way at every corner with a cross product above `CONVEX_EPSILON`, so a folded or
+  degenerate quad is refused. Both fits check it; contracts/models.py's `Calibration` too.
+- **The cover rectangle** (`cover_rectangle`): in Cover, the Frame's picture is the tightest
+  unskewed rectangle, turned `rotation` degrees clockwise, that holds every corner. Worked in
+  output PIXELS, so a non-square output never skews it: the picture's axes are
+  u = (cos r, sin r) and v = (-sin r, cos r) in y-down pixels; its width is the spread of the
+  corners projected on u, its height their spread on v, and its centre is the midpoint of both
+  spreads (never the corners' average).
+- **Orientation** (setting #96) follows the cover rectangle's shape: landscape when it is at
+  least as wide as tall, so a square (45 degrees on a square opening) reads landscape and
+  nothing jumps at 45 degrees.
+
+Rules it does NOT own: the per-Frame and per-Output masks and the final pass (the Player,
+player/geometry.py and player/native.py); which fit a Frame uses and where its profile is stored
+(Central).
+"""
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Final
+
+Point = tuple[float, float]                             # (x, y), fractions of the output, origin top-left
+Corners = tuple[Point, Point, Point, Point]             # top-left, top-right, bottom-right, bottom-left
+OutputSize = tuple[int, int]                            # (width, height) in output pixels, each >= 1
+
+FULL_SCREEN: Final[Corners] = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+CONVEX_EPSILON: Final = 1e-6                            # the smallest cross product of a usable corner
+
+
+def convex_clockwise(corners: Sequence[Sequence[float]]) -> bool:
+    """Whether the four corners turn clockwise (in y-down coordinates) at every corner with a cross
+    product above CONVEX_EPSILON. Pure; the one copy of the rule (moved verbatim from
+    contracts.models.Calibration's validator)."""
+    cross = []
+    for i, a in enumerate(corners):
+        b, c = corners[(i + 1) % 4], corners[(i + 2) % 4]
+        cross.append((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]))
+    return min(cross) > CONVEX_EPSILON
+
+
+@dataclass(frozen=True)
+class CoverRectangle:
+    """The Frame's picture in Cover, in output pixels: its centre, its width along the picture's u
+    axis, its height along v, and the clockwise turn `rotation` in degrees, 0 <= rotation < 360."""
+    centre_x: float
+    centre_y: float
+    width: float
+    height: float
+    rotation: float
+
+    @property
+    def landscape(self) -> bool:
+        """Orientation (#96): at least as wide as tall (a square reads landscape)."""
+        raise NotImplementedError
+
+
+def cover_rectangle(corners: Corners, rotation: float, output: OutputSize) -> CoverRectangle:
+    """The tightest rectangle turned `rotation` degrees clockwise that holds every corner, worked in
+    output pixels (corners scaled by `output`). Pure. ValueError("cover_rotation") unless
+    0 <= rotation < 360 and finite; ValueError("cover_output") unless both sizes >= 1;
+    ValueError("cover_corners") unless `convex_clockwise(corners)`."""
+    raise NotImplementedError
+
+
+__all__ = ["CONVEX_EPSILON", "FULL_SCREEN", "Corners", "CoverRectangle", "OutputSize", "Point",
+           "convex_clockwise", "cover_rectangle"]

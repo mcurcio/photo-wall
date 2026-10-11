@@ -1,13 +1,31 @@
-"""Scalar calibration/SDR reference. Production pixels are processed by shaders."""
+"""Scalar calibration/SDR reference. Production pixels are processed by shaders.
+
+Roadmap 1c (run ledger .claude/runs/display-1c.md, slice R1) adds the Frame fit and the final
+pass, each stated once here and mirrored by player/native.py's shaders:
+- **One matrix per fit** (`output_to_picture`): output fractions -> the picture's unit square.
+  Corners: the inverse perspective onto the corners with the quarter turn folded in. Cover: the
+  inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle, worked
+  in output pixels so a non-square output never skews it.
+- **Per-Frame mask** (`inside_opening`): a Frame draws nothing outside its own opening (owner
+  2026-10-10 q2: outside the Frame is "someone else's territory"), in the position pass.
+- **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated
+  order, then the per-Output mask LAST, so black stays black outside every opening whatever
+  the picture settings.
+- **Photo fit** (`photo_rect`): each photo's source rectangle, centred cover of the Frame's
+  aspect (today's `cover_rect`, renamed for Photo fit #48/#102; trim removed, owner q3).
+"""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
 
-from contracts.models import Calibration
+from contracts.frame_fit import Corners, OutputSize
+from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.node_frame import PictureOperations
 
 Matrix = tuple[float, float, float, float, float, float, float, float, float]
+Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
 
 
 def _solve(rows: list[list[float]]) -> tuple[float, ...]:
@@ -128,3 +146,52 @@ def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], flo
         alpha = rgba[3]*opacity
         rgb = [decode_channel(rgba[i], video)*alpha + rgb[i]*(1-alpha) for i in range(3)]
     return (*(encode_srgb(v*gain) for v in rgb), 1.0)
+
+
+# -- roadmap 1c, slice R1 (frozen; bodies land with R1) -----------------------------------------
+
+def fit_of(calibration: Calibration) -> CornersFit | CoverFit:
+    """The fit a Position draws: `calibration.fit`, or until INTEGRATE, a record without one read
+    as CornersFit(corners, rotation) (exactly today's picture). INTEGRATE deletes the second arm."""
+    raise NotImplementedError
+
+
+def output_to_picture(fit: CornersFit | CoverFit, output: OutputSize) -> Matrix:
+    """The one matrix of a fit: output fractions (x, y) -> the picture's unit square (u, v), origin
+    top-left. Pure. ValueError("singular homography") for a degenerate fit."""
+    raise NotImplementedError
+
+
+def inside_opening(corners: Corners, x: float, y: float) -> bool:
+    """Whether output point (x, y) lies in the convex opening (edges included): the per-Frame mask,
+    by half-planes. Pure."""
+    raise NotImplementedError
+
+
+def photo_rect(frame_aspect: float, source_width: int, source_height: int) -> tuple[float, float, float, float]:
+    """The photo's source UV rectangle (left, top, right, bottom) for centred cover of
+    `frame_aspect` (Photo fit). Pure; ValueError as `cover_rect` for bad sizes."""
+    raise NotImplementedError
+
+
+def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, frame_aspect: float,
+                      source_width: int, source_height: int) -> tuple[float, float] | None:
+    """The source UV one Frame samples at output point (x, y); None outside its opening or its
+    picture. Replaces `source_uv`."""
+    raise NotImplementedError
+
+
+def final_pixel(linear: Linear, operations: PictureOperations, *, inside: bool) -> tuple[float, float, float, float]:
+    """One output pixel's final pass: white balance, light factor (linear light), clamp, sRGB
+    encode, contrast about 0.5, gamma exponent, clamp, then the per-Output mask (opaque black when
+    not `inside` any Frame's opening). Pure."""
+    raise NotImplementedError
+
+
+def output_pixel(x: float, y: float, frames: Sequence[tuple[CornersFit | CoverFit, Linear]],
+                 operations: PictureOperations, output: OutputSize) -> tuple[float, float, float, float]:
+    """The reference for one Output carrying several Frames, each drawn as one flat linear colour:
+    the colour of the last Frame whose opening holds (x, y), black where none does, through
+    `final_pixel` with `inside` = some opening holds it. Pure; the two-Frames test's oracle."""
+    raise NotImplementedError
+

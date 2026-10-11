@@ -6,6 +6,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+from contracts.frame_fit import FULL_SCREEN, convex_clockwise
+
 # The API identifier rule (path parameters, Scene/Program/Source ids). The console's
 # IDENTIFIER_PATTERN (authoring.js) is pinned equal to it by a test.
 IDENTIFIER_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"
@@ -32,14 +34,59 @@ class FrameProfile(Model):
     video: bool = True
 
 
+Fraction = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+FitPoint = tuple[Fraction, Fraction]
+FitCorners = tuple[FitPoint, FitPoint, FitPoint, FitPoint]   # TL, TR, BR, BL; fractions of the output
+
+
+class CornersFit(Model):
+    """Frame fit Corners (roadmap 1c; an explicit opt-in, owner 2026-10-10 q1): the picture is
+    stretched exactly onto the four corners (a perspective transform), and a quarter turn picks
+    which corner edge is the picture's top."""
+    mode: Literal["corners"] = "corners"
+    corners: FitCorners = FULL_SCREEN
+    rotation: Literal[0, 90, 180, 270] = 0
+
+    @model_validator(mode="after")
+    def convex(self) -> Self:
+        if not convex_clockwise(self.corners):
+            raise ValueError("corners must form a nondegenerate ordered convex aperture")
+        return self
+
+
+class CoverFit(Model):
+    """Frame fit Cover (roadmap 1c; the default, owner 2026-10-10 q1): the four corners are the
+    opening; the picture is the unskewed rectangle turned `rotation` degrees clockwise that holds
+    every corner (contracts/frame_fit.py `cover_rectangle`), and nothing is drawn outside the
+    opening (owner q2: "Black/nothing")."""
+    mode: Literal["cover"] = "cover"
+    corners: FitCorners = FULL_SCREEN
+    rotation: float = Field(default=0, ge=0, lt=360, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def convex(self) -> Self:
+        if not convex_clockwise(self.corners):
+            raise ValueError("corners must form a nondegenerate ordered convex aperture")
+        return self
+
+
+FrameFit = Annotated[CornersFit | CoverFit, Field(discriminator="mode")]
+
+
 class Calibration(Model):
-    """Physical Frame geometry remains in registry; these values map output pixels.
+    """A Frame's Position (the console's word): how its picture sits on the output.
+
+    1c (run ledger .claude/runs/display-1c.md) is additive here until its INTEGRATE slice: `fit`
+    is the new truth; `rotation`, `corners`, `crop` and `gain` are retiring and, when `fit` is
+    set, must keep their defaults (one truth per value, checked at construction). INTEGRATE
+    deletes them and makes `fit` required. Trim (`crop`) is gone in 1c (owner 2026-10-10 q3) and
+    brightness (`gain`) moves to the Display's picture settings.
 
     Corner order: top-left, top-right, bottom-right, bottom-left; normalized output.
-    Renderer applies crop/layout before this projective transform and gain.
     """
 
     revision: int = Field(default=1, ge=1)
+    fit: FrameFit | None = None
     rotation: Literal[0, 90, 180, 270] = 0
     corners: tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] = (
         (0, 0), (1, 0), (1, 1), (0, 1)
@@ -55,13 +102,21 @@ class Calibration(Model):
         if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
             raise ValueError("crop must describe a nonempty normalized rectangle")
         # Consistently convex clockwise in screen coordinates; excludes folded/degenerate quads.
-        cross = []
-        for i, a in enumerate(self.corners):
-            b, c = self.corners[(i + 1) % 4], self.corners[(i + 2) % 4]
-            cross.append((b[0]-a[0])*(c[1]-b[1]) - (b[1]-a[1])*(c[0]-b[0]))
-        if min(cross) <= 1e-6:
+        if not convex_clockwise(self.corners):
             raise ValueError("corners must form a nondegenerate ordered convex aperture")
+        if self.fit is not None and (self.rotation, tuple(map(tuple, self.corners)), self.crop, self.gain) != (
+                0, FULL_SCREEN, (0, 0, 1, 1), 1):
+            raise ValueError("calibration_retiring_fields_with_fit")
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_fit(self, handler):
+        # Until INTEGRATE, a record with no fit serializes byte-identically to before 1c (witness
+        # tags, trial hashes and stored JSON unchanged).
+        value = handler(self)
+        if self.fit is None:
+            value.pop("fit", None)
+        return value
 
 
 class OutputBinding(Model):
