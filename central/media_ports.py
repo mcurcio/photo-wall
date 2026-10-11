@@ -12,8 +12,9 @@ from typing import Any, Protocol
 
 from central.catalog import Candidate, SourcePool
 from central.planner import AcquisitionRequest, MeasureRequest
-from central.wall_plan.fit import DEFAULT_CROP_LIMIT
-from contracts.models import FrameProfile, Variant
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
+from contracts.models import Variant
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +64,8 @@ class MediaApplication(Protocol):
     def media_read(self) -> dict: ...
 
     def source_candidates(
-        self, source_ref: str, *, profile: FrameProfile | None = None,
-        crop_limit: float = DEFAULT_CROP_LIMIT,
+        self, source_ref: str, *, target: FitTarget | None = None,
+        crop_limit: float | None = None, settings: FitSettings,
     ) -> dict: ...
 
     def author_authored_candidates(

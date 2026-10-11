@@ -6,7 +6,8 @@ from support.key_content_builders import measured
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene
-from central.wall_plan.fit import DEFAULT_CROP_LIMIT
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import FrameProfile, OutputBinding, Plan, Variant
@@ -52,10 +53,17 @@ def runtime(*, cycle=10, contributions=None, children=(), order="newest_first"):
     return instance
 
 
+def full_screen(bindings) -> dict:
+    """Each bound Frame full screen on a Display of its profile's size (its Frame output)."""
+    return {item.frame_id: (item.profile.width_px, item.profile.height_px)
+            for items in bindings.values() for item in items}
+
+
 def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
             authored=None, locks=None, limits=None):
+    bindings = bindings or {"player-one": (binding(),)}
     options = dict(
-        bindings_by_player=bindings or {"player-one": (binding(),)},
+        bindings_by_player=bindings, settings=FitSettings(), frame_outputs=full_screen(bindings),
         source_pools=pools if pools is not None else {
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         },
@@ -107,8 +115,10 @@ def test_original_eligibility_precedes_derivative_dimensions(kind, width, height
     asset = candidate(kind=kind, width=width, height=height,
                       variant_width=3840, variant_height=2160)
     profile = binding(diagonal=diagonal, video=video).profile
-    assert eligible(asset, profile, DEFAULT_CROP_LIMIT) is expected
-    assert eligible(asset, profile, 0.5) is (expected or (width, height) == (2000, 2000))
+    target, house = FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px)), \
+        FitSettings()
+    assert eligible(asset, target, house.crop_limit, house) is expected
+    assert eligible(asset, target, 0.5, house) is (expected or (width, height) == (2000, 2000))
 
 
 def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_stays_on_role():
@@ -185,9 +195,10 @@ def test_a_pool_of_fifty_thousand_photos_on_four_frames_plans_an_hour_with_no_bu
     photos = [Candidate(asset_id=f"photo-{n}", kind="image", original_width=1080,
                         original_height=1920, captured_at=n, analysis=shared)
               for n in range(50_000)]
+    bindings = {"player-one": tuple(binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))}
     result = project(
-        instance, 0, bindings_by_player={"player-one": tuple(
-            binding(frame, f"hdmi-{n}") for n, frame in enumerate(frames))},
+        instance, 0, bindings_by_player=bindings, settings=FitSettings(),
+        frame_outputs=full_screen(bindings),
         source_pools={"holiday:1": pool("holiday:1", *photos)}, authored_candidates={},
         locked_assignments={}, history=WallHistory(), horizon_seconds=300, plan_seconds=3600)
     assert layers(result) == ()

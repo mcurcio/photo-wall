@@ -1379,7 +1379,8 @@ def test_every_demo_upload_fills_every_demo_frame(project):
     limit, has fewer pixels than the Frame, or cuts its key content. Every demo image, measured
     as the worker measures it (no faces: the fixture's machine learning is off), and the video
     fill every demo Frame at the demo Scene's crop limit, so the wall's baseline shows both."""
-    from central.wall_plan.fit import Fits, judge, shape_fit
+    from central.wall_plan.fit import Fits, FitTarget, judge, shape_fit
+    from central.wall_plan.fit_settings import FitSettings
     from contracts.models import FrameProfile
     from media.key_content import measure
     from scripts.demo_wall import (
@@ -1391,8 +1392,11 @@ def test_every_demo_upload_fills_every_demo_frame(project):
     from scripts.immich_actions import synthetic_image
 
     profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
+    # Full screen on a Display of the profile's size: the largest Frame output it can have.
+    target, house = FitTarget(profile=profile,
+                              output_px=(profile.width_px, profile.height_px)), FitSettings()
     for label, (size, _) in DEMO_IMAGES.items():
         key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"))
-        verdict = judge("image", *size, key, profile, DEMO_CROP_LIMIT)
+        verdict = judge("image", *size, key, target, DEMO_CROP_LIMIT, house)
         assert isinstance(verdict, Fits), (label, verdict)
-    assert shape_fit("video", *DEMO_VIDEO_SIZE, profile, DEMO_CROP_LIMIT) is None
+    assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house) is None

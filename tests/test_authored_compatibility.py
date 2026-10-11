@@ -9,7 +9,16 @@ from test_authored_media import RECIPE, asset, setup_source
 from central.coordination import Coordinator
 from central.registry import FrameCreate, RegistryError
 from central.runtime import Child, Contribution, Scene
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_settings import FitSettings
 from contracts.models import FrameProfile, Variant
+
+HOUSE = FitSettings()
+
+
+def full_screen(profile: FrameProfile) -> FitTarget:
+    """A Frame full screen on a Display of its profile's size (its Frame output, follow-ups B1)."""
+    return FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px))
 
 
 def add_frame(registry, frame_id: str, *, portrait: bool = True):
@@ -38,11 +47,13 @@ def test_source_candidates_filters_originals_with_the_planner_policy(registry):
     landscape_profile = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 
     assert [c["asset_id"] for c in repo.source_candidates(
-        spec.source_ref, profile=portrait_profile)["candidates"]] == [portrait.asset_id]
+        spec.source_ref, target=full_screen(portrait_profile), settings=HOUSE)["candidates"]] == [
+        portrait.asset_id]
     # Roadmap 5a: the ratio decides both ways, so a portrait photo does not fill a landscape
     # Frame either (owner, 2026-10-11: "a photo either fills the frame or it doesn't show").
     assert [c["asset_id"] for c in repo.source_candidates(
-        spec.source_ref, profile=landscape_profile)["candidates"]] == [landscape.asset_id]
+        spec.source_ref, target=full_screen(landscape_profile), settings=HOUSE)["candidates"]] == [
+        landscape.asset_id]
 
 
 def _prepared(conn, asset_id, *, state="ready", variant=None, failure=None, retry_at=0):
@@ -79,7 +90,8 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
         _prepared(conn, retrying.asset_id, state="retry", failure="asset_missing",
                   retry_at=registry.clock.utc() + 60)
 
-    served = repo.source_candidates(spec.source_ref, profile=portrait)["candidates"]
+    served = repo.source_candidates(spec.source_ref, target=full_screen(portrait),
+                                    settings=HOUSE)["candidates"]
     assert {c["asset_id"]: c["standing"] for c in served} == {
         usable.asset_id: "usable",
         wrong_shape.asset_id: "no_compatible_variant",
@@ -88,7 +100,8 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
         waiting.asset_id: "preparing",
     }
     # Without a frame there is no profile to stand against.
-    assert all("standing" not in c for c in repo.source_candidates(spec.source_ref)["candidates"])
+    assert all("standing" not in c
+               for c in repo.source_candidates(spec.source_ref, settings=HOUSE)["candidates"])
 
 
 def test_registry_reads_persistent_profiles_and_rejects_unknown_frames(registry):
@@ -190,8 +203,12 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
     """Roadmap 5a (slice W1): with a Frame, the route lists the photos the fit rule accepts at
     the given crop limit, or that pass on their size and are not measured yet, each with its
     `fit`, and counts every skipped photo by its reason; a crop limit outside 5-60 % answers
-    422. Owner, 2026-10-11: "It's about the ratio, not strict labels"."""
+    422. Owner, 2026-10-11: "It's about the ratio, not strict labels". Follow-ups B1: the
+    Frame's pixels are its Frame output (here full screen on the enrolled 1920 x 1080 Output);
+    before it is bound it has none and is judged by shape only."""
+    from support.position import save_position
     from test_authored_media import ADMIN, client_for
+    from test_registry import enroll
 
     wide = asset(1, width=3840, height=2160)
     tall = asset(2, width=2000, height=3000)          # 2:3 on 16:9 crops 62.5 %
@@ -206,6 +223,11 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
     with client_for(registry) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
         route = f"/v1/operator/sources/{spec.source_ref}/candidates"
+        unbound = client.get(route, params={"frame_id": "wide"}, headers=headers).json()
+        assert small.asset_id in {c["asset_id"] for c in unbound["candidates"]}
+        player, _, _ = enroll(registry)
+        registry.bind("wide", player["player_id"], "HDMI-A-1", expected_generation=0)
+        save_position(registry, "wide")
         answer = client.get(route, params={"frame_id": "wide"}, headers=headers).json()
         assert {c["asset_id"]: c["fit"] for c in answer["candidates"]} == {
             wide.asset_id: "fits", unmeasured.asset_id: "not_measured"}

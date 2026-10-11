@@ -24,10 +24,10 @@ from central.photo_library.model import LibraryAsset, PoolMember
 from central.planner import AcquisitionRequest, MeasureRequest, candidate_standing
 from central.registry import RegistryError
 from central.wall_plan.assignment import fit_of
-from central.wall_plan.fit import DEFAULT_CROP_LIMIT, DoesNotFit, FitRefusal
+from central.wall_plan.fit import DoesNotFit, FitRefusal, FitTarget
+from central.wall_plan.fit_settings import FitSettings
 from contracts.models import (
     Digest,
-    FrameProfile,
     Identifier,
     Instant,
     Model,
@@ -152,23 +152,25 @@ class MediaRepository:
             }))
         return tuple(hydrated)
 
-    def source_candidates(self, source_ref: str, *, profile: FrameProfile | None = None,
-                          crop_limit: float = DEFAULT_CROP_LIMIT) -> dict:
+    def source_candidates(self, source_ref: str, *, target: FitTarget | None = None,
+                          crop_limit: float | None = None, settings: FitSettings) -> dict:
         """A Source revision's whole pool as neutral candidates, newest first, with no limit
         (F-10); `ready` is whether the pool has a complete check.
 
-        With a Frame profile (roadmap 5a, slice W1): only the candidates the photo fit rule
-        accepts on it at `crop_limit`, or, not measured yet, that pass on their size alone
-        (central/wall_plan/assignment.py `fit_of`), each with the planner's `standing` for that
-        profile (`planner.candidate_standing`) and its `fit` ("fits" | "not_measured"); and
+        With a Frame `target` (roadmap 5a, slice W1; its Frame output, follow-ups B1): only the
+        candidates the photo fit rule accepts on it at `crop_limit` (None: the house crop limit,
+        `settings.crop_limit`) with `settings`, or, not measured yet, that pass on their size
+        alone (central/wall_plan/assignment.py `fit_of`), each with the planner's `standing` for
+        that Frame (`planner.candidate_standing`) and its `fit` ("fits" | "not_measured"); and
         `skipped`, how many it left out for each fit refusal (every one named, 0 included), plus
         `not_measured`, how many of those listed are not measured yet.
         """
+        limit = settings.crop_limit if crop_limit is None else crop_limit
         with self.transaction() as conn:
             pool = self.source_pools_in(conn, {source_ref}).get(source_ref)
             if pool is None:
                 raise RegistryError("source_not_found", 404)
-            if profile is None:
+            if target is None:
                 return {"source_ref": source_ref, "ready": pool.ready,
                         "count": len(pool.candidates),
                         "candidates": [candidate.model_dump(mode="json")
@@ -176,12 +178,12 @@ class MediaRepository:
             skipped = dict.fromkeys(get_args(FitRefusal), 0)
             listed = []
             for candidate in pool.candidates:
-                verdict = fit_of(candidate, profile, crop_limit)
+                verdict = fit_of(candidate, target, limit, settings)
                 if isinstance(verdict, DoesNotFit):
                     skipped[verdict.reason] += 1
                     continue
                 listed.append(candidate.model_dump(mode="json") | {
-                    "standing": candidate_standing(candidate, profile),
+                    "standing": candidate_standing(candidate, target, settings),
                     "fit": "not_measured" if verdict is None else "fits"})
             skipped["not_measured"] = sum(item["fit"] == "not_measured" for item in listed)
             return {"source_ref": source_ref, "ready": pool.ready, "count": len(listed),

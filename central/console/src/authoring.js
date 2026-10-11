@@ -285,7 +285,11 @@ export function buildSave(
   }));
   const scene = {
     scene_id: sceneId, revision, cycle_seconds: cycleSeconds, loop, contributions,
-    selection: { order, no_repeat_days: Number(noRepeatDays), crop_limit: Number(cropLimit) },
+    selection: {
+      order, no_repeat_days: Number(noRepeatDays),
+      // null: the Scene follows the house crop limit (Settings › Photo fit, follow-ups B1).
+      crop_limit: cropLimit === null || cropLimit === undefined ? null : Number(cropLimit),
+    },
   };
   if (ending !== "none") {
     const seconds = Number(endingSeconds);
@@ -329,7 +333,7 @@ export const SCENE_DEFAULTS = {
   "selection": {
     "order": "shuffle",
     "no_repeat_days": 7,
-    "crop_limit": 0.35
+    "crop_limit": null
   }
 };
 
@@ -351,8 +355,10 @@ export const CONTRIBUTION_DEFAULTS = {
  * between photos (#41); no ending (#62, #63: the catalogue's "dissolve 3 s" and "black" are
  * one choice in the built model and disagree, so the built behaviour stays until the owner
  * picks); 3 s once an ending is chosen; the last photo kept up (#64); Frames not held
- * together (#65); and the selection's, which are the Scene model's own
- * ({@link SCENE_DEFAULTS}`.selection`: shuffle, 7 days, 35 %).
+ * together (#65); and the selection's order and no-repeat, which are the Scene model's own
+ * ({@link SCENE_DEFAULTS}`.selection`: shuffle, 7 days). The crop limit starts at 35 %, the
+ * house default, written on the Scene: the model's default is null (the Scene follows the
+ * house crop limit, follow-ups B1), which the Scene editor offers from follow-ups C1 on.
  */
 export const SCENE_SETTING_DEFAULTS = Object.freeze({
   fadeSeconds: 1.5,
@@ -362,7 +368,7 @@ export const SCENE_SETTING_DEFAULTS = Object.freeze({
   keepTogether: false,
   order: SCENE_DEFAULTS.selection.order,
   noRepeatDays: SCENE_DEFAULTS.selection.no_repeat_days,
-  cropLimit: SCENE_DEFAULTS.selection.crop_limit,
+  cropLimit: 0.35,
 });
 
 export const UNAUTHORABLE_REASON =
@@ -457,7 +463,8 @@ export function editableDraft(scene) {
       || (draft.ending !== "none" && !inRange(draft.endingSeconds, SETTING_RANGES.endingSeconds))
       || !ORDERS.includes(draft.order)
       || !inRange(draft.noRepeatDays, SETTING_RANGES.noRepeatDays)
-      || !inRange(draft.cropLimit, SETTING_RANGES.cropLimit)) {
+      // null: the Scene follows the house crop limit (follow-ups B1), which it keeps on save.
+      || (draft.cropLimit !== null && !inRange(draft.cropLimit, SETTING_RANGES.cropLimit))) {
     return null;
   }
   const { body } = buildSave(draft.mode, { ...draft, sceneId: scene.scene_id });

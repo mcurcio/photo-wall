@@ -66,9 +66,14 @@ export function daysWords(days) {
   return value === 0 ? "Off" : value === 1 ? "1 day" : `${value} days`;
 }
 
-/** A crop limit (a fraction) in words: "35 %". */
+/**
+ * A crop limit (a fraction) in words: "35 %"; null (the Scene follows the house crop limit,
+ * follow-ups B1) is "House setting".
+ */
 export function cropWords(cropLimit) {
-  return `${cropPercent(cropLimit)} %`;
+  return cropLimit === null || cropLimit === undefined
+    ? "House setting"
+    : `${cropPercent(cropLimit)} %`;
 }
 
 /** The element a field's problem and "Change" focus. */

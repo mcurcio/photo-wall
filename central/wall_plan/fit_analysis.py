@@ -25,15 +25,34 @@ Frames within 1.5 s on the lane's machine, gated at 5 s by a test.
 """
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Final, Literal, Self
 
 from pydantic import Field, model_validator
 
 from central.photo_library.model import DraftRef
-from central.wall_plan.fit import FitRefusal, MediaKind
+from central.wall_plan.fit import (
+    FitRefusal,
+    Fits,
+    FitTarget,
+    MediaKind,
+    band,
+    crop_share,
+    judge,
+    shape_fit,
+)
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.key_content import KeyContent
-from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model, PhotoCrop
+from contracts.models import (
+    Calibration,
+    FrameProfile,
+    Identifier,
+    Instant,
+    Model,
+    PhotoCrop,
+    frame_output,
+)
+from contracts.photo_crop import CENTRED
 
 if TYPE_CHECKING:
     from central.wall_plan.ports import FitAnalysisReader
@@ -217,7 +236,148 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
     at tier "full" at most one `sample` call per judged Frame for the content tier plus one per
     refusal reason that has photos. AnalysisRefused for an unknown frame id in `frames` or
     `frame_drafts` ("frame_unknown"); the reader raises it for an unknown Source or draft."""
-    raise NotImplementedError
+    settings = request.settings or saved
+    crop_limit = settings.crop_limit if request.crop_limit is None else request.crop_limit
+    outputs = {output.frame_id: output for output in reader.frame_outputs()}
+    judged = sorted(set(outputs if request.frames is None else request.frames))
+    drafts = {draft.frame_id: draft for draft in request.frame_drafts}
+    if any(frame_id not in outputs for frame_id in (*judged, *drafts)):
+        raise AnalysisRefused("frame_unknown", 404)
+    if any(frame_id not in judged for frame_id in drafts):
+        raise AnalysisRefused("draft_frame_not_judged", 422)
+    sizes = reader.selection_sizes(request.selection)
+    samples = _Samples(reader, request.selection, request.seed, request.tier == "full")
+    frames: list[FrameFit] = []
+    taken: set[str] = set()
+    for frame_id in judged:
+        output, draft = outputs[frame_id], drafts.get(frame_id)
+        target = FitTarget(profile=output.profile, output_px=output.output_px) if draft is None \
+            else FitTarget(profile=draft.profile,
+                           output_px=frame_output(draft.profile, draft.calibration,
+                                                  output.display_px))
+        frame = _frame_fit(frame_id, target, output.display_px, draft is not None, sizes,
+                           crop_limit, settings, samples, taken)
+        if frame.lead is not None:
+            taken.add(frame.lead.asset_id)
+        frames.append(frame)
+    return FitAnalysis(
+        tier=request.tier, crop_limit=crop_limit, settings=settings,
+        photos=sum(group.photos for group in sizes.groups if group.kind == "image"),
+        videos=sum(group.photos for group in sizes.groups if group.kind == "video"),
+        waiting=sizes.waiting, left_out=sizes.left_out, reading=sizes.reading,
+        bins=_bins(sizes.groups), frames=tuple(frames), read_at=sizes.read_at)
+
+
+# The refusals each tier counts, in the fit rule's order (central/wall_plan/fit.py).
+_SHAPE_REFUSALS: Final[tuple[FitRefusal, ...]] = ("no_video_here", "beyond_crop_limit",
+                                                  "below_frame_pixels")
+_CONTENT_REFUSALS: Final[tuple[FitRefusal, ...]] = ("face_cut", "interest_cut")
+_Size = tuple[MediaKind, int, int]
+
+
+class _Samples:
+    """The sample reads of one analysis, each asked at most once for its sizes (two Frames that
+    refuse the same sizes share one read); none at tier "shape"."""
+
+    def __init__(self, reader: FitAnalysisReader, selection: FitSelection, seed: int,
+                 full: bool) -> None:
+        self.reader, self.selection, self.seed, self.full = reader, selection, seed, full
+        self._read: dict[tuple[frozenset[_Size], int, bool], tuple[SamplePhoto, ...]] = {}
+
+    def of(self, sizes: frozenset[_Size], *, limit: int,
+           measured_only: bool) -> tuple[SamplePhoto, ...]:
+        if not self.full or not sizes:
+            return ()
+        key = (sizes, limit, measured_only)
+        if key not in self._read:
+            self._read[key] = self.reader.sample(self.selection, sizes, seed=self.seed,
+                                                 limit=limit, measured_only=measured_only)
+        return self._read[key]
+
+
+def _frame_fit(frame_id: str, target: FitTarget, display_px: tuple[int, int] | None,
+               draft: bool, sizes: SelectionSizes, crop_limit: float, settings: FitSettings,
+               samples: _Samples, taken: set[str]) -> FrameFit:
+    """One Frame's answer: the shape tier over every group, then (tier "full") the content tier
+    over a seeded sample of the measured photos that pass it."""
+    passing: set[_Size] = set()
+    refused: dict[FitRefusal, set[_Size]] = {reason: set() for reason in _SHAPE_REFUSALS}
+    counts: dict[FitRefusal, int] = dict.fromkeys(_SHAPE_REFUSALS, 0)
+    fit_by_shape = measured = 0
+    for group in sizes.groups:
+        size = (group.kind, group.width, group.height)
+        refusal = shape_fit(group.kind, group.width, group.height, target, crop_limit, settings)
+        if refusal is None:
+            passing.add(size)
+            fit_by_shape += group.photos
+            measured += group.measured
+        else:
+            refused[refusal.reason].add(size)
+            counts[refusal.reason] += group.photos
+    by_shape = tuple(RefusalCount(
+        reason=reason, photos=counts[reason],
+        samples=tuple(_sample(photo, None) for photo in samples.of(
+            frozenset(refused[reason]), limit=SAMPLES, measured_only=False)))
+        for reason in _SHAPE_REFUSALS)
+    judged = samples.of(frozenset(passing), limit=CONTENT_SAMPLE, measured_only=True)
+    fitting: list[FitSample] = []
+    by_content: dict[FitRefusal, list[FitSample]] = {reason: [] for reason in _CONTENT_REFUSALS}
+    for photo in judged:
+        verdict = judge(photo.kind, photo.width, photo.height, photo.key, target, crop_limit,
+                        settings)
+        if isinstance(verdict, Fits):
+            fitting.append(_sample(photo, verdict.crop))
+        else:   # shape and size passed, so the refusal is a content one
+            by_content[verdict.reason].append(_sample(photo, None))
+    lead = next((sample for sample in fitting if sample.asset_id not in taken), None)
+    return FrameFit(
+        frame_id=frame_id, aspect=target.profile.width_px / target.profile.height_px,
+        output_px=target.output_px, display_px=display_px, draft=draft,
+        band=band(target.profile.width_px / target.profile.height_px, crop_limit),
+        photos=sum(group.photos for group in sizes.groups), fit_by_shape=fit_by_shape,
+        refused_by_shape=by_shape, measured=measured,
+        nearest_crop_limit=None if fit_by_shape else _nearest_crop_limit(
+            sizes.groups, target, settings),
+        checked=len(judged), fit_checked=len(fitting),
+        refused_by_content=tuple(RefusalCount(reason=reason, photos=len(found),
+                                              samples=tuple(found[:SAMPLES]))
+                                 for reason, found in by_content.items()),
+        lead=lead, fitting=tuple(fitting[:SAMPLES]))
+
+
+def _nearest_crop_limit(groups: tuple[SizeGroup, ...], target: FitTarget,
+                        settings: FitSettings) -> float | None:
+    """The smallest crop limit within FIT_SETTING_RANGES at which some group passes `shape_fit`
+    (each group's `crop_share`, raised to the range's floor); None when none does."""
+    low, high = FIT_SETTING_RANGES["crop_limit"]
+    found = [limit for group in groups
+             if (limit := max(low, crop_share(group.width, group.height, target.profile))) <= high
+             and shape_fit(group.kind, group.width, group.height, target, limit,
+                           settings) is None]
+    return min(found, default=None)
+
+
+def _sample(photo: SamplePhoto, crop: PhotoCrop | None) -> FitSample:
+    """A sample photo as the answer draws it: the fit rule's crop, or centred for a refusal."""
+    return FitSample(asset_id=photo.asset_id, kind=photo.kind, width=photo.width,
+                     height=photo.height, crop=CENTRED if crop is None else crop,
+                     thumbnail=f"/v1/operator/library/thumbnails/{photo.asset_id}")
+
+
+def _bins(groups: tuple[SizeGroup, ...]) -> tuple[RatioBin, ...]:
+    """The Shape map: RATIO_BIN_COUNT log-spaced bins of width / height over RATIO_RANGE, the
+    first and last also holding every ratio beyond them."""
+    low, high = RATIO_RANGE
+    span = math.log(high / low)
+    edges = [low * math.exp(span * index / RATIO_BIN_COUNT)
+             for index in range(RATIO_BIN_COUNT + 1)]
+    photos, videos = [0] * RATIO_BIN_COUNT, [0] * RATIO_BIN_COUNT
+    for group in groups:
+        place = math.floor(RATIO_BIN_COUNT * math.log(group.width / group.height / low) / span)
+        index = min(RATIO_BIN_COUNT - 1, max(0, place))
+        (photos if group.kind == "image" else videos)[index] += group.photos
+    return tuple(RatioBin(low=edges[index], high=edges[index + 1], photos=photos[index],
+                          videos=videos[index]) for index in range(RATIO_BIN_COUNT))
 
 
 __all__ = [

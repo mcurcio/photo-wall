@@ -22,6 +22,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from central.db import Database, TransactionClock
+from central.infra.photo_library_store import library_assets_in
 from central.media_queue import MediaTaskQueue
 from central.photo_library.model import LibraryAsset
 from central.registry import RegistryError
@@ -104,13 +105,10 @@ class PgKeyContent:
                    for asset_id in due)
 
     def asset_to_measure(self, asset_id: str) -> LibraryAsset | None:
-        """KeyContentWriter.asset_to_measure. The row's metadata is a LibraryAsset: the rule's
-        one home is central/media_repository.py `lease_asset_of` (central.infra cannot import
-        the repository, which builds this store), repeated here in one line."""
+        """KeyContentWriter.asset_to_measure: the revision joined to its Immich asset, through
+        the one read of a photo as a LibraryAsset (`library_assets_in`)."""
         with self.db.transaction() as conn:
-            row = conn.execute("SELECT metadata FROM asset_revisions WHERE asset_id=%s",
-                               (asset_id,)).fetchone()
-        return None if row is None else LibraryAsset.model_validate(row["metadata"])
+            return library_assets_in(conn, (asset_id,)).get(asset_id)
 
     def record_measured(self, asset_id: str, key: KeyContent) -> None:
         """KeyContentWriter.record_measured; nothing when the asset is gone. A photo's first

@@ -20,13 +20,14 @@ from typing import get_args
 
 import pytest
 
+from central.wall_plan.fit_settings import FIT_SETTING_RANGES
 from central.wall_plan.selection import (
-    MAX_CROP_LIMIT,
     MAX_NO_REPEAT_DAYS,
-    MIN_CROP_LIMIT,
     Order,
     SceneSelection,
 )
+
+MIN_CROP_LIMIT, MAX_CROP_LIMIT = FIT_SETTING_RANGES["crop_limit"]
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 
@@ -348,7 +349,7 @@ def test_flow_kit_and_scene_flow_shape():
         "mode": "live", "name": "", "idOverride": None, "sourceRefs": ["holiday:1"],
         "targets": ["lobby"], "selections": {}, "cycleSeconds": 20, "loop": True,
         "fadeSeconds": 0, "ending": "none", "endingSeconds": 3, "keepLastPhoto": True,
-        "keepTogether": False, "order": "shuffle", "noRepeatDays": 7, "cropLimit": 0.35,
+        "keepTogether": False, "order": "shuffle", "noRepeatDays": 7, "cropLimit": None,
         "revision": 3}
     assert out["seedMissing"] is None
     assert out["changed"] == ["Keep playing until the Program ends"]
@@ -411,7 +412,8 @@ def test_flow_kit_and_scene_flow_shape():
     back = {"order": "chronological", "noRepeatDays": 3, "cropLimit": 0.3}
     assert out["selectionBack"] == back
     assert out["selectionAuthoredBack"] == back
-    assert out["selectionMissing"] == {"order": "shuffle", "noRepeatDays": 7, "cropLimit": 0.35}
+    # Follow-ups B1: no crop limit of its own, the Scene follows the house value.
+    assert out["selectionMissing"] == {"order": "shuffle", "noRepeatDays": 7, "cropLimit": None}
     assert out["selectionEditable"] == [False, False, False, False, False, True, True]
     rule = "Don't repeat within must be a whole number of days from 0 to 365."
     assert out["noRepeatProblems"] == [[rule], [rule], [rule], [rule], [], []]

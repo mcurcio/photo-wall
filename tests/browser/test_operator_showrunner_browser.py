@@ -58,6 +58,7 @@ from operator_harness import (
 )
 from photo_seed import begin, connected, filled, in_pool, library_of, saved_source, step
 from playwright.sync_api import expect
+from psycopg.types.json import Jsonb
 from public_media import public_photo, publish_photo
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
@@ -168,6 +169,13 @@ def _seed(registry):
     """
     id_a, _key_a, _req_a = enroll(registry, count=1)
     id_b, _key_b, _req_b = enroll(registry, count=1)
+    # Follow-ups B1: the photo fit rule measures a photo against its Frame output (the Frame's
+    # picture on its Display), so the Displays here report PORTRAIT's own size and the small
+    # public photos fill the Frames drawn full screen on them.
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE outputs SET observation = observation || %s WHERE player_id = ANY(%s)",
+                     (Jsonb({"width_px": PORTRAIT.width_px, "height_px": PORTRAIT.height_px}),
+                      [id_a["player_id"], id_b["player_id"]]))
 
     registry.create_frame(FrameCreate(
         id=VALID_FRAME, surface_id="wall", x_mm=100, y_mm=100,

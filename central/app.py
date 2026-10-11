@@ -28,7 +28,14 @@ from central.execution_repository import PostgresExecutionRepository
 from central.fleet.leaf_bridge import mount_leaf_bridge
 from central.fleet.node_routes import mount_node_routes
 from central.fleet.node_sessions import NodeControlConfig
-from central.infra.display_store import PgDisplayCommands, PgDisplayQueries, PgPictureSessions
+from central.infra.display_store import (
+    PgDisplayCommands,
+    PgDisplayQueries,
+    PgPictureSessions,
+    frame_outputs_in,
+)
+from central.infra.fit_analysis_store import PgFitAnalysisReader
+from central.infra.fit_settings_store import PgFitSettings
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import InstallationInventory
 from central.library_routes import mount_library_routes
@@ -40,6 +47,7 @@ from central.media_store import MediaStore
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
+from central.photo_fit_routes import mount_photo_fit_routes
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
 from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
@@ -54,8 +62,9 @@ from central.registry import (
 from central.runtime import Program, RuntimeConflict, Scene, SceneInUse
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
-from central.wall_plan.fit import DEFAULT_CROP_LIMIT
-from central.wall_plan.selection import MAX_CROP_LIMIT, MIN_CROP_LIMIT
+from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit_analysis import analyse
+from central.wall_plan.fit_settings import FIT_SETTING_RANGES
 from contracts.central_identity import LOCATE_PATH, identity_body
 from contracts.models import (
     Identifier,
@@ -148,6 +157,11 @@ def create_app(
         DatabaseTransactionClock() if clock_injected is None else ProcessTransactionClock(clock_injected))
     media_repository = MediaRepository(db, clock, times=media_times, queue=media_queue)
     media_application: MediaApplication = media_repository
+    # Follow-ups B1: the photo fit settings' one store (the Planner, the authoring check, the
+    # candidates read, the settings routes and the fit analysis all read it).
+    fit_settings = PgFitSettings(db, times=media_times)
+    # Follow-ups B2: the one fit analysis read (every console moment asks it).
+    fit_analysis_reader = PgFitAnalysisReader(db, times=media_times)
     coordinator = Coordinator(
         db,
         clock,
@@ -156,6 +170,7 @@ def create_app(
             renewal_seconds=float(os.environ.get("PHOTO_WALL_RENEWAL_SECONDS", "30")),
         ),
         media=media_repository,
+        fit=fit_settings,
     )
     runtime_store = RuntimeStore(db, clock)
     operator_snapshot = OperatorSnapshotReader(
@@ -661,12 +676,20 @@ def create_app(
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(
         source_ref: Identifier, frame_id: Identifier | None = None,
-        crop_limit: float = Query(default=DEFAULT_CROP_LIMIT, ge=MIN_CROP_LIMIT,
-                                  le=MAX_CROP_LIMIT),
+        crop_limit: float | None = Query(default=None, ge=FIT_SETTING_RANGES["crop_limit"][0],
+                                         le=FIT_SETTING_RANGES["crop_limit"][1]),
     ):
-        profile = registry.frame_profile(frame_id) if frame_id is not None else None
-        return media_application.source_candidates(source_ref, profile=profile,
-                                                   crop_limit=crop_limit)
+        # Follow-ups B1: the Frame as the fit rule sees it (its Frame output), judged with the
+        # saved photo fit settings; no crop limit given is the house's.
+        target = None
+        if frame_id is not None:
+            profile = registry.frame_profile(frame_id)      # an unknown Frame: unknown_frame
+            with db.transaction() as conn:
+                outputs = {output.frame_id: output.output_px for output in frame_outputs_in(conn)}
+            target = FitTarget(profile=profile, output_px=outputs.get(frame_id))
+        return media_application.source_candidates(source_ref, target=target,
+                                                   crop_limit=crop_limit,
+                                                   settings=fit_settings.fit_settings())
 
     @app.post("/v1/operator/authored-candidates", dependencies=[Depends(admin)])
     def author_candidates(request: AuthoredCandidatesRequest):
@@ -728,6 +751,9 @@ def create_app(
 
     mount_photo_library_routes(app, admin=admin, queries=photo_library, commands=photo_library)
     mount_photo_source_routes(app, admin=admin, queries=photo_sources, commands=photo_sources)
+    mount_photo_fit_routes(
+        app, admin=admin, settings=fit_settings,
+        analysis=lambda request: analyse(request, fit_analysis_reader, fit_settings.fit_settings()))
     mount_library_routes(app, admin=admin, library=photo_library, content=content)
     mount_display_routes(app, admin=admin, queries=PgDisplayQueries(db), commands=PgDisplayCommands(db))
     pictures = PgPictureSessions(db)

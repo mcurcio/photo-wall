@@ -19,8 +19,8 @@ import { apiWrite } from "./apiWrite.js";
  *
  * @param {string} sourceRef
  * @param {string} frameId
- * @param {number} [cropLimit] the Scene's crop limit, a fraction (0.35, never
- *   35); Central's default when not given
+ * @param {number|null} [cropLimit] the Scene's crop limit, a fraction (0.35, never
+ *   35); the house crop limit when not given or null (the Scene follows it, follow-ups B1)
  * @returns {Promise<{ready: boolean, candidates: Array<object>,
  *            skipped: Record<string, number>}>} whether the Source's pool has a
  *   complete check, its candidates for this frame, and the skipped counts
@@ -31,7 +31,7 @@ export async function readCandidates(sourceRef, frameId, cropLimit) {
   // what the chooser's mutation probe attacks; so would dropping crop_limit,
   // which judges the Scene's photos at another limit than the Scene's.
   const query = new URLSearchParams({ frame_id: frameId });
-  if (cropLimit !== undefined) {
+  if (cropLimit !== undefined && cropLimit !== null) {
     query.set("crop_limit", String(cropLimit));
   }
   const result = await apiWrite(

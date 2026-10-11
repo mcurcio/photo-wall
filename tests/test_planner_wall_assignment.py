@@ -21,6 +21,7 @@ from support.key_content_builders import face, measured
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene
+from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
 from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
 from central.wall_plan.selection import SceneSelection
@@ -76,7 +77,8 @@ def scene(frames: dict[str, FrameSetup], *, cycle: float = 30, order="newest_fir
 def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float = 0,
          horizon: float = 300, plan_seconds: float = 3600, locks=(), authored=(),
          history: WallHistory = WallHistory(), limits: PlannerLimits = PlannerLimits(),
-         ) -> Projection:
+         fit: FitSettings = FitSettings()) -> Projection:
+    """Each Frame full screen on a Display of its profile's size (its Frame output)."""
     return project(
         instance, now,
         bindings_by_player={"player": tuple(OutputBinding(
@@ -86,7 +88,9 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         authored_candidates={candidate.asset_id: candidate for candidate in authored},
         locked_assignments={layer.assignment_id: layer for layer in locks},
         history=history, horizon_seconds=horizon, plan_seconds=plan_seconds,
-        max_clock_uncertainty=UNCERTAINTY, limits=limits)
+        max_clock_uncertainty=UNCERTAINTY, limits=limits, settings=fit,
+        frame_outputs={frame: (PROFILES[setup.shape].width_px, PROFILES[setup.shape].height_px)
+                       for frame, setup in frames.items()})
 
 
 def layers(projection: Projection) -> tuple[Layer, ...]:
