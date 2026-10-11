@@ -39,6 +39,7 @@ from central.photo_library.model import (
     LibraryCounts,
     LibraryPerson,
     LibraryTag,
+    OriginalFile,
     Place,
     UnexpectedAnswer,
     Unreachable,
@@ -424,21 +425,24 @@ class ImmichClient:
 
     async def search_page(self, query: LibraryQuery, window: TakenWindow,
                           after: KeysetPosition | None) -> SearchPage:
-        body = {**_filters(query, window), "withStacked": True, "withExif": False}
+        body = {**_filters(query, window), "withStacked": True}
         rows, position, over = await self._step(self._keyset(body, window, after))
         return SearchPage(items=tuple(self._item(row) for row in rows), next=position,
                           over_one_instant=over)
 
     async def exclusion_page(self, exclusion: ExclusionQuery,
                              after: KeysetPosition | None) -> IdsPage:
-        body = {**_exclusion_body(exclusion), "withExif": False}
+        body = _exclusion_body(exclusion)
         rows, position, _ = await self._step(self._keyset(body, TakenWindow(), after))
         return IdsPage(ids=tuple(_ref(row.get("id"), "search") for row in rows), next=position)
 
     async def _search(self, body: dict) -> tuple[list[dict], bool]:
-        """One `search/metadata` page 1: its rows and whether more match."""
+        """One `search/metadata` page 1: its rows and whether more match. Every search a check
+        makes asks `withExif` (follow-ups 2026-10-11, owner item 1: discovery reads each
+        original's facts), about 1 KB more per row and no extra request."""
         answer = _mapping(await self._answer("POST", "search/metadata", body={
-            **body, "size": self.library_limits.page_size, "page": 1, "order": "desc"},
+            **body, "withExif": True, "size": self.library_limits.page_size, "page": 1,
+            "order": "desc"},
             chosen=_names_chosen(body)), "search")
         assets = _mapping(answer.get("assets"), "search")
         rows = [_mapping(row, "search") for row in _array(assets.get("items"), "search")]
@@ -531,7 +535,8 @@ class ImmichClient:
                 taken_at=_instant(row.get("fileCreatedAt")),
                 checksum=_checksum(row.get("checksum")), is_edited=row.get("isEdited") is True,
                 updated_at=updated if isinstance(updated, str) else None,
-                width=width, height=height, duration=duration, stack_primary=primary)
+                width=width, height=height, duration=duration, stack_primary=primary,
+                original=_original(row))
         except (KeyError, ValueError, TypeError, MediaError, ValidationError, _Malformed):
             return SearchItem(upstream_id=upstream_id, problem="unreadable_answer")
         limits = self.library_limits
@@ -749,6 +754,11 @@ _WEB_IMAGES = frozenset({"image/jpeg", "image/jpg", "image/png", "image/webp", "
 _RENDITION_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "video/mp4",
                               "video/quicktime", "video/webm", "video/x-matroska"})
 _MAX_REDIRECTS = 3
+_MEDIA_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
+_ORIENTATIONS = frozenset("12345678")
+# The largest original side and byte size stored (`library_assets` INTEGER and BIGINT columns).
+_MAX_SIDE = 2**31 - 1
+_MAX_BYTES = 2**63 - 1
 # The narrowest window of upload times worth halving: below it one instant holds more than a
 # page, and the check is incomplete.
 _CREATED_RESOLUTION = 1e-3
@@ -900,6 +910,35 @@ def _month(value: object) -> str:
     if not isinstance(value, str) or not re.match(r"^[0-9]{4}-[0-9]{2}", value):
         raise _unexpected("timeline")
     return value[:7] + "-01"
+
+
+def _original(row: dict) -> OriginalFile | None:
+    """The original file a row describes (`originalMimeType` and `exifInfo`); None without
+    `exifInfo`, or when Immich said nothing usable. A malformed field is None, never the row's
+    problem. Immich sends the EXIF orientation as text ("1" to "8")."""
+    exif = row.get("exifInfo")
+    if not isinstance(exif, dict):
+        return None
+    media_type = row.get("originalMimeType")
+    media_type = media_type.lower() if isinstance(media_type, str) else None
+    if media_type is not None and (len(media_type) > 127
+                                   or not _MEDIA_TYPE.fullmatch(media_type)):
+        media_type = None
+    orientation = exif.get("orientation")
+    original = OriginalFile(
+        media_type=media_type, width=_positive(exif.get("exifImageWidth"), _MAX_SIDE),
+        height=_positive(exif.get("exifImageHeight"), _MAX_SIDE),
+        orientation=(int(orientation) if isinstance(orientation, str)
+                     and orientation in _ORIENTATIONS else None),
+        size_bytes=_positive(exif.get("fileSizeInByte"), _MAX_BYTES))
+    return None if original == OriginalFile() else original
+
+
+def _positive(value: object, limit: int) -> int | None:
+    """A JSON whole number in 1..`limit`; anything else is None."""
+    if type(value) is float and value.is_integer():
+        value = int(value)
+    return value if type(value) is int and 0 < value <= limit else None
 
 
 def _lands_on_preview(location: str) -> bool:

@@ -18,7 +18,7 @@ import binascii
 import hashlib
 import json
 import re
-from typing import Annotated, Literal, Self
+from typing import Annotated, Final, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -400,6 +400,11 @@ MediaTypeName = Annotated[str, Field(max_length=127,
                                      pattern=r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")]
 
 
+# EXIF orientations that turn the stored pixels a quarter turn (5 to 8: transpose, 90, transverse,
+# 270): the upright picture's width is the file's height.
+_QUARTER_TURNS: Final = frozenset({5, 6, 7, 8})
+
+
 class OriginalFile(Model):
     """The original file Immich keeps for a photo, as the check's search answer describes it
     (`search/metadata` with `withExif: true`: `originalMimeType` and `exifInfo`; follow-ups
@@ -418,8 +423,15 @@ class OriginalFile(Model):
 
     @property
     def upright(self) -> tuple[int, int] | None:
-        """The original's (width, height) as shown upright; None when either size is unknown."""
-        raise NotImplementedError
+        """The original's (width, height) as shown upright; None when either size is unknown.
+        Immich v2.5.6 reports the file's stored pixels (slice A3's real-Immich test,
+        tests/test_original_facts.py), so an EXIF orientation of 5 to 8 (a quarter turn) swaps
+        them."""
+        if self.width is None or self.height is None:
+            return None
+        if self.orientation in _QUARTER_TURNS:
+            return self.height, self.width
+        return self.width, self.height
 
 
 class MeasuredCopy(Model):
@@ -472,7 +484,7 @@ class LibraryAsset(Model):
         """Whether Immich shows this photo edited: its revision carries an edit-list suffix
         (`AssetRevision`, "<checksum>-<edits>"); an unedited photo's revision is its checksum.
         The one home of the test (slice A3); never stored."""
-        raise NotImplementedError
+        return "-" in self.revision
 
     @model_validator(mode="after")
     def _duration_for_videos(self) -> Self:

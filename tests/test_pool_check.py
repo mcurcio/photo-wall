@@ -7,6 +7,7 @@ from central.photo_library.model import (
     Exclusions,
     InPool,
     LeftOut,
+    OriginalFile,
     SourceQuery,
     TakenLast,
     Waiting,
@@ -89,6 +90,14 @@ def test_a_known_revision_is_reused_only_at_the_same_updated_at():
 def test_an_in_pool_entry_carries_immichs_updated_at_for_the_store():
     found, _ = entries([item(1), item(2, updated_at=None)])
     assert [entry.updated_at for entry in found] == ["2026-01-15T00:00:00.000Z", None]
+
+
+def test_an_in_pool_photo_keeps_the_originals_facts_its_row_brought():
+    """Follow-ups 2026-10-11, slice A3: discovery's original facts reach the stored asset."""
+    original = OriginalFile(media_type="image/heic", width=4032, height=3024, orientation=6,
+                            size_bytes=2_000_000)
+    found, _ = entries([item(1, original=original), item(2)])
+    assert [entry.asset.original for entry in found] == [original, None]
 
 
 def test_an_unedited_photos_revision_is_its_checksum():

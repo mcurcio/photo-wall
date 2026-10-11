@@ -28,6 +28,7 @@ from central.photo_library.model import (
     ContactRefused,
     Exclusions,
     LibraryAsset,
+    OriginalFile,
     Place,
     SourceQuery,
     TakenBetween,
@@ -279,7 +280,7 @@ def test_the_search_body_carries_every_filter_of_the_query_in_one_request():
         "personIds": [ref(40), ref(41)], "tagIds": [ref(50)], "city": "Paris", "state": None,
         "country": "France", "takenAfter": "2026-01-01T00:00:00.000000Z",
         "takenBefore": "2026-01-02T00:00:00.000000Z", "isFavorite": True, "type": "IMAGE",
-        "withStacked": True, "withExif": False, "size": 500, "page": 1, "order": "desc"}]
+        "withStacked": True, "withExif": True, "size": 500, "page": 1, "order": "desc"}]
 
 
 @pytest.mark.parametrize(("kinds", "sent"), [
@@ -353,6 +354,49 @@ def test_live_photos_videos_and_stacks_are_read_from_the_row():
     assert copy.stack_primary == ref(1)
 
 
+# 5b. the original's facts (follow-ups 2026-10-11, slice A3; owner item 1) ---------------------
+
+
+EXIF = {"exifImageWidth": 4032, "exifImageHeight": 3024, "orientation": "6",
+        "fileSizeInByte": 2_345_678}
+
+
+def test_a_row_with_exif_brings_its_originals_facts():
+    """A3 case 1: `originalMimeType` and `exifInfo` become `SearchItem.original`; a row without
+    `exifInfo` has none; Immich's text orientation "6" is 6 and anything else is unknown."""
+    rows = [asset(1, originalMimeType="image/HEIC", exifInfo=EXIF),
+            asset(2, taken=T0 - 1),
+            asset(3, taken=T0 - 2, exifInfo={**EXIF, "orientation": "x"}),
+            asset(4, taken=T0 - 3, exifInfo={"exifImageWidth": -1, "exifImageHeight": "3024",
+                                              "orientation": None, "fileSizeInByte": 1.5}),
+            asset(5, taken=T0 - 4, originalMimeType="not a type",
+                  exifInfo={**EXIF, "orientation": 6})]
+    page = run(Library(rows).client().search_page(query(), TakenWindow(), None))
+    first, bare, odd, malformed, untyped = page.items
+    assert first.original == OriginalFile(media_type="image/heic", width=4032, height=3024,
+                                          orientation=6, size_bytes=2_345_678)
+    assert bare.original is None
+    assert odd.original.orientation is None and odd.original.width == 4032
+    assert malformed.problem is None
+    assert malformed.original == OriginalFile(media_type="image/jpeg")
+    assert untyped.original.media_type is None and untyped.original.orientation is None
+
+
+def test_every_search_a_check_sends_asks_for_exif():
+    """A3 case 2: the include walk (by capture and by upload time) and every exclusion query.
+    Mutation probe: drop `withExif` from `_search` and this fails."""
+    rows = [asset(n, taken=T0, created=T0 - 50 + n) for n in range(1, 6)]
+    library = Library(rows + [asset(9, taken=T0 - 10)])
+    run(walk(library.client(page_size=3), query()))
+    for kind, number in (("album", 30), ("person", 40), ("tag", 50)):
+        run(library.client().exclusion_page(ExclusionQuery(kind=kind, ref=ref(number)), None))
+    for kind in ("screenshot_name", "screenshot_png"):
+        run(library.client().exclusion_page(ExclusionQuery(kind=kind), None))
+    assert any("createdBefore" in body or "createdAfter" in body for body in library.searches)
+    assert len(library.searches) > 6
+    assert all(body["withExif"] is True for body in library.searches)
+
+
 # 6, 7. exclusions -----------------------------------------------------------------------------
 
 
@@ -368,7 +412,7 @@ def test_each_exclusion_is_its_own_query(exclusion, body):
     library = Library([asset(1)])
     page = run(library.client().exclusion_page(exclusion, None))
     assert page.ids == (ref(1),) and page.next is None
-    assert library.searches == [{**body, "withExif": False, "size": 1000, "page": 1,
+    assert library.searches == [{**body, "withExif": True, "size": 1000, "page": 1,
                                  "order": "desc"}]
     assert "visibility" not in library.searches[0]
 

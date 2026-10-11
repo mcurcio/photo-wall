@@ -215,7 +215,7 @@ def entries_of(items: Sequence[SearchItem], *, query: SourceQuery, bound_user: s
         entries.append(InPool(asset=LibraryAsset(
             connection_ref=connection_ref, upstream_id=item.upstream_id, revision=revision,
             kind=item.kind, taken_at=item.taken_at, width=item.width, height=item.height,
-            duration=item.duration if item.kind == "video" else None),
+            duration=item.duration if item.kind == "video" else None, original=item.original),
             updated_at=item.updated_at))
     return tuple(entries), tuple(marks)
 

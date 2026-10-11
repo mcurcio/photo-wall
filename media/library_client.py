@@ -32,6 +32,7 @@ from central.photo_library.model import (
     LibraryTag,
     MeasurableCopy,
     MeasuredCopy,
+    OriginalFile,
     Place,
     SourceQuery,
 )
@@ -136,6 +137,9 @@ class SearchItem(Model):
     height: int | None = Field(default=None, gt=0)
     duration: Positive | None = None
     stack_primary: LibraryRef | None = None           # `stack.primaryAssetId` when Immich sends it
+    # The original file (`originalMimeType` and `exifInfo`, sent because every search asks
+    # `withExif`; follow-ups 2026-10-11, slice A3). None: the row carried no `exifInfo`.
+    original: OriginalFile | None = None
     problem: LeftOutReason | None = None
 
 
