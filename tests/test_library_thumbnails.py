@@ -14,6 +14,7 @@ import io
 import stat
 import time
 import uuid
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -35,7 +36,15 @@ from central.kernel.handling import OriginUnavailable, TerminalFailure
 from central.kernel.job_types import CATALOG, FetchLibraryThumbnail, FetchOsImage
 from central.kernel.jobs import QueueName
 from central.media_repository import ServableThumbnail
-from central.photo_library.model import ConnectionSecret, PoolThumbnail
+from central.photo_library.model import (
+    ConnectionSecret,
+    InPool,
+    LibraryAsset,
+    PoolThumbnail,
+    SourceQuery,
+)
+from central.photo_library.ports import CheckStep
+from central.photo_library.views import ConnectionWrite
 from media.immich import THUMBNAIL_EDGE, edits_fingerprint, reencode_thumbnail
 from media.library_thumbnails import LibraryThumbnailOrigin
 from media.models import MediaError, SourcePreviewQuery
@@ -324,10 +333,27 @@ def _nothing_queued(db):
     assert _thumbnail_jobs(db) == 0 and _thumbnail_records(db) == set()
 
 
+def _pool_photo(library, number):
+    """A wanted pool's `in_pool` row, made through the store's own sides: a draft wants the
+    pool, a check begins and records one step holding the photo. Returns (asset id, draft)."""
+    refs = {view.name: view.connection_ref for view in library.connections()}
+    ref = refs.get("Home") or library.add_connection(ConnectionWrite(
+        name="Home", url="http://immich.invalid", key="PUBLIC-FIXTURE-KEY-1234"))
+    query = SourceQuery(connection_ref=ref)
+    draft = library.create_draft(query, None)
+    photo = LibraryAsset(connection_ref=ref, upstream_id=str(uuid.UUID(int=number)),
+                         revision=f"{number:040x}", kind="image", taken_at=100.0 + number,
+                         width=4000, height=3000)
+    lease = library.begin_check(query.pool_key())
+    assert library.record_step(lease, CheckStep(progress={"page": 1}, entries=(InPool(
+        asset=photo),), seen_so_far=1))
+    return photo.asset_id, draft
+
+
 def test_a_servable_thumbnail_answers_within_about_two_seconds_then_serves(route, registry):
     app, root = route
-    member = stored_member(5)
-    _complete(app.state.media_repository, member)
+    asset_id, _ = _pool_photo(app.state.photo_library, 5)
+    member = SimpleNamespace(asset_id=asset_id)
     with TestClient(app) as client:
         started = time.monotonic()
         cold = client.get(_url(member.asset_id), headers={**AUTH, "Sec-Fetch-Site": "same-origin"})
@@ -368,18 +394,19 @@ class RegeneratingOrigin:
 def test_a_purged_then_regenerated_thumbnail_serves_again_and_is_not_refetched(route, registry):
     """A thumbnail is keyed by its original, so after a cache purge the library's regenerated
     bytes REPLACE its produced facts (`AssetKind.keyed_by_content`) instead of turning it
-    terminal `not_reproducible` while previews keep selecting it (B5-FC2-4); once served, a
-    tile request is a hit that publishes no fetch. Covers a repeated preview keeping the record
-    past the first one's expiry. Mutation probe: raise `not_reproducible` for every kind in
+    terminal `not_reproducible` while a wanted pool keeps selecting it (B5-FC2-4); once served,
+    a tile request is a hit that publishes no fetch. Covers retirement keeping the record while
+    its pool is wanted. Mutation probe: raise `not_reproducible` for every kind in
     `AssetProduction.produce` and the second fetch is terminal."""
     app, root = route
-    repo, member = app.state.media_repository, stored_member(9)
+    library = app.state.photo_library
+    asset_id, _ = _pool_photo(library, 9)
+    member = SimpleNamespace(asset_id=asset_id)
     origin = RegeneratingOrigin()
     runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
                                 thumbnails=origin)
     job = FetchLibraryThumbnail(asset_id=member.asset_id)
     previews = ensure_previews_directory(root)
-    _complete(repo, member)
     asyncio.run(build_library_thumbnails(registry.db, registry.clock, cache_root=root)
                 .prefetch([member.asset_id]))
     with TestClient(app) as client:
@@ -396,34 +423,33 @@ def test_a_purged_then_regenerated_thumbnail_serves_again_and_is_not_refetched(r
             with Image.open(io.BytesIO(served[0].content)) as image:
                 assert image.convert("RGB").getpixel((10, 10))[colour.index(200)] > 150
             assert _thumbnail_jobs(registry.db) == 0  # hits: nothing published
-            # A repeated preview keeps the record past the first one's expiry.
-            registry.clock.advance(500)
-            _complete(repo, member)
-            registry.clock.advance(200)
-            assert member.asset_id in repo.maintain_source_previews()
+            # Retirement keeps the record while its pool is wanted.
+            assert member.asset_id in library.retire_unwanted()
     assert origin.calls == 3
 
 
 def test_a_fetch_for_a_retired_record_never_blocks_the_next_preview(route, registry):
-    """A tile job that runs after its preview expired and maintenance retired the record is
-    terminal `thumbnail_unknown`, never a transient retry window: the next preview's prefetch
-    is a new ask (`retry_terminal`), which a window would silently drop (PB2), leaving the
-    GET refused `thumbnail_asset_not_recorded` for up to the last retry delay. Mutation probe:
-    make the missing record transient again in `AssetProduction.produce` and the prefetch
-    below queues nothing."""
+    """A tile job that runs after its pool stopped being wanted and maintenance retired the
+    record is terminal `thumbnail_unknown`, never a transient retry window: the next pool's
+    prefetch is a new ask (`retry_terminal`), which a window would silently drop (PB2), leaving
+    the GET refused `thumbnail_asset_not_recorded` for up to the last retry delay. Mutation
+    probe: make the missing record transient again in `AssetProduction.produce` and the
+    prefetch below queues nothing."""
     app, root = route
-    repo, member = app.state.media_repository, stored_member(11)
+    library = app.state.photo_library
+    asset_id, draft = _pool_photo(library, 11)
+    member = SimpleNamespace(asset_id=asset_id)
     runtime = build_job_runtime(registry.db, registry.clock, cache_root=root, env={},
                                 thumbnails=FakeOrigin())
     thumbnails = build_library_thumbnails(registry.db, registry.clock, cache_root=root)
     job = FetchLibraryThumbnail(asset_id=member.asset_id)
-    _complete(repo, member)
     asyncio.run(thumbnails.prefetch([member.asset_id]))
-    registry.clock.advance(700)  # the preview expires before its tile job runs
-    assert member.asset_id not in repo.maintain_source_previews()  # the record is retired
+    with library.db.transaction() as conn:   # the draft goes before its tile job runs
+        library.remove_draft_in(conn, draft)
+    assert member.asset_id not in library.retire_unwanted()  # the record is retired
     assert asyncio.run(runtime._executor.execute(job, 0)) == "terminal"
     _drop_thumbnail_jobs(registry.db)
-    _complete(repo, member)  # a new preview selects the same item
+    assert _pool_photo(library, 11)[0] == member.asset_id  # a new pool selects the same photo
     asyncio.run(thumbnails.prefetch([member.asset_id]))
     assert _thumbnail_jobs(registry.db) == 1  # the new ask is queued at once
     assert asyncio.run(runtime._executor.execute(job, 0)) == "ok"

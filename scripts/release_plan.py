@@ -426,7 +426,8 @@ SUITES: Final = (
                  ".github/actions/docker-hub-mirror/action.yml",
                  ".github/actions/node-builder/action.yml",
                  "central/**/*.py", "appliance/*.py", "media/__init__.py", "media/models.py",
-                 "media/prepare.py", "central/migrations/*_node_*.sql", "uv.lock")),
+                 "media/prepare.py", "media/library_client.py", "central/migrations/*_node_*.sql",
+                 "uv.lock")),
 )
 SUITE_JOBS: Final = frozenset(suite.job for suite in SUITES)
 # The jobs that build for others, and the jobs they build for: each runs when the plan lists one

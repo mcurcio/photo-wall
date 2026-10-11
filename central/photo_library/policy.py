@@ -38,6 +38,9 @@ OLDEST_VERSION: Final = ImmichVersion(major=2, minor=5, patch=0)
 TESTED_RELEASE: Final[tuple[int, int]] = (2, 5)
 # #12 "Look for new photos every": each connection check and each Source's check (C2).
 CHECK_EVERY_SECONDS: Final = 900
+# A running check whose latest step began this long ago (database time) is due again, so a step
+# lost with its worker never leaves a pool checking. Varies independently of CHECK_EVERY_SECONDS.
+STALE_CHECK_SECONDS: Final = 900
 # C8: an unsaved draft and its pool, when nothing else uses that pool, go after a day.
 DRAFT_KEEP_SECONDS: Final = 86400
 # One page of a pool in the console (newest first).

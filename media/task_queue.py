@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Final
 
 import procrastinate
+from procrastinate.jobs import Job, Status
 
 from central.infra.job_queue import async_connector
 from central.media_queue import (
@@ -29,6 +31,13 @@ WORKER_CHECK_IN_SECONDS: Final = MAINTENANCE_MINUTES * 60
 # check-in intervals plus a minute); tests/test_media_queue.py pins the two equal. Cost: a hung
 # worker reads healthy for up to 11 minutes (Compose consumes worker health only for `--wait`).
 WORKER_FRESH_SECONDS: Final = 2 * WORKER_CHECK_IN_SECONDS + 60
+# A `doing` media job whose worker has not beaten this long is a dead worker's (Procrastinate's
+# own stalled-worker default); the rescue looks every 30 seconds.
+STALLED_HEARTBEAT_SECONDS: Final = 30
+RESCUE_CRON: Final = "* * * * * */30"  # seconds last, as REFRESH_CRON
+RESCUE_TASK: Final = "photo_wall.media.rescue"
+
+logger = logging.getLogger(__name__)
 
 
 class MediaTaskFailed(RuntimeError):
@@ -73,6 +82,42 @@ class ProcrastinateCheckQueue:
         await self._defer(CHECK_POOL_TASK, LIBRARY_POOL_LOCK_PREFIX + pool_key, pool_key=pool_key)
 
 
+async def rescue_stalled(app: procrastinate.App, *,
+                         heartbeat_seconds: float = STALLED_HEARTBEAT_SECONDS) -> int:
+    """Each `doing` job on MEDIA_QUEUE whose worker has not beaten for `heartbeat_seconds`
+    (Procrastinate's `get_stalled_jobs`), each on its own: first defer one copy (same task,
+    arguments, lock and queueing lock; an already queued copy absorbs it), then finish the
+    stalled row `failed`, which frees its lock. A periodic task's row is only finished: its
+    schedule defers the next run. Returns how many rows were finished. One row's failure never
+    skips the others; any failure is logged and the next run looks again.
+
+    Deferring first leaves no window without a copy: the queueing-lock index covers only `todo`
+    rows, and the copy cannot run while the stalled row holds the lock (the content runtime's
+    rescue, central/infra/queue_ops.py, follows the same order for its typed jobs)."""
+    periodic = {task.task.name for task in app.periodic_registry.periodic_tasks.values()}
+    finished = 0
+    for row in await app.job_manager.get_stalled_jobs(
+            queue=MEDIA_QUEUE, seconds_since_heartbeat=heartbeat_seconds):
+        if row.id is None:
+            continue
+        logger.warning("rescuing stalled media job %s (%s)", row.id, row.task_name)
+        try:
+            if row.task_name not in periodic:
+                try:
+                    await app.job_manager.defer_job_async(Job(
+                        queue=row.queue, priority=row.priority, lock=row.lock,
+                        queueing_lock=row.queueing_lock, task_name=row.task_name,
+                        task_kwargs=row.task_kwargs))
+                except procrastinate.exceptions.AlreadyEnqueued:
+                    pass
+            await app.job_manager.finish_job_by_id_async(job_id=row.id, status=Status.FAILED,
+                                                         delete_job=False)
+            finished += 1
+        except Exception:
+            logger.exception("rescue of stalled media job %s failed", row.id)
+    return finished
+
+
 def create_worker_app(dsn: str) -> procrastinate.App:
     """Build the async worker app; runtime collaborators arrive via context."""
     app = procrastinate.App(
@@ -109,6 +154,14 @@ def create_worker_app(dsn: str) -> procrastinate.App:
     @app.task(name=CHECK_POOL_TASK, queue=MEDIA_QUEUE, pass_context=True)
     async def check_pool(context, pool_key: str):
         await context.additional_context["library_checks"].check_pool(pool_key)
+
+    # No lock: a dead worker's row holding MEDIA_STORAGE_LOCK must never block its own rescue.
+    @app.periodic(cron=RESCUE_CRON)
+    @app.task(name=RESCUE_TASK, queue=MEDIA_QUEUE, pass_context=True,
+              queueing_lock="media-rescue")
+    async def rescue(context, timestamp: int):
+        del timestamp
+        await rescue_stalled(context.app)
 
     @app.periodic(cron=MAINTENANCE_CRON)
     @app.task(name="photo_wall.media.maintenance", queue=MEDIA_QUEUE, pass_context=True,

@@ -33,7 +33,11 @@ from central.photo_library.model import (
     PoolThumbnail,
     SourceQuery,
 )
-from central.photo_library.policy import CHECK_EVERY_SECONDS, contact_health
+from central.photo_library.policy import (
+    CHECK_EVERY_SECONDS,
+    STALE_CHECK_SECONDS,
+    contact_health,
+)
 from central.photo_library.ports import (
     CheckComplete,
     CheckFinish,
@@ -64,6 +68,7 @@ class _Pool:
     check_number: int = 0
     checking: bool = False
     started_at: float | None = None
+    step_at: float | None = None
     progress: dict | None = None
     finished_at: float | None = None
     last_complete_at: float | None = None
@@ -160,10 +165,14 @@ class FakeLibraryStore:
 
     def due_pools(self) -> tuple[str, ...]:
         now = self._now()
-        return tuple(sorted(key for key, pool in self.pools.items() if pool.wanted
-                            and not pool.checking and (
-                                pool.requested or pool.finished_at is None
-                                or now - pool.finished_at >= CHECK_EVERY_SECONDS)))
+        def due(pool: _Pool) -> bool:
+            if pool.checking:
+                return (self._secret(pool.query.connection_ref) is not None
+                        and (pool.step_at is None or now - pool.step_at >= STALE_CHECK_SECONDS))
+            return (pool.requested or pool.finished_at is None
+                    or now - pool.finished_at >= CHECK_EVERY_SECONDS)
+
+        return tuple(sorted(key for key, pool in self.pools.items() if pool.wanted and due(pool)))
 
     def begin_check(self, pool_key: str) -> CheckLease | None:
         pool = self.pools.get(pool_key)
@@ -176,6 +185,7 @@ class FakeLibraryStore:
             pool.check_number += 1
             pool.checking, pool.started_at, pool.progress = True, self._now(), None
             pool.requested, pool.seen_so_far = False, 0
+        pool.step_at = self._now()
         return CheckLease(pool_key=pool_key, query=pool.query, connection=secret,
                           check_number=pool.check_number, started_at=pool.started_at,
                           progress=pool.progress)
@@ -202,6 +212,9 @@ class FakeLibraryStore:
             ref = entry.asset.upstream_id if isinstance(entry, InPool) else entry.upstream_id
             if ref not in marked:
                 pool.rows[ref] = (entry, lease.check_number)
+                if isinstance(entry, InPool) and entry.updated_at is not None:
+                    self.known[(entry.asset.connection_ref, ref)] = KnownRevision(
+                        updated_at=entry.updated_at, revision=entry.asset.revision)
         pool.progress, pool.seen_so_far = step.progress, step.seen_so_far
         if step.immich_up_to is not None:
             pool.up_to = step.immich_up_to

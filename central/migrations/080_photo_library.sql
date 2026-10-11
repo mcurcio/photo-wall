@@ -52,6 +52,7 @@ CREATE TABLE photo_pools (
   incomplete_reason TEXT NULL CHECK (incomplete_reason IN ('over_1000_at_one_instant')),
   last_complete_at DOUBLE PRECISION NULL, immich_up_to BIGINT NULL,
   check_requested BOOLEAN NOT NULL DEFAULT TRUE,
+  step_at DOUBLE PRECISION NULL,    -- database time the running check's latest step began
   created_at DOUBLE PRECISION NOT NULL,
   CHECK ((check_state = 'failed') = (problem IS NOT NULL)),
   CHECK ((check_state = 'incomplete') = (incomplete_reason IS NOT NULL)));

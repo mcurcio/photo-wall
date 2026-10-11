@@ -430,6 +430,8 @@ class PoolMember(Model):
 class InPool(Model):
     outcome: Literal["in_pool"] = "in_pool"
     asset: LibraryAsset
+    # Immich's `updatedAt` when the check read this photo: KnownRevision's source. None: not sent.
+    updated_at: str | None = Field(default=None, max_length=64)
 
 
 class Waiting(Model):
