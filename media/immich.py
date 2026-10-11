@@ -669,8 +669,15 @@ class ImmichClient:
                     path = (destination if index == 0
                             else destination.with_name(f"{destination.name}.{step}"))
                     held = kept if kept is not None and kept.copy == "preview" else None
-                    fetched = await self._download(*_request(asset, step), path, created,
-                                                   stop_at_preview=held is not None)
+                    try:
+                        fetched = await self._download(*_request(asset, step), path, created,
+                                                       stop_at_preview=held is not None)
+                    except MediaError as refused:
+                        # A larger copy Photo Wall cannot take (its type, its size) leaves the
+                        # copy already held: fall back to what Immich has (owner, 2026-10-09).
+                        if kept is None or refused.code not in _LARGER_COPY_REFUSALS:
+                            raise
+                        break
                     if fetched is None:   # Immich keeps no such copy: the preview held is all
                         break
                     if asset.kind == "video":
@@ -801,6 +808,8 @@ class ImmichClient:
 _RENDITION_TYPES = STILL_MEDIA_TYPES | frozenset({
     "video/mp4", "video/quicktime", "video/webm", "video/x-matroska"})
 _MAX_REDIRECTS = 3
+# A later, larger copy refused for these keeps the copy already fetched (`fetch_rendition`).
+_LARGER_COPY_REFUSALS = frozenset({"unsupported_media", "asset_oversize"})
 _MEDIA_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
 _ORIENTATIONS = frozenset("12345678")
 # The largest original side and byte size stored (`library_assets` INTEGER and BIGINT columns).

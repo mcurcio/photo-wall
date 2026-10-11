@@ -558,6 +558,42 @@ def test_an_edited_photo_is_fetched_as_its_edited_full_size_copy(tmp_path):
     assert sizes(fetched) == [("preview", 1440, 1080), ("fullsize", 3000, 2250)]
 
 
+@pytest.mark.parametrize(("media_type", "body"), [
+    ("image/gif", b"GIF89a" + bytes(64)),          # a type Photo Wall cannot read
+    ("image/jpeg", None),                          # over the fetch limit
+])
+def test_a_larger_copy_refused_keeps_the_preview_already_fetched(tmp_path, media_type, body):
+    """A later step Photo Wall cannot take (unsupported_media, asset_oversize) falls back to the
+    preview held instead of failing the job and deleting it. Mutation probe: re-raise every
+    refusal and the job fails with nothing kept."""
+    library = Library([asset(1)])
+    copies(library)
+    content = body if body is not None else jpeg(4000, 3000)
+
+    def original_file(request):
+        library.edited.append(("original", request.url.params.get("edited")))
+        headers = {"content-type": media_type}
+        if body is None:
+            headers["content-length"] = str(10 ** 12)
+        return httpx.Response(200, content=content, headers=headers)
+    library.routes[f"/api/assets/{ref(1)}/original"] = original_file
+    fetched = fetch(library, tmp_path, ("preview", "original"), LARGE)
+    assert (fetched.rendition, fetched.width, fetched.height) == ("preview", 1440, 1080)
+    assert library.edited == [("preview", "true"), ("original", "false")]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["kept"]
+
+
+def test_a_first_copy_refused_is_still_a_failure(tmp_path):
+    library = Library([asset(1)])
+    copies(library)
+    library.routes[f"/api/assets/{ref(1)}/original"] = lambda request: httpx.Response(
+        200, content=b"GIF89a" + bytes(64), headers={"content-type": "image/gif"})
+    with pytest.raises(MediaError) as refused:
+        fetch(library, tmp_path, ("original",), LARGE)
+    assert refused.value.code == "unsupported_media"
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_with_no_full_size_copy_the_preview_held_is_kept_once(tmp_path):
     """An unedited photo Photo Wall cannot read (HEIC, RAW) and full-size copies off: Immich
     redirects `size=fullsize` to the preview, which is not downloaded again."""

@@ -52,6 +52,18 @@ def test_the_plan_tries_the_preview_then_the_full_resolution_copy(asset, needs, 
     assert fetch_plan(asset, needs, known, READABLE) == plan
 
 
+@pytest.mark.parametrize("original_type", ["image/gif", "image/bmp", "image/svg+xml"])
+@pytest.mark.parametrize("known", [{}, preview(1440, 1080)])
+def test_an_unedited_original_immich_serves_as_itself_but_photo_wall_cannot_read(original_type,
+                                                                                 known):
+    """Immich keeps no full-size copy of an unedited GIF or BMP and serves its original for
+    "fullsize": the preview is the only copy Photo Wall can read, even when it is small."""
+    assert fetch_plan(photo(original_type=original_type), (UHD,), known, READABLE) == ("preview",)
+    assert fetch_plan(photo(original_type=original_type), (), {}, READABLE) == ("preview",)
+    assert fetch_plan(photo(edited=True, original_type=original_type), (UHD,), {},
+                      READABLE) == ("preview", "fullsize")
+
+
 def test_a_readable_type_is_the_callers_word():
     """HEIC is fetched as its original once preparation reads it (A5's STILL_MEDIA_TYPES)."""
     assert fetch_plan(photo(original_type="image/heic"), (UHD,), {},

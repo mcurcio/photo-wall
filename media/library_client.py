@@ -37,6 +37,7 @@ from central.photo_library.model import (
     Place,
     SourceQuery,
 )
+from central.photo_library.policy import IMMICH_WEB_TYPES
 from contracts.frame_fit import window_holds
 from contracts.models import Digest, Instant, Model, Positive
 
@@ -90,6 +91,9 @@ def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
       `/assets/{id}/original?edited=false`); otherwise "fullsize" (`size=fullsize&edited=false`;
       Immich redirects it to the preview when it keeps no full-size copy, and the preview is then
       the only copy Photo Wall can read).
+    - An unedited photo whose original's type Immich serves as itself (`IMMICH_WEB_TYPES`: it
+      keeps no full-size copy and redirects "fullsize" to the original) but is not in `readable`
+      (a GIF, a BMP): ("preview",) alone, the only copy Photo Wall can read.
     - No need: the full-resolution step alone.
     - A known preview size (`known["preview"]`) that does not cover: the full-resolution step
       alone (the preview is not downloaded again). Otherwise ("preview", <full-resolution step>).
@@ -98,6 +102,9 @@ def fetch_plan(asset: LibraryAsset, needs: Sequence[FrameNeed],
     if asset.kind == "video":
         return ("original",)
     original_type = None if asset.original is None else asset.original.media_type
+    if (not asset.edited and original_type is not None and original_type not in readable
+            and original_type.lower() in IMMICH_WEB_TYPES):
+        return ("preview",)
     full: FetchStep = ("original" if not asset.edited and original_type in readable
                        else "fullsize")
     preview = known.get("preview")
